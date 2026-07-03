@@ -7,6 +7,8 @@ orchestration.
 
 from __future__ import annotations
 
+import functools
+
 from vera import ast
 from vera.environment import (
     ConstructorInfo,
@@ -14,6 +16,7 @@ from vera.environment import (
     OpInfo,
 )
 from vera.types import (
+    UNIT,
     AdtType,
     ConcreteEffectRow,
     FunctionType,
@@ -29,6 +32,27 @@ from vera.types import (
     pretty_type,
     substitute,
 )
+
+
+@functools.lru_cache(maxsize=1)
+def _builtin_fn_names() -> frozenset[str]:
+    """Every registered built-in function name (the #900 E206 exclusion set).
+
+    The E206 generic-over-``Unit`` rejection targets the user ``forall<T>``
+    functions the monomorphizer clones body-and-all, whose ``@T`` parameter
+    slots break at the zero-size ``Unit`` type.  Built-in generics
+    (``async`` / ``await`` / the collection + prelude combinators) have
+    hand-written codegen rather than a cloned ``@T``-slot body, so they are
+    out of scope — even the prelude-overridable ones (``option_map`` and
+    friends), which stay in ``TypeEnv().functions``.  Cached: the built-in
+    registry is static.
+    """
+    from vera.environment import TypeEnv
+
+    # apply_fn is a checker special form, not a registry row (#854); it is
+    # variadic/effect-polymorphic and never inferred through this path, but
+    # include it for completeness alongside the registry names.
+    return frozenset(TypeEnv().functions) | {"apply_fn"}
 
 
 class CallsMixin:
@@ -159,6 +183,64 @@ class CallsMixin:
                     spec_ref='Chapter 5, Section 5.2 "Function Declaration Syntax"',
                     error_code="E205",
                 )
+            # #900: reject instantiating a generic type parameter at the
+            # zero-size `Unit` type *when the generic's body reads it*.  Unit
+            # is 0 bytes with no WASM representation (spec §11.2.2 / §11.3.1:
+            # Unit-returning fns have no result type, and `UnitLit` compiles to
+            # nothing), so a monomorphized `forall<T>` body's `@T.n` slot READ
+            # lowers to a `local.get` with no local — the dangling-slot codegen
+            # invariant (E699).  This closes the inferred (arg-pinned) case at
+            # check time rather than letting it crash in codegen, per DESIGN.md
+            # principle 1 (checkability over correctness).
+            #
+            # Narrowed to bodies that actually MATERIALIZE `@T` (a `@T.n`
+            # SlotRef read — direct return, match scrutinee, etc.).  A `@T`
+            # parameter the body never reads erases cleanly from the ABI, so
+            # `firstInt(@T, @Int){ @Int.0 }` and `ignore(@T){ 0 }` run fine at
+            # `T = Unit` and must NOT be rejected (`fn_info.forall_vars_read`
+            # is the per-declaration set of body-read forall vars).
+            #
+            # Keyed to *bare* Unit only: a boxed `Option<Unit>` (tag + pointer)
+            # is a valid, non-zero-size type argument.  Scoped to USER-declared
+            # functions the monomorphizer clones — built-in generics (`async`,
+            # `await`, collection/prelude combinators) have hand-written
+            # codegen, not a `@T`-slot body, so `async(IO.print(...))` (a valid
+            # `Future<Unit>`) is not an over-reject.
+            unit_vars = (
+                sorted(
+                    tv for tv in fn_info.forall_vars
+                    if tv in fn_info.forall_vars_read
+                    and (b := mapping.get(tv)) is not None
+                    and base_type(b) == UNIT
+                )
+                if fn_info.name not in _builtin_fn_names()
+                else []
+            )
+            if unit_vars:
+                joined = ", ".join(unit_vars)
+                self._error(
+                    node,
+                    f"Cannot instantiate the type parameter(s) {joined} of "
+                    f"'{fn_info.name}' at the zero-size type Unit.",
+                    rationale="Unit is a zero-size type with no runtime "
+                              "representation (a Unit value occupies 0 bytes "
+                              "and compiles to no WASM value), so a generic "
+                              "function specialised at Unit has a parameter "
+                              "slot that refers to no runtime local — the "
+                              "monomorphized body cannot be generated.",
+                    fix="Do not pass a Unit-typed value where a generic "
+                        "parameter is inferred. If you need to thread a unit "
+                        "result through, wrap it in a boxed type (e.g. "
+                        "Option<Unit>) or restructure so the generic is "
+                        "instantiated at a type with a runtime representation.",
+                    spec_ref='Chapter 11, Section 11.2.2 "Unit as Void"',
+                    error_code="E206",
+                )
+                # Return the *substituted* result type so the enclosing
+                # context (e.g. `let @Unit = idt(...)`) sees the concrete
+                # `Unit` rather than a leaked `@T`, avoiding a misleading
+                # cascade error on top of the actionable E206.
+                return substitute(return_type, mapping)
             if mapping:
                 param_types = tuple(
                     substitute(p, mapping) for p in param_types)

@@ -11,10 +11,32 @@ from typing import TYPE_CHECKING, Callable
 
 from vera import ast
 from vera.environment import FunctionInfo, TypeEnv
+from vera.obligations.cache import walk_nodes
 from vera.types import EffectRowType, Type, TypeVar
 
 if TYPE_CHECKING:
     pass
+
+
+def _forall_vars_read_in_body(decl: ast.FnDecl) -> frozenset[str]:
+    """Which of ``decl``'s forall type-vars its *body* reads via a `@T.n` slot.
+
+    A `@T.n` ``SlotRef`` in the body lowers to a `local.get` (#900): once the
+    function is monomorphized at `T = Unit`, that local does not exist (Unit is
+    zero-size, erased from the ABI), so the read dangles and codegen crashes.
+    A `@T` parameter that the body never reads erases cleanly and runs fine, so
+    it must not trip E206.  Only the body is walked — a `@T` in a `requires` /
+    `ensures` clause is contract-only (never lowered to body WASM), and
+    ``where``-helpers are registered separately with their own forall scope.
+    """
+    if not decl.forall_vars:
+        return frozenset()
+    fvars = set(decl.forall_vars)
+    return frozenset(
+        n.type_name
+        for n in walk_nodes(decl.body)
+        if isinstance(n, ast.SlotRef) and n.type_name in fvars
+    )
 
 
 def register_fn(
@@ -50,6 +72,7 @@ def register_fn(
         param_type_exprs=decl.params,
         visibility=visibility,
         forall_constraints=decl.forall_constraints or (),
+        forall_vars_read=_forall_vars_read_in_body(decl),
     )
 
     if decl.where_fns:
