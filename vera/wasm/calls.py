@@ -616,10 +616,33 @@ class CallsMixin:
         constrained_vars = self._generic_constrained_vars.get(
             call.name, frozenset())
         mapping: dict[str, str] = {}
+        # #898: mirror the discovery-side sparse-multi-parameter merge
+        # (Monomorphizer._infer_type_args_from_args) so the call-site mangled
+        # name matches the clone Pass 1.5 emitted — else `main`'s call to
+        # `eq2(MkErr(5), MkOk("x"))` references a `$Res` clone the emitter named
+        # `$Res_LString_C_Int_R`, is dropped, and `main` vanishes (the #878 class).
+        partial_adt: dict[str, tuple[str, list[str | None]]] = {}
 
         for param_te, arg in zip(param_types, call.args):
             self._unify_param_arg_wasm(
-                param_te, arg, forall_vars, mapping, constrained_vars)
+                param_te, arg, forall_vars, mapping, constrained_vars,
+                partial_adt)
+
+        for tv, (base_name, slots) in partial_adt.items():
+            if all(s is not None for s in slots):
+                resolved = [s for s in slots if s is not None]
+                mapping[tv] = f"{base_name}<{', '.join(resolved)}>"
+            elif tv in constrained_vars:
+                # Partial recovery — mirror the discovery-side sentinel
+                # materialisation (Monomorphizer._infer_type_args_from_args) so
+                # the two stay in lockstep.  Such an instance is always rejected
+                # by the ability gate and never emitted, but keeping the names
+                # identical means the call-rewrite↔emitted-clone differential
+                # never sees a phantom mismatch for the under-determined shape.
+                from vera.monomorphize import _FREE_TYPE_PARAM
+                rendered = [s if s is not None else _FREE_TYPE_PARAM
+                            for s in slots]
+                mapping[tv] = f"{base_name}<{', '.join(rendered)}>"
 
         # Build mangled name; default phantom vars to Bool (i32 repr — Unit
         # has no WASM representation), matching Monomorphizer's clone-side
@@ -642,6 +665,7 @@ class CallsMixin:
         forall_vars: tuple[str, ...],
         mapping: dict[str, str],
         constrained_vars: frozenset[str] = frozenset(),
+        partial_adt: dict[str, tuple[str, list[str | None]]] | None = None,
     ) -> None:
         """Unify a parameter TypeExpr against an argument to bind type vars.
 
@@ -651,7 +675,7 @@ class CallsMixin:
         if isinstance(param_te, ast.RefinementType):
             self._unify_param_arg_wasm(
                 param_te.base_type, arg, forall_vars, mapping,
-                constrained_vars,
+                constrained_vars, partial_adt,
             )
             return
 
@@ -682,6 +706,19 @@ class CallsMixin:
                     if arg_names and all(a is not None for a in arg_names):
                         resolved = [a for a in arg_names if a is not None]
                         vera_type = f"{base_name}<{', '.join(resolved)}>"
+                    elif arg_names and partial_adt is not None:
+                        # #898: PARTIAL recovery merged across arguments —
+                        # mirrors Monomorphizer._unify_param_arg so the mangled
+                        # call name matches the emitted clone.
+                        prev = partial_adt.get(param_te.name)
+                        if prev is None or prev[0] != base_name:
+                            slots: list[str | None] = list(arg_names)
+                            partial_adt[param_te.name] = (base_name, slots)
+                        else:
+                            slots = prev[1]
+                            for i, name in enumerate(arg_names):
+                                if name is not None and i < len(slots):
+                                    slots[i] = name
             if vera_type and param_te.name not in mapping:
                 mapping[param_te.name] = vera_type
             return

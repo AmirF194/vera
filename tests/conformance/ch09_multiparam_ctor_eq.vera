@@ -1,0 +1,114 @@
+-- Conformance: Eq auto-derivation over a SPARSE MULTI-type-parameter ADT on the
+-- constructor-inferred path (Chapter 9, #898 — sibling of #772).
+-- Tests: a fully-determined `Res<Int, Int>` value derives structural Eq and
+-- compares by value through an Eq<T>-constrained generic — exactly as the
+-- single-type-parameter Box<T> path does (ch09_ctor_inferred_eq).  Fixing only
+-- the type argument via a `let @Res<Int, Int> = ...;` slot annotation supplies
+-- BOTH parameters, so derivation checks every constructor's fields and succeeds.
+-- The CROSS-ARGUMENT merge path (#898 round 2) also determines both parameters
+-- WITHOUT annotation: `eq2(MkErr(5), MkOk("x"))` fixes `B` from the first
+-- argument and `A` from the second, so the fully-determined `Res<String, Int>`
+-- type-checks, monomorphizes, and runs by structural comparison.
+-- The under-determined form (`id1(MkErr(5))`, leaving A free) is correctly
+-- rejected with the clearer E619 (see tests/test_codegen_structural_eq.py).
+-- ================================================================
+private data Res<A, B> {
+  MkOk(A),
+  MkErr(B)
+}
+
+-- Eq<T>-constrained generic over a bare type variable
+private forall<T where Eq<T>> fn eq2(@T, @T -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  eq(@T.1, @T.0)
+}
+
+-- Test: two equal MkErr values of a fully-determined Res<Int, Int> compare equal
+public fn test_err_equal(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 1)
+  effects(pure)
+{
+  let @Res<Int, Int> = MkErr(7);
+  let @Res<Int, Int> = MkErr(7);
+  if eq2(@Res<Int, Int>.1, @Res<Int, Int>.0) then {
+    1
+  } else {
+    0
+  }
+}
+
+-- Test: distinct MkErr payloads compare unequal
+public fn test_err_unequal(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 0)
+  effects(pure)
+{
+  let @Res<Int, Int> = MkErr(5);
+  let @Res<Int, Int> = MkErr(6);
+  if eq2(@Res<Int, Int>.1, @Res<Int, Int>.0) then {
+    1
+  } else {
+    0
+  }
+}
+
+-- Test: the OTHER constructor (MkOk) of the same Res<Int, Int> also derives —
+-- equal MkOk payloads compare equal, proving derivation covers all constructors
+public fn test_ok_equal(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 1)
+  effects(pure)
+{
+  let @Res<Int, Int> = MkOk(3);
+  let @Res<Int, Int> = MkOk(3);
+  if eq2(@Res<Int, Int>.1, @Res<Int, Int>.0) then {
+    1
+  } else {
+    0
+  }
+}
+
+-- Test: an MkOk and an MkErr of the same Res<Int, Int> differ by constructor tag
+public fn test_cross_ctor_unequal(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 0)
+  effects(pure)
+{
+  let @Res<Int, Int> = MkOk(4);
+  let @Res<Int, Int> = MkErr(4);
+  if eq2(@Res<Int, Int>.1, @Res<Int, Int>.0) then {
+    1
+  } else {
+    0
+  }
+}
+
+-- Test: CROSS-ARGUMENT merge (#898 round 2) — `eq2(MkErr(5), MkOk("x"))`
+-- determines Res<String, Int> across the two arguments (first fixes B, second
+-- fixes A) WITHOUT any annotation.  The two arguments use different
+-- constructors, so structural comparison is unequal (0).
+public fn test_cross_arg_merge(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 0)
+  effects(pure)
+{
+  if eq2(MkErr(5), MkOk("x")) then {
+    1
+  } else {
+    0
+  }
+}
+
+-- Drive every test from main so the derivations run and their runtime
+-- postconditions fire.  Total = 1 + 0 + 1 + 0 + 0 = 2.
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 2)
+  effects(pure)
+{
+  test_err_equal(()) + test_err_unequal(()) + test_ok_equal(()) + test_cross_ctor_unequal(()) + test_cross_arg_merge(())
+}

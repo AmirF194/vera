@@ -111,6 +111,30 @@ public fn use_transitive(@Int -> @Option<Int>)
   wrap_twice(@Int.0)
 }
 """,
+    # #898: cross-argument type-argument merge — the verifier's discovery
+    # (`_collect_instantiations`, which shares `_infer_type_args_from_args` with
+    # codegen) must merge the two sparse constructor arguments into the same
+    # `eq2$Res<String, Int>` clone codegen emits, or the verifier⊇codegen
+    # invariant breaks (a clone codegen emits that the verifier never proves).
+    "cross_arg_merge_eq": """
+private data Res<A, B> { MkOk(A), MkErr(B) }
+
+private forall<T where Eq<T>> fn eq2(@T, @T -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  eq(@T.1, @T.0)
+}
+
+public fn use_cross_arg(@Unit -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  eq2(MkErr(5), MkOk("x"))
+}
+""",
 }
 
 
@@ -363,6 +387,43 @@ private forall<VeraT> fn pick_last(@VeraT, @VeraT -> @VeraT)
 public fn main(@Unit -> @Int)
   requires(true) ensures(true) effects(pure)
 { match pick_last(mkb(1), mkb(2)) { MkBox(@Decimal) -> 0 } }
+""",
+    # #898: CROSS-ARGUMENT type-argument merge.  `eq2(MkErr(5), MkOk("x"))`
+    # over `data Res<A, B> { MkOk(A), MkErr(B) }` — the first argument fixes
+    # `B = Int`, the second fixes `A = String` — so discovery, the verifier, AND
+    # the call-rewrite must all merge the two partial recoveries into the ONE
+    # clone `eq2$Res<String, Int>`.  A one-sided merge (call-rewrite resolves
+    # the bare `eq2$Res` while discovery emits `eq2$Res<String, Int>`, or vice
+    # versa) drops `main` with an `unknown func` — exactly what this differential
+    # exists to catch.  This is the entry that was MISSING when the merge landed.
+    "cross_arg_merge_eq": """
+private data Res<A, B> { MkOk(A), MkErr(B) }
+
+private forall<T where Eq<T>> fn eq2(@T, @T -> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(@T.1, @T.0) }
+
+public fn main(@Unit -> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq2(MkErr(5), MkOk("x")) }
+""",
+    # #898: cross-argument merge, REVERSED argument order — the merge must be
+    # order-independent (arg 0 fixes `A`, arg 1 fixes `B`), and all three
+    # consultors must still agree on the ONE `eq2$Res<String, Int>` clone.  A
+    # first-argument-wins consultor would key `eq2$Res<String, ?>` here vs the
+    # `eq2$Res<?, Int>` of the non-reversed entry, so pairing the two orders
+    # pins that the merged name is stable regardless of which argument arrives
+    # first.
+    "cross_arg_merge_eq_reversed": """
+private data Res<A, B> { MkOk(A), MkErr(B) }
+
+private forall<T where Eq<T>> fn eq2(@T, @T -> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(@T.1, @T.0) }
+
+public fn main(@Unit -> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq2(MkOk("x"), MkErr(5)) }
 """,
 }
 

@@ -1572,3 +1572,84 @@ public fn f(@Unit -> @Int)
   requires(true) ensures(true) effects(pure)
 { -18446744073709551616 }
 """)
+
+
+# =====================================================================
+# #898 — cross-argument type-argument merge for a generic bound by
+# multiple sparse-multi-parameter constructor literals.
+#
+#   data Res<A, B> { MkOk(A), MkErr(B) }
+#   forall<T> fn eq2(@T, @T -> @Bool)
+#
+# `eq2(MkErr(5), MkOk("x"))` is a fully-determined `Res<String, Int>` — arg 0
+# (`MkErr(B)`) fixes `B = Int`, arg 1 (`MkOk(A)`) fixes `A = String` — but
+# first-argument-wins binding used to reject it (E202): the checker bound `@T`
+# to the first argument's whole `Res<A$1, Nat>` (with a fresh `A$1`) and the
+# concrete second argument did not unify.  The checker now MERGES per-type-
+# parameter information across the constructor arguments so a fully-determined
+# multi-parameter ADT type-checks — while a genuine per-parameter CONFLICT
+# (two arguments fixing the same parameter to different types) stays a clear
+# error.
+# =====================================================================
+
+class TestCrossArgTypeArgMerge:
+
+    _RES = "private data Res<A, B> { MkOk(A), MkErr(B) }\n"
+    _EQ2 = (
+        "private forall<T> fn eq2(@T, @T -> @Bool)\n"
+        "  requires(true) ensures(true) effects(pure) { true }\n"
+    )
+
+    def test_mergeable_cross_arg_accepts(self) -> None:
+        # arg0 fixes B=Int, arg1 fixes A=String -> fully-determined Res<String,Int>
+        _check_ok(
+            self._RES + self._EQ2
+            + "public fn main(@Unit -> @Bool)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ eq2(MkErr(5), MkOk(\"x\")) }\n"
+        )
+
+    def test_mergeable_cross_arg_reversed_order_accepts(self) -> None:
+        # order independence: arg0 fixes A, arg1 fixes B
+        _check_ok(
+            self._RES + self._EQ2
+            + "public fn main(@Unit -> @Bool)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ eq2(MkOk(\"x\"), MkErr(5)) }\n"
+        )
+
+    def test_conflicting_type_arg_rejected(self) -> None:
+        # both args are MkOk (fix A), but to DIFFERENT types (String vs Int) —
+        # a genuine conflict, must stay rejected (not silently merged) and get
+        # the clear E205 conflict diagnostic (a subtype-check E202 is the
+        # soundness backstop, but E205 is the actionable message).
+        errs = _errors(
+            self._RES + self._EQ2
+            + "public fn main(@Unit -> @Bool)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ eq2(MkOk(\"x\"), MkOk(5)) }\n"
+        )
+        codes = {e.error_code for e in errs}
+        assert "E205" in codes, f"conflict must be a clear E205, got {codes}"
+
+    def test_conflicting_nested_type_arg_rejected(self) -> None:
+        # nested conflict: arg0 gives A=String, arg1 gives A=Bool via MkOk
+        errs = _errors(
+            self._RES + self._EQ2
+            + "public fn main(@Unit -> @Bool)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ eq2(MkOk(\"x\"), MkOk(true)) }\n"
+        )
+        codes = {e.error_code for e in errs}
+        assert "E205" in codes, f"nested conflict must be a clear E205, got {codes}"
+
+    def test_fully_determined_noneq_still_typechecks(self) -> None:
+        # Res<Int, Array<Int>> is fully determined across args; it TYPE-CHECKS
+        # (the Eq rejection is a codegen concern, not a checker concern here —
+        # eq2 has no Eq bound in this fixture, so it must check cleanly).
+        _check_ok(
+            self._RES + self._EQ2
+            + "public fn main(@Unit -> @Bool)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ eq2(MkErr([1]), MkOk(2)) }\n"
+        )

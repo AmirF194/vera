@@ -775,3 +775,292 @@ public fn main(@Unit -> @Bool) requires(true) ensures(true) effects(pure)
     codes = _errors(source)
     assert "E613" in codes, f"non-Eq Box<Array> must reject, got {codes}"
     assert "E699" not in codes, f"invariant leak on rejection: {codes}"
+
+
+# ---------------------------------------------------------------------------
+# #898 — sparse multi-type-parameter ADT on the constructor-inferred Eq path.
+#
+#   data Res<A, B> { MkOk(A), MkErr(B) }
+#
+# `MkErr(5)` recovers only `B = Int`; the `MkOk(A)` constructor is ABSENT from
+# the argument, so `A` is genuinely undetermined at the call site.  Structural
+# Eq derivation checks ALL constructors' fields — `MkOk(A)` included — so
+# `Res<A, Int>` is Eq-derivable iff `A` is Eq, which cannot be decided from
+# `MkErr(5)` alone.  Rejecting is therefore CORRECT (never unsound), but the
+# old diagnostic (E613 "Res does not satisfy Eq") is misleading: the real
+# problem is an under-determined type argument.  The fix reports the clearer
+# E619 ("cannot infer type argument") for exactly this shape, while leaving the
+# fully-determined and non-Eq cases unchanged (accept / E613 respectively).
+#
+# See tests/conformance/ch09_multiparam_ctor_eq.vera for the accept-side
+# end-to-end program (annotated `Res<Int, Int>` derives + compares by value).
+# ---------------------------------------------------------------------------
+
+_RES_ADT = "public data Res<A, B> { MkOk(A), MkErr(B) }\n"
+_ID1 = (
+    "private forall<T where Eq<T>> fn id1(@T -> @Bool)\n"
+    "  requires(true) ensures(true) effects(pure) { @T.0 == @T.0 }\n"
+)
+
+
+def test_898_sparse_multiparam_ctor_underdetermined_is_e619_not_e613() -> None:
+    """#898: `id1(MkErr(5))` on `Res<A, B>` leaves `A` undetermined.
+
+    Rejection is correct (derivability depends on the free `A`), but the
+    diagnostic must be the clearer E619 (under-determined type argument),
+    NOT the misleading E613 ("Res does not satisfy Eq").
+    """
+    source = (
+        _RES_ADT + _ID1
+        + "public fn main(@Unit -> @Bool)\n"
+        "  requires(true) ensures(true) effects(pure) { id1(MkErr(5)) }\n"
+    )
+    codes = _errors(source)
+    assert "E619" in codes, (
+        f"under-determined type arg must be E619, got {codes}"
+    )
+    assert "E613" not in codes, (
+        f"misleading E613 must be replaced by E619, got {codes}"
+    )
+    assert "E699" not in codes, f"invariant leak on rejection: {codes}"
+
+
+def test_898_fully_determined_multiparam_ctor_accepts_and_runs() -> None:
+    """#898 accept side: a fully-annotated `Res<Int, Int>` derives Eq.
+
+    Both type parameters are supplied (via the `let` slot annotation), so the
+    constructor path derives structural Eq exactly as the slot-ref form does
+    and compares by value — `MkErr(5) == MkErr(6)` is `false` (0).
+    """
+    source = (
+        _RES_ADT + _ID1
+        + "public fn same(@Unit -> @Bool)\n"
+        "  requires(true) ensures(true) effects(pure) {\n"
+        "  let @Res<Int, Int> = MkErr(5);\n"
+        "  id1(@Res<Int, Int>.0)\n"
+        "}\n"
+    )
+    assert _errors(source) == [], "fully-determined Res<Int,Int> must derive Eq"
+    assert _run(source, fn="same") == 1
+
+
+def test_898_fully_determined_multiparam_direct_eq_compares_by_value() -> None:
+    """#898: direct `==` on two `Res<Int,Int>` MkErr values compares by value."""
+    source = (
+        _RES_ADT
+        + "public fn diff(@Unit -> @Bool)\n"
+        "  requires(true) ensures(true) effects(pure) {\n"
+        "  let @Res<Int, Int> = MkErr(5);\n"
+        "  let @Res<Int, Int> = MkErr(6);\n"
+        "  @Res<Int, Int>.0 == @Res<Int, Int>.1\n"
+        "}\n"
+    )
+    assert _errors(source) == [], "direct == on Res<Int,Int> must derive"
+    assert _run(source, fn="diff") == 0
+
+
+def test_898_soundness_gate_nonEq_multiparam_stays_e613() -> None:
+    """#898 soundness gate: a non-Eq type argument still rejects with E613.
+
+    `Res<Array<Int>, Int>` is fully determined (both params supplied) but `A`
+    is `Array`, which has no Eq semantics — this must STAY a clean E613, not an
+    E619 (the parameter is not under-determined, it is determined-and-non-Eq)
+    and not an over-accept.
+    """
+    source = (
+        _RES_ADT + _ID1
+        + "public fn main(@Unit -> @Bool)\n"
+        "  requires(true) ensures(true) effects(pure) {\n"
+        "  let @Res<Array<Int>, Int> = MkErr(5);\n"
+        "  id1(@Res<Array<Int>, Int>.0)\n"
+        "}\n"
+    )
+    codes = _errors(source)
+    assert "E613" in codes, f"non-Eq Res<Array,Int> must reject E613, got {codes}"
+    assert "E619" not in codes, (
+        f"determined-but-non-Eq is E613, not E619, got {codes}"
+    )
+    assert "E699" not in codes, f"invariant leak on rejection: {codes}"
+
+
+# ---------------------------------------------------------------------------
+# #898 round 2 — the FULL over-reject fix (cross-argument type-arg merge) and
+# the E619 diagnostic-accuracy correction.
+#
+# Round 2, Task 1: `eq2(MkErr(5), MkOk("x"))` is a fully-determined
+# `Res<String, Int>` — arg 0 fixes `B`, arg 1 fixes `A` — and now type-checks
+# (checker cross-argument merge), monomorphizes to the `Res<String, Int>` clone
+# on both the codegen and verifier sides, and runs by VALUE.  A genuine
+# per-parameter conflict stays a clear E205; a fully-determined NON-Eq type
+# stays E613.
+#
+# Round 2, Task 2: E619 fires only when the under-determined type WOULD derive
+# once its free parameter is annotated (all KNOWN components are Eq).  A known
+# non-Eq component — recovered (`Res<A, Array<Int>>`) or structural
+# (`W<A,B>{ K(Array<A>, B) }`) — is the accurate E613 instead, since no
+# annotation of the free parameter can make it Eq.
+# ---------------------------------------------------------------------------
+
+_EQ2 = (
+    "private forall<T where Eq<T>> fn eq2(@T, @T -> @Bool)\n"
+    "  requires(true) ensures(true) effects(pure) { eq(@T.1, @T.0) }\n"
+)
+
+
+def test_898r2_cross_arg_merge_compiles_and_runs() -> None:
+    """Task 1: `eq2(MkErr(5), MkOk("x"))` cross-determines `Res<String, Int>`.
+
+    Arg 0 (`MkErr`) fixes `B = Int`, arg 1 (`MkOk`) fixes `A = String`, so the
+    monomorphizer's cross-argument merge recovers the full `Res<String, Int>`
+    clone on BOTH the discovery and call-rewrite sides — the call compiles with
+    no Eq rejection (a pre-fix bare-`Res` recovery was an E619) and runs by
+    structural comparison to 0 (the two arguments use different constructors,
+    so they are unequal).  A determined-both-params call in ONE 2-arg `eq2`
+    necessarily compares two DIFFERENT constructors; the same-constructor
+    value-equality proof lives in the conformance program
+    ``ch09_multiparam_ctor_eq`` (annotated `Res<Int, Int>`).
+    """
+    source = (
+        _RES_ADT + _EQ2
+        + "public fn diff(@Unit -> @Bool)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ eq2(MkErr(5), MkOk(\"x\")) }\n"
+    )
+    assert _errors(source) == [], (
+        f"cross-arg-determined Res<String,Int> must derive Eq, "
+        f"got {_errors(source)}"
+    )
+    assert _run(source, fn="diff") == 0  # MkErr vs MkOk — different constructors
+
+
+def test_898r2_cross_arg_determined_noneq_is_e613() -> None:
+    """Task 1 soundness: a cross-arg-determined NON-Eq type stays E613.
+
+    `eq2(MkErr([1]), MkOk(2))` is a fully-determined `Res<Int, Array<Int>>`
+    (arg 0 fixes `B = Array<Int>`, arg 1 fixes `A = Int`).  It type-checks (both
+    parameters determined) but `Array` has no Eq semantics, so it must be a
+    clean E613 — not an over-accept, not E619 (nothing is under-determined).
+    """
+    source = (
+        _RES_ADT + _EQ2
+        + "public fn main(@Unit -> @Bool)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ eq2(MkErr([1]), MkOk(2)) }\n"
+    )
+    codes = _errors(source)
+    assert "E613" in codes, f"determined non-Eq must be E613, got {codes}"
+    assert "E619" not in codes, f"determined non-Eq is not E619, got {codes}"
+    assert "E699" not in codes, f"invariant leak: {codes}"
+
+
+def test_898r2_e619_accuracy_known_noneq_recovered_is_e613() -> None:
+    """Task 2: a recovered non-Eq component is E613, not E619.
+
+    `id1(MkErr([1]))` recovers `B = Array<Int>` (non-Eq) and leaves `A` free.
+    No value of `A` makes `Res<A, Array<Int>>` derive Eq, so "annotate to fix"
+    (E619) is false advice — it must be the accurate E613.
+    """
+    source = (
+        _RES_ADT + _ID1
+        + "public fn main(@Unit -> @Bool)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ id1(MkErr([1])) }\n"
+    )
+    codes = _errors(source)
+    assert "E613" in codes, f"recovered non-Eq component must be E613, got {codes}"
+    assert "E619" not in codes, (
+        f"a known non-Eq component is E613, not E619, got {codes}"
+    )
+    assert "E699" not in codes, f"invariant leak: {codes}"
+
+
+def test_898r2_e619_accuracy_structural_noneq_field_is_e613() -> None:
+    """Task 2: a structurally non-Eq field is E613 even with a free parameter.
+
+    `data W<A, B> { K(Array<A>, B) }`, `id1(K([1], 7))` collapses to bare `W`
+    with `B = Int` recovered.  The `Array<A>` field has no Eq semantics for ANY
+    `A`, so annotating the free parameter cannot help — the accurate diagnostic
+    is E613, not E619.
+    """
+    source = (
+        "private data W<A, B> { K(Array<A>, B) }\n" + _ID1
+        + "public fn main(@Unit -> @Bool)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ id1(K([1], 7)) }\n"
+    )
+    codes = _errors(source)
+    assert "E613" in codes, f"structural non-Eq field must be E613, got {codes}"
+    assert "E619" not in codes, (
+        f"a structural non-Eq field is E613, not E619, got {codes}"
+    )
+    assert "E699" not in codes, f"invariant leak: {codes}"
+
+
+def test_898r2_e619_accuracy_all_known_eq_free_param_stays_e619() -> None:
+    """Task 2: genuinely under-determined with all-Eq known components → E619.
+
+    `id1(MkErr(5))` recovers `B = Int` (Eq) and leaves `A` free.  Annotating
+    `A` to an Eq type makes `Res<A, Int>` derive, so the clearer E619 is
+    correct — this must NOT regress to E613 under the accuracy fix.
+    """
+    source = (
+        _RES_ADT + _ID1
+        + "public fn main(@Unit -> @Bool)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ id1(MkErr(5)) }\n"
+    )
+    codes = _errors(source)
+    assert "E619" in codes, f"all-known-Eq under-determined must be E619, got {codes}"
+    assert "E613" not in codes, f"must stay E619 not E613, got {codes}"
+    assert "E699" not in codes, f"invariant leak: {codes}"
+
+
+def test_898r2_e619_message_has_no_sentinel_and_valid_fix() -> None:
+    """The E619 message and fix must not leak the internal `?` sentinel, and the
+    fix must be a syntactically valid Vera annotation (#898 round-3 review).
+
+    For `id1(MkErr(5))` the free parameter `A` used to render as the reserved
+    `_FREE_TYPE_PARAM = "?"` sentinel — `Res<?, Int>` — and the fix suggested
+    `let @Res<?, Int><...> = ...;`, which is not valid Vera (double type-args,
+    `?`, `<...>` placeholder).  The free slot now renders as its declared
+    parameter name (`Res<A, Int>`) and the fix is a concrete, compilable
+    annotation binding the free parameter to an Eq type (`let @Res<Int, Int>
+    = ...;`).
+    """
+    source = (
+        _RES_ADT + _ID1
+        + "public fn main(@Unit -> @Bool)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ id1(MkErr(5)) }\n"
+    )
+    result = _compile(source)
+    e619 = [d for d in result.diagnostics if d.error_code == "E619"]
+    assert e619, "expected an E619 diagnostic"
+    d = e619[0]
+    # No sentinel leak anywhere in the user-facing text.
+    for field in (d.description, d.fix):
+        assert "?" not in field, f"sentinel leaked in E619 text: {field!r}"
+        assert "<...>" not in field, f"placeholder syntax in E619 text: {field!r}"
+    # The description names the ADT with its declared parameter names, not `?`.
+    assert "Res<A, Int>" in d.description, (
+        f"free slot must render as its parameter name, got: {d.description!r}"
+    )
+    # The fix's suggested annotation must actually compile: extract the
+    # `let @<Type> = ...;` type and check the whole program with that binding
+    # derives (a valid, actionable fix — not `Res<?, Int><...>`).
+    import re
+    m = re.search(r"let @(Res<[^=]*?>) =", d.fix)
+    assert m, f"fix must contain a concrete `let @Res<...> =` binding, got: {d.fix!r}"
+    fixed_type = m.group(1).strip()
+    probe = (
+        _RES_ADT + _ID1
+        + "public fn main(@Unit -> @Bool)\n"
+        "  requires(true) ensures(true) effects(pure) {\n"
+        f"  let @{fixed_type} = MkErr(5);\n"
+        f"  id1(@{fixed_type}.0)\n"
+        "}\n"
+    )
+    assert _errors(probe) == [], (
+        f"the E619 fix's annotation ({fixed_type}) must compile + derive, "
+        f"got {_errors(probe)}"
+    )

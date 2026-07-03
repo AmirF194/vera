@@ -8,7 +8,6 @@ Defects in shipped compiler, runtime, or tooling behaviour — this table matche
 
 | Bug | Issue |
 |-----|-------|
-| `Eq` auto-derivation over-rejects a *sparse multi-type-parameter* ADT on the constructor-inferred path. `eq2(MkErr(5), MkOk("x"))` for `data Res<A, B> { MkOk(A), MkErr(B) }` is a fully-determined `Res<String, Int>` (each type parameter fixed by a different argument) but is rejected at the checker (E202, first-argument-wins binding, no cross-argument type-arg merge). The genuinely under-determined case (`eq2(MkErr(5), MkErr(6))`, `A` free) is correctly rejected but with a misleading E613 — replaced by the clearer E619. Fix: merge per-parameter type-arg recovery across the call's constructor arguments in the checker, plus the E619 diagnostic. Over-reject only — never unsound. | [#898](https://github.com/aallan/vera/issues/898) |
 | A generic instantiated at the zero-size `Unit` type (`forall<T>` with `T = Unit`) passes `vera check` but fails at codegen — hash-seed-dependently `E699`, a dropped `main`, or a `codegen invariant violation` crash telling the user to file a bug report. A check-green program must not reach a codegen crash: the checker should cleanly reject `forall<T>` instantiated at `Unit` (or codegen should support the `Unit` monomorphization). Pre-existing on `main`. | [#900](https://github.com/aallan/vera/issues/900) |
 
 ## Limitations

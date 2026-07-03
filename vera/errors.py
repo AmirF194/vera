@@ -494,6 +494,7 @@ ERROR_CODES: dict[str, str] = {
     "E202": "Argument type mismatch",
     "E203": "Effect operation wrong argument count",
     "E204": "Effect operation argument type mismatch",
+    "E205": "Conflicting type argument inference",
     "E210": "Unknown constructor",
     "E211": "Constructor is nullary",
     "E212": "Constructor wrong field count",
@@ -568,6 +569,7 @@ ERROR_CODES: dict[str, str] = {
     "E616": "Cannot infer closure return type for call_indirect",
     "E617": "Refinement predicate not compilable to runtime guard",
     "E618": "Nested refinement base unsupported",
+    "E619": "Cannot infer type argument for ability-constrained parameter",
     "E699": "Internal compiler error",
     # E7xx — Testing
     "E700": "Contract violation during testing",

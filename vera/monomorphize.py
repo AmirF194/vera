@@ -341,6 +341,16 @@ def unmangle_type_name(mangled: str) -> str:
     return "".join(out)
 
 
+# Sentinel marking a genuinely-FREE (un-inferred) type-parameter slot in a
+# partially-recovered sparse-multi-parameter ADT name (`Res<?, Int>`, #898).
+# `?` cannot occur in a real Vera type name, so it never collides with a
+# concrete type; such a name reaches only the ability gate (the instance is
+# always rejected), never an emitted clone, and lets the gate tell an
+# under-determined-but-would-derive type (E619, annotate the free param) from
+# one whose known component is already non-Eq (E613, annotation cannot help).
+_FREE_TYPE_PARAM = "?"
+
+
 # Builtin function name → Vera return type name.
 # Used by Monomorphizer._infer_fncall_vera_type_simple() to resolve opaque
 # handle types that all share the same WASM representation (i32) but are
@@ -621,9 +631,43 @@ class Monomorphizer:
         )
 
         mapping: dict[str, str] = {}
+        # #898: per-constrained-forall-var accumulator of a sparse
+        # multi-parameter ADT's partial per-parameter recovery, MERGED across
+        # every constructor argument bound to that var.  Each entry is
+        # (base_name, [name-or-None per ADT type parameter]); `MkErr(5)` fills
+        # one slot, `MkOk("x")` fills the other, so the two together yield the
+        # fully-determined `Res<String, Int>` the checker's cross-argument merge
+        # (`merge_inferred_types`) already accepted — keeping the monomorphizer
+        # in lockstep so the emitted clone matches the type-checked call.
+        partial_adt: dict[str, tuple[str, list[str | None]]] = {}
         for param_te, arg in zip(decl.params, args):
             self._unify_param_arg(param_te, arg, forall_vars, ctor_to_adt,
-                                  mapping, generic_decls, constrained_vars)
+                                  mapping, generic_decls, constrained_vars,
+                                  partial_adt)
+
+        # Materialise any merged sparse-ADT recovery.
+        #
+        # * Fully determined (every parameter now known across all arguments):
+        #   promote the bare name to the full parameterised name so the E613
+        #   gate and clone body see the concrete field types, and the emitted
+        #   clone matches the type-checked call.
+        # * Partially determined (a genuinely free parameter remains — the
+        #   single-argument `id1(MkErr(5))` shape): materialise a name that
+        #   still carries the RECOVERED components, with each free slot marked
+        #   by the reserved `?` sentinel (`Res<?, Int>`).  This never names an
+        #   emitted clone (the instance is always rejected by the ability gate),
+        #   but it lets the gate distinguish an under-determined type whose
+        #   known components ARE Eq (→ clearer E619, annotate the free param)
+        #   from one whose known component is already non-Eq (→ accurate E613,
+        #   annotation cannot help) — #898 diagnostic-accuracy fix.
+        for tv, (base_name, slots) in partial_adt.items():
+            if all(s is not None for s in slots):
+                resolved = [s for s in slots if s is not None]
+                mapping[tv] = f"{base_name}<{', '.join(resolved)}>"
+            elif tv in constrained_vars:
+                rendered = [s if s is not None else _FREE_TYPE_PARAM
+                            for s in slots]
+                mapping[tv] = f"{base_name}<{', '.join(rendered)}>"
 
         # Check all type vars are resolved; default unresolved phantom vars to
         # Bool (NOT Unit — see the rationale just below: Bool has an i32 repr)
@@ -647,12 +691,13 @@ class Monomorphizer:
         mapping: dict[str, str],
         generic_decls: dict[str, ast.FnDecl] | None = None,
         constrained_vars: frozenset[str] = frozenset(),
+        partial_adt: dict[str, tuple[str, list[str | None]]] | None = None,
     ) -> None:
         """Unify a parameter TypeExpr against an argument to bind type vars."""
         if isinstance(param_te, ast.RefinementType):
             self._unify_param_arg(
                 param_te.base_type, arg, forall_vars, ctor_to_adt, mapping,
-                generic_decls, constrained_vars,
+                generic_decls, constrained_vars, partial_adt,
             )
             return
 
@@ -677,6 +722,26 @@ class Monomorphizer:
                     if arg_names and all(a is not None for a in arg_names):
                         resolved = [a for a in arg_names if a is not None]
                         vera_type = f"{base_name}<{', '.join(resolved)}>"
+                    elif arg_names and partial_adt is not None:
+                        # #898: PARTIAL recovery — this constructor pins only
+                        # some of the ADT's type parameters (`MkErr(5)` fills
+                        # `B`, not `A`).  Accumulate the per-slot info under this
+                        # forall var, MERGING with any sibling argument's
+                        # recovery (`MkOk("x")` fills `A`), so the fully-
+                        # determined `Res<String, Int>` is materialised after
+                        # every argument is seen.  A later slot overwrites None,
+                        # never a concrete name (siblings agree on shared slots
+                        # because the checker already accepted the call — a
+                        # genuine conflict is an E205 there, never reaching mono).
+                        prev = partial_adt.get(param_te.name)
+                        if prev is None or prev[0] != base_name:
+                            slots: list[str | None] = list(arg_names)
+                            partial_adt[param_te.name] = (base_name, slots)
+                        else:
+                            slots = prev[1]
+                            for i, name in enumerate(arg_names):
+                                if name is not None and i < len(slots):
+                                    slots[i] = name
             if vera_type and param_te.name not in mapping:
                 mapping[param_te.name] = vera_type
             return
