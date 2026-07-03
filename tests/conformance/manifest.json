@@ -700,6 +700,19 @@
     ]
   },
   {
+    "id": "ch06_adt_sort_disambiguation",
+    "file": "ch06_adt_sort_disambiguation.vera",
+    "chapter": 6,
+    "title": "ADT sort disambiguation (generic vs flat-ADT name collision)",
+    "level": "verify",
+    "spec_ref": "Section 6.4.1",
+    "features": [
+      "ensures",
+      "adt_match",
+      "sort_disambiguation"
+    ]
+  },
+  {
     "id": "ch06_decreases",
     "file": "ch06_decreases.vera",
     "chapter": 6,

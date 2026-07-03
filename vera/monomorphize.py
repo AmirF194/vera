@@ -163,6 +163,54 @@ def mangle_type_name(type_name: str) -> str:
     )
 
 
+# Two-char escape code -> the canonical character(s) it decodes to.
+# `_C` decodes to the canonical separator spelling `", "` (mangle collapses
+# both `", "` and `","` to `_C`, but canonical type names always spell the
+# separator `", "`, so that is the sole preimage in the domain).
+_UNMANGLE_CODES = {"_": "_", "L": "<", "R": ">", "C": ", ", "S": " "}
+
+
+def unmangle_type_name(mangled: str) -> str:
+    """Inverse of :func:`mangle_type_name` over canonical type names.
+
+    :func:`mangle_type_name` is a prefix code — the output is a concatenation
+    of code units, each either a single non-``_`` character (mapping to
+    itself) or a two-character ``_X`` code (``__``/``_L``/``_R``/``_C``/``_S``)
+    — so a left-to-right scan decodes uniquely: at a ``_`` consume two
+    characters and emit the decoded character(s), otherwise consume one and
+    emit it.  Round-trips every canonical type name
+    (``unmangle_type_name(mangle_type_name(t)) == t``), which is what lets the
+    verifier's Array-element reverse lookup (``_get_element_sort_for_array``
+    in ``vera/smt.py``) recover the ``_z3_sorts`` key (``List<Int>``) from a
+    mangled Array-element sort name (``List_LInt_R``) after #884 routed ADT
+    sort names through the mangler.
+
+    Raises ``ValueError`` on a string that is not valid mangler output (a
+    trailing lone ``_`` or an unknown ``_X`` code) — such input is outside the
+    mangler's range and has no preimage.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(mangled)
+    while i < n:
+        ch = mangled[i]
+        if ch != "_":
+            out.append(ch)
+            i += 1
+            continue
+        if i + 1 >= n:
+            raise ValueError(f"trailing lone '_' in mangled name: {mangled!r}")
+        code = mangled[i + 1]
+        decoded = _UNMANGLE_CODES.get(code)
+        if decoded is None:
+            raise ValueError(
+                f"unknown escape code '_{code}' in mangled name: {mangled!r}"
+            )
+        out.append(decoded)
+        i += 2
+    return "".join(out)
+
+
 # Builtin function name → Vera return type name.
 # Used by Monomorphizer._infer_fncall_vera_type_simple() to resolve opaque
 # handle types that all share the same WASM representation (i32) but are

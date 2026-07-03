@@ -642,6 +642,54 @@ class TestSmtContextDirect:
         result = _adt_sort_key("List", (TypeVar("T"),))
         assert result == "List<?>"
 
+    def test_element_sort_reverse_lookup_tier3_generic_adt(self) -> None:
+        """#884 follow-up — `_get_element_sort_for_array`'s tier-3 fallback
+        recovers a *generic-ADT* element sort from the mangled Array-element
+        sort name.
+
+        #884 routed ADT sort names through the injective `mangle_type_name`,
+        so a `Box<Int>` element sort is Z3-named `Box_LInt_R` and its Array
+        carrier is `Array_Box_LInt_R`.  Tier 3 must invert the mangler
+        (`Box_LInt_R` → `Box<Int>`) to hit the `_z3_sorts` key.  The old
+        string round-trip (`elt_key.replace("_", "<", 1) + ">"`) produced the
+        candidate `Box<LInt_R>`, which never matched `Box<Int>` — so tier 3
+        silently returned None for every generic-ADT element after the #884
+        rename.
+
+        This exercises tier 3 in isolation: `_array_element_sorts` (tier 1) is
+        left empty and the sort name is not a primitive (tier 2), so recovery
+        depends entirely on the tier-3 mangler inversion.  Mutation oracle:
+        reverting the tier-3 candidate reconstruction to the old
+        `elt_key.replace("_", "<", 1) + ">"` string surgery flips this test —
+        the lookup returns None instead of the ADT sort.
+        """
+        import z3
+        from vera.smt import SmtContext
+        from vera.monomorphize import mangle_type_name
+
+        ctx = SmtContext()
+        # Register a `Box<Int>` ADT sort under its canonical `_z3_sorts` key,
+        # with the Z3-visible name the #884 mangler produces.
+        key = "Box<Int>"
+        z3_name = mangle_type_name(key)  # "Box_LInt_R"
+        dt = z3.Datatype(z3_name)
+        dt.declare("MkBox", ("MkBox_0", z3.IntSort()))
+        elem_sort = dt.create()
+        ctx._z3_sorts[key] = elem_sort
+
+        # The Array carrier sort, exactly as `_get_array_sort` names it.
+        array_sort = z3.DeclareSort(f"Array_{elem_sort}")
+        assert str(array_sort) == "Array_Box_LInt_R"
+
+        # Tier 1 disabled: no `_array_element_sorts` entry for this carrier.
+        assert str(array_sort) not in ctx._array_element_sorts
+
+        recovered = ctx._get_element_sort_for_array(array_sort)
+        assert recovered is elem_sort, (
+            "tier-3 reverse lookup failed to recover the `Box<Int>` element "
+            f"sort from `{array_sort}`; got {recovered!r}"
+        )
+
     def test_check_valid_unknown(self) -> None:
         """check_valid returns 'unknown' for indeterminate formulas."""
         from vera.smt import SmtContext
@@ -1213,8 +1261,11 @@ public fn f(@Int -> @Int)
         `_z3_sorts` under the unqualified key — that worked for
         nullary ADTs by coincidence (no `<...>` to strip), but
         was fragile for generic ADTs like `List<Int>` whose
-        canonical key is `List<Int>` but the Z3 sort name is
-        `List_Int`.  The direct map sidesteps the round-trip.
+        canonical key is `List<Int>` but whose Z3 sort name is
+        the mangled `List_LInt_R` (#884).  The direct map
+        sidesteps the round-trip; the tier-3 fallback that does
+        need the round-trip inverts the mangler
+        (`test_element_sort_reverse_lookup_tier3_generic_adt`).
         """
         result = _verify("""
 private data MyAdt { Wrap(Int) }

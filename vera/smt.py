@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Callable
 import z3
 
 from vera import ast
+from vera.monomorphize import mangle_type_name, unmangle_type_name
 from vera.types import (
     AdtType,
     PrimitiveType,
@@ -481,8 +482,14 @@ class SmtContext:
                 return None
             subst = dict(zip(adt_info.type_params, type_args))
 
-        # Create Z3 Datatype
-        z3_name = key.replace("<", "_").replace(">", "").replace(", ", "_")
+        # Create Z3 Datatype.  The Z3-visible sort name MUST be injective in
+        # the type key: Z3's per-context datatype cache conflates same-named
+        # sorts (last create() wins and retroactively mutates earlier ones),
+        # so a lossy name collision (e.g. `Box<Int>` and a flat `Box_Int` both
+        # sanitizing to `Box_Int`) makes one sort adopt the other's
+        # constructors — a false E500 counterexample on valid code (#884).
+        # Route through the injective #775 mangler (`mangle_type_name`).
+        z3_name = mangle_type_name(key)
         dt = z3.Datatype(z3_name)
 
         for ctor_name, ctor_info in adt_info.constructors.items():
@@ -518,7 +525,8 @@ class SmtContext:
         accessors — needed for non-literal tuple-destructure narrowing
         obligations.  Cached like any other ADT sort.
         """
-        z3_name = key.replace("<", "_").replace(">", "").replace(", ", "_")
+        # Injective Z3 sort name (see _get_or_create_adt_sort / #884).
+        z3_name = mangle_type_name(key)
         dt = z3.Datatype(z3_name)
         fields: list[tuple[str, Any]] = []
         for i, ft in enumerate(type_args):
@@ -1008,9 +1016,10 @@ class SmtContext:
            against future regressions).
 
         3. **`_z3_sorts` direct key lookup**: tries the raw
-           stripped key (e.g. `MyAdt`) and the angle-bracketed
-           generic form (e.g. `List_Int` → `List<Int>`) as
-           defensive last-ditch ADT-sort recovery.  Mostly
+           stripped key (e.g. `MyAdt`) and the mangler-inverted
+           key (e.g. `List_LInt_R` → `List<Int>`, since #884 routed
+           ADT sort names through the injective `mangle_type_name`)
+           as defensive last-ditch ADT-sort recovery.  Mostly
            redundant given (1) — every `Array_<T>` sort is
            created via `_get_array_sort` which populates
            `_array_element_sorts` at creation time — but kept as
@@ -1031,16 +1040,24 @@ class SmtContext:
             return z3.BoolSort()
         if sort_name == "Array_String":
             return z3.StringSort()
-        # 3. ADT-element fallback — try the stripped name, then a
-        # few canonical key shapes.  `_z3_sorts` uses
-        # `_adt_sort_key(name, type_args)` which produces
-        # `"List<Int>"`-style keys with angle brackets; the Z3
-        # sort name has those stripped via the transformation in
-        # `_get_or_create_adt_sort`, so direct round-trip isn't
-        # always possible — these candidates catch the common
-        # generic-ADT shapes.
+        # 3. ADT-element fallback — recover the `_z3_sorts` key from the
+        # mangled Array-element sort name.  `_z3_sorts` uses
+        # `_adt_sort_key(name, type_args)` which produces `"List<Int>"`-style
+        # keys with angle brackets, while the element sort's Z3 name is the
+        # injective mangler output (`List<Int>` → `List_LInt_R`; #884 routed
+        # ADT sort names through `mangle_type_name`).  Invert the mangler to
+        # get the key back; a flat ADT name (no metacharacters) unmangles to
+        # itself.  A stripped name that is not valid mangler output has no
+        # ADT preimage — skip that candidate rather than guess.
         elt_key = sort_name[len("Array_"):]
-        for candidate in (elt_key, elt_key.replace("_", "<", 1) + ">"):
+        candidates = [elt_key]
+        try:
+            unmangled = unmangle_type_name(elt_key)
+        except ValueError:
+            unmangled = None
+        if unmangled is not None and unmangled != elt_key:
+            candidates.append(unmangled)
+        for candidate in candidates:
             sort = self._z3_sorts.get(candidate)
             if sort is not None:
                 return sort
