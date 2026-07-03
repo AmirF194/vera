@@ -18,6 +18,7 @@ from vera import ast
 from vera.monomorphize import mangle_type_name, unmangle_type_name
 from vera.types import (
     AdtType,
+    PRIMITIVES,
     PrimitiveType,
     RefinedType,
     Type,
@@ -163,6 +164,25 @@ class CallViolation:
     counterexample: dict[str, str] | None = None
 
 
+@dataclass
+class CallDemotion:
+    """Records a call site whose precondition obligation cannot be checked
+    statically (#882).
+
+    Emitted when a callee has a non-trivial ``requires`` but the call cannot
+    be translated to Z3 — an argument or the precondition itself uses a
+    construct outside the decidable fragment (e.g. an ADT field of a
+    host-handle type like ``Map``).  The verifier turns this into a LOUD
+    Tier-3 obligation (E532) rather than letting the precondition obligation
+    silently not exist: DESIGN.md degrades loudly, and the runtime guard
+    still enforces the contract.
+    """
+
+    callee_name: str
+    call_node: ast.FnCall | ast.ModuleCall
+    precondition: ast.Requires
+
+
 # =====================================================================
 # SMT context — solver and translation
 # =====================================================================
@@ -273,6 +293,10 @@ class SmtContext:
         self._fn_lookup = fn_lookup
         self._module_fn_lookup = module_fn_lookup
         self._call_violations: list[CallViolation] = []
+        # #882: call sites whose precondition obligation cannot be checked
+        # statically (untranslatable ADT-argument, etc.) — demoted to a loud
+        # Tier-3 by the verifier rather than silently dropped.
+        self._call_demotions: list[CallDemotion] = []
         self._fresh_counter: int = 0
         # Path conditions accumulated from if/match branches so that
         # call-site precondition checks can see which branch is active.
@@ -401,6 +425,72 @@ class SmtContext:
         violations = list(self._call_violations)
         self._call_violations.clear()
         return violations
+
+    def drain_call_demotions(self) -> list[CallDemotion]:
+        """Return accumulated call-site Tier-3 demotions and clear the list
+        (#882)."""
+        demotions = list(self._call_demotions)
+        self._call_demotions.clear()
+        return demotions
+
+    def _record_call_demotion(
+        self,
+        callee_info: Any,
+        callee_name: str,
+        call_node: ast.FnCall | ast.ModuleCall,
+    ) -> None:
+        """Record a Tier-3 demotion for an untranslatable call argument (#882).
+
+        The representative precondition is the callee's first non-trivial
+        ``requires`` — its expression text and the call-site span locate the
+        obligation.  A guard on ``has_nontrivial_pre`` at the call site
+        guarantees one exists.
+        """
+        contract = next(
+            (
+                c for c in callee_info.contracts
+                if isinstance(c, ast.Requires)
+                and not (isinstance(c.expr, ast.BoolLit) and c.expr.value)
+            ),
+            None,
+        )
+        if contract is None:  # pragma: no cover — guarded by has_nontrivial_pre
+            return
+        self._record_call_demotion_for(callee_name, call_node, contract)
+
+    def _record_call_demotion_for(
+        self,
+        callee_name: str,
+        call_node: ast.FnCall | ast.ModuleCall,
+        contract: ast.Requires,
+    ) -> None:
+        """Record one Tier-3 call-pre demotion, deduped by (precondition,
+        call-site span) exactly like :class:`CallViolation` (#882).
+
+        The same call site is translated more than once per function (the
+        primitive-op / @Nat walkers re-translate RHSes and operands), so this
+        keeps a single demotion per site regardless of how many passes visit
+        it.  A demoted site must also not double-count as a violation, so the
+        two lists share the same span key.
+        """
+        already = any(
+            d.precondition is contract
+            and (
+                d.call_node.span == call_node.span
+                if (
+                    d.call_node.span is not None
+                    and call_node.span is not None
+                )
+                else d.call_node is call_node
+            )
+            for d in self._call_demotions
+        )
+        if not already:
+            self._call_demotions.append(CallDemotion(
+                callee_name=callee_name,
+                call_node=call_node,
+                precondition=contract,
+            ))
 
     # -----------------------------------------------------------------
     # ADT support
@@ -1616,48 +1706,62 @@ class SmtContext:
             callee_info, call.name, call.args, call, env,
         )
 
-    def _translate_call_with_info(
-        self,
-        callee_info: Any,
-        callee_name: str,
-        args: tuple[ast.Expr, ...],
-        call_node: ast.FnCall | ast.ModuleCall,
-        env: SlotEnv,
-    ) -> z3.ExprRef | None:
-        """Core modular verification: check preconditions, assume postconditions.
+    def _translate_call_args(
+        self, args: tuple[ast.Expr, ...], env: SlotEnv,
+    ) -> list[z3.ExprRef] | None:
+        """Translate every actual argument in the caller's env (#882 helper).
 
-          1. Check callee is non-generic with matching arity
-          2. Translate actual arguments in the caller's env
-          3. Check each callee precondition holds (solver has caller assumptions)
-          4. Create a fresh return variable
-          5. Assume callee postconditions about the return variable
-          6. Return the fresh variable
+        Returns the Z3 argument list, or None if any argument uses a construct
+        outside the decidable fragment.  Factored out so the call translator
+        can attempt argument translation twice: once as-is (pre-#882
+        behaviour) and once after forcing the callee's ADT sorts.
         """
-        # Generic functions can't be translated to Z3
-        if callee_info.forall_vars:
-            return None
-
-        # Must have matching arity
-        if len(args) != len(callee_info.param_type_exprs):
-            return None
-
-        # Translate actual arguments in the caller's env
         z3_args: list[z3.ExprRef] = []
         for arg_expr in args:
             z3_arg = self.translate_expr(arg_expr, env)
             if z3_arg is None:
                 return None
             z3_args.append(z3_arg)
+        return z3_args
 
-        # Build callee's SlotEnv: push params in declaration order
+    def _build_callee_env(
+        self,
+        callee_info: Any,
+        z3_args: list[z3.ExprRef],
+    ) -> SlotEnv | None:
+        """Build the callee's SlotEnv by pushing each parameter's Z3 argument
+        in declaration order (#882 helper).
+
+        Returns None if a parameter type expression has no slot name (a shape
+        the checker rules out; guarded for safety).
+        """
         callee_env = SlotEnv()
         for param_te, z3_arg in zip(callee_info.param_type_exprs, z3_args):
             slot_name = self._type_expr_to_slot_name(param_te)
             if slot_name is None:  # pragma: no cover
                 return None
             callee_env = callee_env.push(slot_name, z3_arg)
+        return callee_env
 
-        # Check each callee precondition
+    def _check_call_preconditions(
+        self,
+        callee_info: Any,
+        callee_name: str,
+        z3_args: list[z3.ExprRef],
+        call_node: ast.FnCall | ast.ModuleCall,
+    ) -> bool:
+        """Check each of the callee's preconditions at this call site.
+
+        Returns True when every non-trivial precondition is discharged (or the
+        callee has none), False when one is violated (E501 recorded) or cannot
+        be translated (E532 demotion recorded).  Shared by the modelled-return
+        path and the #882 opaque-return path so both check the obligation with
+        identical dedup semantics.
+        """
+        callee_env = self._build_callee_env(callee_info, z3_args)
+        if callee_env is None:  # pragma: no cover
+            return False
+
         for contract in callee_info.contracts:
             if not isinstance(contract, ast.Requires):
                 continue
@@ -1665,9 +1769,16 @@ class SmtContext:
             if isinstance(contract.expr, ast.BoolLit) and contract.expr.value:
                 continue
             z3_pre = self.translate_expr(contract.expr, callee_env)
-            if z3_pre is None:  # pragma: no cover
-                # Can't translate precondition → bail to Tier 3
-                return None
+            if z3_pre is None:
+                # The precondition itself uses a construct outside the
+                # decidable fragment.  Demote loudly to Tier-3 rather than
+                # silently dropping the obligation (#882): the arguments
+                # translated, so this is a real call-pre obligation we simply
+                # can't discharge statically.
+                self._record_call_demotion_for(
+                    callee_name, call_node, contract,
+                )
+                return False
             # Check validity: solver state already has caller's assumptions
             result = self.check_valid(z3_pre, [])
             if result.status != "verified":
@@ -1703,7 +1814,90 @@ class SmtContext:
                         precondition=contract,
                         counterexample=result.counterexample,
                     ))
+                return False
+        return True
+
+    def _translate_call_with_info(
+        self,
+        callee_info: Any,
+        callee_name: str,
+        args: tuple[ast.Expr, ...],
+        call_node: ast.FnCall | ast.ModuleCall,
+        env: SlotEnv,
+    ) -> z3.ExprRef | None:
+        """Core modular verification: check preconditions, assume postconditions.
+
+          1. Check callee is non-generic with matching arity
+          2. Translate actual arguments in the caller's env
+          3. Check each callee precondition holds (solver has caller assumptions)
+          4. Create a fresh return variable
+          5. Assume callee postconditions about the return variable
+          6. Return the fresh variable
+        """
+        # Generic functions can't be translated to Z3
+        if callee_info.forall_vars:
+            return None
+
+        # Must have matching arity
+        if len(args) != len(callee_info.param_type_exprs):
+            return None
+
+        # Does the callee carry a real (non-trivial) precondition?  A callee
+        # with only `requires(true)` has no obligation to demote — a failed
+        # arg translation there is correctly silent (#882).
+        has_nontrivial_pre = any(
+            isinstance(c, ast.Requires)
+            and not (isinstance(c.expr, ast.BoolLit) and c.expr.value)
+            for c in callee_info.contracts
+        )
+
+        # Translate actual arguments in the caller's env.  First WITHOUT
+        # forcing any ADT sort — this is the exact pre-#882 attempt.  When it
+        # succeeds the call is modelled as before (return value assumed from
+        # the callee's ensures below), so no existing behaviour changes.
+        z3_args = self._translate_call_args(args, env)
+
+        # #882: a constructor-call argument (`MkP(1)`) only translates once the
+        # callee's concrete ADT sort exists.  In a caller context that never
+        # declared that ADT the sort is absent, so the pre-#882 attempt bails
+        # and the call-site precondition obligation silently vanishes.  Force
+        # the sorts from the callee's declared parameter types and retry — but
+        # ONLY to CHECK the precondition, not to newly model the return value.
+        if z3_args is None:
+            self._ensure_call_arg_sorts(callee_info.param_type_exprs)
+            forced_args = self._translate_call_args(args, env)
+            if forced_args is not None:
+                # Arguments now translate.  Check the call-site precondition
+                # against them (records E501 / discharges), then return None so
+                # the return value stays opaque exactly as pre-#882 — the
+                # caller reasoned about this helper's result only through its
+                # ensures before, and still does; the *only* new behaviour is
+                # the precondition obligation.
+                self._check_call_preconditions(
+                    callee_info, callee_name, forced_args, call_node,
+                )
                 return None
+            # Still untranslatable (a host-handle field like `Map`).  A real
+            # precondition must demote LOUDLY to Tier-3 (#882); a trivial
+            # `requires(true)` has no obligation and stays silent.
+            if has_nontrivial_pre:
+                self._record_call_demotion(callee_info, callee_name, call_node)
+            return None
+
+        # Check the callee's preconditions against the translated arguments.
+        # On any failure (violation or demotion recorded) the call result is
+        # opaque — return None so the enclosing postcondition demotes to
+        # Tier-3, unchanged from before this refactor.
+        if not self._check_call_preconditions(
+            callee_info, callee_name, z3_args, call_node,
+        ):
+            return None
+
+        # Rebuild the callee env for the ensures-assumption step below (the
+        # postcondition may reference the callee's own parameters).
+        callee_env = self._build_callee_env(callee_info, z3_args)
+        if callee_env is None:  # pragma: no cover
+            return None
 
         # Create fresh return variable
         from vera.types import RefinedType
@@ -2077,6 +2271,67 @@ class SmtContext:
             z3_args.append(z3_arg)
         return sort.constructor(idx)(*z3_args)
 
+    def _type_expr_to_adt_type(self, te: ast.TypeExpr) -> Type | None:
+        """Resolve a parameter type expression naming a registered ADT to its
+        concrete :class:`AdtType` (#882).
+
+        Returns None for type expressions that don't name an ADT in the
+        registry (primitives, type vars, function types, unknown names).
+        Type arguments are resolved recursively so a nested generic
+        instantiation (``Box<Inner>``) materialises with the right element
+        sort.  A refinement unwraps to its base, mirroring
+        ``_vera_type_to_z3_sort``.
+        """
+        if isinstance(te, ast.RefinementType):
+            return self._type_expr_to_adt_type(te.base_type)
+        if not isinstance(te, ast.NamedType):
+            return None
+        if te.name not in self._adt_registry:
+            return None
+        type_args: list[Type] = []
+        if te.type_args:
+            for a in te.type_args:
+                arg_ty = self._type_expr_to_adt_type(a)
+                if arg_ty is None:
+                    arg_ty = self._named_type_expr_to_primitive(a)
+                if arg_ty is None:
+                    # An argument we can't resolve (function-typed, unknown)
+                    # — leave the whole instantiation unmaterialised so the
+                    # caller demotes loudly rather than building a wrong sort.
+                    return None
+                type_args.append(arg_ty)
+        return AdtType(te.name, tuple(type_args))
+
+    @staticmethod
+    def _named_type_expr_to_primitive(te: ast.TypeExpr) -> Type | None:
+        """Resolve a type expression naming a primitive to its ``Type``
+        (#882 helper for ADT type-argument resolution)."""
+        if isinstance(te, ast.RefinementType):
+            return SmtContext._named_type_expr_to_primitive(te.base_type)
+        if isinstance(te, ast.NamedType) and not te.type_args:
+            return PRIMITIVES.get(te.name)
+        return None
+
+    def _ensure_call_arg_sorts(
+        self, param_type_exprs: Any,
+    ) -> None:
+        """Materialise the Z3 ADT sort for each ADT-typed parameter (#882).
+
+        A constructor-call argument (``MkP(1)``) only translates once the
+        callee's concrete ADT sort exists in ``_z3_sorts`` — otherwise
+        ``_find_sort_for_ctor`` returns None and the call-site precondition
+        obligation silently vanishes.  In the caller's context the sort may
+        never have been created (the caller has no parameter of that ADT), so
+        force it here from the callee's declared parameter types before
+        translating the arguments.  A type whose sort can't be built (a
+        host-handle field like ``Map``) is left absent — the argument then
+        fails to translate and the caller demotes loudly to Tier-3.
+        """
+        for pte in param_type_exprs:
+            adt_ty = self._type_expr_to_adt_type(pte)
+            if adt_ty is not None:
+                self._vera_type_to_z3_sort(adt_ty)
+
     def _type_expr_to_slot_name(self, te: ast.TypeExpr) -> str | None:
         """Extract the slot name from a type expression."""
         if isinstance(te, ast.NamedType):
@@ -2174,6 +2429,7 @@ class SmtContext:
         self._vars.clear()
         self._result_var = None
         self._call_violations.clear()
+        self._call_demotions.clear()
         self._fresh_counter = 0
         self._path_conditions.clear()
         self._length_fns = {

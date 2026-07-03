@@ -1,0 +1,23 @@
+-- Conformance: a callee whose requires() constrains ADT-typed parameters gets a
+-- call-site precondition obligation, discharged statically at Tier-1 exactly
+-- like Int parameters (Chapter 6, #882).
+-- Tests: requires clause over ADT equality, call-site precondition discharge
+private data Point {
+  MkPoint(Int)
+}
+
+private fn same_point(@Point, @Point -> @Bool)
+  requires(@Point.1 == @Point.0)
+  ensures(true)
+  effects(pure)
+{
+  true
+}
+
+public fn main(@Unit -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  same_point(MkPoint(3), MkPoint(3))
+}

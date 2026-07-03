@@ -3211,6 +3211,7 @@ Every diagnostic has a stable error code. Codes are grouped by compiler phase:
 - **E529**: float_to_int domain (NaN, infinity, or out of i64 range)
 - **E530**: Nat-to-Int widening out of i64 range
 - **E531**: Nat-to-Int widening unverified and not runtime-guarded
+- **E532**: Cannot verify call-site precondition (undecidable)
 - **E600**: Unsupported parameter type
 - **E601**: Unsupported return type
 - **E602**: Unsupported body expression type
