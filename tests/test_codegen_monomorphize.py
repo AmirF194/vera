@@ -720,6 +720,440 @@ public fn main(-> @Int)
 
 
 # =====================================================================
+# Structural show / hash for composite types (#911)
+# =====================================================================
+
+
+class TestCompositeShowHash:
+    """show(x) / hash(x) on ADT / Tuple / Option / Result / Array (#911).
+
+    Before #911 these were ``vera check``-green but dropped at codegen
+    (``show()/hash() not supported for type ...`` → function skipped).
+    Structural traversal mirrors the ``$eq_<type>`` machinery: render each
+    field by its own ``show`` (recursively); fold field hashes with the tag.
+    """
+
+    # ---- show: user ADT ------------------------------------------------
+
+    def test_show_adt_nullary(self) -> None:
+        """A nullary enum constructor renders as its bare name."""
+        source = """\
+private data Color { Red, Green, Blue }
+
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(show(Green), "Green") }
+"""
+        assert _run(source, fn="main") == 1
+
+    def test_show_adt_one_field(self) -> None:
+        """A single-field constructor renders as ``Ctor(field)``."""
+        source = """\
+private data Foo { MkFoo(Int) }
+
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(show(MkFoo(5)), "MkFoo(5)") }
+"""
+        assert _run(source, fn="main") == 1
+
+    def test_show_adt_two_fields(self) -> None:
+        """A multi-field constructor renders comma+space separated."""
+        source = """\
+private data Pair { MkPair(Int, Bool) }
+
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(show(MkPair(3, true)), "MkPair(3, true)") }
+"""
+        assert _run(source, fn="main") == 1
+
+    # ---- show: Tuple ---------------------------------------------------
+
+    def test_show_tuple(self) -> None:
+        """A Tuple renders as ``(a, b)``."""
+        source = """\
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(show(Tuple(1, 2)), "(1, 2)") }
+"""
+        assert _run(source, fn="main") == 1
+
+    # ---- show: Option --------------------------------------------------
+
+    def test_show_option_some(self) -> None:
+        """``Some(x)`` renders with the inner value shown."""
+        source = """\
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(show(some_int(3)), "Some(3)") }
+
+private fn some_int(@Int -> @Option<Int>)
+  requires(true) ensures(true) effects(pure)
+{ Some(@Int.0) }
+"""
+        assert _run(source, fn="main") == 1
+
+    def test_show_option_none(self) -> None:
+        """``None`` renders as the bare name."""
+        source = """\
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(show(none_int(0)), "None") }
+
+private fn none_int(@Int -> @Option<Int>)
+  requires(true) ensures(true) effects(pure)
+{ None }
+"""
+        assert _run(source, fn="main") == 1
+
+    # ---- show: Result --------------------------------------------------
+
+    def test_show_result_ok(self) -> None:
+        """``Ok(x)`` renders with the inner value shown."""
+        source = """\
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(show(ok_int(7)), "Ok(7)") }
+
+private fn ok_int(@Int -> @Result<Int, Int>)
+  requires(true) ensures(true) effects(pure)
+{ Ok(@Int.0) }
+"""
+        assert _run(source, fn="main") == 1
+
+    def test_show_result_err(self) -> None:
+        """``Err(e)`` renders with the error value shown."""
+        source = """\
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(show(err_int(9)), "Err(9)") }
+
+private fn err_int(@Int -> @Result<Int, Int>)
+  requires(true) ensures(true) effects(pure)
+{ Err(@Int.0) }
+"""
+        assert _run(source, fn="main") == 1
+
+    # ---- show: Array ---------------------------------------------------
+
+    def test_show_array(self) -> None:
+        """An array renders as ``[e0, e1, e2]``."""
+        source = """\
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(show([1, 2, 3]), "[1, 2, 3]") }
+"""
+        assert _run(source, fn="main") == 1
+
+    def test_show_array_empty(self) -> None:
+        """An empty array renders as ``[]``."""
+        source = """\
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(show(empty_arr(0)), "[]") }
+
+private fn empty_arr(@Int -> @Array<Int>)
+  requires(true) ensures(true) effects(pure)
+{ array_slice([@Int.0], 0, 0) }
+"""
+        assert _run(source, fn="main") == 1
+
+    # ---- show: nested composites --------------------------------------
+
+    def test_show_nested_adt(self) -> None:
+        """An ADT field that is itself an ADT recurses."""
+        source = """\
+private data Inner { MkInner(Int) }
+private data Outer { MkOuter(Inner) }
+
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(show(MkOuter(MkInner(4))), "MkOuter(MkInner(4))") }
+"""
+        assert _run(source, fn="main") == 1
+
+    def test_show_option_of_tuple(self) -> None:
+        """``Some`` wrapping a Tuple recurses through both."""
+        source = """\
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(show(some_pair(1)), "Some((1, 2))") }
+
+private fn some_pair(@Int -> @Option<Tuple<Int, Int>>)
+  requires(true) ensures(true) effects(pure)
+{ Some(Tuple(@Int.0, 2)) }
+"""
+        assert _run(source, fn="main") == 1
+
+    def test_show_tuple_of_composite(self) -> None:
+        """A Tuple whose fields are themselves composites recurses."""
+        source = """\
+private data Color { Red, Green, Blue }
+
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(show(Tuple(Some(1), Green)), "(Some(1), Green)") }
+"""
+        assert _run(source, fn="main") == 1
+
+    def test_show_array_of_tuples(self) -> None:
+        """An array whose elements are composites recurses per element."""
+        source = """\
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(show([Tuple(1, 2), Tuple(3, 4)]), "[(1, 2), (3, 4)]") }
+"""
+        assert _run(source, fn="main") == 1
+
+    def test_show_array_of_adt(self) -> None:
+        """An array of ADT values renders each element structurally."""
+        source = """\
+private data Foo { MkFoo(Int) }
+
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(show([MkFoo(1), MkFoo(2)]), "[MkFoo(1), MkFoo(2)]") }
+"""
+        assert _run(source, fn="main") == 1
+
+    # ---- show: SAME-base finite nesting (#911 review finding #1) --------
+    #
+    # The recursion guard keys on the FULL parameterized type
+    # (`Option<Option<Int>>` != `Option<Int>`), not the bare head — so a
+    # finite composite nesting the same constructor at different type args
+    # renders correctly instead of being mis-classified as recursive and
+    # dropped.
+
+    def test_show_option_of_option(self) -> None:
+        """`Some(Some(x))` — same base (`Option`) nested finitely."""
+        source = """\
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(show(nest(1)), "Some(Some(1))") }
+
+private fn nest(@Int -> @Option<Option<Int>>)
+  requires(true) ensures(true) effects(pure)
+{ Some(Some(@Int.0)) }
+"""
+        assert _run(source, fn="main") == 1
+
+    def test_show_result_of_result(self) -> None:
+        """`Ok(Ok(x))` — same base (`Result`) nested finitely."""
+        source = """\
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(show(nest(1)), "Ok(Ok(1))") }
+
+private fn nest(@Int -> @Result<Result<Int, Int>, Int>)
+  requires(true) ensures(true) effects(pure)
+{ Ok(Ok(@Int.0)) }
+"""
+        assert _run(source, fn="main") == 1
+
+    def test_show_inline_some_of_tuple(self) -> None:
+        """Inline `show(Some(Tuple(1, 2)))` — bare-`Option` arg recovered."""
+        source = """\
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(show(Some(Tuple(1, 2))), "Some((1, 2))") }
+"""
+        assert _run(source, fn="main") == 1
+
+    def test_hash_option_of_option_runs(self) -> None:
+        """hash on `Some(Some(x))` compiles and runs deterministically."""
+        source = """\
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(hash(nest(1)), hash(nest(1))) }
+
+private fn nest(@Int -> @Option<Option<Int>>)
+  requires(true) ensures(true) effects(pure)
+{ Some(Some(@Int.0)) }
+"""
+        assert _run(source, fn="main") == 1
+
+    def test_recursive_adt_still_skips_cleanly(self) -> None:
+        """A directly-recursive ADT's `show` still skips (no infinite loop).
+
+        `List<Int> = Cons(Int, List<Int>)` recurs on the SAME parameterized
+        type, so the full-ptype guard correctly collapses it: codegen must
+        drop `main` cleanly (E602 warning, no export) rather than infinitely
+        expand the traversal.  Recursive-ADT show/hash is a separate scoped
+        item (needs generated recursive helpers).
+        """
+        source = """\
+private data List { Nil, Cons(Int, List) }
+
+public fn main(-> @String)
+  requires(true) ensures(true) effects(pure)
+{ show(Cons(1, Nil)) }
+"""
+        # `main` is dropped from the exports → execute raises rather than
+        # returning a value.  (Codegen terminates — no hang — which is the
+        # load-bearing assertion; the drop is the existing clean-skip path.)
+        result = _compile(source)
+        assert "main" not in result.exports
+
+    # ---- hash: runs and is deterministic ------------------------------
+
+    def test_hash_adt_nullary_runs(self) -> None:
+        """hash on a nullary enum compiles, runs, and is stable."""
+        source = """\
+private data Color { Red, Green, Blue }
+
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(hash(Red), hash(Red)) }
+"""
+        assert _run(source, fn="main") == 1
+
+    def test_hash_adt_distinguishes_tags(self) -> None:
+        """Distinct nullary constructors hash differently."""
+        source = """\
+private data Color { Red, Green, Blue }
+
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(hash(Red), hash(Green)) }
+"""
+        # Red and Green must NOT collide → eq returns false (0).
+        assert _run(source, fn="main") == 0
+
+    def test_hash_adt_field_runs(self) -> None:
+        """hash on a field-carrying ADT compiles, runs, and is stable."""
+        source = """\
+private data Foo { MkFoo(Int) }
+
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(hash(MkFoo(5)), hash(MkFoo(5))) }
+"""
+        assert _run(source, fn="main") == 1
+
+    def test_hash_adt_field_distinguishes(self) -> None:
+        """Different field values hash differently."""
+        source = """\
+private data Foo { MkFoo(Int) }
+
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(hash(MkFoo(5)), hash(MkFoo(6))) }
+"""
+        assert _run(source, fn="main") == 0
+
+    def test_hash_tuple_runs(self) -> None:
+        """hash on a Tuple compiles and runs deterministically."""
+        source = """\
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(hash(Tuple(1, 2)), hash(Tuple(1, 2))) }
+"""
+        assert _run(source, fn="main") == 1
+
+    def test_hash_option_runs(self) -> None:
+        """hash on Option (Some and None) compiles and runs."""
+        source = """\
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(hash(some_int(3)), hash(some_int(3))) }
+
+private fn some_int(@Int -> @Option<Int>)
+  requires(true) ensures(true) effects(pure)
+{ Some(@Int.0) }
+"""
+        assert _run(source, fn="main") == 1
+
+    def test_hash_array_runs(self) -> None:
+        """hash on an Array compiles and runs deterministically."""
+        source = """\
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(hash([1, 2, 3]), hash([1, 2, 3])) }
+"""
+        assert _run(source, fn="main") == 1
+
+    def test_show_large_array_no_shadow_overflow(self) -> None:
+        """A large array's `show` unwinds per-element shadow slots.
+
+        Each element render shadow-pushes its string buffers with no
+        matching pop; without the per-iteration `$gc_sp` restore they leak
+        one-plus per element and overflow the 4 096-slot shadow stack.  6 000
+        elements (> 4 096) proves the restore reclaims them — pre-fix this
+        traps with `unreachable`.
+        """
+        source = """\
+public fn main(-> @Nat)
+  requires(true) ensures(true) effects(pure)
+{ string_length(show(array_range(0, 6000))) }
+"""
+        # array_range(0, 6000) → "[0, 1, …, 5999]"; assert it runs and returns
+        # a plausible non-trivial length (no trap).
+        assert _run(source, fn="main") > 6000
+
+    def test_hash_large_composite_array_no_shadow_overflow(self) -> None:
+        """A large array of ADTs `hash`es without shadow-stack overflow.
+
+        A composite element's hash shadow-pushes its struct pointer per
+        element; the per-iteration `$gc_sp` restore reclaims it.  5 000 ADT
+        elements (> 4 096) proves it — pre-fix this traps with `unreachable`.
+        """
+        source = """\
+private data Foo { MkFoo(Nat) }
+
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  let @Array<Foo> = array_map(array_range(0, 5000), fn(@Nat -> @Foo) effects(pure) { MkFoo(@Nat.0) });
+  eq(hash(@Array<Foo>.0), hash(@Array<Foo>.0))
+}
+"""
+        assert _run(source, fn="main") == 1
+
+
+class TestSplitParamType:
+    """`_split_param_type` top-level type-argument splitting (#911 finding #2)."""
+
+    def test_flat_two_args(self) -> None:
+        from vera.wasm.calls_handlers import CallsHandlersMixin
+
+        assert CallsHandlersMixin._split_param_type(
+            "Result<Int, String>"
+        ) == ("Result", ["Int", "String"])
+
+    def test_single_arg(self) -> None:
+        from vera.wasm.calls_handlers import CallsHandlersMixin
+
+        assert CallsHandlersMixin._split_param_type(
+            "Option<Int>"
+        ) == ("Option", ["Int"])
+
+    def test_nested_generic_in_last_position(self) -> None:
+        """A nested generic in the LAST arg keeps its closing `>` intact.
+
+        Pre-fix `rstrip(">")` stripped EVERY trailing `>`, yielding the
+        corrupt `["Int", "Option<Int"]`.
+        """
+        from vera.wasm.calls_handlers import CallsHandlersMixin
+
+        assert CallsHandlersMixin._split_param_type(
+            "Result<Int, Option<Int>>"
+        ) == ("Result", ["Int", "Option<Int>"])
+
+    def test_same_base_nested(self) -> None:
+        from vera.wasm.calls_handlers import CallsHandlersMixin
+
+        assert CallsHandlersMixin._split_param_type(
+            "Option<Option<Int>>"
+        ) == ("Option", ["Option<Int>"])
+
+    def test_bare_type_no_args(self) -> None:
+        from vera.wasm.calls_handlers import CallsHandlersMixin
+
+        assert CallsHandlersMixin._split_param_type("Foo") == ("Foo", [])
+
+
+# =====================================================================
 # Array operations: array_slice, array_map, array_filter, array_fold
 # =====================================================================
 

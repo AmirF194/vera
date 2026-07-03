@@ -1295,6 +1295,24 @@ class InferenceMixin:
                 "Int", "Nat", "Bool", "Byte", "Float64", "String",
             ):
                 return ret_te.name
+        # #911: a PARAMETERIZED i32-pointer return (`Option<Int>`,
+        # `Result<Int, String>`, a generic ADT) is the same ambiguous
+        # i32-collapse as the scalar-guard above, but the `not ret_te.type_args`
+        # clause skipped it — so it fell through to `i32 → "Bool"` and mis-typed
+        # a composite `show`/`hash` argument.  Return the base head; the
+        # `show`/`hash` site recovers the type args separately via
+        # `_get_arg_type_info_wasm`.  Array is excluded: it is i32_pair, already
+        # disambiguated to "Array" by the `_resolve_i32_pair_ret_te` branch
+        # below — intercepting it here would be a redundant second path.
+        if (
+            isinstance(ret_te, ast.NamedType)
+            and ret_te.type_args
+            and self._fn_ret_types.get(call.name) == "i32"
+            and self._resolve_base_type_name(ret_te.name) not in (
+                "Int", "Nat", "Bool", "Byte", "Float64", "String", "Array",
+            )
+        ):
+            return ret_te.name
         # Non-generic: map from WASM return type
         ret_wt = self._fn_ret_types.get(call.name)
         if ret_wt == "i64":

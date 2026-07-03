@@ -1,0 +1,266 @@
+-- Conformance: structural show/hash for composite types (Chapter 9, #911)
+-- Tests: show/hash on ADT (nullary, one-field, multi-field), Tuple, Option
+-- (Some/None), Result (Ok/Err), Array (non-empty/empty), nested ADT,
+-- nested Option-of-Tuple; hash determinism and tag discrimination.
+-- ================================================================
+-- ADTs used below
+-- ================================================================
+private data Color {
+  Red,
+  Green,
+  Blue
+}
+
+private data Foo {
+  MkFoo(Int)
+}
+
+private data Pair {
+  MkPair(Int, Bool)
+}
+
+private data Inner {
+  MkInner(Int)
+}
+
+private data Outer {
+  MkOuter(Inner)
+}
+
+-- ================================================================
+-- Helpers: obtain fully-typed Option/Result/Array values
+-- ================================================================
+private fn none_int(@Int -> @Option<Int>)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  None
+}
+
+private fn ok_int(@Int -> @Result<Int, Int>)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  Ok(@Int.0)
+}
+
+private fn err_int(@Int -> @Result<Int, Int>)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  Err(@Int.0)
+}
+
+private fn empty_arr(@Int -> @Array<Int>)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  array_slice([@Int.0], 0, 0)
+}
+
+private fn some_pair(@Int -> @Option<Tuple<Int, Int>>)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  Some(Tuple(@Int.0, 2))
+}
+
+-- ================================================================
+-- show: user ADT
+-- ================================================================
+-- Test: nullary constructor renders as its bare name
+public fn test_show_adt_nullary(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result == true)
+  effects(pure)
+{
+  eq(show(Green), "Green")
+}
+
+-- Test: single-field constructor renders as Ctor(field)
+public fn test_show_adt_one_field(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result == true)
+  effects(pure)
+{
+  eq(show(MkFoo(5)), "MkFoo(5)")
+}
+
+-- Test: multi-field constructor renders comma+space separated
+public fn test_show_adt_two_fields(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result == true)
+  effects(pure)
+{
+  eq(show(MkPair(3, true)), "MkPair(3, true)")
+}
+
+-- ================================================================
+-- show: Tuple
+-- ================================================================
+-- Test: a Tuple renders as (a, b)
+public fn test_show_tuple(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result == true)
+  effects(pure)
+{
+  eq(show(Tuple(1, 2)), "(1, 2)")
+}
+
+-- ================================================================
+-- show: Option
+-- ================================================================
+-- Test: Some(x) renders with the inner value shown
+public fn test_show_option_some(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result == true)
+  effects(pure)
+{
+  eq(show(Some(3)), "Some(3)")
+}
+
+-- Test: None renders as the bare name
+public fn test_show_option_none(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result == true)
+  effects(pure)
+{
+  eq(show(none_int(0)), "None")
+}
+
+-- ================================================================
+-- show: Result
+-- ================================================================
+-- Test: Ok(x) renders with the inner value shown
+public fn test_show_result_ok(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result == true)
+  effects(pure)
+{
+  eq(show(ok_int(7)), "Ok(7)")
+}
+
+-- Test: Err(e) renders with the error value shown
+public fn test_show_result_err(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result == true)
+  effects(pure)
+{
+  eq(show(err_int(9)), "Err(9)")
+}
+
+-- ================================================================
+-- show: Array
+-- ================================================================
+-- Test: a non-empty array renders as [e0, e1, e2]
+public fn test_show_array(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result == true)
+  effects(pure)
+{
+  eq(show([1, 2, 3]), "[1, 2, 3]")
+}
+
+-- Test: an empty array renders as []
+public fn test_show_array_empty(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result == true)
+  effects(pure)
+{
+  eq(show(empty_arr(0)), "[]")
+}
+
+-- ================================================================
+-- show: nested composites
+-- ================================================================
+-- Test: an ADT field that is itself an ADT recurses
+public fn test_show_nested_adt(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result == true)
+  effects(pure)
+{
+  eq(show(MkOuter(MkInner(4))), "MkOuter(MkInner(4))")
+}
+
+-- Test: Some wrapping a Tuple recurses through both
+public fn test_show_option_of_tuple(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result == true)
+  effects(pure)
+{
+  eq(show(some_pair(1)), "Some((1, 2))")
+}
+
+-- Test: same-base finite nesting (Tuple inside Tuple) renders, not dropped
+-- (recursion guard keys on the full parameterized type, not the bare head —
+-- #911 review).  Tuple-of-Tuple is used here because a nested-Option-returning
+-- helper trips a pre-existing verifier limitation unrelated to show/hash.
+public fn test_show_tuple_of_tuple(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result == true)
+  effects(pure)
+{
+  eq(show(Tuple(Tuple(1, 2), 3)), "((1, 2), 3)")
+}
+
+-- Test: inline nested constructor recovers the nested type argument
+public fn test_show_inline_some_of_tuple(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result == true)
+  effects(pure)
+{
+  eq(show(Some(Tuple(1, 2))), "Some((1, 2))")
+}
+
+-- ================================================================
+-- hash: determinism and tag discrimination
+-- ================================================================
+-- Test: hash on a nullary enum is deterministic
+public fn test_hash_adt_nullary_deterministic(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result == true)
+  effects(pure)
+{
+  eq(hash(Red), hash(Red))
+}
+
+-- Test: distinct nullary constructors hash differently
+public fn test_hash_adt_distinguishes_tags(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result == false)
+  effects(pure)
+{
+  eq(hash(Red), hash(Green))
+}
+
+-- Test: hash on a field-carrying ADT is deterministic
+public fn test_hash_adt_field_deterministic(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result == true)
+  effects(pure)
+{
+  eq(hash(MkFoo(5)), hash(MkFoo(5)))
+}
+
+-- Test: hash on a Tuple is deterministic
+public fn test_hash_tuple_deterministic(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result == true)
+  effects(pure)
+{
+  eq(hash(Tuple(1, 2)), hash(Tuple(1, 2)))
+}
+
+-- Test: hash on an Array is deterministic
+public fn test_hash_array_deterministic(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result == true)
+  effects(pure)
+{
+  eq(hash([1, 2, 3]), hash([1, 2, 3]))
+}

@@ -142,7 +142,18 @@ class CallsStringsMixin:
         b_instrs = self.translate_expr(arg_b, env)
         if a_instrs is None or b_instrs is None:
             return None
+        return self._string_concat_core(a_instrs, b_instrs)
 
+    def _string_concat_core(
+        self, a_instrs: list[str], b_instrs: list[str],
+    ) -> list[str]:
+        """Concatenate two String (i32_pair) value producers (#911).
+
+        ``a_instrs`` / ``b_instrs`` each leave (ptr, len) on the stack.
+        Factored out of :meth:`_translate_string_concat` so the structural
+        ``show`` traversal can fold rendered pieces without synthesizing
+        AST nodes.
+        """
         self.needs_alloc = True
 
         # Locals for both strings and the result
@@ -582,7 +593,16 @@ class CallsStringsMixin:
         arg_instrs = self.translate_expr(arg, env)
         if arg_instrs is None:
             return None
+        return self._to_string_core(arg_instrs)
 
+    def _to_string_core(self, arg_instrs: list[str]) -> list[str]:
+        """Int (i64) → decimal String (i32_pair) from a value producer.
+
+        ``arg_instrs`` must leave a single i64 on the stack.  Factored out
+        of :meth:`_translate_to_string` (#911) so the structural ``show``
+        traversal can render an Int field whose value is already loaded
+        (``local.get``/``i64.load``) rather than an AST expression.
+        """
         self.needs_alloc = True
 
         val = self.alloc_local("i64")
@@ -758,7 +778,10 @@ class CallsStringsMixin:
         arg_instrs = self.translate_expr(arg, env)
         if arg_instrs is None:
             return None
+        return self._bool_to_string_core(arg_instrs)
 
+    def _bool_to_string_core(self, arg_instrs: list[str]) -> list[str]:
+        """Bool (i32) → "true"/"false" String from a value producer (#911)."""
         true_off, true_len = self.string_pool.intern("true")
         false_off, false_len = self.string_pool.intern("false")
 
@@ -785,7 +808,10 @@ class CallsStringsMixin:
         arg_instrs = self.translate_expr(arg, env)
         if arg_instrs is None:
             return None
+        return self._byte_to_string_core(arg_instrs)
 
+    def _byte_to_string_core(self, arg_instrs: list[str]) -> list[str]:
+        """Byte (i32) → 1-char String from a value producer (#911)."""
         self.needs_alloc = True
 
         bval = self.alloc_local("i32")
@@ -825,7 +851,10 @@ class CallsStringsMixin:
         arg_instrs = self.translate_expr(arg, env)
         if arg_instrs is None:
             return None
+        return self._float_to_string_core(arg_instrs)
 
+    def _float_to_string_core(self, arg_instrs: list[str]) -> list[str]:
+        """Float64 (f64) → decimal String from a value producer (#911)."""
         self.needs_alloc = True
 
         fval = self.alloc_local("f64")

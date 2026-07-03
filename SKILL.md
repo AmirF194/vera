@@ -1817,8 +1817,8 @@ Four built-in abilities are available — no declarations needed:
 
 - **`Eq<T>`** — `eq(x, y)` returns `@Bool`. Satisfied by: Int, Nat, Bool, Float64, String, Byte, Unit, and simple enum ADTs.
 - **`Ord<T>`** — `compare(x, y)` returns `@Ordering` (`Less`, `Equal`, `Greater`). Satisfied by: Int, Nat, Bool, Float64, String, Byte.
-- **`Hash<T>`** — `hash(x)` returns `@Int`. Satisfied by: Int, Nat, Bool, Float64, String, Byte, Unit.
-- **`Show<T>`** — `show(x)` returns `@String`. Satisfied by: Int, Nat, Bool, Float64, String, Byte, Unit.
+- **`Hash<T>`** — `hash(x)` returns `@Int`. Satisfied by: Int, Nat, Bool, Float64, String, Byte, Unit, and composite types (ADT, Tuple, Option, Result, Array) whose fields/elements are themselves `Hash` (structural derivation).
+- **`Show<T>`** — `show(x)` returns `@String`. Satisfied by: Int, Nat, Bool, Float64, String, Byte, Unit, and composite types (ADT, Tuple, Option, Result, Array) whose fields/elements are themselves `Show`; renders `Ctor(f0, f1, …)` / `(a, b)` / `Some(x)` / `Ok(x)` / `[e0, e1, …]`.
 
 The `Ordering` type is a built-in ADT with three constructors: `Less`, `Equal`, `Greater`. Use it with pattern matching:
 
