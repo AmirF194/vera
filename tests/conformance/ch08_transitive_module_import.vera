@@ -1,0 +1,17 @@
+import ch08_transitive_module_import_mid;
+
+-- Chapter 8 (§8.6.4) — the top of a three-module chain (main -> mid -> base)
+-- with ZERO generics.  `main` imports only `mid`; `mid`'s body calls `base`.
+-- Codegen must transitively include every reachable module in the importer's
+-- flat WASM module, or `mid`'s call to `base`'s `wrap40` dangles and `vera
+-- run` fails at WAT validation with `unknown func` (#890).  `base` is not
+-- transitively visible here (§8.6.4): `main` reaches `wrap40` only via
+-- `via_mid`, never by naming `base`.  `via_mid` guarantees `>= 40`, so 42 is
+-- returned at run while the statically-provable bound is `>= 40`.
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result >= 40)
+  effects(pure)
+{
+  via_mid(2)
+}

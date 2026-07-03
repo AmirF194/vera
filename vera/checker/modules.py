@@ -146,7 +146,18 @@ class ModulesMixin:
                             error_code="E150",
                         )
 
-            # 5. Inject public names into main env for bare calls
+            # 5. Inject public names into main env for bare calls.
+            #
+            # #890: only a DIRECTLY-imported module's public declarations are
+            # visible to the top-level importer (spec §8.6.4 — a transitive
+            # module reached only through another module's imports is *not*
+            # transitively visible here).  A transitive module is still in
+            # ``self._resolved_modules`` so codegen can compile the bodies that
+            # call into it, but its names must not enter the importer's bare
+            # namespace, and its qualified-call registries above stay unset for
+            # it — ``main`` can neither bare-call nor ``base::``-call it.
+            if not mod.direct:
+                continue
             for fn_name, fn_info in mod_fns.items():
                 if name_filter is None or fn_name in name_filter:
                     self.env.functions.setdefault(fn_name, fn_info)

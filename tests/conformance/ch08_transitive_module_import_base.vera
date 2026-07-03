@@ -1,0 +1,9 @@
+module ch08_transitive_module_import_base;
+
+public fn wrap40(@Int -> @Int)
+  requires(true)
+  ensures(@Int.result >= 40)
+  effects(pure)
+{
+  @Int.0 + 40
+}

@@ -6,6 +6,8 @@ via flattening.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import wasmtime
 
@@ -2112,3 +2114,171 @@ class TestResolveFnTypeAliasCycleGuard867:
         result = self._resolve_with_watchdog(
             ast.NamedType(name="X", type_args=None), aliases)
         assert result is None
+
+
+class TestTransitiveModuleImport890:
+    """#890: a transitive module import (``main`` imports ``mid``, ``mid``
+    imports ``base``) must compile and run.
+
+    Codegen compiles the DIRECTLY-imported module's bodies (Pass 2.5), but
+    the importer's flat WASM module must ALSO include every module reachable
+    through the import graph — otherwise ``mid``'s body (which calls
+    ``base::wrap40``) is left with a dangling call and ``vera run`` fails at
+    WAT validation with ``unknown func``.  The fix makes
+    ``ModuleResolver.resolve_imports`` return the transitive closure of
+    reachable modules (each tagged ``direct``), and the codegen /
+    checker / verifier only inject the DIRECT imports into the importer's
+    callable namespace (spec §8.6.4: transitive declarations are not visible
+    to the original importer).
+
+    These tests drive the REAL on-disk resolver end-to-end so the resolver's
+    "return only direct imports" defect is exercised, not papered over by a
+    hand-built module list.
+    """
+
+    @staticmethod
+    def _compile_run_chain(
+        tmp_path: Path,
+        files: dict[str, str],
+        fn: str = "main",
+        args: list[int] | None = None,
+    ) -> int:
+        """Write ``files`` (rel path -> source), resolve ``main.vera`` with the
+        real resolver, compile, execute, and return the integer result."""
+        from vera.resolver import ModuleResolver
+
+        main_file: Path | None = None
+        for rel, content in files.items():
+            p = tmp_path / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding="utf-8")
+            if rel == "main.vera":
+                main_file = p
+        assert main_file is not None, "files must include 'main.vera'"
+
+        resolver = ModuleResolver(_root=tmp_path)
+        tree = parse_file(str(main_file))
+        prog = transform(tree)
+        resolved = resolver.resolve_imports(prog, main_file)
+        assert not resolver.errors, (
+            f"resolution errors: {[e.description for e in resolver.errors]}"
+        )
+        result = compile(
+            prog,
+            source=main_file.read_text(encoding="utf-8"),
+            file=str(main_file),
+            resolved_modules=resolved,
+        )
+        errors = [d for d in result.diagnostics if d.severity == "error"]
+        assert not errors, (
+            f"compile errors: {[e.description for e in errors]}"
+        )
+        exec_result = execute(result, fn_name=fn, args=args)
+        assert exec_result.value is not None, "Expected a return value"
+        return exec_result.value
+
+    BASE = """\
+module base;
+public fn wrap40(@Int -> @Int)
+  requires(true) ensures(true) effects(pure) { @Int.0 + 40 }
+"""
+
+    MID = """\
+module mid;
+import base;
+public fn via_mid(@Int -> @Int)
+  requires(true) ensures(true) effects(pure) { wrap40(@Int.0) }
+"""
+
+    def test_transitive_chain_runs(self, tmp_path: Path) -> None:
+        """main -> mid -> base: ``via_mid(2)`` returns 42.
+
+        Pre-fix this failed at WAT validation with
+        ``unknown func: failed to find name $via_mid`` because ``base`` was
+        dropped from the resolved-module list, so ``mid``'s body could not be
+        compiled with ``wrap40`` in scope.  42 is not a compiler default for
+        any type, so a stray success can't masquerade as a pass.
+        """
+        val = self._compile_run_chain(
+            tmp_path,
+            {
+                "base.vera": self.BASE,
+                "mid.vera": self.MID,
+                "main.vera": """\
+import mid;
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure) { via_mid(2) }
+""",
+            },
+        )
+        assert val == 42
+
+    def test_transitive_base_not_bare_visible_to_main(
+        self, tmp_path: Path,
+    ) -> None:
+        """spec §8.6.4: ``base``'s ``wrap40`` is NOT bare-callable from
+        ``main`` — only ``mid``'s public declarations are visible to the
+        top-level importer.  A bare ``wrap40(...)`` in ``main`` must fail to
+        compile even though ``base`` is now in the resolved-module closure."""
+        from vera.resolver import ModuleResolver
+
+        (tmp_path / "base.vera").write_text(self.BASE, encoding="utf-8")
+        (tmp_path / "mid.vera").write_text(self.MID, encoding="utf-8")
+        main_file: Path = tmp_path / "main.vera"
+        main_file.write_text(
+            """\
+import mid;
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure) { wrap40(2) }
+""",
+            encoding="utf-8",
+        )
+        resolver = ModuleResolver(_root=tmp_path)
+        tree = parse_file(str(main_file))
+        prog = transform(tree)
+        resolved = resolver.resolve_imports(prog, main_file)
+        assert not resolver.errors
+        result = compile(
+            prog,
+            source=main_file.read_text(encoding="utf-8"),
+            file=str(main_file),
+            resolved_modules=resolved,
+        )
+        errors = [d for d in result.diagnostics if d.severity == "error"]
+        assert errors, (
+            "expected a cross-module error: base::wrap40 must not be "
+            "bare-callable from main (spec §8.6.4)"
+        )
+
+    def test_diamond_transitive_runs(self, tmp_path: Path) -> None:
+        """main -> {left, right} -> base (diamond): the shared transitive
+        ``base`` is included once and both branches resolve.  ``main`` sums
+        ``via_left(1)`` (wrap40(1)+1 = 42) and ``via_right(0)`` (wrap40(0) =
+        40) → 82, guarding both the shared-module dedup and multi-branch
+        reachability."""
+        val = self._compile_run_chain(
+            tmp_path,
+            {
+                "base.vera": self.BASE,
+                "left.vera": """\
+module left;
+import base;
+public fn via_left(@Int -> @Int)
+  requires(true) ensures(true) effects(pure) { wrap40(@Int.0) + 1 }
+""",
+                "right.vera": """\
+module right;
+import base;
+public fn via_right(@Int -> @Int)
+  requires(true) ensures(true) effects(pure) { wrap40(@Int.0) }
+""",
+                "main.vera": """\
+import left;
+import right;
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ via_left(1) + via_right(0) }
+""",
+            },
+        )
+        assert val == 82
