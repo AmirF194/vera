@@ -917,6 +917,84 @@ public fn main(-> @Bool)
 """
         assert _run(source, fn="main") == 1
 
+    # ---- show: SAME-base finite nesting (#911 review finding #1) --------
+    #
+    # The recursion guard keys on the FULL parameterized type
+    # (`Option<Option<Int>>` != `Option<Int>`), not the bare head — so a
+    # finite composite nesting the same constructor at different type args
+    # renders correctly instead of being mis-classified as recursive and
+    # dropped.
+
+    def test_show_option_of_option(self) -> None:
+        """`Some(Some(x))` — same base (`Option`) nested finitely."""
+        source = """\
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(show(nest(1)), "Some(Some(1))") }
+
+private fn nest(@Int -> @Option<Option<Int>>)
+  requires(true) ensures(true) effects(pure)
+{ Some(Some(@Int.0)) }
+"""
+        assert _run(source, fn="main") == 1
+
+    def test_show_result_of_result(self) -> None:
+        """`Ok(Ok(x))` — same base (`Result`) nested finitely."""
+        source = """\
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(show(nest(1)), "Ok(Ok(1))") }
+
+private fn nest(@Int -> @Result<Result<Int, Int>, Int>)
+  requires(true) ensures(true) effects(pure)
+{ Ok(Ok(@Int.0)) }
+"""
+        assert _run(source, fn="main") == 1
+
+    def test_show_inline_some_of_tuple(self) -> None:
+        """Inline `show(Some(Tuple(1, 2)))` — bare-`Option` arg recovered."""
+        source = """\
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(show(Some(Tuple(1, 2))), "Some((1, 2))") }
+"""
+        assert _run(source, fn="main") == 1
+
+    def test_hash_option_of_option_runs(self) -> None:
+        """hash on `Some(Some(x))` compiles and runs deterministically."""
+        source = """\
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(hash(nest(1)), hash(nest(1))) }
+
+private fn nest(@Int -> @Option<Option<Int>>)
+  requires(true) ensures(true) effects(pure)
+{ Some(Some(@Int.0)) }
+"""
+        assert _run(source, fn="main") == 1
+
+    def test_recursive_adt_still_skips_cleanly(self) -> None:
+        """A directly-recursive ADT's `show` still skips (no infinite loop).
+
+        `List<Int> = Cons(Int, List<Int>)` recurs on the SAME parameterized
+        type, so the full-ptype guard correctly collapses it: codegen must
+        drop `main` cleanly (E602 warning, no export) rather than infinitely
+        expand the traversal.  Recursive-ADT show/hash is a separate scoped
+        item (needs generated recursive helpers).
+        """
+        source = """\
+private data List { Nil, Cons(Int, List) }
+
+public fn main(-> @String)
+  requires(true) ensures(true) effects(pure)
+{ show(Cons(1, Nil)) }
+"""
+        # `main` is dropped from the exports → execute raises rather than
+        # returning a value.  (Codegen terminates — no hang — which is the
+        # load-bearing assertion; the drop is the existing clean-skip path.)
+        result = _compile(source)
+        assert "main" not in result.exports
+
     # ---- hash: runs and is deterministic ------------------------------
 
     def test_hash_adt_nullary_runs(self) -> None:
@@ -1031,6 +1109,48 @@ public fn main(-> @Bool)
 }
 """
         assert _run(source, fn="main") == 1
+
+
+class TestSplitParamType:
+    """`_split_param_type` top-level type-argument splitting (#911 finding #2)."""
+
+    def test_flat_two_args(self) -> None:
+        from vera.wasm.calls_handlers import CallsHandlersMixin
+
+        assert CallsHandlersMixin._split_param_type(
+            "Result<Int, String>"
+        ) == ("Result", ["Int", "String"])
+
+    def test_single_arg(self) -> None:
+        from vera.wasm.calls_handlers import CallsHandlersMixin
+
+        assert CallsHandlersMixin._split_param_type(
+            "Option<Int>"
+        ) == ("Option", ["Int"])
+
+    def test_nested_generic_in_last_position(self) -> None:
+        """A nested generic in the LAST arg keeps its closing `>` intact.
+
+        Pre-fix `rstrip(">")` stripped EVERY trailing `>`, yielding the
+        corrupt `["Int", "Option<Int"]`.
+        """
+        from vera.wasm.calls_handlers import CallsHandlersMixin
+
+        assert CallsHandlersMixin._split_param_type(
+            "Result<Int, Option<Int>>"
+        ) == ("Result", ["Int", "Option<Int>"])
+
+    def test_same_base_nested(self) -> None:
+        from vera.wasm.calls_handlers import CallsHandlersMixin
+
+        assert CallsHandlersMixin._split_param_type(
+            "Option<Option<Int>>"
+        ) == ("Option", ["Option<Int>"])
+
+    def test_bare_type_no_args(self) -> None:
+        from vera.wasm.calls_handlers import CallsHandlersMixin
+
+        assert CallsHandlersMixin._split_param_type("Foo") == ("Foo", [])
 
 
 # =====================================================================

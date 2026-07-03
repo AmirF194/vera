@@ -280,17 +280,17 @@ class CallsHandlersMixin:
             if "<" in formatted or formatted == bare:
                 return formatted
 
-        # A direct `Tuple(...)` literal has no registered field types (it is
-        # variadic); recover them by recursively resolving each argument's own
-        # parameterized type, so `show(Tuple(Some(1), 2))` sees the inner
-        # `Option<Int>` field rather than a bare `Option`.
-        if isinstance(arg, ast.ConstructorCall) and arg.name == "Tuple":
-            elem_types = [
-                self._parameterized_arg_type(a, self._infer_vera_type(a) or "")
-                for a in arg.args
-            ]
-            if all(t for t in elem_types):
-                return f"Tuple<{', '.join(elem_types)}>"
+        # A direct constructor literal's flat `_get_arg_type_info_wasm` result
+        # Nones-out (or bare-heads) any type arg that is itself a composite —
+        # so inline `Some(Tuple(1, 2))` / `Ok(Some(1))` lose the nested type
+        # args.  Recover the FULL parameterized type by resolving each argument
+        # recursively.  `Tuple` is variadic (its type args ARE its element
+        # types, one per arg); every other constructor maps args to the ADT's
+        # type-parameter slots via `_ctor_adt_tp_indices`.
+        if isinstance(arg, ast.ConstructorCall):
+            recovered = self._recover_ctor_ptype(arg, bare)
+            if recovered is not None:
+                return recovered
 
         info = self._get_arg_type_info_wasm(arg)
         if info is None:
@@ -300,6 +300,48 @@ class CallsHandlersMixin:
             resolved = [a for a in arg_names if a is not None]
             return f"{base_name}<{', '.join(resolved)}>"
         return base_name
+
+    def _recover_ctor_ptype(
+        self, arg: ast.ConstructorCall, bare: str,
+    ) -> str | None:
+        """Recover a constructor call's FULL parameterized type, recursively.
+
+        `Tuple(a, b, …)` → ``Tuple<Ta, Tb, …>`` (element types are the args'
+        own parameterized types).  Any other constructor maps each argument to
+        its ADT type-parameter slot (via ``_ctor_adt_tp_indices``) and resolves
+        that slot's argument recursively, so `Some(Tuple(1, 2))` yields
+        ``Option<Tuple<Int, Int>>``.  Returns None when the recovery is not
+        fully ground (a slot arg whose type can't be inferred), leaving the
+        caller on its existing fallbacks.
+        """
+        if arg.name == "Tuple":
+            elem_types = [
+                self._parameterized_arg_type(a, self._infer_vera_type(a) or "")
+                for a in arg.args
+            ]
+            if all(elem_types):
+                return f"Tuple<{', '.join(elem_types)}>"
+            return None
+
+        adt_name = self._ctor_to_adt_name(arg.name)
+        if adt_name is None:
+            return None
+        tp_count = self._adt_tp_counts.get(adt_name, 0)
+        if tp_count == 0:
+            return None  # non-generic ADT — bare name already correct
+        field_tp_idx = self._ctor_adt_tp_indices.get(arg.name)
+        if field_tp_idx is None:
+            return None
+        slots: list[str | None] = [None] * tp_count
+        for field_i, tp_idx in enumerate(field_tp_idx):
+            if tp_idx is not None and field_i < len(arg.args):
+                a = arg.args[field_i]
+                a_bare = self._infer_vera_type(a)
+                if a_bare is not None:
+                    slots[tp_idx] = self._parameterized_arg_type(a, a_bare)
+        if all(s is not None for s in slots):
+            return f"{adt_name}<{', '.join(s for s in slots if s)}>"
+        return None
 
     def _declared_type_expr_for_show(
         self, arg: ast.Expr,
@@ -324,11 +366,18 @@ class CallsHandlersMixin:
 
     @staticmethod
     def _split_param_type(ptype: str) -> tuple[str, list[str]]:
-        """Split ``"Option<Int>"`` → ``("Option", ["Int"])`` (top level only)."""
+        """Split ``"Option<Int>"`` → ``("Option", ["Int"])`` (top level only).
+
+        Nested generics in the last argument keep their closing ``>``:
+        ``"Result<Int, Option<Int>>"`` → ``("Result", ["Int", "Option<Int>"])``.
+        """
         if "<" not in ptype:
             return ptype, []
         base, rest = ptype.split("<", 1)
-        inner = rest.rstrip(">")
+        # Drop exactly ONE trailing ``>`` (the one matching this ``<``).  A
+        # bare `rstrip(">")` strips EVERY trailing ``>``, corrupting a nested
+        # generic in the last arg (`Option<Int>>` → `Option<Int`).
+        inner = rest[:-1] if rest.endswith(">") else rest
         # Split on top-level commas (nested generics keep their commas).
         args: list[str] = []
         depth = 0
@@ -475,9 +524,15 @@ class CallsHandlersMixin:
         _seen: frozenset[str] | None,
     ) -> list[str] | None:
         seen = _seen or frozenset()
-        if base in seen:
-            return None  # recursive type — needs a real helper (out of scope)
-        seen = seen | {base}
+        # Key the recursion guard on the FULL parameterized type, not the bare
+        # head: `Option<Option<Int>>` nests `Option<Int>` — a DIFFERENT type,
+        # finite depth — and must render, whereas a directly-recursive ADT
+        # (`List<Int>` whose `Cons` field is again `List<Int>`) recurs on the
+        # SAME parameterized type and is correctly collapsed here so the
+        # traversal terminates (that skip is out of scope for #911).
+        if ptype in seen:
+            return None
+        seen = seen | {ptype}
 
         plans = self._composite_ctor_plans(ptype)
         if plans is None:
@@ -812,9 +867,12 @@ class CallsHandlersMixin:
         _seen: frozenset[str] | None,
     ) -> list[str] | None:
         seen = _seen or frozenset()
-        if base in seen:
+        # Full-ptype recursion guard (see `_show_adt`): distinguishes finite
+        # same-base nesting (`Option<Option<Int>>`) from genuine self-reference
+        # (`List<Int>`), so the former hashes and the latter terminates+skips.
+        if ptype in seen:
             return None
-        seen = seen | {base}
+        seen = seen | {ptype}
 
         plans = self._composite_ctor_plans(ptype)
         if plans is None:

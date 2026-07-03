@@ -196,6 +196,27 @@ public fn test_show_option_of_tuple(@Unit -> @Bool)
   eq(show(some_pair(1)), "Some((1, 2))")
 }
 
+-- Test: same-base finite nesting (Tuple inside Tuple) renders, not dropped
+-- (recursion guard keys on the full parameterized type, not the bare head —
+-- #911 review).  Tuple-of-Tuple is used here because a nested-Option-returning
+-- helper trips a pre-existing verifier limitation unrelated to show/hash.
+public fn test_show_tuple_of_tuple(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result == true)
+  effects(pure)
+{
+  eq(show(Tuple(Tuple(1, 2), 3)), "((1, 2), 3)")
+}
+
+-- Test: inline nested constructor recovers the nested type argument
+public fn test_show_inline_some_of_tuple(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result == true)
+  effects(pure)
+{
+  eq(show(Some(Tuple(1, 2))), "Some((1, 2))")
+}
+
 -- ================================================================
 -- hash: determinism and tag discrimination
 -- ================================================================
