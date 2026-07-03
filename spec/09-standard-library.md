@@ -2351,7 +2351,7 @@ Returns the value of the named attribute if the node is an `HtmlElement` with th
 
 ## 9.8 Abilities
 
-> **Status: Implemented.** Tracked in [#60](https://github.com/aallan/vera/issues/60). Four built-in abilities (`Eq`, `Ord`, `Hash`, `Show`) are fully compilable. Supported types: Int, Nat, Bool, Float64, String, Byte, Unit. `Eq` supports ADT auto-derivation for simple enums and ADTs whose fields are all Eq-satisfying primitive types. The built-in `Ordering` ADT (`Less`, `Equal`, `Greater`) is available for `Ord`'s `compare` operation.
+> **Status: Implemented.** Tracked in [#60](https://github.com/aallan/vera/issues/60). Four built-in abilities (`Eq`, `Ord`, `Hash`, `Show`) are fully compilable. Supported types: Int, Nat, Bool, Float64, String, Byte, Unit. `Eq` derivation is **structural** ([#773](https://github.com/aallan/vera/issues/773)): a simple enum, or an ADT every field of which is itself `Eq` — an `Eq` primitive (`String` included, compared by content) or a nested `Eq` ADT (compared recursively, including recursive types) — supports `Eq` automatically. Fields with no `Eq` semantics (`Array`, `Map`, host handles) make the ADT non-derivable. The built-in `Ordering` ADT (`Less`, `Equal`, `Greater`) is available for `Ord`'s `compare` operation.
 
 Vera supports restricted abilities for constraining type variables in generic functions. To support practical generic programming — sorting, hashing, serialisation — type variables need constraints. Vera adopts restricted abilities rather than full typeclasses:
 
@@ -2457,7 +2457,7 @@ For `Eq`, ADTs are automatically derivable when all constructor fields are Eq-sa
 
 Simple enums (ADTs with only nullary constructors) always satisfy `Eq` — equality reduces to tag comparison.
 
-ADTs with `String` or `Array` fields do not currently auto-derive `Eq` (these use pair representation in WASM and require special comparison logic beyond field-level comparison).
+ADTs with `String` fields derive `Eq` by content, and nested-ADT fields recurse into the nested ADT's own equality — including recursive and mutually-recursive types ([#773](https://github.com/aallan/vera/issues/773)). `Array`, `Map`, host-handle, and tuple fields remain non-derivable: an `Eq` constraint over (or a direct `==` on) such an ADT is rejected with E613.
 
 ### 9.8.3 Compilation Strategy
 
