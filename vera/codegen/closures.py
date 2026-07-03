@@ -308,11 +308,17 @@ class ClosureLiftingMixin:
                 # `@T` *parameter* draws E604 via `_is_compilable`; only the
                 # monomorphized clone (whose closure param is the concrete
                 # type) is ever run.  So drop THIS closure cleanly — a
-                # user-facing skip that routes through `_lift_pending_closures`
-                # to the enclosing fn's droppable E602, whose template warning
-                # is then suppressed once a clone compiles (#604) — rather than
-                # raising the hard E699 that reported a valid generic as an
-                # internal compiler error.
+                # user-facing skip that returns None, routing through
+                # `_lift_pending_closures` to `_compile_fn`'s droppable
+                # dropped-parent E602 — rather than raising the hard E699 that
+                # reported a valid generic as an internal compiler error.  Both
+                # this closure-level E602 and the function-level wrapper are
+                # suppressed once a clone compiles: the wrapper by the #604
+                # description-prefix filter, THIS one by that filter's #913
+                # forall-origin arm (`vera/codegen/core.py`), which matches a
+                # template-body E602 by its source line falling inside a
+                # compiled-clone template's span (its description names the
+                # closure, not the enclosing fn, so the prefix match misses it).
                 self._harvest_interp_inference_failures(ctx)
                 self._warning(
                     anon_fn,

@@ -2498,3 +2498,54 @@ class TestGenericClosureTypeVarSubstitution:
             "{ firstlen([1, 2, 3]) }\n"
         )
         assert _run(source, fn="main") == 3
+
+    def test_generic_closure_compiles_with_no_warnings(self) -> None:
+        """#913 review: a CORRECT generic-closure program compiles with ZERO
+        warnings.
+
+        The closure-param skip emits an [E602] whose description names the
+        closure (not the enclosing fn), so the #604 description-prefix filter
+        missed it and it leaked on a program that runs perfectly.  The #604
+        filter's forall-origin arm now suppresses it once a clone compiles.
+        """
+        source = (
+            "private forall<T> fn map_ident(@Array<T> -> @Array<T>)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ array_map(@Array<T>.0, fn(@T -> @T) effects(pure) { @T.0 }) }\n"
+            "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ array_length(map_ident([10, 20, 30])) }\n"
+        )
+        result = _compile(source)
+        warnings = [d for d in result.diagnostics if d.severity == "warning"]
+        assert warnings == [], (
+            "a correct generic-closure program must compile with no warnings: "
+            f"{[(w.error_code, w.description) for w in warnings]}"
+        )
+        # The program must still export and run — suppression must not have
+        # come from dropping the whole program.
+        assert _run(source, fn="main") == 3
+
+    def test_uninstantiated_generic_closure_still_warns(self) -> None:
+        """#913 review: the suppression stays CONDITIONAL — a generic-closure
+        template that is NEVER instantiated (no clone compiles) keeps its
+        [E602] skip-warning, the honest signal it cannot compile.
+
+        This is the guard that the forall-origin suppression is gated on
+        ``mono_compiled`` (a clone actually compiled), not unconditional.
+        """
+        source = (
+            "private forall<T> fn map_ident(@Array<T> -> @Array<T>)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ array_map(@Array<T>.0, fn(@T -> @T) effects(pure) { @T.0 }) }\n"
+            "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ 42 }\n"
+        )
+        result = _compile(source)
+        e602 = [d for d in result.diagnostics if d.error_code == "E602"]
+        assert e602, (
+            "an uninstantiated generic-closure template must keep its E602 "
+            "skip-warning (suppression must stay conditional on a clone "
+            f"compiling): {[d.description for d in result.diagnostics]}"
+        )
