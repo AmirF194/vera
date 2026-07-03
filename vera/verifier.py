@@ -1541,6 +1541,36 @@ class ContractVerifier:
                 v.precondition, v.counterexample,
             )
 
+        # 6b. Report call sites whose precondition obligation could not be
+        #     checked statically (#882) — an untranslatable ADT argument or an
+        #     untranslatable precondition.  These would otherwise vanish, making
+        #     `verify` overstate coverage; DESIGN.md degrades loudly, so each
+        #     becomes a Tier-3 obligation (E522) plus a warning.  The runtime
+        #     guard still enforces the contract.  Counted like the ensures
+        #     Tier-3 path so the obligation/summary differential stays exact;
+        #     located at the call site (span_node) like E501 so repeated calls
+        #     to the same callee stay distinct.
+        for d in smt.drain_call_demotions():
+            self.summary.tier3_runtime += 1
+            self._record_obligation(
+                decl.name, "call_pre", d.precondition, "tier3",
+                error_code="E522",
+                span_node=d.call_node,
+            )
+            self._warning(
+                d.call_node,
+                f"Cannot statically verify the precondition of "
+                f"'{d.callee_name}' at this call site in '{decl.name}'. "
+                f"The call uses constructs outside the decidable fragment. "
+                f"The precondition will be checked at runtime.",
+                rationale="An argument or the callee's precondition contains "
+                          "constructs that cannot be translated to SMT (e.g. "
+                          "an ADT field of a host-handle type such as Map).",
+                spec_ref='Chapter 6, Section 6.8 "Summary of Verification Tiers"',
+                error_code="E522",
+                tier=3,
+            )
+
         # 7. Verify ensures clauses
         for contract in decl.contracts:
             if isinstance(contract, ast.Ensures):

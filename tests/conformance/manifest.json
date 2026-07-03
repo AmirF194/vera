@@ -687,6 +687,19 @@
     ]
   },
   {
+    "id": "ch06_requires_adt_arg",
+    "file": "ch06_requires_adt_arg.vera",
+    "chapter": 6,
+    "title": "Call-site preconditions over ADT-typed arguments",
+    "level": "run",
+    "spec_ref": "Section 6.1",
+    "features": [
+      "requires",
+      "precondition",
+      "adt"
+    ]
+  },
+  {
     "id": "ch06_ensures",
     "file": "ch06_ensures.vera",
     "chapter": 6,

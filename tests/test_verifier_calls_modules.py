@@ -15,6 +15,7 @@ from tests.verifier_helpers import (
     _verify,
     _verify_err,
     _verify_ok,
+    _verify_warn,
 )
 
 
@@ -611,6 +612,248 @@ private fn bad_caller(@Int -> @Int)
   else { positive(@Int.0) }
 }
 """, "precondition")
+
+
+# =====================================================================
+# #882: call-site preconditions over ADT-typed arguments
+# =====================================================================
+
+class TestAdtCallSitePrecondition:
+    """A callee `requires()` over ADT-typed parameters must generate a
+    call-site precondition obligation, exactly like Int parameters (#882).
+
+    Before the fix `_translate_call_with_info` bailed when a constructor-call
+    argument's ADT sort had never been materialised in the caller context, so
+    the obligation silently vanished: `vera verify` reported ok=true with no
+    E501 and no Tier-3 warning, while `vera run` trapped at runtime.
+    """
+
+    _REFUTABLE = """
+private data P { MkP(Int) }
+
+private fn g(@P, @P -> @Bool)
+  requires(@P.1 == @P.0)
+  ensures(true)
+  effects(pure)
+{ true }
+
+public fn main(@Unit -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ g(MkP(1), MkP(2)) }
+"""
+
+    _SATISFIABLE = """
+private data P { MkP(Int) }
+
+private fn g(@P, @P -> @Bool)
+  requires(@P.1 == @P.0)
+  ensures(true)
+  effects(pure)
+{ true }
+
+public fn main(@Unit -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ g(MkP(5), MkP(5)) }
+"""
+
+    def test_refutable_adt_arg_fires_e501(self) -> None:
+        """`MkP(1)` vs `MkP(2)` violates `requires(@P.1 == @P.0)` — the
+        call-site precondition is statically refutable, so it must fire E501
+        (the exact class the Int control already caught)."""
+        result = _verify(self._REFUTABLE)
+        call_pres = [
+            o for o in result.obligations
+            if o.kind == "call_pre" and o.error_code == "E501"
+        ]
+        assert len(call_pres) == 1, (
+            "expected exactly one refuted call_pre obligation for the ADT "
+            f"argument, got {len(call_pres)}: {call_pres}"
+        )
+        assert call_pres[0].status == "violated"
+        _verify_err(self._REFUTABLE, "precondition")
+
+    def test_int_control_fires_e501(self) -> None:
+        """Control: the identical program with Int params already fires E501.
+        Pins the parity the ADT case must reach."""
+        src = """
+private fn g(@Int, @Int -> @Bool)
+  requires(@Int.1 == @Int.0)
+  ensures(true)
+  effects(pure)
+{ true }
+
+public fn main(@Unit -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ g(1, 2) }
+"""
+        result = _verify(src)
+        call_pres = [
+            o for o in result.obligations
+            if o.kind == "call_pre" and o.error_code == "E501"
+        ]
+        assert len(call_pres) == 1
+        assert call_pres[0].status == "violated"
+
+    def test_satisfiable_adt_arg_discharges(self) -> None:
+        """`MkP(5)` vs `MkP(5)` satisfies the precondition — it must discharge
+        (no error).  Paired with the refutable case this proves the obligation
+        is actually *checked* against Z3, not merely absent: same machinery,
+        opposite verdict on the same shape."""
+        _verify_ok(self._SATISFIABLE)
+
+    def test_nested_adt_arg_fires_e501(self) -> None:
+        """A nested-ADT argument (`MkOuter(MkInner(1))` vs `...(2)`) is
+        statically refutable via recursive field decomposition (#879)."""
+        _verify_err("""
+private data Inner { MkInner(Int) }
+private data Outer { MkOuter(Inner) }
+
+private fn g(@Outer, @Outer -> @Bool)
+  requires(@Outer.1 == @Outer.0)
+  ensures(true)
+  effects(pure)
+{ true }
+
+public fn main(@Unit -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ g(MkOuter(MkInner(1)), MkOuter(MkInner(2))) }
+""", "precondition")
+
+    def test_float64_field_adt_nan_arg_fires_e501(self) -> None:
+        """A Float64-field ADT with NaN arguments: `requires(@W.1 == @W.0)`
+        is runtime-false (NaN != NaN) and, post-#879 fpEQ, statically
+        refutable — so it must fire E501, not silently pass."""
+        _verify_err("""
+private data W { MkW(Float64) }
+
+private fn g(@W, @W -> @Bool)
+  requires(@W.1 == @W.0)
+  ensures(true)
+  effects(pure)
+{ true }
+
+public fn main(@Unit -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ g(MkW(0.0 / 0.0), MkW(0.0 / 0.0)) }
+""", "precondition")
+
+    def test_untranslatable_adt_field_demotes_to_e522(self) -> None:
+        """An ADT with a host-handle field (`Map`) can't be modelled in Z3.
+        The precondition obligation must demote LOUDLY to Tier-3 (E522 warning),
+        never silently vanish — DESIGN.md degrades loudly (#882)."""
+        src = """
+private data M { MkM(Map<String, Int>) }
+
+private fn g(@M, @M -> @Bool)
+  requires(@M.1 == @M.0)
+  ensures(true)
+  effects(pure)
+{ true }
+
+public fn main(@Unit -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ g(MkM(map_new()), MkM(map_new())) }
+"""
+        warns = _verify_warn(src, "precondition")
+        assert any(w.error_code == "E522" for w in warns), (
+            f"expected an E522 Tier-3 demotion warning, got: "
+            f"{[(w.error_code, w.description) for w in warns]}"
+        )
+        result = _verify(src)
+        demoted = [
+            o for o in result.obligations
+            if o.kind == "call_pre" and o.error_code == "E522"
+        ]
+        assert len(demoted) == 1, (
+            f"expected one demoted call_pre obligation, got {demoted}"
+        )
+        assert demoted[0].status == "tier3"
+        # The demotion is loud but not an error — the runtime guard enforces it.
+        errors = [d for d in result.diagnostics if d.severity == "error"]
+        assert errors == []
+
+    def test_untranslatable_precondition_demotes_to_e522(self) -> None:
+        """When the callee's *precondition* is outside the decidable fragment
+        (`string_length(...) > 0`) the arguments still translate, so the
+        call-site obligation exists but can't be discharged — it must demote
+        loudly to E522, not vanish (#882).  This exercises the
+        precondition-untranslatable arm, distinct from the untranslatable-
+        argument arm above."""
+        src = """
+private fn needs_len(@String -> @String)
+  requires(string_length(@String.0) > 0)
+  ensures(true)
+  effects(pure)
+{ @String.0 }
+
+public fn main(@String -> @String)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ needs_len(@String.0) }
+"""
+        result = _verify(src)
+        demoted = [
+            o for o in result.obligations
+            if o.kind == "call_pre" and o.error_code == "E522"
+        ]
+        assert len(demoted) == 1, (
+            f"expected one call-site E522 demotion, got {demoted}"
+        )
+        assert demoted[0].status == "tier3"
+        errors = [d for d in result.diagnostics if d.severity == "error"]
+        assert errors == []
+        # The loud call-site warning is present (distinct from the callee's
+        # own E521 definition-site warning).
+        call_warns = [
+            d for d in result.diagnostics
+            if d.severity == "warning" and d.error_code == "E522"
+        ]
+        assert len(call_warns) == 1
+
+    def test_trivial_requires_adt_arg_stays_silent(self) -> None:
+        """A callee with only `requires(true)` has no obligation — an
+        untranslatable ADT argument must NOT spuriously demote (no warning)."""
+        src = """
+private data M { MkM(Map<String, Int>) }
+
+private fn g(@M, @M -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ true }
+
+public fn main(@Unit -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ g(MkM(map_new()), MkM(map_new())) }
+"""
+        result = _verify(src)
+        demoted = [
+            o for o in result.obligations
+            if o.kind == "call_pre" and o.error_code == "E522"
+        ]
+        assert demoted == [], (
+            f"trivial requires(true) must not demote, got {demoted}"
+        )
+        warns = [
+            d for d in result.diagnostics
+            if d.severity == "warning" and d.error_code == "E522"
+        ]
+        assert warns == []
 
 
 # =====================================================================
