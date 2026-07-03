@@ -139,6 +139,7 @@ Everything allowed in the decidable fragment (Chapter 2, Section 2.6.1):
 - String literals
 - Linear arithmetic (`+`, `-`, `*` with literal multiplier)
 - Comparisons (`==`, `!=`, `<`, `>`, `<=`, `>=`)
+- The `Eq` / `Ord` ability operations `eq(a, b)` and `compare(a, b)` (Chapter 9, Section 9.8) — the generic-programming spelling of `==` and the three-way `Ordering` comparison.  A contract predicate may use either form; `eq(a, b)` is verified and compiled *as* `a == b`, and `compare(a, b)` *as* the canonical `Ordering` if-chain (`if a < b then Less else if a == b then Equal else Greater`).  The two spellings are semantically identical and share one internal representation (one canonical form, Section 0.2.3), so a contract written with the ability op enjoys the same Tier-1 reasoning and runtime enforcement as its operator form ([#874](https://github.com/aallan/vera/issues/874))
 - Boolean connectives (`&&`, `||`, `!`)
 - `array_length()` on arrays, `string_length()` on strings
 - Array index expressions (`@Array<T>.0[i]`) — uninterpreted `index_<T>(arr, i)` function; sound for relational facts but doesn't reason about element structure beyond what explicit predicates assert (added [#667](https://github.com/aallan/vera/issues/667))

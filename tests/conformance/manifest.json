@@ -1497,6 +1497,7 @@
       "adt_auto_derivation",
       "ordering_adt",
       "compare_operation",
+      "ability_op_in_contract",
       "show_operation",
       "hash_operation"
     ]

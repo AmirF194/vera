@@ -1180,11 +1180,15 @@ class CodeGenerator(
                     tld.decl.body, ability_ops)
                 new_where = self._rewrite_where_fns(
                     tld.decl.where_fns, ability_ops)
+                new_contracts = self._rewrite_ops_in_contracts(
+                    tld.decl.contracts, ability_ops)
                 if (new_body is not tld.decl.body
-                        or new_where is not tld.decl.where_fns):
+                        or new_where is not tld.decl.where_fns
+                        or new_contracts is not tld.decl.contracts):
                     new_decl = _replace(
                         tld.decl, body=new_body,  # type: ignore[arg-type]
-                        where_fns=new_where)
+                        where_fns=new_where,
+                        contracts=new_contracts)
                     tld = _replace(tld, decl=new_decl)
                     prog_changed = True
             new_tlds.append(tld)
@@ -1197,20 +1201,76 @@ class CodeGenerator(
             new_body = self._rewrite_ops_in_expr(mdecl.body, ability_ops)
             new_where = self._rewrite_where_fns(
                 mdecl.where_fns, ability_ops)
-            if new_body is not mdecl.body or new_where is not mdecl.where_fns:
+            new_contracts = self._rewrite_ops_in_contracts(
+                mdecl.contracts, ability_ops)
+            if (new_body is not mdecl.body
+                    or new_where is not mdecl.where_fns
+                    or new_contracts is not mdecl.contracts):
                 mdecl = _replace(
                     mdecl, body=new_body,  # type: ignore[arg-type]
-                    where_fns=new_where)
+                    where_fns=new_where,
+                    contracts=new_contracts)
             new_monos.append(mdecl)
 
         return program, new_monos
+
+    def _rewrite_ops_in_contracts(
+        self,
+        contracts: tuple[ast.Contract, ...],
+        ability_ops: dict[str, str],
+    ) -> tuple[ast.Contract, ...]:
+        """Rewrite ability op calls inside a function's contract clauses.
+
+        The same Pass 1.6 canonicalisation that lowers ``eq(a, b)`` →
+        ``BinaryExpr(a, EQ, b)`` in bodies must also run over ``requires`` /
+        ``ensures`` / ``decreases`` predicates (#874).  A contract predicate
+        written with the ability op reached the WASM contract-lowering path as
+        a bare ``FnCall`` whose target is unregistered, tripping the
+        ``_translate_call`` guard-rail with an *uncaught* ``CodegenSkip`` — the
+        contract path runs outside ``_compile_fn``'s skip-to-E602 try/except.
+        Rewriting here keeps codegen on the one canonical operator form
+        (#815) so ``vera check``-green contracts compile and enforce.
+        """
+        from dataclasses import replace as _replace
+
+        new_contracts: list[ast.Contract] = []
+        changed = False
+        for contract in contracts:
+            if isinstance(contract, (ast.Requires, ast.Ensures)):
+                new_expr = self._rewrite_ops_in_expr(
+                    contract.expr, ability_ops)
+                if new_expr is not contract.expr:
+                    new_contracts.append(_replace(contract, expr=new_expr))
+                    changed = True
+                    continue
+            elif isinstance(contract, ast.Decreases):
+                new_exprs = tuple(
+                    self._rewrite_ops_in_expr(e, ability_ops)
+                    for e in contract.exprs
+                )
+                if any(n is not o
+                       for n, o in zip(new_exprs, contract.exprs)):
+                    new_contracts.append(
+                        _replace(contract, exprs=new_exprs))
+                    changed = True
+                    continue
+            new_contracts.append(contract)
+        return tuple(new_contracts) if changed else contracts
 
     def _rewrite_where_fns(
         self,
         where_fns: tuple[ast.FnDecl, ...] | None,
         ability_ops: dict[str, str],
     ) -> tuple[ast.FnDecl, ...] | None:
-        """Rewrite ability ops in where-block function bodies."""
+        """Rewrite ability ops in where-block function bodies AND contracts.
+
+        A `where`-helper carries its own full contract block, so its
+        `requires` / `ensures` / `decreases` predicates hit the same
+        contract-lowering CodegenSkip as a top-level fn when they use `eq` /
+        `compare` (#874).  Rewrite both the body and the contracts through the
+        same Pass 1.6 canonicalisation (PR #887 review found the first pass
+        covered only `wfn.body`).
+        """
         if not where_fns:
             return where_fns
         from dataclasses import replace as _replace
@@ -1219,8 +1279,14 @@ class CodeGenerator(
         changed = False
         for wfn in where_fns:
             new_body = self._rewrite_ops_in_expr(wfn.body, ability_ops)
-            if new_body is not wfn.body:
-                new_fns.append(_replace(wfn, body=new_body))  # type: ignore[arg-type]
+            new_contracts = self._rewrite_ops_in_contracts(
+                wfn.contracts, ability_ops)
+            if (new_body is not wfn.body
+                    or new_contracts is not wfn.contracts):
+                new_fns.append(_replace(
+                    wfn,
+                    body=new_body,  # type: ignore[arg-type]
+                    contracts=new_contracts))
                 changed = True
             else:
                 new_fns.append(wfn)
@@ -1374,6 +1440,22 @@ class CodeGenerator(
             )
             if any(n is not o for n, o in zip(new_args, expr.args)):
                 return _replace(expr, args=new_args)
+            return expr
+
+        # Quantifiers: rewrite the domain and the predicate body.  A `forall` /
+        # `exists` in a contract (`ensures(forall(..., |i| eq(xs[i], 0)))`) is
+        # runtime-lowered by `_translate_quantifier`, which compiles the
+        # predicate `AnonFn` body — so an `eq` / `compare` inside it hits the
+        # same unregistered-call CodegenSkip as a top-level contract op unless
+        # canonicalised here first (PR #887 review: the walker fell through
+        # quantifier nodes to the leaf return).
+        if isinstance(expr, (ast.ForallExpr, ast.ExistsExpr)):
+            new_domain = self._rewrite_ops_in_expr(expr.domain, ability_ops)
+            new_pred = self._rewrite_ops_in_expr(expr.predicate, ability_ops)
+            if new_domain is not expr.domain or new_pred is not expr.predicate:
+                return _replace(
+                    expr, domain=new_domain,
+                    predicate=new_pred)  # type: ignore[arg-type]
             return expr
 
         # Leaf nodes (literals, slot refs, etc.) — no rewriting needed
