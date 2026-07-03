@@ -2172,3 +2172,173 @@ public fn main(@Unit -> @Int)
         # @Option<Int>.0 (most recent) = pick_last(mki(3), mki(4)) = mki(4)
         # = Some(4); the Decimal instantiation flows through the SAME clone.
         assert _run(source, fn="main") == 4
+
+
+class TestGenericWhereHelper904:
+    """#904 — a `where`-helper inside a monomorphized generic must be emitted.
+
+    A generic ``forall<T>`` carrying a ``where { fn helper(...) {...} }`` block
+    passes ``vera check`` but crashed at codegen: the clone (``outer$Int``)
+    calls ``$helper`` but the where-helper was never emitted (the generic
+    parent is skipped in Pass 2 because its ``@T`` param is `unsupported`, and
+    where-helpers used to be emitted only alongside their compilable parent).
+    Both helper shapes must work:
+
+    - (a) T-INDEPENDENT helper (``fn helper(@Int -> @Int)``, no ``@T``): its
+      body is instantiation-agnostic; it must still be emitted and the clone's
+      call must resolve.
+    - (b) T-DEPENDENT helper (``fn id(@T -> @T)``): its signature/body reads
+      the enclosing ``@T``, so it is monomorphized per-instantiation with a
+      name aligned to the enclosing clone, and the clone's call resolves.
+    """
+
+    def test_t_independent_where_helper_runs(self) -> None:
+        """(a) The #904 repro: a T-independent where-helper inside a generic.
+
+        ``outer(99)`` instantiates ``outer<Int>``; the clone calls the
+        T-independent ``helper(5)`` which returns 5.  Before the fix this
+        crashed with ``unknown func: failed to find name $helper``.
+        """
+        source = """\
+private forall<T> fn outer(@T -> @Int) requires(true) ensures(true) effects(pure)
+{ helper(5) }
+where {
+  fn helper(@Int -> @Int) requires(true) ensures(true) effects(pure) { @Int.0 }
+}
+public fn main(@Unit -> @Int) requires(true) ensures(true) effects(pure) { outer(99) }
+"""
+        assert _run(source, fn="main") == 5
+
+    def test_t_dependent_where_helper_runs(self) -> None:
+        """(b) A where-helper whose signature/body reads the enclosing ``@T``.
+
+        ``outer(7)`` instantiates ``outer<Int>``; the clone body calls the
+        per-instantiation ``id(@T.0)`` (``id: @T -> @T``, here ``@Int -> @Int``)
+        which returns its argument, 7.  Before the fix this crashed with
+        ``unknown func: failed to find name $id``.
+        """
+        source = """\
+private forall<T> fn outer(@T -> @T) requires(true) ensures(true) effects(pure)
+{ id(@T.0) }
+where {
+  fn id(@T -> @T) requires(true) ensures(true) effects(pure) { @T.0 }
+}
+public fn main(@Unit -> @Int) requires(true) ensures(true) effects(pure) { outer(7) }
+"""
+        assert _run(source, fn="main") == 7
+
+    def test_where_helper_multiple_instantiations(self) -> None:
+        """Two instantiations of the same generic each resolve the helper.
+
+        ``pick`` is instantiated at both ``Int`` and ``Bool``; each clone's
+        ``dup`` helper (T-independent) must be emitted and resolved without a
+        duplicate-definition collision between the two clones.
+        """
+        source = """\
+private forall<T> fn pick(@T -> @Int) requires(true) ensures(true) effects(pure)
+{ dup(3) }
+where {
+  fn dup(@Int -> @Int) requires(true) ensures(true) effects(pure) { @Int.0 + @Int.0 }
+}
+public fn main(@Unit -> @Int) requires(true) ensures(true) effects(pure)
+{
+  let @Int = pick(10);
+  let @Int = pick(true);
+  @Int.0
+}
+"""
+        # Both pick<Int> and pick<Bool> return dup(3) = 3 + 3 = 6; @Int.0 (most
+        # recent) is pick<Bool>'s result, so each clone's helper must resolve.
+        assert _run(source, fn="main") == 6
+
+    def test_t_dependent_where_helper_two_instantiations(self) -> None:
+        """A T-DEPENDENT helper monomorphized at two distinct concrete types.
+
+        ``wrap<Int>`` and ``wrap<Bool>`` each get their own ``id`` clone; the
+        Int one moves an i64, the Bool one an i32, so a single shared emission
+        would be type-wrong — each clone must carry its own per-instantiation
+        helper.
+        """
+        source = """\
+private forall<T> fn wrap(@T -> @T) requires(true) ensures(true) effects(pure)
+{ id(@T.0) }
+where {
+  fn id(@T -> @T) requires(true) ensures(true) effects(pure) { @T.0 }
+}
+public fn main(@Unit -> @Int) requires(true) ensures(true) effects(pure)
+{
+  let @Bool = wrap(true);
+  let @Int = wrap(9);
+  @Int.0
+}
+"""
+        assert _run(source, fn="main") == 9
+
+    def test_where_helper_sibling_call_in_generic(self) -> None:
+        """A where-helper that calls a SIBLING where-helper, inside a generic.
+
+        ``h1`` calls ``h2`` by bare name; both live inside the generic's
+        ``where`` block.  Under monomorphization both bare sibling calls must
+        be rewritten to the per-clone helper names so neither dangles.
+        """
+        source = """\
+private forall<T> fn outer(@T -> @Int) requires(true) ensures(true) effects(pure)
+{ h1(4) }
+where {
+  fn h1(@Int -> @Int) requires(true) ensures(true) effects(pure) { h2(@Int.0) + 1 }
+  fn h2(@Int -> @Int) requires(true) ensures(true) effects(pure) { @Int.0 * 10 }
+}
+public fn main(@Unit -> @Int) requires(true) ensures(true) effects(pure) { outer(0) }
+"""
+        # h1(4) = h2(4) + 1 = 40 + 1 = 41
+        assert _run(source, fn="main") == 41
+
+    def test_non_generic_where_helper_still_runs(self) -> None:
+        """Regression: a NON-generic fn with a where-block still compiles+runs.
+
+        This path (helper emitted alongside its compilable parent) must be
+        left intact by the #904 fix.
+        """
+        source = """\
+private fn ng(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{ h1(@Int.0) }
+where {
+  fn h1(@Int -> @Int) requires(true) ensures(true) effects(pure) { h2(@Int.0) }
+  fn h2(@Int -> @Int) requires(true) ensures(true) effects(pure) { @Int.0 }
+}
+public fn main(@Unit -> @Int) requires(true) ensures(true) effects(pure) { ng(42) }
+"""
+        assert _run(source, fn="main") == 42
+
+    def test_generic_without_where_still_runs(self) -> None:
+        """Regression: a generic with NO where-block still monomorphizes+runs."""
+        source = """\
+private forall<T> fn identity(@T -> @T) requires(true) ensures(true) effects(pure)
+{ @T.0 }
+public fn main(@Unit -> @Int) requires(true) ensures(true) effects(pure)
+{ identity(55) }
+"""
+        assert _run(source, fn="main") == 55
+
+    def test_where_helper_calls_another_generic(self) -> None:
+        """A where-helper body that calls a DIFFERENT top-level generic.
+
+        ``helper`` (inside ``outer<T>``'s where block) calls ``inner<Int>``.
+        That transitive generic instantiation must be discovered from the
+        where-fn body (the transitive scan runs on the clone with its
+        ``where_fns`` still attached, before hoisting), so ``inner$Int`` exists
+        and the hoisted helper's call resolves to it.
+        """
+        source = """\
+private forall<U> fn inner(@U -> @U) requires(true) ensures(true) effects(pure)
+{ @U.0 }
+private forall<T> fn outer(@T -> @Int) requires(true) ensures(true) effects(pure)
+{ helper(5) }
+where {
+  fn helper(@Int -> @Int) requires(true) ensures(true) effects(pure)
+  { inner(@Int.0) }
+}
+public fn main(@Unit -> @Int) requires(true) ensures(true) effects(pure)
+{ outer(99) }
+"""
+        assert _run(source, fn="main") == 5

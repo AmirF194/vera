@@ -267,7 +267,94 @@ class MonomorphizationMixin:
                 generic_decls, seen,
             )
 
-        return mono_decls
+        # #904: hoist every clone's ``where``-helpers into standalone mono
+        # decls.  A generic's ``where { fn helper(...) }`` block is carried into
+        # each clone by ``monomorphize_fn`` (a total AST substitution), but the
+        # generic PARENT is skipped in Pass 2 (its ``@T`` param is `unsupported`
+        # WASM), so the parent's where-helpers — emitted only alongside a
+        # COMPILABLE parent — were never emitted, and the clone's bare call to
+        # ``$helper`` dangled (``unknown func``).  Give each clone its own copy
+        # of every helper under a clone-aligned name and rewrite the intra-clone
+        # calls to match, so the ordinary mono-decl emission path (register in
+        # Pass 1.5, compile in Pass 2) emits them.
+        return self._hoist_clone_where_fns(mono_decls)
+
+    def _hoist_clone_where_fns(
+        self,
+        mono_decls: list[ast.FnDecl],
+    ) -> list[ast.FnDecl]:
+        """Hoist every clone's ``where``-helpers into standalone mono decls (#904).
+
+        For each monomorphized clone that carries a ``where`` block, rename each
+        helper to a clone-aligned name (``<clone>$where$<helper>`` — ``$`` can't
+        appear in a source identifier and ``where`` is a reserved keyword, so
+        the name can collide with neither a real user function nor another mono
+        clone), rewrite the clone body's (and each sibling helper's) bare call
+        to that helper to the renamed target, strip ``where_fns`` off the clone,
+        and append the renamed helpers as ordinary mono decls.
+
+        Cloning per-instantiation (rather than emitting each helper once) is
+        uniformly correct for both helper shapes:
+
+        - a T-INDEPENDENT helper (``fn helper(@Int -> @Int)``) produces
+          identical bodies under distinct names — redundant but sound;
+        - a T-DEPENDENT helper (``fn id(@T -> @T)``) reads the enclosing ``@T``,
+          so its substituted body genuinely differs per instantiation (an i64
+          mover for ``@Int``, an i32 mover for ``@Bool``) and MUST be
+          per-instantiation — a single shared emission would be type-wrong.
+
+        Nested ``where`` blocks (a helper with its own helpers) are hoisted
+        recursively under the same clone-qualified prefix.
+        """
+        result: list[ast.FnDecl] = []
+        for decl in mono_decls:
+            if not decl.where_fns:
+                result.append(decl)
+                continue
+            hoisted: list[ast.FnDecl] = []
+            rewritten = self._hoist_where_fns_under(
+                decl, decl.name, hoisted,
+            )
+            result.append(rewritten)
+            result.extend(hoisted)
+        return result
+
+    def _hoist_where_fns_under(
+        self,
+        fn: ast.FnDecl,
+        prefix: str,
+        hoisted: list[ast.FnDecl],
+    ) -> ast.FnDecl:
+        """Hoist ``fn``'s ``where``-helpers under ``prefix``, recursively.
+
+        Returns ``fn`` with its ``where_fns`` stripped and every bare call to a
+        (now-renamed) helper redirected.  Each helper is appended to ``hoisted``
+        under ``<prefix>$where$<helper>``, with its OWN nested helpers hoisted
+        under that new prefix.  The sibling-rename map is shared across the
+        parent body and every helper body so a helper→sibling-helper call is
+        rewritten identically to a parent→helper call.
+        """
+        from dataclasses import replace as _replace
+
+        where_fns = fn.where_fns or ()
+        rename = {
+            wfn.name: f"{prefix}$where${wfn.name}"
+            for wfn in where_fns
+        }
+        for wfn in where_fns:
+            # Recurse first (under the helper's own hoisted name) so a nested
+            # helper's calls are redirected before the sibling-rename pass.
+            child = self._hoist_where_fns_under(
+                wfn, rename[wfn.name], hoisted,
+            )
+            renamed = self._rewrite_call_names(child, rename)
+            assert isinstance(renamed, ast.FnDecl)  # noqa: S101
+            hoisted.append(_replace(renamed, name=rename[wfn.name]))
+        # Strip the parent's where block and redirect its calls to the helpers.
+        stripped = _replace(fn, where_fns=None)
+        rewritten = self._rewrite_call_names(stripped, rename)
+        assert isinstance(rewritten, ast.FnDecl)  # noqa: S101
+        return rewritten
 
     def _register_shadowed_generic_bases(
         self,

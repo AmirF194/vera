@@ -1658,6 +1658,20 @@
     ]
   },
   {
+    "id": "ch09_generic_where_helper",
+    "file": "ch09_generic_where_helper.vera",
+    "chapter": 9,
+    "title": "where-helpers inside a monomorphized generic (#904)",
+    "level": "run",
+    "spec_ref": "Section 11.10.3",
+    "features": [
+      "generic_function",
+      "monomorphization",
+      "forall_where",
+      "where_block"
+    ]
+  },
+  {
     "id": "ch09_ctor_inferred_eq",
     "file": "ch09_ctor_inferred_eq.vera",
     "chapter": 9,
