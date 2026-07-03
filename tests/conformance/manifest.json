@@ -761,6 +761,22 @@
     ]
   },
   {
+    "id": "ch05_generic_pipe_monomorph",
+    "file": "ch05_generic_pipe_monomorph.vera",
+    "chapter": 5,
+    "title": "Generic monomorphization via the |> pipe and @T closure substitution (#913)",
+    "level": "run",
+    "spec_ref": "Section 5.4",
+    "features": [
+      "generics",
+      "forall",
+      "monomorphization",
+      "pipe",
+      "closures",
+      "higher_order"
+    ]
+  },
+  {
     "id": "ch06_requires",
     "file": "ch06_requires.vera",
     "chapter": 6,

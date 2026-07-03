@@ -2342,3 +2342,159 @@ public fn main(@Unit -> @Int) requires(true) ensures(true) effects(pure)
 { outer(99) }
 """
         assert _run(source, fn="main") == 5
+
+
+# =====================================================================
+# #913: monomorphization DISCOVERY misses two call shapes
+# =====================================================================
+
+
+class TestGenericPipeMonomorphization:
+    """A generic called via the ``|>`` pipe must be discovered and its type
+    argument inferred from the piped value — exactly as a direct call is.
+
+    Pre-fix, discovery walked the pipe's RHS ``FnCall`` with its *literal*
+    (empty) argument list, so ``T`` never bound and no ``ident$Int`` clone was
+    emitted; codegen then lowered ``42 |> ident()`` to ``call $ident$Int`` on a
+    function that doesn't exist and the enclosing fn was dropped at run (#913).
+    """
+
+    _IDENT = (
+        "private forall<T> fn ident(@T -> @T)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ @T.0 }\n"
+    )
+
+    def test_pipe_int(self) -> None:
+        """``42 |> ident()`` runs and returns 42 (was: ident$Int not
+        registered → function dropped)."""
+        source = self._IDENT + (
+            "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ 42 |> ident() }\n"
+        )
+        assert _run(source, fn="main") == 42
+
+    def test_pipe_string(self) -> None:
+        """``\"hi\" |> ident()`` resolves ident$String; length probe = 2."""
+        source = self._IDENT + (
+            "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ string_length(\"hi\" |> ident()) }\n"
+        )
+        # 2 cannot coincide with a 0 fallback / dropped-fn default.
+        assert _run(source, fn="main") == 2
+
+    def test_pipe_chained(self) -> None:
+        """A chained pipe ``5 |> ident() |> ident()`` resolves ident$Int on
+        both stages and returns 5."""
+        source = self._IDENT + (
+            "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ 5 |> ident() |> ident() }\n"
+        )
+        assert _run(source, fn="main") == 5
+
+    def test_pipe_two_instantiations_one_program(self) -> None:
+        """Two distinct pipe instantiations of the same generic in one program
+        each resolve (ident$Int and ident$Bool)."""
+        source = self._IDENT + (
+            "public fn ints(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ 42 |> ident() }\n"
+            "public fn bools(@Unit -> @Bool)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ true |> ident() }\n"
+        )
+        assert _run(source, fn="ints") == 42
+        assert _run(source, fn="bools") == 1
+
+    def test_pipe_with_explicit_extra_arg(self) -> None:
+        """A pipe into a two-parameter generic prepends the piped value as the
+        FIRST argument; the second arg is written explicitly."""
+        source = (
+            "private forall<T> fn first(@T, @T -> @T)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ @T.1 }\n"
+            "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ 7 |> first(9) }\n"
+        )
+        # first(7, 9) returns @T.1 = the first (least-recent) arg = 7.
+        assert _run(source, fn="main") == 7
+
+    def test_direct_call_still_runs(self) -> None:
+        """Regression: the direct call form keeps working unchanged."""
+        source = self._IDENT + (
+            "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ ident(42) }\n"
+        )
+        assert _run(source, fn="main") == 42
+
+    def test_non_generic_pipe_still_runs(self) -> None:
+        """Regression: a pipe into a NON-generic fn is unaffected."""
+        source = (
+            "private fn inc(@Int -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ @Int.0 + 1 }\n"
+            "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ 41 |> inc() }\n"
+        )
+        assert _run(source, fn="main") == 42
+
+
+class TestGenericClosureTypeVarSubstitution:
+    """A ``@T`` closure parameter inside a ``forall<T>`` body must be
+    substituted with the concrete type argument during monomorphization.
+
+    Pre-fix, the generic TEMPLATE itself was body-compiled (its ``Array<T>``
+    params look compilable as i32_pair), which lifted its ``@T`` closure and
+    hit the hard ``closure parameter has unsupported WASM type`` invariant
+    ([E699]) at run — even though the emitted clone ``map_ident$Int`` is fine
+    (#913)."""
+
+    def test_generic_body_closure_type_var(self) -> None:
+        """``forall<T>`` body maps an ``@T``-param closure over ``Array<T>``;
+        instantiated at Int it runs (was: [E699])."""
+        source = (
+            "private forall<T> fn map_ident(@Array<T> -> @Array<T>)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ array_map(@Array<T>.0, fn(@T -> @T) effects(pure) { @T.0 }) }\n"
+            "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ array_length(map_ident([10, 20, 30])) }\n"
+        )
+        assert _run(source, fn="main") == 3
+
+    def test_generic_body_closure_no_e699(self) -> None:
+        """The compile must not surface an [E699] for the generic template."""
+        source = (
+            "private forall<T> fn map_ident(@Array<T> -> @Array<T>)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ array_map(@Array<T>.0, fn(@T -> @T) effects(pure) { @T.0 }) }\n"
+            "public fn main(@Unit -> @Array<Int>)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ map_ident([1, 2, 3]) }\n"
+        )
+        result = _compile(source)
+        assert not [d for d in result.diagnostics if d.error_code == "E699"], (
+            "generic template with an @T closure must not raise [E699]: "
+            f"{[(d.error_code, d.description) for d in result.diagnostics]}"
+        )
+
+    def test_generic_array_arg_binds_from_element_type(self) -> None:
+        """A generic over ``Array<T>`` given an array literal binds ``T`` from
+        the element type — the WASM call-rewrite consultor must agree with
+        instantiation discovery on ``firstlen$Int`` (was: call rewritten to a
+        never-emitted ``firstlen$Bool``, dropping the caller)."""
+        source = (
+            "private forall<T> fn firstlen(@Array<T> -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ array_length(@Array<T>.0) }\n"
+            "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ firstlen([1, 2, 3]) }\n"
+        )
+        assert _run(source, fn="main") == 3

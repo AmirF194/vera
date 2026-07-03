@@ -300,9 +300,32 @@ class ClosureLiftingMixin:
             wt = self._type_expr_to_wasm_type(param_te)
             if wt is None:  # pragma: no cover — Unit closure param
                 continue  # Unit param, skip
-            if wt == "unsupported":  # pragma: no cover — type-check rejects this
-                raise CodegenInvariantError(
-                    "closure parameter has unsupported WASM type", anon_fn)
+            if wt == "unsupported":
+                # #913: a bare type variable (`@T` inside a `forall<T>` body)
+                # is `"unsupported"` here — but it is NOT a codegen bug.  The
+                # generic TEMPLATE is body-compiled to draw its skip-warning
+                # surface (E602/E604/E605), exactly as a template's own bare
+                # `@T` *parameter* draws E604 via `_is_compilable`; only the
+                # monomorphized clone (whose closure param is the concrete
+                # type) is ever run.  So drop THIS closure cleanly — a
+                # user-facing skip that routes through `_lift_pending_closures`
+                # to the enclosing fn's droppable E602, whose template warning
+                # is then suppressed once a clone compiles (#604) — rather than
+                # raising the hard E699 that reported a valid generic as an
+                # internal compiler error.
+                self._harvest_interp_inference_failures(ctx)
+                self._warning(
+                    anon_fn,
+                    "Closure parameter has unsupported WASM type — "
+                    "closure skipped.",
+                    rationale="A closure parameter typed as an unsubstituted "
+                    "type variable has no monomorphic WASM representation. "
+                    "This occurs only in an uninstantiated generic template "
+                    "body; the enclosing function is dropped, and each "
+                    "concrete instantiation compiles its own clone.",
+                    error_code="E602",
+                )
+                return None
             if wt == "i32_pair":
                 # String/Array params need two consecutive i32 slots (ptr, len).
                 # The pair convention uses ptr_idx and ptr_idx+1 implicitly, so
@@ -409,9 +432,25 @@ class ClosureLiftingMixin:
 
         # Return type
         ret_wt = self._type_expr_to_wasm_type(anon_fn.return_type)
-        if ret_wt == "unsupported":  # pragma: no cover — type-check rejects this
-            raise CodegenInvariantError(
-                "closure return type has unsupported WASM type", anon_fn)
+        if ret_wt == "unsupported":
+            # #913: same as the closure-parameter case above — an unsubstituted
+            # type variable (`-> @T`) in an uninstantiated generic template body
+            # is a clean skip, not an internal compiler error.  Drop the closure
+            # so the enclosing fn is dropped droppably (E602); the clone whose
+            # return type is concrete compiles normally.
+            self._harvest_interp_inference_failures(ctx)
+            self._warning(
+                anon_fn,
+                "Closure return type has unsupported WASM type — "
+                "closure skipped.",
+                rationale="A closure return typed as an unsubstituted type "
+                "variable has no monomorphic WASM representation. This occurs "
+                "only in an uninstantiated generic template body; the enclosing "
+                "function is dropped, and each concrete instantiation compiles "
+                "its own clone.",
+                error_code="E602",
+            )
+            return None
         if ret_wt == "i32_pair":
             result_part = " (result i32 i32)"
         elif ret_wt:

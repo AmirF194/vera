@@ -1581,6 +1581,20 @@ class InferenceMixin:
                     else:  # pragma: no cover
                         return None
                 return (adt_name, tuple(arg_types))
+        if isinstance(expr, ast.ArrayLit):
+            # #913: an array literal matched against an `Array<T>` formal must
+            # expose its element type so `T` binds from THIS argument.  Mirrors
+            # the discovery-side `Monomorphizer._get_arg_type_info` ArrayLit
+            # branch (vera/monomorphize.py) — without it, the WASM call-rewrite
+            # consultor left `T` unbound for `map_ident([1, 2, 3])`, fell to the
+            # phantom-var `Bool` default, and mangled the call to
+            # `map_ident$Bool` while discovery emitted `map_ident$Int` — a
+            # dangling reference that dropped the enclosing fn.
+            if expr.elements:
+                elem_type = self._infer_vera_type(expr.elements[0])
+                if elem_type:
+                    return ("Array", (elem_type,))
+            return ("Array", ())
         if isinstance(expr, ast.FnCall):
             # #878: a call whose result is itself a parameterized type
             # (`Option<Decimal>`, `Array<Int>`) matched against a

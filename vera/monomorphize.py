@@ -568,6 +568,31 @@ class Monomorphizer:
             )
             if type_args is not None:
                 instances[node.name].add(type_args)
+        # #913: a generic invoked via the ``|>`` pipe — ``x |> g(…)`` — desugars
+        # to ``g(x, …)`` at BOTH the checker (`_check_pipe`) and codegen
+        # (`_translate_binary`) boundaries, prepending the piped LHS as the
+        # call's FIRST argument.  Discovery must reconstruct that same argument
+        # list, or the bare RHS ``FnCall``/``ModuleCall`` (whose own `args`
+        # omit the piped value) fails to bind the type variable that the piped
+        # value supplies — so no ``g$Type`` clone is emitted and codegen lowers
+        # the pipe to a call on a non-existent function (the enclosing fn is
+        # dropped at run).  The RHS itself is walked by the generic field
+        # recursion below, so an inner generic call reachable through the RHS
+        # is still discovered; this branch only adds the pipe-desugared
+        # instantiation.
+        if (
+            isinstance(node, ast.BinaryExpr)
+            and node.op == ast.BinOp.PIPE
+            and isinstance(node.right, (ast.FnCall, ast.ModuleCall))
+            and node.right.name in generic_decls
+        ):
+            decl = generic_decls[node.right.name]
+            piped_args = (node.left,) + node.right.args
+            type_args = self._infer_type_args_from_args(
+                decl, piped_args, ctor_to_adt, generic_decls,
+            )
+            if type_args is not None:
+                instances[node.right.name].add(type_args)
         if isinstance(node, ast.Node):
             for f in fields(node):
                 if f.name == "span":
