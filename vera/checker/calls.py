@@ -127,9 +127,38 @@ class CallsMixin:
         # Generic inference
         param_types = fn_info.param_types
         return_type = fn_info.return_type
+        type_arg_conflict = False
         if fn_info.forall_vars:
+            conflicts: set[str] = set()
             mapping = self._infer_type_args(
-                fn_info.forall_vars, fn_info.param_types, arg_types)
+                fn_info.forall_vars, fn_info.param_types, arg_types,
+                conflicts)
+            if conflicts:
+                # #898: two arguments pinned the same type parameter to
+                # different, irreconcilable types (`eq2(MkOk("x"), MkOk(5))`
+                # fixes `A` to both `String` and `Int`).  Report the conflict
+                # directly — a clear E205 — rather than the misleading
+                # "expected Res<String, ...>, got Res<Int, ...>" E202 the
+                # partial merge would otherwise emit for one arm.
+                type_arg_conflict = True
+                self._error(
+                    node,
+                    f"Cannot infer a consistent type for the type "
+                    f"parameter(s) {', '.join(sorted(conflicts))} of "
+                    f"'{fn_info.name}': different arguments require "
+                    f"incompatible types.",
+                    rationale="A generic call binds each type parameter to one "
+                              "type; when several arguments determine the same "
+                              "parameter, they must agree (a sparse "
+                              "multi-parameter ADT built from different "
+                              "constructors must still name one consistent "
+                              "instantiation).",
+                    fix="Make the arguments agree on the conflicting type "
+                        "parameter, or annotate the intended instantiation "
+                        "with a typed slot binding.",
+                    spec_ref='Chapter 5, Section 5.2 "Function Declaration Syntax"',
+                    error_code="E205",
+                )
             if mapping:
                 param_types = tuple(
                     substitute(p, mapping) for p in param_types)
@@ -147,8 +176,13 @@ class CallsMixin:
                         if key is not None and not contains_typevar(c_pt):
                             self.expr_target_types[key] = c_pt
 
-        # Check each argument
+        # Check each argument.  When a type-argument conflict was already
+        # reported (#898), skip the per-argument subtype check: the merged
+        # parameter type is one arbitrary arm of the conflict, so re-checking
+        # would pile a misleading E202 on top of the clear E205.
         for i, (arg_ty, param_ty) in enumerate(zip(arg_types, param_types)):
+            if type_arg_conflict:
+                break
             if arg_ty is None or isinstance(arg_ty, UnknownType):
                 continue
             if isinstance(param_ty, (TypeVar, UnknownType)):

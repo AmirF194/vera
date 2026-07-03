@@ -598,6 +598,60 @@ class MonomorphizationMixin:
                 if (constraint.ability_name == "Eq"
                         and self._adt_satisfies_eq(concrete)):
                     continue
+                # #898: a SPARSE multi-type-parameter ADT reached via the
+                # constructor-inferred path (`id1(MkErr(5))` on
+                # `Res<A, B> { MkOk(A), MkErr(B) }`) recovers only the type
+                # parameter present in the argument (`B = Int`) and leaves the
+                # other (`A`) undetermined — the monomorphizer falls back to the
+                # bare ADT name `Res`.  Structural Eq derivation checks EVERY
+                # constructor's fields (`MkOk(A)` included), so derivability
+                # genuinely depends on the free `A` and cannot be decided here.
+                # Rejecting is correct (never unsound — the annotated
+                # `Res<Array, Int>` form is a real E613), but "Res does not
+                # satisfy Eq" misdescribes an under-determined type argument.
+                # Report the clearer E619 for this shape only: a bare/partial
+                # ADT name whose declared type-parameter count exceeds the type
+                # arguments recovered.  A FULLY-determined non-Eq instance
+                # (`Res<Array<Int>, Int>`, both params supplied) has no missing
+                # argument and stays on the E613 path below.
+                if (constraint.ability_name == "Eq"
+                        and self._eq_type_arg_under_determined(concrete)):
+                    # Render user-facing names WITHOUT the internal `?` sentinel:
+                    # the display names each free slot by its declared parameter
+                    # (`Res<A, Int>`), and the fix is a concrete, compilable
+                    # annotation binding the free parameter to an Eq type
+                    # (`let @Res<Int, Int> = ...;`) — #898 round-3 review.
+                    display_name, annotation = (
+                        self._under_determined_display_and_fix(concrete)
+                    )
+                    self.diagnostics.append(Diagnostic(
+                        description=(
+                            f"Cannot infer the type argument(s) for "
+                            f"'{display_name}' from the constructor argument, so "
+                            f"its 'Eq' derivability is under-determined."
+                        ),
+                        location=SourceLocation(file=self.file),
+                        rationale=(
+                            "Structural Eq derivation checks every "
+                            "constructor's fields, so a multi-type-parameter "
+                            "ADT built from a single constructor (which fixes "
+                            "only some parameters) leaves the remaining "
+                            "parameters — and thus whether the type derives "
+                            "Eq — undetermined."
+                        ),
+                        fix=(
+                            f"Annotate the value so every type parameter is "
+                            f"fixed, binding each free parameter to a type that "
+                            f"supports Eq — e.g. 'let @{annotation} = ...;' — "
+                            f"and pass that slot reference; the constructor path "
+                            f"then derives Eq exactly as the annotated form does."
+                        ),
+                        spec_ref='Chapter 9, Section 9.8 "Abilities"',
+                        severity="error",
+                        error_code="E619",
+                    ))
+                    ok = False
+                    continue
                 # Vera has no `derive` construct — for Eq the actionable fix
                 # is structural: make every constructor field itself Eq.
                 if constraint.ability_name == "Eq":
@@ -652,6 +706,111 @@ class MonomorphizationMixin:
                 ))
                 ok = False
         return ok
+
+    def _eq_type_arg_under_determined(self, type_name: str) -> bool:
+        """Is ``type_name`` an under-determined ADT that WOULD derive Eq? (#898)
+
+        Fires only for a sparse multi-parameter ADT reached via the constructor
+        path with a genuinely-FREE type parameter AND whose *known* components
+        are all Eq — so annotating the free parameter to an Eq type makes it
+        derive.  The caller then reports the clearer E619 ("under-determined
+        type argument — annotate it") instead of the misleading E613.
+
+        Distinguishes the two shapes the count-only predecessor conflated
+        (both were wrongly E619):
+
+        - `id1(MkErr(5))` on `Res<A, B>`: `B = Int` (Eq), `A` free →  True (E619,
+          annotating `A` to an Eq type derives).
+        - `id1(MkErr([1]))` on `Res<A, B>` (`B = Array<Int>`, non-Eq recovered),
+          and `id1(K([1], 7))` on `W<A, B> { K(Array<A>, B) }` (a structurally
+          non-Eq `Array<A>` field) →  False (E613: a known/structural component
+          is not Eq, so no annotation of the free parameter can help).
+
+        The monomorphizer materialises a free slot as the ``?`` sentinel
+        (`Res<?, Array>`); a bare name (`Res`, no recovery at all) is treated as
+        all-free.  The predicate is: some slot is free AND, with every free slot
+        provisionally bound to an Eq type, the ADT derives Eq structurally
+        (`_adt_satisfies_eq`), which also rejects a structurally non-Eq field.
+
+        False for a fully-applied instance (`Res<Array<Int>, Int>` — no free
+        slot; a determined-and-non-Eq E613), a parameterless ADT, or a non-ADT.
+        """
+        from vera.monomorphize import _FREE_TYPE_PARAM, Monomorphizer
+
+        parsed = Monomorphizer._parse_type_name(type_name)
+        base = parsed.name
+        if base not in self._adt_layouts:
+            return False
+        declared = self._adt_tp_counts.get(base, 0)
+        if declared == 0:
+            return False
+        # Reconstruct the per-parameter slots: an explicit arg list may carry
+        # the `?` sentinel for free slots; a bare name (`Res`) is all-free.
+        arg_names = [
+            Monomorphizer._format_type_name(a)
+            for a in (parsed.type_args or ())
+            if isinstance(a, ast.NamedType)
+        ]
+        if not arg_names:
+            arg_names = [_FREE_TYPE_PARAM] * declared
+        has_free = any(a == _FREE_TYPE_PARAM for a in arg_names)
+        if not has_free:
+            return False
+        # Provisionally bind each free slot to a known-Eq type (`Int`) and ask
+        # whether the ADT then derives Eq structurally.  If yes, only the free
+        # parameters stand between this type and Eq (→ E619, annotate them); if
+        # no, a known component or a structural field is non-Eq (→ E613).
+        probe_args = [a if a != _FREE_TYPE_PARAM else "Int" for a in arg_names]
+        probe_name = f"{base}<{', '.join(probe_args)}>"
+        return self._adt_satisfies_eq(probe_name)
+
+    def _under_determined_display_and_fix(
+        self, type_name: str,
+    ) -> tuple[str, str]:
+        """Render user-facing names for an under-determined ADT (#898 round 3).
+
+        Returns ``(display_name, annotation)`` for the E619 diagnostic, with the
+        internal ``?`` sentinel (`_FREE_TYPE_PARAM`) never exposed:
+
+        - ``display_name`` shows each free slot as the ADT's *declared* type
+          parameter name (`Res<A, Int>`), so the message names the parameter the
+          writer must pin — not the reserved `?` placeholder.
+        - ``annotation`` is a concrete, compilable Vera type binding each free
+          slot to a known-Eq type (`Res<Int, Int>`), so the suggested
+          `let @Res<Int, Int> = ...;` fix actually type-checks and derives.
+
+        Falls back to a bare parameterised form from the declared parameter names
+        when the recovery carried no explicit slots (a fully-bare `Res`).
+        """
+        from vera.monomorphize import _FREE_TYPE_PARAM, Monomorphizer
+
+        parsed = Monomorphizer._parse_type_name(type_name)
+        base = parsed.name
+        declared = self._adt_tp_counts.get(base, 0)
+        param_names = self._adt_tp_param_names.get(base, ())
+        arg_names = [
+            Monomorphizer._format_type_name(a)
+            for a in (parsed.type_args or ())
+            if isinstance(a, ast.NamedType)
+        ]
+        if not arg_names:
+            arg_names = [_FREE_TYPE_PARAM] * declared
+        display_slots: list[str] = []
+        fix_slots: list[str] = []
+        for i, a in enumerate(arg_names):
+            if a == _FREE_TYPE_PARAM:
+                # Free slot: show its declared parameter name in the message,
+                # and pin it to `Int` (an Eq type) in the actionable fix.
+                display_slots.append(
+                    param_names[i] if i < len(param_names) else f"T{i}"
+                )
+                fix_slots.append("Int")
+            else:
+                display_slots.append(a)
+                fix_slots.append(a)
+        display_name = f"{base}<{', '.join(display_slots)}>"
+        annotation = f"{base}<{', '.join(fix_slots)}>"
+        return display_name, annotation
 
     def _adt_satisfies_eq(
         self, type_name: str, _seen: frozenset[str] = frozenset(),
