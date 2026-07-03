@@ -546,8 +546,24 @@ class FunctionCompilationMixin:
             )
             return None
 
-        # Compile postcondition checks (wrap around body result)
-        post_instrs = self._compile_postconditions(ctx, decl, env, ret_wt)
+        # Compile postcondition checks (wrap around body result).
+        # #912: a composite `==` on a genuinely non-Eq-derivable operand
+        # (a `Tuple`, or an ADT with an `Array`/`Map` field) in an `ensures`
+        # clause raises `AdtEqNotDerivableError` from the structural-Eq dispatch,
+        # exactly as the body path does — but `_compile_postconditions` runs
+        # OUTSIDE the body/closure try blocks above, so the exception escaped
+        # uncaught (a Python traceback on a `check`-green program).  Catch it
+        # here with the SAME clean E613 the body (line 407) and closure (line
+        # 504) paths emit, dropping the function.  The *provable* free-type-var
+        # shape (`@Box<T>.result == @Box<T>.0`) never reaches here — it is routed
+        # to the scalar lowering by `_is_lost_type_arg_clone` before dispatch —
+        # so this backstop only fires on operands the checker's own Eq gate
+        # would reject (it does not yet gate contract position; a distinct gap).
+        try:
+            post_instrs = self._compile_postconditions(ctx, decl, env, ret_wt)
+        except AdtEqNotDerivableError as nde:
+            self._emit_adt_eq_not_derivable(ctx, nde, decl)
+            return None
 
         # Propagate resource / host-import flags from ``ctx`` to the module
         # ``self`` that ``_assemble_module`` reads.  This runs HERE — after the

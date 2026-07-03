@@ -87,6 +87,12 @@ def _verify(source: str) -> VerifyResult:
     )
 
 
+def _error_codes(source: str) -> list[str]:
+    """Error-severity diagnostic codes from a compile (no exception raised)."""
+    result = _compile(source)
+    return [d.error_code for d in result.diagnostics if d.severity == "error"]
+
+
 # Program bodies -------------------------------------------------------
 
 _BOX = """
@@ -261,3 +267,154 @@ class TestCompositePostconditionVerifies912:
         errors = [d for d in result.diagnostics if d.severity == "error"]
         assert errors == [], f"Unexpected verify errors: {errors}"
         assert result.summary.tier1_verified >= 1
+
+
+# =====================================================================
+# Generic over a PARAMETERIZED ADT: `fn(@Box<T> -> @Box<T>)` with a
+# slot-vs-slot postcondition `@Box<T>.result == @Box<T>.0`.
+#
+# The #912 fix's `ResultRef` arm resolves `@Box<T>.result` to `lv =
+# "Box<T>"`.  Round-1 both lost-arg guards bypassed a name containing `<`
+# (`"<" in lv`), so the dispatch routed `"Box<T>"` to `_translate_adt_eq`,
+# whose derivability gate raised an UNCAUGHT `AdtEqNotDerivableError` — a
+# codegen crash on a `check`-green/`verify`-green program that ran fine on
+# base (a PR-introduced regression: reverting only the `ResultRef` arm makes
+# it run).  The operands here are BOTH refs (no `ConstructorCall` sibling to
+# recover a concrete type argument from), and the monomorphizer does not
+# specialize `id2` to a concrete clone — its `@Box<T>` operands carry the
+# UNRESOLVED type variable `T`.  Such a name is non-dispatchable for
+# structural Eq, so the composite `==` must fall back to the pre-#912 scalar
+# lowering (the base behavior), NOT crash.
+#
+# SOUNDNESS: this postcondition is proved at Tier 3 (deferred to runtime),
+# NOT Tier 1 — the verifier does not structurally prove `@Box<T>.result ==
+# @Box<T>.0` for a free `T` (pinned by `test_generic_param_adt_ensures_is_
+# tier3`).  So the scalar (pointer) runtime check cannot contradict a
+# structural Tier-1 proof (no #912 resurrection), and for the identity
+# function the two operands ARE the same pointer, so `i32.eq` is correct.
+# =====================================================================
+
+_GENERIC_PARAM_ADT = """
+private data Box<T> {{ MkBox(T) }}
+private forall<T> fn id2(@Box<T> -> @Box<T>)
+  requires(true)
+  ensures({ensures})
+  effects(pure)
+{{
+  @Box<T>.0
+}}
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{{
+  match id2(MkBox(7)) {{ MkBox(@Int) -> @Int.0 }}
+}}
+"""
+
+
+class TestGenericParamAdtPostcondition912:
+    def test_generic_param_adt_slot_eq_slot_runs(self) -> None:
+        # RED (round 2): `@Box<T>.result == @Box<T>.0` crashed codegen with an
+        # uncaught AdtEqNotDerivableError('Box<T>').  id2 is the identity, so
+        # result and arg are the same pointer → the scalar fallback is correct
+        # and main returns 7.
+        src = _GENERIC_PARAM_ADT.format(ensures="@Box<T>.result == @Box<T>.0")
+        assert _run(src, fn="main") == 7
+
+    def test_generic_param_adt_slot_neq_slot_runs(self) -> None:
+        # RED (round 2): the `!=` form shares the crash.  `@Box<T>.result !=
+        # @Box<T>.0` is FALSE for the identity fn (same pointer), and the fn
+        # returns its input regardless, so main still returns 7 — what we pin is
+        # that it COMPILES and RUNS rather than crashing codegen.
+        src = _GENERIC_PARAM_ADT.format(ensures="@Box<T>.result != @Box<T>.0 || true")
+        assert _run(src, fn="main") == 7
+
+    def test_generic_param_adt_ensures_is_tier3_not_tier1(self) -> None:
+        # SOUNDNESS PIN: the generic-parameterized-ADT slot-vs-slot postcondition
+        # defers to Tier 3 (runtime), it is NOT structurally proved at Tier 1.
+        # This is what makes the scalar (pointer) runtime fallback sound — there
+        # is no Tier-1 structural proof for the runtime check to contradict, so
+        # #912 is not resurrected for this shape.  If a future change made this
+        # prove at Tier 1, the scalar fallback would become unsound and this
+        # test would flag it (forcing a concrete-structural lowering instead).
+        src = _GENERIC_PARAM_ADT.format(ensures="@Box<T>.result == @Box<T>.0")
+        result = _verify(src)
+        errors = [d for d in result.diagnostics if d.severity == "error"]
+        assert errors == [], f"Unexpected verify errors: {errors}"
+        assert result.summary.tier3_runtime >= 1, (
+            "the @Box<T>.result == @Box<T>.0 postcondition must defer to Tier 3 "
+            "(free type var T) — the invariant that makes the scalar runtime "
+            "fallback sound"
+        )
+
+
+# =====================================================================
+# Genuinely non-Eq composite in a postcondition → clean E613, not a
+# codegen crash.  These operands carry a CONCRETE non-Eq argument (an
+# `Array` field, or `Tuple`), so — unlike the free-type-var `Box<T>` case
+# — they are correctly NOT routed to the scalar fallback and reach the
+# structural-Eq dispatch, which raises `AdtEqNotDerivableError`.  The #912
+# postcondition backstop (`vera/codegen/functions.py`) catches it and emits
+# the same clean E613 the body / closure paths already emit, instead of the
+# uncaught Python traceback the postcondition path produced before.
+# =====================================================================
+
+_BOX_GENERIC = """
+private data Box<T> {{ MkBox(T) }}
+private fn mk(@Array<Int> -> @Box<Array<Int>>)
+  requires(true)
+  ensures({ensures})
+  effects(pure)
+{{
+  MkBox(@Array<Int>.0)
+}}
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{{
+  match mk([1, 2]) {{ MkBox(@Array<Int>) -> 0 }}
+}}
+"""
+
+_TUPLE_POSTCOND = """
+private fn mk(@Int -> @Tuple<Int, Int>)
+  requires(true)
+  ensures({ensures})
+  effects(pure)
+{{
+  Tuple(@Int.0, @Int.0)
+}}
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{{
+  match mk(5) {{ Tuple(@Int, @Int) -> @Int.1 }}
+}}
+"""
+
+
+class TestNonEqCompositePostconditionCleanE613912:
+    def test_array_field_adt_postcond_is_clean_e613(self) -> None:
+        # `@Box<Array<Int>>.result == MkBox(...)`: the argument is a CONCRETE
+        # non-Eq type (`Array`), so the operand is NOT a free-type-var clone —
+        # it correctly reaches the structural-Eq dispatch, which is non-
+        # derivable.  Before the #912 postcondition backstop this escaped as an
+        # uncaught `AdtEqNotDerivableError` traceback; now it is a clean E613
+        # (the same the body path emits), never an unhandled exception.
+        src = _BOX_GENERIC.format(
+            ensures="@Box<Array<Int>>.result == MkBox(@Array<Int>.0)")
+        codes = _error_codes(src)
+        assert "E613" in codes, f"expected E613, got {codes}"
+
+    def test_tuple_postcond_is_clean_e613(self) -> None:
+        # `Tuple` is intentionally non-Eq (spec §9.8), so a `Tuple<...>` `==` in
+        # a postcondition is non-derivable.  The backstop turns the previously
+        # uncaught crash into a clean E613 — pinned so the postcondition path
+        # keeps parity with the body path's handling.
+        src = _TUPLE_POSTCOND.format(
+            ensures="@Tuple<Int, Int>.result == Tuple(@Int.0, @Int.0)")
+        codes = _error_codes(src)
+        assert "E613" in codes, f"expected E613, got {codes}"

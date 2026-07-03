@@ -380,31 +380,97 @@ class OperatorsMixin:
         recovered = self._parameterize_ctor_operand(other, base)
         return recovered if recovered is not None else lv
 
+    # Non-ADT type-name bases that are nonetheless CONCRETE (primitives +
+    # built-in containers).  A single-segment type-argument base that is none
+    # of these AND is not a registered ADT is an unresolved type VARIABLE
+    # (`T`), the #912 round-2 signal.
+    _CONCRETE_NON_ADT_BASES = frozenset(
+        {
+            "Int", "Nat", "Bool", "Float64", "String", "Byte", "Unit", "Never",
+            "Array", "Map", "Set", "Tuple", "Decimal", "Json",
+        }
+    )
+
+    def _type_arg_is_free_var(self, arg: str) -> bool:
+        """Whether a type-argument name is an unresolved type VARIABLE (#912).
+
+        `arg` is a rendered type-name string (`"Int"`, `"Box<Int>"`, `"T"`).
+        Its base is a free type variable when it is neither a known concrete
+        base (primitive or built-in container, `_CONCRETE_NON_ADT_BASES`) nor a
+        registered ADT (`_adt_type_names`) — i.e. a bare `T` left un-substituted
+        in a generic function's `@Box<T>` operand that the monomorphizer did not
+        specialize to a concrete clone.
+        """
+        base = arg.split("<", 1)[0].strip()
+        return (
+            base not in self._CONCRETE_NON_ADT_BASES
+            and base not in self._adt_type_names
+        )
+
+    def _has_free_type_var_arg(self, lv: str) -> bool:
+        """Whether `lv` carries a type argument that is an unresolved type var.
+
+        Parses the top-level type arguments out of a rendered name
+        (`"Box<T>"` → `["T"]`, `"Map<K, V>"` → `["K", "V"]`, respecting nesting)
+        and returns True if any is a free type variable (`_type_arg_is_free_var`).
+        Such a name (`Box<T>`) cannot dispatch to a concrete `$eq_<type>` helper,
+        so the composite `==` falls back to the scalar lowering rather than
+        crashing the derivability gate.
+        """
+        lt = lv.find("<")
+        if lt == -1:
+            return False
+        inner = lv[lt + 1 : lv.rfind(">")]
+        args: list[str] = []
+        depth = 0
+        start = 0
+        for i, ch in enumerate(inner):
+            if ch == "<":
+                depth += 1
+            elif ch == ">":
+                depth -= 1
+            elif ch == "," and depth == 0:
+                args.append(inner[start:i])
+                start = i + 1
+        args.append(inner[start:])
+        return any(self._type_arg_is_free_var(a) for a in args if a.strip())
+
     def _is_lost_type_arg_clone(self, lv: str, lv_base: str | None) -> bool:
         """Whether `lv` is a generic-ADT name that lost its type argument (#912).
 
-        True when the base ADT declares type parameters yet `lv` carries no
-        `<…>` argument — the monomorphization residue where `@T.result` became
-        the bare `@Box.result` for a `Box<T>` clone, dropping `<Int>` (the #772
-        gap).  Such a composite `==` falls back to the scalar (pointer) lowering
-        it used before #912, rather than raising a spurious E613 on an
-        otherwise-derivable type.
+        Two lost-argument shapes route the composite `==` to the scalar
+        (pointer) lowering it used before #912 — rather than raising a spurious
+        E613 (or crashing the derivability gate) on an otherwise-valid program:
+
+        1. **Bare** generic-ADT name (round 1): the base ADT declares type
+           parameters yet `lv` carries no `<…>` argument — the #772
+           monomorphization residue where `@T.result` became `@Box.result` for
+           a `Box<T>` clone, dropping `<Int>`.
+
+        2. **Free-type-variable** argument (round 2, #912): `lv` carries a `<…>`
+           whose argument is an unresolved type variable (`Box<T>`) — a function
+           generic over the parameterized ADT itself, whose `@Box<T>` operands
+           the monomorphizer did not specialize to a concrete clone.  This is
+           sound: such a slot-vs-slot postcondition defers to **Tier 3**, not
+           Tier 1 (the verifier does not structurally prove `@Box<T>.result ==
+           @Box<T>.0` for a free `T`), so a scalar runtime check cannot
+           contradict a structural Tier-1 proof (no #912 resurrection), and for
+           the identity case the operands are the same pointer.
 
         A genuinely non-derivable operand — a `Map`/`Array`-field ADT (a
         concrete non-Eq field, and the ADT itself has NO type parameters),
-        `Tuple` (variadic placeholder, no parameters registered), an `Md*`
-        builtin, or a generic ADT WITH a present non-Eq argument
-        (`Box<Array<Int>>`, which carries a `<…>` and so is excluded here) — is
-        NOT a lost-arg clone, so it still routes to `_translate_adt_eq` and
-        raises the correct E613, keeping the checker↔codegen lockstep the #732
-        differential pins.  Relies on imported generic ADTs' type-parameter
-        metadata being propagated (`modules.py`, #912) so `_adt_tp_param_names`
-        answers for cross-module `Box<T>` too, not just local ADTs.
+        `Tuple` (variadic placeholder), an `Md*` builtin, or a generic ADT with
+        a present CONCRETE non-Eq argument (`Box<Array<Int>>`, whose argument is
+        a known concrete type, NOT a free variable) — is NOT a lost-arg clone,
+        so it still routes to `_translate_adt_eq` and raises the correct E613,
+        keeping the checker↔codegen lockstep the #732 differential pins.  Relies
+        on imported generic ADTs' type-parameter metadata being propagated
+        (`modules.py`, #912) so `_adt_tp_param_names` answers for cross-module
+        `Box<T>` too, not just local ADTs.
         """
-        return (
-            "<" not in lv
-            and bool(self._adt_tp_param_names.get(lv_base or ""))
-        )
+        if "<" in lv:
+            return self._has_free_type_var_arg(lv)
+        return bool(self._adt_tp_param_names.get(lv_base or ""))
 
     def _translate_adt_eq(
         self,
