@@ -1606,3 +1606,125 @@ public fn main(@Unit -> @Int)
         # 39 + 1 = 40: the ADT instantiation must return the ADT payload
         # and the Map instantiation must return the (usable) Map handle.
         assert _run(source, fn="main") == 40
+
+
+class TestTransitiveAliasGenericHof867:
+    """#867 class, PR #880 review round (blast-radius skeptic): the generic
+    higher-order monomorphization path did SINGLE-hop alias lookups in both
+    consultors — ``_resolve_arg_fn_shape`` / ``_infer_fn_alias_type_args``
+    (vera/monomorphize.py, instantiation discovery) and their WASM
+    call-rewrite twins in vera/wasm/calls.py.  A closure slot typed as a
+    two-hop alias chain (`type MyFn = InnerFn;` where `InnerFn = fn(...)`)
+    passed to a generic HOF failed shape resolution, so a type param bound
+    ONLY by the closure (the ``B`` in ``fn(A -> B)``) fell to the
+    phantom-var default: check-green, run-trap
+    (`type mismatch: expected i64, found i32`).  The single-hop control
+    always ran.  Both consultors now route through the shared
+    ``resolve_fn_type_alias`` (vera/monomorphize.py)."""
+
+    # `B` is inferable ONLY from the closure argument — the second arg
+    # binds `A` alone.  This is deliberate: a shape where a literal arg
+    # also binds the result param would mask the closure-arg resolution
+    # failure (the phantom default could coincide).
+    _TWO_HOP_ARG = """\
+type MapFn<A, B> = fn(A -> B) effects(pure);
+type InnerFn = fn(Int -> Int) effects(pure);
+type MyFn = InnerFn;
+
+private forall<A, B> fn my_map(@MapFn<A, B>, @A -> @B)
+  requires(true) ensures(true) effects(pure)
+{
+  apply_fn(@MapFn<A, B>.0, @A.0)
+}
+
+private fn use_it(@MyFn -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  my_map(@MyFn.0, 7)
+}
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  use_it(fn(@Int -> @Int) effects(pure) { @Int.0 * 10 })
+}
+"""
+
+    _SINGLE_HOP_ARG = """\
+type MapFn<A, B> = fn(A -> B) effects(pure);
+type MyFn = fn(Int -> Int) effects(pure);
+
+private forall<A, B> fn my_map(@MapFn<A, B>, @A -> @B)
+  requires(true) ensures(true) effects(pure)
+{
+  apply_fn(@MapFn<A, B>.0, @A.0)
+}
+
+private fn use_it(@MyFn -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  my_map(@MyFn.0, 7)
+}
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  use_it(fn(@Int -> @Int) effects(pure) { @Int.0 * 10 })
+}
+"""
+
+    # The PARAM side of the same class: the generic HOF's declared fn
+    # param is itself an alias chain (`MapFn2<X, Y> = MapFn<X, Y>`), so
+    # `_infer_fn_alias_type_args*`'s lookup of the param alias body must
+    # resolve transitively too — instantiated at the alias's own param
+    # names so positional matching stays alias-local.
+    _PARAM_ALIAS_CHAIN = """\
+type MapFn<A, B> = fn(A -> B) effects(pure);
+type MapFn2<X, Y> = MapFn<X, Y>;
+
+private forall<A, B> fn my_map(@MapFn2<A, B>, @A -> @B)
+  requires(true) ensures(true) effects(pure)
+{
+  apply_fn(@MapFn2<A, B>.0, @A.0)
+}
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  my_map(fn(@Int -> @Int) effects(pure) { @Int.0 * 10 }, 7)
+}
+"""
+
+    def test_two_hop_arg_alias_generic_hof_runs(self) -> None:
+        """A two-hop-alias-typed closure slot into a generic HOF: pre-fix
+        the closure shape failed to resolve, `B` fell to the phantom-var
+        default, and the mono clone's signature mismatched at WASM
+        validation (`expected i64, found i32`)."""
+        assert _run(self._TWO_HOP_ARG) == 70
+
+    def test_single_hop_arg_alias_generic_hof_runs(self) -> None:
+        """Control: the single-hop form has always resolved (#604)."""
+        assert _run(self._SINGLE_HOP_ARG) == 70
+
+    def test_two_hop_arg_alias_mangles_concrete_clone(self) -> None:
+        """Compile-time discriminator, execution-free: the mono suffix
+        must be `$Int_Int` (closure-bound `B` = Int), never a
+        phantom-default suffix."""
+        result = _compile_ok(self._TWO_HOP_ARG)
+        wat = result.wat or ""
+        # Clone names use the #775 injective encoding: multi-arg
+        # instantiation vectors join with `_J` (`my_map$Int_JInt`).
+        assert "$my_map$Int_JInt" in wat, (
+            "expected the closure-bound instantiation my_map$Int_JInt; "
+            "got: "
+            + repr([ln for ln in wat.splitlines() if "my_map$" in ln][:4]))
+        assert "$my_map$Int_JBool" not in wat, (
+            "phantom-var default leaked into the mono suffix — the "
+            "closure arg's alias chain did not resolve (#867 HOF path)")
+
+    def test_param_alias_chain_generic_hof_runs(self) -> None:
+        """The HOF's own fn param declared through an alias chain
+        (`MapFn2<X, Y> = MapFn<X, Y>`) must resolve transitively in
+        `_infer_fn_alias_type_args*` as well — pre-fix: same
+        check-green → run-trap."""
+        assert _run(self._PARAM_ALIAS_CHAIN) == 70

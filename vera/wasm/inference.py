@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 from vera import ast
-from vera.monomorphize import Monomorphizer, substitute_type_vars
+from vera.monomorphize import (
+    Monomorphizer,
+    resolve_fn_type_alias,
+    substitute_type_vars,
+)
 from vera.wasm.helpers import _element_wasm_type
 
 # `substitute_type_vars` was relocated to `vera.monomorphize` (the codegen-free
 # shared monomorphizer, #732) so the verifier can reuse it without importing the
 # WASM backend.  Re-exported here so the existing
 # `from vera.wasm.inference import substitute_type_vars` call sites
-# (wasm/calls.py, codegen/core.py, codegen/registration.py, codegen/contracts.py)
-# keep working.
+# (codegen/core.py, codegen/registration.py, codegen/contracts.py)
+# keep working.  (wasm/calls.py now imports `resolve_fn_type_alias`
+# from `vera.monomorphize` directly instead — PR #880.)
 __all__ = ["InferenceMixin", "substitute_type_vars"]
 
 
@@ -159,9 +164,16 @@ class InferenceMixin:
                 return "i32"
             if base in self._adt_type_names:
                 return "i32"
-            # Function type aliases → i32 (closure pointer)
-            alias_te = self._type_aliases.get(expr.type_name)
-            if isinstance(alias_te, ast.FnType):
+            # Function type aliases → i32 (closure pointer).  Resolved
+            # through the shared transitive resolver so an alias chain
+            # (`type MyFn = InnerFn;`, #867 / PR #880 sweep) classifies
+            # the same as the direct alias — the depth-1 behaviour is
+            # unchanged (a direct FnType alias resolves in one hop).
+            if resolve_fn_type_alias(
+                ast.NamedType(name=expr.type_name, type_args=expr.type_args),
+                self._type_aliases,
+                self._type_alias_params,
+            ) is not None:
                 return "i32"
             return None
         if isinstance(expr, ast.ResultRef):
@@ -1036,41 +1048,25 @@ class InferenceMixin:
             return "Result"
         # apply_fn(closure, args...) — infer from closure's return type.
         #
-        # Post-#630: both `SlotRef` (let-bound closure ref into a
-        # `FnType` type alias) and `AnonFn` (inline closure literal)
-        # paths feed into the centralised `_canonical_named_type`
-        # walker.  Pre-#630 each shape had its own ad-hoc walk with
-        # subset-of-the-concerns coverage — accounting for triggers
-        # 7 (SlotRef + nested-RefinementType return), 8 (SlotRef +
-        # `FnType`-aliased-String return), 9 (AnonFn + plain return),
-        # and 10 (AnonFn + nested-RefinementType return) of the #602
-        # bug class.  Future closure-arg shapes (e.g. a `FnCall`
-        # returning a closure) can plug into the same walker call
-        # by adding an `elif` that extracts `ret_te` and reuses the
-        # canonicalisation below — no per-shape canonicalisation
-        # logic needed.  Shapes without a single `return_type` field
-        # (`IfExpr` between two closures with the same Vera-level
-        # type, `MatchExpr` arms, etc.) need a unifying step that's
-        # genuinely additional dispatch work, not "plug-in".
+        # The closure-arg return TypeExpr is extracted by the shared
+        # `_closure_arg_return_type` dispatch: a `SlotRef` resolves
+        # **transitively** through the alias chain to the terminal
+        # `FnType` (via `resolve_fn_type_alias`, #867 — with any generic
+        # alias's type params substituted), an inline `AnonFn` yields its
+        # declared return type.  Pre-#630 each shape had its own ad-hoc
+        # walk with subset-of-the-concerns coverage — accounting for
+        # triggers 7 (SlotRef + nested-RefinementType return), 8 (SlotRef
+        # + `FnType`-aliased-String return), 9 (AnonFn + plain return),
+        # and 10 (AnonFn + nested-RefinementType return) of the #602 bug
+        # class; the extracted TypeExpr then feeds the centralised
+        # `_canonical_named_type` walker.  Shapes without a single
+        # `return_type` field (`IfExpr` between two closures with the same
+        # Vera-level type, `MatchExpr` arms, etc.) need a unifying step
+        # that's genuinely additional dispatch work, not "plug-in".
         if call.name == "apply_fn" and call.args:
-            closure_arg = call.args[0]
-            ret_te: ast.TypeExpr | None = None
-            alias_map: dict[str, ast.TypeExpr] | None = None
-            if isinstance(closure_arg, ast.SlotRef):
-                alias_te = self._type_aliases.get(closure_arg.type_name)
-                if isinstance(alias_te, ast.FnType):
-                    ret_te = alias_te.return_type
-                    alias_params = self._type_alias_params.get(
-                        closure_arg.type_name)
-                    if (alias_params and closure_arg.type_args
-                            and len(alias_params)
-                            == len(closure_arg.type_args)):
-                        alias_map = dict(zip(
-                            alias_params, closure_arg.type_args))
-            elif isinstance(closure_arg, ast.AnonFn):
-                ret_te = closure_arg.return_type
+            ret_te = self._closure_arg_return_type(call.args[0])
             if ret_te is not None:
-                canonical = self._canonical_named_type(ret_te, alias_map)
+                canonical = self._canonical_named_type(ret_te)
                 if canonical is not None:
                     return self._format_named_type(canonical)
         # Map builtins
@@ -1502,6 +1498,43 @@ class InferenceMixin:
                 return (adt_name, tuple(arg_types))
         return None
 
+    def _closure_arg_return_type(
+        self, closure_arg: ast.Expr,
+    ) -> ast.TypeExpr | None:
+        """Declared return TypeExpr of the closure an ``apply_fn`` applies.
+
+        The mixin-side shape dispatch shared by both inference consultors
+        (``_infer_apply_fn_return_type`` — the ``call_indirect`` signature
+        — and ``_infer_fncall_vera_type``'s ``apply_fn`` arm — the
+        Vera-type inference).  A ``SlotRef`` is resolved through the shared
+        :func:`resolve_fn_type_alias`, which follows the alias chain
+        **transitively** to the terminal ``FnType`` (``type Fetcher =
+        InnerFetcher;`` — #867) and substitutes any generic alias's type
+        params from the slot's bound type args; an inline ``AnonFn`` yields
+        its declared return type directly.  Any other shape yields
+        ``None``.
+
+        This is the same resolution the fused-await classifier's
+        ``_apply_fn_closure_ret_type`` (``vera/wasm/async_fusion.py``)
+        performs — both route the ``SlotRef`` through
+        :func:`resolve_fn_type_alias`, so the signature this builds and
+        the classification that gates the runtime fused-handle check can
+        never consult a differently-resolved return type.
+        """
+        if isinstance(closure_arg, ast.SlotRef):
+            fn_type = resolve_fn_type_alias(
+                ast.NamedType(
+                    name=closure_arg.type_name,
+                    type_args=closure_arg.type_args,
+                ),
+                self._type_aliases,
+                self._type_alias_params,
+            )
+            return fn_type.return_type if fn_type is not None else None
+        if isinstance(closure_arg, ast.AnonFn):
+            return closure_arg.return_type
+        return None
+
     def _infer_apply_fn_return_type(
         self, closure_arg: ast.Expr,
     ) -> str | None:
@@ -1538,23 +1571,9 @@ class InferenceMixin:
         diagnostic discipline as Tier 2 is queued for the #626
         Layer 1 work.
         """
-        ret_te: ast.TypeExpr | None = None
-        alias_map: dict[str, ast.TypeExpr] | None = None
-        if isinstance(closure_arg, ast.SlotRef):
-            alias_te = self._type_aliases.get(closure_arg.type_name)
-            if isinstance(alias_te, ast.FnType):
-                ret_te = alias_te.return_type
-                alias_params = self._type_alias_params.get(
-                    closure_arg.type_name)
-                if (alias_params and closure_arg.type_args
-                        and len(alias_params)
-                        == len(closure_arg.type_args)):
-                    alias_map = dict(zip(
-                        alias_params, closure_arg.type_args))
-        elif isinstance(closure_arg, ast.AnonFn):
-            ret_te = closure_arg.return_type
+        ret_te = self._closure_arg_return_type(closure_arg)
         if ret_te is not None:
-            return self._canonical_wasm_type(ret_te, alias_map)
+            return self._canonical_wasm_type(ret_te)
         return "i64"
 
     def _resolve_generic_fn_return(
@@ -1741,11 +1760,26 @@ class InferenceMixin:
         base = name.split("<")[0] if "<" in name else name
         if base in self._adt_type_names:
             return "i32"
-        # Function type aliases are closure pointers (i32)
-        if name in self._type_aliases:
-            alias_te = self._type_aliases[name]
-            if isinstance(alias_te, ast.FnType):
-                return "i32"
+        # Function type aliases are closure pointers (i32) — resolved
+        # **transitively** through the shared resolver (#867 / PR #880
+        # 4th site) so a refinement-wrapped (`type Foo = { @fn(...) | p }`)
+        # or chained-through-a-refinement fn alias classifies as a
+        # closure, not `None`.  Without this the let/param binding is
+        # rejected with `CodegenSkip` and its whole function is dropped
+        # ("has no WASM representation"), on a check/verify-green program.
+        # A plain `NamedType` chain (`type Foo = Bar;` where `Bar` is a
+        # bare `FnType`) is already collapsed to `Bar` by the
+        # `_resolve_base_type_name` call above; the resolver additionally
+        # covers the refinement-peeling and generic-alias hops that walk
+        # cannot.  The `name` string may carry type args for a generic
+        # alias (`Mapper<Int>`); the resolver keys on `base` and
+        # substitutes at each hop.
+        if resolve_fn_type_alias(
+            ast.NamedType(name=base, type_args=None),
+            self._type_aliases,
+            self._type_alias_params,
+        ) is not None:
+            return "i32"
         # Bare "Fn" for anonymous function types
         if name == "Fn":
             return "i32"

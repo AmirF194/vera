@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 import wasmtime
 
+from vera import ast
 from vera.codegen import (
     CompileResult,
     compile,
@@ -17,6 +18,7 @@ from vera.codegen import (
 from vera.parser import parse_file
 from vera.resolver import ResolvedModule
 from vera.transform import transform
+from vera.monomorphize import resolve_fn_type_alias
 
 
 # =====================================================================
@@ -1965,20 +1967,17 @@ public fn main(@Unit -> @Bool)
             "the awaited Err must carry the real fetch outcome — identity "
             "lowering reads the fused wrapper as the ADT and returns 0")
 
-    def test_nested_alias_slot_still_fails_loud(self) -> None:
-        """#867 interaction guard: an alias-of-alias fn-typed slot
-        (`type Fetcher = InnerFetcher;`) stays LOUD after the generic
-        substitution fix.  Neither consultor resolves the alias chain
-        (E616 does not fire — that gap is #867), but
-        `_infer_apply_fn_return_type` falls to its `i64` default while
-        the closure actually returns an i32 fused pointer, so the
-        call_indirect signature mismatch traps at WASM validation —
-        loud, not a silent wrong value.  The substitution added for the
-        generic-alias fix must NOT accidentally resolve this shape into
-        a silent identity-await path.  When #867 lands transitive alias
-        resolution in BOTH consultors, this pin flips and should be
-        updated to assert correct execution instead."""
-        source = """\
+    # An alias-of-alias fn-typed slot (`type Fetcher = InnerFetcher;`)
+    # where `InnerFetcher` is the fused future fn type — the #867
+    # transitive-alias case.  Pre-#867 both consultors resolved only one
+    # alias hop: the await classified as unresolvable (identity lowering
+    # smuggled the fused wrapper past the await) AND
+    # `_infer_apply_fn_return_type` fell to its `i64` default while the
+    # closure returns an i32 fused pointer, so the call_indirect signature
+    # mismatched and trapped at WASM validation.  Post-#867 the shared
+    # transitive resolver follows the chain to the terminal FnType in BOTH
+    # consultors, so the program classifies and runs correctly.
+    _NESTED_ALIAS_SLOT_SOURCE = """\
 type InnerFetcher = fn(String -> Future<Result<String, String>>) effects(<Http, Async>);
 type Fetcher = InnerFetcher;
 
@@ -2003,6 +2002,113 @@ public fn main(@Unit -> @Bool)
   )
 }
 """
-        result = _compile_ok(source)
-        with pytest.raises((wasmtime.WasmtimeError, wasmtime.Trap, RuntimeError)):
-            execute(result)
+
+    # A THREE-hop chain (`Fetcher = B = A = fn(...)`) — the transitive
+    # resolver must follow depth-N, not just depth-2.  A single-level
+    # unwrap resolves `Fetcher` to `B` (still a NamedType, not a FnType)
+    # and bails; a two-level unwrap would resolve to `A` and still bail.
+    _THREE_HOP_ALIAS_SLOT_SOURCE = """\
+type A = fn(String -> Future<Result<String, String>>) effects(<Http, Async>);
+type B = A;
+type Fetcher = B;
+
+private fn run_fetch(@Fetcher, @String -> @Bool)
+  requires(true) ensures(true) effects(<Http, Async>)
+{
+  let @Result<String, String> = await(apply_fn(@Fetcher.0, @String.0));
+  match @Result<String, String>.0 {
+    Ok(@String) -> false,
+    Err(@String) -> string_contains(@String.0, "refusing non-HTTP(S)")
+  }
+}
+
+public fn main(@Unit -> @Bool)
+  requires(true) ensures(true) effects(<Http, Async>)
+{
+  run_fetch(
+    fn(@String -> @Future<Result<String, String>>) effects(<Http, Async>) {
+      async(Http.get(@String.0))
+    },
+    "ftp://blocked.invalid/x"
+  )
+}
+"""
+
+    def test_nested_alias_slot_awaited_correctly(self) -> None:
+        """#867 (two-hop): `type Fetcher = InnerFetcher;` where
+        `InnerFetcher` is the fused future fn type — the await must import
+        `async_await` and deliver the real fetch outcome.  Flipped from the
+        pre-#867 `_still_fails_loud` pin once the shared transitive resolver
+        landed in both consultors."""
+        self._assert_awaited_correctly(self._NESTED_ALIAS_SLOT_SOURCE)
+
+    def test_three_hop_alias_slot_awaited_correctly(self) -> None:
+        """#867 (three-hop): `Fetcher = B = A = fn(...)` — the transitive
+        resolver must follow the chain to depth-N, not just one or two
+        hops."""
+        self._assert_awaited_correctly(self._THREE_HOP_ALIAS_SLOT_SOURCE)
+
+
+class TestResolveFnTypeAliasCycleGuard867:
+    """#867: the shared transitive resolver ``resolve_fn_type_alias`` must
+    TERMINATE on a malformed cyclic alias chain, returning ``None`` (the
+    caller then falls to its loud backstop) rather than spinning forever.
+
+    Circular aliases are rejected upstream by the type checker
+    (``[E132]``, #648), so a cycle only reaches codegen through malformed
+    input, but the resolver — reached before any such check on a raw
+    ``type_aliases`` map — must be self-guarding.  A watchdog (SIGALRM)
+    proves termination: a resolver without the ``seen`` guard hangs and
+    the alarm fires."""
+
+    @staticmethod
+    def _resolve_with_watchdog(
+        te: ast.NamedType,
+        aliases: dict[str, ast.TypeExpr],
+    ) -> ast.FnType | None:
+        import signal
+
+        if not hasattr(signal, "SIGALRM"):
+            pytest.skip("SIGALRM unavailable on this platform")
+
+        def _timeout(_sig: int, _frm: object) -> None:
+            raise TimeoutError("resolve_fn_type_alias did not terminate")
+
+        old = signal.signal(signal.SIGALRM, _timeout)
+        signal.alarm(5)
+        try:
+            return resolve_fn_type_alias(te, aliases, {})
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old)
+
+    def test_two_node_cycle_terminates_none(self) -> None:
+        """`type A = B; type B = A;` — resolver returns None, no hang."""
+        aliases: dict[str, ast.TypeExpr] = {
+            "A": ast.NamedType(name="B", type_args=None),
+            "B": ast.NamedType(name="A", type_args=None),
+        }
+        result = self._resolve_with_watchdog(
+            ast.NamedType(name="A", type_args=None), aliases)
+        assert result is None
+
+    def test_self_cycle_terminates_none(self) -> None:
+        """`type A = A;` — resolver returns None, no hang."""
+        aliases: dict[str, ast.TypeExpr] = {
+            "A": ast.NamedType(name="A", type_args=None),
+        }
+        result = self._resolve_with_watchdog(
+            ast.NamedType(name="A", type_args=None), aliases)
+        assert result is None
+
+    def test_prefix_into_cycle_terminates_none(self) -> None:
+        """`type X = A; type A = B; type B = A;` — X leads into an A<->B
+        cycle that does not include X; resolver still terminates None."""
+        aliases: dict[str, ast.TypeExpr] = {
+            "X": ast.NamedType(name="A", type_args=None),
+            "A": ast.NamedType(name="B", type_args=None),
+            "B": ast.NamedType(name="A", type_args=None),
+        }
+        result = self._resolve_with_watchdog(
+            ast.NamedType(name="X", type_args=None), aliases)
+        assert result is None
