@@ -168,7 +168,13 @@ class OperatorsMixin:
                 # ADT structural equality (§9.8 auto-derivation).  `lv` may be
                 # parameterized (`Box<String>`); dispatch on the base name but
                 # pass the full name so the generated helper resolves the
-                # concrete field types of *this* instantiation (#773).
+                # concrete field types of *this* instantiation (#773).  A
+                # `ConstructorCall` operand (`Some(1)`) resolves to the BARE
+                # ADT name via `_infer_vera_type`, dropping its type argument;
+                # recover the parameterized name from the argument so the direct
+                # `==` derivation sees the concrete field type, just as the
+                # slot-ref operand form does (#772).
+                lv = self._parameterize_ctor_operand(expr.left, lv)
                 lv_base = lv.split("<", 1)[0] if lv is not None else None
                 if (op in (ast.BinOp.EQ, ast.BinOp.NEQ)
                         and lv is not None
@@ -310,6 +316,30 @@ class OperatorsMixin:
     # non-derivable ADT never silently mis-compares by pointer and never trips
     # the helper generator's E699 field-dispatch invariant (PR #870 review;
     # closes the #872 hole).
+
+    def _parameterize_ctor_operand(
+        self, operand: ast.Expr, bare: str | None,
+    ) -> str | None:
+        """Recover an `==` operand's parameterized ADT type name (#772).
+
+        `_infer_vera_type` resolves a `ConstructorCall` to the BARE ADT name
+        (`Option`, dropping `<Int>`).  For the direct structural-`==` derivation
+        the type argument is load-bearing — the generated `$eq_<type>` helper
+        must resolve the concrete field type — so recover it from the
+        constructor's arguments via `_get_arg_type_info_wasm` (the same routine
+        the generic-call rewriter uses).  Falls back to ``bare`` when the operand
+        is not a `ConstructorCall` or its type argument cannot be inferred.
+        """
+        if bare is None or not isinstance(operand, ast.ConstructorCall):
+            return bare
+        info = self._get_arg_type_info_wasm(operand)
+        if info is None:
+            return bare
+        base_name, arg_names = info
+        if arg_names and all(a is not None for a in arg_names):
+            resolved = [a for a in arg_names if a is not None]
+            return f"{base_name}<{', '.join(resolved)}>"
+        return bare
 
     def _translate_adt_eq(
         self,

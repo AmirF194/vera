@@ -1628,6 +1628,23 @@
     ]
   },
   {
+    "id": "ch09_ctor_inferred_eq",
+    "file": "ch09_ctor_inferred_eq.vera",
+    "chapter": 9,
+    "title": "Eq auto-derivation on the constructor-inferred path (#772)",
+    "level": "run",
+    "spec_ref": "Section 9.8",
+    "features": [
+      "ability_constraint",
+      "forall_where",
+      "eq_operation",
+      "adt_auto_derivation",
+      "structural_eq",
+      "constructor_inferred_type_args",
+      "nested_adt_eq"
+    ]
+  },
+  {
     "id": "ch09_decimal_generics",
     "file": "ch09_decimal_generics.vera",
     "chapter": 9,

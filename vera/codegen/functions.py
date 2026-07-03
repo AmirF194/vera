@@ -121,6 +121,8 @@ class FunctionCompilationMixin:
             ctor_layouts=ctor_layouts,
             adt_type_names=adt_type_names,
             generic_fn_info=getattr(self, "_generic_fn_info", None),
+            generic_constrained_vars=getattr(
+                self, "_generic_constrained_vars", None),
             ctor_to_adt=ctor_to_adt,
             known_fns=set(self._fn_sigs.keys()),
             ctor_adt_tp_indices=getattr(self, "_ctor_adt_tp_indices", None),

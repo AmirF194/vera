@@ -199,9 +199,19 @@ class MonomorphizationMixin:
         self._generic_fn_info: dict[
             str, tuple[tuple[str, ...], tuple[ast.TypeExpr, ...]]
         ] = {}
+        # Per-generic set of type vars carrying an ability bound.  The WASM
+        # call-site rewriter (`_unify_param_arg_wasm`) recovers the type
+        # argument of a `ConstructorCall` bound to one of these, matching the
+        # parameterized clone name Pass 1.5 emits — see `_unify_param_arg`
+        # (#772).  Without this the call site mangles to `eq2$Box` while the
+        # clone is `eq2$Box<String>`, a dangling reference (E602).
+        self._generic_constrained_vars: dict[str, frozenset[str]] = {}
         for name, decl in generic_decls.items():
             assert decl.forall_vars is not None  # noqa: S101
             self._generic_fn_info[name] = (decl.forall_vars, decl.params)
+            self._generic_constrained_vars[name] = frozenset(
+                c.type_var for c in (decl.forall_constraints or ())
+            )
 
         # #814 asymmetric variant: an imported generic whose bare name a LOCAL
         # non-generic shadows is reachable ONLY via a qualified call `m::gen`,
@@ -245,6 +255,12 @@ class MonomorphizationMixin:
                 )
                 self._generic_fn_info[qual_base] = (
                     gdecl.forall_vars, gdecl.params,
+                )
+                # #772: the qualified base needs the same constrained-var set as
+                # a bare generic, so a `ConstructorCall`-inferred Eq call through
+                # the `mod$…` clone recovers its type argument too.
+                self._generic_constrained_vars[qual_base] = frozenset(
+                    c.type_var for c in (gdecl.forall_constraints or ())
                 )
 
     def _monomorphize_shadowed_module_generics(
@@ -537,7 +553,11 @@ class MonomorphizationMixin:
             entry = _ABILITY_TYPE_SETS.get(constraint.ability_name)
             if entry is not None:
                 type_set, desc = entry
-                # For Eq, also check ADT auto-derivation.
+                # For Eq, also check ADT auto-derivation.  A constrained var
+                # bound to a constructor-inferred instance now carries its type
+                # argument (`Box<String>`, not bare `Box`) — see
+                # `_unify_param_arg` — so `_adt_satisfies_eq` resolves the
+                # concrete field type (#772).
                 if concrete in type_set:
                     continue
                 if (constraint.ability_name == "Eq"

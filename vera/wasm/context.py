@@ -88,6 +88,7 @@ class WasmContext(
         generic_fn_info: (
             dict[str, tuple[tuple[str, ...], tuple[ast.TypeExpr, ...]]] | None
         ) = None,
+        generic_constrained_vars: dict[str, frozenset[str]] | None = None,
         ctor_to_adt: dict[str, str] | None = None,
         known_fns: set[str] | None = None,
         ctor_adt_tp_indices: dict[str, tuple[int | None, ...]] | None = None,
@@ -111,6 +112,13 @@ class WasmContext(
         self._generic_fn_info: dict[
             str, tuple[tuple[str, ...], tuple[ast.TypeExpr, ...]]
         ] = generic_fn_info or {}
+        # Per-generic set of type vars carrying an ability bound (`where Eq<T>`).
+        # Used by `_unify_param_arg_wasm` to keep a `ConstructorCall`'s type
+        # argument when rewriting the call site, so the mangled call name matches
+        # the parameterized clone Pass 1.5 emitted (#772).
+        self._generic_constrained_vars: dict[str, frozenset[str]] = (
+            generic_constrained_vars or {}
+        )
         # Constructor name → ADT name reverse mapping
         self._ctor_to_adt: dict[str, str] = ctor_to_adt or {}
         # Known locally-defined function names (for cross-module guard rail)

@@ -1140,9 +1140,12 @@ class InferenceMixin:
             return "Float64"
         if call.name in self._generic_fn_info:
             forall_vars, param_types = self._generic_fn_info[call.name]
+            constrained_vars = self._generic_constrained_vars.get(
+                call.name, frozenset())
             mapping: dict[str, str] = {}
             for pt, arg in zip(param_types, call.args):
-                self._unify_param_arg_wasm(pt, arg, forall_vars, mapping)
+                self._unify_param_arg_wasm(
+                    pt, arg, forall_vars, mapping, constrained_vars)
             # Use the first param's type to determine return type
             # (Generic fn return type is typically a type var)
             # We need to figure out the return type from forall info
