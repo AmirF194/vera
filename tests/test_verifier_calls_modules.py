@@ -747,10 +747,14 @@ public fn main(@Unit -> @Bool)
 { g(MkW(0.0 / 0.0), MkW(0.0 / 0.0)) }
 """, "precondition")
 
-    def test_untranslatable_adt_field_demotes_to_e522(self) -> None:
+    def test_untranslatable_adt_field_demotes_to_e532(self) -> None:
         """An ADT with a host-handle field (`Map`) can't be modelled in Z3.
-        The precondition obligation must demote LOUDLY to Tier-3 (E522 warning),
-        never silently vanish — DESIGN.md degrades loudly (#882)."""
+        The precondition obligation must demote LOUDLY to Tier-3 (E532 warning),
+        never silently vanish — DESIGN.md degrades loudly (#882).
+
+        E532 ("Cannot verify call-site precondition (undecidable)") is the
+        dedicated code for this class — distinct from E522, whose registered
+        meaning is a *postcondition* demotion (body undecidable)."""
         src = """
 private data M { MkM(Map<String, Int>) }
 
@@ -767,14 +771,14 @@ public fn main(@Unit -> @Bool)
 { g(MkM(map_new()), MkM(map_new())) }
 """
         warns = _verify_warn(src, "precondition")
-        assert any(w.error_code == "E522" for w in warns), (
-            f"expected an E522 Tier-3 demotion warning, got: "
+        assert any(w.error_code == "E532" for w in warns), (
+            f"expected an E532 Tier-3 demotion warning, got: "
             f"{[(w.error_code, w.description) for w in warns]}"
         )
         result = _verify(src)
         demoted = [
             o for o in result.obligations
-            if o.kind == "call_pre" and o.error_code == "E522"
+            if o.kind == "call_pre" and o.error_code == "E532"
         ]
         assert len(demoted) == 1, (
             f"expected one demoted call_pre obligation, got {demoted}"
@@ -784,11 +788,11 @@ public fn main(@Unit -> @Bool)
         errors = [d for d in result.diagnostics if d.severity == "error"]
         assert errors == []
 
-    def test_untranslatable_precondition_demotes_to_e522(self) -> None:
+    def test_untranslatable_precondition_demotes_to_e532(self) -> None:
         """When the callee's *precondition* is outside the decidable fragment
         (`string_length(...) > 0`) the arguments still translate, so the
         call-site obligation exists but can't be discharged — it must demote
-        loudly to E522, not vanish (#882).  This exercises the
+        loudly to E532, not vanish (#882).  This exercises the
         precondition-untranslatable arm, distinct from the untranslatable-
         argument arm above."""
         src = """
@@ -807,10 +811,10 @@ public fn main(@String -> @String)
         result = _verify(src)
         demoted = [
             o for o in result.obligations
-            if o.kind == "call_pre" and o.error_code == "E522"
+            if o.kind == "call_pre" and o.error_code == "E532"
         ]
         assert len(demoted) == 1, (
-            f"expected one call-site E522 demotion, got {demoted}"
+            f"expected one call-site E532 demotion, got {demoted}"
         )
         assert demoted[0].status == "tier3"
         errors = [d for d in result.diagnostics if d.severity == "error"]
@@ -819,7 +823,7 @@ public fn main(@String -> @String)
         # own E521 definition-site warning).
         call_warns = [
             d for d in result.diagnostics
-            if d.severity == "warning" and d.error_code == "E522"
+            if d.severity == "warning" and d.error_code == "E532"
         ]
         assert len(call_warns) == 1
 
@@ -844,16 +848,101 @@ public fn main(@Unit -> @Bool)
         result = _verify(src)
         demoted = [
             o for o in result.obligations
-            if o.kind == "call_pre" and o.error_code == "E522"
+            if o.kind == "call_pre" and o.error_code == "E532"
         ]
         assert demoted == [], (
             f"trivial requires(true) must not demote, got {demoted}"
         )
         warns = [
             d for d in result.diagnostics
-            if d.severity == "warning" and d.error_code == "E522"
+            if d.severity == "warning" and d.error_code == "E532"
         ]
         assert warns == []
+
+    # -- GAP-1: a contracted call INSIDE an ensures clause ---------------
+    #
+    # The call-pre demotion for a call in an ensures predicate is recorded
+    # during step-7 postcondition translation, which runs AFTER the step-6b
+    # drain.  Without the step-8b re-drain the obligation vanishes exactly
+    # like the pre-#882 statement-position bug.  These tests pin the fix; the
+    # mutation-kill is: delete the step-8b `_report_call_demotions` call in
+    # `_verify_fn` (or move it before step 7) → the ensures-clause obligation
+    # disappears and both assertions below go RED.
+
+    _ENSURES_CALL = """
+private fn needs_len(@String -> @Int)
+  requires(string_length(@String.0) > 0)
+  ensures(true)
+  effects(pure)
+{ 1 }
+
+public fn caller(@String -> @Int)
+  requires(true)
+  ensures(needs_len(@String.0) == 1)
+  effects(pure)
+{ 1 }
+"""
+
+    _STMT_CALL = """
+private fn needs_len(@String -> @Int)
+  requires(string_length(@String.0) > 0)
+  ensures(true)
+  effects(pure)
+{ 1 }
+
+public fn caller(@String -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ needs_len(@String.0) }
+"""
+
+    def test_call_inside_ensures_clause_demotes_to_e532(self) -> None:
+        """A contracted call whose precondition can't be translated, appearing
+        inside an `ensures` predicate, must still record its call-pre Tier-3
+        demotion (E532) — it must NOT silently vanish (#882 GAP-1)."""
+        result = _verify(self._ENSURES_CALL)
+        demoted = [
+            o for o in result.obligations
+            if o.kind == "call_pre" and o.error_code == "E532"
+        ]
+        assert len(demoted) == 1, (
+            "a call inside an ensures clause must produce exactly one E532 "
+            f"call-pre demotion, got {demoted}"
+        )
+        assert demoted[0].status == "tier3"
+        call_warns = [
+            d for d in result.diagnostics
+            if d.severity == "warning" and d.error_code == "E532"
+        ]
+        assert len(call_warns) == 1, (
+            "expected a loud E532 call-site warning for the ensures-clause "
+            f"call, got {[(w.error_code, w.description) for w in call_warns]}"
+        )
+        # Loud, not an error — the runtime guard enforces the precondition.
+        errors = [d for d in result.diagnostics if d.severity == "error"]
+        assert errors == []
+
+    def test_ensures_and_statement_position_report_identically(self) -> None:
+        """Parity: the call-pre demotion count is identical whether the
+        contracted call sits in statement position or inside an ensures
+        clause.  Before the GAP-1 fix the ensures side reported ZERO and the
+        statement side reported ONE — this differential is the regression."""
+        stmt = _verify(self._STMT_CALL)
+        ens = _verify(self._ENSURES_CALL)
+        stmt_demoted = [
+            o for o in stmt.obligations
+            if o.kind == "call_pre" and o.error_code == "E532"
+        ]
+        ens_demoted = [
+            o for o in ens.obligations
+            if o.kind == "call_pre" and o.error_code == "E532"
+        ]
+        assert len(stmt_demoted) == 1
+        assert len(ens_demoted) == len(stmt_demoted), (
+            "statement-position and ensures-clause calls must report the same "
+            f"number of E532 demotions: stmt={stmt_demoted} ens={ens_demoted}"
+        )
 
 
 # =====================================================================

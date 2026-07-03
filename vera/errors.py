@@ -59,7 +59,7 @@ class Diagnostic:
     severity: str = "error"
     error_code: str = ""
     # #222 Phase D: verification tier this diagnostic concerns, when
-    # applicable.  3 on the Tier-3 fallback warnings (E520-E525);
+    # applicable.  3 on the Tier-3 fallback warnings (E520-E525, E532);
     # None elsewhere.  Surfaced in --json and the LSP diagnostic
     # payload so agents can rank edits by verification strength.
     tier: int | None = None
@@ -547,6 +547,7 @@ ERROR_CODES: dict[str, str] = {
     "E529": "float_to_int domain (NaN, infinity, or out of i64 range)",
     "E530": "Nat-to-Int widening out of i64 range",
     "E531": "Nat-to-Int widening unverified and not runtime-guarded",
+    "E532": "Cannot verify call-site precondition (undecidable)",
     # E6xx — Codegen
     "E600": "Unsupported parameter type",
     "E601": "Unsupported return type",

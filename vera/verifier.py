@@ -1541,35 +1541,14 @@ class ContractVerifier:
                 v.precondition, v.counterexample,
             )
 
-        # 6b. Report call sites whose precondition obligation could not be
-        #     checked statically (#882) — an untranslatable ADT argument or an
-        #     untranslatable precondition.  These would otherwise vanish, making
-        #     `verify` overstate coverage; DESIGN.md degrades loudly, so each
-        #     becomes a Tier-3 obligation (E522) plus a warning.  The runtime
-        #     guard still enforces the contract.  Counted like the ensures
-        #     Tier-3 path so the obligation/summary differential stays exact;
-        #     located at the call site (span_node) like E501 so repeated calls
-        #     to the same callee stay distinct.
-        for d in smt.drain_call_demotions():
-            self.summary.tier3_runtime += 1
-            self._record_obligation(
-                decl.name, "call_pre", d.precondition, "tier3",
-                error_code="E522",
-                span_node=d.call_node,
-            )
-            self._warning(
-                d.call_node,
-                f"Cannot statically verify the precondition of "
-                f"'{d.callee_name}' at this call site in '{decl.name}'. "
-                f"The call uses constructs outside the decidable fragment. "
-                f"The precondition will be checked at runtime.",
-                rationale="An argument or the callee's precondition contains "
-                          "constructs that cannot be translated to SMT (e.g. "
-                          "an ADT field of a host-handle type such as Map).",
-                spec_ref='Chapter 6, Section 6.8 "Summary of Verification Tiers"',
-                error_code="E522",
-                tier=3,
-            )
+        # 6b. Report call sites (in the body or a requires predicate) whose
+        #     precondition obligation could not be checked statically (#882).
+        #     A second drain runs after step 8 for calls that appear inside an
+        #     ensures / refined-return / decreases predicate — those record
+        #     their demotion during step-7/8 translation, after this drain has
+        #     already run, and would otherwise vanish (the exact silent-loss
+        #     #882 closes).
+        self._report_call_demotions(decl, smt)
 
         # 7. Verify ensures clauses
         for contract in decl.contracts:
@@ -1772,6 +1751,18 @@ class ContractVerifier:
                         error_code="E525",
                         tier=3,
                     )
+
+        # 8b. Second demotion drain (#882 GAP-1).  A contracted call that
+        #     appears inside an ensures / refined-return / decreases predicate
+        #     records its call-pre demotion during *this function's* clause
+        #     translation (steps 7–8), which all run AFTER the step-6b drain.
+        #     Drain again here so those demotions are reported instead of
+        #     silently vanishing when the next `_verify_fn` reset()s the shared
+        #     SMT context.  Must run before step 9 recurses into where-fns for
+        #     the same reason.  The demotion list is deduped by (precondition,
+        #     call-site span), so a call visited by both a step-5.x walk and a
+        #     step-7 translation is reported once, never double-counted.
+        self._report_call_demotions(decl, smt)
 
         # 9. Verify where-block functions
         if decl.where_fns:
@@ -5972,6 +5963,49 @@ class ContractVerifier:
             spec_ref='Chapter 6, Section 6.4.2 "Call Site Verification"',
             error_code="E501",
         )
+
+    def _report_call_demotions(
+        self, decl: ast.FnDecl, smt: SmtContext,
+    ) -> None:
+        """Drain and report call sites whose precondition obligation could not
+        be checked statically (#882).
+
+        An untranslatable ADT argument or an untranslatable callee precondition
+        makes the call-site precondition obligation impossible to discharge in
+        Z3.  Rather than let it vanish (which would make `verify` overstate
+        coverage), each becomes a LOUD Tier-3 obligation (E532) plus a warning;
+        the runtime guard still enforces the contract.  DESIGN.md degrades
+        loudly.
+
+        Called twice per function: once after the body/requires translation
+        (step 6b) and once after the ensures/refined-return/decreases
+        translation (step 8b).  The demotion list is drained each time, so the
+        second call reports only the calls that appear inside those later
+        clauses — the exact silent-loss the first drain missed.  Each demotion
+        is counted like the ensures Tier-3 path so the obligation/summary
+        differential stays exact, and located at the call site (span_node) like
+        E501 so repeated calls to the same callee stay distinct.
+        """
+        for d in smt.drain_call_demotions():
+            self.summary.tier3_runtime += 1
+            self._record_obligation(
+                decl.name, "call_pre", d.precondition, "tier3",
+                error_code="E532",
+                span_node=d.call_node,
+            )
+            self._warning(
+                d.call_node,
+                f"Cannot statically verify the precondition of "
+                f"'{d.callee_name}' at this call site in '{decl.name}'. "
+                f"The call uses constructs outside the decidable fragment. "
+                f"The precondition will be checked at runtime.",
+                rationale="An argument or the callee's precondition contains "
+                          "constructs that cannot be translated to SMT (e.g. "
+                          "an ADT field of a host-handle type such as Map).",
+                spec_ref='Chapter 6, Section 6.8 "Summary of Verification Tiers"',
+                error_code="E532",
+                tier=3,
+            )
 
     def _contract_source_text(self, contract: ast.Contract) -> str:
         """Extract the source text of a contract clause."""

@@ -172,7 +172,7 @@ class CallDemotion:
     be translated to Z3 — an argument or the precondition itself uses a
     construct outside the decidable fragment (e.g. an ADT field of a
     host-handle type like ``Map``).  The verifier turns this into a LOUD
-    Tier-3 obligation (E522) rather than letting the precondition obligation
+    Tier-3 obligation (E532) rather than letting the precondition obligation
     silently not exist: DESIGN.md degrades loudly, and the runtime guard
     still enforces the contract.
     """
@@ -1530,7 +1530,7 @@ class SmtContext:
 
         Returns True when every non-trivial precondition is discharged (or the
         callee has none), False when one is violated (E501 recorded) or cannot
-        be translated (E522 demotion recorded).  Shared by the modelled-return
+        be translated (E532 demotion recorded).  Shared by the modelled-return
         path and the #882 opaque-return path so both check the obligation with
         identical dedup semantics.
         """

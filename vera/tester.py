@@ -472,7 +472,7 @@ def _classify_functions(
     """
     # Collect function names mentioned in verifier diagnostics.
     tier3_fns: set[str] = set()
-    tier3_codes = {"E520", "E521", "E522", "E523", "E524", "E525"}
+    tier3_codes = {"E520", "E521", "E522", "E523", "E524", "E525", "E532"}
     failed_fns: dict[str, str] = {}
     for diag in verify_diagnostics:
         if diag.severity == "warning" and diag.error_code in tier3_codes:
