@@ -1,0 +1,11 @@
+module ch08_transitive_module_import_mid;
+
+import ch08_transitive_module_import_base;
+
+public fn via_mid(@Int -> @Int)
+  requires(true)
+  ensures(@Int.result >= 40)
+  effects(pure)
+{
+  wrap40(@Int.0)
+}

@@ -66,6 +66,14 @@ class CrossModuleMixin:
         adt_provenance: dict[str, tuple[str, ...]] = {}
         ctor_provenance: dict[str, tuple[tuple[str, ...], str]] = {}
 
+        # #890: names contributed by transitive-only modules vs names visible
+        # to the top-level importer (its own locals + its direct imports'
+        # public, in-filter declarations).  A transitive name that is NOT
+        # importer-visible becomes `_transitive_only_names` (computed after the
+        # loop) so the guard rail forbids a main-program body from calling it.
+        transitive_contributed: set[str] = set()
+        importer_visible: set[str] = set(local_fn_names)
+
         # 2. Register each module in isolation
         for mod in self._resolved_modules:
             temp = CodeGenerator(source=mod.source)
@@ -105,6 +113,15 @@ class CrossModuleMixin:
                 # All module functions (including private helpers) get
                 # registered so the guard rail sees them as known
                 self._fn_sigs.setdefault(fn_name, sig)
+                # #890: track importer visibility.  A direct import contributes
+                # its public, in-filter names to the importer's namespace; a
+                # transitive-only module contributes nothing visible here even
+                # though its body is compiled into the flat module.
+                if mod.direct:
+                    if is_public and in_filter:
+                        importer_visible.add(fn_name)
+                else:
+                    transitive_contributed.add(fn_name)
 
             # Harvest return-type expressions alongside _fn_sigs.
             # #628 — _fn_ret_type_exprs (added in #614 / re-used by
@@ -197,6 +214,16 @@ class CrossModuleMixin:
                     self._adt_layouts.setdefault(adt_name, layouts)
                     self._needs_alloc = True
                     self._needs_memory = True
+                    # #890: importer-visible only for a direct import; a
+                    # transitive module's public ADT + ctors are compiled in
+                    # (an imported body may construct them) but stay invisible
+                    # to the top-level program.
+                    if mod.direct:
+                        importer_visible.add(adt_name)
+                        importer_visible.update(layouts.keys())
+                    else:
+                        transitive_contributed.add(adt_name)
+                        transitive_contributed.update(layouts.keys())
 
             # Harvest type aliases
             for alias_name, alias_expr in temp._type_aliases.items():
@@ -268,6 +295,16 @@ class CrossModuleMixin:
                         mod.path, wfn, temp, local_fn_names,
                         qualified_eligible=False,
                     )
+
+        # #890: a name is transitive-only iff a transitive module contributes
+        # it AND it is not visible to the importer (not a local, not a direct
+        # import's public in-filter name).  A transitive symbol that a direct
+        # import ALSO exposes stays callable — the direct exposure wins.  The
+        # guard rail subtracts this set so a main-program body calling a purely
+        # transitive symbol fails loudly (spec §8.6.4), while the imported
+        # bodies that legitimately call it (compiled in Pass 2.5, not scanned
+        # by the guard rail) keep resolving to the emitted definition.
+        self._transitive_only_names = transitive_contributed - importer_visible
 
     @staticmethod
     def _collect_local_fn_names(program: ast.Program) -> set[str]:
@@ -454,6 +491,11 @@ class CrossModuleMixin:
         known: set[str] = set(self._fn_sigs.keys())
         for layouts in self._adt_layouts.values():
             known.update(layouts.keys())
+        # #890: a purely transitive symbol (compiled in for an imported body,
+        # but not visible to this program per spec §8.6.4) is NOT callable from
+        # a main-program body — drop it so such a call is reported unresolved
+        # rather than silently binding to the emitted-for-a-sibling definition.
+        known -= self._transitive_only_names
         # Built-in names handled specially in _translate_call
         known.update({
             "array_length", "array_append", "array_range", "array_concat",

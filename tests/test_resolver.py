@@ -239,9 +239,17 @@ private fn fd(-> @Unit) requires(true) ensures(true) effects(pure) { () }
         program = transform(tree)
         resolved = resolver.resolve_imports(program, main_file)
         assert not resolver.errors
-        # main directly imports b and c
-        assert len(resolved) == 2
-        # d should be in cache (resolved transitively)
+        # #890: the returned list is the transitive closure — b, c (direct)
+        # AND d (reached through both b and c), deduplicated to one d.
+        by_path = {m.path: m for m in resolved}
+        assert set(by_path) == {("b",), ("c",), ("d",)}
+        # d appears exactly once despite the diamond (b and c both import it)
+        assert [m.path for m in resolved].count(("d",)) == 1
+        # direct imports are tagged direct; the transitive d is not
+        assert by_path[("b",)].direct is True
+        assert by_path[("c",)].direct is True
+        assert by_path[("d",)].direct is False
+        # d is also in the cache (parsed once)
         assert ("d",) in resolver._cache
 
 

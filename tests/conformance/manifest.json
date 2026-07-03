@@ -1095,6 +1095,43 @@
     ]
   },
   {
+    "id": "ch08_transitive_module_import_base",
+    "file": "ch08_transitive_module_import_base.vera",
+    "chapter": 8,
+    "title": "Transitive import chain — base module",
+    "level": "check",
+    "spec_ref": "Section 8.6.4",
+    "features": [
+      "transitive_import",
+      "cross_module"
+    ]
+  },
+  {
+    "id": "ch08_transitive_module_import_mid",
+    "file": "ch08_transitive_module_import_mid.vera",
+    "chapter": 8,
+    "title": "Transitive import chain — middle module",
+    "level": "verify",
+    "spec_ref": "Section 8.6.4",
+    "features": [
+      "transitive_import",
+      "cross_module"
+    ]
+  },
+  {
+    "id": "ch08_transitive_module_import",
+    "file": "ch08_transitive_module_import.vera",
+    "chapter": 8,
+    "title": "Transitive module import (main -> mid -> base)",
+    "level": "run",
+    "spec_ref": "Section 8.6.4",
+    "features": [
+      "transitive_import",
+      "cross_module",
+      "bare_call"
+    ]
+  },
+  {
     "id": "ch08_circular_import",
     "file": "ch08_circular_import.vera",
     "chapter": 8,

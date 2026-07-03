@@ -601,6 +601,18 @@ class ContractVerifier:
                 if k not in builtin_fn_names or v.span is not None
             }
 
+            # #890: a transitively-reached module (imported by an imported
+            # module, not by this program) is in ``_resolved_modules`` so the
+            # importer-side monomorphization discovery can seed return types
+            # from it (above), but per spec §8.6.4 its declarations are NOT
+            # visible to the top-level importer — ``verify_program`` only
+            # verifies THIS program's bodies, which can bare- or qualified-call
+            # only direct imports.  Skip a transitive module's bare-namespace,
+            # qualified-registry, and constructor injection so ``main`` cannot
+            # reference it (matching the checker's §8.6.4 gate).
+            if not mod.direct:
+                continue
+
             # 3. Filter to public only
             mod_fns = {
                 k: v for k, v in all_fns.items()

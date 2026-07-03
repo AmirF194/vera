@@ -312,6 +312,16 @@ class CodeGenerator(
         # Pass 2.5 consults it so an imported fn shadowed by a local where-fn is
         # not emitted under a clashing bare name (#814).
         self._local_shadowed_fn_names: set[str] = set()
+        # #890: fn/ADT/ctor names contributed ONLY by a transitively-reached
+        # module (imported by an imported module, not by this program).  Their
+        # bodies ARE compiled into the flat WASM module so an imported body can
+        # call them, but the top-level program's own bodies must not reach them
+        # (spec §8.6.4 — a transitive module's declarations are not visible to
+        # the original importer).  The guard rail (`_check_cross_module_calls`)
+        # subtracts these from its "known" set, so a bare/qualified call to a
+        # transitive symbol from a *main-program* body fails loudly at compile
+        # instead of silently resolving to the emitted-for-a-sibling body.
+        self._transitive_only_names: set[str] = set()
         # #774: imported PUBLIC generic (`forall`) FnDecls the importer must
         # monomorphize itself — cross-module generic monomorphization.  The
         # importer discovers instantiations from ITS OWN call sites and emits

@@ -204,8 +204,14 @@ class TypeChecker(
         self._resolved_modules: list[ResolvedModule] = (
             resolved_modules or []
         )
+        # #890: only DIRECT imports are qualified-callable (`mid::via_mid`)
+        # from this program.  A transitively-reached module (`base`, imported
+        # only by `mid`) is in ``_resolved_modules`` so codegen can compile
+        # the bodies that call into it, but per spec §8.6.4 its declarations
+        # are not visible here — a `base::wrap40` from the top-level importer
+        # must fail resolution (E230), so it stays out of this set.
         self._resolved_module_paths: set[tuple[str, ...]] = {
-            m.path for m in self._resolved_modules
+            m.path for m in self._resolved_modules if m.direct
         }
         # C7b: per-module declaration registries (for ModuleCall path).
         self._module_functions: dict[
