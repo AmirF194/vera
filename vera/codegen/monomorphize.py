@@ -16,6 +16,8 @@ plus the transitive worklist, with constraint-failing instances filtered out
 
 from __future__ import annotations
 
+from typing import Any
+
 from vera import ast
 from vera.monomorphize import MonoContext, Monomorphizer
 
@@ -98,7 +100,27 @@ class MonomorphizationMixin:
             if isinstance(decl, ast.FnDecl) and decl.forall_vars:
                 generic_decls[decl.name] = decl
 
-        if not generic_decls:
+        # #774: cross-module generic monomorphization.  An imported PUBLIC
+        # generic whose bare name is NOT locally shadowed joins `generic_decls`
+        # so the importer discovers its instantiations and emits the clones;
+        # both a bare call and a qualified `m::g` (which desugars to the bare
+        # target) then route through `_generic_fn_info` to the emitted clone.
+        # A LOCAL generic of the same name wins (already inserted above; the
+        # `setdefault`-populated import registry keeps local-shadows-import).
+        imported_generic_decls = getattr(
+            self, "_imported_generic_decls", {},
+        )
+        for gname, gdecl in imported_generic_decls.items():
+            generic_decls.setdefault(gname, gdecl)
+
+        # Shadowed imported generics (a local non-generic owns the bare name,
+        # #814) are monomorphized under a distinct per-module mono base, driven
+        # separately below so bare calls stay on the local shadow.
+        shadowed_imported: dict[tuple[str, ...], dict[str, ast.FnDecl]] = (
+            getattr(self, "_shadowed_imported_generic_decls", {})
+        )
+
+        if not generic_decls and not shadowed_imported:
             return []
 
         # Build constructor → ADT name mapping
@@ -181,7 +203,315 @@ class MonomorphizationMixin:
             assert decl.forall_vars is not None  # noqa: S101
             self._generic_fn_info[name] = (decl.forall_vars, decl.params)
 
+        # #814 asymmetric variant: an imported generic whose bare name a LOCAL
+        # non-generic shadows is reachable ONLY via a qualified call `m::gen`,
+        # so it can't join `generic_decls` (that would hijack the bare `gen`
+        # to the module generic).  Discover its qualified instantiations and
+        # emit each clone under a distinct ``mod$<path>$…`` mono name so the
+        # ModuleCall desugar reaches the module's generic body rather than
+        # falling back to the local shadow (the false-Tier-1: verify resolves
+        # the module contract, codegen ran the local shadow).  ``generic_decls``
+        # + ``seen`` are threaded so a shadowed clone body that calls ANOTHER
+        # generic (unshadowed → a normal clone; a same-module shadowed sibling →
+        # another ``mod$…`` clone) gets that transitive clone emitted too — a
+        # shadowed clone body is scanned exactly like a normal clone body.
+        self._register_shadowed_generic_bases(shadowed_imported)
+        for path, decls_by_name in shadowed_imported.items():
+            self._monomorphize_shadowed_module_generics(
+                program, path, decls_by_name, ctor_to_adt, mono, mono_decls,
+                generic_decls, seen,
+            )
+
         return mono_decls
+
+    def _register_shadowed_generic_bases(
+        self,
+        shadowed_imported: dict[tuple[str, ...], dict[str, ast.FnDecl]],
+    ) -> None:
+        """Record the ``mod$…`` qualified-call base for every shadowed generic.
+
+        Done up front — before any body scanning — so both the ModuleCall
+        desugar and ``_resolve_generic_call`` can resolve a shadowed generic
+        (even one only reached transitively from another clone body) to its
+        clone, and so a ``m::gen`` site with no discovered instance still routes
+        to the module's generic rather than falling back to the local shadow.
+        """
+        for path, decls_by_name in shadowed_imported.items():
+            for gen_name, gdecl in decls_by_name.items():
+                assert gdecl.forall_vars is not None  # noqa: S101
+                qual_base = self._module_qualified_wasm_name(path, gen_name)
+                self._module_qualified_generic_bases[(path, gen_name)] = (
+                    qual_base
+                )
+                self._generic_fn_info[qual_base] = (
+                    gdecl.forall_vars, gdecl.params,
+                )
+
+    def _monomorphize_shadowed_module_generics(
+        self,
+        program: ast.Program,
+        path: tuple[str, ...],
+        decls_by_name: dict[str, ast.FnDecl],
+        ctor_to_adt: dict[str, str],
+        mono: Monomorphizer,
+        mono_decls: list[ast.FnDecl],
+        generic_decls: dict[str, ast.FnDecl],
+        seen: set[tuple[str, tuple[str, ...]]],
+    ) -> None:
+        """Emit clones for a shadowed imported generic reached via ``m::gen``.
+
+        Discovers the concrete instantiations of each shadowed generic from the
+        importer's ``ast.ModuleCall`` sites (targeting this module path), emits
+        each clone renamed to ``mod$<path>$gen$<types>`` (composing the #814
+        ``mod$`` qualified-call prefix with the mono suffix so it can never
+        collide with the local shadow's bare ``gen`` nor a normal clone), and
+        runs a transitive worklist over the clone bodies exactly like the normal
+        path — a shadowed generic whose body calls ANOTHER generic (unshadowed
+        or a same-module shadowed sibling) gets that transitive clone emitted
+        too, else the missing clone is an ``unknown func`` at run one level out
+        (the #774 review, CR 3518737014).
+        """
+        from dataclasses import replace as _replace
+
+        # Seed: `path::gen(...)` sites in the importer's non-generic bodies AND
+        # in every already-emitted NORMAL clone body (CR 3519063445): an
+        # UNshadowed generic `caller<T>` whose body qualified-calls a SHADOWED
+        # `g::gen` reaches this shadowed generic only through its clone
+        # (`caller$Int`), which the main worklist already emitted into
+        # `mono_decls`.  Scanning those clones here is the reverse direction of
+        # the shadowed→normal transitive scan — without it `caller$Int`'s
+        # `g::gen(...)` has no `mod$g$gen$Int` target (`unknown func` at run).
+        instances: dict[str, set[tuple[str, ...]]] = {
+            name: set() for name in decls_by_name
+        }
+        for tld in program.declarations:
+            decl = tld.decl
+            if isinstance(decl, ast.FnDecl) and not decl.forall_vars:
+                self._collect_shadowed_qualified_calls(
+                    decl, path, decls_by_name, ctor_to_adt, instances,
+                )
+        for mono_fn in mono_decls:
+            self._collect_shadowed_qualified_calls(
+                mono_fn, path, decls_by_name, ctor_to_adt, instances,
+            )
+
+        # Transitive worklist over shadowed clones.  Each popped shadowed
+        # instance is monomorphized under its `mod$…` name; its body is then
+        # scanned two ways:
+        #   * against `generic_decls` (unshadowed generics) — a discovered
+        #     instance is queued into the MAIN worklist's `seen`/`mono_decls`
+        #     stream so `inner$Int` etc. are emitted as ordinary clones;
+        #   * against this module's shadowed `decls_by_name` (a same-module
+        #     shadowed sibling reached by bare name inside the module body) —
+        #     queued back onto this shadowed worklist.
+        shadowed_seen: set[tuple[str, tuple[str, ...]]] = set()
+        worklist: list[tuple[str, tuple[str, ...]]] = [
+            (gen_name, ct)
+            for gen_name, cts in instances.items()
+            for ct in sorted(cts)
+        ]
+        while worklist:
+            gen_name, concrete_types = worklist.pop()
+            key = (gen_name, concrete_types)
+            if key in shadowed_seen:
+                continue
+            shadowed_seen.add(key)
+            gdecl = decls_by_name[gen_name]
+            if not self._check_constraints(gdecl, concrete_types):
+                continue
+            clone = mono.monomorphize_fn(gdecl, concrete_types)
+            qual_base = self._module_qualified_generic_bases[(path, gen_name)]
+            mangled = self._mono_shadowed_name(qual_base, gen_name, clone.name)
+
+            # Scan the clone body BEFORE rewriting sibling calls, so discovery
+            # sees the original bare names.  Unshadowed generics → emit the full
+            # closure as ordinary clones; same-module shadowed siblings → queue
+            # back onto this shadowed worklist.
+            self._chase_normal_transitive(
+                clone, generic_decls, ctor_to_adt, mono, mono_decls, seen,
+            )
+            trans_shadow: dict[str, set[tuple[str, ...]]] = {
+                name: set() for name in decls_by_name
+            }
+            mono.collect_calls_in_node(
+                clone, decls_by_name, ctor_to_adt, trans_shadow,
+            )
+            for s_name, s_types in trans_shadow.items():
+                for s_ct in sorted(s_types):
+                    if (s_name, s_ct) not in shadowed_seen:
+                        worklist.append((s_name, s_ct))
+
+            # A bare call to a same-module shadowed sibling inside this module
+            # body must reach the sibling's ``mod$…`` clone, NOT the importer's
+            # local shadow of that name.  The bare sibling name isn't in
+            # `_generic_fn_info` (only its `mod$…` base is), so rewrite each such
+            # `FnCall.name` to the sibling's `mod$…` base — then the WASM
+            # call-site rewriter mangles it to the sibling's clone.
+            sibling_bases = {
+                s_name: self._module_qualified_generic_bases[(path, s_name)]
+                for s_name in decls_by_name
+            }
+            clone = self._rewrite_sibling_generic_calls(clone, sibling_bases)
+            mono_decls.append(_replace(clone, name=mangled))
+            # Record the shadowed MODULE clone under its `mod$…` base, NOT the
+            # bare `gen_name` — a same-named LOCAL generic owns the bare key, and
+            # collapsing both onto it would let the verifier's #732 differential
+            # count the module clone as "covered" by the local generic's
+            # verification (CR 3519156263).  The verifier records + verifies it
+            # under the identical base, keeping the two in lockstep.
+            self._emitted_instances.add((qual_base, concrete_types))
+
+    def _chase_normal_transitive(
+        self,
+        root_fn: ast.FnDecl,
+        generic_decls: dict[str, ast.FnDecl],
+        ctor_to_adt: dict[str, str],
+        mono: Monomorphizer,
+        mono_decls: list[ast.FnDecl],
+        seen: set[tuple[str, tuple[str, ...]]],
+    ) -> None:
+        """Emit the transitive closure of normal (unshadowed) clones reachable
+        from a clone body scanned during shadowed emission.
+
+        The main worklist has already drained by the time shadowed emission
+        runs, so a normal generic reached ONLY from a shadowed clone body (e.g.
+        `mod$g$outer$Int` → `inner` → `helper`) would otherwise never be
+        emitted — an ``unknown func`` at run.  This re-runs the normal path's
+        body-scan worklist rooted at ``root_fn`` (itself already emitted),
+        feeding the shared ``seen`` set so nothing is emitted twice.
+        """
+        stack: list[ast.FnDecl] = [root_fn]
+        while stack:
+            fn = stack.pop()
+            transitive: dict[str, set[tuple[str, ...]]] = {
+                name: set() for name in generic_decls
+            }
+            mono.collect_calls_in_node(
+                fn, generic_decls, ctor_to_adt, transitive,
+            )
+            for t_name, t_types in transitive.items():
+                for t_ct in sorted(t_types):
+                    if (t_name, t_ct) in seen:
+                        continue
+                    seen.add((t_name, t_ct))
+                    t_decl = generic_decls[t_name]
+                    if not self._check_constraints(t_decl, t_ct):
+                        continue
+                    t_fn = mono.monomorphize_fn(t_decl, t_ct)
+                    mono_decls.append(t_fn)
+                    self._emitted_instances.add((t_name, t_ct))
+                    stack.append(t_fn)
+
+    @staticmethod
+    def _mono_shadowed_name(
+        qual_base: str, gen_name: str, clone_name: str,
+    ) -> str:
+        """Compose the ``mod$…`` qualified prefix with the mono suffix.
+
+        ``monomorphize_fn`` mangles the clone under the bare generic name
+        (``gen$Int``); a shadowed generic must live under the module-qualified
+        base (``mod$<path>$gen``) instead, so swap the ``gen`` prefix for
+        ``qual_base`` while preserving the exact mono suffix (``$Int`` /
+        ``$Int_JBool`` / …).  ``clone_name`` always starts with ``gen$`` (the
+        mangler joins name + ``$`` + suffix), so this is a straight prefix
+        substitution.
+        """
+        suffix = clone_name[len(gen_name):]  # e.g. "$Int"
+        return qual_base + suffix
+
+    def _rewrite_sibling_generic_calls(
+        self,
+        node: ast.FnDecl,
+        sibling_bases: dict[str, str],
+    ) -> ast.FnDecl:
+        """Rewrite bare ``FnCall``s to same-module shadowed-generic siblings.
+
+        Inside a shadowed generic's clone body (a ``mod$…`` function), a bare
+        call to a sibling generic from the SAME module refers to the module's
+        sibling — but the importer's flat namespace binds that bare name to the
+        LOCAL shadow.  Renaming the ``FnCall.name`` to the sibling's ``mod$…``
+        base (a ``_generic_fn_info`` key) makes the WASM call-site rewriter
+        mangle it to the sibling's clone (``mod$g$inner$Int``) instead of
+        resolving the bare name to the local shadow.  Only the ``.name`` field
+        of a matching ``FnCall`` changes; the total dataclass walk leaves every
+        other node — including nested ``AnonFn`` bodies — structurally intact.
+        """
+        result = self._rewrite_call_names(node, sibling_bases)
+        assert isinstance(result, ast.FnDecl)  # noqa: S101
+        return result
+
+    def _rewrite_call_names(
+        self, node: object, rename: dict[str, str],
+    ) -> object:
+        from dataclasses import fields as _fields
+        from dataclasses import replace as _replace
+
+        if isinstance(node, ast.Node):
+            changes: dict[str, Any] = {}
+            for f in _fields(node):
+                if f.name == "span":
+                    continue
+                val = getattr(node, f.name)
+                new_val = self._rewrite_call_names(val, rename)
+                if new_val is not val:
+                    changes[f.name] = new_val
+            if isinstance(node, ast.FnCall) and node.name in rename:
+                changes["name"] = rename[node.name]
+            if changes:
+                return _replace(node, **changes)
+            return node
+        if isinstance(node, tuple):
+            new_items = tuple(
+                self._rewrite_call_names(v, rename) for v in node
+            )
+            if any(n is not o for n, o in zip(new_items, node)):
+                return new_items
+            return node
+        return node
+
+    def _collect_shadowed_qualified_calls(
+        self,
+        node: object,
+        path: tuple[str, ...],
+        decls_by_name: dict[str, ast.FnDecl],
+        ctor_to_adt: dict[str, str],
+        instances: dict[str, set[tuple[str, ...]]],
+    ) -> None:
+        """Total AST walk collecting ``path::gen(...)`` instantiation sites."""
+        from dataclasses import fields as _fields
+
+        if (isinstance(node, ast.ModuleCall)
+                and tuple(node.path) == path
+                and node.name in decls_by_name):
+            decl = decls_by_name[node.name]
+            type_args = self._mono_infer_shadowed(
+                decl, node.args, ctor_to_adt,
+            )
+            if type_args is not None:
+                instances[node.name].add(type_args)
+        if isinstance(node, ast.Node):
+            for f in _fields(node):
+                if f.name == "span":
+                    continue
+                self._collect_shadowed_qualified_calls(
+                    getattr(node, f.name), path, decls_by_name,
+                    ctor_to_adt, instances,
+                )
+        elif isinstance(node, (tuple, list)):
+            for item in node:
+                self._collect_shadowed_qualified_calls(
+                    item, path, decls_by_name, ctor_to_adt, instances,
+                )
+
+    def _mono_infer_shadowed(
+        self,
+        decl: ast.FnDecl,
+        args: tuple[ast.Expr, ...],
+        ctor_to_adt: dict[str, str],
+    ) -> tuple[str, ...] | None:
+        """Infer a shadowed generic's type args from a qualified call's args."""
+        m = Monomorphizer(self._build_mono_context({}, ctor_to_adt))
+        return m._infer_type_args_from_args(decl, args, ctor_to_adt, None)
 
     def _check_constraints(
         self,

@@ -356,10 +356,18 @@ class Monomorphizer:
         instances: dict[str, set[tuple[str, ...]]],
     ) -> None:
         """Total AST recursion underlying :meth:`collect_calls_in_expr`."""
-        if isinstance(node, ast.FnCall) and node.name in generic_decls:
+        # #774: a qualified call `m::g(…)` to an imported generic is an
+        # ``ast.ModuleCall``, not a ``FnCall`` — discover it identically (same
+        # arg-driven type inference) so the importer monomorphizes the same
+        # instantiation for both call forms.  Keyed on ``generic_decls``: the
+        # caller merges imported (unshadowed) generics into that dict, so a
+        # ModuleCall only matches once its target is a known generic.
+        if isinstance(node, (ast.FnCall, ast.ModuleCall)) and (
+            node.name in generic_decls
+        ):
             decl = generic_decls[node.name]
-            type_args = self._infer_type_args_from_call(
-                decl, node, ctor_to_adt, generic_decls,
+            type_args = self._infer_type_args_from_args(
+                decl, node.args, ctor_to_adt, generic_decls,
             )
             if type_args is not None:
                 instances[node.name].add(type_args)
@@ -389,12 +397,32 @@ class Monomorphizer:
         Returns a tuple of concrete type names, one per forall_var, or
         None if inference fails.
         """
+        return self._infer_type_args_from_args(
+            decl, call.args, ctor_to_adt, generic_decls,
+        )
+
+    def _infer_type_args_from_args(
+        self,
+        decl: ast.FnDecl,
+        args: tuple[ast.Expr, ...],
+        ctor_to_adt: dict[str, str],
+        generic_decls: dict[str, ast.FnDecl] | None = None,
+    ) -> tuple[str, ...] | None:
+        """Infer concrete type variable bindings from an argument tuple.
+
+        The arg-driven core shared by ``FnCall`` and ``ModuleCall`` (#774): a
+        qualified call to an imported generic carries the same positional
+        arguments, so the type-parameter inference is identical to a bare call.
+
+        Returns a tuple of concrete type names, one per forall_var, or
+        None if inference fails.
+        """
         forall_vars = decl.forall_vars
         if not forall_vars:
             return None
 
         mapping: dict[str, str] = {}
-        for param_te, arg in zip(decl.params, call.args):
+        for param_te, arg in zip(decl.params, args):
             self._unify_param_arg(param_te, arg, forall_vars, ctor_to_adt,
                                   mapping, generic_decls)
 

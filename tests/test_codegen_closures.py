@@ -1616,3 +1616,99 @@ public fn test(@Unit -> @Int)
 }
 """
         assert _run(src, "test") == 90
+
+
+class TestGenericCalledOnlyFromClosureBody873:
+    """`#873` — a user generic whose ONLY call site is inside a closure body
+    must be monomorphized: mono discovery already walks closure bodies (the
+    total AST walk), and the clone is emitted, but the LIFTED closure body must
+    also rewrite the call to the mangled clone.
+
+    Pre-fix: ``_compile_lifted_closure`` built its ``WasmContext`` without
+    ``generic_fn_info``, so the lifted body left the call on the bare generic
+    name (``call $are_equal``) — which has no implementation — and ``vera run``
+    failed WASM validation on a ``check``/``verify``-green program.
+    """
+
+    def test_generic_in_closure_body_executes(self) -> None:
+        """`are_equal(@Int.0, 2)` inside an `array_any` closure runs.
+
+        ``array_range(1, 4)`` = [1, 2, 3]; the predicate is true for 2, so
+        ``array_any`` returns true (1).  Pre-fix: ``unknown func $are_equal``.
+        The observable output distinguishes the real result from any default.
+        """
+        src = """\
+private forall<T where Eq<T>> fn are_equal(@T, @T -> @Bool)
+  requires(true) ensures(@Bool.result == (@T.1 == @T.0)) effects(pure)
+{
+  @T.1 == @T.0
+}
+
+public fn main(@Unit -> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  array_any(array_range(1, 4),
+            fn(@Int -> @Bool) effects(pure) { are_equal(@Int.0, 2) })
+}
+"""
+        assert _run(src, "main") == 1
+
+    def test_generic_in_closure_body_false_case(self) -> None:
+        """The same shape with a needle NOT in the range returns false (0),
+        so the closure-body clone is genuinely exercised — not short-circuited
+        to a constant.  ``array_range(1, 4)`` = [1, 2, 3] has no 9.
+        """
+        src = """\
+private forall<T where Eq<T>> fn are_equal(@T, @T -> @Bool)
+  requires(true) ensures(@Bool.result == (@T.1 == @T.0)) effects(pure)
+{
+  @T.1 == @T.0
+}
+
+public fn main(@Unit -> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  array_any(array_range(1, 4),
+            fn(@Int -> @Bool) effects(pure) { are_equal(@Int.0, 9) })
+}
+"""
+        assert _run(src, "main") == 0
+
+    def test_generic_only_in_closure_body_verify_and_run_agree(self) -> None:
+        """`verify` and `run` agree: the generic's postcondition is proved per
+        monomorphization (#732) AND the emitted clone runs — the closure-body
+        instantiation is covered on both sides.
+        """
+        import tempfile
+        from pathlib import Path
+
+        from vera.verifier import verify
+
+        src = """\
+private forall<T where Eq<T>> fn are_equal(@T, @T -> @Bool)
+  requires(true) ensures(@Bool.result == (@T.1 == @T.0)) effects(pure)
+{
+  @T.1 == @T.0
+}
+
+public fn main(@Unit -> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  array_any(array_range(1, 4),
+            fn(@Int -> @Bool) effects(pure) { are_equal(@Int.0, 2) })
+}
+"""
+        assert _run(src, "main") == 1
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".vera", delete=False, encoding="utf-8",
+        ) as f:
+            f.write(src)
+            f.flush()
+            path = f.name
+        try:
+            prog = transform(parse_file(path))
+            vres = verify(prog, src, file=path)
+            errors = [d for d in vres.diagnostics if d.severity == "error"]
+            assert errors == [], [e.description for e in errors]
+        finally:
+            Path(path).unlink(missing_ok=True)

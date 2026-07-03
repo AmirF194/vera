@@ -174,6 +174,12 @@ class FunctionCompilationMixin:
         # whose bare name is shadowed by a local resolves to the module's
         # body (emitted under a distinct ``mod$…`` name) rather than the local.
         ctx.set_module_qualified_targets(self._module_qualified_targets)
+        # #814/#774: shadowed imported-generic qualified-call bases, so a
+        # `m::gen(…)` whose bare name a local shadows resolves to the module
+        # generic's clone rather than the local shadow.
+        ctx.set_module_qualified_generic_bases(
+            self._module_qualified_generic_bases,
+        )
         # #814 C2: intra-module call renames, set ONLY when compiling a
         # ``mod$…`` body, so a bare sibling call inside it reaches the
         # module's version rather than the main program's local shadow.

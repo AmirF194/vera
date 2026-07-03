@@ -207,6 +207,15 @@ class WasmContext(
         self._module_qualified_targets: dict[
             tuple[tuple[str, ...], str], str
         ] = {}
+        # #814/#774: (module path, generic name) → the ``mod$…`` mono BASE for
+        # an imported generic whose bare name a local shadows.  The ModuleCall
+        # desugar rewrites `m::gen(…)` to a FnCall on this base, which is a key
+        # in `_generic_fn_info`, so `_resolve_generic_call` mangles it to the
+        # emitted clone (`mod$m$gen$Int`) instead of the local shadow's bare
+        # `gen`.  Empty unless the program qualified-calls a shadowed generic.
+        self._module_qualified_generic_bases: dict[
+            tuple[tuple[str, ...], str], str
+        ] = {}
         # #814 C2: bare name → mod$ name, set only while compiling a `mod$…`
         # body so an intra-module sibling call reaches the module's version.
         self._intra_module_renames: dict[str, str] = {}
@@ -343,6 +352,13 @@ class WasmContext(
     ) -> None:
         """Set the (module path, fn name) → WASM target map (#814 §8.5.3)."""
         self._module_qualified_targets = targets
+
+    def set_module_qualified_generic_bases(
+        self, bases: dict[tuple[tuple[str, ...], str], str],
+    ) -> None:
+        """Set the (module path, generic name) → ``mod$…`` mono base map
+        for a shadowed imported generic reached via ``m::gen`` (#814/#774)."""
+        self._module_qualified_generic_bases = bases
 
     def set_intra_module_renames(self, renames: dict[str, str]) -> None:
         """Set the intra-module bare-call rename map (#814 C2).
@@ -550,9 +566,21 @@ class WasmContext(
             # when a local shadows its bare name, so resolve the WASM target
             # via the qualified-target table (mod$… name for a shadowed fn,
             # else the bare name) rather than blindly dropping the path.
-            target = self._module_qualified_targets.get(
-                (tuple(expr.path), expr.name), expr.name,
-            )
+            #
+            # #814/#774: an imported GENERIC whose bare name a local shadows
+            # resolves through a separate table to its ``mod$…`` mono BASE; the
+            # base is a `_generic_fn_info` key, so the resulting FnCall is
+            # rewritten by `_resolve_generic_call` to the per-instantiation clone
+            # (`mod$m$gen$Int`) rather than the local shadow's bare `gen`.
+            #
+            # The desugar and the statement-position result-shape predicates
+            # (`_is_void_expr` / `_is_pair_result_expr`) share ONE target
+            # resolver so they can never disagree on which function is called
+            # (CR 3518737022): `_resolve_module_call_wasm_name` returns a shadowed
+            # generic's fully-resolved clone (`mod$m$gen$Int`, which
+            # `_translate_call` then calls directly) or the bare name of an
+            # UNshadowed generic (which `_translate_call` mangles itself).
+            target = self._resolve_module_call_wasm_name(expr)
             desugared = ast.FnCall(
                 name=target,
                 args=expr.args,
@@ -830,12 +858,12 @@ class WasmContext(
             return self._fn_ret_types[expr.name] is None
         # A module-qualified call is void iff its resolved target returns
         # @Unit — mirror the FnCall clause on the resolved WASM target (bare
-        # name, or the ``mod$…`` name when the bare name is locally shadowed),
-        # so a unit-returning ``m::f()`` in statement position gets no stray
-        # drop (#814; same class as the user-@Unit-fn case #584).
+        # name, the ``mod$…`` name when the bare name is locally shadowed, or a
+        # shadowed generic's per-instantiation clone), so a unit-returning
+        # ``m::f()`` in statement position gets no stray drop (#814; same class
+        # as the user-@Unit-fn case #584).
         if isinstance(expr, ast.ModuleCall):
-            target = self._module_qualified_targets.get(
-                (tuple(expr.path), expr.name), expr.name)
+            target = self._resolve_module_call_wasm_name(expr)
             if target in self._fn_ret_types:
                 return self._fn_ret_types[target] is None
             return False
@@ -875,13 +903,42 @@ class WasmContext(
             ret = self._infer_qualified_call_wasm_type(expr)
             return ret == "i32_pair"
         if isinstance(expr, ast.ModuleCall):
-            # Resolve the qualified target (bare name, or ``mod$…`` when
-            # shadowed) and reuse the FnCall inference so a String/Array-
-            # returning ``m::f()`` in statement position drops both stack
-            # values, not one (#814).
-            target = self._module_qualified_targets.get(
-                (tuple(expr.path), expr.name), expr.name)
+            # Resolve the qualified target (bare name, the ``mod$…`` name when
+            # shadowed, or a shadowed generic's per-instantiation clone) and
+            # reuse the FnCall inference so a String/Array-returning ``m::f()``
+            # in statement position drops both stack values, not one (#814).
+            target = self._resolve_module_call_wasm_name(expr)
             ret = self._infer_fncall_wasm_type(
                 ast.FnCall(name=target, args=expr.args, span=expr.span))
             return ret == "i32_pair"
         return False
+
+    def _resolve_module_call_wasm_name(self, expr: ast.ModuleCall) -> str:
+        """Resolve a ``ast.ModuleCall`` to the WASM function name it will call.
+
+        The single target-resolution consulted by BOTH the desugar
+        (``translate_expr``) and the statement-position result-shape predicates
+        (``_is_void_expr`` / ``_is_pair_result_expr``), so they can never
+        disagree on which function ``m::f(...)`` reaches (the #774 review, CR
+        3518737022): if the result-shape checks resolved differently from the
+        desugar, a shadowed generic's ``String``/``@Unit`` clone could drop the
+        wrong number of stack values → a WASM validation failure on a
+        check-green program.
+
+        Order mirrors the desugar exactly:
+          1. a shadowed imported GENERIC (``_module_qualified_generic_bases``) →
+             its per-instantiation clone (via ``_resolve_generic_call`` on the
+             ``mod$…`` base, which mangles in the inferred type args);
+          2. a shadowed NON-generic (``_module_qualified_targets``) → its
+             ``mod$…`` name;
+          3. otherwise the bare name.
+        """
+        qkey = (tuple(expr.path), expr.name)
+        gen_base = self._module_qualified_generic_bases.get(qkey)
+        if gen_base is not None:
+            resolved = self._resolve_generic_call(
+                ast.FnCall(name=gen_base, args=expr.args, span=expr.span))
+            if resolved is not None:
+                return resolved
+            return gen_base
+        return self._module_qualified_targets.get(qkey, expr.name)

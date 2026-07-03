@@ -222,7 +222,17 @@ class ClosureLiftingMixin:
             self.string_pool,
             ctor_layouts=ctor_layouts,
             adt_type_names=set(self._adt_layouts.keys()),
+            # #873: a generic called ONLY from inside a closure body must be
+            # rewritten to its monomorphized clone here too — mono discovery
+            # already walks closure bodies (the total AST walk) and emits the
+            # clone, but without `generic_fn_info` the lifted closure body left
+            # the call on the bare generic name (`call $are_equal`), which has
+            # no implementation → WASM validation failure at run.  `known_fns`
+            # rides along so the same cross-module guard rail the per-function
+            # context uses (functions.py) also protects closure bodies.
+            generic_fn_info=getattr(self, "_generic_fn_info", None),
             ctor_to_adt=ctor_to_adt,
+            known_fns=set(self._fn_sigs.keys()),
             ctor_adt_tp_indices=getattr(self, "_ctor_adt_tp_indices", None),
             adt_tp_counts=getattr(self, "_adt_tp_counts", None),
             adt_tp_param_names=getattr(self, "_adt_tp_param_names", None),
@@ -267,6 +277,14 @@ class ClosureLiftingMixin:
         ctx.set_fn_byte_params(self._fn_byte_params)
         ctx.set_type_aliases(self._type_aliases)
         ctx.set_type_alias_params(self._type_alias_params)
+        # #814/#774: a qualified call inside a closure body must resolve the
+        # same way it does in a top-level body — to the module's function
+        # (`mod$…` for a shadowed fn) and, for a shadowed imported generic, to
+        # the module generic's clone rather than the local shadow.
+        ctx.set_module_qualified_targets(self._module_qualified_targets)
+        ctx.set_module_qualified_generic_bases(
+            self._module_qualified_generic_bases,
+        )
         env = WasmSlotEnv()
 
         # Parameter 0: $env (i32 — closure environment pointer)

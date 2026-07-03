@@ -1015,6 +1015,32 @@
     ]
   },
   {
+    "id": "ch08_cross_module_generic_lib",
+    "file": "ch08_cross_module_generic_lib.vera",
+    "chapter": 8,
+    "title": "Cross-module generic library",
+    "level": "check",
+    "spec_ref": "Section 11.16",
+    "features": [
+      "cross_module_generic",
+      "generic_function"
+    ]
+  },
+  {
+    "id": "ch08_cross_module_generic",
+    "file": "ch08_cross_module_generic.vera",
+    "chapter": 8,
+    "title": "Cross-module generic monomorphization",
+    "level": "run",
+    "spec_ref": "Section 11.16",
+    "features": [
+      "cross_module_generic",
+      "monomorphization",
+      "bare_call",
+      "module_qualified_call"
+    ]
+  },
+  {
     "id": "ch08_circular_import",
     "file": "ch08_circular_import.vera",
     "chapter": 8,
@@ -1478,6 +1504,21 @@
       "string_field_eq",
       "nested_adt_eq",
       "string_concat"
+    ]
+  },
+  {
+    "id": "ch09_generic_in_closure",
+    "file": "ch09_generic_in_closure.vera",
+    "chapter": 9,
+    "title": "Generic called only from inside a closure body (#873)",
+    "level": "run",
+    "spec_ref": "Section 11.10.3",
+    "features": [
+      "generic_function",
+      "monomorphization",
+      "closure",
+      "array_any",
+      "ability_constraint"
     ]
   },
   {

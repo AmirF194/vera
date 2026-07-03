@@ -1,0 +1,22 @@
+-- Chapter 9 (§11.16 / §5) — a user generic whose only call site is inside a
+-- closure body must be monomorphized (#873).  Mono discovery already walks
+-- closure bodies; the lifted closure body must rewrite the call to the clone.
+-- Pre-#873 this failed WASM validation with `unknown func $are_equal`.
+-- Eq-constrained generic; its ONLY call site is inside the closure below.
+private forall<T where Eq<T>> fn are_equal(@T, @T -> @Bool)
+  requires(true)
+  ensures(@Bool.result == (@T.1 == @T.0))
+  effects(pure)
+{
+  @T.1 == @T.0
+}
+
+-- array_range(1, 4) = [1, 2, 3]; the predicate is true for the element 2,
+-- so array_any returns true.
+public fn main(@Unit -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  array_any(array_range(1, 4), fn(@Int -> @Bool) effects(pure) { are_equal(@Int.0, 2) })
+}

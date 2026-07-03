@@ -740,6 +740,515 @@ public fn main(@Unit -> @Unit)
 
 
 # =====================================================================
+# #774 — cross-module generic monomorphization
+# =====================================================================
+
+
+class TestCrossModuleGenerics774:
+    """`#774` — an imported generic instantiated only by the importer must be
+    monomorphized by the importer (its clone emitted into the flat module) and
+    verified in lockstep, for both the bare and module-qualified call forms.
+
+    Pre-fix: the importer's mono discovery built from its own
+    ``program.declarations`` (the imported generic isn't there) and the defining
+    module only monomorphized its own instantiations, so the clone was emitted
+    NOWHERE — ``vera check`` passed but ``vera run`` failed WASM validation at
+    ``call $gid`` (both call forms).  The #814 asymmetric variant (a generic
+    shadowed by a local AND qualified-called) false-Tier-1'd instead: verify
+    resolved the module generic's contract while codegen fell back to the local
+    shadow.
+    """
+
+    # Reuse the sibling class's module-compilation helpers.  Wrapped in
+    # ``staticmethod(...)`` so ``self._resolved(path, src)`` doesn't bind ``self``
+    # as an extra positional argument (the underlying methods are static/class
+    # methods of ``TestCrossModuleCodegen`` and take no ``self``).
+    _resolved = staticmethod(TestCrossModuleCodegen._resolved)
+    _compile_mod = staticmethod(TestCrossModuleCodegen._compile_mod)
+    _run_mod = staticmethod(TestCrossModuleCodegen._run_mod)
+
+    GEN_MODULE = """\
+public forall<T> fn gid(@T -> @T)
+  requires(true) ensures(@T.result == @T.0) effects(pure)
+{ @T.0 }
+"""
+
+    def test_imported_generic_bare_call_executes(self) -> None:
+        """`gid(42)` (bare) runs, returning 42 — the importer emits gid$Int.
+
+        Pre-fix this failed WASM validation at ``call $gid`` (no clone).  The
+        observable output (42) cannot coincide with the phantom-var default
+        (Bool/i32), so a discovery miss can't masquerade as a pass.
+        """
+        mod = self._resolved(("genmod",), self.GEN_MODULE)
+        val = self._run_mod("""\
+import genmod;
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ gid(42) }
+""", [mod], fn="main")
+        assert val == 42
+
+    def test_imported_generic_qualified_call_executes(self) -> None:
+        """`genmod::gid(42)` (qualified ModuleCall) runs, returning 42.
+
+        The qualified form is an ``ast.ModuleCall`` the shared discovery now
+        walks; it desugars to the bare mono target at codegen.  Pre-fix it
+        crashed identically at ``call $gid``.
+        """
+        mod = self._resolved(("genmod",), self.GEN_MODULE)
+        val = self._run_mod("""\
+import genmod;
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ genmod::gid(42) }
+""", [mod], fn="main")
+        assert val == 42
+
+    def test_imported_generic_two_instantiations_execute(self) -> None:
+        """Two distinct instantiations (`gid<Int>`, `gid<Bool>`) both emit and
+        run — the importer's worklist covers each concrete type it uses."""
+        mod = self._resolved(("genmod",), self.GEN_MODULE)
+        # gid(true) → true (1); if it wrongly shared gid<Int>'s i64 clone the
+        # bool result would still read 1 here, so also exercise the Int arm to
+        # pin that both symbols exist (a missing gid$Bool fails WASM validation).
+        val = self._run_mod("""\
+import genmod;
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  let @Bool = gid(true);
+  gid(41) + 1
+}
+""", [mod], fn="main")
+        assert val == 42
+
+    def test_imported_generic_verify_and_run_agree(self) -> None:
+        """The importer's ``verify`` and ``run`` agree on the imported generic's
+        contract — no false Tier-1.  ``bad_id`` has a real ``ensures`` and the
+        emitted clone carries the runtime postcondition guard.
+        """
+        import tempfile
+        from pathlib import Path
+
+        from vera.verifier import verify
+
+        mod = self._resolved(("lib",), self.GEN_MODULE.replace("gid", "bad_id"))
+        main_src = """\
+import lib;
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ bad_id(42) }
+"""
+        assert self._run_mod(main_src, [mod], fn="main") == 42
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".vera", delete=False, encoding="utf-8",
+        ) as f:
+            f.write(main_src)
+            f.flush()
+            path = f.name
+        try:
+            prog = transform(parse_file(path))
+            vres = verify(prog, main_src, resolved_modules=[mod])
+            errors = [d for d in vres.diagnostics if d.severity == "error"]
+            assert errors == [], [e.description for e in errors]
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+    def test_shadowed_imported_generic_qualified_call_no_false_tier1(
+        self,
+    ) -> None:
+        """`#814` asymmetric variant: an imported generic (`gen`, identity)
+        shadowed by a LOCAL non-generic `gen` (adds 100) AND module-qualified
+        called must run the MODULE generic — matching what verify proves — not
+        the local shadow.
+
+        Pre-fix: verify proved ``m::gen(5) == 5`` via the module's contract while
+        codegen fell back to the local shadow (`5 + 100 == 105`) — a false
+        Tier-1 (verify clean, runtime violates).  The local's ``+ 100`` (not
+        identity) makes the shadow's wrong answer (105) impossible to mistake for
+        the module generic's (5), and a bare ``gen(5)`` must STILL reach the
+        local shadow (§8.5.2), proving the qualified fix didn't hijack the bare
+        namespace.
+        """
+        import tempfile
+        from pathlib import Path
+
+        from vera.verifier import verify
+
+        gen_mod = """\
+public forall<T> fn gen(@T -> @T)
+  requires(true) ensures(@T.result == @T.0) effects(pure)
+{ @T.0 }
+"""
+        mod = self._resolved(("g",), gen_mod)
+        main_src = """\
+import g;
+private fn gen(@Int -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ @Int.0 + 100 }
+public fn qual_probe(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ g::gen(5) }
+public fn bare_probe(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ gen(5) }
+"""
+        # Codegen: qualified reaches the module identity generic (5); bare stays
+        # on the local shadow (105).
+        assert self._run_mod(main_src, [mod], fn="qual_probe") == 5
+        assert self._run_mod(main_src, [mod], fn="bare_probe") == 105
+
+        # Verifier: proving `qual_probe`'s value through the module generic's
+        # contract must be consistent with the run (no false Tier-1).
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".vera", delete=False, encoding="utf-8",
+        ) as f:
+            f.write(main_src)
+            f.flush()
+            path = f.name
+        try:
+            prog = transform(parse_file(path))
+            vres = verify(prog, main_src, resolved_modules=[mod])
+            errors = [d for d in vres.diagnostics if d.severity == "error"]
+            assert errors == [], [e.description for e in errors]
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+    def test_shadowed_generic_calling_another_generic_transitive(self) -> None:
+        """`#774` review (CR 3518737014): a SHADOWED imported generic whose body
+        calls ANOTHER generic must get that transitive clone emitted too.
+
+        `outer<T>` (identity via `inner(@T.0)`) is shadowed by a local
+        non-generic `outer` (adds 100); `inner<T>` is an unshadowed sibling.
+        `g::outer(7)` must run the module generic — `inner(7) == 7` — so the
+        transitive `inner$Int` clone MUST be emitted.  Pre-fix the shadowed path
+        appended `mod$g$outer$Int` without scanning its body, so `inner$Int` was
+        never emitted and the run failed WASM validation at
+        `unknown func $mod$g$outer$Int` (the clone body couldn't compile its
+        missing `inner$Int` call).  A bare `outer(7)` must still hit the local
+        shadow (107), proving the qualified transitive fix didn't leak.
+        """
+        gen_mod = """\
+module g;
+public forall<T> fn inner(@T -> @T)
+  requires(true) ensures(@T.result == @T.0) effects(pure)
+{ @T.0 }
+public forall<T> fn outer(@T -> @T)
+  requires(true) ensures(@T.result == @T.0) effects(pure)
+{ inner(@T.0) }
+"""
+        mod = self._resolved(("g",), gen_mod)
+        main_src = """\
+import g;
+private fn outer(@Int -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ @Int.0 + 100 }
+public fn qual_probe(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ g::outer(7) }
+public fn bare_probe(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ outer(7) }
+"""
+        assert self._run_mod(main_src, [mod], fn="qual_probe") == 7
+        assert self._run_mod(main_src, [mod], fn="bare_probe") == 107
+
+    def test_shadowed_generic_deep_transitive_chain(self) -> None:
+        """A three-deep transitive chain through a shadowed generic
+        (`outer` → `inner` → `helper`, all identity) resolves end-to-end: the
+        closure must chase past the first transitive hop.  `g::outer(9) == 9`.
+        """
+        gen_mod = """\
+module g;
+public forall<T> fn helper(@T -> @T)
+  requires(true) ensures(@T.result == @T.0) effects(pure)
+{ @T.0 }
+public forall<T> fn inner(@T -> @T)
+  requires(true) ensures(@T.result == @T.0) effects(pure)
+{ helper(@T.0) }
+public forall<T> fn outer(@T -> @T)
+  requires(true) ensures(@T.result == @T.0) effects(pure)
+{ inner(@T.0) }
+"""
+        mod = self._resolved(("g",), gen_mod)
+        main_src = """\
+import g;
+private fn outer(@Int -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ @Int.0 + 100 }
+public fn probe(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ g::outer(9) }
+"""
+        assert self._run_mod(main_src, [mod], fn="probe") == 9
+
+    def test_shadowed_generic_calling_shadowed_sibling(self) -> None:
+        """When a shadowed generic's body calls a SAME-MODULE shadowed sibling,
+        the intra-module call must reach the sibling's `mod$…` clone, not the
+        importer's local shadow of that name.
+
+        Both `outer` and `inner` are shadowed by locals (adding 100 / 200).
+        `g::outer(9)` runs the module `outer`, whose body calls the module
+        `inner` (identity) — so the result is `9`, NOT `9 + 200 == 209` (the
+        local `inner` shadow).  Pre-fix the clone body's bare `inner` resolved to
+        the local shadow and the postcondition `result == arg` failed at run.
+        """
+        gen_mod = """\
+module g;
+public forall<T> fn inner(@T -> @T)
+  requires(true) ensures(@T.result == @T.0) effects(pure)
+{ @T.0 }
+public forall<T> fn outer(@T -> @T)
+  requires(true) ensures(@T.result == @T.0) effects(pure)
+{ inner(@T.0) }
+"""
+        mod = self._resolved(("g",), gen_mod)
+        main_src = """\
+import g;
+private fn outer(@Int -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ @Int.0 + 100 }
+private fn inner(@Int -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ @Int.0 + 200 }
+public fn probe(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ g::outer(9) }
+"""
+        assert self._run_mod(main_src, [mod], fn="probe") == 9
+
+    def test_shadowed_generic_pair_result_in_statement_position(self) -> None:
+        """`#774` review (CR 3518737022): the statement-position result-shape
+        predicates (`_is_void_expr` / `_is_pair_result_expr`) must resolve a
+        shadowed-generic `m::gen(...)` to its per-instantiation clone, the same
+        way the desugar does.
+
+        `mkstr<T>` (shadowed) returns `@String` (an i32_pair — two stack values);
+        its LOCAL shadow returns `@Int` (one).  In statement position
+        (`g::mkstr(5); 42`) the result must be dropped as a PAIR.  Pre-fix the
+        predicate resolved the ModuleCall via `_module_qualified_targets` only —
+        seeing the local `@Int` shadow — so it dropped one value, leaving one on
+        the stack: a WASM `type mismatch: values remaining on stack` at run on a
+        check-green program.  Runs to `42`.
+        """
+        gen_mod = """\
+module g;
+public forall<T> fn mkstr(@T -> @String)
+  requires(true) ensures(true) effects(pure)
+{ "hi" }
+"""
+        mod = self._resolved(("g",), gen_mod)
+        main_src = """\
+import g;
+private fn mkstr(@Int -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ @Int.0 }
+public fn probe(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  g::mkstr(5);
+  42
+}
+"""
+        assert self._run_mod(main_src, [mod], fn="probe") == 42
+
+    def test_shadowed_generic_scalar_result_with_pair_local_shadow(
+        self,
+    ) -> None:
+        """The dual of the pair case: a shadowed generic returning a SCALAR whose
+        local shadow returns a pair.  The predicate must resolve to the clone's
+        scalar shape (drop ONE), not the local's pair (drop two) — else a value
+        is under-dropped.  `g::f(5); 42` runs to `42`.
+        """
+        gen_mod = """\
+module g;
+public forall<T> fn f(@T -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ 1 }
+"""
+        mod = self._resolved(("g",), gen_mod)
+        main_src = """\
+import g;
+private fn f(@Int -> @String)
+  requires(true) ensures(true) effects(pure)
+{ "x" }
+public fn probe(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  g::f(5);
+  42
+}
+"""
+        assert self._run_mod(main_src, [mod], fn="probe") == 42
+
+    # -- #774 review (CR 3519156263): the imported-generic false Tier-1 --
+
+    @pytest.mark.parametrize("local_shadow", [
+        "",  # unshadowed imported generic
+        (  # a same-named LOCAL GENERIC shadows it (the unhandled twin)
+            "private forall<T> fn tag(@T -> @Int)\n"
+            "  requires(true) ensures(@Int.result == 0) effects(pure)\n"
+            "{ 0 }\n\n"
+        ),
+        (  # a same-named LOCAL NON-generic shadows it (#814 family)
+            "private fn tag(@Int -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ 100 }\n\n"
+        ),
+    ], ids=["unshadowed", "generic_shadow", "nongeneric_shadow"])
+    def test_imported_generic_with_lying_contract_is_caught_at_verify(
+        self, local_shadow: str,
+    ) -> None:
+        """A cross-module generic whose clone RUNS in the importer must have its
+        MODULE contract verified by the importer — else a LYING module contract
+        is a false Tier-1 (verify clean, run violates the clone's postcondition).
+
+        The module `tag<T>` returns `0` but claims `ensures(@Int.result == 9)`.
+        The module itself never instantiates `tag`, so it only Tier-3s the
+        uninstantiated generic — the importer is the only site that instantiates
+        it.  Pre-fix, verify passed clean (`ok: True`, all Tier-1) while `vera
+        run` trapped the clone's postcondition; the fix verifies the imported
+        generic's clone at the importer's instantiation, turning it into an
+        honest E500 at verify time.  Covers all three shadow shapes: unshadowed,
+        a same-named local GENERIC shadow (the unhandled twin that absorbed the
+        module instance into the local key), and a local non-generic shadow.
+        """
+        from vera.verifier import verify
+
+        mod = self._resolved(("g",), (
+            "module g;\n"
+            "public forall<T> fn tag(@T -> @Int)\n"
+            "  requires(true) ensures(@Int.result == 9) effects(pure)\n"
+            "{ 0 }\n"
+        ))
+        call = "tag(5)" if local_shadow == "" else "g::tag(5)"
+        main_src = (
+            "import g;\n\n"
+            f"{local_shadow}"
+            "public fn probe(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            f"{{ {call} }}\n"
+        )
+        import tempfile
+        from pathlib import Path
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".vera", delete=False, encoding="utf-8",
+        ) as f:
+            f.write(main_src)
+            f.flush()
+            path = f.name
+        try:
+            prog = transform(parse_file(path))
+            vres = verify(prog, main_src, resolved_modules=[mod])
+            errors = [d for d in vres.diagnostics if d.severity == "error"]
+            assert any(e.error_code == "E500" for e in errors), (
+                f"the lying module generic's clone must be caught at verify "
+                f"(E500), got diagnostics {[e.error_code for e in errors]}"
+            )
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+    def test_imported_generic_honest_contract_verifies_and_runs(self) -> None:
+        """The dual of the lying-contract test: an HONEST imported generic
+        (`tag` returns `0`, `ensures(@Int.result == 0)`) with a local generic
+        shadow verifies clean AND runs — the fix must not over-reject the
+        common honest case.  `g::tag(5)` runs the module (0); a bare `tag(5)`
+        runs the local generic shadow (which here also returns 0 but with a
+        distinct contract, verified independently).
+        """
+        from vera.verifier import verify
+
+        mod = self._resolved(("g",), (
+            "module g;\n"
+            "public forall<T> fn tag(@T -> @Int)\n"
+            "  requires(true) ensures(@Int.result == 0) effects(pure)\n"
+            "{ 0 }\n"
+        ))
+        main_src = (
+            "import g;\n\n"
+            "private forall<T> fn tag(@T -> @Int)\n"
+            "  requires(true) ensures(@Int.result == 7) effects(pure)\n"
+            "{ 7 }\n\n"
+            "public fn qual(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ g::tag(5) }\n"
+            "public fn bare(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ tag(5) }\n"
+        )
+        # Module tag → 0; local generic tag → 7. Distinct clones, both honest.
+        assert self._run_mod(main_src, [mod], fn="qual") == 0
+        assert self._run_mod(main_src, [mod], fn="bare") == 7
+        import tempfile
+        from pathlib import Path
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".vera", delete=False, encoding="utf-8",
+        ) as f:
+            f.write(main_src)
+            f.flush()
+            path = f.name
+        try:
+            prog = transform(parse_file(path))
+            vres = verify(prog, main_src, resolved_modules=[mod])
+            errors = [d for d in vres.diagnostics if d.severity == "error"]
+            assert errors == [], [e.description for e in errors]
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+    def test_unshadowed_generic_calling_shadowed_sibling(self) -> None:
+        """`#774` review (CR 3519063445): the REVERSE of the shadowed→normal
+        transitive case — an UNSHADOWED (normal) local generic whose body
+        qualified-calls a SHADOWED generic must emit that shadowed clone.
+
+        `caller<T>` (local, unshadowed) calls `g::gen(@T.0)` where `gen` is
+        shadowed by a local non-generic (+100).  `caller(5)` → its clone
+        `caller$Int` calls `g::gen` → the MODULE generic (identity) → `5`.
+        Pre-fix the shadowed emission seeded only from `program.declarations`
+        non-generic bodies, never from the emitted `caller$Int` clone, so
+        `mod$g$gen$Int` was missing → `unknown func $caller$Int` at run.  A
+        lying module `gen` reached this way is caught at verify (E500), and
+        both sides discover `mod$g$gen<Int>` (the differential pins it).
+        """
+        from vera.verifier import verify
+
+        mod = self._resolved(("g",), (
+            "module g;\n"
+            "public forall<T> fn gen(@T -> @T)\n"
+            "  requires(true) ensures(@T.result == @T.0) effects(pure)\n"
+            "{ @T.0 }\n"
+        ))
+        main_src = (
+            "import g;\n\n"
+            "private fn gen(@Int -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ @Int.0 + 100 }\n\n"
+            "private forall<T> fn caller(@T -> @T)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ g::gen(@T.0) }\n\n"
+            "public fn probe(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ caller(5) }\n"
+        )
+        assert self._run_mod(main_src, [mod], fn="probe") == 5
+        import tempfile
+        from pathlib import Path
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".vera", delete=False, encoding="utf-8",
+        ) as f:
+            f.write(main_src)
+            f.flush()
+            path = f.name
+        try:
+            prog = transform(parse_file(path))
+            vres = verify(prog, main_src, resolved_modules=[mod])
+            errors = [d for d in vres.diagnostics if d.severity == "error"]
+            assert errors == [], [e.description for e in errors]
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+
+# =====================================================================
 # #661 — cross-module name collision in template-warning suppression
 # =====================================================================
 

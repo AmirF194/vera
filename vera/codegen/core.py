@@ -312,6 +312,34 @@ class CodeGenerator(
         # Pass 2.5 consults it so an imported fn shadowed by a local where-fn is
         # not emitted under a clashing bare name (#814).
         self._local_shadowed_fn_names: set[str] = set()
+        # #774: imported PUBLIC generic (`forall`) FnDecls the importer must
+        # monomorphize itself — cross-module generic monomorphization.  The
+        # importer discovers instantiations from ITS OWN call sites and emits
+        # the clones into its own (flat) WASM module, since the defining module
+        # only monomorphizes its own instantiations (and never calls a generic
+        # it merely exports).  Keyed by bare name (first-seen wins, public +
+        # import-filtered), split by whether a LOCAL shadows the bare name:
+        #   * `_imported_generic_decls` — UNshadowed: merged into
+        #     `generic_decls` in `_monomorphize`, so both a bare call `gid(…)`
+        #     and a qualified `m::gid(…)` (which desugars to the bare target)
+        #     route through `_generic_fn_info` to the emitted clone.
+        #   * `_shadowed_imported_generic_decls` — a local non-generic shadows
+        #     the bare name (#814 asymmetric variant), so ONLY the qualified
+        #     form may reach the module's generic; the bare name stays on the
+        #     local.  These are monomorphized under a distinct ``mod$…$`` mono
+        #     prefix and reached via `_module_qualified_generic_targets`.
+        self._imported_generic_decls: dict[str, ast.FnDecl] = {}
+        self._shadowed_imported_generic_decls: dict[
+            tuple[str, ...], dict[str, ast.FnDecl]
+        ] = {}
+        # #814/#774: (module path, generic name) → mono base name the qualified
+        # call must mangle against, for a generic whose bare name a local
+        # shadows.  The ModuleCall desugar consults this so `m::gen(5)` resolves
+        # to the module generic's clone (`mod$m$gen$Int`) instead of falling
+        # back to the local shadow's bare `gen`.
+        self._module_qualified_generic_bases: dict[
+            tuple[tuple[str, ...], str], str
+        ] = {}
 
     # -----------------------------------------------------------------
     # Diagnostics
