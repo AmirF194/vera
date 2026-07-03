@@ -2282,3 +2282,181 @@ public fn main(@Unit -> @Int)
             },
         )
         assert val == 82
+
+
+class TestModuleCallInConstructorField905(TestCrossModuleCodegen):
+    """#905: a non-void cross-module call (``ModuleCall``) used *directly* as a
+    constructor argument (a ``Tuple``/ADT field) must compile and run.
+
+    This is the non-void sibling of #902 (which fixed only the ``Unit``-valued
+    field case via ``_is_void_expr``).  Before the fix, ``_infer_expr_wasm_type``
+    returned ``None`` for a ``ModuleCall`` argument, so
+    ``_translate_constructor_call`` raised ``CodegenSkip``; the enclosing
+    function was silently dropped and any call to it dangled at run with
+    ``unknown func: failed to find name $mkt``.
+
+    All programs here pass ``vera check`` (the checker resolves the module
+    call's return type fine); the gap was purely codegen-time WASM-type
+    inference at the constructor-arg site.
+    """
+
+    # A module exporting a NON-void @Int-returning function (magnitude) plus a
+    # @Unit-returning one (log) so we can compose with the #902 Unit-field case.
+    MAG_MODULE = """\
+public fn magnitude(@Int -> @Int)
+  requires(true)
+  ensures(@Int.result >= 0)
+  effects(pure)
+{ if @Int.0 < 0 then { 0 - @Int.0 } else { @Int.0 } }
+"""
+
+    def test_module_call_in_tuple_field_runs(self) -> None:
+        """``Tuple(m::magnitude(@Int.0), 9)`` — the canonical #905 repro.
+
+        Extracts the trailing (literal ``9``) field so the assertion is
+        decoupled from the module-call value; the point is that the function
+        compiles at all (before the fix it was dropped and ``mkt`` dangled).
+        De Bruijn: ``@Int.0`` = LAST field (the ``9``), ``@Int.1`` = first.
+        """
+        mod = self._resolved(("m",), self.MAG_MODULE)
+        val = self._run_mod("""\
+import m(magnitude);
+private fn mkt(@Int -> @Tuple<Int, Int>)
+  requires(true) ensures(true) effects(pure)
+{ Tuple(m::magnitude(@Int.0), 9) }
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Tuple<Int, Int> = mkt(-5); match @Tuple<Int, Int>.0 { Tuple(@Int, @Int) -> @Int.0 } }
+""", [mod], fn="main")
+        assert val == 9
+
+    def test_module_call_in_tuple_field_value_correct(self) -> None:
+        """Extract the FIRST field (the module-call result) itself: it must be
+        the actual ``magnitude(-5) == 5``, not garbage — proves the field is laid
+        out at the right offset with the right WASM type, not merely that the
+        function compiles.  De Bruijn: ``@Int.1`` = first field (the module
+        call)."""
+        mod = self._resolved(("m",), self.MAG_MODULE)
+        val = self._run_mod("""\
+import m(magnitude);
+private fn mkt(@Int -> @Tuple<Int, Int>)
+  requires(true) ensures(true) effects(pure)
+{ Tuple(m::magnitude(@Int.0), 9) }
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Tuple<Int, Int> = mkt(-5); match @Tuple<Int, Int>.0 { Tuple(@Int, @Int) -> @Int.1 } }
+""", [mod], fn="main")
+        assert val == 5  # magnitude(-5)
+
+    def test_module_call_in_dotted_path_tuple_field_runs(self) -> None:
+        """The dotted-path form ``vera.math::magnitude(...)`` (as in the issue
+        repro) is the same ``ModuleCall`` AST node and must also work.  Extracts
+        the module-call field (``@Int.1`` = first field)."""
+        mod = self._resolved(("vera", "math"), self.MAG_MODULE)
+        val = self._run_mod("""\
+import vera.math(magnitude);
+private fn mkt(@Int -> @Tuple<Int, Int>)
+  requires(true) ensures(true) effects(pure)
+{ Tuple(vera.math::magnitude(@Int.0), 9) }
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Tuple<Int, Int> = mkt(-5); match @Tuple<Int, Int>.0 { Tuple(@Int, @Int) -> @Int.1 } }
+""", [mod], fn="main")
+        assert val == 5
+
+    def test_module_call_non_final_field_with_unit_field(self) -> None:
+        """#905 composed with #902: a module-call field in NON-final position,
+        mixed with a zero-size ``Unit`` field — ``Tuple(m::magnitude(-5), (), 7)``.
+
+        The Unit field advances no offset, so extracting the trailing ``7``
+        checks the module-call field's WASM type feeds correct offsets for the
+        fields after it."""
+        mod = self._resolved(("m",), self.MAG_MODULE)
+        val = self._run_mod("""\
+import m(magnitude);
+private fn mkt(@Int -> @Tuple<Int, Unit, Int>)
+  requires(true) ensures(true) effects(pure)
+{ Tuple(m::magnitude(@Int.0), (), 7) }
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Tuple<Int, Unit, Int> = mkt(-5); match @Tuple<Int, Unit, Int>.0 { Tuple(@Int, @Unit, @Int) -> @Int.0 } }
+""", [mod], fn="main")
+        assert val == 7  # trailing field extracted past the module-call + Unit
+
+    def test_module_call_in_adt_constructor_field(self) -> None:
+        """A user ADT (non-Tuple) constructor with a module-call field shares
+        ``_translate_constructor_call``, so it must be fixed too."""
+        mod = self._resolved(("m",), self.MAG_MODULE)
+        val = self._run_mod("""\
+import m(magnitude);
+public data Boxed { Box(Int) }
+private fn mk(@Int -> @Boxed)
+  requires(true) ensures(true) effects(pure)
+{ Box(m::magnitude(@Int.0)) }
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Boxed = mk(-8); match @Boxed.0 { Box(@Int) -> @Int.0 } }
+""", [mod], fn="main")
+        assert val == 8  # magnitude(-8)
+
+    def test_module_call_in_array_literal_element(self) -> None:
+        """#905 array-literal sibling: a ModuleCall as the FIRST element of an
+        array literal reaches ``_infer_array_element_type`` → ``_infer_vera_type``,
+        which also returned None for ModuleCall.  The symptom was quieter than
+        the constructor crash — ``compile`` reported ``ok`` but the enclosing
+        function was dropped from the exports (its array-let binding was
+        skipped).  ``[m::magnitude(-5), 9]`` indexed at 0 must be
+        ``magnitude(-5) == 5``."""
+        mod = self._resolved(("m",), self.MAG_MODULE)
+        val = self._run_mod("""\
+import m(magnitude);
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Array<Int> = [m::magnitude(-5), 9]; @Array<Int>.0[0] }
+""", [mod], fn="main")
+        assert val == 5
+
+    def test_module_call_in_array_literal_trailing_element(self) -> None:
+        """The same array-literal, indexed at the trailing literal element (9),
+        confirms the module-call element sized the array correctly."""
+        mod = self._resolved(("m",), self.MAG_MODULE)
+        val = self._run_mod("""\
+import m(magnitude);
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Array<Int> = [m::magnitude(-5), 9]; @Array<Int>.0[1] }
+""", [mod], fn="main")
+        assert val == 9
+
+    # -- Regressions: paths that already worked must be unaffected -----------
+
+    def test_same_file_fncall_in_field_still_runs(self) -> None:
+        """A SAME-FILE ``FnCall`` in a constructor field already worked (its
+        return type is resolved); the fix must not disturb it.  Extracts the
+        same-file-call field (``@Int.1`` = first field)."""
+        val = _run("""\
+private fn magnitude(@Int -> @Int)
+  requires(true) ensures(@Int.result >= 0) effects(pure)
+{ if @Int.0 < 0 then { 0 - @Int.0 } else { @Int.0 } }
+private fn mkt(@Int -> @Tuple<Int, Int>)
+  requires(true) ensures(true) effects(pure)
+{ Tuple(magnitude(@Int.0), 9) }
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Tuple<Int, Int> = mkt(-5); match @Tuple<Int, Int>.0 { Tuple(@Int, @Int) -> @Int.1 } }
+""", fn="main")
+        assert val == 5
+
+    def test_plain_literal_field_still_runs(self) -> None:
+        """A plain-literal constructor field must NOT take the new module-call
+        path — guards against the fix over-firing.  De Bruijn: ``@Int.0`` = LAST
+        field (the literal ``9``)."""
+        val = _run("""\
+private fn mkt(@Int -> @Tuple<Int, Int>)
+  requires(true) ensures(true) effects(pure)
+{ Tuple(@Int.0, 9) }
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Tuple<Int, Int> = mkt(4); match @Tuple<Int, Int>.0 { Tuple(@Int, @Int) -> @Int.0 } }
+""", fn="main")
+        assert val == 9
