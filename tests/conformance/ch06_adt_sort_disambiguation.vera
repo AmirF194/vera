@@ -1,0 +1,43 @@
+-- Conformance: the verifier must not conflate distinct ADT sorts (Chapter 6)
+-- Tests: ensures over ADT match, generic vs flat-ADT sort disambiguation (#884)
+-- A monomorphized `Box<Int>` and a flat ADT named `Box_Int` sanitized to the
+-- same Z3 sort name pre-#884, so Z3's datatype cache conflated the two sorts
+-- and rejected this trivially-true program with a false E500 counterexample
+-- (`@Box<Int>.0 = MkBoxInt(False)`, the flat ADT's ctor on a `Box<Int>` slot).
+-- Injective Z3 sort names keep the sorts distinct; every clause is Tier-1.
+public data Box<T> {
+  MkBox(T)
+}
+
+public data Box_Int {
+  MkBoxInt(Bool)
+}
+
+public fn box_val(@Box<Int> -> @Int)
+  requires(true)
+  ensures(match @Box<Int>.0 { MkBox(@Int) -> @Int.result == @Int.0 })
+  effects(pure)
+{
+  match @Box<Int>.0 {
+    MkBox(@Int) -> @Int.0
+  }
+}
+
+public fn bool_val(@Box_Int -> @Bool)
+  requires(true)
+  ensures(match @Box_Int.0 { MkBoxInt(@Bool) -> @Bool.result == @Bool.0 })
+  effects(pure)
+{
+  match @Box_Int.0 {
+    MkBoxInt(@Bool) -> @Bool.0
+  }
+}
+
+public fn identity_true(@Box<Int>, @Box_Int -> @Int)
+  requires(true)
+  ensures(@Int.result == box_val(@Box<Int>.0))
+  effects(pure)
+{
+  let @Bool = bool_val(@Box_Int.0);
+  box_val(@Box<Int>.0)
+}

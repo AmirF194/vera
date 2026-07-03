@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Callable
 import z3
 
 from vera import ast
+from vera.monomorphize import mangle_type_name, unmangle_type_name
 from vera.types import (
     AdtType,
     PrimitiveType,
@@ -207,16 +208,20 @@ def _adt_sort_key(adt_name: str, type_args: tuple[Type, ...]) -> str:
 
 
 def _z3_sort_name(key: str) -> str:
-    """Derive a Z3-legal datatype name from a canonical sort key (#881).
+    """Derive a Z3-legal datatype name from a canonical sort key (#881, #884).
 
     Single choke point for the ``key -> z3.Datatype`` name transformation that
-    was previously inlined at each ``z3.Datatype(...)`` site.  ``<``/``>`` and
-    the ``", "`` type-arg separator are not valid in a Z3 datatype identifier,
-    so ``List<Int>`` becomes ``List_Int`` and ``Pair<A, B>`` becomes
-    ``Pair_A_B``.  Centralised so mutually-recursive group members and tuples
-    name themselves identically.
+    was previously inlined at each ``z3.Datatype(...)`` site (#881, centralised
+    so mutually-recursive group members and tuples name themselves
+    identically).  The transform MUST be **injective** in the type key: Z3's
+    per-context datatype cache conflates same-named sorts (last ``create()``
+    wins and retroactively mutates earlier ones), so a lossy collision (e.g.
+    ``Box<Int>`` and a flat user ADT ``Box_Int`` both sanitizing to
+    ``Box_Int``) makes one sort adopt the other's constructors — a false E500
+    counterexample on valid code (#884).  Route through the injective #775
+    mangler rather than the old lossy ``<``/``>``/``", "`` replacement.
     """
-    return key.replace("<", "_").replace(">", "").replace(", ", "_")
+    return mangle_type_name(key)
 
 
 def _substitute_type(ty: Type, subst: dict[str, Type]) -> Type:
@@ -597,7 +602,11 @@ class SmtContext:
 
         # One builder per group member, all referenceable while resolving
         # fields so cross-references (mutual or self, direct or Tuple-mediated)
-        # stitch at create time.
+        # stitch at create time (#881).  Each builder's Z3-visible name comes
+        # from `_z3_sort_name`, which is injective in the type key (#884): a
+        # lossy collision (e.g. `Box<Int>` vs a flat `Box_Int`) would make Z3's
+        # per-context datatype cache conflate the two sorts and adopt one's
+        # constructors for the other — a false E500 on valid code.
         builders: dict[str, z3.Datatype] = {
             member_key: z3.Datatype(_z3_sort_name(member_key))
             for member_key in group
@@ -1126,9 +1135,10 @@ class SmtContext:
            against future regressions).
 
         3. **`_z3_sorts` direct key lookup**: tries the raw
-           stripped key (e.g. `MyAdt`) and the angle-bracketed
-           generic form (e.g. `List_Int` → `List<Int>`) as
-           defensive last-ditch ADT-sort recovery.  Mostly
+           stripped key (e.g. `MyAdt`) and the mangler-inverted
+           key (e.g. `List_LInt_R` → `List<Int>`, since #884 routed
+           ADT sort names through the injective `mangle_type_name`)
+           as defensive last-ditch ADT-sort recovery.  Mostly
            redundant given (1) — every `Array_<T>` sort is
            created via `_get_array_sort` which populates
            `_array_element_sorts` at creation time — but kept as
@@ -1149,16 +1159,24 @@ class SmtContext:
             return z3.BoolSort()
         if sort_name == "Array_String":
             return z3.StringSort()
-        # 3. ADT-element fallback — try the stripped name, then a
-        # few canonical key shapes.  `_z3_sorts` uses
-        # `_adt_sort_key(name, type_args)` which produces
-        # `"List<Int>"`-style keys with angle brackets; the Z3
-        # sort name has those stripped via the transformation in
-        # `_get_or_create_adt_sort`, so direct round-trip isn't
-        # always possible — these candidates catch the common
-        # generic-ADT shapes.
+        # 3. ADT-element fallback — recover the `_z3_sorts` key from the
+        # mangled Array-element sort name.  `_z3_sorts` uses
+        # `_adt_sort_key(name, type_args)` which produces `"List<Int>"`-style
+        # keys with angle brackets, while the element sort's Z3 name is the
+        # injective mangler output (`List<Int>` → `List_LInt_R`; #884 routed
+        # ADT sort names through `mangle_type_name`).  Invert the mangler to
+        # get the key back; a flat ADT name (no metacharacters) unmangles to
+        # itself.  A stripped name that is not valid mangler output has no
+        # ADT preimage — skip that candidate rather than guess.
         elt_key = sort_name[len("Array_"):]
-        for candidate in (elt_key, elt_key.replace("_", "<", 1) + ">"):
+        candidates = [elt_key]
+        try:
+            unmangled = unmangle_type_name(elt_key)
+        except ValueError:
+            unmangled = None
+        if unmangled is not None and unmangled != elt_key:
+            candidates.append(unmangled)
+        for candidate in candidates:
             sort = self._z3_sorts.get(candidate)
             if sort is not None:
                 return sort

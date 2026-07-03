@@ -1417,6 +1417,45 @@ class TestMangleInjectivity:
         b = Monomorphizer._mangle_fn_name("g", ("Map<String, Int>", "A_B"))
         assert a == b
 
+    def test_unmangle_inverts_mangle_over_canonical_names(self) -> None:
+        """``unmangle_type_name`` round-trips every canonical type name (#884).
+
+        The verifier's Array-element reverse lookup depends on inverting the
+        mangler to recover a ``_z3_sorts`` key (``Box<Int>``) from a mangled
+        element sort name (``Box_LInt_R``).  The mangler is a prefix code, so
+        the inverse is exact over canonical names — including flat ADT names
+        that literally spell escape codes (``Box_Int`` → ``Box__Int`` →
+        ``Box_Int``) and nested generics with separators.
+        """
+        from vera.monomorphize import mangle_type_name, unmangle_type_name
+
+        names = [
+            "Int", "Box<Int>", "List<Int>", "Map<String, Int>",
+            "Box_Int", "A_B_C", "Result<String, Int>",
+            "Tuple<Tuple<Int>, Int>", "Tuple<Tuple<Int, Int>>",
+            "Map<String, List<Int>>",
+        ]
+        for name in names:
+            assert unmangle_type_name(mangle_type_name(name)) == name, (
+                f"mangle/unmangle round-trip failed for {name!r}"
+            )
+
+    def test_unmangle_rejects_non_range_input(self) -> None:
+        """``unmangle_type_name`` raises on strings outside the mangler range.
+
+        A trailing lone ``_`` or an unknown ``_X`` code has no preimage; the
+        Array-element lookup relies on this to *skip* a candidate rather than
+        silently fabricate a wrong key.
+        """
+        import pytest
+
+        from vera.monomorphize import unmangle_type_name
+
+        with pytest.raises(ValueError):
+            unmangle_type_name("Box_")  # trailing lone underscore
+        with pytest.raises(ValueError):
+            unmangle_type_name("Box_X")  # unknown escape code
+
     # Two-param collision program: `unwrap_second<A_B, C>` and
     # `unwrap_second<A, B_C>` collided to `$unwrap_second$A_B_C` pre-fix
     # (WAT: duplicate func identifier).  Outputs are chosen so no
