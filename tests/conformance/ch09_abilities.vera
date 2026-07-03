@@ -240,3 +240,88 @@ public fn test_hash_consistent(@Unit -> @Bool)
 {
   eq(hash("hello"), hash("hello"))
 }
+
+-- ================================================================
+-- Eq / Ord ability operations in CONTRACT position (#874, spec §6.3.1)
+-- ----------------------------------------------------------------
+-- `eq(a, b)` and `compare(a, b)` are the generic-programming spelling of
+-- `==` and the three-way `Ordering` comparison, and may appear directly in
+-- a contract predicate.  Each is verified AND compiled as its canonical
+-- operator form (Tier-1 proved, runtime-enforced), so these functions
+-- exercise the ability op inside `ensures` / `requires` — the exact path
+-- that pre-#874 tripped an uncaught CodegenSkip and a Tier-3 demotion.
+-- ================================================================
+-- Test: eq in ensures — the postcondition proves at Tier 1 and enforces.
+public fn test_eq_in_ensures(@Unit -> @Int)
+  requires(true)
+  ensures(eq(@Int.result, 3))
+  effects(pure)
+{
+  3
+}
+
+-- Test: eq in requires — the precondition proves at the call site below.
+public fn requires_eq_three(@Int -> @Int)
+  requires(eq(@Int.0, 3))
+  ensures(@Int.result == @Int.0)
+  effects(pure)
+{
+  @Int.0
+}
+
+public fn test_eq_in_requires(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 3)
+  effects(pure)
+{
+  requires_eq_three(3)
+}
+
+-- Test: compare in ensures — the result equals the input, so their
+-- three-way comparison is Equal (universally provable at Tier 1).
+public fn test_compare_in_ensures(@Int -> @Int)
+  requires(true)
+  ensures(compare(@Int.result, @Int.0) == Equal)
+  effects(pure)
+{
+  @Int.0
+}
+
+-- Test: compare in requires — a precondition that the input compares
+-- Less than 5, discharged at the call site below (3 < 5).
+public fn requires_compare_lt5(@Int -> @Int)
+  requires(compare(@Int.0, 5) == Less)
+  ensures(@Int.result == @Int.0)
+  effects(pure)
+{
+  @Int.0
+}
+
+-- Test: driver so both compare-in-contract functions run at run level.
+public fn test_compare_in_contract_driver(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 3)
+  effects(pure)
+{
+  requires_compare_lt5(test_compare_in_ensures(3))
+}
+
+-- Test: an ability op in a WHERE-helper's OWN contract (#874, PR #887).
+-- The helper's ensures uses eq; the same canonicalization must reach a
+-- where-fn's contract clauses, not just top-level ones.
+public fn test_eq_in_where_fn_contract(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 3)
+  effects(pure)
+{
+  where_helper(3)
+}
+where {
+  fn where_helper(@Int -> @Int)
+    requires(true)
+    ensures(eq(@Int.result, @Int.0))
+    effects(pure)
+  {
+    @Int.0
+  }
+}

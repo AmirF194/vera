@@ -1139,6 +1139,56 @@ class SmtContext:
             return None
         return z3.If(cond, then, else_)
 
+    def _is_user_fn(self, name: str) -> bool:
+        """True if a user (or module) function of this name is registered.
+
+        Mirrors codegen's ``expr.name not in self._fn_sigs`` gate on the
+        ability-op rewrite (#874): a `where`-helper may legitimately shadow a
+        built-in ability-op name, in which case the call is an ordinary
+        user-function call, not the built-in `eq` / `compare`.
+        """
+        return self._fn_lookup is not None and self._fn_lookup(name) is not None
+
+    @staticmethod
+    def _desugar_compare(call: ast.FnCall) -> ast.Expr:
+        """Desugar ``compare(a, b)`` to the canonical Ordering if-chain.
+
+        Mirrors codegen's Pass 1.6 exactly (#874):
+            if a < b then Less else if a == b then Equal else Greater
+        so the verifier reasons over the SAME term the runtime produces.
+        """
+        left, right = call.args[0], call.args[1]
+        return ast.IfExpr(
+            condition=ast.BinaryExpr(
+                left=left, op=ast.BinOp.LT, right=right, span=call.span,
+            ),
+            then_branch=ast.Block(
+                statements=(), span=call.span,
+                expr=ast.NullaryConstructor(name="Less", span=call.span),
+            ),
+            else_branch=ast.Block(
+                statements=(), span=call.span,
+                expr=ast.IfExpr(
+                    condition=ast.BinaryExpr(
+                        left=left, op=ast.BinOp.EQ, right=right,
+                        span=call.span,
+                    ),
+                    then_branch=ast.Block(
+                        statements=(), span=call.span,
+                        expr=ast.NullaryConstructor(
+                            name="Equal", span=call.span),
+                    ),
+                    else_branch=ast.Block(
+                        statements=(), span=call.span,
+                        expr=ast.NullaryConstructor(
+                            name="Greater", span=call.span),
+                    ),
+                    span=call.span,
+                ),
+            ),
+            span=call.span,
+        )
+
     def _translate_call(
         self, call: ast.FnCall, env: SlotEnv
     ) -> z3.ExprRef | None:
@@ -1148,6 +1198,44 @@ class SmtContext:
         For user-defined functions, looks up the callee and delegates
         to ``_translate_call_with_info``.
         """
+        # Built-in ability operations `eq` / `compare` (#874).  These are the
+        # generic-programming spelling of `==` and the Ordering three-way
+        # comparison (spec §9.8); a contract may use them directly
+        # (`ensures(eq(@Int.result, 3))`).  They are semantically identical to
+        # their operator form, so — one canonical form (#815) — desugar to the
+        # SAME canonical AST node codegen's Pass 1.6 (`_rewrite_ability_ops`)
+        # emits and re-translate, reusing this module's FP-correct `==` path
+        # and the `Ordering` datatype encoding.  Without this the ability-op
+        # `FnCall` matched no built-in, fell to the user-fn lookup (which has
+        # no `eq` entry), returned None, and demoted the whole contract to
+        # Tier 3 (E523) — a `vera check`-green postcondition never statically
+        # proved.  Guard on absence from `_fn_sigs` so a user function that
+        # legitimately shadows the name (permitted for `where`-helpers) is not
+        # hijacked, mirroring codegen's `expr.name not in self._fn_sigs` gate.
+        if (call.name == "eq" and len(call.args) == 2
+                and not self._is_user_fn(call.name)):
+            desugared: ast.Expr = ast.BinaryExpr(
+                left=call.args[0], op=ast.BinOp.EQ, right=call.args[1],
+                span=call.span,
+            )
+            return self.translate_expr(desugared, env)
+        if (call.name == "compare" and len(call.args) == 2
+                and not self._is_user_fn(call.name)):
+            # The desugar produces `Ordering` nullary ctors (`Less` / `Equal`
+            # / `Greater`).  When `compare` appears ONLY in a contract of a
+            # function whose signature never mentions `Ordering`, that sort is
+            # registered (`_adt_registry`) but never materialised in
+            # `_z3_sorts` — nothing referenced the type — so the ctors would
+            # translate to None and demote the predicate to Tier 3.  Force the
+            # sort here, scoped to the desugar so general ADT-call modular
+            # reasoning is untouched (a broad on-demand materialisation in
+            # `_find_sort_for_ctor` regressed unrelated `ensures(true)`-return
+            # ADT calls to false E500 — PR #887 review).
+            if "Ordering" in self._adt_registry:
+                self._get_or_create_adt_sort("Ordering", ())
+            return self.translate_expr(
+                self._desugar_compare(call), env)
+
         # Built-in: array_length()
         if call.name == "array_length" and len(call.args) == 1:
             arg = self.translate_expr(call.args[0], env)
