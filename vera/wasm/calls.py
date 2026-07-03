@@ -613,10 +613,13 @@ class CallsMixin:
         Returns None if type inference fails.
         """
         forall_vars, param_types = self._generic_fn_info[call.name]
+        constrained_vars = self._generic_constrained_vars.get(
+            call.name, frozenset())
         mapping: dict[str, str] = {}
 
         for param_te, arg in zip(param_types, call.args):
-            self._unify_param_arg_wasm(param_te, arg, forall_vars, mapping)
+            self._unify_param_arg_wasm(
+                param_te, arg, forall_vars, mapping, constrained_vars)
 
         # Build mangled name; default phantom vars to Bool (i32 repr — Unit
         # has no WASM representation), matching Monomorphizer's clone-side
@@ -638,6 +641,7 @@ class CallsMixin:
         arg: ast.Expr,
         forall_vars: tuple[str, ...],
         mapping: dict[str, str],
+        constrained_vars: frozenset[str] = frozenset(),
     ) -> None:
         """Unify a parameter TypeExpr against an argument to bind type vars.
 
@@ -647,6 +651,7 @@ class CallsMixin:
         if isinstance(param_te, ast.RefinementType):
             self._unify_param_arg_wasm(
                 param_te.base_type, arg, forall_vars, mapping,
+                constrained_vars,
             )
             return
 
@@ -655,6 +660,19 @@ class CallsMixin:
 
         if param_te.name in forall_vars:
             vera_type = self._infer_vera_type(arg)
+            if (param_te.name in constrained_vars
+                    and isinstance(arg, ast.ConstructorCall)):
+                # Recover the type argument a `ConstructorCall` drops, so the
+                # call-site mangled name matches the parameterized clone Pass 1.5
+                # emitted for a constrained var (`eq2$Box<String>`, not the bare
+                # `eq2$Box`).  Mirrors the discovery-side recovery in
+                # `Monomorphizer._unify_param_arg` (#772).
+                info = self._get_arg_type_info_wasm(arg)
+                if info is not None:
+                    base_name, arg_names = info
+                    if arg_names and all(a is not None for a in arg_names):
+                        resolved = [a for a in arg_names if a is not None]
+                        vera_type = f"{base_name}<{', '.join(resolved)}>"
             if vera_type and param_te.name not in mapping:
                 mapping[param_te.name] = vera_type
             return

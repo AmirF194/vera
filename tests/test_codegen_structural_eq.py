@@ -562,21 +562,25 @@ public fn main(@Unit -> @Bool) requires(true) ensures(true) effects(pure)
         assert "E699" not in codes, f"{name}: invariant leak: {codes}"
 
 
-def test_direct_eq_bare_ctor_inferred_option_rejected_e613() -> None:
-    """Direct `==` on ctor-inferred builtin Option is E613, not E699.
+def test_direct_eq_ctor_inferred_option_accepts_and_runs() -> None:
+    """#772 direct path: `Some(1) == Some(1)` recovers `Option<Int>` and runs.
 
-    `Some(1) == Some(1)` infers the BARE name `Option` (the #772-family
-    type-argument loss), so the field type is unresolvable — the direct-path
-    gate rejects in lockstep with the generic gate.  #772 recovering the
-    type argument flips this to a working comparison.
+    The `==` operand type is inferred from the `ConstructorCall` `Some(1)`;
+    pre-#772 that resolved to the BARE `Option` (type-argument loss) and the
+    direct-path gate spuriously E613'd.  The fix recovers `<Int>`, so the
+    comparison derives and compares by value.
     """
-    source = """\
+    same = """\
 public fn main(@Unit -> @Bool) requires(true) ensures(true) effects(pure)
 { Some(1) == Some(1) }
 """
-    codes = _errors(source)
-    assert "E613" in codes, f"expected E613, got {codes}"
-    assert "E699" not in codes, f"invariant leak on the direct path: {codes}"
+    diff = """\
+public fn main(@Unit -> @Bool) requires(true) ensures(true) effects(pure)
+{ Some(1) == Some(2) }
+"""
+    assert _errors(same) == [], f"Some(1)==Some(1) must derive: {_errors(same)}"
+    assert _run(same) == 1
+    assert _run(diff) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -683,31 +687,91 @@ public fn main(@Unit -> @Bool) requires(true) ensures(true) effects(pure)
 
 
 # ---------------------------------------------------------------------------
-# #772 interaction probe (report-only; behaviour asserted, not a fix here)
+# #772 — Eq auto-derivation on the CONSTRUCTOR-inferred path is type-arg-aware
 #
-# The exact #772 constructor-path repro: `eq2(MkBox("a"), MkBox("a"))` where the
-# type argument is inferred from a `ConstructorCall`.  Under #773's structural
-# rewrite the outcome is a clean E613 rather than the pre-existing silent
-# false-accept OR a codegen invariant crash: the monomorphizer still resolves
-# the `ConstructorCall` to the BARE `Box` (dropping `<String>`), so the gate has
-# no type argument and — in lockstep with codegen, which likewise can't resolve
-# the field — rejects.  Recovering the lost type argument (so this DERIVES) is
-# #772's job.  This test pins the current, lockstep-correct behaviour so a
-# future #772 fix flips it deliberately.
+# When an Eq-constrained generic's type var is inferred from a `ConstructorCall`
+# (`eq2(MkBox("a"), …)`), the monomorphizer resolves the argument to the BARE
+# ADT name `Box` for clone mangling.  Pre-#772 that bare name also reached the
+# Eq gate, which — having no `<String>` type argument — rejected `Box<String>`
+# with a spurious E613 (an over-reject; post-#773 it no longer mis-compiles, it
+# refuses a program the slot-ref form accepts).  #772 recovers the type argument
+# for the Eq check specifically (leaving clone mangling on the bare name), so the
+# constructor path derives `Eq` exactly when the slot-ref path does.
+#
+# These assert the POST-FIX behaviour and must run correctly (content
+# comparison, not pointer identity), while a genuinely non-Eq type argument
+# (Array) is still rejected.
 # ---------------------------------------------------------------------------
 
+_BOX_STRING_CTOR_EQ = """\
+public data Box<T> { MkBox(T) }
+private forall<T where Eq<T>> fn eq2(@T, @T -> @Bool)
+  requires(true) ensures(true) effects(pure) { @T.1 == @T.0 }
+public fn same(@Unit -> @Bool) requires(true) ensures(true) effects(pure)
+{ eq2(MkBox("a"), MkBox("a")) }
+public fn diff(@Unit -> @Bool) requires(true) ensures(true) effects(pure)
+{ eq2(MkBox("a"), MkBox("b")) }
+"""
 
-def test_772_constructor_path_rejects_in_lockstep() -> None:
-    """#772 ctor-path: bare-name resolution → clean E613, no E699 crash."""
+# Nested-ADT field: two `MkInner(1)` are DISTINCT heap allocations with equal
+# content, so an equal result on `same` proves the derived Eq compares by VALUE
+# (recurses into `$eq_Inner`), not by the wrapper pointer — the run differential
+# that a pointer-identity mis-compile would fail (`same` would be 0).  This
+# exercises the constructor path WITHOUT the String-returning-builtin inference
+# gap (#769) that `string_concat` args would hit.
+_BOX_NESTED_CTOR_EQ = """\
+public data Inner { MkInner(Int) }
+public data Box<T> { MkBox(T) }
+private forall<T where Eq<T>> fn eq2(@T, @T -> @Bool)
+  requires(true) ensures(true) effects(pure) { @T.1 == @T.0 }
+public fn same(@Unit -> @Bool) requires(true) ensures(true) effects(pure)
+{ eq2(MkBox(MkInner(1)), MkBox(MkInner(1))) }
+public fn diff(@Unit -> @Bool) requires(true) ensures(true) effects(pure)
+{ eq2(MkBox(MkInner(1)), MkBox(MkInner(2))) }
+"""
+
+
+def test_772_ctor_path_box_string_accepts() -> None:
+    """#772: `eq2(MkBox("a"), ...)` (ctor-inferred Box<String>) compiles.
+
+    The type argument `String` is recovered — for the Eq gate AND the clone
+    body's slot type AND the call-site mangled name — so the constructor path
+    now derives `Eq` just as the slot-ref form does, with no spurious E613.
+    """
+    codes = _errors(_BOX_STRING_CTOR_EQ)
+    assert codes == [], f"ctor-path Box<String> must derive Eq, got {codes}"
+
+
+def test_772_ctor_path_box_string_run_differential() -> None:
+    """#772: the ctor-path Box<String> derivation compares by String content."""
+    assert _run(_BOX_STRING_CTOR_EQ, fn="same") == 1
+    assert _run(_BOX_STRING_CTOR_EQ, fn="diff") == 0
+
+
+def test_772_ctor_path_nested_adt_compares_by_value() -> None:
+    """#772: the recovered derivation recurses into the field's Eq, not pointer.
+
+    `MkInner(1)` on each side is a fresh allocation; an equal `same` result
+    proves value comparison — a pointer-identity mis-compile returns 0 here.
+    """
+    assert _run(_BOX_NESTED_CTOR_EQ, fn="same") == 1
+    assert _run(_BOX_NESTED_CTOR_EQ, fn="diff") == 0
+
+
+def test_772_ctor_path_box_array_still_rejected_e613() -> None:
+    """#772 soundness gate: a non-Eq type argument (Array) is STILL rejected.
+
+    The fix recovers the type argument; it must not over-accept.  `Box<Array>`
+    (Array has no Eq semantics) is E613 on the constructor path, with no E699
+    codegen-invariant leak.
+    """
     source = """\
 public data Box<T> { MkBox(T) }
 private forall<T where Eq<T>> fn eq2(@T, @T -> @Bool)
   requires(true) ensures(true) effects(pure) { @T.1 == @T.0 }
 public fn main(@Unit -> @Bool) requires(true) ensures(true) effects(pure)
-{ eq2(MkBox("a"), MkBox("a")) }
+{ eq2(MkBox([1, 2]), MkBox([1, 2])) }
 """
     codes = _errors(source)
-    assert "E613" in codes, f"expected E613, got {codes}"
-    assert "E699" not in codes, (
-        f"#772 ctor-path must not hit a codegen invariant: {codes}"
-    )
+    assert "E613" in codes, f"non-Eq Box<Array> must reject, got {codes}"
+    assert "E699" not in codes, f"invariant leak on rejection: {codes}"

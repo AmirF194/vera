@@ -560,10 +560,22 @@ class Monomorphizer:
         if not forall_vars:
             return None
 
+        # Type vars carrying an ability bound (`where Eq<T>`).  For these, a
+        # `ConstructorCall` argument to a direct `@T` parameter must keep its
+        # type argument (`Box<String>`, not bare `Box`) so the clone name, the
+        # substituted slot type in the clone body, AND the E613 gate all see the
+        # concrete field type — exactly as the slot-ref call form already does
+        # (#772).  Unconstrained vars stay bare: a `Box<T>` clone is a uniform
+        # pointer, so keeping one `id$Box` for every instantiation avoids
+        # needless clone splitting for generics whose behaviour is type-blind.
+        constrained_vars = frozenset(
+            c.type_var for c in (decl.forall_constraints or ())
+        )
+
         mapping: dict[str, str] = {}
         for param_te, arg in zip(decl.params, args):
             self._unify_param_arg(param_te, arg, forall_vars, ctor_to_adt,
-                                  mapping, generic_decls)
+                                  mapping, generic_decls, constrained_vars)
 
         # Check all type vars are resolved; default unresolved phantom vars to
         # Bool (NOT Unit — see the rationale just below: Bool has an i32 repr)
@@ -586,12 +598,13 @@ class Monomorphizer:
         ctor_to_adt: dict[str, str],
         mapping: dict[str, str],
         generic_decls: dict[str, ast.FnDecl] | None = None,
+        constrained_vars: frozenset[str] = frozenset(),
     ) -> None:
         """Unify a parameter TypeExpr against an argument to bind type vars."""
         if isinstance(param_te, ast.RefinementType):
             self._unify_param_arg(
                 param_te.base_type, arg, forall_vars, ctor_to_adt, mapping,
-                generic_decls,
+                generic_decls, constrained_vars,
             )
             return
 
@@ -602,6 +615,20 @@ class Monomorphizer:
             # Direct type variable — infer from argument
             vera_type = self._infer_vera_type_name(
                 arg, ctor_to_adt, generic_decls)
+            if (param_te.name in constrained_vars
+                    and isinstance(arg, ast.ConstructorCall)):
+                # `_infer_vera_type_name` drops the type argument for a
+                # `ConstructorCall` (returns bare `Box`).  For a CONSTRAINED
+                # var the type argument is load-bearing (the ability check and
+                # the clone body's structural `==` both need it), so recover the
+                # parameterized name via `_get_arg_type_info` — the same routine
+                # the `Option<T>` parameterized path uses (#772).
+                info = self._get_arg_type_info(arg, ctor_to_adt)
+                if info is not None:
+                    base_name, arg_names = info
+                    if arg_names and all(a is not None for a in arg_names):
+                        resolved = [a for a in arg_names if a is not None]
+                        vera_type = f"{base_name}<{', '.join(resolved)}>"
             if vera_type and param_te.name not in mapping:
                 mapping[param_te.name] = vera_type
             return
