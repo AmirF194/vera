@@ -214,6 +214,35 @@ public fn main(-> @Bool)
 """
         assert _run(source, fn="main") == 0
 
+    def test_generic_over_param_adt_runs(self) -> None:
+        """#891: a generic instantiated over a parameterized ADT (`gid(MkBox(7))`
+        where `gid : forall<T> fn(@T -> @T)` and `data Box<T> { MkBox(T) }`) must
+        run.  The postcondition `@T.result == @T.0` lowers `@T` (an i32 heap
+        pointer once `T = Box`) — the `ResultRef` operand once inferred as the
+        scalar i64 default emitted `i64.eq` against two i32 operands, trapping at
+        run with `type mismatch: expected i64, found i32` in the `gid$Box` clone.
+        The clone must lower an ADT-bound type variable as i32 on BOTH the
+        signature AND the postcondition/body slot reads."""
+        source = """\
+public data Box<T> { MkBox(T) }
+
+public forall<T> fn gid(@T -> @T)
+  requires(true) ensures(@T.result == @T.0) effects(pure)
+{ @T.0 }
+
+public fn main(-> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  match gid(MkBox(42)) {
+    MkBox(@Int) -> @Int.0
+  }
+}
+"""
+        # 42 is not a codegen fallback/default value; a wrong lowering traps at
+        # compile so any observable value distinguishes fixed from broken, but
+        # the unwrap also proves the ADT round-trips its payload intact.
+        assert _run(source, fn="main") == 42
+
     def test_generic_fn_wat_has_mangled_name(self) -> None:
         """WAT output contains mangled function name."""
         source = """\

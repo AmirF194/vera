@@ -148,42 +148,21 @@ class InferenceMixin:
         if isinstance(expr, ast.UnitLit):
             return None
         if isinstance(expr, ast.SlotRef):
-            resolved = self._resolve_base_type_name(expr.type_name)
-            if resolved in ("Int", "Nat"):
-                return "i64"
-            if resolved == "Float64":
-                return "f64"
-            if resolved in ("Bool", "Byte"):
-                return "i32"
-            if self._is_pair_type_name(resolved):
-                return "i32_pair"
-            base = (resolved.split("<")[0]
-                    if "<" in resolved else resolved)
-            # Opaque handle types — i32 handles managed by host runtime
-            if base in ("Decimal", "Map", "Set"):
-                return "i32"
-            if base in self._adt_type_names:
-                return "i32"
-            # Function type aliases → i32 (closure pointer).  Resolved
-            # through the shared transitive resolver so an alias chain
-            # (`type MyFn = InnerFn;`, #867 / PR #880 sweep) classifies
-            # the same as the direct alias — the depth-1 behaviour is
-            # unchanged (a direct FnType alias resolves in one hop).
-            if resolve_fn_type_alias(
-                ast.NamedType(name=expr.type_name, type_args=expr.type_args),
-                self._type_aliases,
-                self._type_alias_params,
-            ) is not None:
-                return "i32"
-            return None
+            return self._ref_type_name_wasm_type(
+                expr.type_name, expr.type_args)
         if isinstance(expr, ast.ResultRef):
-            if expr.type_name in ("Int", "Nat"):
-                return "i64"
-            if expr.type_name == "Float64":
-                return "f64"
-            if expr.type_name in ("Bool", "Byte"):
-                return "i32"
-            return None  # pragma: no cover
+            # #891: a `@T.result` in a monomorphized clone carries the same
+            # concrete `type_name` as `@T.0` (e.g. `Box` once `T = Box`), so it
+            # must lower through the SAME type-name → WAT-type logic.  Inferring
+            # only the scalar primitives here left an ADT-bound (pointer-
+            # represented) return inferred as `None`, so the postcondition
+            # `@T.result == @T.0` fell through to the i64 comparison default
+            # while both operands were i32 heap pointers — an ill-typed
+            # `i64.eq` that traps `gid$Box` at run with `expected i64, found
+            # i32`.  Sharing `_ref_type_name_wasm_type` keeps the ResultRef and
+            # SlotRef operands in agreement (ADT, pair, and handle types alike).
+            return self._ref_type_name_wasm_type(
+                expr.type_name, expr.type_args)
         if isinstance(expr, ast.BinaryExpr):
             if expr.op in self._ARITH_OPS:
                 # Propagate operand type: f64 if operands are f64
@@ -1739,6 +1718,54 @@ class InferenceMixin:
                 alias.name, _seen, _root_name,
             )
         return name
+
+    def _ref_type_name_wasm_type(
+        self,
+        type_name: str,
+        type_args: tuple[ast.TypeExpr, ...] | None = None,
+    ) -> str | None:
+        """Map a slot/result ref's ``type_name`` to its WAT stack type.
+
+        The result-value type of a ``SlotRef`` or ``ResultRef``: ``"i64"`` for
+        Int/Nat, ``"f64"`` for Float64, ``"i32"`` for Bool/Byte and pointer-
+        represented types (ADTs, Decimal/Map/Set handles, closure pointers),
+        ``"i32_pair"`` for the two-word String/Array representation, or ``None``
+        for Unit / unknown.
+
+        Shared by the ``SlotRef`` and ``ResultRef`` arms of
+        :meth:`_infer_expr_wasm_type` so a monomorphized clone's
+        ``@T.result`` and ``@T.0`` — which carry the *same* concrete
+        ``type_name`` after substitution — agree on their WAT type.  Before
+        #891 the ResultRef arm inferred only the scalar primitives, so an
+        ADT-bound return defaulted to ``None`` and the postcondition equality
+        compared two i32 heap pointers with ``i64.eq`` (a WASM validation
+        trap)."""
+        resolved = self._resolve_base_type_name(type_name)
+        if resolved in ("Int", "Nat"):
+            return "i64"
+        if resolved == "Float64":
+            return "f64"
+        if resolved in ("Bool", "Byte"):
+            return "i32"
+        if self._is_pair_type_name(resolved):
+            return "i32_pair"
+        base = resolved.split("<")[0] if "<" in resolved else resolved
+        # Opaque handle types — i32 handles managed by host runtime
+        if base in ("Decimal", "Map", "Set"):
+            return "i32"
+        if base in self._adt_type_names:
+            return "i32"
+        # Function type aliases → i32 (closure pointer).  Resolved through the
+        # shared transitive resolver so an alias chain (`type MyFn = InnerFn;`,
+        # #867 / PR #880) classifies the same as a direct FnType alias — the
+        # depth-1 behaviour is unchanged (a direct alias resolves in one hop).
+        if resolve_fn_type_alias(
+            ast.NamedType(name=type_name, type_args=type_args),
+            self._type_aliases,
+            self._type_alias_params,
+        ) is not None:
+            return "i32"
+        return None
 
     def _slot_name_to_wasm_type(self, name: str) -> str | None:
         """Map a slot type name to a WAT type string."""
