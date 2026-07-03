@@ -364,7 +364,19 @@ class InferenceMixin:
             "regex_replace",
         ):
             return "i32"
-        # Ability operations: show → String (i32_pair), hash → Int (i64)
+        # Ability operations: show → String (i32_pair), hash → Int (i64).
+        # #908: these are name special-cases the checker does NOT reserve
+        # (unlike E151 registry builtins), so a user may define `fn show` /
+        # `fn hash` with a different return width.  `_translate_call` gates its
+        # ability-op dispatch on `call.name not in self._known_fns`, so a
+        # user-defined `show`/`hash` is emitted as a plain call to the USER
+        # function — its DECLARED return width, not the ability-op width.  Defer
+        # to `_fn_ret_types` (the same registry the general user-fn branch below
+        # consults) when the name resolves to a user fn, so the field/element
+        # WASM type matches the emit.  A GENUINE ability op has no `_fn_ret_types`
+        # entry, so it falls through to the special-case width.
+        if expr.name in ("show", "hash") and expr.name in self._fn_ret_types:
+            return self._fn_ret_types[expr.name]
         if expr.name == "show":
             return "i32_pair"
         if expr.name == "hash":
@@ -1104,11 +1116,20 @@ class InferenceMixin:
             return "Ordering"
         if call.name == "decimal_eq":
             return "Bool"
-        # Ability operations: show → String, hash → Int
-        if call.name == "show":
-            return "String"
-        if call.name == "hash":
-            return "Int"
+        # Ability operations: show → String, hash → Int.  #908: skip the name
+        # special-case when the user has defined `fn show` / `fn hash` (the
+        # checker doesn't reserve these ability-op names), so the Vera element
+        # type falls through to the general non-generic user-fn resolution below
+        # (which reads the DECLARED return type from `_fn_ret_type_exprs` /
+        # `_fn_ret_types`).  A GENUINE ability op has no `_fn_ret_types` entry, so
+        # it keeps the special-case.  Mirrors the WASM-width guard in
+        # `_infer_fncall_wasm_type` and the `not in self._known_fns` gate in
+        # `_translate_call`.
+        if call.name not in self._fn_ret_types:
+            if call.name == "show":
+                return "String"
+            if call.name == "hash":
+                return "Int"
         # Async builtins — Future<T> is transparent
         if call.name == "async" and call.args:
             inner = self._infer_fncall_vera_type(call.args[0]) \
