@@ -879,6 +879,23 @@
     ]
   },
   {
+    "id": "ch06_composite_postcondition_eq",
+    "file": "ch06_composite_postcondition_eq.vera",
+    "chapter": 6,
+    "title": "Composite equality in a postcondition lowers to structural Eq at runtime (#912)",
+    "level": "run",
+    "spec_ref": "Section 6.5 / Section 9.8",
+    "features": [
+      "ensures",
+      "postcondition",
+      "structural_eq",
+      "adt",
+      "option",
+      "nested_adt_eq",
+      "tier1_discharge"
+    ]
+  },
+  {
     "id": "ch07_pure",
     "file": "ch07_pure.vera",
     "chapter": 7,

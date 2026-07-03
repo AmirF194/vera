@@ -814,6 +814,29 @@ class InferenceMixin:
             return self._format_named_type(te)
         return self._format_named_type(canonical)
 
+    def _ref_vera_type_name(
+        self, type_name: str, type_args: tuple[ast.TypeExpr, ...] | None,
+    ) -> str | None:
+        """Vera type name of a slot/result reference (`@T` / `@T.result`).
+
+        Shared by the `SlotRef` and `ResultRef` arms of `_infer_vera_type` —
+        both carry the same declared @Type shape (`type_name` + optional
+        `type_args`).  A parameterized ref (`@Option<Int>`) renders its type
+        arguments (`"Option<Int>"`) so the composite structural-`==` dispatch
+        can resolve the concrete field types; a ref whose type argument is not a
+        plain `NamedType` (a generic type variable, say) falls back to the bare
+        `type_name` rather than emitting a malformed name.
+        """
+        if type_args:
+            arg_names = []
+            for ta in type_args:
+                if isinstance(ta, ast.NamedType):
+                    arg_names.append(self._format_named_type(ta))
+                else:
+                    return type_name
+            return f"{type_name}<{', '.join(arg_names)}>"
+        return type_name
+
     def _infer_vera_type(self, expr: ast.Expr) -> str | None:
         """Infer the Vera type name of an expression for call rewriting.
 
@@ -828,6 +851,16 @@ class InferenceMixin:
         #   StringLit         → "String"
         #   InterpolatedString → "String"
         #   SlotRef           → slot type name (with type-args)
+        #   ResultRef         → declared @Type name (with type-args) —
+        #                       shares the SlotRef arm.  A `@T.result`
+        #                       operand of `==`/`!=` in an `ensures`
+        #                       reaches here through the runtime
+        #                       postcondition-check lowering; without a
+        #                       Vera-type name the composite structural-
+        #                       `==` dispatch is skipped and the compare
+        #                       falls back to scalar `i32.eq` (a pointer
+        #                       compare) → a spurious trap on a proved
+        #                       composite postcondition (#912).
         #   ConstructorCall   → parent ADT name
         #   NullaryConstructor → parent ADT name
         #   BinaryExpr        → "Bool" for cmp/logic, else left's type
@@ -859,7 +892,6 @@ class InferenceMixin:
         #                       consumes `path`, so no wrong-name lookup)
         #
         # Cannot occur (contract-only or check-time rejected):
-        #   ResultRef         → only valid in `ensures`; not at call site
         #   OldExpr           → contract-only
         #   NewExpr           → contract-only
         #   ForallExpr        → contract-only quantifier
@@ -875,15 +907,19 @@ class InferenceMixin:
         if isinstance(expr, ast.UnitLit):
             return "Unit"
         if isinstance(expr, ast.SlotRef):
-            if expr.type_args:
-                arg_names = []
-                for ta in expr.type_args:
-                    if isinstance(ta, ast.NamedType):
-                        arg_names.append(self._format_named_type(ta))
-                    else:
-                        return expr.type_name
-                return f"{expr.type_name}<{', '.join(arg_names)}>"
-            return expr.type_name
+            return self._ref_vera_type_name(expr.type_name, expr.type_args)
+        if isinstance(expr, ast.ResultRef):
+            # #912: a `@T.result` operand of `==`/`!=` in an `ensures` reaches
+            # here from the runtime postcondition-check lowering, carrying the
+            # same declared @Type shape as a SlotRef (`type_name` + optional
+            # `type_args`, no `index`).  Sharing the SlotRef name logic lets the
+            # composite structural-`==` dispatch in `operators.py` resolve
+            # `@Box.result` → "Box" (or "Option<Int>", "Tuple<Int, Int>", …) and
+            # route to structural equality instead of the scalar `i32.eq`
+            # pointer compare that spuriously trapped a proved composite
+            # postcondition.  `_infer_expr_wasm_type` already handled the
+            # ResultRef *width* (#891); this closes the parallel Vera-type gap.
+            return self._ref_vera_type_name(expr.type_name, expr.type_args)
         if isinstance(expr, ast.ConstructorCall):
             return self._ctor_to_adt_name(expr.name)
         if isinstance(expr, ast.NullaryConstructor):
