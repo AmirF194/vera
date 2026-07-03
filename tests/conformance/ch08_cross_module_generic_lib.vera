@@ -1,0 +1,12 @@
+module ch08_cross_module_generic_lib;
+
+-- A public generic exported for a downstream importer to instantiate.
+-- The defining module never calls it, so the importer is the only site
+-- that instantiates it — the #774 cross-module monomorphization case.
+public forall<T> fn identity(@T -> @T)
+  requires(true)
+  ensures(@T.result == @T.0)
+  effects(pure)
+{
+  @T.0
+}

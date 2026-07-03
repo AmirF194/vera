@@ -252,6 +252,28 @@ class VerificationSession:
             summary.total += entry.total_delta
             stats.verified_fns += 1
 
+        # #774 (CR 3519156263): verify IMPORTED generic clones (shadowed and
+        # unshadowed) at the importer's instantiations, exactly as the cold
+        # `verify_program` path does — their bodies live in another module, so
+        # the per-function loop above never reaches them, yet their clones RUN.
+        # Not cached per-function (they aren't in `program.declarations`); their
+        # obligations depend on the whole-program instantiation set, which is
+        # already reflected in `_instances` (register_program ran above).  Folded
+        # into the output stream so the warm session's summary/diagnostics match
+        # the cold path's (the #732 warm==cold differential oracle).
+        s0, o0, e0 = (
+            verifier.summary.tier1_verified,
+            len(verifier.obligations),
+            len(verifier.errors),
+        )
+        t3_0, tot_0 = verifier.summary.tier3_runtime, verifier.summary.total
+        verifier._verify_shadowed_module_generics()
+        out_obls.extend(verifier.obligations[o0:])
+        out_diags.extend(verifier.errors[e0:])
+        summary.tier1_verified += verifier.summary.tier1_verified - s0
+        summary.tier3_runtime += verifier.summary.tier3_runtime - t3_0
+        summary.total += verifier.summary.total - tot_0
+
         self.last_program = program
         self.last_run_stats = stats
 

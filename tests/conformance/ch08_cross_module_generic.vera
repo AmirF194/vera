@@ -1,0 +1,27 @@
+import ch08_cross_module_generic_lib;
+
+-- Bare call: identity<Int> clone emitted + invoked.
+public fn bare(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 42)
+  effects(pure)
+{
+  identity(42)
+}
+
+-- Module-qualified call (an ast.ModuleCall) desugars to the same clone.
+public fn qualified(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 7)
+  effects(pure)
+{
+  ch08_cross_module_generic_lib::identity(7)
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 49)
+  effects(pure)
+{
+  bare(()) + qualified(())
+}

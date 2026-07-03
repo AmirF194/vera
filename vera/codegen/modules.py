@@ -223,11 +223,30 @@ class CrossModuleMixin:
             for tld in mod.program.declarations:
                 if not isinstance(tld.decl, ast.FnDecl):
                     continue
-                # Generics are excluded before they enter any list: cross-
-                # module generic monomorphisation is unimplemented (#774), and
-                # a generic body (or its where-fns) can't be compiled in Pass
-                # 2.5 nor emitted under a mangled name.
+                # #774: an imported PUBLIC generic is monomorphized by the
+                # importer (Pass 1.5) at its own call sites — it can't be
+                # emitted verbatim under a bare/mangled name in Pass 2.5, but
+                # its concrete clones can.  Harvest its FnDecl here so
+                # `_monomorphize` can discover instantiations of it and clone
+                # its body; a private module generic is not callable from the
+                # importer, so it never needs harvesting.  Split by local
+                # shadowing (§8.5.2): an unshadowed generic routes bare +
+                # qualified through `_generic_fn_info`; a shadowed one is
+                # qualified-only (the bare name stays on the local).
                 if tld.decl.forall_vars:
+                    is_public = (tld.visibility or "private") == "public"
+                    in_filter = (
+                        name_filter is None or tld.decl.name in name_filter
+                    )
+                    if is_public and in_filter:
+                        if tld.decl.name in local_fn_names:
+                            self._shadowed_imported_generic_decls.setdefault(
+                                mod.path, {},
+                            ).setdefault(tld.decl.name, tld.decl)
+                        else:
+                            self._imported_generic_decls.setdefault(
+                                tld.decl.name, tld.decl,
+                            )
                     continue
                 is_public = (tld.visibility or "private") == "public"
                 in_filter = name_filter is None or tld.decl.name in name_filter
