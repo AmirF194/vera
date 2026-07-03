@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from vera import ast
 from vera.monomorphize import (
+    _BUILTIN_PARAMETERIZED_RETURNS,
     Monomorphizer,
+    declared_return_clone_key,
     resolve_fn_type_alias,
     substitute_type_vars,
 )
@@ -1188,6 +1190,37 @@ class InferenceMixin:
                 if resolved is not None:
                     return resolved
             return None
+        # Non-generic user-fn call: prefer the PRECISE declared return type
+        # name (#878).  The WAT-type map below collapses every i32 handle
+        # (Decimal, an ADT, an Option/Result pointer) to "Bool" — the exact
+        # phantom-var default value — so a user helper `d` returning `@Decimal`
+        # used in a generic's bare `@VeraT` argument position resolved to the
+        # Bool clone (`option_unwrap_or$Bool`), a symbol Pass 1.5 never emitted.
+        # The declared return TypeExpr (registered by `_register_fn`) carries
+        # the real name, mirroring how the #732 verifier builds `fn_ret_types`
+        # from declared types.  Only the i32-collapse ambiguity needs this;
+        # i64/f64/i32_pair are already unambiguous, and a bare scalar declared
+        # return (`Int`, `Bool`) still yields the same name.
+        #
+        # NB: this returns the ALIAS-RESOLVED name for scalar-resolving aliases
+        # (`type Age = Int` → "Int"), which is what non-clone-naming callers
+        # (interpolation, container element/key typing, `show`/`hash`) require.
+        # The clone-naming path needs the RAW alias name instead and gets it
+        # from `_declared_return_clone_name` (used by `_unify_param_arg_wasm`),
+        # NOT from here — see #899 issue 2.
+        ret_te = self._fn_ret_type_exprs.get(call.name)
+        if isinstance(ret_te, ast.RefinementType):
+            ret_te = ret_te.base_type
+        if isinstance(ret_te, ast.NamedType) and not ret_te.type_args:
+            # Only override the ambiguous i32 collapse: an i32-returning user
+            # fn whose declared base is not a scalar (Decimal, an ADT, …) must
+            # keep its true name.  Gate on the ALIAS-RESOLVED base (so
+            # `type Money = Decimal` is recognised as non-scalar), returning the
+            # raw declared name for it.  i64/f64/i32_pair fall through.
+            if self._resolve_base_type_name(ret_te.name) not in (
+                "Int", "Nat", "Bool", "Byte", "Float64", "String",
+            ):
+                return ret_te.name
         # Non-generic: map from WASM return type
         ret_wt = self._fn_ret_types.get(call.name)
         if ret_wt == "i64":
@@ -1215,6 +1248,38 @@ class InferenceMixin:
             if resolved is not None:
                 return resolved
         return None
+
+    def _declared_return_clone_name(self, call: ast.FnCall) -> str | None:
+        """The clone-name KEY a non-generic user fn call's declared return
+        contributes when its result is bound to a generic's bare ``@T``, for
+        CLONE NAMING only (#878 / #899).
+
+        Delegates to the shared
+        :func:`vera.monomorphize.declared_return_clone_key` — THE single source
+        of truth that instantiation discovery (``_simple_return_type_name``) and
+        the #732 verifier (``_simple_type_name``) also route through — so the
+        call-rewrite cannot desync from the emitted clone by construction.  This
+        ends the three-round whack-a-mole: the previous ad-hoc gate
+        (``not ret_te.type_args``) BAILED for a parameterized return
+        (``-> @Option<Decimal>``) and fell through to the ``i32 → "Bool"``
+        collapse, so the call site referenced ``pick$Bool`` while discovery
+        emitted ``pick$Option`` — a NET regression vs base, which linked both to
+        ``$Bool``.  The shared key gives the base name for a parameterized
+        return (``Option``), the raw name for an alias/refinement (``Age``), and
+        the plain name for a scalar/handle (``Decimal``), identically to
+        discovery for EVERY shape.
+
+        The general ``_infer_fncall_vera_type`` deliberately alias-RESOLVES
+        scalars for its OTHER callers (interpolation, container typing,
+        ``show``/``hash`` need the canonical ``Int``/``String``), which is why
+        the clone-naming path must consult THIS method instead.  Returns
+        ``None`` for builtins, generics, and fns with no NamedType return, so
+        the caller falls back to ``_infer_vera_type``.
+        """
+        if call.name in self._generic_fn_info:
+            return None
+        return declared_return_clone_key(
+            self._fn_ret_type_exprs.get(call.name))
 
     def _resolve_i32_pair_ret_te(
         self, ret_te: ast.TypeExpr | None,
@@ -1478,6 +1543,53 @@ class InferenceMixin:
                     else:  # pragma: no cover
                         return None
                 return (adt_name, tuple(arg_types))
+        if isinstance(expr, ast.FnCall):
+            # #878: a call whose result is itself a parameterized type
+            # (`Option<Decimal>`, `Array<Int>`) matched against a
+            # parameterized formal (`Option<VeraT>`) must expose its type
+            # args so the type var binds from THIS argument.  Mirrors the
+            # discovery-side `Monomorphizer._get_arg_type_info` FnCall branch
+            # (vera/monomorphize.py) so the WASM call-rewrite consultor and
+            # instantiation discovery agree on the concrete instantiation.
+            # Without it, `option_unwrap_or(decimal_div(a, b), …)` bound
+            # nothing from arg0 and fell through to the phantom-var default.
+            param_ret = _BUILTIN_PARAMETERIZED_RETURNS.get(expr.name)
+            if param_ret is not None:
+                return param_ret
+            if expr.name == "array_range":
+                return ("Array", ("Int",))
+            if expr.name in ("array_concat", "array_append",
+                             "array_slice", "array_filter"):
+                if expr.args:
+                    return self._get_arg_type_info_wasm(expr.args[0])
+            # User-fn call returning a parameterized type: read the declared
+            # return TypeExpr (registered by `_register_fn`).  A NON-generic
+            # user helper returning `Option<Decimal>` in `Option<VeraT>`
+            # position resolves `VeraT = Decimal` here — the user-fn half of
+            # #878, symmetric with the builtin table above.
+            #
+            # A GENERIC call (`option_map(None, …)` → `Option<B>`) is excluded:
+            # its declared return type is parameterized over the callee's OWN
+            # type vars (`B`), not concrete types, so its type args would bind
+            # a phantom `B` here.  Such calls fall through to the generic-return
+            # resolution in `_infer_fncall_vera_type` instead, and the outer
+            # generic then binds from another argument (e.g. the `0` default) —
+            # exactly as instantiation discovery does (its FnCall branch has no
+            # user-generic case either, so the two consultors stay in lockstep).
+            if expr.name in self._generic_fn_info:
+                return None
+            ret_te = self._fn_ret_type_exprs.get(expr.name)
+            if isinstance(ret_te, ast.RefinementType):
+                ret_te = ret_te.base_type
+            if (isinstance(ret_te, ast.NamedType)
+                    and ret_te.type_args):
+                ta_names: list[str | None] = []
+                for ta in ret_te.type_args:
+                    if isinstance(ta, ast.NamedType) and not ta.type_args:
+                        ta_names.append(self._format_named_type(ta))
+                    else:
+                        ta_names.append(None)
+                return (ret_te.name, tuple(ta_names))
         return None
 
     def _closure_arg_return_type(
