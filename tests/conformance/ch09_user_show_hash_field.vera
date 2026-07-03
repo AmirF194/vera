@@ -1,0 +1,75 @@
+import vera.util(show, hash);
+
+-- User `show` (returns @Int) in a Tuple field, followed by a literal.
+-- Extract the literal (De Bruijn: @Int.0 = last field) => 9.
+private fn user_show_tuple_snd(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Tuple<Int, Int> = Tuple(vera.util::show(@Int.0), 9);
+  match @Tuple<Int, Int>.0 {
+    Tuple(@Int, @Int) -> @Int.0
+  }
+}
+
+-- Extract the user-`show` field itself (De Bruijn: @Int.1 = first field).
+-- user show(5) = 6, proving the i64 field is at the right offset.
+private fn user_show_tuple_fst(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Tuple<Int, Int> = Tuple(vera.util::show(@Int.0), 9);
+  match @Tuple<Int, Int>.0 {
+    Tuple(@Int, @Int) -> @Int.1
+  }
+}
+
+-- User `hash` (returns @String / i32_pair) in a Tuple field, followed by a
+-- literal Int.  The ability-op width (i64) would mis-size the String field;
+-- extract the trailing Int (@Int.0 = last) => 7.
+private fn user_hash_string_tuple_snd(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Tuple<String, Int> = Tuple(vera.util::hash(@Int.0), 7);
+  match @Tuple<String, Int>.0 {
+    Tuple(@String, @Int) -> @Int.0
+  }
+}
+
+-- User `show` (returns @Int) as an array-literal element.  Index 0 = show(5) = 6.
+private fn user_show_array_elem(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Array<Int> = [vera.util::show(@Int.0), 9];
+  @Array<Int>.0[0]
+}
+
+-- Bare (unqualified) user `show` — the import shadows the ability op, so this
+-- reaches the user function via the same-file FnCall path.  Extract the
+-- trailing literal (@Int.0 = last) => 9.
+private fn user_show_bare_tuple_snd(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Tuple<Int, Int> = Tuple(show(@Int.0), 9);
+  match @Tuple<Int, Int>.0 {
+    Tuple(@Int, @Int) -> @Int.0
+  }
+}
+
+-- Driver: 9 + 6 + 7 + 6 + 9 = 37 (checked at run level; the helpers carry
+-- `ensures(true)` so the sum is a runtime, not Tier-1, guarantee).
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  user_show_tuple_snd(5) + user_show_tuple_fst(5) + user_hash_string_tuple_snd(5) + user_show_array_elem(5) + user_show_bare_tuple_snd(5)
+}

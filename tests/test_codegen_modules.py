@@ -2460,3 +2460,188 @@ public fn main(@Unit -> @Int)
 { let @Tuple<Int, Int> = mkt(4); match @Tuple<Int, Int>.0 { Tuple(@Int, @Int) -> @Int.0 } }
 """, fn="main")
         assert val == 9
+
+
+class TestUserShowHashInField908(TestCrossModuleCodegen):
+    """#908: a user-defined function literally named ``show`` or ``hash`` used
+    in a constructor field / array-literal element must be laid out at the WIDTH
+    of ITS declared return type, not the ability-op width special-case.
+
+    ``vera/wasm/inference.py`` name-special-cases the ability operations
+    (``show`` → ``i32_pair`` / String, ``hash`` → ``i64`` / Int) by bare name in
+    ``_infer_expr_wasm_type`` / ``_infer_fncall_wasm_type`` (WASM width) and
+    ``_infer_fncall_vera_type`` (Vera-type-name).  The type checker rejects
+    user redefinition of registry builtins (E151) but NOT the ability ops
+    ``show``/``hash``, so a user helper named ``show`` (returning ``@Int``) or
+    ``hash`` (returning ``@String``) was mis-sized: the constructor-field
+    inference reported the ability-op width while ``_translate_call`` (gated on
+    ``call.name not in self._known_fns``) correctly emitted a call to the USER
+    function.  The two disagreed → an ``expected i32, found i64`` WASM
+    translation error on a ``vera check``-green program.
+
+    A GENUINE ability op (``show``/``hash`` on a value whose type derives
+    ``Show``/``Hash``) has NO user-fn registry entry, so it still falls back to
+    the special-case width — the load-bearing regression at the bottom of this
+    class.
+    """
+
+    # A module exporting a user function named ``show`` that returns @Int
+    # (NOT the String the ability op returns) — the mis-width trigger.
+    SHOW_INT_MODULE = """\
+public fn show(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ @Int.0 + 1 }
+"""
+
+    # -- User-fn show/hash mis-sizing (the bug) ------------------------------
+
+    def test_module_user_show_in_tuple_field_runs(self) -> None:
+        """``Tuple(m::show(@Int.0), 9)`` where ``m::show`` returns @Int (i64) —
+        the canonical #908 repro.  Before the fix, the field was sized as the
+        ability-op ``i32_pair`` while the emitted ``call $show`` returned i64.
+        Extracts the trailing literal ``9`` (De Bruijn ``@Int.0`` = LAST)."""
+        mod = self._resolved(("m",), self.SHOW_INT_MODULE)
+        val = self._run_mod("""\
+import m(show);
+private fn mkt(@Int -> @Tuple<Int, Int>)
+  requires(true) ensures(true) effects(pure)
+{ Tuple(m::show(@Int.0), 9) }
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Tuple<Int, Int> = mkt(5); match @Tuple<Int, Int>.0 { Tuple(@Int, @Int) -> @Int.0 } }
+""", [mod], fn="main")
+        assert val == 9
+
+    def test_module_user_show_in_tuple_field_value_correct(self) -> None:
+        """Extract the module-call field itself (``@Int.1`` = FIRST field): it
+        must be ``show(5) == 6`` (the user fn's ``@Int.0 + 1``), proving the
+        field is laid out at the right offset with the i64 (not i32_pair)
+        width."""
+        mod = self._resolved(("m",), self.SHOW_INT_MODULE)
+        val = self._run_mod("""\
+import m(show);
+private fn mkt(@Int -> @Tuple<Int, Int>)
+  requires(true) ensures(true) effects(pure)
+{ Tuple(m::show(@Int.0), 9) }
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Tuple<Int, Int> = mkt(5); match @Tuple<Int, Int>.0 { Tuple(@Int, @Int) -> @Int.1 } }
+""", [mod], fn="main")
+        assert val == 6  # user show(5) = 5 + 1
+
+    def test_dotted_path_user_show_in_tuple_field_runs(self) -> None:
+        """The dotted-path form ``vera.util::show(...)`` (the issue repro) is the
+        same ``ModuleCall`` node and must also work."""
+        mod = self._resolved(("vera", "util"), self.SHOW_INT_MODULE)
+        val = self._run_mod("""\
+import vera.util(show);
+private fn mkt(@Int -> @Tuple<Int, Int>)
+  requires(true) ensures(true) effects(pure)
+{ Tuple(vera.util::show(@Int.0), 9) }
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Tuple<Int, Int> = mkt(5); match @Tuple<Int, Int>.0 { Tuple(@Int, @Int) -> @Int.0 } }
+""", [mod], fn="main")
+        assert val == 9
+
+    def test_same_file_user_show_in_tuple_field_runs(self) -> None:
+        """A SAME-FILE ``fn show(@Int -> @Int)`` used bare in a field
+        (``Tuple(show(x), 9)``) hits the same bug via the same-file ``FnCall``
+        path in ``_infer_expr_wasm_type``.  Extracts the trailing ``9``
+        (De Bruijn ``@Int.0`` = LAST field)."""
+        val = _run("""\
+private fn show(@Int -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ @Int.0 + 1 }
+private fn mkt(@Int -> @Tuple<Int, Int>)
+  requires(true) ensures(true) effects(pure)
+{ Tuple(show(@Int.0), 9) }
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Tuple<Int, Int> = mkt(5); match @Tuple<Int, Int>.0 { Tuple(@Int, @Int) -> @Int.0 } }
+""", fn="main")
+        assert val == 9
+
+    def test_same_file_user_hash_string_in_tuple_field_runs(self) -> None:
+        """A user ``fn hash(@Int -> @String)`` returns a NON-Int type (i32_pair)
+        — the opposite mis-width from ``show``.  The ability-op special-case
+        would size the field as ``i64``; the user fn emits an ``i32_pair``.
+        Extracts the trailing Int ``7`` (De Bruijn ``@Int.0`` = last field)."""
+        val = _run("""\
+private fn hash(@Int -> @String)
+  requires(true) ensures(true) effects(pure)
+{ "n" }
+private fn mkt(@Int -> @Tuple<String, Int>)
+  requires(true) ensures(true) effects(pure)
+{ Tuple(hash(@Int.0), 7) }
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Tuple<String, Int> = mkt(5); match @Tuple<String, Int>.0 { Tuple(@String, @Int) -> @Int.0 } }
+""", fn="main")
+        assert val == 7
+
+    def test_module_user_show_in_array_literal_element(self) -> None:
+        """A user ``m::show`` (returns @Int) as the FIRST element of an array
+        literal reaches ``_infer_array_element_type`` → ``_infer_vera_type`` →
+        ``_infer_fncall_vera_type``, which name-special-cased ``show`` → String.
+        ``[m::show(-5), 9]`` indexed at 1 (the literal) must be ``9``."""
+        mod = self._resolved(("m",), self.SHOW_INT_MODULE)
+        val = self._run_mod("""\
+import m(show);
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Array<Int> = [m::show(5), 9]; @Array<Int>.0[1] }
+""", [mod], fn="main")
+        assert val == 9
+
+    def test_same_file_user_show_in_array_literal_element(self) -> None:
+        """The same-file ``fn show(@Int -> @Int)`` as an array-literal element.
+        Indexed at 0 it must be the user ``show(5) == 6``."""
+        val = _run("""\
+private fn show(@Int -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ @Int.0 + 1 }
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Array<Int> = [show(5), 9]; @Array<Int>.0[0] }
+""", fn="main")
+        assert val == 6
+
+    # -- CRITICAL regression: genuine ability dispatch must still work -------
+
+    def test_genuine_show_in_tuple_field_still_runs(self) -> None:
+        """LOAD-BEARING: a GENUINE ability ``show(42)`` (no user fn; Int derives
+        Show) in a constructor field must STILL be sized as the ability-op
+        ``i32_pair`` (String).  ``Tuple(show(42), 9)`` indexed at the trailing
+        Int ``9`` proves the field after the String is at the right offset."""
+        val = _run("""\
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Tuple<String, Int> = Tuple(show(42), 9); match @Tuple<String, Int>.0 { Tuple(@String, @Int) -> @Int.0 } }
+""", fn="main")
+        assert val == 9
+
+    def test_genuine_hash_in_tuple_field_still_runs(self) -> None:
+        """LOAD-BEARING: a GENUINE ability ``hash(42)`` (no user fn; Int derives
+        Hash, identity) in a constructor field must STILL be sized as the
+        ability-op ``i64`` (Int).  ``Tuple(hash(42), 9)`` indexed at the
+        module-call field (``@Int.1`` = first) must be ``hash(42) == 42``."""
+        val = _run("""\
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Tuple<Int, Int> = Tuple(hash(42), 9); match @Tuple<Int, Int>.0 { Tuple(@Int, @Int) -> @Int.1 } }
+""", fn="main")
+        assert val == 42
+
+    def test_genuine_show_in_array_literal_element_still_runs(self) -> None:
+        """LOAD-BEARING: a GENUINE ability ``hash(42)`` as an array-literal
+        element must still size the array as ``Int`` (i64) so indexing returns
+        the correct value.  ``[hash(42), 9]`` indexed at 0 must be ``42``."""
+        val = _run("""\
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Array<Int> = [hash(42), 9]; @Array<Int>.0[0] }
+""", fn="main")
+        assert val == 42

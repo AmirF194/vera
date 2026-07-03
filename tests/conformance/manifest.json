@@ -1639,6 +1639,23 @@
     ]
   },
   {
+    "id": "ch09_user_show_hash_field",
+    "file": "ch09_user_show_hash_field.vera",
+    "chapter": 9,
+    "title": "User-defined show/hash in a constructor field or array element",
+    "level": "run",
+    "spec_ref": "Section 9.8",
+    "features": [
+      "show_operation",
+      "hash_operation",
+      "user_shadows_ability_op",
+      "module_qualified_call",
+      "constructor",
+      "tuple",
+      "array_literal"
+    ]
+  },
+  {
     "id": "ch09_structural_eq",
     "file": "ch09_structural_eq.vera",
     "chapter": 9,
