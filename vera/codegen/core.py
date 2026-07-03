@@ -1414,6 +1414,22 @@ class CodeGenerator(
                 return _replace(expr, args=new_args)
             return expr
 
+        # Quantifiers: rewrite the domain and the predicate body.  A `forall` /
+        # `exists` in a contract (`ensures(forall(..., |i| eq(xs[i], 0)))`) is
+        # runtime-lowered by `_translate_quantifier`, which compiles the
+        # predicate `AnonFn` body — so an `eq` / `compare` inside it hits the
+        # same unregistered-call CodegenSkip as a top-level contract op unless
+        # canonicalised here first (PR #887 review: the walker fell through
+        # quantifier nodes to the leaf return).
+        if isinstance(expr, (ast.ForallExpr, ast.ExistsExpr)):
+            new_domain = self._rewrite_ops_in_expr(expr.domain, ability_ops)
+            new_pred = self._rewrite_ops_in_expr(expr.predicate, ability_ops)
+            if new_domain is not expr.domain or new_pred is not expr.predicate:
+                return _replace(
+                    expr, domain=new_domain,
+                    predicate=new_pred)  # type: ignore[arg-type]
+            return expr
+
         # Leaf nodes (literals, slot refs, etc.) — no rewriting needed
         return expr
 

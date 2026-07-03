@@ -259,6 +259,58 @@ where {
         assert _run(src, fn="caller") == 3
         assert _skip_warnings(src) == []
 
+    def test_eq_in_forall_contract_compiles_and_runs(self) -> None:
+        # RED: a `forall` in a contract is runtime-lowered by
+        # `_translate_quantifier`, which compiles the predicate `AnonFn` body.
+        # `_rewrite_ops_in_expr` fell through `ForallExpr`/`ExistsExpr` to the
+        # leaf return, so an `eq` inside the predicate reached codegen as a bare
+        # unregistered call — the same uncaught `CodegenSkip` as #874's original
+        # top-level case (PR #887 review).  The ensures holds ([0,0,0] all == 0),
+        # so `all_zero(())` returns 1 (true).
+        src = """
+private fn all_zero(@Array<Int> -> @Bool)
+  requires(true)
+  ensures(forall(@Int, array_length(@Array<Int>.0), fn(@Int -> @Bool) effects(pure) { eq(@Array<Int>.0[@Int.0], 0) }))
+  effects(pure)
+{
+  true
+}
+
+public fn main(@Unit -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  all_zero([0, 0, 0])
+}
+"""
+        assert _run(src) == 1
+        assert _skip_warnings(src) == []
+
+    def test_compare_in_exists_contract_compiles_and_runs(self) -> None:
+        # RED: the sibling `exists` quantifier + `compare` op share the gap.
+        # The ensures holds (9 > 5, so some element compares Greater), so
+        # `any_big(())` returns 1 (true).
+        src = """
+private fn any_big(@Array<Int> -> @Bool)
+  requires(true)
+  ensures(exists(@Int, array_length(@Array<Int>.0), fn(@Int -> @Bool) effects(pure) { compare(@Array<Int>.0[@Int.0], 5) == Greater }))
+  effects(pure)
+{
+  true
+}
+
+public fn main(@Unit -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  any_big([1, 9, 2])
+}
+"""
+        assert _run(src) == 1
+        assert _skip_warnings(src) == []
+
 
 # =====================================================================
 # Verify: eq in ensures must be proved at Tier 1, not deferred to Tier 3
