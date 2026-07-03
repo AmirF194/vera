@@ -1251,6 +1251,26 @@ public fn probe(@Unit -> @Int)
         finally:
             Path(path).unlink(missing_ok=True)
 
+    def test_imported_generic_via_pipe_executes(self) -> None:
+        """`#913`: an imported generic invoked through the `|>` pipe
+        (`42 |> genmod::gid()`) is discovered and monomorphized.
+
+        The pipe RHS is an ``ast.ModuleCall`` — the ``ModuleCall`` arm of the
+        #913 pipe-discovery branch (`Monomorphizer._collect_calls`) must
+        reconstruct the pipe-desugared argument list `(42,)` so `gid$Int` is
+        emitted; pre-#913 the bare RHS `ModuleCall` (empty args) bound nothing
+        and no clone existed, dropping the caller.  42 cannot coincide with the
+        phantom-var Bool/i32 default, so a discovery miss can't masquerade.
+        """
+        mod = self._resolved(("genmod",), self.GEN_MODULE)
+        val = self._run_mod("""\
+import genmod;
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ 42 |> genmod::gid() }
+""", [mod], fn="main")
+        assert val == 42
+
 
 # =====================================================================
 # #661 — cross-module name collision in template-warning suppression

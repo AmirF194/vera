@@ -882,20 +882,39 @@ class CodeGenerator(
         # name-shadowing fixture and asserts there's no over-broad
         # suppression.
         forall_decl_names: set[str] = set()
+        # #913: name → span of each forall template, so a CLOSURE-level skip
+        # warning (whose description is NOT `Function 'NAME' …`-prefixed —
+        # it names the closure, not the enclosing fn) can be matched by
+        # error_code + forall-origin (the warning's source line falls within
+        # the template's declaration span).  Keeps the suppression robust
+        # against description wording rather than re-parsing a name out of it.
+        forall_decl_spans: dict[str, ast.Span] = {}
         for tld in program.declarations:
             decl = tld.decl
             if isinstance(decl, ast.FnDecl) and decl.forall_vars:
                 forall_decl_names.add(decl.name)
+                if decl.span is not None:
+                    forall_decl_spans[decl.name] = decl.span
         if forall_decl_names:
             mono_compiled = compiled_mono_bases & forall_decl_names
             if mono_compiled:
                 # Filter out template warnings for fns whose mono
                 # clones compiled.  Keep all other diagnostics intact.
-                # Match on description prefix `Function 'NAME' ` —
-                # the format used by both `_is_compilable` in
-                # `vera/codegen/compilability.py` ([E604]/[E605]) and
-                # the [E602] emit sites in `vera/codegen/functions.py`
-                # (reached via `_compile_fn`).
+                # Two match shapes, both gated on a clone having compiled
+                # (so a genuinely-broken generic with NO compilable clone
+                # keeps its warning):
+                #   1. Description prefix `Function 'NAME' ` — the
+                #      function-level [E604]/[E605] (`_is_compilable`,
+                #      `vera/codegen/compilability.py`) and the [E602]
+                #      dropped-parent warning (`vera/codegen/functions.py`,
+                #      reached via `_compile_fn`).
+                #   2. #913: a closure-level [E602] emitted while compiling
+                #      the template body (`vera/codegen/closures.py`) whose
+                #      unsubstituted `@T` param/return type has no WASM
+                #      representation.  Its description names the closure, so
+                #      the prefix match misses it; suppress it by forall-origin
+                #      — its source line sits inside a compiled-clone
+                #      template's declaration span.
                 suppressible_codes = {"E602", "E604", "E605"}
                 kept: list[Diagnostic] = []
                 for d in self.diagnostics:
@@ -904,6 +923,13 @@ class CodeGenerator(
                             d.description.startswith(f"Function '{name}' ")
                             for name in mono_compiled
                         )
+                        if not suppressed and d.error_code == "E602":
+                            line = d.location.line
+                            suppressed = any(
+                                (span := forall_decl_spans.get(name)) is not None
+                                and span.line <= line <= span.end_line
+                                for name in mono_compiled
+                            )
                         if suppressed:
                             continue
                     kept.append(d)
