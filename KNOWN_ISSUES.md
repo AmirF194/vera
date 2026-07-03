@@ -9,6 +9,7 @@ Defects in shipped compiler, runtime, or tooling behaviour — this table matche
 | Bug | Issue |
 |-----|-------|
 | A generic instantiated at the zero-size `Unit` type (`forall<T>` with `T = Unit`) passes `vera check` but fails at codegen — hash-seed-dependently `E699`, a dropped `main`, or a `codegen invariant violation` crash telling the user to file a bug report. A check-green program must not reach a codegen crash: the checker should cleanly reject `forall<T>` instantiated at `Unit` (or codegen should support the `Unit` monomorphization). Pre-existing on `main`. | [#900](https://github.com/aallan/vera/issues/900) |
+| A function returning a `Tuple` with a `Unit` component (`@Tuple<Unit, Int>`) passes `vera check` but fails at codegen with `unknown func` — the tuple-returning function is silently skipped because a zero-size `Unit` field is placed inline in the by-value tuple layout (`Option<Unit>`, boxed, works fine). Not generic-related. Fix: codegen support for zero-size tuple components, or a checker-side rejection of `Unit` as a compound component (consistent with #900). Pre-existing on `main`. | [#902](https://github.com/aallan/vera/issues/902) |
 
 ## Limitations
 
