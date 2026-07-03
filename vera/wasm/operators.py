@@ -448,14 +448,27 @@ class OperatorsMixin:
            a `Box<T>` clone, dropping `<Int>`.
 
         2. **Free-type-variable** argument (round 2, #912): `lv` carries a `<…>`
-           whose argument is an unresolved type variable (`Box<T>`) — a function
-           generic over the parameterized ADT itself, whose `@Box<T>` operands
-           the monomorphizer did not specialize to a concrete clone.  This is
-           sound: such a slot-vs-slot postcondition defers to **Tier 3**, not
-           Tier 1 (the verifier does not structurally prove `@Box<T>.result ==
-           @Box<T>.0` for a free `T`), so a scalar runtime check cannot
-           contradict a structural Tier-1 proof (no #912 resurrection), and for
-           the identity case the operands are the same pointer.
+           whose argument is an unresolved type variable (`Box<T>`) — the BASE
+           generic clone of a function generic over the parameterized ADT
+           itself, whose `@Box<T>` operands the monomorphizer left as a free
+           `T`.  Routing this to the scalar lowering is SOUND — and the scalar
+           compare NEVER runs — because the base generic clone is DEAD CODE:
+           `$id2` (the `Box<T>` clone) is emitted but is never a call target and
+           never exported (higher-order escape of a bare generic fn is a parse
+           error, E005, so it cannot be routed into a `call_indirect`/table).
+           Every *reachable* call dispatches to a monomorphized clone
+           (`$id2$Int`) whose `@Box<Int>.result == @Box<Int>.0` is lowered
+           STRUCTURALLY (`call $eq_Box_LInt_R`) — `Box<Int>` is concrete, so it
+           is NOT matched here — correctly discharging the composite `==` at its
+           Tier-1 proof.  (The `ensures` obligation IS proved at Tier 1, the
+           verifier substituting `T:=Int`; that is exactly why the reachable
+           path must be — and is — structural.)  This is verified by
+           `rebox`-style tests where the result is a FRESHLY-constructed,
+           structurally-equal, DIFFERENT-pointer box: Tier-1-verified AND runs
+           correctly (via the structural mono clone), where a reachable scalar
+           pointer compare would have trapped.  The scalar fallback here merely
+           lets the dead base clone COMPILE (as harmless dead `i32.eq`) instead
+           of E613-erroring and being dropped, which failed the whole compile.
 
         A genuinely non-derivable operand — a `Map`/`Array`-field ADT (a
         concrete non-Eq field, and the ADT itself has NO type parameters),

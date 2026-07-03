@@ -273,25 +273,32 @@ class TestCompositePostconditionVerifies912:
 # Generic over a PARAMETERIZED ADT: `fn(@Box<T> -> @Box<T>)` with a
 # slot-vs-slot postcondition `@Box<T>.result == @Box<T>.0`.
 #
-# The #912 fix's `ResultRef` arm resolves `@Box<T>.result` to `lv =
-# "Box<T>"`.  Round-1 both lost-arg guards bypassed a name containing `<`
-# (`"<" in lv`), so the dispatch routed `"Box<T>"` to `_translate_adt_eq`,
-# whose derivability gate raised an UNCAUGHT `AdtEqNotDerivableError` — a
-# codegen crash on a `check`-green/`verify`-green program that ran fine on
-# base (a PR-introduced regression: reverting only the `ResultRef` arm makes
-# it run).  The operands here are BOTH refs (no `ConstructorCall` sibling to
-# recover a concrete type argument from), and the monomorphizer does not
-# specialize `id2` to a concrete clone — its `@Box<T>` operands carry the
-# UNRESOLVED type variable `T`.  Such a name is non-dispatchable for
-# structural Eq, so the composite `==` must fall back to the pre-#912 scalar
-# lowering (the base behavior), NOT crash.
+# The #912 fix's `ResultRef` arm resolves `@Box<T>.result` to `lv = "Box<T>"`.
+# Round-1 both lost-arg guards bypassed a name containing `<` (`"<" in lv`), so
+# dispatch routed `"Box<T>"` (the BASE generic clone) to `_translate_adt_eq`,
+# whose derivability gate raised an UNCAUGHT `AdtEqNotDerivableError` — a codegen
+# crash on a `check`-green/`verify`-green program that ran fine on base (a
+# PR-introduced regression).  The `Box<T>` operand carries an UNRESOLVED type
+# variable `T` (the monomorphizer does not specialize the base clone), which is
+# non-dispatchable for structural Eq, so the base clone's composite `==` falls
+# back to the pre-#912 scalar lowering instead of crashing.
 #
-# SOUNDNESS: this postcondition is proved at Tier 3 (deferred to runtime),
-# NOT Tier 1 — the verifier does not structurally prove `@Box<T>.result ==
-# @Box<T>.0` for a free `T` (pinned by `test_generic_param_adt_ensures_is_
-# tier3`).  So the scalar (pointer) runtime check cannot contradict a
-# structural Tier-1 proof (no #912 resurrection), and for the identity
-# function the two operands ARE the same pointer, so `i32.eq` is correct.
+# SOUNDNESS — the corrected rationale (round 3).  The `ensures` obligation IS
+# proved at TIER 1 (the verifier substitutes `T:=Int` and proves the composite
+# `==` structurally); the earlier "defers to Tier 3" claim was WRONG — the only
+# Tier-3 obligation is an incidental `nat_to_int_coerce` in `main`, unrelated to
+# the `==`.  The scalar fallback is nonetheless sound because it only ever
+# affects UNREACHABLE DEAD CODE: the base generic clone `$id2` (the `Box<T>`
+# one, lowered `i32.eq`) is emitted but is never a call target and never
+# exported — a bare generic fn cannot escape higher-order (that is a parse
+# error, E005), so it can never reach a `call_indirect`/table.  Every reachable
+# call dispatches to a MONOMORPHIZED clone `$id2$Int` whose `@Box<Int>.result ==
+# @Box<Int>.0` is lowered STRUCTURALLY (`call $eq_Box_LInt_R`, since `Box<Int>`
+# is concrete and NOT matched by the free-var guard), correctly discharging the
+# Tier-1 proof.  The `rebox`-style test below is the direct witness: a result
+# that is a FRESHLY-constructed, structurally-equal, DIFFERENT-pointer box is
+# Tier-1-verified AND runs correctly (via the structural mono clone) — the exact
+# case that WOULD trap if a reachable call were scalar (pointer) lowered.
 # =====================================================================
 
 _GENERIC_PARAM_ADT = """
@@ -312,40 +319,101 @@ public fn main(@Unit -> @Int)
 }}
 """
 
+# `rebox` returns a FRESHLY-CONSTRUCTED box (a NEW `MkBox` allocation at a
+# DIFFERENT heap address) that is structurally equal to its argument.  This is
+# the case that distinguishes structural from pointer equality: a reachable
+# scalar (`i32.eq`) postcondition check would compare two distinct pointers and
+# trap; the structural mono clone compares by value and passes.
+_REBOX = """
+private data Box<T> {{ MkBox(T) }}
+private forall<T> fn rebox(@Box<T> -> @Box<T>)
+  requires(true)
+  ensures({ensures})
+  effects(pure)
+{{
+  match @Box<T>.0 {{ MkBox(@T) -> MkBox(@T.0) }}
+}}
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{{
+  match rebox(MkBox(7)) {{ MkBox(@Int) -> @Int.0 }}
+}}
+"""
+
+
+def _mono_clone_postcond_wat(source: str, clone: str) -> str:
+    """The WAT body of a named monomorphized clone (`$id2$Int`, `$rebox$Int`).
+
+    Slices from the clone's `(func $<clone>` header to the next `(func ` so a
+    test can assert HOW its postcondition `==` was lowered (structural
+    `call $eq_...` vs scalar `i32.eq`).
+    """
+    result = _compile(source)
+    errors = [d for d in result.diagnostics if d.severity == "error"]
+    assert not errors, f"Unexpected compile errors: {errors}"
+    marker = f"(func ${clone}"
+    start = result.wat.find(marker)
+    assert start != -1, f"clone {clone!r} not found in WAT:\n{result.wat}"
+    end = result.wat.find("(func ", start + len(marker))
+    return result.wat[start:end if end != -1 else len(result.wat)]
+
 
 class TestGenericParamAdtPostcondition912:
     def test_generic_param_adt_slot_eq_slot_runs(self) -> None:
         # RED (round 2): `@Box<T>.result == @Box<T>.0` crashed codegen with an
-        # uncaught AdtEqNotDerivableError('Box<T>').  id2 is the identity, so
-        # result and arg are the same pointer → the scalar fallback is correct
-        # and main returns 7.
+        # uncaught AdtEqNotDerivableError('Box<T>') — the base generic clone
+        # reached the derivability gate.  The free-var scalar fallback lets that
+        # dead base clone compile (harmless dead `i32.eq`) instead of erroring;
+        # main dispatches to the structural mono clone and returns 7.
         src = _GENERIC_PARAM_ADT.format(ensures="@Box<T>.result == @Box<T>.0")
         assert _run(src, fn="main") == 7
 
     def test_generic_param_adt_slot_neq_slot_runs(self) -> None:
-        # RED (round 2): the `!=` form shares the crash.  `@Box<T>.result !=
-        # @Box<T>.0` is FALSE for the identity fn (same pointer), and the fn
-        # returns its input regardless, so main still returns 7 — what we pin is
-        # that it COMPILES and RUNS rather than crashing codegen.
+        # RED (round 2): the `!=` form shares the crash.  `main` still returns 7;
+        # what we pin is that it COMPILES and RUNS rather than crashing codegen.
         src = _GENERIC_PARAM_ADT.format(ensures="@Box<T>.result != @Box<T>.0 || true")
         assert _run(src, fn="main") == 7
 
-    def test_generic_param_adt_ensures_is_tier3_not_tier1(self) -> None:
-        # SOUNDNESS PIN: the generic-parameterized-ADT slot-vs-slot postcondition
-        # defers to Tier 3 (runtime), it is NOT structurally proved at Tier 1.
-        # This is what makes the scalar (pointer) runtime fallback sound — there
-        # is no Tier-1 structural proof for the runtime check to contradict, so
-        # #912 is not resurrected for this shape.  If a future change made this
-        # prove at Tier 1, the scalar fallback would become unsound and this
-        # test would flag it (forcing a concrete-structural lowering instead).
-        src = _GENERIC_PARAM_ADT.format(ensures="@Box<T>.result == @Box<T>.0")
+    def test_rebox_fresh_pointer_result_is_tier1_verified_and_runs(self) -> None:
+        # THE soundness pin (round 3, replaces the vacuous Tier-3 assertion).
+        # `rebox` returns a FRESHLY-constructed, structurally-equal, DIFFERENT-
+        # pointer box.  Its `ensures(@Box<T>.result == @Box<T>.0)` is proved at
+        # TIER 1 (the verifier substitutes T:=Int), and it must RUN without
+        # trapping — which it can only do if the reachable mono clone lowers the
+        # `==` STRUCTURALLY.  A reachable scalar (pointer) lowering would compare
+        # the two distinct allocations and trap: this is the case #912 was
+        # about, now for a generic-parameterized ADT.
+        src = _REBOX.format(ensures="@Box<T>.result == @Box<T>.0")
         result = _verify(src)
         errors = [d for d in result.diagnostics if d.severity == "error"]
         assert errors == [], f"Unexpected verify errors: {errors}"
-        assert result.summary.tier3_runtime >= 1, (
-            "the @Box<T>.result == @Box<T>.0 postcondition must defer to Tier 3 "
-            "(free type var T) — the invariant that makes the scalar runtime "
-            "fallback sound"
+        # The composite `==` is proved at Tier 1 (NOT deferred to Tier 3).
+        ensures_obls = [
+            o for o in result.obligations
+            if getattr(o, "kind", None) == "ensures"
+            and getattr(o, "fn_name", getattr(o, "function", None)) == "rebox"
+        ]
+        assert ensures_obls, "expected a `rebox` ensures obligation"
+        assert all(getattr(o, "status", None) == "verified" for o in ensures_obls), (
+            "the rebox composite `==` postcondition must be proved at Tier 1"
+        )
+        # And it runs correctly — structural eq on different pointers, no trap.
+        assert _run(src, fn="main") == 7
+
+    def test_reachable_mono_clone_postcondition_is_structural(self) -> None:
+        # Pins the ACTUAL soundness invariant: the REACHABLE monomorphized clone
+        # (`$rebox$Int`, the one `main` calls) lowers its postcondition `==`
+        # STRUCTURALLY (`call $eq_...`), never a scalar `i32.eq` pointer compare.
+        # This is what makes the free-var scalar fallback on the dead BASE clone
+        # harmless.  (The check keys on the postcondition dispatch: the mono
+        # clone must contain a structural `call $eq_` helper call.)
+        src = _REBOX.format(ensures="@Box<T>.result == @Box<T>.0")
+        clone_wat = _mono_clone_postcond_wat(src, "rebox$Int")
+        assert "call $eq_" in clone_wat, (
+            "the reachable mono clone's postcondition `==` must be lowered "
+            f"structurally (call $eq_...), got:\n{clone_wat}"
         )
 
 
