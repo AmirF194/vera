@@ -1,0 +1,25 @@
+-- Conformance: generic instantiated over a parameterized ADT (Chapter 2)
+-- Tests: forall<T> monomorphized over a parameterized ADT (Box<T>); the clone's
+-- postcondition @T.result == @T.0 lowers the ADT-bound type variable as an i32
+-- heap pointer on both the signature and the body slot reads (#891 regression).
+public data Box<T> {
+  MkBox(T)
+}
+
+public forall<T> fn gid(@T -> @T)
+  requires(true)
+  ensures(@T.result == @T.0)
+  effects(pure)
+{
+  @T.0
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 42)
+  effects(pure)
+{
+  match gid(MkBox(42)) {
+    MkBox(@Int) -> @Int.0
+  }
+}

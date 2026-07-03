@@ -219,6 +219,20 @@
     ]
   },
   {
+    "id": "ch02_generic_over_param_adt",
+    "file": "ch02_generic_over_param_adt.vera",
+    "chapter": 2,
+    "title": "Generic instantiated over a parameterized ADT",
+    "level": "run",
+    "spec_ref": "Section 2.5",
+    "features": [
+      "generics",
+      "forall",
+      "monomorphization",
+      "adt"
+    ]
+  },
+  {
     "id": "ch02_tuple_basic",
     "file": "ch02_tuple_basic.vera",
     "chapter": 2,
