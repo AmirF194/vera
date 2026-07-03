@@ -1656,6 +1656,25 @@
     ]
   },
   {
+    "id": "ch09_show_hash_composites",
+    "file": "ch09_show_hash_composites.vera",
+    "chapter": 9,
+    "title": "Structural show/hash for composite types (#911)",
+    "level": "run",
+    "spec_ref": "Section 9.8",
+    "features": [
+      "show_operation",
+      "hash_operation",
+      "constructor",
+      "tuple",
+      "option",
+      "result",
+      "array_literal",
+      "adt_auto_derivation",
+      "nested_adt"
+    ]
+  },
+  {
     "id": "ch09_structural_eq",
     "file": "ch09_structural_eq.vera",
     "chapter": 9,

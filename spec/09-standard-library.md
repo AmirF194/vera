@@ -2377,7 +2377,7 @@ Returns the value of the named attribute if the node is an `HtmlElement` with th
 
 ## 9.8 Abilities
 
-> **Status: Implemented.** Tracked in [#60](https://github.com/aallan/vera/issues/60). Four built-in abilities (`Eq`, `Ord`, `Hash`, `Show`) are fully compilable. Supported types: Int, Nat, Bool, Float64, String, Byte, Unit. `Eq` derivation is **structural** ([#773](https://github.com/aallan/vera/issues/773)): a simple enum, or an ADT every field of which is itself `Eq` — an `Eq` primitive (`String` included, compared by content) or a nested `Eq` ADT (compared recursively, including recursive types) — supports `Eq` automatically. Fields with no `Eq` semantics (`Array`, `Map`, host handles) make the ADT non-derivable. The built-in `Ordering` ADT (`Less`, `Equal`, `Greater`) is available for `Ord`'s `compare` operation.
+> **Status: Implemented.** Tracked in [#60](https://github.com/aallan/vera/issues/60). Four built-in abilities (`Eq`, `Ord`, `Hash`, `Show`) are fully compilable. Supported types: Int, Nat, Bool, Float64, String, Byte, Unit. `Eq` derivation is **structural** ([#773](https://github.com/aallan/vera/issues/773)): a simple enum, or an ADT every field of which is itself `Eq` — an `Eq` primitive (`String` included, compared by content) or a nested `Eq` ADT (compared recursively, including recursive types) — supports `Eq` automatically. Fields with no `Eq` semantics (`Array`, `Map`, host handles) make the ADT non-derivable. `Show` and `Hash` derive **structurally** for composite types too ([#911](https://github.com/aallan/vera/issues/911)) — ADT, `Tuple`, `Option`, `Result`, and `Array`, recursing into each field/element by its own `show`/`hash` (see §9.8.2). The built-in `Ordering` ADT (`Less`, `Equal`, `Greater`) is available for `Ord`'s `compare` operation.
 
 Vera supports restricted abilities for constraining type variables in generic functions. To support practical generic programming — sorting, hashing, serialisation — type variables need constraints. Vera adopts restricted abilities rather than full typeclasses:
 
@@ -2463,7 +2463,7 @@ ability Hash<T> {
 
 Operation: `hash(@T -> @Int)`. Returns a deterministic integer hash of the value.
 
-Satisfied by: Int, Nat, Bool, Float64, String, Byte, Unit.
+Satisfied by: Int, Nat, Bool, Float64, String, Byte, Unit, and composite types — ADTs, `Tuple`, `Option`, `Result`, and `Array` — whose fields/elements are themselves `Hash`-satisfying (structural auto-derivation, §9.8.2).
 
 **Show\<T\>** — String representation.
 
@@ -2475,7 +2475,7 @@ ability Show<T> {
 
 Operation: `show(@T -> @String)`. Returns a human-readable string representation.
 
-Satisfied by: Int, Nat, Bool, Float64, String, Byte, Unit.
+Satisfied by: Int, Nat, Bool, Float64, String, Byte, Unit, and composite types — ADTs, `Tuple`, `Option`, `Result`, and `Array` — whose fields/elements are themselves `Show`-satisfying (structural auto-derivation, §9.8.2).
 
 `show(@Float64)` is backed by `float_to_string` and is therefore **total** over all `Float64` values: the non-finite classes render as `"nan"`, `"inf"`, and `"-inf"` (§9.6.11, [#857](https://github.com/aallan/vera/issues/857)), with the same spellings in both the Python and browser runtimes.
 
@@ -2487,13 +2487,32 @@ Simple enums (ADTs with only nullary constructors) always satisfy `Eq` — equal
 
 ADTs with `String` fields derive `Eq` by content, and nested-ADT fields recurse into the nested ADT's own equality — including recursive and mutually-recursive types ([#773](https://github.com/aallan/vera/issues/773)). `Array`, `Map`, host-handle, and tuple fields remain non-derivable: an `Eq` constraint over (or a direct `==` on) such an ADT is rejected with E613.
 
+`Show` and `Hash` also derive **structurally** for composite types ([#911](https://github.com/aallan/vera/issues/911)) — user ADTs, `Tuple`, `Option`, `Result`, and `Array` — recursing into each field/element by its own `show`/`hash`.
+
+`show` renders a composite value using its constructor syntax:
+
+| Type | Rendering |
+|------|-----------|
+| ADT nullary constructor | `Ctor` (bare name) |
+| ADT with fields | `Ctor(f0, f1, …)` — each field by its own `show` |
+| `Tuple` | `(a, b, …)` |
+| `Option` | `Some(x)` / `None` |
+| `Result` | `Ok(x)` / `Err(e)` |
+| `Array` | `[e0, e1, …]` (empty: `[]`) |
+
+Fields are separated by `, ` (comma + space). A `String` field renders as its raw content (no surrounding quotes), consistent with `show` on a `String` being the identity. Nesting recurses to arbitrary finite depth (ADT-of-ADT, `Option`-of-`Tuple`, `Array`-of-composite).
+
+`hash` on a composite is deterministic: it seeds with the constructor tag (or, for an `Array`, its length) and folds each field/element hash in FNV-style, so distinct constructors and distinct field values hash differently.
+
+A composite whose element/field types cannot be resolved at the `show`/`hash` site — a directly self-referential recursive ADT (`List<T>`), which would require a generated recursive helper function — is not yet derivable; such a site is skipped rather than mis-rendered.
+
 ### 9.8.3 Compilation Strategy
 
 Ability operations are compiled via two mechanisms:
 
 1. **AST-level rewriting** (Pass 1.6): `eq(a, b)` is rewritten to `a == b`, and `compare(a, b)` is rewritten to `if a < b then Less else if a == b then Equal else Greater`. This reuses existing comparison codegen.
 
-2. **WASM-level dispatch**: `show(x)` and `hash(x)` are dispatched at WASM generation time based on the inferred type of the argument, routing to type-specific implementations (e.g., `to_string` for Int, FNV-1a for String hashing).
+2. **WASM-level dispatch**: `show(x)` and `hash(x)` are dispatched at WASM generation time based on the inferred type of the argument, routing to type-specific implementations (e.g., `to_string` for Int, FNV-1a for String hashing). For a composite argument the dispatch recurses over the value's layout — tag at offset 0, then each field at its concrete offset — rendering / folding each field by its own `show`/`hash`, the same structural traversal `Eq` uses.
 
 ## 9.9 Limitations
 

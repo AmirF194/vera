@@ -1,14 +1,31 @@
 """Ability and effect handler translation mixin for WasmContext.
 
 Handles: Show ability (_translate_show), Hash ability (_translate_hash,
-_translate_hash_string), and effect handlers (State<T>, Exn<E>).
+_translate_hash_string), structural show/hash for composite types (#911),
+and effect handlers (State<T>, Exn<E>).
 """
 
 from __future__ import annotations
 
 from vera import ast
 from vera.skip import CodegenSkip
-from vera.wasm.helpers import WasmSlotEnv
+from vera.wasm.helpers import (
+    WasmSlotEnv,
+    _element_load_op,
+    _element_mem_size,
+    _is_pair_element_type,
+    gc_shadow_push,
+)
+
+
+class _ShowHashUnsupported(Exception):  # noqa: N818
+    """Internal signal: a field is not showable/hashable here (#911).
+
+    Raised mid-traversal from a nested field render/fold and caught by the
+    top-level `_show_adt` / `_hash_adt` so the whole composite falls back to
+    `CodegenSkip` (unchanged behaviour) rather than emitting partial code.
+    Not a diagnostic — a control-flow unwind, hence the plain `Exception`.
+    """
 
 
 class CallsHandlersMixin:
@@ -68,6 +85,18 @@ class CallsHandlersMixin:
             )
             return self._translate_call(desugared, env)
 
+        # Composite (#911): ADT / Tuple / Option / Result / Array.  Render
+        # structurally, recursing into each field's own `show`.  Recover the
+        # PARAMETERIZED type (`Option<Int>`, `Array<String>`) so inner field
+        # types resolve — `_infer_vera_type` only reports the bare head.
+        param_type = self._parameterized_arg_type(arg, vera_type)
+        value_instrs = self.translate_expr(arg, env)
+        if value_instrs is None:
+            return None
+        composite = self._show_value(param_type, value_instrs, arg)
+        if composite is not None:
+            return composite
+
         raise CodegenSkip(
             arg, f"show() not supported for type {vera_type!r}"
         )
@@ -113,6 +142,13 @@ class CallsHandlersMixin:
         # String → FNV-1a hash
         if vera_type == "String":
             return self._translate_hash_string(arg_instrs)
+
+        # Composite (#911): fold the constructor tag with each field's own
+        # hash.  Parameterized type recovers inner field types (see show).
+        param_type = self._parameterized_arg_type(arg, vera_type)
+        composite = self._hash_value(param_type, arg_instrs, arg)
+        if composite is not None:
+            return composite
 
         raise CodegenSkip(
             arg, f"hash() not supported for type {vera_type!r}"
@@ -184,6 +220,718 @@ class CallsHandlersMixin:
         # Push result
         instructions.append(f"local.get {hash_val}")
         return instructions
+
+    # -----------------------------------------------------------------
+    # Structural show / hash for composite types (#911)
+    # -----------------------------------------------------------------
+    #
+    # `show`/`hash` are registered as universal builtins (§9.8), but codegen
+    # historically only handled primitives — every composite `show`/`hash`
+    # site tripped `CodegenSkip` and the enclosing function was dropped.
+    #
+    # These helpers render / fold a composite value INLINE, recursing into
+    # each field by its own `show`/`hash`.  Recursion terminates on the
+    # value's static type structure; a type that (transitively) contains
+    # itself (a recursive ADT like `List<T>`) is detected via `_seen` and
+    # cleanly skipped — those need generated helper functions, out of scope
+    # for #911 (whose repros are all finite-depth composites).
+    #
+    # This mirrors the structural-`Eq` traversal in `operators.py`
+    # (`_generate_adt_eq_fn` / `_emit_field_eq`): tag at offset 0, fields at
+    # concrete offsets recomputed from their concrete WASM types via the same
+    # `_concrete_field_layout`, and per-field dispatch by resolved Vera type.
+
+    def _parameterized_arg_type(
+        self, arg: ast.Expr, bare: str,
+    ) -> str:
+        """Recover a show/hash argument's PARAMETERIZED type name.
+
+        `_infer_vera_type` reports the bare head (`"Option"`, `"Array"`);
+        the structural traversal needs the type arguments to resolve inner
+        field types.  Reuses `_get_arg_type_info_wasm` (the same routine the
+        generic-call rewriter and structural-`==` use).  Falls back to the
+        bare name when the type arguments cannot be inferred.
+        """
+        # Array literal: recover the element type directly from its elements
+        # (`_get_arg_type_info_wasm` does not special-case a bare `ArrayLit`).
+        # Resolve the first element's FULL parameterized type recursively so an
+        # array of composites (`[Tuple(1, 2), …]`, `[Some(1), …]`) carries the
+        # nested type args rather than a bare `Array<Tuple>` head.
+        if isinstance(arg, ast.ArrayLit):
+            if arg.elements:
+                first = arg.elements[0]
+                elem_bare = self._infer_vera_type(first)
+                if elem_bare is not None:
+                    elem = self._parameterized_arg_type(first, elem_bare)
+                    return f"Array<{elem}>"
+            elem = self._infer_array_element_type(arg)
+            if elem is not None:
+                return f"Array<{elem}>"
+            return bare
+
+        # SlotRef and FnCall carry a DECLARED type expression that formats
+        # nested generics in full (`Option<Tuple<Int, Int>>`), which the flat
+        # `_get_arg_type_info_wasm` list cannot (it Nones-out any type arg that
+        # is itself parameterized).  Prefer it when present.
+        declared = self._declared_type_expr_for_show(arg)
+        if declared is not None:
+            formatted = self._format_named_type(declared)
+            # Only trust it if it is fully ground (no bare type-parameter head).
+            if "<" in formatted or formatted == bare:
+                return formatted
+
+        # A direct `Tuple(...)` literal has no registered field types (it is
+        # variadic); recover them by recursively resolving each argument's own
+        # parameterized type, so `show(Tuple(Some(1), 2))` sees the inner
+        # `Option<Int>` field rather than a bare `Option`.
+        if isinstance(arg, ast.ConstructorCall) and arg.name == "Tuple":
+            elem_types = [
+                self._parameterized_arg_type(a, self._infer_vera_type(a) or "")
+                for a in arg.args
+            ]
+            if all(t for t in elem_types):
+                return f"Tuple<{', '.join(elem_types)}>"
+
+        info = self._get_arg_type_info_wasm(arg)
+        if info is None:
+            return bare
+        base_name, arg_names = info
+        if arg_names and all(a is not None for a in arg_names):
+            resolved = [a for a in arg_names if a is not None]
+            return f"{base_name}<{', '.join(resolved)}>"
+        return base_name
+
+    def _declared_type_expr_for_show(
+        self, arg: ast.Expr,
+    ) -> ast.NamedType | None:
+        """The declared/annotated NamedType of a show/hash argument, if any.
+
+        A ``SlotRef`` carries its bound type (with type args); a non-generic
+        user ``FnCall`` carries its declared return TypeExpr (registered by
+        ``_register_fn``).  Both format nested generics in full via
+        ``_format_named_type``.  Generic calls are excluded — their return
+        type is over the callee's own type vars, not concrete types.
+        """
+        if isinstance(arg, ast.SlotRef):
+            return ast.NamedType(name=arg.type_name, type_args=arg.type_args)
+        if isinstance(arg, ast.FnCall) and arg.name not in self._generic_fn_info:
+            ret_te = self._fn_ret_type_exprs.get(arg.name)
+            if isinstance(ret_te, ast.RefinementType):
+                ret_te = ret_te.base_type
+            if isinstance(ret_te, ast.NamedType):
+                return ret_te
+        return None
+
+    @staticmethod
+    def _split_param_type(ptype: str) -> tuple[str, list[str]]:
+        """Split ``"Option<Int>"`` → ``("Option", ["Int"])`` (top level only)."""
+        if "<" not in ptype:
+            return ptype, []
+        base, rest = ptype.split("<", 1)
+        inner = rest.rstrip(">")
+        # Split on top-level commas (nested generics keep their commas).
+        args: list[str] = []
+        depth = 0
+        cur = ""
+        for ch in inner:
+            if ch == "<":
+                depth += 1
+                cur += ch
+            elif ch == ">":
+                depth -= 1
+                cur += ch
+            elif ch == "," and depth == 0:
+                args.append(cur.strip())
+                cur = ""
+            else:
+                cur += ch
+        if cur.strip():
+            args.append(cur.strip())
+        return base.strip(), args
+
+    def _composite_ctor_plans(
+        self, ptype: str,
+    ) -> list[tuple[str, int, list[tuple[int, str, str]]]] | None:
+        """Per-constructor field plan for a composite type.
+
+        Returns ``[(ctor_name, tag, [(offset, wasm_type, field_vera_type)])]``
+        sorted by tag, or None when ``ptype`` is not a known composite (its
+        head is not in `_adt_type_names`, or it has no registered
+        constructors).  Field offsets / WASM types are recomputed from the
+        CONCRETE field types (type parameters substituted) exactly as the
+        construction site and `$eq_<type>` helper do, so a `String`
+        instantiation lays out an i32_pair, not a bare pointer.
+        """
+        base, type_args = self._split_param_type(ptype)
+        if base not in self._adt_type_names:
+            return None
+
+        # Tuple is a VARIADIC product with an empty registered layout — its
+        # fields come from the instantiation's type args, laid out exactly as
+        # the construction site does (`_concrete_field_layout`).  A missing /
+        # unparameterized Tuple type (no args recovered) is not showable here.
+        if base == "Tuple":
+            if not type_args:
+                return None
+            concrete = self._concrete_field_layout(type_args)
+            fields = [
+                (offset, wt, ftype)
+                for (offset, wt), ftype in zip(concrete, type_args)
+            ]
+            return [("Tuple", 0, fields)]
+
+        tp_names = self._adt_tp_param_names.get(base, ())
+        tp_mapping = dict(zip(tp_names, type_args))
+
+        ctors = sorted(
+            (
+                (cname, self._ctor_layouts[cname])
+                for cname, parent in self._ctor_to_adt.items()
+                if parent == base and cname in self._ctor_layouts
+            ),
+            key=lambda x: x[1].tag,
+        )
+        if not ctors:
+            return None
+
+        plans: list[tuple[str, int, list[tuple[int, str, str]]]] = []
+        for cname, layout in ctors:
+            n_fields = len(layout.field_offsets)
+            tp_idx = self._ctor_adt_tp_indices.get(cname)
+            raw_types = (
+                layout.field_types
+                if layout.field_types
+                else ("<opaque>",) * n_fields
+            )
+            field_type_names = [
+                self._resolve_field_type_for_eq(
+                    raw, i, tp_idx, type_args, tp_mapping,
+                )
+                for i, raw in enumerate(raw_types)
+            ]
+            concrete = self._concrete_field_layout(field_type_names)
+            fields = [
+                (offset, wt, ftype)
+                for (offset, wt), ftype in zip(concrete, field_type_names)
+            ]
+            plans.append((cname, layout.tag, fields))
+        return plans
+
+    def _const_string(self, text: str) -> list[str]:
+        """Instructions leaving an interned literal String (ptr, len)."""
+        offset, length = self.string_pool.intern(text)
+        return [f"i32.const {offset}", f"i32.const {length}"]
+
+    # ---- show ---------------------------------------------------------
+
+    def _show_value(
+        self,
+        ptype: str,
+        value_instrs: list[str],
+        node: ast.Expr,
+        _seen: frozenset[str] | None = None,
+    ) -> list[str] | None:
+        """Render a value of parameterized type ``ptype`` to a String.
+
+        ``value_instrs`` leaves the value on the stack in its natural WASM
+        shape (i64 for Int/Nat, f64 for Float64, i32 for Bool/Byte/ADT
+        pointer, i32_pair for String/Array).  Returns instructions that
+        leave the rendered String (ptr, len) on the stack, or None if the
+        type is not showable here (recursive ADT, opaque field).
+        """
+        base, type_args = self._split_param_type(ptype)
+
+        # Primitives — reuse the value-instruction cores factored out for
+        # #911.  These behave exactly as the top-level primitive show paths.
+        if base == "Int" or base == "Nat":
+            return self._to_string_core(value_instrs)
+        if base == "Bool":
+            return self._bool_to_string_core(value_instrs)
+        if base == "Byte":
+            return self._byte_to_string_core(value_instrs)
+        if base == "Float64":
+            return self._float_to_string_core(value_instrs)
+        if base == "String":
+            return value_instrs  # a String is its own representation
+        if base == "Unit":
+            # value_instrs leaves nothing useful; drop it and emit "unit".
+            return self._const_string("unit")
+
+        if base == "Array":
+            elem_type = type_args[0] if type_args else None
+            if elem_type is None:
+                return None
+            return self._show_array(elem_type, value_instrs, node, _seen)
+
+        # ADT / Tuple / Option / Result — heap pointer, tag-dispatched.
+        return self._show_adt(base, ptype, value_instrs, node, _seen)
+
+    def _show_adt(
+        self,
+        base: str,
+        ptype: str,
+        value_instrs: list[str],
+        node: ast.Expr,
+        _seen: frozenset[str] | None,
+    ) -> list[str] | None:
+        seen = _seen or frozenset()
+        if base in seen:
+            return None  # recursive type — needs a real helper (out of scope)
+        seen = seen | {base}
+
+        plans = self._composite_ctor_plans(ptype)
+        if plans is None:
+            return None
+
+        ptr = self.alloc_local("i32")
+        acc_ptr = self.alloc_local("i32")
+        acc_len = self.alloc_local("i32")
+        result_ptr = self.alloc_local("i32")
+        result_len = self.alloc_local("i32")
+
+        instrs: list[str] = []
+        instrs.extend(value_instrs)
+        instrs.append(f"local.set {ptr}")
+        instrs.extend(gc_shadow_push(ptr))
+        # One shadow slot roots the running accumulator across the per-field
+        # concat allocations (seeded with the struct pointer, overwritten with
+        # the accumulator on first re-root).
+        root_slot = self._reserve_root_slot(instrs, ptr)
+
+        is_tuple = base == "Tuple"
+
+        # Build a nested if/else on the tag.  Each branch renders one
+        # constructor's String into (result_ptr, result_len).
+        def render_ctor(cname: str, fields: list[tuple[int, str, str]]) -> None:
+            # Head: `Ctor(` (or `(` for a Tuple; bare `Ctor` for nullary).
+            if is_tuple:
+                head = "("
+            elif fields:
+                head = f"{cname}("
+            else:
+                head = cname
+            piece = self._const_string(head)
+            instrs.extend(f"  {i}" for i in piece)
+            instrs.append(f"  local.set {acc_len}")
+            instrs.append(f"  local.set {acc_ptr}")
+            self._reroot(instrs, root_slot, acc_ptr, indent="  ")
+            for fi, (offset, wt, ftype) in enumerate(fields):
+                if fi > 0:
+                    self._concat_into(instrs, acc_ptr, acc_len,
+                                      self._const_string(", "), indent="  ",
+                                      root_slot=root_slot)
+                load = self._load_field(ptr, offset, wt)
+                rendered = self._show_value(ftype, load, node, seen)
+                if rendered is None:
+                    # Unrenderable field — abandon this whole show.
+                    raise _ShowHashUnsupported
+                self._concat_into(instrs, acc_ptr, acc_len,
+                                  rendered, indent="  ", root_slot=root_slot)
+            if fields:
+                self._concat_into(instrs, acc_ptr, acc_len,
+                                  self._const_string(")"), indent="  ",
+                                  root_slot=root_slot)
+            instrs.append(f"  local.get {acc_ptr}")
+            instrs.append(f"  local.set {result_ptr}")
+            instrs.append(f"  local.get {acc_len}")
+            instrs.append(f"  local.set {result_len}")
+
+        try:
+            # tag = mem[ptr]
+            n = len(plans)
+            for depth, (cname, tag, fields) in enumerate(plans):
+                if depth < n - 1:
+                    instrs.append(f"local.get {ptr}")
+                    instrs.append("i32.load")
+                    instrs.append(f"i32.const {tag}")
+                    instrs.append("i32.eq")
+                    instrs.append("if")
+                    render_ctor(cname, fields)
+                    instrs.append("else")
+                else:
+                    # Last constructor: the fall-through else.
+                    render_ctor(cname, fields)
+            for _ in range(n - 1):
+                instrs.append("end")
+        except _ShowHashUnsupported:
+            return None
+
+        instrs.append(f"local.get {result_ptr}")
+        instrs.append(f"local.get {result_len}")
+        return instrs
+
+    def _show_array(
+        self,
+        elem_type: str,
+        value_instrs: list[str],
+        node: ast.Expr,
+        _seen: frozenset[str] | None,
+    ) -> list[str] | None:
+        # Render a probe element to confirm the element type is showable and
+        # to reuse its instruction shape inside the loop body.
+        arr_ptr = self.alloc_local("i32")
+        arr_len = self.alloc_local("i32")
+        idx = self.alloc_local("i32")
+        acc_ptr = self.alloc_local("i32")
+        acc_len = self.alloc_local("i32")
+        sp_save = self.alloc_local("i32")
+
+        elem_size = _element_mem_size(elem_type)
+        if elem_size is None:
+            return None
+
+        # Element load: address = arr_ptr + idx*elem_size, then load per type.
+        elem_load = self._load_array_element(arr_ptr, idx, elem_type, elem_size)
+        if elem_load is None:
+            return None
+        elem_rendered = self._show_value(elem_type, elem_load, node, _seen)
+        if elem_rendered is None:
+            return None
+
+        instrs: list[str] = []
+        instrs.extend(value_instrs)  # (ptr, len)
+        instrs.append(f"local.set {arr_len}")
+        instrs.append(f"local.set {arr_ptr}")
+        instrs.extend(gc_shadow_push(arr_ptr))
+
+        # acc = "["
+        opening = self._const_string("[")
+        instrs.extend(opening)
+        instrs.append(f"local.set {acc_len}")
+        instrs.append(f"local.set {acc_ptr}")
+        # Root the accumulator across the per-element concat allocations.
+        root_slot = self._reserve_root_slot(instrs, acc_ptr)
+
+        # idx = 0
+        instrs.append("i32.const 0")
+        instrs.append(f"local.set {idx}")
+        instrs.append("block $show_arr_brk")
+        instrs.append("  loop $show_arr_lp")
+        instrs.append(f"    local.get {idx}")
+        instrs.append(f"    local.get {arr_len}")
+        instrs.append("    i32.ge_u")
+        instrs.append("    br_if $show_arr_brk")
+        # Snapshot $gc_sp at the top of the body.  Every string built this
+        # iteration (the separator, the element render, the concat results)
+        # shadow-pushes its buffer with NO matching pop — those slots unwind
+        # only at function exit, so in this loop they leak one-plus per element
+        # and overflow the 4 096-slot shadow stack on large arrays.  Restoring
+        # $gc_sp to the snapshot at the end of the body reclaims them all; the
+        # accumulator is separately rooted in `root_slot` (reserved BELOW the
+        # snapshot), so the restore never orphans the live result.
+        instrs.append("    global.get $gc_sp")
+        instrs.append(f"    local.set {sp_save}")
+        # separator ", " for idx > 0
+        instrs.append(f"    local.get {idx}")
+        instrs.append("    i32.const 0")
+        instrs.append("    i32.gt_u")
+        instrs.append("    if")
+        self._concat_into(instrs, acc_ptr, acc_len,
+                          self._const_string(", "), indent="      ",
+                          root_slot=root_slot)
+        instrs.append("    end")
+        # render element
+        self._concat_into(instrs, acc_ptr, acc_len,
+                          elem_rendered, indent="    ", root_slot=root_slot)
+        # Unwind this iteration's shadow slots (accumulator stays in root_slot).
+        instrs.append(f"    local.get {sp_save}")
+        instrs.append("    global.set $gc_sp")
+        # idx++
+        instrs.append(f"    local.get {idx}")
+        instrs.append("    i32.const 1")
+        instrs.append("    i32.add")
+        instrs.append(f"    local.set {idx}")
+        instrs.append("    br $show_arr_lp")
+        instrs.append("  end")
+        instrs.append("end")
+        # acc = acc ++ "]"
+        self._concat_into(instrs, acc_ptr, acc_len,
+                          self._const_string("]"), indent="",
+                          root_slot=root_slot)
+
+        instrs.append(f"local.get {acc_ptr}")
+        instrs.append(f"local.get {acc_len}")
+        return instrs
+
+    def _reserve_root_slot(
+        self, instrs: list[str], init_ptr: int, indent: str = "",
+    ) -> int:
+        """Reserve one shadow-stack slot for a loop accumulator; return the
+        local holding its address.
+
+        A loop accumulator (`_show_adt` / `_show_array`) lives in a plain
+        local across many per-concat `$alloc`s — between iterations it is
+        neither on the operand stack nor a GC root, so a collection would
+        sweep it.  This pushes ONE slot (via the standard `gc_shadow_push`,
+        seeded with the initial accumulator ``init_ptr``) and captures its
+        address so the caller re-stores the current accumulator into that
+        FIXED slot after each concat (`_reroot`) — exactly one live root
+        regardless of loop length (unlike per-iteration pushes, which would
+        exhaust the shadow stack).  The slot unwinds at function exit with
+        the rest of the frame's shadow region — the same lifetime the
+        existing `gc_shadow_push` roots already have.
+        """
+        slot_addr = self.alloc_local("i32")
+        # Capture the slot address (current $gc_sp) BEFORE the push advances it.
+        instrs.append(f"{indent}global.get $gc_sp")
+        instrs.append(f"{indent}local.set {slot_addr}")
+        instrs.extend(indent + i for i in gc_shadow_push(init_ptr))
+        return slot_addr
+
+    def _reroot(
+        self, instrs: list[str], slot_addr: int, ptr_local: int, indent: str,
+    ) -> None:
+        """Store ``ptr_local`` into the reserved shadow slot ``slot_addr``."""
+        instrs.append(f"{indent}local.get {slot_addr}")
+        instrs.append(f"{indent}local.get {ptr_local}")
+        instrs.append(f"{indent}i32.store")
+
+    def _concat_into(
+        self,
+        instrs: list[str],
+        acc_ptr: int,
+        acc_len: int,
+        piece_instrs: list[str],
+        indent: str,
+        root_slot: int | None = None,
+    ) -> None:
+        """Append ``acc = concat(acc, piece)`` to ``instrs``, in place.
+
+        ``acc_ptr`` / ``acc_len`` hold the running String; ``piece_instrs``
+        leaves the piece (ptr, len) on the stack.  Rebinds the accumulator
+        locals to the freshly allocated concatenation, then (when
+        ``root_slot`` is given) re-roots the new accumulator into that fixed
+        shadow slot so it survives the NEXT concat's allocation.
+        """
+        concat = self._string_concat_core(
+            [f"local.get {acc_ptr}", f"local.get {acc_len}"],
+            piece_instrs,
+        )
+        instrs.extend(indent + i for i in concat)
+        instrs.append(f"{indent}local.set {acc_len}")
+        instrs.append(f"{indent}local.set {acc_ptr}")
+        if root_slot is not None:
+            self._reroot(instrs, root_slot, acc_ptr, indent)
+
+    def _load_field(
+        self, ptr_local: int, offset: int, wt: str,
+    ) -> list[str]:
+        """Instructions leaving field at ``offset`` on the stack (by WASM type)."""
+        if wt == "i64":
+            return [f"local.get {ptr_local}", f"i64.load offset={offset}"]
+        if wt == "f64":
+            return [f"local.get {ptr_local}", f"f64.load offset={offset}"]
+        if wt == "i32_pair":
+            return [
+                f"local.get {ptr_local}", f"i32.load offset={offset}",
+                f"local.get {ptr_local}", f"i32.load offset={offset + 4}",
+            ]
+        # i32 (Bool/Byte/Unit/ADT pointer)
+        return [f"local.get {ptr_local}", f"i32.load offset={offset}"]
+
+    def _load_array_element(
+        self, arr_ptr: int, idx: int, elem_type: str, elem_size: int,
+    ) -> list[str] | None:
+        """Instructions leaving arr[idx] on the stack (natural WASM shape)."""
+        is_pair = _is_pair_element_type(elem_type)
+        load_op = _element_load_op(elem_type)
+        if load_op is None and not is_pair:
+            return None
+        addr: list[str] = [f"local.get {arr_ptr}", f"local.get {idx}"]
+        if elem_size == 1:
+            addr.append("i32.add")
+        else:
+            addr.append(f"i32.const {elem_size}")
+            addr.append("i32.mul")
+            addr.append("i32.add")
+        if is_pair:
+            # addr on stack → duplicate via a temp local to load (ptr, len).
+            tmp = self.alloc_local("i32")
+            return addr + [
+                f"local.set {tmp}",
+                f"local.get {tmp}", "i32.load offset=0",
+                f"local.get {tmp}", "i32.load offset=4",
+            ]
+        return addr + [load_op]  # type: ignore[list-item]
+
+    # ---- hash ---------------------------------------------------------
+
+    # 64-bit FNV constants, shared with the String hash above.
+    _FNV_BASIS = -3750763034362895579  # 14695981039346656037 as signed i64
+    _FNV_PRIME = 1099511628211
+
+    def _hash_value(
+        self,
+        ptype: str,
+        value_instrs: list[str],
+        node: ast.Expr,
+        _seen: frozenset[str] | None = None,
+    ) -> list[str] | None:
+        """Fold a value of type ``ptype`` into an i64 hash.
+
+        Deterministic: primitives hash as their top-level `hash` does;
+        composites seed with the constructor tag and mix each field's hash
+        (FNV-style).  Returns None for unhashable / recursive types.
+        """
+        base, type_args = self._split_param_type(ptype)
+
+        if base in ("Int", "Nat"):
+            return value_instrs
+        if base in ("Bool", "Byte"):
+            return value_instrs + ["i64.extend_i32_u"]
+        if base == "Float64":
+            return value_instrs + ["i64.reinterpret_f64"]
+        if base == "Unit":
+            return ["i64.const 0"]
+        if base == "String":
+            return self._translate_hash_string(value_instrs)
+        if base == "Array":
+            elem_type = type_args[0] if type_args else None
+            if elem_type is None:
+                return None
+            return self._hash_array(elem_type, value_instrs, node, _seen)
+        return self._hash_adt(base, ptype, value_instrs, node, _seen)
+
+    def _mix_hash(self, acc: int, field_hash: list[str]) -> list[str]:
+        """``acc = (acc XOR field_hash) * FNV_PRIME`` — one fold step."""
+        return [
+            f"local.get {acc}",
+            *field_hash,
+            "i64.xor",
+            f"i64.const {self._FNV_PRIME}",
+            "i64.mul",
+            f"local.set {acc}",
+        ]
+
+    def _hash_adt(
+        self,
+        base: str,
+        ptype: str,
+        value_instrs: list[str],
+        node: ast.Expr,
+        _seen: frozenset[str] | None,
+    ) -> list[str] | None:
+        seen = _seen or frozenset()
+        if base in seen:
+            return None
+        seen = seen | {base}
+
+        plans = self._composite_ctor_plans(ptype)
+        if plans is None:
+            return None
+
+        ptr = self.alloc_local("i32")
+        acc = self.alloc_local("i64")
+
+        instrs: list[str] = []
+        instrs.extend(value_instrs)
+        instrs.append(f"local.set {ptr}")
+        instrs.extend(gc_shadow_push(ptr))
+        # Seed with the FNV basis, then mix the tag (distinguishes
+        # constructors) and each field's hash.
+        instrs.append(f"i64.const {self._FNV_BASIS}")
+        instrs.append(f"local.set {acc}")
+        instrs.extend(self._mix_hash(
+            acc, [f"local.get {ptr}", "i32.load", "i64.extend_i32_u"]))
+
+        def mix_ctor(fields: list[tuple[int, str, str]]) -> None:
+            for offset, wt, ftype in fields:
+                load = self._load_field(ptr, offset, wt)
+                fh = self._hash_value(ftype, load, node, seen)
+                if fh is None:
+                    raise _ShowHashUnsupported
+                fh_local = self.alloc_local("i64")
+                instrs.extend(f"  {i}" for i in fh)
+                instrs.append(f"  local.set {fh_local}")
+                mix = self._mix_hash(acc, [f"local.get {fh_local}"])
+                instrs.extend(f"  {i}" for i in mix)
+
+        try:
+            n = len(plans)
+            for depth, (_cname, tag, fields) in enumerate(plans):
+                if depth < n - 1:
+                    instrs.append(f"local.get {ptr}")
+                    instrs.append("i32.load")
+                    instrs.append(f"i32.const {tag}")
+                    instrs.append("i32.eq")
+                    instrs.append("if")
+                    mix_ctor(fields)
+                    instrs.append("else")
+                else:
+                    mix_ctor(fields)
+            for _ in range(n - 1):
+                instrs.append("end")
+        except _ShowHashUnsupported:
+            return None
+
+        instrs.append(f"local.get {acc}")
+        return instrs
+
+    def _hash_array(
+        self,
+        elem_type: str,
+        value_instrs: list[str],
+        node: ast.Expr,
+        _seen: frozenset[str] | None,
+    ) -> list[str] | None:
+        arr_ptr = self.alloc_local("i32")
+        arr_len = self.alloc_local("i32")
+        idx = self.alloc_local("i32")
+        acc = self.alloc_local("i64")
+        sp_save = self.alloc_local("i32")
+
+        elem_size = _element_mem_size(elem_type)
+        if elem_size is None:
+            return None
+        elem_load = self._load_array_element(arr_ptr, idx, elem_type, elem_size)
+        if elem_load is None:
+            return None
+        elem_hash = self._hash_value(elem_type, elem_load, node, _seen)
+        if elem_hash is None:
+            return None
+
+        instrs: list[str] = []
+        instrs.extend(value_instrs)  # (ptr, len)
+        instrs.append(f"local.set {arr_len}")
+        instrs.append(f"local.set {arr_ptr}")
+        instrs.extend(gc_shadow_push(arr_ptr))
+        # Seed with basis, mix the length, then each element hash.
+        instrs.append(f"i64.const {self._FNV_BASIS}")
+        instrs.append(f"local.set {acc}")
+        instrs.extend(self._mix_hash(
+            acc, [f"local.get {arr_len}", "i64.extend_i32_u"]))
+
+        instrs.append("i32.const 0")
+        instrs.append(f"local.set {idx}")
+        instrs.append("block $hash_arr_brk")
+        instrs.append("  loop $hash_arr_lp")
+        instrs.append(f"    local.get {idx}")
+        instrs.append(f"    local.get {arr_len}")
+        instrs.append("    i32.ge_u")
+        instrs.append("    br_if $hash_arr_brk")
+        # A COMPOSITE element's hash shadow-pushes its struct pointer with no
+        # matching pop; snapshot/restore $gc_sp around the element hash to
+        # unwind those per-iteration slots (the i64 accumulator is a value, not
+        # a heap root, so nothing here needs rooting).
+        instrs.append("    global.get $gc_sp")
+        instrs.append(f"    local.set {sp_save}")
+        eh_local = self.alloc_local("i64")
+        instrs.extend(f"    {i}" for i in elem_hash)
+        instrs.append(f"    local.set {eh_local}")
+        mix = self._mix_hash(acc, [f"local.get {eh_local}"])
+        instrs.extend(f"    {i}" for i in mix)
+        instrs.append(f"    local.get {sp_save}")
+        instrs.append("    global.set $gc_sp")
+        instrs.append(f"    local.get {idx}")
+        instrs.append("    i32.const 1")
+        instrs.append("    i32.add")
+        instrs.append(f"    local.set {idx}")
+        instrs.append("    br $hash_arr_lp")
+        instrs.append("  end")
+        instrs.append("end")
+
+        instrs.append(f"local.get {acc}")
+        return instrs
 
     # -----------------------------------------------------------------
     # Effect handlers: State<T> and Exn<E>
