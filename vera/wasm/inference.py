@@ -124,16 +124,13 @@ class InferenceMixin:
         #   AssertExpr        → None (Unit)
         #   AssumeExpr        → None (Unit)
         #   AnonFn            → "i32" (closure ptr — defensive add #597)
-        #   ModuleCall        → None (defensive add #597; the
-        #                       `path` field can't be threaded
-        #                       through the bare-name FnCall
-        #                       dispatcher.  Today the type checker
-        #                       resolves ModuleCalls to FnCalls
-        #                       before this helper runs; if a
-        #                       regression flows a ModuleCall here,
-        #                       returning None surfaces the failure
-        #                       cleanly rather than masking with a
-        #                       wrong-name lookup.)
+        #   ModuleCall        → resolve target via
+        #                       `_resolve_module_call_wasm_name` (the
+        #                       single shared resolver), then reuse
+        #                       `_infer_fncall_wasm_type` (#905 — a
+        #                       ModuleCall in a constructor field needs
+        #                       its WASM return type; the resolver
+        #                       consumes `path`, so no wrong-name lookup)
         #
         # Cannot occur (rejected before reaching this codegen-time
         # helper):
@@ -219,18 +216,26 @@ class InferenceMixin:
         # represents a closure handle on the WASM stack (i32 ptr).
         if isinstance(expr, ast.AnonFn):
             return "i32"
-        # Defensive add (#597): ModuleCall resolves cross-module and
-        # carries an `expr.path` field that the bare-name `FnCall`
-        # dispatcher cannot consume.  Synthesising a fake
-        # `FnCall(name=expr.name, args=expr.args)` would drop the
-        # path and could match a same-name local fn from a different
-        # module — silent wrong-answer rather than safe failure.
-        # Return None instead so a regression that flows a ModuleCall
-        # to this helper surfaces as a None-typed expression at the
-        # caller (which then either skips via [E602] or reports an
-        # explicit error) rather than masking with a wrong lookup.
+        # #905: a non-void ModuleCall used *directly* as a constructor argument
+        # (a Tuple/ADT field) reaches this helper via
+        # `_translate_constructor_call`, which needs the field's WASM type to lay
+        # out offsets.  Resolve the qualified target through the SAME single
+        # resolver the desugar and the statement-position result-shape predicates
+        # (`_is_void_expr` / `_is_pair_result_expr`) already use —
+        # `_resolve_module_call_wasm_name` returns the bare name, the `mod$…`
+        # name when a local shadows it, or a shadowed generic's per-
+        # instantiation clone — then reuse the FnCall inference on that resolved
+        # target.  This does NOT drop the path (the earlier #597 concern): the
+        # resolver consumes it, so a same-name local from a different module can
+        # never be matched.  Keeping all four sites on one resolver means they
+        # can never disagree on which function `m::f(...)` reaches.  Before this,
+        # returning None made `_translate_constructor_call` raise CodegenSkip and
+        # silently drop the enclosing function — a check-green program then
+        # dangled its call at run (`unknown func $mkt`).
         if isinstance(expr, ast.ModuleCall):
-            return None
+            target = self._resolve_module_call_wasm_name(expr)
+            return self._infer_fncall_wasm_type(
+                ast.FnCall(name=target, args=expr.args, span=expr.span))
         return None
 
     _IO_WASM_TYPES: dict[str, str | None] = {
@@ -834,11 +839,12 @@ class InferenceMixin:
         #                       through the bare-name FnCall
         #                       dispatcher; None instead of a
         #                       wrong same-name lookup)
-        #   ModuleCall        → None (defensive add #597 — the
-        #                       `path` field can't be threaded
-        #                       through the bare-name FnCall
-        #                       dispatcher; same rationale as
-        #                       QualifiedCall)
+        #   ModuleCall        → resolve target via
+        #                       `_resolve_module_call_wasm_name`, then
+        #                       reuse `_infer_fncall_vera_type` (#905 —
+        #                       a ModuleCall as an array-literal element
+        #                       needs its Vera return type; the resolver
+        #                       consumes `path`, so no wrong-name lookup)
         #
         # Cannot occur (contract-only or check-time rejected):
         #   ResultRef         → only valid in `ensures`; not at call site
@@ -913,17 +919,28 @@ class InferenceMixin:
             return self._infer_vera_type(expr.body.expr)
         if isinstance(expr, (ast.AssertExpr, ast.AssumeExpr)):
             return "Unit"
-        # AnonFn / QualifiedCall / ModuleCall: return None rather
-        # than a placeholder string.  AnonFn's Vera type would be a
-        # full `FnType` shape that isn't typically needed for call
-        # rewriting; QualifiedCall carries a `qualifier` and
-        # ModuleCall carries a `path` that the bare-name `FnCall`
-        # dispatcher cannot consume — synthesising a fake `FnCall`
-        # would drop those fields and could match a same-name local
-        # fn instead.  None lets callers handle the unknown-type
-        # case explicitly rather than propagating a wrong type
-        # silently.
-        if isinstance(expr, (ast.AnonFn, ast.QualifiedCall, ast.ModuleCall)):
+        # #905 (array-literal sibling): a ModuleCall used as the FIRST element
+        # of an array literal reaches here via `_infer_array_element_type`,
+        # which needs the element's Vera type name to lay the array out.
+        # Resolve the qualified target through the SAME single resolver the
+        # desugar uses (`_resolve_module_call_wasm_name` — it CONSUMES `path`,
+        # so no same-name-local mismatch, the earlier #597 concern) and delegate
+        # to the FnCall Vera-type inference.  Without this, `[m::f(x), …]` inferred
+        # a None element type → the array-let binding was dropped and the
+        # enclosing function silently vanished from the exports on a check-green
+        # program (same class as the constructor-field crash, quieter symptom).
+        if isinstance(expr, ast.ModuleCall):
+            target = self._resolve_module_call_wasm_name(expr)
+            return self._infer_fncall_vera_type(
+                ast.FnCall(name=target, args=expr.args, span=expr.span))
+        # AnonFn / QualifiedCall: return None rather than a placeholder string.
+        # AnonFn's Vera type would be a full `FnType` shape that isn't typically
+        # needed for call rewriting; QualifiedCall carries a `qualifier` the
+        # bare-name `FnCall` dispatcher cannot consume — synthesising a fake
+        # `FnCall` would drop it and could match a same-name local fn instead.
+        # None lets callers handle the unknown-type case explicitly rather than
+        # propagating a wrong type silently.
+        if isinstance(expr, (ast.AnonFn, ast.QualifiedCall)):
             return None
         return None  # pragma: no cover
 

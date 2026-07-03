@@ -1,0 +1,55 @@
+import vera.math(magnitude);
+
+public data Boxed {
+  Box(Int)
+}
+
+-- Module call in a Tuple field (non-final position, followed by a literal).
+private fn pair_of(@Int -> @Tuple<Int, Int>)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  Tuple(vera.math::magnitude(@Int.0), 9)
+}
+
+-- Module call in a user-ADT constructor field.
+private fn box_of(@Int -> @Boxed)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  Box(vera.math::magnitude(@Int.0))
+}
+
+-- Extract the literal (last) Tuple field: @Int.0 = 9 (De Bruijn: .0 = last).
+private fn snd_of_pair(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Tuple<Int, Int> = pair_of(@Int.0);
+  match @Tuple<Int, Int>.0 {
+    Tuple(@Int, @Int) -> @Int.0
+  }
+}
+
+-- Extract the ADT field: @Int.0 = magnitude(@Int.0) (= 9 when called with -9).
+private fn unbox(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Boxed = box_of(@Int.0);
+  match @Boxed.0 {
+    Box(@Int) -> @Int.0
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  snd_of_pair(-5) + unbox(-9)
+}

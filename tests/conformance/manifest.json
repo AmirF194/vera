@@ -1113,6 +1113,20 @@
     ]
   },
   {
+    "id": "ch08_ctor_field_module_call",
+    "file": "ch08_ctor_field_module_call.vera",
+    "chapter": 8,
+    "title": "Module-qualified call as a constructor field argument",
+    "level": "run",
+    "spec_ref": "Section 8.5.3",
+    "features": [
+      "module_qualified_call",
+      "constructor",
+      "tuple",
+      "adt"
+    ]
+  },
+  {
     "id": "ch08_cross_module_generic_lib",
     "file": "ch08_cross_module_generic_lib.vera",
     "chapter": 8,
