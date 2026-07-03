@@ -919,6 +919,111 @@ public fn main(-> @Unit)
         # @String.4 = deepest binding = first field = "https"
         assert _run_io(source, fn="main") == "https"
 
+    # ---- #902: a zero-size Unit component in a by-value compound layout ----
+    # A Unit field (0 bytes, no WASM representation) must be laid out as a
+    # zero-size field — construction stores nothing and it occupies no bytes —
+    # so the enclosing function compiles and runs.  Pre-fix, `Tuple((), n)`
+    # raised a CodegenSkip ("could not infer constructor argument WASM type"),
+    # silently dropping the function and dangling its `call` (unknown func).
+
+    def test_tuple_unit_first_component_runs(self) -> None:
+        """Tuple((), 3) returned from a fn — the Unit field must not skip it."""
+        source = """\
+private fn mkt(@Int -> @Tuple<Unit, Int>)
+  requires(true) ensures(true) effects(pure)
+{ Tuple((), 3) }
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Tuple<Unit, Int> = mkt(5); 7 }
+"""
+        assert _run(source, fn="f") == 7
+
+    def test_tuple_unit_component_int_extractable(self) -> None:
+        """The Int field of Tuple<Unit, Int> lands at the right offset after
+        the zero-size Unit field — match-extract must recover it."""
+        source = """\
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  let @Tuple<Unit, Int> = Tuple((), 42);
+  match @Tuple<Unit, Int>.0 {
+    Tuple(@Unit, @Int) -> @Int.0
+  }
+}
+"""
+        assert _run(source, fn="f") == 42
+
+    def test_tuple_unit_second_component_runs(self) -> None:
+        """Unit in the trailing position — offset of the leading Int unchanged."""
+        source = """\
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  let @Tuple<Int, Unit> = Tuple(99, ());
+  match @Tuple<Int, Unit>.0 {
+    Tuple(@Int, @Unit) -> @Int.0
+  }
+}
+"""
+        assert _run(source, fn="f") == 99
+
+    def test_tuple_multiple_unit_components_runs(self) -> None:
+        """Several zero-size Unit fields collapse to nothing; the Int survives."""
+        source = """\
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  let @Tuple<Unit, Unit, Int> = Tuple((), (), 5);
+  match @Tuple<Unit, Unit, Int>.0 {
+    Tuple(@Unit, @Unit, @Int) -> @Int.0
+  }
+}
+"""
+        assert _run(source, fn="f") == 5
+
+    def test_user_adt_unit_field_runs(self) -> None:
+        """A user ADT (not Tuple) with a Unit field goes through the same
+        constructor-layout path and must also compile + run."""
+        source = """\
+private data Wrap { MkWrap(Unit, Int) }
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  let @Wrap = MkWrap((), 8);
+  match @Wrap.0 {
+    MkWrap(@Unit, @Int) -> @Int.0
+  }
+}
+"""
+        assert _run(source, fn="f") == 8
+
+    def test_tuple_side_effecting_unit_field_runs_effect(self) -> None:
+        """#902 completeness: a Unit-*returning call* (IO.print) in a tuple
+        field must compile AND run its side effect — the zero-size field emits
+        its argument instructions even though it stores nothing.  A bare `()`
+        UnitLit never exercises this; the earlier `_is_void_expr` detection
+        also has to recognise the QualifiedCall (which `_infer_vera_type`
+        reports as None)."""
+        source = _IO_PRELUDE + """\
+private fn mkt(@Int -> @Tuple<Unit, Int>)
+  requires(true) ensures(true) effects(<IO>)
+{ Tuple(IO.print("side"), @Int.0) }
+
+public fn main(-> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  let @Tuple<Unit, Int> = mkt(7);
+  match @Tuple<Unit, Int>.0 {
+    Tuple(@Unit, @Int) -> IO.print("end")
+  }
+}
+"""
+        # The IO.print in the tuple field must actually run (side effect
+        # observable), then the match body prints "end".
+        assert _run_io(source, fn="main") == "sideend"
+
 
 class TestAdtStringFields:
     """ADT constructors with String/Array fields (bug #266)."""

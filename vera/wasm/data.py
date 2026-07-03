@@ -68,7 +68,16 @@ class DataMixin:
                 expr, f"unknown constructor {expr.name!r}"
             )
 
-        # Translate all arguments and infer their concrete WASM types
+        # Translate all arguments and infer their concrete WASM types.
+        # A `Unit` field is zero-size (spec §2.2 / §11.2.2: `Unit` is 0 bytes
+        # with no WASM representation), so it carries the `"unit"` sentinel
+        # rather than a real WAT type: its instructions are still emitted (for
+        # any side effect — a `()` literal produces nothing, but a
+        # `Unit`-returning call does have effects), but it occupies no bytes
+        # in the layout and stores nothing.  This mirrors the existing
+        # Unit-skip in `_translate_let_destruct` and closes #902 — a
+        # `Tuple<Unit, …>` (or any constructor with a `Unit` field) must
+        # compile, not silently skip the function and dangle its call.
         arg_instrs_list: list[list[str]] = []
         arg_wasm_types: list[str] = []
         for arg in expr.args:
@@ -77,16 +86,29 @@ class DataMixin:
                 return None
             arg_wt = self._infer_expr_wasm_type(arg)
             if arg_wt is None:
-                raise CodegenSkip(
-                    arg,
-                    "could not infer constructor argument WASM type",
-                )
+                # Distinguish a genuine zero-size `Unit` field (handled) from a
+                # true inability to infer the WASM type (still a skip).  Use
+                # `_is_void_expr` — the canonical "produces no stack value"
+                # check — rather than `_infer_vera_type == "Unit"`, so a
+                # *Unit-returning call* in field position (`IO.print("x")`, a
+                # user `@Unit` fn, a void effect op, a `ModuleCall` to a
+                # `@Unit` fn) is also laid out zero-size instead of falling
+                # through to a skip (#902 completeness: `_infer_vera_type`
+                # returns None for Qualified/Module calls).
+                if self._is_void_expr(arg):
+                    arg_wt = "unit"
+                else:
+                    raise CodegenSkip(
+                        arg,
+                        "could not infer constructor argument WASM type",
+                    )
             arg_instrs_list.append(arg_instrs)
             arg_wasm_types.append(arg_wt)
 
-        # Compute field offsets from concrete argument types
-        _sizes = {"i32": 4, "i64": 8, "f64": 8, "i32_pair": 8}
-        _aligns = {"i32": 4, "i64": 8, "f64": 8, "i32_pair": 4}
+        # Compute field offsets from concrete argument types.  A `"unit"`
+        # field is zero-size: it neither aligns nor advances the offset.
+        _sizes = {"i32": 4, "i64": 8, "f64": 8, "i32_pair": 8, "unit": 0}
+        _aligns = {"i32": 4, "i64": 8, "f64": 8, "i32_pair": 4, "unit": 1}
         offset = 4  # after tag (i32, 4 bytes)
         field_offsets: list[tuple[int, str]] = []
         for wt in arg_wasm_types:
@@ -109,7 +131,13 @@ class DataMixin:
 
         # Store each field at its computed offset
         for i, (fo, wt) in enumerate(field_offsets):
-            if wt == "i32_pair":
+            if wt == "unit":
+                # Zero-size Unit field: emit the argument for its side effects
+                # (a `()` literal is empty; a Unit-returning call still runs),
+                # but there is nothing on the stack to store and no bytes to
+                # occupy — no `local.get`, no store.
+                instructions.extend(arg_instrs_list[i])
+            elif wt == "i32_pair":
                 # Pair type (String, Array<T>): store (ptr, len) as two i32s
                 tmp_val_ptr = self.alloc_local("i32")
                 tmp_val_len = self.alloc_local("i32")

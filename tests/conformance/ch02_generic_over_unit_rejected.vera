@@ -1,0 +1,32 @@
+-- Conformance: instantiating a generic type parameter at Unit is a checker
+--   error (Chapter 2, Section 2.7 / Chapter 11, Section 11.2.2)
+-- Tests: E206 — a `forall<T>` whose type parameter is inferred to the
+--        zero-size `Unit` type is rejected at check time (#900).  Unit is
+--        0 bytes with no WASM representation (§11.2.2: Unit-returning fns
+--        have no result type), so a monomorphized `@T.n` slot would resolve
+--        to no runtime local — the dangling-slot codegen invariant.  The
+--        checker rejects it cleanly rather than crashing in codegen (E699).
+private fn mku(@Int -> @Unit)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  ()
+}
+
+private forall<T> fn idt(@T -> @T)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  @T.0
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Unit = idt(mku(5));
+  7
+}

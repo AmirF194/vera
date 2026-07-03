@@ -46,6 +46,12 @@ class FunctionInfo:
     param_type_exprs: tuple[object, ...] = ()  # ast.TypeExpr nodes (for C6b)
     visibility: str | None = None  # "public" | "private" | None (C7c)
     forall_constraints: tuple[object, ...] = ()  # ast.AbilityConstraint nodes
+    # #900: forall type-var names the *body* reads via a `@T.n` slot (a WASM
+    # local materialization).  A generic monomorphized at `T = Unit` only
+    # crashes codegen (dangling `@T.n`) when its body READS `@T`; a `@T`
+    # parameter that is never read erases cleanly from the ABI.  Empty for
+    # non-generic and built-in functions.  Drives the narrowed E206.
+    forall_vars_read: frozenset[str] = frozenset()
 
 
 @dataclass

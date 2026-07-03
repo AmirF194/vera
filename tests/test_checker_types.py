@@ -1653,3 +1653,162 @@ class TestCrossArgTypeArgMerge:
             "  requires(true) ensures(true) effects(pure)\n"
             "{ eq2(MkErr([1]), MkOk(2)) }\n"
         )
+
+
+class TestGenericOverUnitRejected900:
+    """#900: a generic type parameter instantiated at the zero-size ``Unit``
+    type is rejected at *check* time (E206) — but ONLY when the generic's body
+    reads a ``@T``-typed slot, the exact condition that crashes in codegen.
+
+    ``Unit`` is 0 bytes with no WASM representation (spec §11.2.2 / §11.3.1),
+    so a monomorphized ``forall<T>`` body's ``@T.n`` slot read resolves to no
+    local (the dangling-slot codegen invariant).  A ``@T`` parameter that is
+    never read erases cleanly from the WASM ABI, so a generic whose body does
+    NOT read ``@T`` (``firstInt(@T, @Int){ @Int.0 }``, ``ignore(@T){ 0 }``)
+    runs fine at ``T = Unit`` and MUST NOT be rejected — the discriminator is
+    a ``@T.n`` read, not merely ``T = Unit``.  The check must fire for every
+    way ``T`` is pinned to ``Unit`` *when the body reads it*, not just the one
+    repro shape from the issue.
+    """
+
+    _IDT = (
+        "private forall<T> fn idt(@T -> @T)\n"
+        "  requires(true) ensures(true) effects(pure) { @T.0 }\n"
+    )
+    _MKU = (
+        "private fn mku(@Int -> @Unit)\n"
+        "  requires(true) ensures(true) effects(pure) { () }\n"
+    )
+
+    def test_generic_over_unit_from_fn_return_rejected(self) -> None:
+        # The issue's repro: a @Unit-returning fn feeds the generic arg.
+        errs = _errors(
+            self._MKU + self._IDT
+            + "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ let @Unit = idt(mku(5)); 7 }\n"
+        )
+        codes = {e.error_code for e in errs}
+        assert "E206" in codes, \
+            f"generic-over-Unit must be a clean E206, got {codes}"
+
+    def test_generic_over_unit_from_unit_literal_rejected(self) -> None:
+        # T bound to Unit by a bare () unit literal passed directly.
+        errs = _errors(
+            self._IDT
+            + "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ let @Unit = idt(()); 7 }\n"
+        )
+        codes = {e.error_code for e in errs}
+        assert "E206" in codes, \
+            f"() literal into generic must be E206, got {codes}"
+
+    def test_generic_over_unit_one_of_several_params_rejected(self) -> None:
+        # Unit pins T through one of several parameters (the others are Int).
+        errs = _errors(
+            self._MKU
+            + "private forall<T> fn pair(@T, @Int -> @T)\n"
+            "  requires(true) ensures(true) effects(pure) { @T.0 }\n"
+            + "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ let @Unit = pair(mku(5), 3); 7 }\n"
+        )
+        codes = {e.error_code for e in errs}
+        assert "E206" in codes, \
+            f"Unit pinning one of several params must be E206, got {codes}"
+
+    def test_generic_over_unit_names_parameter_and_type(self) -> None:
+        # The diagnostic must name the offending type parameter and Unit so
+        # the message is actionable (checkability-over-correctness).
+        errs = _errors(
+            self._MKU + self._IDT
+            + "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ let @Unit = idt(mku(5)); 7 }\n"
+        )
+        e206 = [e for e in errs if e.error_code == "E206"]
+        assert e206, "expected an E206 diagnostic"
+        msg = e206[0].description
+        assert "T" in msg and "Unit" in msg, \
+            f"message must name the param and Unit, got: {msg!r}"
+
+    def test_boxed_option_over_unit_still_ok(self) -> None:
+        # Boundary: Option<Unit> is a *boxed* ADT (tag + pointer), not
+        # zero-size, so instantiating a generic at Option<Unit> must remain
+        # ACCEPTED — the rejection is keyed to *bare* Unit only.
+        _check_ok(
+            "private fn mko(@Int -> @Option<Unit>)\n"
+            "  requires(true) ensures(true) effects(pure) { None }\n"
+            + self._IDT
+            + "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ let @Option<Unit> = idt(mko(5)); 7 }\n"
+        )
+
+    def test_builtin_generic_over_unit_not_e206(self) -> None:
+        # E206 is scoped to USER `forall<T>` fns the monomorphizer clones.
+        # The built-in generic `async` has hand-written codegen, not a
+        # `@T`-slot body, so `async(IO.print(...))` (a valid Future<Unit>
+        # fire-and-forget) must NOT trip E206 — its W002 concurrency
+        # warning path is preserved.
+        errs = _errors(
+            "private fn f(-> @Future<Unit>)\n"
+            "  requires(true) ensures(true) effects(<IO, Async>)\n"
+            "{ async(IO.print(\"hi\")) }\n"
+        )
+        codes = {e.error_code for e in errs}
+        assert "E206" not in codes, \
+            f"built-in async over Unit must not be E206, got {codes}"
+
+    # ---- The @T-not-read cases: VALID at T=Unit, must be ACCEPTED ----
+    # A `@T` parameter that the body never reads erases cleanly from the WASM
+    # ABI, so these run on base and E206 must not fire (the round-2 fix).
+
+    def test_generic_unread_typevar_extra_param_accepted(self) -> None:
+        # firstInt(@T, @Int){ @Int.0 } never reads @T; runs 42 on base.
+        _check_ok(
+            self._MKU
+            + "private forall<T> fn firstInt(@T, @Int -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure) { @Int.0 }\n"
+            + "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ firstInt(mku(5), 42) }\n"
+        )
+
+    def test_generic_unread_typevar_return_const_accepted(self) -> None:
+        # ignore(@T){ 0 } never reads @T; monomorphizes to $ignore$Unit, runs 0.
+        _check_ok(
+            self._MKU
+            + "private forall<T> fn ignore(@T -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure) { 0 }\n"
+            + "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ ignore(mku(5)) }\n"
+        )
+
+    def test_generic_unread_typevar_from_unit_literal_accepted(self) -> None:
+        # Same discriminator via a bare () literal, no Unit-returning helper.
+        _check_ok(
+            "private forall<T> fn ignore(@T -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure) { 0 }\n"
+            + "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ ignore(()) }\n"
+        )
+
+    def test_generic_reads_typevar_as_match_scrutinee_rejected(self) -> None:
+        # A `@T` read as a match scrutinee IS a materialization — E699 on base,
+        # so it must stay an E206 rejection (not slip through the narrowing).
+        errs = _errors(
+            self._MKU
+            + "private forall<T> fn matchT(@T, @Int -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ match @T.0 { @T -> @Int.0 } }\n"
+            + "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ matchT(mku(3), 8) }\n"
+        )
+        codes = {e.error_code for e in errs}
+        assert "E206" in codes, \
+            f"a @T match-scrutinee read must stay E206, got {codes}"

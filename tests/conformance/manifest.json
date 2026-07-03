@@ -233,6 +233,22 @@
     ]
   },
   {
+    "id": "ch02_generic_over_unit_rejected",
+    "file": "ch02_generic_over_unit_rejected.vera",
+    "chapter": 2,
+    "title": "Instantiating a generic at the zero-size Unit type is a checker error (#900)",
+    "level": "check",
+    "spec_ref": "Section 11.2.2",
+    "expected_error": "E206",
+    "features": [
+      "generics",
+      "forall",
+      "monomorphization",
+      "unit",
+      "check_error"
+    ]
+  },
+  {
     "id": "ch02_tuple_basic",
     "file": "ch02_tuple_basic.vera",
     "chapter": 2,
@@ -242,6 +258,20 @@
     "features": [
       "tuple",
       "let_destruct",
+      "match",
+      "constructor"
+    ]
+  },
+  {
+    "id": "ch02_tuple_unit_component",
+    "file": "ch02_tuple_unit_component.vera",
+    "chapter": 2,
+    "title": "A zero-size Unit component in a by-value Tuple layout compiles and runs (#902)",
+    "level": "run",
+    "spec_ref": "Section 2.3.1",
+    "features": [
+      "tuple",
+      "unit",
       "match",
       "constructor"
     ]

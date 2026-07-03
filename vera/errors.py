@@ -495,6 +495,7 @@ ERROR_CODES: dict[str, str] = {
     "E203": "Effect operation wrong argument count",
     "E204": "Effect operation argument type mismatch",
     "E205": "Conflicting type argument inference",
+    "E206": "Generic type parameter instantiated at Unit",
     "E210": "Unknown constructor",
     "E211": "Constructor is nullary",
     "E212": "Constructor wrong field count",
