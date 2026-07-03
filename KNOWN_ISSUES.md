@@ -6,7 +6,9 @@ Bugs and limitations tracked against the [issue tracker](https://github.com/aall
 
 Defects in shipped compiler, runtime, or tooling behaviour — this table matches the issue tracker's open [`bug`-labelled issues](https://github.com/aallan/vera/issues?q=is%3Aissue%20state%3Aopen%20label%3Abug) one-to-one. Verification-soundness gaps carry the `limitation` label instead and are tracked under [Limitations](#limitations).
 
-No known bugs.
+| Bug | Issue |
+|-----|-------|
+| `Eq` auto-derivation on the constructor-inferred path over-rejects a *sparse multi-type-parameter* ADT (`data Res<A, B> { MkOk(A), MkErr(B) }`, `eq2(MkErr(5), …)`): recovery infers only the type parameter present in the constructor argument (`B = Int`) and leaves the other (`A`) unknown, so the `all(a is not None)` guard declines and the E613 derivability gate rejects a program the slot-ref form (`Res<Int, Int>`) accepts. Over-reject only — the *safe* direction, never unsound. #772 closed the single-type-parameter case; sparse multi-parameter ADTs need per-parameter type-arg recovery merged across the call's constructor arguments. | [#898](https://github.com/aallan/vera/issues/898) |
 
 ## Limitations
 
