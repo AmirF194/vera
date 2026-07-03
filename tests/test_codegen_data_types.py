@@ -1337,3 +1337,123 @@ public fn main(@Unit -> @Int)
             f"got warnings: "
             f"{[d.description for d in warnings]}"
         )
+
+
+class TestSingleLetterAdtNamePreludeCollision869:
+    """`#869` — a user ADT with a single-uppercase-letter name (``data A``)
+    must not collide with a prelude combinator's generic type PARAMETER.
+
+    The prelude ships ``option_map`` / ``option_and_then`` as
+    ``forall<A, B>`` templates and ``result_map`` as ``forall<A, B, E>``.
+    A generic FnDecl is a *template* — it must reach WAT only through its
+    monomorphized clones (call sites are rewritten to mangled clone names
+    in ``vera/wasm/calls.py``), never as a bare-named function.  When
+    ``T``/``E`` etc. stay abstract the template's body fails to lower and
+    the Pass-2 ``_compile_fn`` attempt is (correctly) skipped.
+
+    Pre-fix, a user ``data A`` put ``A`` into ``_adt_layouts``; the prelude
+    template's forall var ``A`` then resolved to the *concrete* user ADT,
+    so ``option_map`` lowered cleanly and was emitted as a bare
+    ``$option_map`` function — including the ``call_indirect`` for its
+    passed-in closure argument, whose function table is only declared when
+    a program actually constructs a closure.  The uncalled template
+    therefore referenced a table the module never emitted, and ``vera run``
+    trapped at WASM instantiation with ``unknown table 0`` on a program
+    that passed both ``check`` and ``verify``.
+
+    The prelude combinators' internal type-parameter identifiers are now
+    reserved names no ordinary user ADT spells (``vera/prelude.py``), so
+    the collision cannot arise (spec §0.2 principle 4 — structural
+    references eliminate naming-coherence errors; prelude internals stay
+    invisible to user namespace decisions).
+    """
+
+    @staticmethod
+    def _prog(name: str) -> str:
+        """A program with a single ADT ``name`` that also drags in the
+        prelude Option combinators (``option_unwrap_or`` is referenced so
+        the whole Option combinator family is injected)."""
+        return f"""
+public data {name} {{ Mk{name}(Int) }}
+
+private fn getval(@{name} -> @Int)
+  requires(true) ensures(true) effects(pure)
+{{
+  match @{name}.0 {{ Mk{name}(@Int) -> @Int.0 }}
+}}
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{{
+  option_unwrap_or(Some(getval(Mk{name}(7))), 0)
+}}
+"""
+
+    # Every single uppercase letter the prelude uses as a combinator type
+    # parameter (A/B from option_map/option_and_then, E from result_map,
+    # T/U/E from the *_unwrap_or and array aliases) plus a couple of
+    # controls.  All must run — none may hit `unknown table 0`.
+    def test_single_letter_adt_A_runs(self) -> None:
+        # `A` is the canonical repro from #869 (option_map/option_and_then
+        # forall var).  Pre-fix: `unknown table 0` at run.
+        assert _run(self._prog("A"), fn="main") == 7
+
+    def test_single_letter_adt_B_runs(self) -> None:
+        assert _run(self._prog("B"), fn="main") == 7
+
+    def test_single_letter_adt_E_runs(self) -> None:
+        # `E` is result_map's error-type forall var.
+        assert _run(self._prog("E"), fn="main") == 7
+
+    def test_single_letter_adt_T_runs(self) -> None:
+        # `T` is the *_unwrap_or / array-alias forall var.
+        assert _run(self._prog("T"), fn="main") == 7
+
+    def test_single_letter_adt_U_runs(self) -> None:
+        # `U` is ArrayFoldFn's accumulator forall var.
+        assert _run(self._prog("U"), fn="main") == 7
+
+    def test_multi_letter_adt_control_runs(self) -> None:
+        # Control: a two-letter name never matched a prelude type param
+        # even pre-fix.  Guards against the fix accidentally regressing
+        # ordinary ADT names.
+        assert _run(self._prog("Aa"), fn="main") == 7
+
+    def test_colliding_adt_does_not_emit_bare_prelude_template(self) -> None:
+        """The uncalled ``option_map`` / ``option_and_then`` templates must
+        not be emitted as bare-named functions when a ``data A`` is present.
+
+        This is the mechanism behind the ``unknown table 0`` trap: a
+        bare ``(func $option_map ...)`` in the module carries a
+        ``call_indirect`` with no backing table.  Assert the bare
+        definitions are absent (mono clones, if any, carry a ``$`` suffix
+        and are fine — but this program never calls the combinators, so
+        none should appear at all)."""
+        wat = _compile_ok(self._prog("A")).wat or ""
+        for tmpl in ("option_map", "option_and_then"):
+            assert not re.search(
+                rf"\(func \${tmpl}(?![A-Za-z0-9_$])", wat
+            ), (
+                f"bare template `(func ${tmpl} ...)` leaked into WAT for a "
+                f"`data A` program — the #869 collision emitted an "
+                f"uncalled generic template with a table-less "
+                f"call_indirect.  WAT lines: "
+                f"{[ln.strip() for ln in wat.splitlines() if tmpl in ln]}"
+            )
+
+    def test_two_adt_issue_repro_runs(self) -> None:
+        """The exact two-ADT shape from the #869 issue body: ``data A`` +
+        ``data B { MkB(A) }`` with a main constructing them."""
+        src = """
+public data A { MkA(Int) }
+public data B { MkB(A) }
+
+private fn get_a(@A -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ match @A.0 { MkA(@Int) -> @Int.0 } }
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ match MkB(MkA(42)) { MkB(@A) -> get_a(@A.0) } }
+"""
+        assert _run(src, fn="main") == 42

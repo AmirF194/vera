@@ -1,0 +1,51 @@
+-- Conformance: single-uppercase-letter ADT names (Chapter 2)
+-- Tests: a user ADT named with a single uppercase letter (data A, data B)
+-- does not collide with a prelude combinator's generic type parameter.
+-- Regression for #869: pre-fix such a name pulled the prelude option_map
+-- template (forall<A, B>) into codegen with a table-less call_indirect and
+-- trapped at run with `unknown table 0` on a check/verify-green program.
+-- The program references option_unwrap_or so the Option combinator family
+-- is injected, exercising the collision path.
+private data A {
+  MkA(Int)
+}
+
+private data B {
+  MkB(A)
+}
+
+private fn a_value(@A -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  match @A.0 {
+    MkA(@Int) -> @Int.0
+  }
+}
+
+private fn b_value(@B -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  match @B.0 {
+    MkB(@A) -> a_value(@A.0)
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 42)
+  effects(pure)
+{
+  b_value(MkB(MkA(42)))
+}
+
+public fn test_option(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 7)
+  effects(pure)
+{
+  option_unwrap_or(Some(a_value(MkA(7))), 0)
+}
