@@ -1,0 +1,53 @@
+-- Conformance: where-helpers inside a monomorphized generic (Chapter 9, #904)
+-- Tests: a forall<T> function carrying a `where { fn ... }` block must emit
+-- its helpers under each monomorphized clone.  The generic parent is skipped
+-- in codegen (its @T param is not a concrete WASM type), so before #904 the
+-- clone's call to the helper dangled (`unknown func`).  Covers both shapes:
+--   * a T-INDEPENDENT helper (`helper(@Int -> @Int)`, no @T) — shared body,
+--     emitted per-clone;
+--   * a T-DEPENDENT helper (`id(@T -> @T)`) — monomorphized per-instantiation.
+private forall<T> fn outer(@T -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  helper(5)
+}
+where {
+  fn helper(@Int -> @Int)
+    requires(true)
+    ensures(true)
+    effects(pure)
+  {
+    @Int.0
+  }
+}
+
+private forall<T> fn wrap(@T -> @T)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  id(@T.0)
+}
+where {
+  fn id(@T -> @T)
+    requires(true)
+    ensures(true)
+    effects(pure)
+  {
+    @T.0
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 12)
+  effects(pure)
+{
+  -- outer<Int> runs its T-independent helper (returns 5); wrap<Int> runs its
+  -- T-dependent id (returns 7); 5 + 7 == 12.  wrap<Bool> exercises a second,
+  -- distinct instantiation of the T-dependent helper.
+  let @Bool = wrap(true);
+  outer(99) + wrap(7)
+}
