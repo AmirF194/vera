@@ -1628,6 +1628,42 @@ class TestBrowserState:
 
         assert node_result["value"] == py_result.value
 
+    def test_state_composite_type_arg_parity(self, tmp_path: Path) -> None:
+        """#914: `State<Option<Int>>` — the mangled `state_*` import names
+        (`state_get_Option_LInt_R` etc.) are discovered and paired into one
+        cell by the Node runtime's import regex exactly as the Python host
+        does, so a composite State roundtrips identically in both runtimes."""
+        source = """\
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Option<Int>>](@Option<Int> = Some(5)) {
+    get(@Unit) -> { resume(@Option<Int>.0) },
+    put(@Option<Int>) -> { resume(()) }
+    with @Option<Int> = @Option<Int>.0
+  } in {
+    put(Some(9));
+    option_unwrap_or(get(()), 0)
+  }
+}
+"""
+        vera_file = tmp_path / "state_composite.vera"
+        vera_file.write_text(source, encoding="utf-8")
+        tree = parse_file(str(vera_file))
+        ast = transform(tree)
+        result = codegen_compile(ast, source=source, file=str(vera_file))
+        assert result.ok, f"Compile errors: {result.diagnostics}"
+        wasm_path = tmp_path / "state_composite.wasm"
+        wasm_path.write_bytes(result.wasm_bytes)
+
+        py_result = _run_python(result, fn_name="main")
+        node_result = _run_node(wasm_path, fn="main")
+
+        assert py_result.value == 9
+        assert node_result["value"] == py_result.value
+
 
 # =====================================================================
 # TestBrowserContracts — contract_fail parity

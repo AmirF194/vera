@@ -263,10 +263,15 @@ class InferenceMixin:
             return "i32"
         # User-defined effect ops (e.g. Exn.throw, State.get/put)
         if expr.name in self._effect_ops:
-            target_name, is_void = self._effect_ops[expr.name]
+            _target_name, is_void = self._effect_ops[expr.name]
             if expr.name == "throw" or is_void:
                 return None  # throw → Never; void ops return no value
-            return self._fn_ret_types.get(target_name)
+            # #914: the op's result type is its State<T> parameter's WAT type,
+            # recorded in `_effect_op_result_wt` at the injection site — NOT a
+            # `_fn_ret_types` lookup on the dispatch target (`$vera.state_get_T`
+            # is never a `_fn_ret_types` key, so the old lookup returned None
+            # for every value-producing op, composite or primitive).
+            return self._effect_op_result_wt.get(expr.name)
         return None  # pragma: no cover
 
     def _infer_fncall_wasm_type(self, expr: ast.FnCall) -> str | None:
@@ -464,6 +469,19 @@ class InferenceMixin:
         # apply_fn(closure, args...) — infer from closure type
         if expr.name == "apply_fn" and len(expr.args) >= 1:
             return self._infer_apply_fn_return_type(expr.args[0])
+        # #914: a bare effect-op call (`get(())` inside a State<T> handler /
+        # a fn declaring `<State<T>>`) is an `ast.FnCall`, not a
+        # `QualifiedCall`.  Its result WAT type is the op's registered
+        # result type — needed when the call sits directly in a
+        # constructor-argument (A1) or match-scrutinee (A2) position.  The
+        # `_effect_ops` guard in codegen/functions.py only registers ops a
+        # user fn does NOT shadow, so a same-named user fn still reaches the
+        # `_fn_ret_types` lookup below.
+        if expr.name in self._effect_ops:
+            _target, is_void = self._effect_ops[expr.name]
+            if expr.name == "throw" or is_void:
+                return None
+            return self._effect_op_result_wt.get(expr.name)
         # Try generic call resolution first
         if expr.name in self._generic_fn_info:
             mangled = self._resolve_generic_call(expr)

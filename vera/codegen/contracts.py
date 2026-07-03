@@ -7,6 +7,7 @@ postcondition checks with informative failure messages.
 from __future__ import annotations
 
 from vera import ast
+from vera.monomorphize import mangle_type_name
 from vera.skip import CodegenSkip
 from vera.wasm import WasmContext, WasmSlotEnv
 from vera.wasm.inference import substitute_type_vars
@@ -734,8 +735,10 @@ class ContractsMixin:
                 continue
             # Allocate a temp local for the snapshot
             local_idx = ctx.alloc_local(wasm_t)
-            # Emit: call $vera.state_get_<Type> ; local.set <idx>
-            instrs.append(f"call $vera.state_get_{type_name}")
+            # Emit: call $vera.state_get_<Type> ; local.set <idx>.
+            # #914: mangle so a composite State<T> old()-read matches the
+            # mangled import identifier emitted by `assembly.py`.
+            instrs.append(f"call $vera.state_get_{mangle_type_name(type_name)}")
             instrs.append(f"local.set {local_idx}")
             old_locals[type_name] = local_idx
 

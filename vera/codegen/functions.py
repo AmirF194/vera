@@ -9,6 +9,7 @@ from __future__ import annotations
 from vera import ast
 from vera.skip import AdtEqNotDerivableError, CodegenInvariantError, CodegenSkip
 from vera.codegen.tail_position import compute_tail_call_sites
+from vera.monomorphize import mangle_type_name
 from vera.wasm import WasmContext, WasmSlotEnv
 from vera.wasm.helpers import _is_host_handle_type, gc_shadow_push
 
@@ -81,29 +82,45 @@ class FunctionCompilationMixin:
         if not self._is_compilable(decl):
             return None
 
-        # Build effect_ops mapping for State<T> and Exn<E> operations
+        # Build effect_ops mapping for State<T> and Exn<E> operations.
+        # `effect_op_result_wt` records each value-producing op's result WAT
+        # type (its State<T> parameter's WAT type) so `_infer_expr_wasm_type`
+        # can type a bare `get(())` in constructor-arg / match-scrutinee
+        # position (#914 A1/A2).  Composite type args (`Tuple<Int, Int>`,
+        # `Option<Int>`) are routed through the injective `mangle_type_name`
+        # escaper (#775/#914 B) so the `state_*`/`exn_*` WAT identifiers stay
+        # legal — raw `<`, `>`, `,`, ` ` are illegal in a WAT identifier.
         effect_ops: dict[str, tuple[str, bool]] = {}
+        effect_op_result_wt: dict[str, str | None] = {}
         if isinstance(decl.effect, ast.EffectSet):
             for eff in decl.effect.effects:
                 if (isinstance(eff, ast.EffectRef) and eff.name == "State"
                         and eff.type_args and len(eff.type_args) == 1):
                     type_name = self._type_expr_to_slot_name(eff.type_args[0])
                     if type_name:
+                        mangled = mangle_type_name(type_name)
                         # Only map if no user-defined function shadows the op
                         if "get" not in self._fn_sigs:
                             effect_ops["get"] = (
-                                f"$vera.state_get_{type_name}", False
+                                f"$vera.state_get_{mangled}", False
+                            )
+                            # State<T>'s T is validated non-pair /
+                            # non-unsupported by `_check_state_type` (E607),
+                            # so this yields a scalar (i64/f64/i32) or an
+                            # ADT-pointer (i32) — exactly the op's result WT.
+                            effect_op_result_wt["get"] = (
+                                self._type_expr_to_wasm_type(eff.type_args[0])
                             )
                         if "put" not in self._fn_sigs:
                             effect_ops["put"] = (
-                                f"$vera.state_put_{type_name}", True
+                                f"$vera.state_put_{mangled}", True
                             )
                 elif (isinstance(eff, ast.EffectRef) and eff.name == "Exn"
                         and eff.type_args and len(eff.type_args) == 1):
                     type_name = self._type_expr_to_slot_name(eff.type_args[0])
                     if type_name and "throw" not in self._fn_sigs:
                         effect_ops["throw"] = (
-                            f"$exn_{type_name}", False
+                            f"$exn_{mangle_type_name(type_name)}", False
                         )
 
         # Flatten ADT layouts into ctor_name -> layout for WasmContext
@@ -118,6 +135,7 @@ class FunctionCompilationMixin:
         ctx = WasmContext(
             self.string_pool,
             effect_ops=effect_ops,
+            effect_op_result_wt=effect_op_result_wt,
             ctor_layouts=ctor_layouts,
             adt_type_names=adt_type_names,
             generic_fn_info=getattr(self, "_generic_fn_info", None),

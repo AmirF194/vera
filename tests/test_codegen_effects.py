@@ -12,6 +12,10 @@ from vera.codegen import (
 from vera.parser import parse_file
 from vera.transform import transform
 
+import pytest
+
+from vera.codegen.api import WasmTrapError
+
 from tests.codegen_helpers import (
     _IO_PRELUDE,
     _compile,
@@ -1491,3 +1495,197 @@ public fn handle(@Request -> @Response)
             f"handler not exported; diagnostics: "
             f"{[d.description for d in result.diagnostics]}"
         )
+
+
+class TestEffectCompositeTypeArgs914:
+    """#914: effect handlers (State/Exn) and effect-op results over
+    COMPOSITE / parameterized type arguments must compile and run.
+
+    Six gaps, all ``vera check``-green but failing at codegen, split
+    across three root causes:
+
+    * A — effect-op RESULT type not inferred in constructor-argument /
+      match-scrutinee position (function silently skipped).
+    * B — effect-handler WAT names not escaped for composite type args,
+      and an emit↔call desync between the full slot name used for the
+      ``(import …)`` decl and the base name used in the handler body.
+    * C — the Exn payload ``@T`` binding pushed the base type name, so a
+      ``@Option<Int>.n`` slot ref in the handler body dangled (E699).
+
+    A primitive-effect regression pin (`State<Int>` / `Exn<Int>`) lives
+    in the sibling `TestStateEffect` / `TestExnHandlers` classes; the
+    two pins below assert the composite path does not perturb it.
+    """
+
+    # --- Root cause A ------------------------------------------------
+
+    def test_a1_state_get_directly_as_constructor_field(self) -> None:
+        """A1: `get(())` (State<Int> op result) used directly as a
+        Tuple constructor field. The op result type must be inferred at
+        the constructor-argument site, else the function is skipped."""
+        src = """\
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(<State<Int>>)
+{
+  let @Tuple<Int, Int> = Tuple(get(()), 1);
+  0
+}
+"""
+        result = _compile_ok(src)
+        assert "main" in result.exports, (
+            "main was skipped — effect-op result type not inferred in "
+            f"constructor-arg position; diagnostics: "
+            f"{[d.description for d in result.diagnostics]}"
+        )
+        assert _run(src, fn="main") == 0
+
+    def test_a2_match_scrutinee_is_effect_op_with_adt_result(self) -> None:
+        """A2: `match get(())` where `get` returns a non-primitive ADT
+        (`Box`). The op result type must be inferred at the
+        match-scrutinee site."""
+        src = """\
+private data Box { Box(Int) }
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[State<Box>](@Box = Box(0)) {
+    get(@Unit) -> { resume(@Box.0) },
+    put(@Box) -> { resume(()) }
+    with @Box = @Box.0
+  } in {
+    match get(()) {
+      Box(@Int) -> @Int.0
+    }
+  }
+}
+"""
+        result = _compile_ok(src)
+        assert "main" in result.exports, (
+            "main was skipped — effect-op result type not inferred in "
+            f"match-scrutinee position; diagnostics: "
+            f"{[d.description for d in result.diagnostics]}"
+        )
+        assert _run(src, fn="main") == 0
+
+    # --- Root cause B ------------------------------------------------
+
+    def test_b1_state_handler_over_tuple(self) -> None:
+        """B1: `handle[State<Tuple<Int, Int>>]` — the composite type arg
+        must be escaped for the `state_*` WAT identifiers (raw `<`, `,`,
+        ` ` are illegal in a WAT identifier)."""
+        src = """\
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[State<Tuple<Int, Int>>](@Tuple<Int, Int> = Tuple(20, 22)) {
+    put(@Tuple<Int, Int>) -> { resume(()) }
+    with @Tuple<Int, Int> = @Tuple<Int, Int>.0
+  } in {
+    0
+  }
+}
+"""
+        assert _run(src, fn="main") == 0
+
+    def test_b2_state_handler_over_option_get_and_put(self) -> None:
+        """B2: `handle[State<Option<Int>>]` exercising get + put — the
+        handler-body `state_push`/`get`/`put`/`pop` calls must use the
+        SAME escaped full name as the `(import …)` decls (pre-fix the
+        body used the base name `Option`, the import the full
+        `Option<Int>` → `unknown func $vera.state_push_Option`)."""
+        src = """\
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[State<Option<Int>>](@Option<Int> = Some(5)) {
+    get(@Unit) -> { resume(@Option<Int>.0) },
+    put(@Option<Int>) -> { resume(()) }
+    with @Option<Int> = @Option<Int>.0
+  } in {
+    get(());
+    7
+  }
+}
+"""
+        assert _run(src, fn="main") == 7
+
+    def test_b3_exn_handler_tag_over_tuple(self) -> None:
+        """B3: a function declaring `<Exn<Tuple<Int, Int>>>` emits an
+        `(tag $exn_Tuple<Int, Int> …)` — the composite type arg must be
+        escaped. Post-fix it compiles to valid WAT (main exported) and,
+        as an uncaught throw, traps at run exactly like the primitive
+        `Exn<Int>` case."""
+        src = """\
+effect Exn<E> {
+  op throw(E -> Never);
+}
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(<Exn<Tuple<Int, Int>>>)
+{
+  throw(Tuple(1, 2))
+}
+"""
+        result = _compile_ok(src)
+        assert "main" in result.exports, (
+            "main was skipped or emitted invalid WAT for the composite "
+            f"Exn tag; diagnostics: "
+            f"{[d.description for d in result.diagnostics]}"
+        )
+        # Uncaught throw traps at run (same as primitive Exn<Int>).
+        with pytest.raises(WasmTrapError, match="thrown Wasm exception"):
+            execute(result, fn_name="main")
+
+    # --- Root cause C ------------------------------------------------
+
+    def test_c_exn_payload_binding_over_option(self) -> None:
+        """C: `handle[Exn<Option<Int>>]` — the caught-payload `@T`
+        binding must materialize under the full canonical slot name
+        `Option<Int>`, else `@Option<Int>.0` in the handler body
+        resolves to no local (dangling @T.n, E699)."""
+        src = """\
+effect Exn<E> {
+  op throw(E -> Never);
+}
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[Exn<Option<Int>>] {
+    throw(@Option<Int>) -> { option_unwrap_or(@Option<Int>.0, 0) }
+  } in {
+    throw(Some(9))
+  }
+}
+"""
+        assert _run(src, fn="main") == 9
+
+    # --- Primitive regression pins (must be unaffected) --------------
+
+    def test_primitive_state_int_still_works(self) -> None:
+        """Pin: the common primitive `State<Int>` path is untouched."""
+        src = """\
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(<State<Int>>)
+{
+  put(42);
+  get(())
+}
+"""
+        assert _run(src, fn="main") == 42
+
+    def test_primitive_exn_int_still_works(self) -> None:
+        """Pin: the common primitive `Exn<Int>` path is untouched."""
+        src = """\
+effect Exn<E> {
+  op throw(E -> Never);
+}
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[Exn<Int>] {
+    throw(@Int) -> { @Int.0 + 100 }
+  } in {
+    throw(42)
+  }
+}
+"""
+        assert _run(src, fn="main") == 142

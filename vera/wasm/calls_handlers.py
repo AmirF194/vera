@@ -8,6 +8,7 @@ and effect handlers (State<T>, Exn<E>).
 from __future__ import annotations
 
 from vera import ast
+from vera.monomorphize import mangle_type_name
 from vera.skip import CodegenSkip
 from vera.wasm.helpers import (
     WasmSlotEnv,
@@ -1035,17 +1036,27 @@ class CallsHandlersMixin:
         """
         assert isinstance(expr.effect, ast.EffectRef)  # noqa: S101
         type_arg = expr.effect.type_args[0]  # type: ignore[index]
-        if isinstance(type_arg, ast.NamedType):
-            type_name = type_arg.name
-        else:
+        if not isinstance(type_arg, ast.NamedType):
             raise CodegenSkip(
                 expr, "State<T> type argument must be a named type"
             )
+        # #914: use the FULL canonical slot name (`Tuple<Int, Int>`, not the
+        # base `Tuple`) so the handler-body get/put/push/pop calls match the
+        # `(import …)` decls emitted from `_state_types` (also full names) —
+        # pre-fix the two diverged for composite T (`state_push_Option` vs
+        # `state_push_Option<Int>`).  Then route through the injective
+        # `mangle_type_name` (#775) so the WAT identifier is legal.
+        type_name = self._type_expr_to_slot_name(type_arg)
+        if type_name is None:  # pragma: no cover — NamedType always resolves
+            raise CodegenSkip(
+                expr, "State<T> type argument has no slot name"
+            )
+        mangled = mangle_type_name(type_name)
 
-        put_import = f"$vera.state_put_{type_name}"
-        get_import = f"$vera.state_get_{type_name}"
-        push_import = f"$vera.state_push_{type_name}"
-        pop_import = f"$vera.state_pop_{type_name}"
+        put_import = f"$vera.state_put_{mangled}"
+        get_import = f"$vera.state_get_{mangled}"
+        push_import = f"$vera.state_push_{mangled}"
+        pop_import = f"$vera.state_pop_{mangled}"
 
         instructions: list[str] = []
 
@@ -1062,16 +1073,22 @@ class CallsHandlersMixin:
             instructions.append(f"call {put_import}")
         # If no state clause, state starts at default (0)
 
-        # 3. Save current effect_ops and inject handler ops
+        # 3. Save current effect_ops and inject handler ops.  Record `get`'s
+        #    result WAT type (#914 A2: a `match get(())` inside the body needs
+        #    it to type the scrutinee — State<T>'s T is validated non-pair by
+        #    the checker, so `_type_name_to_wasm` yields the op's result WT).
         saved_ops = dict(self._effect_ops)
+        saved_result_wt = dict(self._effect_op_result_wt)
         self._effect_ops["get"] = (get_import, False)
         self._effect_ops["put"] = (put_import, True)
+        self._effect_op_result_wt["get"] = self._type_name_to_wasm(type_name)
 
         # 4. Compile handler body
         body_instrs = self.translate_block(expr.body, env)
 
         # 5. Restore effect_ops
         self._effect_ops = saved_ops
+        self._effect_op_result_wt = saved_result_wt
 
         if body_instrs is None:
             return None
@@ -1109,8 +1126,18 @@ class CallsHandlersMixin:
             raise CodegenSkip(
                 expr, "Exn<E> type argument must be a named type"
             )
-        type_name = type_arg.name
-        tag_name = f"$exn_{type_name}"
+        # #914: use the FULL canonical slot name (`Option<Int>`, not `Option`)
+        # so the caught-payload slot env binds under the same key a
+        # `@Option<Int>.n` ref in the handler body resolves against (root
+        # cause C — pre-fix the push used the base name and the ref dangled,
+        # E699).  The tag identifier is escaped via `mangle_type_name` (#775)
+        # so a composite E yields a legal WAT tag name (root cause B3).
+        type_name = self._type_expr_to_slot_name(type_arg)
+        if type_name is None:  # pragma: no cover — NamedType always resolves
+            raise CodegenSkip(
+                expr, "Exn<E> type argument has no slot name"
+            )
+        tag_name = f"$exn_{mangle_type_name(type_name)}"
         is_pair = self._is_pair_type_name(type_name)
 
         # Unique label ids for nested handlers

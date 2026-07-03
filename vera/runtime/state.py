@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import wasmtime
 
+from vera.monomorphize import mangle_type_name
+
 
 def register_state(
     linker: wasmtime.Linker,
@@ -32,7 +34,14 @@ def register_state(
     # state cells (#417).
 
     for type_name, wasm_t in state_types:
+        # State cell key stays the human-readable full name (the
+        # `ExecuteResult.state` dict is keyed `State_<type_name>` and is a
+        # public surface — tests read `state["State_Int"]`).  The IMPORT field
+        # names, however, must match the mangled WAT identifiers emitted by
+        # `assembly.py` for composite T (`Tuple<Int, Int>` →
+        # `Tuple_LInt_C_Int_R`; #914/#775), so register those mangled.
         state_key = f"State_{type_name}"
+        import_suffix = mangle_type_name(type_name)
         state_store[state_key] = [_DEFAULT_STATE[wasm_t]]
         val_type = _WASM_VAL_TYPE[wasm_t]
 
@@ -60,25 +69,25 @@ def register_state(
 
         get_type = wasmtime.FuncType([], [val_type])
         linker.define_func(
-            "vera", f"state_get_{type_name}", get_type,
+            "vera", f"state_get_{import_suffix}", get_type,
             _make_host_get(state_key),
         )
 
         put_type = wasmtime.FuncType([val_type], [])
         linker.define_func(
-            "vera", f"state_put_{type_name}", put_type,
+            "vera", f"state_put_{import_suffix}", put_type,
             _make_host_put(state_key),
         )
 
         push_type = wasmtime.FuncType([], [])
         linker.define_func(
-            "vera", f"state_push_{type_name}", push_type,
+            "vera", f"state_push_{import_suffix}", push_type,
             _make_host_push(state_key, _DEFAULT_STATE[wasm_t]),
         )
 
         pop_type = wasmtime.FuncType([], [])
         linker.define_func(
-            "vera", f"state_pop_{type_name}", pop_type,
+            "vera", f"state_pop_{import_suffix}", pop_type,
             _make_host_pop(state_key),
         )
 
