@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 from vera import ast
-from vera.monomorphize import Monomorphizer
+from vera.monomorphize import Monomorphizer, resolve_fn_type_alias
 from vera.skip import CodegenSkip
 from vera.wasm.helpers import WasmSlotEnv
-from vera.wasm.inference import substitute_type_vars
 
 
 class CallsMixin:
@@ -686,11 +685,16 @@ class CallsMixin:
 
         Mirrors :meth:`MonomorphizationMixin._resolve_arg_fn_shape` for
         WASM call-site rewriting.  Handles both ``AnonFn`` literals and
-        ``SlotRef`` args whose static type is an FnType alias (#604).
-        For parameterised aliases like
-        ``type Mapper<T> = fn(T -> T)``, the SlotRef's type_args are
-        substituted into the alias body so the resolver returns the
-        instantiated shape (CR-5 on PR #659).  Without substitution,
+        ``SlotRef`` args whose static type is an FnType alias (#604) —
+        resolved **transitively** through the alias chain with the
+        SlotRef's type_args substituted per hop, via the shared
+        :func:`vera.monomorphize.resolve_fn_type_alias` (#867 / PR #880
+        review: the single-hop lookup here made a two-hop-alias-typed
+        closure slot fail shape resolution, so a closure-bound type
+        param fell to the phantom-var default — wrong mono suffix,
+        ``call_indirect`` trap).  For parameterised aliases like
+        ``type Mapper<T> = fn(T -> T)``, the substitution yields the
+        instantiated shape (CR-5 on PR #659); without it,
         ``_resolve_generic_call`` would mangle the call to a name like
         ``$option_map$T_JT`` that doesn't match the mono-clone names
         Pass 1.5 registered.
@@ -698,28 +702,13 @@ class CallsMixin:
         if isinstance(arg, ast.AnonFn):
             return (tuple(arg.params), arg.return_type)
         if isinstance(arg, ast.SlotRef):
-            alias_te = self._type_aliases.get(arg.type_name)
-            if isinstance(alias_te, ast.FnType):
-                # Parameterised alias — substitute the SlotRef's
-                # type_args into the alias body before returning.
-                # Arity is enforced upstream by the type checker
-                # ([E133], #660) since v0.0.148.
-                alias_params = self._type_alias_params.get(arg.type_name)
-                if (alias_params
-                        and arg.type_args
-                        and len(alias_params) == len(arg.type_args)):
-                    subst: dict[str, ast.TypeExpr] = dict(
-                        zip(alias_params, arg.type_args),
-                    )
-                    substituted_params = tuple(
-                        substitute_type_vars(p, subst)
-                        for p in alias_te.params
-                    )
-                    substituted_return = substitute_type_vars(
-                        alias_te.return_type, subst,
-                    )
-                    return (substituted_params, substituted_return)
-                return (tuple(alias_te.params), alias_te.return_type)
+            fn_type = resolve_fn_type_alias(
+                ast.NamedType(name=arg.type_name, type_args=arg.type_args),
+                self._type_aliases,
+                self._type_alias_params,
+            )
+            if fn_type is not None:
+                return (tuple(fn_type.params), fn_type.return_type)
         return None
 
     def _infer_fn_alias_type_args_wasm(
@@ -732,15 +721,19 @@ class CallsMixin:
         Mirrors :meth:`MonomorphizationMixin._infer_fn_alias_type_args`
         for use during WASM call-site rewriting.  Accepts either an
         ``AnonFn`` literal or a ``SlotRef`` typed as an FnType alias.
+
+        The param alias's body is resolved **transitively** (#867 / PR
+        #880 review): the HOF's declared fn param may itself be an alias
+        chain (``type MapFn2<X, Y> = MapFn<X, Y>;``).  The chain is
+        resolved instantiated at the alias's *own* param names, so the
+        terminal ``FnType`` body stays expressed in ``alias_params``
+        names — including across renaming hops — and the positional
+        matching below is untouched.
         """
         arg_shape = self._resolve_arg_fn_shape_wasm(arg)
         if arg_shape is None:
             return None
         arg_params, arg_return = arg_shape
-
-        alias_te = self._type_aliases.get(param_te.name)
-        if not isinstance(alias_te, ast.FnType):
-            return None
 
         alias_params = self._type_alias_params.get(param_te.name)
         if (
@@ -748,6 +741,20 @@ class CallsMixin:
             or not param_te.type_args
             or len(alias_params) != len(param_te.type_args)
         ):
+            return None
+
+        alias_te = resolve_fn_type_alias(
+            ast.NamedType(
+                name=param_te.name,
+                type_args=tuple(
+                    ast.NamedType(name=p, type_args=None)
+                    for p in alias_params
+                ),
+            ),
+            self._type_aliases,
+            self._type_alias_params,
+        )
+        if alias_te is None:
             return None
 
         alias_mapping: dict[str, str] = {}

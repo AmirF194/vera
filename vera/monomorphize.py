@@ -44,10 +44,12 @@ def substitute_type_vars(
     (`vera/wasm/inference.py` — the canonicaliser, called from
     interpolation/apply_fn inference), `CodeGenerator`
     (`vera/codegen/core.py` — the compilability check
-    `_type_expr_to_wasm_type`), and the parameterised-FnType-alias
-    resolver in `Monomorphizer._resolve_arg_fn_shape` /
+    `_type_expr_to_wasm_type`), and :func:`resolve_fn_type_alias`
+    below — the shared transitive walker behind
+    `Monomorphizer._resolve_arg_fn_shape` /
     `CallsMixin._resolve_arg_fn_shape_wasm` (#604 / #659 CR-4 +
-    CR-5).  All sites need the same substitution semantics when
+    CR-5, routed through the resolver by PR #880).  All sites need
+    the same substitution semantics when
     following a parameterised alias (`type Box<T> = Array<T>`,
     `type Mapper<T> = fn(T -> T)`) so the alias's own type-param
     references in the body get bound to the concrete type arguments
@@ -100,6 +102,95 @@ def substitute_type_vars(
             effect=te.effect,
         )
     return te
+
+
+def resolve_fn_type_alias(
+    te: ast.TypeExpr,
+    type_aliases: dict[str, ast.TypeExpr],
+    type_alias_params: dict[str, tuple[str, ...]],
+) -> ast.FnType | None:
+    """Resolve a ``TypeExpr`` to the ``FnType`` it aliases, transitively.
+
+    The single transitive-alias-to-fn-type resolver behind every site
+    that discovers a function type through an alias — the ``apply_fn``
+    ``call_indirect`` signature builder (``_infer_apply_fn_return_type``),
+    its Vera-type twin (``_infer_fncall_vera_type``), the fused-await
+    classifier (``_apply_fn_closure_ret_type``,
+    ``vera/wasm/async_fusion.py``), and the generic higher-order-fn
+    consultors (``Monomorphizer._resolve_arg_fn_shape`` /
+    ``_infer_fn_alias_type_args`` below, and their WASM call-rewrite
+    twins in ``vera/wasm/calls.py``).  Routing every site through this
+    one walker makes their depth-N behaviour structurally identical
+    rather than replicated per-site: a single-level unwrap at any one
+    site desynced it from the signal it must agree with (#867 — a
+    two-hop ``type Fetcher = InnerFetcher;`` resolved one hop, saw a
+    ``NamedType`` not a ``FnType``, bailed, and consultors diverged
+    into a silent identity await / an ``i64``-defaulted
+    ``call_indirect`` signature that trapped at WASM validation; the
+    PR #880 review found the same single-hop miss in the generic-HOF
+    consultors, where a closure-bound type param fell to the
+    phantom-var default).
+
+    Lives here — the deliberately codegen-free shared monomorphizer
+    module (see the module docstring / #732) — so the WASM backend,
+    the codegen-free fusion predicates, and the monomorphizer can all
+    import it without an import cycle (``vera/wasm/async_fusion.py``
+    imports this module, so it cannot host a helper this module needs).
+
+    Walks iteratively (until the terminal ``FnType``, a non-resolvable
+    shape, or a cycle):
+
+    1. Unwraps ``RefinementType`` layers (any nesting depth).
+    2. Treats a bared ``FnType`` as terminal wherever it appears —
+       including an alias body that is a refinement DIRECTLY wrapping
+       an inline fn type (``type Foo = { @fn(...) | p };`` — PR #880
+       review, CodeRabbit Major: pre-fix the peeled ``FnType`` fell
+       through the ``NamedType`` check to ``None``).
+    3. For a ``NamedType`` whose ``type_aliases`` body is a ``FnType``,
+       substitutes the current ``NamedType``'s ``type_args`` into the
+       alias's type params (for a generic alias like
+       ``type Producer<T> = fn(String -> T)``) and loops — the
+       substituted ``FnType`` terminates at step 2.
+    4. For a ``NamedType`` aliasing another ``NamedType`` /
+       ``RefinementType``, substitutes any generic type args at this hop
+       and follows the chain one step.
+    5. Anything else (a bare ``NamedType`` that is not an alias, a
+       primitive) yields ``None`` — no ``FnType`` reachable.
+
+    The ``seen`` set guards against a cyclic alias chain
+    (``type A = B; type B = A``).  The type checker rejects circular
+    aliases upstream (``[E132]``, #648), so a cycle here can only arise
+    from malformed input; the guard makes the resolver terminate with
+    ``None`` (the caller then falls to its loud backstop) rather than
+    spin forever — the same defence-in-depth
+    ``InferenceMixin._resolve_base_type_name`` and
+    ``_canonical_named_type`` carry.
+    """
+    seen: set[str] = set()
+    while True:
+        while isinstance(te, ast.RefinementType):
+            te = te.base_type
+        if isinstance(te, ast.FnType):
+            return te
+        if not isinstance(te, ast.NamedType):
+            return None
+        if te.name in seen:
+            return None
+        seen.add(te.name)
+        alias = type_aliases.get(te.name)
+        if alias is None:
+            return None
+        # Bind this hop's concrete type args to the alias's params so a
+        # generic alias body's type-var references resolve to the bound
+        # types (``type Producer<T> = fn(String -> T)`` used as
+        # ``Producer<Future<...>>`` → ``fn(String -> Future<...>)``).
+        params = type_alias_params.get(te.name)
+        if params and te.type_args and len(params) == len(te.type_args):
+            alias = substitute_type_vars(alias, dict(zip(params, te.type_args)))
+        if isinstance(alias, (ast.FnType, ast.NamedType, ast.RefinementType)):
+            te = alias
+            continue
+        return None
 
 
 def substitute_type_param_names(name: str, mapping: dict[str, str]) -> str:
@@ -736,34 +827,22 @@ class Monomorphizer:
         if isinstance(arg, ast.AnonFn):
             return (tuple(arg.params), arg.return_type)
         if isinstance(arg, ast.SlotRef):
-            type_aliases = self.ctx.type_aliases
-            type_alias_params = self.ctx.type_alias_params
-            alias_te = type_aliases.get(arg.type_name)
-            if isinstance(alias_te, ast.FnType):
-                # Parameterised alias — substitute the SlotRef's
-                # type_args into the alias body before returning.
-                # Arity-mismatch on parameterised aliases (e.g.
-                # `@Pair<Int>.0` against a `Pair<A, B>` declaration)
-                # is rejected upstream by the type checker since
-                # v0.0.148 with `[E133]` (#660); reaching here with
-                # `len(arg.type_args) != len(alias_params)` would
-                # require bypassing the checker.
-                alias_params = type_alias_params.get(arg.type_name)
-                if (alias_params
-                        and arg.type_args
-                        and len(alias_params) == len(arg.type_args)):
-                    subst: dict[str, ast.TypeExpr] = dict(
-                        zip(alias_params, arg.type_args),
-                    )
-                    substituted_params = tuple(
-                        substitute_type_vars(p, subst)
-                        for p in alias_te.params
-                    )
-                    substituted_return = substitute_type_vars(
-                        alias_te.return_type, subst,
-                    )
-                    return (substituted_params, substituted_return)
-                return (tuple(alias_te.params), alias_te.return_type)
+            # Resolved transitively through the alias chain via the
+            # shared resolver (#867 / PR #880 review — the single-hop
+            # lookup here made a two-hop-alias-typed closure slot fail
+            # shape resolution, so a closure-bound type param fell to
+            # the phantom-var default: wrong mono suffix, WASM trap).
+            # The resolver substitutes the SlotRef's type_args into a
+            # parameterised alias's body per hop (CR-5 on PR #659);
+            # arity-mismatch on parameterised aliases is rejected
+            # upstream by the type checker ([E133], #660).
+            fn_type = resolve_fn_type_alias(
+                ast.NamedType(name=arg.type_name, type_args=arg.type_args),
+                self.ctx.type_aliases,
+                self.ctx.type_alias_params,
+            )
+            if fn_type is not None:
+                return (tuple(fn_type.params), fn_type.return_type)
         return None
 
     def _infer_fn_alias_type_args(
@@ -790,16 +869,33 @@ class Monomorphizer:
         type_aliases = self.ctx.type_aliases
         type_alias_params = self.ctx.type_alias_params
 
-        alias_te = type_aliases.get(param_te.name)
-        if not isinstance(alias_te, ast.FnType):
-            return None
-
         alias_params = type_alias_params.get(param_te.name)
         if (
             not alias_params
             or not param_te.type_args
             or len(alias_params) != len(param_te.type_args)
         ):
+            return None
+
+        # Resolve the param alias's body transitively (#867 / PR #880
+        # review): the HOF's declared fn param may itself be an alias
+        # chain (`type MapFn2<X, Y> = MapFn<X, Y>;`).  Resolving the
+        # chain instantiated at the alias's *own* param names keeps the
+        # terminal FnType body expressed in `alias_params` names —
+        # including across renaming hops — so the positional matching
+        # below is untouched.
+        alias_te = resolve_fn_type_alias(
+            ast.NamedType(
+                name=param_te.name,
+                type_args=tuple(
+                    ast.NamedType(name=p, type_args=None)
+                    for p in alias_params
+                ),
+            ),
+            type_aliases,
+            type_alias_params,
+        )
+        if alias_te is None:
             return None
 
         # Match the FnType body against the arg's shape to build an

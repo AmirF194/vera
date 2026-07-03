@@ -1616,3 +1616,210 @@ public fn test(@Unit -> @Int)
 }
 """
         assert _run(src, "test") == 90
+
+
+class TestTransitiveFnTypeAlias867:
+    """#867: an ``apply_fn`` over a closure typed as a NESTED fn-type alias
+    (``type Mapper = InnerMapper;`` where ``InnerMapper = fn(...)``) must
+    build the ``call_indirect`` signature from the closure's REAL return
+    width, resolved transitively through the whole alias chain.
+
+    Pre-#867, ``_infer_apply_fn_return_type`` unwrapped only ONE alias hop:
+    for a chain it saw a ``NamedType`` (not a ``FnType``), fell to its
+    ``i64`` default, and emitted ``call_indirect (result i64)``.  When the
+    closure actually returns an ``i32_pair`` (``String``) the signature
+    mismatched the emit and trapped at WASM validation
+    (``expected i32, found i64``); check and verify both passed — a loud
+    failure on a green program (the #867 symptom).  The single-hop control
+    (``type Mapper = fn(...)`` directly) always worked, so these tests pin
+    the transitivity specifically."""
+
+    _STRING_TWO_HOP = """\
+type InnerMapper = fn(String -> String) effects(pure);
+type Mapper = InnerMapper;
+
+private fn use_it(@Mapper, @String -> @String)
+  requires(true) ensures(true) effects(pure)
+{
+  apply_fn(@Mapper.0, @String.0)
+}
+
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  IO.print(use_it(
+    fn(@String -> @String) effects(pure) { string_concat(@String.0, "!") },
+    "hi"
+  ))
+}
+"""
+
+    _STRING_THREE_HOP = """\
+type A = fn(String -> String) effects(pure);
+type B = A;
+type Mapper = B;
+
+private fn use_it(@Mapper, @String -> @String)
+  requires(true) ensures(true) effects(pure)
+{
+  apply_fn(@Mapper.0, @String.0)
+}
+
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  IO.print(use_it(
+    fn(@String -> @String) effects(pure) { string_concat(@String.0, "!") },
+    "hi"
+  ))
+}
+"""
+
+    def test_two_hop_string_return_runs(self) -> None:
+        """`type Mapper = InnerMapper;` with a String-returning closure:
+        pre-#867 the i64-defaulted call_indirect signature trapped at WASM
+        validation; post-#867 it runs and prints the real value."""
+        assert _run_io(self._STRING_TWO_HOP) == "hi!"
+
+    def test_three_hop_string_return_runs(self) -> None:
+        """Same, three hops (`Mapper = B = A = fn(...)`) — depth-N."""
+        assert _run_io(self._STRING_THREE_HOP) == "hi!"
+
+    def test_two_hop_string_signature_is_i32_pair(self) -> None:
+        """Compile-time discriminator: the ``call_indirect`` closure
+        signature must carry the i32_pair (String) result, not the i64
+        default.  Pins the fix at the emit level, network- and
+        execution-free."""
+        result = _compile_ok(self._STRING_TWO_HOP)
+        # A String-returning closure sig has a two-i32 result; the pre-#867
+        # bug emitted `(result i64)`.  No closure sig in this program should
+        # carry a bare i64 result.
+        sigs = re.findall(r"\(type \$closure_sig_\d+ \(func[^\n]*\)", result.wat)
+        assert sigs, ("expected a closure signature type in the WAT", result.wat)
+        assert all("result i64" not in s for s in sigs), (
+            "the call_indirect closure signature must resolve the String "
+            "return through the alias chain to an i32_pair result, not fall "
+            "to the i64 default (#867)", sigs)
+        assert any("result i32 i32" in s for s in sigs), (
+            "expected an i32_pair (String) closure result signature", sigs)
+
+    # PR #880 review (CodeRabbit, Major): an alias whose body is a
+    # RefinementType DIRECTLY wrapping an inline fn type.  The resolver
+    # peeled refinement layers mid-chain but did not treat the bared
+    # FnType as terminal — it fell through the NamedType check to None,
+    # and the caller fell to the i64 default.  String return makes the
+    # miss observable (Int coincides with the i64 default and runs by
+    # accident — the classic fallback-coincidence trap).
+    _REFINEMENT_OVER_FN_TYPE = """\
+type Foo = { @fn(String -> String) effects(pure) | true };
+
+private fn use_it(@Foo, @String -> @String)
+  requires(true) ensures(true) effects(pure)
+{
+  apply_fn(@Foo.0, @String.0)
+}
+
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  IO.print(use_it(
+    fn(@String -> @String) effects(pure) { string_concat(@String.0, "!") },
+    "hi"
+  ))
+}
+"""
+
+    # The chained form: an alias hop INTO a refinement-over-fn-type
+    # terminal (`Foo -> Inner -> { @fn(...) | p }`).
+    _CHAIN_INTO_REFINEMENT_OVER_FN_TYPE = """\
+type Inner = { @fn(String -> String) effects(pure) | true };
+type Foo = Inner;
+
+private fn use_it(@Foo, @String -> @String)
+  requires(true) ensures(true) effects(pure)
+{
+  apply_fn(@Foo.0, @String.0)
+}
+
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  IO.print(use_it(
+    fn(@String -> @String) effects(pure) { string_concat(@String.0, "!") },
+    "hi"
+  ))
+}
+"""
+
+    def test_refinement_over_fn_type_alias_runs(self) -> None:
+        """PR #880 review: `type Foo = { @fn(String -> String) | p };`
+        used as an apply_fn closure arg must resolve to the wrapped
+        FnType — pre-fix the peeled FnType was not terminal, the
+        signature fell to the i64 default, and WASM validation trapped
+        (`expected i32, found i64`)."""
+        assert _run_io(self._REFINEMENT_OVER_FN_TYPE) == "hi!"
+
+    def test_chain_into_refinement_over_fn_type_runs(self) -> None:
+        """Same, one alias hop out: `Foo = Inner = { @fn(...) | p }` —
+        the FnType must be terminal at any depth after wrapper peeling."""
+        assert _run_io(self._CHAIN_INTO_REFINEMENT_OVER_FN_TYPE) == "hi!"
+
+    # PR #880 review, 4th single-hop site (CodeRabbit Major):
+    # `_slot_name_to_wasm_type` (vera/wasm/inference.py) classified only a
+    # BARE FnType alias as a closure pointer.  A `let`/param slot annotated
+    # with a refinement-wrapped fn alias (`type Foo = { @fn(...) | p };`) or
+    # a chain THROUGH a refinement (`type Foo = Inner;` where `Inner`
+    # wraps the fn type) resolved to None, and the binding was rejected
+    # with `CodegenSkip` ("has no WASM representation") — the whole
+    # function dropped, `main` unexported, on a check/verify-green program.
+    # (A plain NamedType chain `Foo = Bar = fn(...)` was already handled by
+    # the `_resolve_base_type_name` prefix walk, so these deliberately
+    # exercise the refinement-involving shapes that walk cannot peel.)
+    _REFINEMENT_FN_ALIAS_SLOT = """\
+type Foo = { @fn(String -> String) effects(pure) | true };
+
+private fn make(@Unit -> @Foo)
+  requires(true) ensures(true) effects(pure)
+{
+  fn(@String -> @String) effects(pure) { string_concat(@String.0, "!") }
+}
+
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  let @Foo = make(());
+  IO.print(apply_fn(@Foo.0, "hi"))
+}
+"""
+
+    _CHAIN_THROUGH_REFINEMENT_FN_ALIAS_SLOT = """\
+type Inner = { @fn(String -> String) effects(pure) | true };
+type Foo = Inner;
+
+private fn make(@Unit -> @Foo)
+  requires(true) ensures(true) effects(pure)
+{
+  fn(@String -> @String) effects(pure) { string_concat(@String.0, "!") }
+}
+
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  let @Foo = make(());
+  IO.print(apply_fn(@Foo.0, "hi"))
+}
+"""
+
+    def test_refinement_fn_alias_let_slot_runs(self) -> None:
+        """PR #880 4th site: a `let @Foo = …` slot annotated with a
+        refinement-wrapped fn alias must classify as an i32 closure
+        pointer — pre-fix `_slot_name_to_wasm_type` returned None, the
+        binding was skipped (`CodegenSkip`), `main` was dropped, and
+        `vera run` reported no exported function to call."""
+        assert _run_io(self._REFINEMENT_FN_ALIAS_SLOT) == "hi!"
+
+    def test_chain_through_refinement_fn_alias_let_slot_runs(self) -> None:
+        """Same, chained through a refinement: `type Foo = Inner;` where
+        `Inner = { @fn(...) | p }` — the resolver peels the refinement at
+        the terminal hop that `_resolve_base_type_name` cannot follow."""
+        assert _run_io(self._CHAIN_THROUGH_REFINEMENT_FN_ALIAS_SLOT) == "hi!"

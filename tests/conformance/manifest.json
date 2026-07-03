@@ -650,6 +650,21 @@
     ]
   },
   {
+    "id": "ch05_nested_fn_type_alias",
+    "file": "ch05_nested_fn_type_alias.vera",
+    "chapter": 5,
+    "title": "Nested (transitive) fn-type alias as apply_fn closure argument (#867)",
+    "level": "run",
+    "spec_ref": "Section 5.4",
+    "features": [
+      "type_alias",
+      "nested_type_alias",
+      "function_type",
+      "apply_fn",
+      "higher_order"
+    ]
+  },
+  {
     "id": "ch06_requires",
     "file": "ch06_requires.vera",
     "chapter": 6,
