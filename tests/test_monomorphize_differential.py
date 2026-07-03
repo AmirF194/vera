@@ -239,6 +239,209 @@ def _assert_covers(
     )
 
 
+# =====================================================================
+# Third consultor: call-rewrite ↔ emitted-clone agreement (#899)
+# =====================================================================
+# The verifier⊇codegen differential above covers TWO of the three
+# monomorphization consultors: instantiation DISCOVERY (which clones get
+# emitted) and the VERIFIER's discovery.  It does NOT exercise the WASM
+# CALL-REWRITE (`_resolve_generic_call` / `_infer_fncall_vera_type`), which
+# independently re-derives the mangled name each generic call site references.
+# When call-rewrite and discovery disagree on a clone name, the call site
+# references a symbol Pass 1.5 never emitted — a check-green / verify-green
+# program whose `main` is dropped at `vera run` (#878's own failure class,
+# reintroduced by PR #899's one-sided consultor edits).  These corpus entries
+# exercise exactly the user-fn-return-into-generic-arg shapes that slipped.
+
+_CALL_REWRITE_CORPUS: dict[str, str] = {
+    # Issue 1: non-generic user fn returning a PARAMETERIZED type in
+    # `Option<T>` position — call-rewrite recovers `Decimal`, discovery must too.
+    "param_user_fn_return": """
+private fn maybe(@Int -> @Option<Decimal>)
+  requires(true) ensures(true) effects(pure)
+{ Some(decimal_from_int(@Int.0)) }
+
+private forall<T> fn first_opt(@Option<T>, @Int -> @Option<T>)
+  requires(true) ensures(true) effects(pure)
+{ @Option<T>.0 }
+
+public fn main(@Unit -> @Option<Decimal>)
+  requires(true) ensures(true) effects(pure)
+{ first_opt(maybe(3), 0) }
+""",
+    # Issue 1 variant: Result<Decimal, String> return.
+    "param_user_fn_result_return": """
+private fn tryit(@Int -> @Result<Decimal, String>)
+  requires(true) ensures(true) effects(pure)
+{ Ok(decimal_from_int(@Int.0)) }
+
+private forall<T> fn first_res(@Result<T, String>, @Int -> @Result<T, String>)
+  requires(true) ensures(true) effects(pure)
+{ @Result<T, String>.0 }
+
+public fn main(@Unit -> @Result<Decimal, String>)
+  requires(true) ensures(true) effects(pure)
+{ first_res(tryit(5), 0) }
+""",
+    # Issue 2: user fn returning a scalar-resolving alias in bare `@T` position
+    # — discovery/verifier key on the RAW name `Age`, call-rewrite must too.
+    "alias_scalar_return": """
+type Age = Int;
+
+private fn getage(@Int -> @Age)
+  requires(true) ensures(true) effects(pure)
+{ @Int.0 }
+
+private forall<T> fn pick_last(@T, @T -> @T)
+  requires(true) ensures(true) effects(pure)
+{ @T.0 }
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ pick_last(getage(1), getage(2)) }
+""",
+    # Issue 2 variant: named refinement of a scalar.
+    "refinement_scalar_return": """
+type PosInt = { @Int | @Int.0 > 0 };
+
+private fn getpos(@Int -> @PosInt)
+  requires(@Int.0 > 0) ensures(true) effects(pure)
+{ @Int.0 }
+
+private forall<T> fn pick_last(@T, @T -> @T)
+  requires(true) ensures(true) effects(pure)
+{ @T.0 }
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ pick_last(getpos(1), getpos(2)) }
+""",
+    # Issue 3 (#899 round 3, a NET regression vs base): a NON-generic user fn
+    # returning a LITERAL PARAMETERIZED type (`Option<…>`/`Result<…>`/`Box<…>`)
+    # bound to a generic's BARE `@T`.  Discovery keys the clone on the base
+    # name (`pick_last$Option`); pre-fix the call-rewrite's `not ret_te.type_args`
+    # gate bailed and fell through to the i32→`Bool` collapse → `pick_last$Bool`,
+    # never emitted.  (`_call_rewrite_desync` on the repro shows
+    # `emitted=['pick_last$Option'], dangling=['pick_last$Bool']`.)
+    "param_return_into_bare_typevar": """
+private fn mk(@Int -> @Option<Option<Decimal>>)
+  requires(true) ensures(true) effects(pure)
+{ Some(Some(decimal_from_int(@Int.0))) }
+
+private forall<VeraT> fn pick_last(@VeraT, @VeraT -> @VeraT)
+  requires(true) ensures(true) effects(pure)
+{ @VeraT.0 }
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ match pick_last(mk(1), mk(2)) { Some(@Option<Decimal>) -> 0, None -> 1 } }
+""",
+    "result_return_into_bare_typevar": """
+private fn mkr(@Int -> @Result<Option<Decimal>, String>)
+  requires(true) ensures(true) effects(pure)
+{ Ok(Some(decimal_from_int(@Int.0))) }
+
+private forall<VeraT> fn pick_last(@VeraT, @VeraT -> @VeraT)
+  requires(true) ensures(true) effects(pure)
+{ @VeraT.0 }
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ match pick_last(mkr(1), mkr(2)) { Ok(@Option<Decimal>) -> 0, Err(@String) -> 1 } }
+""",
+    "adt_return_into_bare_typevar": """
+private data Box<T> { MkBox(T) }
+
+private fn mkb(@Int -> @Box<Decimal>)
+  requires(true) ensures(true) effects(pure)
+{ MkBox(decimal_from_int(@Int.0)) }
+
+private forall<VeraT> fn pick_last(@VeraT, @VeraT -> @VeraT)
+  requires(true) ensures(true) effects(pure)
+{ @VeraT.0 }
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ match pick_last(mkb(1), mkb(2)) { MkBox(@Decimal) -> 0 } }
+""",
+}
+
+def _mangle(name: str, types: tuple[str, ...]) -> str:
+    """The mono-clone symbol for ``(name, types)`` — the shared injective
+    mangler both discovery (clone emission) and call-rewrite use."""
+    from vera.monomorphize import Monomorphizer
+
+    return Monomorphizer._mangle_fn_name(name, types)
+
+
+def _call_rewrite_desync(source: str) -> tuple[set[str], list[str]]:
+    """Compile ``source`` in a FRESH CodeGenerator, capturing every mono-clone
+    symbol the WASM CALL-REWRITE (`_resolve_generic_call`) resolves to, and
+    return ``(emitted_clone_symbols, dangling_targets)``.
+
+    A dangling target is a symbol a generic call site references but that
+    discovery never emitted — the exact call-rewrite↔discovery desync #899
+    caught.  Captured at the consultor level (a monkeypatch on
+    `_resolve_generic_call`) rather than by scraping the WAT, because a desync
+    causes the CALLING function to be SKIPPED (E602), which elides its body —
+    and with it the dangling `call` — from the WAT entirely, so a WAT scan
+    can't see the very evidence it needs (the mistake this test was first
+    written with).  Each call builds its own compile pipeline so
+    `_emitted_instances` never cross-contaminates across corpus entries.
+    """
+    from vera.wasm.calls import CallsMixin
+
+    captured: list[str | None] = []
+    orig = CallsMixin._resolve_generic_call
+
+    def _spy(self: object, call: object) -> object:
+        result = orig(self, call)  # type: ignore[arg-type]
+        captured.append(result)  # type: ignore[arg-type]
+        return result
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".vera", delete=False, encoding="utf-8",
+    ) as f:
+        f.write(source)
+        f.flush()
+        path = f.name
+    try:
+        program = transform(parse_file(path))
+        gen = CodeGenerator(source=source, file=path)
+        CallsMixin._resolve_generic_call = _spy  # type: ignore[assignment]
+        try:
+            gen.compile_program(program)  # type: ignore[arg-type]
+        finally:
+            CallsMixin._resolve_generic_call = orig  # type: ignore[assignment]
+        emitted = {
+            _mangle(name, types)
+            for (name, types) in getattr(gen, "_emitted_instances", set())
+        }
+    finally:
+        os.unlink(path)
+    targets = {t for t in captured if t is not None}
+    dangling = sorted(targets - emitted)
+    return emitted, dangling
+
+
+@pytest.mark.parametrize("label", sorted(_CALL_REWRITE_CORPUS))
+def test_call_rewrite_matches_emitted_clones(label: str) -> None:
+    """Every mono-clone a generic call site references must be an emitted
+    clone — the call-rewrite consultor must pick the same name discovery /
+    the verifier did.  A dangling target is the #899 desync (`main` dropped
+    at run on a check-green program)."""
+    source = _CALL_REWRITE_CORPUS[label]
+    emitted, dangling = _call_rewrite_desync(source)
+    assert emitted, (
+        f"[{label}] no mono clones emitted — corpus entry no longer exercises "
+        f"generic instantiation, the check would pass vacuously"
+    )
+    assert not dangling, (
+        f"[{label}] call site references clone(s) never emitted (call-rewrite "
+        f"↔ discovery desync, #899): {dangling}\n  emitted = {sorted(emitted)}"
+    )
+
+
 @pytest.mark.parametrize("rel", _REPO_CORPUS)
 def test_verifier_covers_codegen_repo(rel: str) -> None:
     path = str(_REPO_ROOT / rel)

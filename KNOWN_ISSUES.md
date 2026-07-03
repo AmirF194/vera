@@ -6,9 +6,7 @@ Bugs and limitations tracked against the [issue tracker](https://github.com/aall
 
 Defects in shipped compiler, runtime, or tooling behaviour — this table matches the issue tracker's open [`bug`-labelled issues](https://github.com/aallan/vera/issues?q=is%3Aissue%20state%3Aopen%20label%3Abug) one-to-one. Verification-soundness gaps carry the `limitation` label instead and are tracked under [Limitations](#limitations).
 
-| Bug | Issue |
-|-----|-------|
-| A generic whose instantiation must be inferred from a **user-fn call in argument position** (`option_unwrap_or(decimal_div(a, b), d("0"))` where `d` returns `@Decimal`) monomorphizes to the **Bool phantom default** instead: `vera check` passes, but codegen requests a non-existent `option_unwrap_or$Bool` clone and skips the calling function — `main` itself silently drops from the exports ("No exported functions to call"), or a private helper in the same shape leaves a dangling `call` to a skipped fn that fails WAT validation. A builtin call in the same argument position (`decimal_from_int(0)`) infers fine; the miss is specifically user-fn return types. The #772–#775 mono-inference cluster's argument-position member. Found while building the #856 parity fixtures (PR #877). | [#878](https://github.com/aallan/vera/issues/878) |
+No known bugs.
 
 ## Limitations
 

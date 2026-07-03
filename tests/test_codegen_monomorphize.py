@@ -1757,3 +1757,418 @@ public fn main(@Unit -> @Int)
         `_infer_fn_alias_type_args*` as well — pre-fix: same
         check-green → run-trap."""
         assert _run(self._PARAM_ALIAS_CHAIN) == 70
+
+
+class TestUserFnReturnTypeInArgPosition878:
+    """#878: mono instantiation inference for a generic whose type argument
+    must be recovered from a **user-fn call's return type in argument
+    position**.
+
+    A generic like ``option_unwrap_or(@Option<VeraT>, @VeraT -> @VeraT)``
+    called as ``option_unwrap_or(decimal_div(a, b), d("0"))`` — where
+    ``decimal_div`` returns ``Option<Decimal>`` and the user fn ``d`` returns
+    ``@Decimal`` — must monomorphize at ``VeraT = Decimal``.  Pre-fix, the
+    WASM call-rewrite consultor (``vera/wasm``) failed to bind ``VeraT`` from
+    either argument:
+
+      * ``_get_arg_type_info_wasm`` had **no ``FnCall`` branch**, so a
+        parameterized builtin return (``decimal_div`` → ``Option<Decimal>``)
+        in ``Option<VeraT>`` position bound nothing; and
+      * a user-fn call in bare ``@VeraT`` position resolved through the
+        WAT-collapse ``i32 → "Bool"`` (a ``Decimal`` handle is ``i32``),
+        the same value as the phantom-var default.
+
+    The call site then emitted ``call $option_unwrap_or$Bool`` — a clone
+    Pass 1.5 never emitted (discovery, which consults
+    ``_BUILTIN_PARAMETERIZED_RETURNS`` and precise declared return types,
+    correctly emitted ``$Decimal``) — so ``main`` was skipped and dropped
+    from the exports on a ``vera check``-green program.
+
+    The ``Decimal`` return value (``0.3333…``) can never coincide with the
+    ``Bool`` phantom default (``true``/``false`` → ``1``/``0``), so wrong and
+    right are observably distinct — the exact Bool-coincidence trap CLAUDE.md
+    warns about.
+    """
+
+    # Canonical issue repro, wired to IO so the run observably prints the
+    # Decimal division — a value that CANNOT coincide with the Bool default.
+    _REPRO_IO = """\
+effect IO {
+  op print(String -> Unit);
+}
+
+private fn d(@String -> @Decimal)
+  requires(true) ensures(true) effects(pure)
+{ option_unwrap_or(decimal_from_string(@String.0), decimal_from_int(0)) }
+
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  IO.print(decimal_to_string(
+    option_unwrap_or(decimal_div(d("1"), d("3")), d("0"))))
+}
+"""
+
+    def test_user_fn_return_in_arg_position_runs_and_prints(self) -> None:
+        """The crash repro: pre-fix ``main`` is skipped (`option_unwrap_or$Bool`
+        dangling call) and never exported — `_run_io` raises.  Post-fix it
+        prints the true Decimal quotient, not the Bool default."""
+        out = _run_io(self._REPRO_IO, fn="main")
+        assert out.strip() == "0.3333333333333333333333333333", (
+            f"expected the Decimal quotient; got {out!r} — the generic "
+            f"instantiation resolved to the Bool phantom default instead of "
+            f"Decimal (#878)"
+        )
+
+    def test_user_fn_return_in_arg_position_mangles_decimal(self) -> None:
+        """Compile-time discriminator, execution-free: the emitted WAT must
+        reference ``$option_unwrap_or$Decimal`` at the ``main`` call site and
+        never the ``$Bool`` phantom-default clone."""
+        result = _compile_ok(self._REPRO_IO)
+        wat = result.wat or ""
+        assert "$option_unwrap_or$Decimal" in wat, (
+            "expected the Decimal instantiation option_unwrap_or$Decimal"
+        )
+        assert "$option_unwrap_or$Bool" not in wat, (
+            "phantom-var Bool default leaked into the call target — the "
+            "user-fn / parameterized-builtin return in argument position did "
+            "not resolve (#878)"
+        )
+        # main must not be skipped: it must be a real exported function.
+        errors = [d for d in result.diagnostics if d.severity == "error"]
+        assert not errors, f"unexpected errors: {errors}"
+        skip_notes = [
+            d for d in result.diagnostics
+            if "function skipped" in str(d.description)
+            or "No exported functions" in str(d.description)
+        ]
+        assert not skip_notes, (
+            f"main was skipped — dangling call to a non-emitted clone: "
+            f"{[str(d.description) for d in skip_notes]}"
+        )
+
+    # A generic bound SOLELY by a user fn in bare ``@VeraT`` position: no
+    # builtin, no constructor arg masks the resolution.  ``mkdec`` returns a
+    # ``Decimal`` (i32 handle) — pre-fix both codegen discovery AND the WASM
+    # call-rewrite collapse it to ``Bool``, so the discovery desyncs from the
+    # verifier (which uses precise declared return types).  The identity clone
+    # body masks the run (Decimal flows through an i32-identity fn unchanged),
+    # so this shape is checked at the discovery level, not by output.
+    _BARE_TYPEVAR_USER_FN = """\
+private fn mkdec(@Unit -> @Decimal)
+  requires(true) ensures(true) effects(pure)
+{ decimal_from_int(7) }
+
+private forall<VeraT> fn pick_first(@VeraT, @VeraT -> @VeraT)
+  requires(true) ensures(true) effects(pure)
+{ @VeraT.0 }
+
+public fn main(@Unit -> @String)
+  requires(true) ensures(true) effects(pure)
+{
+  decimal_to_string(pick_first(mkdec(()), mkdec(())))
+}
+"""
+
+    def test_bare_typevar_user_fn_discovery_matches_verifier(self) -> None:
+        """The codegen mono-discovery and the verifier discovery must agree
+        on the concrete instantiation a user-fn return drives.  Pre-fix
+        codegen discovered ``pick_first$Bool`` (WAT-collapse i32→Bool of the
+        Decimal return) while the verifier discovered ``pick_first$Decimal``
+        (precise declared return type) — a #732 differential desync."""
+        from vera.codegen.core import CodeGenerator
+        from vera.verifier import ContractVerifier
+
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".vera", delete=False, encoding="utf-8",
+        ) as f:
+            f.write(self._BARE_TYPEVAR_USER_FN)
+            f.flush()
+            path = f.name
+        prog = transform(parse_file(path))
+
+        gen = CodeGenerator(source=self._BARE_TYPEVAR_USER_FN, file=path)
+        gen.compile_program(prog)
+        codegen_set = getattr(gen, "_emitted_instances", set())
+
+        verifier = ContractVerifier(
+            source=self._BARE_TYPEVAR_USER_FN, file=path,
+        )
+        verifier.register_program(prog)
+        verifier_set = {
+            (n, ct)
+            for n, cts in verifier._instances.items()
+            for ct in cts
+        }
+
+        # Codegen collapses Decimal→? at the WAT level, but the CONCRETE
+        # discovery must not be the Bool phantom default.
+        assert ("pick_first", ("Bool",)) not in codegen_set, (
+            f"codegen discovered the Bool phantom default for a Decimal "
+            f"user-fn return: {sorted(codegen_set)}"
+        )
+        assert ("pick_first", ("Decimal",)) in codegen_set, (
+            f"codegen did not discover pick_first$Decimal: "
+            f"{sorted(codegen_set)}"
+        )
+        assert codegen_set <= verifier_set or all(
+            (n, ct) in verifier_set for (n, ct) in codegen_set
+        ), (
+            f"codegen discovery desyncs from verifier (#732):\n"
+            f"  codegen  = {sorted(codegen_set)}\n"
+            f"  verifier = {sorted(verifier_set)}"
+        )
+
+    # ---- PR #899 review round 2: the two coupled consultors must agree ----
+    # Both repros below are the SAME class the #878 fix targets — check-green
+    # (and verify-green), then `run` drops `main` because ONE of the two
+    # discovery↔call-rewrite consultor pairs was updated and the other wasn't.
+
+    # ISSUE 1: a non-generic user fn returning a PARAMETERIZED type
+    # (`Option<Decimal>`) in `Option<T>` position.  The WASM call-rewrite
+    # (`_get_arg_type_info_wasm`) recovered `T = Decimal` and mangled the call
+    # to `first_opt$Decimal`, but instantiation discovery
+    # (`Monomorphizer._get_arg_type_info`) had NO user-fn parameterized-return
+    # branch, so it emitted only `first_opt$Bool` — the `$Decimal` clone was
+    # never generated, `main` was skipped.  The unwrapped value (7) can't
+    # coincide with the Bool default.
+    _ISSUE1_PARAM_RETURN = """\
+private fn maybe(@Int -> @Option<Decimal>)
+  requires(true) ensures(true) effects(pure)
+{ Some(decimal_from_int(@Int.0)) }
+
+private forall<T> fn first_opt(@Option<T>, @Int -> @Option<T>)
+  requires(true) ensures(true) effects(pure)
+{ @Option<T>.0 }
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  match first_opt(maybe(7), 0) {
+    Some(@Decimal) -> if decimal_eq(@Decimal.0, decimal_from_int(7)) then { 7 } else { 1 },
+    None -> 2
+  }
+}
+"""
+
+    def test_issue1_param_user_fn_return_runs(self) -> None:
+        """A user fn returning `Option<Decimal>` in `Option<T>` position must
+        drive `T = Decimal` on BOTH the discovery and call-rewrite sides.
+        Pre-fix `main` is skipped (`first_opt$Decimal` never emitted)."""
+        assert _run(self._ISSUE1_PARAM_RETURN, fn="main") == 7
+
+    def test_issue1_discovery_matches_call_rewrite(self) -> None:
+        """Discovery must emit the SAME clone the call site references — the
+        `$Decimal` clone, never the `$Bool` phantom default."""
+        result = _compile_ok(self._ISSUE1_PARAM_RETURN)
+        wat = result.wat or ""
+        assert "$first_opt$Decimal" in wat, (
+            "discovery did not emit first_opt$Decimal for a parameterized "
+            "user-fn return (#899 issue 1)"
+        )
+        assert "$first_opt$Bool" not in wat, (
+            "phantom Bool default leaked — discovery not mirrored to "
+            "call-rewrite (#899 issue 1)"
+        )
+        skip_notes = [
+            d for d in result.diagnostics
+            if "function skipped" in str(d.description)
+            or "No exported functions" in str(d.description)
+        ]
+        assert not skip_notes, f"main skipped: {[str(d.description) for d in skip_notes]}"
+
+    # ISSUE 2: a user fn whose declared return is an ALIAS resolving to a
+    # scalar (`type Age = Int`) in bare `@T` position.  Discovery + verifier
+    # key the clone on the RAW alias name (`pick$Age`), but the call-rewrite
+    # `_infer_fncall_vera_type` alias-resolved to the scalar and mangled the
+    # call to `pick$Int` — a clone never emitted.  The value 20 (via `getage`)
+    # can't coincide with the phantom default, and the two distinct getage
+    # returns make the De Bruijn ordering observable.
+    _ISSUE2_ALIAS_SCALAR_RETURN = """\
+type Age = Int;
+
+private fn getage(@Int -> @Age)
+  requires(true) ensures(true) effects(pure)
+{ @Int.0 }
+
+private forall<T> fn pick_last(@T, @T -> @T)
+  requires(true) ensures(true) effects(pure)
+{ @T.0 }
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  pick_last(getage(10), getage(20))
+}
+"""
+
+    def test_issue2_alias_scalar_return_runs(self) -> None:
+        """A user fn returning a scalar-resolving alias (`type Age = Int`) in
+        bare `@T` position: the call-rewrite must key the clone on the RAW
+        declared name (`pick_last$Age`), matching discovery / the verifier.
+        Pre-fix the call site referenced `pick_last$Int`, never emitted, so
+        `main` was skipped.  `@T.0` (De Bruijn: most recent) returns the second
+        arg, `getage(20)` == 20."""
+        assert _run(self._ISSUE2_ALIAS_SCALAR_RETURN, fn="main") == 20
+
+    def test_issue2_discovery_matches_call_rewrite(self) -> None:
+        """The emitted clone (`pick_last$Age`, raw alias name) and the call
+        target must agree — the call site must not reference the alias-resolved
+        `pick_last$Int`."""
+        result = _compile_ok(self._ISSUE2_ALIAS_SCALAR_RETURN)
+        wat = result.wat or ""
+        assert "$pick_last$Age" in wat, (
+            "discovery emitted the raw-name clone pick_last$Age but it is "
+            "absent from the WAT (#899 issue 2)"
+        )
+        skip_notes = [
+            d for d in result.diagnostics
+            if "function skipped" in str(d.description)
+            or "No exported functions" in str(d.description)
+        ]
+        assert not skip_notes, (
+            f"main skipped — call-rewrite alias-resolved to a non-emitted "
+            f"clone: {[str(d.description) for d in skip_notes]}"
+        )
+
+    # ---- PR #899 review round 3: parameterized return into a BARE @T ----
+    # ISSUE 3 (a NET regression vs base): a non-generic user fn whose declared
+    # return is a LITERAL parameterized type (`Option<…>`/`Result<…>`/`Box<…>`
+    # — a NamedType that CARRIES `type_args`) bound to a generic's bare `@T`.
+    # Discovery names the clone by the BASE name (`pick_last$Option`), but the
+    # round-2 `_declared_return_clone_name` gated on `not ret_te.type_args`, so
+    # a parameterized return bailed and fell through to the i32→`Bool` collapse
+    # — the call site referenced `pick_last$Bool`, never emitted, `main`
+    # skipped.  On BASE both sides consistently emit/call `$Bool` (wrong but
+    # linked) and it runs — so this is a regression the PR introduced, not a
+    # base bug.  The round-3 fix routes all three consultors through the shared
+    # `declared_return_clone_key`, which returns the base name for a
+    # parameterized return.  The base-name key is SOUND: a bare-`@T` body is
+    # representation-polymorphic (it moves an i32 handle, can't project the ADT).
+    _ISSUE3_PARAM_RETURN_BARE_T = """\
+private fn mk(@Int -> @Option<Option<Decimal>>)
+  requires(true) ensures(true) effects(pure)
+{ Some(Some(decimal_from_int(@Int.0))) }
+
+private forall<VeraT> fn pick_last(@VeraT, @VeraT -> @VeraT)
+  requires(true) ensures(true) effects(pure)
+{ @VeraT.0 }
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(@Int.result == 0) effects(pure)
+{
+  match pick_last(mk(1), mk(2)) {
+    Some(@Option<Decimal>) -> 0,
+    None -> 1
+  }
+}
+"""
+
+    _ISSUE3_RESULT_RETURN_BARE_T = """\
+private fn mkr(@Int -> @Result<Option<Decimal>, String>)
+  requires(true) ensures(true) effects(pure)
+{ Ok(Some(decimal_from_int(@Int.0))) }
+
+private forall<VeraT> fn pick_last(@VeraT, @VeraT -> @VeraT)
+  requires(true) ensures(true) effects(pure)
+{ @VeraT.0 }
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(@Int.result == 0) effects(pure)
+{
+  match pick_last(mkr(1), mkr(2)) {
+    Ok(@Option<Decimal>) -> 0,
+    Err(@String) -> 1
+  }
+}
+"""
+
+    _ISSUE3_BOX_RETURN_BARE_T = """\
+private data Box<T> { MkBox(T) }
+
+private fn mkb(@Int -> @Box<Decimal>)
+  requires(true) ensures(true) effects(pure)
+{ MkBox(decimal_from_int(@Int.0)) }
+
+private forall<VeraT> fn pick_last(@VeraT, @VeraT -> @VeraT)
+  requires(true) ensures(true) effects(pure)
+{ @VeraT.0 }
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(@Int.result == 0) effects(pure)
+{
+  match pick_last(mkb(1), mkb(2)) {
+    MkBox(@Decimal) -> 0
+  }
+}
+"""
+
+    def test_issue3_param_return_into_bare_typevar_runs(self) -> None:
+        """`Option<…>` return bound to bare `@VeraT`: discovery emits
+        `pick_last$Option`, so the call site must reference it, not the
+        i32→`Bool` collapse.  Pre-round-3 `main` was dropped."""
+        assert _run(self._ISSUE3_PARAM_RETURN_BARE_T, fn="main") == 0
+
+    def test_issue3_result_return_into_bare_typevar_runs(self) -> None:
+        """`Result<Option<Decimal>, String>` return bound to bare `@VeraT`."""
+        assert _run(self._ISSUE3_RESULT_RETURN_BARE_T, fn="main") == 0
+
+    def test_issue3_box_return_into_bare_typevar_runs(self) -> None:
+        """User ADT `Box<Decimal>` return bound to bare `@VeraT`."""
+        assert _run(self._ISSUE3_BOX_RETURN_BARE_T, fn="main") == 0
+
+    def test_issue3_discovery_matches_call_rewrite(self) -> None:
+        """The emitted clone (`pick_last$Option`) and the call target must
+        agree — the call site must not reference the phantom `pick_last$Bool`."""
+        result = _compile_ok(self._ISSUE3_PARAM_RETURN_BARE_T)
+        wat = result.wat or ""
+        assert "$pick_last$Option" in wat, (
+            "discovery's base-name clone pick_last$Option is absent from the "
+            "WAT (#899 issue 3)"
+        )
+        assert "$pick_last$Bool" not in wat, (
+            "call-rewrite fell through to the i32→Bool collapse for a "
+            "parameterized return (#899 issue 3)"
+        )
+        skip_notes = [
+            d for d in result.diagnostics
+            if "function skipped" in str(d.description)
+            or "No exported functions" in str(d.description)
+        ]
+        assert not skip_notes, (
+            f"main skipped — parameterized return into bare @T desynced "
+            f"call-rewrite from discovery: "
+            f"{[str(d.description) for d in skip_notes]}"
+        )
+
+    def test_issue3_base_name_key_collision_is_sound(self) -> None:
+        """The base-name-only key (`pick_last$Option`) is sound for a bare-`@T`
+        body: `Option<Decimal>` and `Option<Int>` collide to ONE identity clone
+        that is representation-polymorphic (moves an i32 handle, never projects
+        the ADT).  Both instantiations run correctly through the shared clone."""
+        source = """\
+private fn mkd(@Int -> @Option<Decimal>)
+  requires(true) ensures(true) effects(pure)
+{ Some(decimal_from_int(@Int.0)) }
+
+private fn mki(@Int -> @Option<Int>)
+  requires(true) ensures(true) effects(pure)
+{ Some(@Int.0) }
+
+private forall<VeraT> fn pick_last(@VeraT, @VeraT -> @VeraT)
+  requires(true) ensures(true) effects(pure)
+{ @VeraT.0 }
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  let @Option<Decimal> = pick_last(mkd(1), mkd(2));
+  let @Option<Int> = pick_last(mki(3), mki(4));
+  match @Option<Int>.0 { Some(@Int) -> @Int.0, None -> 0 }
+}
+"""
+        # @Option<Int>.0 (most recent) = pick_last(mki(3), mki(4)) = mki(4)
+        # = Some(4); the Decimal instantiation flows through the SAME clone.
+        assert _run(source, fn="main") == 4

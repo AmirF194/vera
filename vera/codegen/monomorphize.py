@@ -19,7 +19,11 @@ from __future__ import annotations
 from typing import Any
 
 from vera import ast
-from vera.monomorphize import MonoContext, Monomorphizer
+from vera.monomorphize import (
+    MonoContext,
+    Monomorphizer,
+    declared_return_clone_key,
+)
 
 # Types that satisfy the built-in abilities.  #773: `Eq` is structural, so a
 # field of ANY of these — String included (compared by content) — is
@@ -56,6 +60,18 @@ _WT_TO_VERA: dict[str | None, str] = {
 }
 
 
+def _simple_return_type_name(te: ast.TypeExpr | None) -> str | None:
+    """The refinement-unwrapped base type name of a return TypeExpr.
+
+    Thin wrapper over the shared :func:`vera.monomorphize.declared_return_clone_key`
+    — THE single source of truth for the user-fn-return clone key, so codegen
+    discovery, the #732 verifier, and the WASM call-rewrite cannot desync
+    (#878 / #899).  ``None`` for shapes with no simple named base (e.g. a bare
+    ``FnType``), which the caller then falls back to the WAT-signature collapse.
+    """
+    return declared_return_clone_key(te)
+
+
 class MonomorphizationMixin:
     """Methods for monomorphizing generic functions."""
 
@@ -66,13 +82,28 @@ class MonomorphizationMixin:
     ) -> MonoContext:
         """Pack codegen registration state into a shared MonoContext.
 
-        ``fn_ret_types`` is derived from the WAT signatures so the shared
-        ``_infer_fncall_vera_type_simple`` returns the same Vera type names the
-        old codegen-local version did (i64→Int, i32→Bool, f64→Float64).
+        ``fn_ret_types`` is seeded from each function's **declared** return
+        TypeExpr (``_fn_ret_type_exprs``, populated by ``_register_fn`` for
+        every top-level, prelude, and where-helper fn) — the *precise* Vera
+        base type name (``Decimal``, ``Color``, ``Int``), exactly as the #732
+        verifier does (``_simple_type_name``).
+
+        This is load-bearing, not cosmetic: a generic whose type argument is
+        recovered from a user-fn return in argument position (#878,
+        ``pick_first(mkdec(()), …)`` where ``mkdec`` returns ``@Decimal``)
+        would otherwise route through the lossy WAT collapse (``i32 → "Bool"``
+        — a ``Decimal`` handle is ``i32``), hit the ``"Bool"`` phantom-var
+        default, and desync from the verifier (which infers the precise
+        ``Decimal``): a #732 differential divergence.  The WAT-signature
+        collapse (``i64→Int, i32→Bool, f64→Float64``) is kept only as a
+        fallback for any name without a registered return TypeExpr.
         """
         fn_ret_types: dict[str, str] = {}
         for name, sig in self._fn_sigs.items():
-            ret_vera = _WT_TO_VERA.get(sig[1])
+            ret_te = self._fn_ret_type_exprs.get(name)
+            ret_vera = _simple_return_type_name(ret_te) if ret_te else None
+            if ret_vera is None:
+                ret_vera = _WT_TO_VERA.get(sig[1])
             if ret_vera is not None:
                 fn_ret_types[name] = ret_vera
         return MonoContext(
@@ -83,6 +114,10 @@ class MonomorphizationMixin:
             type_aliases=getattr(self, "_type_aliases", {}),
             type_alias_params=getattr(self, "_type_alias_params", {}),
             fn_ret_types=fn_ret_types,
+            # #899 issue 1: the declared return TypeExprs (type args retained)
+            # let discovery recover a user fn's parameterized return in
+            # `Option<T>` argument position, mirroring the WASM call-rewrite.
+            fn_ret_type_exprs=dict(self._fn_ret_type_exprs),
         )
 
     def _monomorphize(

@@ -20,7 +20,11 @@ from typing import TYPE_CHECKING
 
 from vera import ast
 from vera.environment import ConstructorInfo, FunctionInfo, TypeEnv
-from vera.monomorphize import MonoContext, Monomorphizer
+from vera.monomorphize import (
+    MonoContext,
+    Monomorphizer,
+    declared_return_clone_key,
+)
 
 if TYPE_CHECKING:
     from vera.resolver import ResolvedModule
@@ -749,12 +753,14 @@ class ContractVerifier:
 
     @staticmethod
     def _simple_type_name(te: ast.TypeExpr) -> str | None:
-        """Return the base type name of a TypeExpr (refinement-unwrapped)."""
-        while isinstance(te, ast.RefinementType):
-            te = te.base_type
-        if isinstance(te, ast.NamedType):
-            return te.name
-        return None
+        """Return the base type name of a TypeExpr (refinement-unwrapped).
+
+        Delegates to the shared :func:`vera.monomorphize.declared_return_clone_key`
+        so the verifier's mono-discovery keys clones identically to codegen and
+        the WASM call-rewrite — the single-source-of-truth that ends the
+        #878 / #899 consultor desync.
+        """
+        return declared_return_clone_key(te)
 
     @staticmethod
     def _module_qualified_base(path: tuple[str, ...], name: str) -> str:
@@ -874,6 +880,10 @@ class ContractVerifier:
         type_aliases: dict[str, ast.TypeExpr] = {}
         type_alias_params: dict[str, tuple[str, ...]] = {}
         fn_ret_types: dict[str, str] = {}
+        # #899 issue 1: raw declared return TypeExprs (type args retained), so
+        # discovery can recover a user fn's parameterized return in `Option<T>`
+        # argument position identically to codegen and the WASM call-rewrite.
+        fn_ret_type_exprs: dict[str, ast.TypeExpr] = {}
 
         def record_fn_ret_type(fn: ast.FnDecl) -> None:
             # Include `where` helpers, keyed by bare name exactly as codegen
@@ -900,6 +910,8 @@ class ContractVerifier:
             ret_name = self._simple_type_name(fn.return_type)
             if ret_name is not None:
                 fn_ret_types[fn.name] = ret_name
+            if fn.return_type is not None:
+                fn_ret_type_exprs[fn.name] = fn.return_type
             for wfn in fn.where_fns or ():
                 record_fn_ret_type(wfn)
 
@@ -931,6 +943,9 @@ class ContractVerifier:
                     iret = self._simple_type_name(idecl.return_type)
                     if iret is not None:
                         fn_ret_types.setdefault(idecl.name, iret)
+                    if idecl.return_type is not None:
+                        fn_ret_type_exprs.setdefault(
+                            idecl.name, idecl.return_type)
 
         return MonoContext(
             generic_decls=generic_decls,
@@ -940,6 +955,7 @@ class ContractVerifier:
             type_aliases=type_aliases,
             type_alias_params=type_alias_params,
             fn_ret_types=fn_ret_types,
+            fn_ret_type_exprs=fn_ret_type_exprs,
         )
 
     @staticmethod

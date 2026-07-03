@@ -660,6 +660,15 @@ class CallsMixin:
 
         if param_te.name in forall_vars:
             vera_type = self._infer_vera_type(arg)
+            if isinstance(arg, ast.FnCall):
+                # #899 issue 2: for CLONE NAMING a user fn's declared return
+                # type must be the RAW (un-alias-resolved) name discovery keys
+                # the clone on (`-> @Age` → `pick$Age`, not the alias-resolved
+                # `pick$Int` that general Vera-type inference returns).  Prefer
+                # the raw declared name when available; else keep `_infer_vera_type`.
+                raw = self._declared_return_clone_name(arg)
+                if raw is not None:
+                    vera_type = raw
             if (param_te.name in constrained_vars
                     and isinstance(arg, ast.ConstructorCall)):
                 # Recover the type argument a `ConstructorCall` drops, so the

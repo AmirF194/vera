@@ -28,7 +28,7 @@ instantiation sets in agreement.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, field, fields, replace
 from typing import Any
 
 from vera import ast
@@ -222,6 +222,45 @@ def substitute_type_param_names(name: str, mapping: dict[str, str]) -> str:
     return name  # pragma: no cover — NamedType in, NamedType out
 
 
+def declared_return_clone_key(te: ast.TypeExpr | None) -> str | None:
+    """The clone-name KEY a user fn's declared return TypeExpr contributes when
+    its call result is bound to a generic's type variable.
+
+    THE single source of truth for this key — discovery
+    (:func:`vera.codegen.monomorphize._simple_return_type_name`), the #732
+    verifier (``ContractVerifier._simple_type_name``), and the WASM call-rewrite
+    (``InferenceMixin._declared_return_clone_name``) ALL delegate here, so the
+    three consultors cannot desync by construction (#878 / #899 whack-a-mole:
+    each independently re-derived this key and they diverged on parameterized
+    returns and scalar-resolving aliases, dropping ``main`` at run time on a
+    check-green program).
+
+    Convention — refinement-unwrap, then the **base name** with type args
+    DROPPED:
+
+      * ``@Decimal``                 → ``"Decimal"``
+      * ``@Age`` (``type Age = Int``) → ``"Age"``  (RAW alias, not resolved)
+      * ``@Option<Decimal>``          → ``"Option"`` (base name only)
+      * ``@{ @Int | p }``             → ``"Int"``  (refinement-unwrapped)
+      * a bare ``FnType`` / anything without a NamedType base → ``None``
+
+    The base-name-only key is **sound** for the bare-``@T`` binding it feeds:
+    a ``forall<T>`` body binding a whole ADT to ``@T`` (``pick(@T, @T -> @T)``)
+    is representation-polymorphic — it can only move/copy the ``i32`` handle,
+    never pattern-match or project ``T`` (the body doesn't know ``T``'s
+    constructors), so ``Option<Decimal>`` and ``Option<Int>`` share one identity
+    clone ``pick$Option`` with byte-identical WAT.  (A parameterized *parameter*
+    like ``Option<T>`` — where the body CAN project the field — is a different
+    path that recovers the full type argument via ``_get_arg_type_info*``; this
+    key is only the bare-``@T`` case.)
+    """
+    while isinstance(te, ast.RefinementType):
+        te = te.base_type
+    if isinstance(te, ast.NamedType):
+        return te.name
+    return None
+
+
 def mangle_type_name(type_name: str) -> str:
     """Escape a canonical Vera type name for embedding in a WAT identifier.
 
@@ -401,6 +440,14 @@ class MonoContext:
       discovered set is a sound superset under that normalization, which the
       #732 differential test maintains (its ``collapse`` table is the one place
       that mapping lives) and pins.
+    * ``fn_ret_type_exprs`` — function name (bare-keyed, same as ``fn_ret_types``)
+      → declared return **TypeExpr** (type args RETAINED, unlike ``fn_ret_types``).
+      Lets discovery recover a user fn's *parameterized* return (`maybe → Option<Decimal>`)
+      in `Option<T>` argument position, mirroring the WASM call-rewrite's
+      ``_fn_ret_type_exprs`` so the two consultors pick the same clone (#899 issue 1).
+      Optional (defaults empty): a consumer that doesn't populate it simply
+      loses the user-fn parameterized-return recovery, degrading to the prior
+      (bare-name) behaviour rather than erroring.
     """
 
     generic_decls: dict[str, ast.FnDecl]
@@ -410,6 +457,7 @@ class MonoContext:
     type_aliases: dict[str, ast.TypeExpr]
     type_alias_params: dict[str, tuple[str, ...]]
     fn_ret_types: dict[str, str]
+    fn_ret_type_exprs: dict[str, ast.TypeExpr] = field(default_factory=dict)
 
 
 class Monomorphizer:
@@ -890,6 +938,30 @@ class Monomorphizer:
                              "array_slice", "array_filter"):
                 if expr.args:
                     return self._get_arg_type_info(expr.args[0], ctor_to_adt)
+            # #899 issue 1: a NON-generic user fn returning a parameterized type
+            # (`maybe → Option<Decimal>`) in `Option<T>` position must expose its
+            # type args so `T` binds from THIS argument.  Mirrors the WASM
+            # call-rewrite `_get_arg_type_info_wasm` FnCall branch
+            # (vera/wasm/inference.py) so discovery and call-rewrite pick the
+            # same clone — else discovery emits `first_opt$Bool` while the call
+            # site references `first_opt$Decimal`, a dangling reference (E602).
+            # GENERIC calls are excluded: their declared return is over the
+            # callee's OWN type vars, not concrete types, so their type args
+            # would bind a phantom var — they fall through to the generic-return
+            # resolution instead (same exclusion the call-rewrite side applies).
+            if expr.name in (self.ctx.generic_decls or {}):
+                return None
+            ret_te = self.ctx.fn_ret_type_exprs.get(expr.name)
+            if isinstance(ret_te, ast.RefinementType):
+                ret_te = ret_te.base_type
+            if isinstance(ret_te, ast.NamedType) and ret_te.type_args:
+                ta_names: list[str | None] = []
+                for ta in ret_te.type_args:
+                    if isinstance(ta, ast.NamedType) and not ta.type_args:
+                        ta_names.append(self._format_type_name(ta))
+                    else:
+                        ta_names.append(None)
+                return (ret_te.name, tuple(ta_names))
         return None
 
     def _resolve_arg_fn_shape(
