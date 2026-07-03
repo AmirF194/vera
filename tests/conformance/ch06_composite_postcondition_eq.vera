@@ -1,0 +1,57 @@
+-- Conformance: composite equality in a postcondition lowers to structural
+-- Eq at runtime, not pointer comparison (Chapter 6 verification tiers,
+-- Section 6.5 / 6.8; Chapter 9 Section 9.8 Eq auto-derivation)
+-- Tests: `@T.result == Ctor(...)` in `ensures` for a user ADT, the built-in
+-- Option ADT, and a nested user ADT, all with the result slot as the LEFT
+-- operand of `==` -- the #912 regression (a Tier-1-proved postcondition of
+-- this shape spuriously trapped at runtime on a pointer compare instead of
+-- a structural one)
+private data Box {
+  MkBox(Int)
+}
+
+private fn mk(@Int -> @Box)
+  requires(true)
+  ensures(@Box.result == MkBox(@Int.0))
+  effects(pure)
+{
+  MkBox(@Int.0)
+}
+
+private fn some_of(@Int -> @Option<Int>)
+  requires(true)
+  ensures(@Option<Int>.result == Some(@Int.0))
+  effects(pure)
+{
+  Some(@Int.0)
+}
+
+private data Inner {
+  MkInner(Int)
+}
+
+private data Outer {
+  MkOuter(Inner)
+}
+
+private fn mk_outer(@Int -> @Outer)
+  requires(true)
+  ensures(@Outer.result == MkOuter(MkInner(@Int.0)))
+  effects(pure)
+{
+  MkOuter(MkInner(@Int.0))
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Box = mk(2);
+  let @Option<Int> = some_of(2);
+  let @Outer = mk_outer(2);
+  let @Int = match @Box.0 { MkBox(@Int) -> @Int.0 };
+  let @Int = @Int.0 + match @Option<Int>.0 { Some(@Int) -> @Int.0, None -> 0 };
+  let @Int = @Int.0 + match @Outer.0 { MkOuter(@Inner) -> match @Inner.0 { MkInner(@Int) -> @Int.0 } };
+  @Int.0 - 1
+}

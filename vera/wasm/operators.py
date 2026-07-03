@@ -175,11 +175,26 @@ class OperatorsMixin:
                 # `==` derivation sees the concrete field type, just as the
                 # slot-ref operand form does (#772).
                 lv = self._parameterize_ctor_operand(expr.left, lv)
+                # #912: a `ResultRef`/`SlotRef` operand resolves through the
+                # SlotRef name logic, which — unlike a `ConstructorCall` — has no
+                # arguments to recover a dropped type parameter from.  When such
+                # an operand is a monomorphized generic-ADT clone whose type
+                # argument was substituted to the bare base name (`@T.result` →
+                # `@Box.result`, the #772 residue, e.g. `id2<Box<Int>>`), the
+                # derivability gate cannot resolve the field type and would raise
+                # E613 on an otherwise-valid program.  Recover the concrete type
+                # argument from the OTHER operand first (`@Box.result ==
+                # MkBox(7)` → `Box<Int>`); only if that fails does the composite
+                # fall through to the scalar lowering below (the established
+                # pre-#912 behavior for this lost-type-arg shape — never an
+                # E613 on the derivable original).
+                lv = self._recover_lost_type_arg(lv, expr.right)
                 lv_base = lv.split("<", 1)[0] if lv is not None else None
                 if (op in (ast.BinOp.EQ, ast.BinOp.NEQ)
                         and lv is not None
                         and lv_base not in ("Bool", "Byte")
-                        and lv_base in self._adt_type_names):
+                        and lv_base in self._adt_type_names
+                        and not self._is_lost_type_arg_clone(lv, lv_base)):
                     adt_eq = self._translate_adt_eq(left, right, lv, expr)
                     if adt_eq is not None:
                         if op == ast.BinOp.NEQ:
@@ -340,6 +355,56 @@ class OperatorsMixin:
             resolved = [a for a in arg_names if a is not None]
             return f"{base_name}<{', '.join(resolved)}>"
         return bare
+
+    def _recover_lost_type_arg(
+        self, lv: str | None, other: ast.Expr,
+    ) -> str | None:
+        """Recover a bare generic-ADT operand's type argument from its sibling.
+
+        A `ResultRef`/`SlotRef` operand of a composite `==` carries no arguments
+        of its own to recover a dropped type parameter from (unlike a
+        `ConstructorCall`, handled by `_parameterize_ctor_operand`).  When `lv`
+        is a bare generic-ADT name (its base declares type parameters but `lv`
+        has no `<…>`) — the #772 monomorphization residue where `@T.result`
+        became `@Box.result`, dropping `<Int>` — try the OTHER `==` operand: a
+        `ConstructorCall` sibling (`@Box.result == MkBox(7)`) still carries the
+        concrete argument, so `_parameterize_ctor_operand` recovers `Box<Int>`.
+        Returns the parameterized name on success, else `lv` unchanged (the
+        caller then treats the still-bare name as a lost-arg clone).
+        """
+        if lv is None or "<" in lv:
+            return lv
+        base = lv
+        if not self._adt_tp_param_names.get(base):
+            return lv  # not a generic ADT — nothing to recover
+        recovered = self._parameterize_ctor_operand(other, base)
+        return recovered if recovered is not None else lv
+
+    def _is_lost_type_arg_clone(self, lv: str, lv_base: str | None) -> bool:
+        """Whether `lv` is a generic-ADT name that lost its type argument (#912).
+
+        True when the base ADT declares type parameters yet `lv` carries no
+        `<…>` argument — the monomorphization residue where `@T.result` became
+        the bare `@Box.result` for a `Box<T>` clone, dropping `<Int>` (the #772
+        gap).  Such a composite `==` falls back to the scalar (pointer) lowering
+        it used before #912, rather than raising a spurious E613 on an
+        otherwise-derivable type.
+
+        A genuinely non-derivable operand — a `Map`/`Array`-field ADT (a
+        concrete non-Eq field, and the ADT itself has NO type parameters),
+        `Tuple` (variadic placeholder, no parameters registered), an `Md*`
+        builtin, or a generic ADT WITH a present non-Eq argument
+        (`Box<Array<Int>>`, which carries a `<…>` and so is excluded here) — is
+        NOT a lost-arg clone, so it still routes to `_translate_adt_eq` and
+        raises the correct E613, keeping the checker↔codegen lockstep the #732
+        differential pins.  Relies on imported generic ADTs' type-parameter
+        metadata being propagated (`modules.py`, #912) so `_adt_tp_param_names`
+        answers for cross-module `Box<T>` too, not just local ADTs.
+        """
+        return (
+            "<" not in lv
+            and bool(self._adt_tp_param_names.get(lv_base or ""))
+        )
 
     def _translate_adt_eq(
         self,

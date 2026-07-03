@@ -212,6 +212,30 @@ class CrossModuleMixin:
 
                 if not ctor_collision and is_public and in_filter:
                     self._adt_layouts.setdefault(adt_name, layouts)
+                    # #912: propagate the imported ADT's type-parameter
+                    # metadata alongside its layout.  Without these, an imported
+                    # generic ADT (`Box<T>`) reached codegen with a layout but
+                    # NO `_adt_tp_param_names` / `_adt_tp_counts` entry, so the
+                    # structural-Eq machinery could neither substitute its
+                    # parameters nor recognise a monomorphized clone that lost
+                    # its type argument — a composite `==` on it fell back to a
+                    # pointer compare or raised a spurious E613.  The `temp`
+                    # generator computed the full metadata from this module's
+                    # `DataDecl`s; carry it over in lockstep with the layout.
+                    for _reg_name, _reg in (
+                        (n, temp._adt_tp_param_names.get(n))
+                        for n in (adt_name,)
+                    ):
+                        if _reg is not None:
+                            self._adt_tp_param_names.setdefault(_reg_name, _reg)
+                    if adt_name in temp._adt_tp_counts:
+                        self._adt_tp_counts.setdefault(
+                            adt_name, temp._adt_tp_counts[adt_name])
+                    for _ctor_name in layouts:
+                        if _ctor_name in temp._ctor_adt_tp_indices:
+                            self._ctor_adt_tp_indices.setdefault(
+                                _ctor_name,
+                                temp._ctor_adt_tp_indices[_ctor_name])
                     self._needs_alloc = True
                     self._needs_memory = True
                     # #890: importer-visible only for a direct import; a
