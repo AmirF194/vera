@@ -1946,6 +1946,10 @@ class TestArrayZeroSizeElementRejected945:
     count)."""
 
     def test_array_literal_of_unit_rejected(self) -> None:
+        # Annotation + literal for ONE zero-size array: `_resolve_type` rejects
+        # the `@Array<Unit>` annotation (E135), and the literal-level gate now
+        # DEFERS to it (PR #938 review) rather than emitting a second E135 for
+        # the same root cause — exactly one E135, not two.
         errs = _errors(
             "public fn main(@Unit -> @Int)\n"
             "  requires(true) ensures(true) effects(pure)\n"
@@ -1954,12 +1958,23 @@ class TestArrayZeroSizeElementRejected945:
             "  nat_to_int(array_length(@Array<Unit>.0))\n"
             "}\n"
         )
-        codes = {e.error_code for e in errs}
-        assert "E135" in codes, f"Array<Unit> literal must be E135, got {codes}"
+        e135 = [e for e in errs if e.error_code == "E135"]
+        assert len(e135) == 1, (
+            "annotated Array<Unit> literal must emit E135 exactly once "
+            f"(no double for one root cause), got {[e.error_code for e in errs]}"
+        )
 
     def test_array_unit_param_rejected(self) -> None:
         # No literal — the `@Array<Unit>` parameter type alone is rejected at
         # resolution, so an index read never reaches codegen either.
+        #
+        # NOTE: this currently reports E135 twice at the same location — a
+        # function's signature types are `_resolve_type`'d in both the
+        # registration and the check pass, so ANY resolution diagnostic on a
+        # param/return doubles.  That pre-existing, general
+        # signature-double-resolution is unrelated to the literal-level gate
+        # this class covers and is tracked separately; assert only that the
+        # param IS rejected, not the (duplicated) exact count.
         errs = _errors(
             "public fn f(@Array<Unit> -> @Int)\n"
             "  requires(true) ensures(true) effects(pure)\n"
@@ -1970,14 +1985,18 @@ class TestArrayZeroSizeElementRejected945:
 
     def test_bare_array_literal_of_unit_rejected(self) -> None:
         # A bare `[()]` with NO `@Array<Unit>` annotation never flows through
-        # `_resolve_type`, so this isolates the `_check_array_lit` gate.
+        # `_resolve_type`, so this isolates the `_check_array_lit` gate — which
+        # must fire exactly once (its only gate; nothing else rejects it).
         errs = _errors(
             "public fn main(-> @Int)\n"
             "  requires(true) ensures(true) effects(pure)\n"
             "{ nat_to_int(array_length([()])) }\n"
         )
-        codes = {e.error_code for e in errs}
-        assert "E135" in codes, f"bare [()] literal must be E135, got {codes}"
+        e135 = [e for e in errs if e.error_code == "E135"]
+        assert len(e135) == 1, (
+            "bare [()] literal must emit E135 exactly once, "
+            f"got {[e.error_code for e in errs]}"
+        )
 
     def test_array_of_int_still_accepted(self) -> None:
         # Non-regression: a normal, non-zero-size element array is unaffected.

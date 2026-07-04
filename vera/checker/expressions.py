@@ -237,7 +237,7 @@ class ExpressionsMixin:
         if isinstance(expr, ast.HandleExpr):
             return self._check_handle(expr)
         if isinstance(expr, ast.ArrayLit):
-            return self._check_array_lit(expr)
+            return self._check_array_lit(expr, expected=expected)
         if isinstance(expr, ast.AssertExpr):
             return self._check_assert(expr)
         if isinstance(expr, ast.AssumeExpr):
@@ -924,7 +924,8 @@ class ExpressionsMixin:
     # Arrays
     # -----------------------------------------------------------------
 
-    def _check_array_lit(self, expr: ast.ArrayLit) -> Type | None:
+    def _check_array_lit(self, expr: ast.ArrayLit, *,
+                         expected: Type | None = None) -> Type | None:
         """Type-check an array literal."""
         if not expr.elements:
             return AdtType("Array", (UnknownType(),))
@@ -948,7 +949,21 @@ class ExpressionsMixin:
         # the `Array<T>` type-resolution gate (E135) — this catches the
         # un-annotated literal (`array_length([()])`) that never flows through
         # `_resolve_type`.
-        if erases_to_unit(first):
+        #
+        # PR #938 review: when this literal is the RHS of an annotated
+        # `Array<zero-size>` binding/return, `_resolve_type` has ALREADY emitted
+        # E135 for that annotation (it returns the `Array<Unit>` type intact —
+        # resolution.py:178), so a second, literal-level E135 would double the
+        # diagnostic for one root cause.  Suppress it when `expected` is already
+        # a zero-size array; the un-annotated literal (`expected` is None, or a
+        # non-degenerate expected type) still reports here — its only gate.
+        expected_is_zero_size_array = (
+            isinstance(expected, AdtType)
+            and expected.name == "Array"
+            and len(expected.type_args) == 1
+            and erases_to_unit(expected.type_args[0])
+        )
+        if erases_to_unit(first) and not expected_is_zero_size_array:
             self._error(
                 expr,
                 f"An array literal of a zero-size element type "
