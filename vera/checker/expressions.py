@@ -478,6 +478,18 @@ class ExpressionsMixin:
                     spec_ref='Chapter 4, Section 4.5 "Comparison Expressions"',
                     error_code="E142",
                 )
+            else:
+                # #928: `==` / `!=` is the surface spelling of the `Eq` ability
+                # (§9.8.1), so the operand type must be Eq-DERIVABLE — not merely
+                # compatible.  Without this gate a non-Eq `==` (two function
+                # values, or a State<Rec>/composite whose field is a Map) passes
+                # check AND compiles: unlike the direct-ADT path (which routes
+                # through `_translate_adt_eq` and raises a clean E613), it falls
+                # to a raw i32/pointer compare that never reaches the structural-
+                # Eq derivability dispatch — a SILENT pointer-identity comparison
+                # (the equality sibling of #921's ordering hole).  Reject here,
+                # the earliest and loudest gate, mirroring #921's E242 for Ord.
+                self._check_eq_ability(expr, left_ty, right_ty)
             return BOOL
 
         if op in (ast.BinOp.LT, ast.BinOp.GT, ast.BinOp.LE, ast.BinOp.GE):
@@ -565,6 +577,65 @@ class ExpressionsMixin:
             return BOOL
 
         return UnknownType()
+
+    def _check_eq_ability(
+        self, node: ast.Node, left_ty: Type, right_ty: Type,
+    ) -> None:
+        """Reject `==` / `!=` / `eq` on a non-Eq-derivable operand type (#928).
+
+        `Eq` is the ability behind equality (§9.8.1); it derives STRUCTURALLY
+        (§9.8.2) for the Eq primitives, simple enums, and ADTs whose fields are
+        (recursively) all Eq — but NOT for function types, `Array` / `Map` /
+        `Set` / `Tuple`, or an ADT/State-composite carrying such a field.  A
+        non-derivable operand that slips past here reaches codegen and silently
+        pointer-compares (identity, not value), so this is the load-bearing
+        soundness gate — its verdict is kept in lockstep with codegen's
+        structural-Eq dispatch by the #928 differential.
+
+        A TypeVar operand (a `forall<T where Eq<T>>` body) is DEFERRED: the
+        `Eq<T>` constraint promises derivability and the monomorphizer's E613
+        gate re-checks every concrete instantiation, so rejecting here would
+        break the legitimate constrained-generic form.  `UnknownType` is
+        likewise deferred (error recovery — no cascading E243).
+        """
+        from vera.checker.eq_ability import is_eq_derivable
+
+        # Defer any operand still carrying a type variable — a constrained
+        # generic (`Eq<T>`) is decided per-instantiation downstream, exactly as
+        # #921 defers a bare-TypeVar Ord operand.  `contains_typevar` catches
+        # nested forms (`Box<T>`, `Option<T>`) too, so a generic body's `==`
+        # over a partially-generic type is never spuriously rejected here.
+        if (contains_typevar(left_ty) or contains_typevar(right_ty)
+                or isinstance(left_ty, UnknownType)
+                or isinstance(right_ty, UnknownType)):
+            return
+        # The compatibility check (E142) already ran; judge the more specific
+        # (subtype) operand — they share a type up to Nat<:Int, and Eq-ness is
+        # invariant across that pair (both Nat and Int are Eq primitives).
+        if is_eq_derivable(left_ty, self.env):
+            return
+        self._error(
+            node,
+            f"Type {pretty_type(left_ty)} does not satisfy the 'Eq' ability; "
+            f"'==' / '!=' requires both operands to be Eq-derivable.",
+            rationale=(
+                "Equality ('==' / '!=', the surface spelling of the Eq "
+                "ability) is defined only on Eq-derivable types — the Eq "
+                "primitives (Int, Nat, Bool, Float64, String, Byte, Unit) and "
+                "ADTs whose fields are (recursively) all Eq. A function type, "
+                "an Array / Map / Set / Tuple, or a composite carrying such a "
+                "field has no structural equality, so comparing it would fall "
+                "to a raw pointer comparison — identity, not value equality."
+            ),
+            fix=(
+                "Compare Eq-derivable values instead. Reduce the operand to an "
+                "Eq-derivable value first (e.g. an Eq primitive or an ADT whose "
+                "every field is itself Eq); functions and Array / Map / Set / "
+                "Tuple values are not Eq-comparable."
+            ),
+            spec_ref='Chapter 9, Section 9.8.1 "Built-in Abilities"',
+            error_code="E243",
+        )
 
     def _check_pipe(self, expr: ast.BinaryExpr) -> Type | None:
         """Type-check pipe: left |> right (right must be a FnCall/ModuleCall)."""

@@ -1988,5 +1988,20 @@
       "adt",
       "check_error"
     ]
+  },
+  {
+    "id": "ch09_eq_non_derivable_rejected",
+    "file": "ch09_eq_non_derivable_rejected.vera",
+    "chapter": 9,
+    "title": "== / Eq on a non-Eq-derivable type is a checker error",
+    "level": "check",
+    "spec_ref": "Section 9.8.1",
+    "expected_error": "E243",
+    "features": [
+      "eq_ability",
+      "equality",
+      "adt",
+      "check_error"
+    ]
   }
 ]

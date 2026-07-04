@@ -759,6 +759,24 @@ class CallsMixin:
                         error_code="E242",
                     )
 
+        # #928: `Eq`'s `eq` is the ability spelling of `==` (§9.8.1), so it
+        # inherits the same Eq-derivability requirement.  Without this gate the
+        # `eq(fn, fn)` / `eq(map_composite, map_composite)` forms type-check
+        # (the `op` params are bare type variables) and then codegen silently
+        # pointer-compares them — the exact silent miscompile the `==` binop
+        # gate (`_check_eq_ability`) closes, reached through the ability-op
+        # surface instead.  Route both through the one predicate so the checker
+        # rejects exactly what codegen cannot derive (the #928 differential).
+        if op_info.parent_effect == "Eq":
+            for i, arg_ty in enumerate(arg_types):
+                if arg_ty is None or isinstance(arg_ty, UnknownType):
+                    continue
+                # A bare/nested type variable is deferred to the caller's
+                # `Eq<T>` constraint + the codegen E613 instantiation gate,
+                # exactly as the Ord arm above and the `==` binop gate do —
+                # `_check_eq_ability` short-circuits on `contains_typevar`.
+                self._check_eq_ability(args[i], arg_ty, arg_ty)
+
         return return_type
 
     def _ability_type_mapping(

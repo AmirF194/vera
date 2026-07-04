@@ -511,6 +511,7 @@ ERROR_CODES: dict[str, str] = {
     "E240": "Ability operation wrong argument count",
     "E241": "Ability operation argument type mismatch",
     "E242": "Ord ability operation on non-orderable type",
+    "E243": "Eq ability operation on non-Eq-derivable type",
     # E3xx — Type Checker: Control Flow
     "E300": "If condition not Bool",
     "E301": "If branches incompatible types",
