@@ -369,18 +369,42 @@ class OperatorsMixin:
         (`Option`, dropping `<Int>`).  For the direct structural-`==` derivation
         the type argument is load-bearing — the generated `$eq_<type>` helper
         must resolve the concrete field type — so recover it from the
-        constructor's type-parameter-field arguments, RECURSIVELY, so a
-        nested-generic operand (`Cons(Cons(1, Nil), Nil)`) reconstructs the
-        FULLY-qualified `List<List<Int>>` rather than the one-level `List<List>`
-        the pre-#923 flat `_get_arg_type_info_wasm` recovery produced (which then
-        spuriously E613'd on the derivable nested type).  Falls back to ``bare``
-        when the operand is not a `ConstructorCall` or a needed type argument
-        cannot be inferred — the established lost-type-arg shape the
-        derivability path already routes to the scalar lowering.
+        constructor's arguments, RECURSIVELY (#923): a nested-generic operand
+        (`Cons(Cons(1, Nil), Nil)`) reconstructs the FULLY-qualified
+        `List<List<Int>>` rather than the one-level `List<List>` the pre-#923
+        flat recovery produced (which then spuriously E613'd on the derivable
+        nested type).  When that recursion bottoms out at a bare head because no
+        field IS a bare type parameter — a GENERIC mutually-recursive ADT whose
+        argument is buried in a NESTED generic field (`Grove(Rose<T>,
+        Forest<T>)`) — fall back to `_recover_ctor_ptype`, which descends into
+        the nested field's own argument to dig the parameter out (#934; without
+        the recovered `<Int>` the composite `==` silently lowered to a
+        bare-pointer `i32.eq` → a wrong `0`).  Falls back to ``bare`` when the
+        operand is not a `ConstructorCall` or a needed type argument cannot be
+        inferred — the established lost-type-arg shape the derivability path
+        already routes to the scalar lowering.
         """
         if bare is None:
             return bare
-        return self._full_ctor_type_name(operand) or bare
+        # #923: recover the FULLY-qualified nested-generic name (List<List<Int>>)
+        # for the direct-`==` path.  #934: when that recursion bottoms out at a
+        # bare head — a GENERIC mutually-recursive ADT (`Grove(Rose<T>,
+        # Forest<T>)`) with no bare-`T` field — fall back to the nested-descent
+        # recovery that digs the parameter out of a nested generic field.  Trying
+        # `_full_ctor_type_name` first (any `<…>` result wins) means the two
+        # recoveries never disagree on a shape the direct path already handles.
+        full = self._full_ctor_type_name(operand)
+        if full is not None and "<" in full:
+            return full
+        # #934 fallback applies only to a `ConstructorCall` — `_recover_ctor_ptype`
+        # reads `.name`/args (a `SlotRef` has neither) and returns None for a
+        # non-generic ADT, so a non-descendable or non-generic operand keeps the
+        # bare name `_full_ctor_type_name` already produced (the release path).
+        if isinstance(operand, ast.ConstructorCall):
+            recovered = self._recover_ctor_ptype(operand, bare)
+            if recovered is not None and recovered != bare:
+                return recovered
+        return full or bare
 
     def _full_ctor_type_name(self, operand: ast.Expr) -> str | None:
         """Fully-qualified Vera type name of a constructor operand (#923).
