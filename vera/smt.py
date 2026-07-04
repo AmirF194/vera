@@ -16,6 +16,7 @@ import z3
 
 from vera import ast
 from vera.monomorphize import mangle_type_name, unmangle_type_name
+from vera.slots import slot_ref_name, type_expr_slot_name
 from vera.types import (
     AdtType,
     PRIMITIVES,
@@ -945,17 +946,14 @@ class SmtContext:
         self, ref: ast.SlotRef, env: SlotEnv
     ) -> z3.ExprRef | None:
         """Translate @Type.n to the corresponding Z3 variable."""
-        type_name = ref.type_name
-        if ref.type_args:
-            # Parameterised type — build canonical name
-            # e.g. Array<Int> → "Array<Int>"
-            arg_names = []
-            for ta in ref.type_args:
-                if isinstance(ta, ast.NamedType):
-                    arg_names.append(ta.name)
-                else:  # pragma: no cover
-                    return None  # complex type arg — unsupported
-            type_name = f"{ref.type_name}<{', '.join(arg_names)}>"
+        # Shared recursive builder (#914 finding 2) — fully-qualified nested
+        # type args, matching the env-key side and the checker so the
+        # verifier resolves the SAME slot the checker did (a one-level name
+        # collided distinct nested composites like `Option<Tuple<Int, Int>>`
+        # vs `Option<Tuple<Bool, Bool>>` into one `Option<Tuple>` stack).
+        type_name = slot_ref_name(ref)
+        if type_name is None:  # pragma: no cover — complex type arg
+            return None
         return env.resolve(type_name, ref.index)
 
     def _translate_binary(
@@ -2333,20 +2331,13 @@ class SmtContext:
                 self._vera_type_to_z3_sort(adt_ty)
 
     def _type_expr_to_slot_name(self, te: ast.TypeExpr) -> str | None:
-        """Extract the slot name from a type expression."""
-        if isinstance(te, ast.NamedType):
-            if te.type_args:
-                arg_names = []
-                for a in te.type_args:
-                    if isinstance(a, ast.NamedType):
-                        arg_names.append(a.name)
-                    else:  # pragma: no cover
-                        return None
-                return f"{te.name}<{', '.join(arg_names)}>"
-            return te.name
-        if isinstance(te, ast.RefinementType):
-            return self._type_expr_to_slot_name(te.base_type)
-        return None
+        """Extract the slot name from a type expression.
+
+        Delegates to the shared recursive :func:`vera.slots.type_expr_slot_name`
+        so the verifier's slot-env keys are fully-qualified over nested
+        composites and agree with the checker + codegen (#914 finding 2).
+        """
+        return type_expr_slot_name(te)
 
     # -----------------------------------------------------------------
     # Validity checking

@@ -1616,8 +1616,14 @@ class TestSmtTranslateEdgeCases:
         result = ctx._type_expr_to_slot_name(te)
         assert result == "Int"
 
-    def test_type_expr_to_slot_name_unknown(self) -> None:
-        """_type_expr_to_slot_name returns None for unknown type expr."""
+    def test_type_expr_to_slot_name_fntype(self) -> None:
+        """A top-level `FnType` slot name is the synthetic ``"Fn"``.
+
+        #914 finding-3 dedup: the smt copy now delegates to the shared
+        `vera.slots.type_expr_slot_name`, which returns ``"Fn"`` for a
+        top-level function type — matching the checker / codegen / slots
+        convention (the pre-dedup smt copy had no `FnType` branch and
+        returned `None`, the lone outlier)."""
         from vera.smt import SmtContext
         from vera.ast import FnType, NamedType
         ctx = SmtContext()
@@ -1628,7 +1634,7 @@ class TestSmtTranslateEdgeCases:
             span=None,
         )
         result = ctx._type_expr_to_slot_name(te)
-        assert result is None
+        assert result == "Fn"
 
     def test_find_sort_for_ctor_none(self) -> None:
         """_find_sort_for_ctor returns None for unknown constructor."""

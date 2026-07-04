@@ -18,25 +18,76 @@ from vera import ast
 
 
 # ------------------------------------------------------------------
+# Canonical slot-name construction (single source of truth)
+# ------------------------------------------------------------------
+
+def type_expr_slot_name(te: ast.TypeExpr) -> str | None:
+    """Canonical slot-matching name for a TypeExpr, or ``None`` if the
+    type has no nameable slot form.
+
+    The ONE recursive builder for slot-environment keys and slot-reference
+    lookups across the codegen and verifier subsystems (#914 finding 2 /
+    dedup): a parameterized type recurses into its type arguments to a
+    FULLY-QUALIFIED name, so nested composites are distinguishable
+    (``Option<Tuple<Int, Int>>`` and ``Option<Tuple<Bool, Bool>>`` do NOT
+    collapse to the same ``Option<Tuple>`` — the pre-#914 one-level bug that
+    collided their `state_*` imports / `exn_*` tags and any two same-outer
+    nested slots in one scope).  Type aliases stay OPAQUE (``@PosInt.0``
+    counts ``PosInt`` bindings, not ``Int``) — refinements resolve to their
+    base name only.  Matches the checker's own recursive key (via
+    ``canonical_type_name`` → ``pretty_type``), so the checker's slot
+    environment and the downstream codegen/verifier ones agree.
+
+    Returns ``None`` when a component is neither a `NamedType` nor a
+    `RefinementType` chain over one — e.g. a `FnType` **nested inside** a
+    type argument — so the strict codegen callers (`str | None`) can skip.
+    A top-level `FnType` yields the synthetic ``"Fn"`` name.
+    """
+    if isinstance(te, ast.NamedType):
+        if te.type_args:
+            inner_names: list[str] = []
+            for a in te.type_args:
+                inner = type_expr_slot_name(a)
+                if inner is None:
+                    return None
+                inner_names.append(inner)
+            return f"{te.name}<{', '.join(inner_names)}>"
+        return te.name
+    if isinstance(te, ast.RefinementType):
+        return type_expr_slot_name(te.base_type)
+    if isinstance(te, ast.FnType):
+        return "Fn"
+    return None
+
+
+def slot_ref_name(ref: ast.SlotRef) -> str | None:
+    """Canonical lookup name for a ``@T.n`` slot reference, or ``None``.
+
+    The lookup-side counterpart of :func:`type_expr_slot_name` — a
+    `SlotRef` carries `type_name` (str) + `type_args` (TypeExprs), so it
+    resolves through the SAME recursive builder as the key side, keeping
+    env-key construction and slot lookup matched for nested composites
+    (#914 finding 2).  Bare (no-type-arg) refs return `type_name` unchanged.
+    """
+    if not ref.type_args:
+        return ref.type_name
+    return type_expr_slot_name(
+        ast.NamedType(name=ref.type_name, type_args=ref.type_args)
+    )
+
+
+# ------------------------------------------------------------------
 # Internal helpers
 # ------------------------------------------------------------------
 
 def _te_slot_name(te: ast.TypeExpr) -> str:
     """Return the canonical slot-matching name for a parameter TypeExpr.
 
-    Mirrors the logic in ``TypeChecker._type_expr_to_slot_name``.
-    Type aliases are opaque: @PosInt.0 counts PosInt bindings, not Int.
+    Thin ``str``-total wrapper over :func:`type_expr_slot_name` (the shared
+    recursive builder) for the ``--explain-slots`` table, which wants a
+    display string for every input: an unnameable component becomes ``"?"``.
     """
-    if isinstance(te, ast.NamedType):
-        if te.type_args:
-            inner = ", ".join(_te_slot_name(a) for a in te.type_args)
-            return f"{te.name}<{inner}>"
-        return te.name
-    if isinstance(te, ast.RefinementType):
-        return _te_slot_name(te.base_type)
-    if isinstance(te, ast.FnType):
-        return "Fn"
-    return "?"
+    return type_expr_slot_name(te) or "?"
 
 
 def _label(tname: str, slot_idx: int, n: int) -> str:

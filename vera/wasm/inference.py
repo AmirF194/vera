@@ -10,6 +10,7 @@ from vera.monomorphize import (
     resolve_fn_type_alias,
     substitute_type_vars,
 )
+from vera.slots import type_expr_slot_name
 from vera.wasm.helpers import _element_wasm_type
 
 # `substitute_type_vars` was relocated to `vera.monomorphize` (the codegen-free
@@ -131,12 +132,14 @@ class InferenceMixin:
         #                       ModuleCall in a constructor field needs
         #                       its WASM return type; the resolver
         #                       consumes `path`, so no wrong-name lookup)
+        #   OldExpr           → State<T>'s WAT type (postcondition
+        #                       snapshot read; #914 finding 1)
+        #   NewExpr           → State<T>'s WAT type (postcondition
+        #                       fresh state read; #914 finding 1)
         #
         # Cannot occur (rejected before reaching this codegen-time
         # helper):
         #   HoleExpr          → parser placeholder; check time rejects
-        #   OldExpr           → contract-only; not in body codegen
-        #   NewExpr           → contract-only; not in body codegen
         """
         if isinstance(expr, ast.IntLit):
             return "i64"
@@ -236,6 +239,16 @@ class InferenceMixin:
             target = self._resolve_module_call_wasm_name(expr)
             return self._infer_fncall_wasm_type(
                 ast.FnCall(name=target, args=expr.args, span=expr.span))
+        # #914 finding 1: `old(State<T>)` / `new(State<T>)` in a postcondition
+        # each yield a value of type T — the snapshot local (old) or a fresh
+        # `state_get` (new).  Without a width here a composite `old == new`
+        # over a pointer-typed T (`Option<Int>` → i32) fell through to the
+        # i64 comparison default and emitted an ill-typed `i64.eq` on two
+        # i32 pointers (`expected i64, found i32`).  Resolve T's WAT type via
+        # the shared canonical-slot-name → WASM map so the `==` picks i32.
+        if isinstance(expr, (ast.OldExpr, ast.NewExpr)):
+            name = self._extract_state_type_name(expr.effect_ref)
+            return self._type_name_to_wasm(name) if name else None
         return None
 
     _IO_WASM_TYPES: dict[str, str | None] = {
@@ -1861,20 +1874,15 @@ class InferenceMixin:
         return types
 
     def _type_expr_name(self, te: ast.TypeExpr) -> str | None:
-        """Extract a simple type name from a TypeExpr."""
-        if isinstance(te, ast.NamedType):
-            if te.type_args:
-                arg_names = []
-                for a in te.type_args:
-                    if isinstance(a, ast.NamedType):
-                        arg_names.append(a.name)
-                    else:  # pragma: no cover
-                        return None
-                return f"{te.name}<{', '.join(arg_names)}>"
-            return te.name
-        if isinstance(te, ast.RefinementType):
-            return self._type_expr_name(te.base_type)
-        return None  # pragma: no cover
+        """Extract a simple type name from a TypeExpr.
+
+        Delegates to the shared recursive :func:`vera.slots.type_expr_slot_name`
+        so a closure's parameter-count keys (`param_type_counts`) use the same
+        fully-qualified nested-composite name that `_translate_slot_ref` /
+        `_walk_free_vars` resolve against (#914 finding 2 — a captured
+        `@Array<Array<Int>>` desynced when this stayed one-level).
+        """
+        return type_expr_slot_name(te)
 
     def _type_name_to_wasm(self, type_name: str) -> str:
         """Map a Vera type name string to a WASM type string."""
@@ -1890,20 +1898,13 @@ class InferenceMixin:
         return "i32"
 
     def _type_expr_to_slot_name(self, te: ast.TypeExpr) -> str | None:
-        """Extract the slot name from a type expression."""
-        if isinstance(te, ast.NamedType):
-            if te.type_args:
-                arg_names = []
-                for a in te.type_args:
-                    if isinstance(a, ast.NamedType):
-                        arg_names.append(a.name)
-                    else:  # pragma: no cover
-                        return None
-                return f"{te.name}<{', '.join(arg_names)}>"
-            return te.name
-        if isinstance(te, ast.RefinementType):
-            return self._type_expr_to_slot_name(te.base_type)
-        return None  # pragma: no cover
+        """Extract the slot name from a type expression.
+
+        Delegates to the shared recursive :func:`vera.slots.type_expr_slot_name`
+        so nested composite type args (`Option<Tuple<Int, Int>>`) are FULLY
+        qualified and distinguishable (#914 finding 2).
+        """
+        return type_expr_slot_name(te)
 
     def _resolve_base_type_name(
         self,

@@ -25,6 +25,7 @@ from vera.codegen.api import CompileResult
 from vera.codegen.memory import ConstructorLayout
 from vera.errors import Diagnostic, SourceLocation
 from vera.prelude import PRELUDE_FILE, mentioned_fn_names
+from vera.slots import type_expr_slot_name
 from vera.wasm import StringPool
 from vera.wasm.async_fusion import (
     compute_future_ret_fns,
@@ -1146,22 +1147,14 @@ class CodeGenerator(
         return "unsupported"
 
     def _type_expr_to_slot_name(self, te: ast.TypeExpr) -> str | None:
-        """Extract the slot name from a type expression."""
-        if isinstance(te, ast.NamedType):
-            if te.type_args:
-                arg_names = []
-                for a in te.type_args:
-                    if isinstance(a, ast.NamedType):
-                        arg_names.append(a.name)
-                    else:
-                        return None
-                return f"{te.name}<{', '.join(arg_names)}>"
-            return te.name
-        if isinstance(te, ast.RefinementType):
-            return self._type_expr_to_slot_name(te.base_type)
-        if isinstance(te, ast.FnType):
-            return "Fn"
-        return None
+        """Extract the slot name from a type expression.
+
+        Delegates to the shared recursive :func:`vera.slots.type_expr_slot_name`
+        so nested composite type args (`Option<Tuple<Int, Int>>`) are
+        FULLY qualified and distinguishable (#914 finding 2), and every
+        slot-name builder agrees by construction (dedup).
+        """
+        return type_expr_slot_name(te)
 
     @staticmethod
     def _escape_wat_string(s: str) -> str:

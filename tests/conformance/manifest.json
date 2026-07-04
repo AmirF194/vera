@@ -1079,6 +1079,20 @@
     ]
   },
   {
+    "id": "ch07_state_old_composite",
+    "file": "ch07_state_old_composite.vera",
+    "chapter": 7,
+    "title": "old/new State snapshot over a composite type argument (#914)",
+    "level": "run",
+    "spec_ref": "Section 7.3",
+    "features": [
+      "state_effect",
+      "old",
+      "new",
+      "composite_type_arg"
+    ]
+  },
+  {
     "id": "ch07_unit_fn_nontail",
     "file": "ch07_unit_fn_nontail.vera",
     "chapter": 7,

@@ -1,0 +1,21 @@
+-- Conformance: old(State<T>) / new(State<T>) over a COMPOSITE type argument
+-- (Chapter 7).  Tests: an ensures postcondition referencing old(State<Option<Int>>)
+-- and new(State<Option<Int>>) — the pre-execution snapshot local is allocated
+-- under the canonical slot name and the composite == lowers at i32 (#914).
+public fn keep(@Unit -> @Unit)
+  requires(true)
+  ensures(new(State<Option<Int>>) == old(State<Option<Int>>))
+  effects(<State<Option<Int>>>)
+{
+  let @Option<Int> = get(());
+  put(@Option<Int>.0);
+  ()
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  0
+}

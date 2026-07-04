@@ -1689,3 +1689,163 @@ public fn main(@Unit -> @Int)
 }
 """
         assert _run(src, fn="main") == 142
+
+    # --- Root cause D (round 2) --------------------------------------
+
+    def test_old_state_composite_runs(self) -> None:
+        """#914 finding 1: `old(State<Option<Int>>)` in a postcondition must
+        allocate a pre-execution snapshot local and run, not crash codegen.
+
+        Pre-fix `_extract_state_type_name` returned the BASE name (`Option`),
+        which missed the canonical-keyed `_state_types` entry (`Option<Int>`),
+        so no snapshot local was allocated and the `old` read raised an
+        uncaught `CodegenInvariantError` (`old(State<T>) has no saved
+        pre-execution state local`) at run."""
+        src = """\
+public fn keep(@Unit -> @Unit)
+  requires(true)
+  ensures(new(State<Option<Int>>) == old(State<Option<Int>>))
+  effects(<State<Option<Int>>>)
+{
+  let @Option<Int> = get(());
+  put(@Option<Int>.0);
+  ()
+}
+"""
+        result = _compile_ok(src)
+        assert "keep" in result.exports, (
+            "keep was skipped for the composite old(State) snapshot; "
+            f"diagnostics: {[d.description for d in result.diagnostics]}"
+        )
+        # get(()) defaults to a null Option pointer (0); put stores it back
+        # unchanged, so new == old holds and the postcondition passes.
+        exec_result = _run_state(src, fn="keep")
+        assert exec_result.value is None  # Unit return
+
+    def test_old_state_composite_verifies_and_runs_cli(
+        self, tmp_path: object,
+    ) -> None:
+        """#914 finding 1 (CLI end-to-end): the composite `old(State<T>)`
+        program `vera run`s with exit 0 (no traceback) and `vera verify`s."""
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        src = """\
+public fn keep(@Unit -> @Unit)
+  requires(true)
+  ensures(new(State<Option<Int>>) == old(State<Option<Int>>))
+  effects(<State<Option<Int>>>)
+{
+  let @Option<Int> = get(());
+  put(@Option<Int>.0);
+  ()
+}
+"""
+        p = Path(tmp_path) / "old_state.vera"  # type: ignore[arg-type]
+        p.write_text(src, encoding="utf-8")
+        venv_bin = Path(sys.executable).parent
+        vera = venv_bin / "vera"
+        for cmd in (["run", "--fn", "keep"], ["verify", "--quiet"]):
+            proc = subprocess.run(
+                [str(vera), *cmd, str(p)],
+                capture_output=True, text=True, encoding="utf-8", timeout=120,
+            )
+            assert proc.returncode == 0, (
+                f"vera {cmd[0]} failed: {proc.stdout}\n{proc.stderr}"
+            )
+            assert "CodegenInvariantError" not in proc.stderr
+            assert "Traceback" not in proc.stderr
+
+    def test_nested_composite_state_distinct_names_and_values(self) -> None:
+        """#914 finding 2: two State handlers over DISTINCT nested-composite
+        types must produce DISTINCT mangled `state_*` names and independent
+        cells — pre-fix `_type_expr_to_slot_name` dropped the inner type args
+        (`Option<Tuple<Int, Int>>` and `Option<Tuple<Bool, Bool>>` both
+        collapsed to the slot name `Option<Tuple>` → the SAME import)."""
+        src = """\
+private fn use_int_pair(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[State<Option<Tuple<Int, Int>>>](@Option<Tuple<Int, Int>> = Some(Tuple(3, 4))) {
+    get(@Unit) -> { resume(@Option<Tuple<Int, Int>>.0) },
+    put(@Option<Tuple<Int, Int>>) -> { resume(()) }
+    with @Option<Tuple<Int, Int>> = @Option<Tuple<Int, Int>>.0
+  } in {
+    match get(()) {
+      Some(@Tuple<Int, Int>) -> match @Tuple<Int, Int>.0 { Tuple(@Int) -> @Int.0 },
+      None -> 0
+    }
+  }
+}
+
+private fn use_bool_pair(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[State<Option<Tuple<Bool, Bool>>>](@Option<Tuple<Bool, Bool>> = Some(Tuple(true, false))) {
+    get(@Unit) -> { resume(@Option<Tuple<Bool, Bool>>.0) },
+    put(@Option<Tuple<Bool, Bool>>) -> { resume(()) }
+    with @Option<Tuple<Bool, Bool>> = @Option<Tuple<Bool, Bool>>.0
+  } in {
+    100
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  use_int_pair(()) + use_bool_pair(())
+}
+"""
+        result = _compile_ok(src)
+        assert "main" in result.exports, (
+            "main skipped; diagnostics: "
+            f"{[d.description for d in result.diagnostics]}"
+        )
+        wat = result.wat or ""
+        # The two nested composites must NOT collapse to the same mangled
+        # import name.  Pre-fix both were `state_get_Option_LTuple_R`.
+        assert "state_get_Option_LTuple_LInt_CInt_R_R" in wat, wat[:400]
+        assert "state_get_Option_LTuple_LBool_CBool_R_R" in wat, wat[:400]
+        # use_int_pair reads the stored Some(Tuple(3, 4)) -> first field 3;
+        # use_bool_pair returns 100 -> total 103.
+        assert _run(src, fn="main") == 103
+
+    def test_nested_composite_exn_distinct_tags(self) -> None:
+        """#914 finding 2 (Exn tag): two Exn handlers over distinct
+        nested-composite payloads must emit DISTINCT tags — a shared tag
+        would be a type-confusion (a `Tuple<Int, Int>` payload caught as a
+        `Tuple<Bool, Bool>`)."""
+        src = """\
+effect Exn<E> {
+  op throw(E -> Never);
+}
+private fn a(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[Exn<Option<Tuple<Int, Int>>>] {
+    throw(@Option<Tuple<Int, Int>>) -> { 1 }
+  } in {
+    2
+  }
+}
+private fn b(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[Exn<Option<Tuple<Bool, Bool>>>] {
+    throw(@Option<Tuple<Bool, Bool>>) -> { 3 }
+  } in {
+    4
+  }
+}
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  a(()) + b(())
+}
+"""
+        result = _compile_ok(src)
+        wat = result.wat or ""
+        assert "$exn_Option_LTuple_LInt_CInt_R_R" in wat, wat[:400]
+        assert "$exn_Option_LTuple_LBool_CBool_R_R" in wat, wat[:400]
+        assert _run(src, fn="main") == 6  # a→2, b→4

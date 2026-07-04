@@ -19,6 +19,7 @@ import z3
 
 from vera import ast
 from vera.errors import Diagnostic, SourceLocation
+from vera.slots import type_expr_slot_name
 from vera.smt import SlotEnv, SmtContext
 from vera.types import BOOL, BYTE, FLOAT64, INT, NAT, STRING, UNIT, PrimitiveType, RefinedType, Type, base_type
 
@@ -922,20 +923,13 @@ def _run_trials(
 # =====================================================================
 
 def _type_expr_to_slot_name(te: ast.TypeExpr) -> str:
-    """Extract the canonical slot name from a type expression."""
-    if isinstance(te, ast.NamedType):
-        if te.type_args:
-            arg_names = []
-            for a in te.type_args:
-                if isinstance(a, ast.NamedType):
-                    arg_names.append(a.name)
-                else:
-                    return "?"
-            return f"{te.name}<{', '.join(arg_names)}>"
-        return te.name
-    if isinstance(te, ast.RefinementType):
-        return _type_expr_to_slot_name(te.base_type)
-    return "?"
+    """Extract the canonical slot name from a type expression.
+
+    Delegates to the shared recursive :func:`vera.slots.type_expr_slot_name`
+    (fully-qualified over nested composites, #914 finding 2) with the
+    tester's total-``str`` contract: an unnameable component is ``"?"``.
+    """
+    return type_expr_slot_name(te) or "?"
 
 
 def _count_slots(env: SlotEnv, type_name: str) -> int:
