@@ -168,6 +168,7 @@ vera run file.vera --fn f -- 42           # call function f with argument 42
 vera compile --target browser file.vera   # emit browser bundle
 vera compile --target wasi-p2 file.vera   # emit a WASI Preview 2 component (experimental)
 vera run --target wasi-p2 file.vera       # execute under the built-in WASI 0.2 host
+vera serve file.vera                      # serve handle(Request -> Response) over HTTP (default :8000)
 vera compile --target wasi-p2 --world server file.vera  # wasi:http server component for wasmtime serve
 vera test file.vera                       # contract-driven testing via Z3 + WASM
 vera fmt file.vera                        # format to canonical form

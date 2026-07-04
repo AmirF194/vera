@@ -1389,6 +1389,7 @@ Commands:
     compile --target wasi-p2 --world server  Emit a wasi:http server component (run with wasmtime serve)
     run [--fn name]      Compile and execute a .vera file
     run --target wasi-p2  Execute under the built-in WASI 0.2 host
+    serve [--port n]     Serve handle(Request -> Response) over HTTP (default :8000)
     ast [--json]         Parse a .vera file and print the AST
     fmt [--write|--check] Format a .vera file to canonical form
     lsp                  Serve the Language Server Protocol over stdio
@@ -1403,6 +1404,8 @@ Options:
     --wat                Print WAT text instead of writing .wasm binary
     --fn <name>          Function to execute or test
     --trials <n>         Number of test trials (default: 100, for vera test)
+    --port <n>           Port to serve on (default: 8000, for vera serve)
+    --host <h>           Host/interface to bind (default: 127.0.0.1, for vera serve)
     -o <path>            Output path for .wasm binary (or directory for --target browser)
     --target <t>         Compilation target: wasm (default), browser, or wasi-p2
     --world <w>          wasi-p2 world: cli (default) or server (wasi:http/incoming-handler)
