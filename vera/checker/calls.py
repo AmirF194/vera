@@ -171,12 +171,14 @@ class CallsMixin:
             # check time rather than letting it crash in codegen, per DESIGN.md
             # principle 1 (checkability over correctness).
             #
-            # Narrowed to bodies that actually MATERIALIZE `@T` (a `@T.n`
-            # SlotRef read — direct return, match scrutinee, etc.).  A `@T`
-            # parameter the body never reads erases cleanly from the ABI, so
-            # `firstInt(@T, @Int){ @Int.0 }` and `ignore(@T){ 0 }` run fine at
-            # `T = Unit` and must NOT be rejected (`fn_info.forall_vars_read`
-            # is the per-declaration set of body-read forall vars).
+            # Narrowed to declarations that actually MATERIALIZE `@T` (a `@T.n`
+            # SlotRef read — direct return, match scrutinee, or a `requires` /
+            # `ensures` clause, all of which lower to a `local.get`; #939).  A
+            # `@T` parameter never read — in the body OR a contract — erases
+            # cleanly from the ABI, so `firstInt(@T, @Int){ @Int.0 }` and
+            # `ignore(@T){ 0 }` run fine at `T = Unit` and must NOT be rejected
+            # (`fn_info.forall_vars_read` is the per-declaration set of forall
+            # vars read anywhere that lowers to WASM).
             #
             # Keyed to *bare* Unit only: a boxed `Option<Unit>` (tag + pointer)
             # is a valid, non-zero-size type argument.  A genuine built-in generic
@@ -209,7 +211,7 @@ class CallsMixin:
                               "and compiles to no WASM value), so a generic "
                               "function specialised at Unit has a parameter "
                               "slot that refers to no runtime local — the "
-                              "monomorphized body cannot be generated.",
+                              "monomorphized function cannot be generated.",
                     fix="Do not pass a Unit-typed value where a generic "
                         "parameter is inferred. If you need to thread a unit "
                         "result through, wrap it in a boxed type (e.g. "

@@ -1657,18 +1657,19 @@ class TestCrossArgTypeArgMerge:
 
 class TestGenericOverUnitRejected900:
     """#900: a generic type parameter instantiated at the zero-size ``Unit``
-    type is rejected at *check* time (E206) — but ONLY when the generic's body
-    reads a ``@T``-typed slot, the exact condition that crashes in codegen.
+    type is rejected at *check* time (E206) — but ONLY when the generic READS a
+    ``@T``-typed slot somewhere that lowers to WASM (its body, or a ``requires``
+    / ``ensures`` clause; #939), the exact condition that crashes in codegen.
 
     ``Unit`` is 0 bytes with no WASM representation (spec §11.2.2 / §11.3.1),
-    so a monomorphized ``forall<T>`` body's ``@T.n`` slot read resolves to no
-    local (the dangling-slot codegen invariant).  A ``@T`` parameter that is
-    never read erases cleanly from the WASM ABI, so a generic whose body does
-    NOT read ``@T`` (``firstInt(@T, @Int){ @Int.0 }``, ``ignore(@T){ 0 }``)
-    runs fine at ``T = Unit`` and MUST NOT be rejected — the discriminator is
-    a ``@T.n`` read, not merely ``T = Unit``.  The check must fire for every
-    way ``T`` is pinned to ``Unit`` *when the body reads it*, not just the one
-    repro shape from the issue.
+    so a monomorphized ``forall<T>``'s ``@T.n`` slot read resolves to no local
+    (the dangling-slot codegen invariant).  A ``@T`` parameter that is never
+    read erases cleanly from the WASM ABI, so a generic that does NOT read
+    ``@T`` (``firstInt(@T, @Int){ @Int.0 }``, ``ignore(@T){ 0 }``) runs fine at
+    ``T = Unit`` and MUST NOT be rejected — the discriminator is a ``@T.n``
+    read, not merely ``T = Unit``.  The check must fire for every way ``T`` is
+    pinned to ``Unit`` *when it is read*, not just the one repro shape from the
+    issue.
     """
 
     _IDT = (
@@ -1830,3 +1831,41 @@ class TestGenericOverUnitRejected900:
         codes = {e.error_code for e in errs}
         assert "E206" in codes, \
             f"a @T match-scrutinee read must stay E206, got {codes}"
+
+    def test_contract_requires_reads_typevar_over_unit_rejected(self) -> None:
+        # #939: a `@T.n` read in a `requires(...)` clause ALSO lowers to a
+        # `local.get` — `_compile_preconditions` emits the runtime precondition
+        # check — so a contract-clause read at `T = Unit` dangles exactly like a
+        # body read.  The body here never reads `@T` (returns `@Int.0`), so only
+        # walking the contract clauses (not just the body) can catch it.
+        # Pre-#939: `check` passed, then `vera run` crashed with a raw
+        # CodegenInvariantError traceback (the dangling-slot invariant).
+        errs = _errors(
+            "private forall<T> fn ignore_pair(@T, @T, @Int -> @Int)\n"
+            "  requires(@T.1 == @T.0) ensures(true) effects(pure)\n"
+            "{ @Int.0 }\n"
+            + "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ ignore_pair((), (), 5) }\n"
+        )
+        codes = {e.error_code for e in errs}
+        assert "E206" in codes, \
+            f"a @T read in a requires clause must be E206 at Unit, got {codes}"
+
+    def test_contract_ensures_reads_typevar_over_unit_rejected(self) -> None:
+        # #939: the `ensures(...)` clause lowers to a runtime postcondition
+        # check too, so a `@T.n` read there dangles at Unit identically.  (The
+        # postcondition codegen path already degraded to a clean E699, but E206
+        # at check is the correct, earlier diagnostic — and keeps requires and
+        # ensures uniform under one discriminator.)
+        errs = _errors(
+            "private forall<T> fn ignore_pair(@T, @T, @Int -> @Int)\n"
+            "  requires(true) ensures(@T.1 == @T.0) effects(pure)\n"
+            "{ @Int.0 }\n"
+            + "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ ignore_pair((), (), 5) }\n"
+        )
+        codes = {e.error_code for e in errs}
+        assert "E206" in codes, \
+            f"a @T read in an ensures clause must be E206 at Unit, got {codes}"

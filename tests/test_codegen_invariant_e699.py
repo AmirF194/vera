@@ -154,3 +154,34 @@ def test_closure_body_invariant_error_surfaces_as_e699(monkeypatch) -> None:
 
     codes = [d.error_code for d in result.diagnostics]
     assert "E699" in codes, f"expected [E699] from closure-body invariant; got {codes}"
+
+
+def test_precondition_invariant_error_surfaces_as_e699(monkeypatch) -> None:
+    """#939: a CodegenInvariantError raised while lowering a `requires(...)`
+    precondition degrades to a loud [E699], not a raw escaping traceback —
+    matching the body and postcondition paths.
+
+    Pre-#939 the precondition-compile `try/except` in `_compile_fn` caught only
+    `(AdtEqNotDerivableError, CodegenSkip)` — the two types #922 added — but NOT
+    `CodegenInvariantError`.  A `@T.n` read inside a `requires` clause of a
+    generic instantiated at Unit hits the dangling-slot invariant in
+    `_translate_slot_ref`, and pre-#939 that escaped `_compile_fn` uncaught (a
+    raw Python traceback on a `check`-green program).  This forces the raise at
+    the `_compile_preconditions` boundary to exercise the catch-side contract
+    directly (the real dangling-slot trigger is now gated earlier by E206, so —
+    like the sibling body/closure E699 tests — the raise is injected)."""
+    from vera.codegen.contracts import ContractsMixin
+
+    def _boom(self, *args, **kwargs):
+        raise CodegenInvariantError("forced precondition invariant (#939 test)", None)
+
+    monkeypatch.setattr(ContractsMixin, "_compile_preconditions", _boom)
+    result = _compile_source(_PROG)
+
+    e699 = [d for d in result.diagnostics if d.error_code == "E699"]
+    assert e699, (
+        "expected an [E699] from a precondition-compile invariant; got "
+        f"{[(d.error_code, d.severity) for d in result.diagnostics]}"
+    )
+    assert e699[0].severity == "error"
+    assert "Internal compiler error" in e699[0].description
