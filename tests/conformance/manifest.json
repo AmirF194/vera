@@ -1877,6 +1877,23 @@
     ]
   },
   {
+    "id": "ch09_nested_generic_call_eq",
+    "file": "ch09_nested_generic_call_eq.vera",
+    "chapter": 9,
+    "title": "Eq auto-derivation over a nested-generic recursive ADT through a constrained generic call (#932)",
+    "level": "run",
+    "spec_ref": "Section 9.8",
+    "features": [
+      "eq_operation",
+      "adt_auto_derivation",
+      "structural_eq",
+      "constructor_inferred_type_args",
+      "nested_adt_eq",
+      "recursive_adt",
+      "ability_constraint"
+    ]
+  },
+  {
     "id": "ch09_decimal_generics",
     "file": "ch09_decimal_generics.vera",
     "chapter": 9,

@@ -1054,6 +1054,54 @@ class Monomorphizer:
                 return (ret_te.name, tuple(ta_names))
         return None
 
+    def full_arg_type_name(
+        self, expr: ast.Expr, ctor_to_adt: dict[str, str],
+    ) -> str | None:
+        """Fully-qualified Vera type name of an argument expression (#932).
+
+        The DERIVABILITY-decision counterpart of the one-level names
+        :meth:`_get_arg_type_info` / :meth:`_infer_vera_type_name` recover.
+        Recurses through nested ``ConstructorCall`` fields so every level's type
+        argument is reconstructed: a `Cons(Cons(1, Nil), Nil)` operand yields the
+        FULLY-qualified ``List<List<Int>>`` rather than the one-level
+        ``List<List>`` the flat recovery produces (the residue that the
+        codegen-side Eq-derivability gate then treats as a lost-type-arg clone
+        and spuriously E613s).
+
+        This is the mono-side mirror of ``OperatorsMixin._full_ctor_type_name``
+        (vera/wasm/operators.py, #923's DIRECT-``==`` recovery).  It is consumed
+        ONLY for the Eq-derivability decision (`_check_constraints`) — the
+        mangled CLONE NAME codegen emits and looks up stays the truncated
+        one-level name (`eq2$List<List>`) that `_get_arg_type_info` produces, so
+        the clone-mangling contract `_unify_param_arg` relies on is unchanged
+        (the #772 hard constraint).
+
+        Falls back to the bare :meth:`_infer_vera_type_name` for a
+        non-``ConstructorCall`` operand (a nested `[1]` bottoms out at the bare
+        `Array`, a nullary `Nil` at the bare `List`).  Returns ``None`` only when
+        the base ADT name itself cannot be resolved; a field whose type argument
+        cannot be inferred leaves that position bare, matching the lost-type-arg
+        shape the derivability gate already handles.
+        """
+        if not isinstance(expr, ast.ConstructorCall):
+            return self._infer_vera_type_name(expr, ctor_to_adt)
+        base = ctor_to_adt.get(expr.name)
+        if base is None:
+            return None
+        tp_indices = self.ctx.ctor_tp_indices.get(expr.name)
+        tp_count = self.ctx.adt_tp_counts.get(base, 0)
+        if not tp_indices or tp_count == 0:
+            return base
+        slots: list[str | None] = [None] * tp_count
+        for field_i, tp_idx in enumerate(tp_indices):
+            if tp_idx is not None and field_i < len(expr.args):
+                slots[tp_idx] = self.full_arg_type_name(
+                    expr.args[field_i], ctor_to_adt,
+                )
+        if all(s is not None for s in slots):
+            return f"{base}<{', '.join(s for s in slots if s is not None)}>"
+        return base
+
     def _resolve_arg_fn_shape(
         self,
         arg: ast.Expr,

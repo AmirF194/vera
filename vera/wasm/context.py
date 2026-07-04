@@ -219,6 +219,16 @@ class WasmContext(
         # WasmContext in unit tests), the gate is skipped and generation
         # proceeds as before.
         self._adt_eq_derivable: Callable[[str], bool] | None = None
+        # #932: TRUNCATED one-level constrained-var name → FULLY-recovered nested
+        # name (`List<List>` → `List<List<Int>>`).  Populated by Pass 1.5
+        # monomorphization (`_collect_eq_full_type_names`) and consulted for the
+        # Eq-derivability DECISION only — by the constraint gate
+        # (`_check_constraints`) and by the direct-`==` path inside a clone body
+        # (`_translate_binary`).  Never keys a clone symbol, so the clone-mangling
+        # contract stays the truncated one-level name (the #772 hard constraint).
+        # Empty for a bare WasmContext (no mono pass) — a plain dict lookup then
+        # leaves every name unchanged.
+        self._eq_full_type_names: dict[str, str] = {}
         # Function return WASM types for type inference:
         # fn_name → return_wasm_type (str | None)
         self._fn_ret_types: dict[str, str | None] = {}
@@ -357,6 +367,19 @@ class WasmContext(
         comparison path rejects exactly the set the E613 gate rejects.
         """
         self._adt_eq_derivable = oracle
+
+    def set_eq_full_type_names(self, full_names: dict[str, str]) -> None:
+        """Share the truncated→full constrained-var name map (#932).
+
+        ``full_names`` is the CodeGenerator's ``_eq_full_type_names``, populated
+        by Pass 1.5 monomorphization BEFORE any body is translated.  The direct
+        ``==`` path inside a generic clone body (`_translate_binary`) consults it
+        so a `@T` slot whose substituted type is the TRUNCATED one-level clone
+        name (`List<List>`) resolves its Eq derivability and its `$eq_<type>`
+        helper on the FULLY-nested name (`List<List<Int>>`) — matching the
+        constraint gate.  The clone SYMBOL stays the truncated name (#772).
+        """
+        self._eq_full_type_names = full_names
 
     def set_future_ret_fns(
         self,

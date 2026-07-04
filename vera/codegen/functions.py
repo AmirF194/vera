@@ -193,6 +193,10 @@ class FunctionCompilationMixin:
         # #773 / PR #870 review: the direct `==` path checks structural-Eq
         # derivability through the SAME gate the generic constraint path uses.
         ctx.set_adt_eq_derivable(self._adt_satisfies_eq)
+        # #932: share the truncated→full constrained-var name map so the direct
+        # `==` path inside a generic clone body resolves a truncated slot type
+        # (`List<List>`) on its fully-nested name for the derivability decision.
+        ctx.set_eq_full_type_names(getattr(self, "_eq_full_type_names", {}))
         # Build function return type map for FnCall type inference.
         # Include Unit-returning fns explicitly with None so `_is_void_expr`
         # in vera/wasm/context.py can distinguish "Unit return" (key present,
