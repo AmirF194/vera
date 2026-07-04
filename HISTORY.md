@@ -435,11 +435,11 @@ Demo-first: each stage ships a working capability, cut as its own release, on th
 
 *Zero known bugs, then the first minor release.*
 
-A single `release/v0.1.0` integration branch absorbed a fix for every open `bug`-labelled issue — 35 in all, surfaced by systematic hunts for check-green programs that fail at codegen or verify — each on its own adversarially-reviewed PR.  The severe cases were silent wrong results: `compare` / ordering on a user ADT compiled to a heap-pointer comparison, and `==` on a non-`Eq` type pointer-compared instead of erroring — both now rejected at check (`E242` / `E243`).  Structural `show` / `hash` / `eq` gained composite, recursive, nested-generic, and generic-mutually-recursive support; effect handlers work over composite type arguments; transitive and alias module imports resolve; the verifier no longer crashes on nested same-ADT constructors.  With the tracker's `bug` label empty, the project cut **v0.1.0** — its first minor release — with a full documentation sweep and the literal "No known bugs."
+A single `release/v0.1.0` integration branch absorbed a fix for every open `bug`-labelled issue — 37 in all, surfaced by systematic hunts for check-green programs that fail at codegen or verify — each on its own adversarially-reviewed PR.  The severe cases were silent wrong results: `compare` / ordering on a user ADT compiled to a heap-pointer comparison, and `==` on a non-`Eq` type pointer-compared instead of erroring — both now rejected at check (`E242` / `E243`).  Structural `show` / `hash` / `eq` gained composite, recursive, nested-generic, and generic-mutually-recursive support; effect handlers work over composite type arguments; transitive and alias module imports resolve; the verifier no longer crashes on nested same-ADT constructors.  With the tracker's `bug` label empty, the project cut **v0.1.0** — its first minor release — with a full documentation sweep and the literal "No known bugs."
 
 | Version | Date | What shipped |
 |---------|------|-------------|
-| v0.1.0 | 4 Jul | **Zero known bugs.** 31 `bug`-labelled issues fixed on one integration branch: silent-miscompile gates for ordering (`E242`) and equality (`E243`), structural `show`/`hash`/`eq` over composite + recursive + nested-generic + mutually-recursive ADTs, effect handlers over composites, transitive/alias module imports, and the verifier nested-ctor-sort crash — the first minor release. |
+| v0.1.0 | 4 Jul | **Zero known bugs** — the first minor release: 37 `bug`-labelled issues fixed on one integration branch. |
 
 ---
 
