@@ -1744,11 +1744,12 @@ public fn keep(@Unit -> @Unit)
 """
         p = Path(tmp_path) / "old_state.vera"  # type: ignore[arg-type]
         p.write_text(src, encoding="utf-8")
-        venv_bin = Path(sys.executable).parent
-        vera = venv_bin / "vera"
+        # Invoke the CLI as a module (`python -m vera.cli`) rather than the
+        # `vera` console-script path — the latter is `vera.exe` on Windows, so
+        # `Path(sys.executable).parent / "vera"` does not exist there ([WinError 2]).
         for cmd in (["run", "--fn", "keep"], ["verify", "--quiet"]):
             proc = subprocess.run(
-                [str(vera), *cmd, str(p)],
+                [sys.executable, "-m", "vera.cli", *cmd, str(p)],
                 capture_output=True, text=True, encoding="utf-8", timeout=120,
             )
             assert proc.returncode == 0, (
