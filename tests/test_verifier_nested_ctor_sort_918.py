@@ -436,5 +436,6 @@ def test_nat_false_postcondition_traps_at_runtime() -> None:
     result = _compile(_NAT_SINGLE_FALSE)
     errors = [d for d in result.diagnostics if d.severity == "error"]
     assert not errors, f"Unexpected compile errors: {errors}"
-    with pytest.raises(WasmTrapError, match="Postcondition violation"):
+    with pytest.raises(WasmTrapError, match="Postcondition violation") as excinfo:
         execute(result, fn_name="main")
+    assert excinfo.value.kind == "contract_violation"

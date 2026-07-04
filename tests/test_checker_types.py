@@ -1761,6 +1761,24 @@ class TestGenericOverUnitRejected900:
         assert "E206" not in codes, \
             f"built-in async over Unit must not be E206, got {codes}"
 
+    def test_user_override_of_prelude_name_over_unit_rejected(self) -> None:
+        # Release review (CodeRabbit): a USER `forall<T>` override of a
+        # prelude name (`option_map`) that READS `@T` is a genuine cloned
+        # `@T`-slot body, so instantiating it at bare Unit must trip E206.
+        # The pre-fix name-based built-in exclusion skipped any name in the
+        # registry, letting this check-green program crash codegen with a
+        # dangling-slot E699.  The discriminator is `forall_vars_read`
+        # (empty for the hand-written built-in, populated for the override).
+        errs = _errors(
+            "private forall<T> fn option_map(@T -> @T)\n"
+            "  requires(true) ensures(true) effects(pure) { @T.0 }\n"
+            "public fn main(@Unit -> @Unit)\n"
+            "  requires(true) ensures(true) effects(pure) { option_map(()) }\n"
+        )
+        codes = {e.error_code for e in errs}
+        assert "E206" in codes, \
+            f"user override of a prelude name over Unit must be E206, got {codes}"
+
     # ---- The @T-not-read cases: VALID at T=Unit, must be ACCEPTED ----
     # A `@T` parameter that the body never reads erases cleanly from the WASM
     # ABI, so these run on base and E206 must not fire (the round-2 fix).

@@ -40,6 +40,7 @@ must make true composite postconditions pass, never false ones.
 
 from __future__ import annotations
 
+import re
 import tempfile
 
 import pytest
@@ -353,10 +354,13 @@ def _mono_clone_postcond_wat(source: str, clone: str) -> str:
     result = _compile(source)
     errors = [d for d in result.diagnostics if d.severity == "error"]
     assert not errors, f"Unexpected compile errors: {errors}"
-    marker = f"(func ${clone}"
-    start = result.wat.find(marker)
-    assert start != -1, f"clone {clone!r} not found in WAT:\n{result.wat}"
-    end = result.wat.find("(func ", start + len(marker))
+    # Boundary-safe: the clone name is followed by whitespace or `(` in the
+    # WAT header, so anchor on that to avoid matching a longer symbol sharing
+    # the prefix (`$rebox$Int` must not match `$rebox$IntArray`).
+    m = re.search(r"\(func \$" + re.escape(clone) + r"[\s(]", result.wat)
+    assert m is not None, f"clone {clone!r} not found in WAT:\n{result.wat}"
+    start = m.start()
+    end = result.wat.find("(func ", m.end())
     return result.wat[start:end if end != -1 else len(result.wat)]
 
 

@@ -7,8 +7,6 @@ orchestration.
 
 from __future__ import annotations
 
-import functools
-
 from vera import ast
 from vera.environment import (
     ConstructorInfo,
@@ -33,27 +31,6 @@ from vera.types import (
     pretty_type,
     substitute,
 )
-
-
-@functools.lru_cache(maxsize=1)
-def _builtin_fn_names() -> frozenset[str]:
-    """Every registered built-in function name (the #900 E206 exclusion set).
-
-    The E206 generic-over-``Unit`` rejection targets the user ``forall<T>``
-    functions the monomorphizer clones body-and-all, whose ``@T`` parameter
-    slots break at the zero-size ``Unit`` type.  Built-in generics
-    (``async`` / ``await`` / the collection + prelude combinators) have
-    hand-written codegen rather than a cloned ``@T``-slot body, so they are
-    out of scope — even the prelude-overridable ones (``option_map`` and
-    friends), which stay in ``TypeEnv().functions``.  Cached: the built-in
-    registry is static.
-    """
-    from vera.environment import TypeEnv
-
-    # apply_fn is a checker special form, not a registry row (#854); it is
-    # variadic/effect-polymorphic and never inferred through this path, but
-    # include it for completeness alongside the registry names.
-    return frozenset(TypeEnv().functions) | {"apply_fn"}
 
 
 class CallsMixin:
@@ -202,11 +179,15 @@ class CallsMixin:
             # is the per-declaration set of body-read forall vars).
             #
             # Keyed to *bare* Unit only: a boxed `Option<Unit>` (tag + pointer)
-            # is a valid, non-zero-size type argument.  Scoped to USER-declared
-            # functions the monomorphizer clones — built-in generics (`async`,
-            # `await`, collection/prelude combinators) have hand-written
-            # codegen, not a `@T`-slot body, so `async(IO.print(...))` (a valid
-            # `Future<Unit>`) is not an over-reject.
+            # is a valid, non-zero-size type argument.  A genuine built-in generic
+            # (`async`, `await`, collection/prelude combinators) has hand-written
+            # codegen and an EMPTY `forall_vars_read`, so it never contributes a
+            # unit var (`async(IO.print(...))`, a valid `Future<Unit>`, is not an
+            # over-reject) — while a USER override of a prelude name that DOES read
+            # `@T` (`forall<T> option_map`) is correctly caught, which the old
+            # name-based exclusion wrongly skipped.  Skipped when a type-argument
+            # conflict already reported E205 (the merged mapping is arbitrary
+            # there — mirrors the E202 per-argument loop skip).
             unit_vars = (
                 sorted(
                     tv for tv in fn_info.forall_vars
@@ -214,7 +195,7 @@ class CallsMixin:
                     and (b := mapping.get(tv)) is not None
                     and base_type(b) == UNIT
                 )
-                if fn_info.name not in _builtin_fn_names()
+                if not type_arg_conflict
                 else []
             )
             if unit_vars:
