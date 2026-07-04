@@ -1966,22 +1966,40 @@ class TestArrayZeroSizeElementRejected945:
 
     def test_array_unit_param_rejected(self) -> None:
         # No literal — the `@Array<Unit>` parameter type alone is rejected at
-        # resolution, so an index read never reaches codegen either.
-        #
-        # NOTE: this currently reports E135 twice at the same location — a
-        # function's signature types are `_resolve_type`'d in both the
-        # registration and the check pass, so ANY resolution diagnostic on a
-        # param/return doubles.  That pre-existing, general
-        # signature-double-resolution is unrelated to the literal-level gate
-        # this class covers and is tracked separately; assert only that the
-        # param IS rejected, not the (duplicated) exact count.
+        # resolution, so an index read never reaches codegen either.  A
+        # function's signature types are `_resolve_type`'d in BOTH the
+        # registration and the check pass, so this once double-reported E135
+        # at one location; the `_error` exact-duplicate dedup (PR #938)
+        # collapses it to exactly one.
         errs = _errors(
             "public fn f(@Array<Unit> -> @Int)\n"
             "  requires(true) ensures(true) effects(pure)\n"
             "{ nat_to_int(array_length(@Array<Unit>.0)) }\n"
         )
-        codes = {e.error_code for e in errs}
-        assert "E135" in codes, f"Array<Unit> param must be E135, got {codes}"
+        e135 = [e for e in errs if e.error_code == "E135"]
+        assert len(e135) == 1, (
+            "Array<Unit> param must emit E135 exactly once (signature "
+            f"double-resolution deduped), got {[e.error_code for e in errs]}"
+        )
+
+    def test_signature_diagnostics_deduplicated_per_location(self) -> None:
+        # The exact-duplicate `_error` dedup (PR #938) is general, not
+        # E135-specific: a signature with a zero-size `Array` in BOTH the
+        # param and the return position emits exactly one E135 per DISTINCT
+        # location — TWO total, not four (the registration- and check-pass
+        # resolutions of each type collapse) and not one (the two positions
+        # stay distinct, so the dedup keys on location, not just the code).
+        errs = _errors(
+            "public fn f(@Array<Unit> -> @Array<Unit>)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ @Array<Unit>.0 }\n"
+        )
+        e135 = [e for e in errs if e.error_code == "E135"]
+        assert len(e135) == 2, (
+            "param + return zero-size Array must emit E135 exactly twice "
+            f"(once per location, not 4 un-deduped nor 1 over-collapsed), "
+            f"got {[e.error_code for e in errs]}"
+        )
 
     def test_bare_array_literal_of_unit_rejected(self) -> None:
         # A bare `[()]` with NO `@Array<Unit>` annotation never flows through
