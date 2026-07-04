@@ -723,10 +723,15 @@ class CallsMixin:
                 arg_base = base_type(arg_ty)
                 # A bare type variable is deferred: inside a
                 # `forall<T where Ord<T>>` body the `Ord<T>` constraint
-                # promises orderability, and the monomorphizer re-checks each
-                # concrete instantiation of the clone (whose slots are the
-                # concrete type) — an ADT instantiation trips E242 there, and a
-                # non-Ord instantiation trips the constraint gate (E613).
+                # promises orderability, and the monomorphizer's E613 constraint
+                # gate re-checks each concrete instantiation against the
+                # orderable set (`_ORD_TYPES` in codegen/monomorphize.py).  Any
+                # non-Ord instantiation — a user ADT OR `Bool` (§4.5 orders
+                # neither) — trips E613 there, so deferring here can never
+                # silently miscompile.  (PR #929 review closed a hole: `Bool`
+                # was wrongly IN `_ORD_TYPES`, so `Ord<Bool>` satisfied the gate
+                # and the clone lowered `compare` on two Bool i32s to a signed
+                # `i32.lt_s` — a silent order.  Bool is now out of that set.)
                 # Rejecting the TypeVar here would break the legitimate
                 # constrained-generic form (ch09_abilities `cmp_sign`).
                 if isinstance(arg_base, TypeVar):

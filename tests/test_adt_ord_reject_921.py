@@ -425,6 +425,123 @@ public fn cmp_self_bad(@Int -> @Ordering)
 
 
 # =====================================================================
+# 5b. Bool reached through a constrained generic — the ONE non-orderable
+#     operand that slipped past both the E242 check gate and the E613
+#     constraint gate (PR #929 adversarial-review finding).
+# =====================================================================
+
+class TestBoolThroughGenericRejected921:
+    """`forall<T where Ord<T>>` instantiated at `Bool` was a silent
+    wrong runtime result AND a verifier `TypeError` crash.
+
+    The checker's E242 gate deliberately DEFERS a bare-``TypeVar`` operand to
+    monomorphization, trusting the E613 ``Ord``-constraint gate to reject a bad
+    instantiation.  For an ADT instantiation E613 fires (the ctor type is not in
+    codegen's ``_ORD_TYPES``).  For **Bool** it did NOT, because ``_ORD_TYPES``
+    still contained ``"Bool"`` — so ``Ord<Bool>`` wrongly satisfied the
+    constraint and the monomorphized clone lowered ``compare`` / ``<`` on the two
+    Bool ``i32`` values to a signed ``i32.lt_s``: a silent order for a type Vera
+    says has no order (§4.5 never orders Bool).  The verifier had the parallel
+    hole — it monomorphizes minus the constraint filter, and the smt guard only
+    degraded ``DatatypeSortRef`` (not ``BoolSortRef``), so a Bool-through-generic
+    ``compare`` in a contract predicate crashed ``verify()`` with
+    ``TypeError: '<' not supported between instances of 'BoolRef' and 'BoolRef'``.
+
+    Each RED assertion below FAILS on the pre-fix compiler:
+    ``run`` returns ``1`` / ``-1`` instead of raising E613; ``verify()`` raises.
+    """
+
+    _CMP2 = """
+private forall<T where Ord<T>> fn cmp2(@T, @T -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ match compare(@T.0, @T.1) { Less -> 0 - 1, Equal -> 0, Greater -> 1 } }
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ cmp2(false, true) }
+"""
+
+    def test_bool_through_generic_check_passes(self) -> None:
+        # The deferral is intentional: a bare `T` under `Ord<T>` is NOT rejected
+        # at check time — the constraint gate is trusted to catch a bad concrete
+        # instantiation.  So `vera check` must still pass (exit 0 / no errors).
+        assert _errors(self._CMP2) == []
+
+    def test_bool_through_generic_compile_rejects_e613(self) -> None:
+        # RED on base: compiled clean and `execute` returned a silent `1`
+        # (`i32.lt_s` decided `false < true`).  With `"Bool"` gone from
+        # `_ORD_TYPES`, the `Ord<Bool>` instantiation now trips the constraint
+        # gate → a clean E613, NO binary, NO silent numeric result.
+        result = _compile(self._CMP2)
+        codes = [d.error_code for d in result.diagnostics
+                 if d.severity == "error"]
+        assert "E613" in codes, f"Expected E613, got: {codes}"
+
+    def test_bool_through_generic_reversed_also_rejected(self) -> None:
+        # The mirror instantiation `cmp2(true, false)` returned a silent `-1` on
+        # the pre-fix compiler; it must reject on the same E613, not run.
+        src = self._CMP2.replace("cmp2(false, true)", "cmp2(true, false)")
+        result = _compile(src)
+        codes = [d.error_code for d in result.diagnostics
+                 if d.severity == "error"]
+        assert "E613" in codes, f"Expected E613, got: {codes}"
+
+    def test_bool_through_generic_verify_no_traceback(self) -> None:
+        # RED on base: `verify()` raised `TypeError: '<' not supported between
+        # instances of 'BoolRef' and 'BoolRef'` — an uncaught traceback out of
+        # the verifier (it monomorphizes minus the constraint filter, so E613
+        # never runs there; the smt guard only degraded DatatypeSortRef).  The
+        # widened guard now degrades a Bool-sorted ordering to Tier 3, so the
+        # direct verify() API returns a clean VerifyResult instead of crashing.
+        src = """
+private forall<T where Ord<T>> fn cmp2(@T, @T -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ match compare(@T.0, @T.1) { Less -> true, Equal -> true, Greater -> false } }
+
+public fn main(@Unit -> @Bool)
+  requires(true)
+  ensures(cmp2(false, false) == true)
+  effects(pure)
+{ cmp2(false, false) }
+"""
+        # Must not raise a Python traceback; a clean VerifyResult is enough.
+        result = _verify(src)
+        assert result is not None
+
+    def test_int_through_generic_positive_control(self) -> None:
+        # POSITIVE CONTROL: the SAME generic instantiated at `Int` — a genuinely
+        # orderable primitive — must still compile AND run.  The body compares
+        # `@T.0` (De Bruijn most-recent = 2nd arg = 5) to `@T.1` (1st arg = 2),
+        # i.e. `compare(5, 2)` → Greater → 1.  This proves the fix removes ONLY
+        # Bool, not the legitimate Ord primitives.
+        src = self._CMP2.replace("cmp2(false, true)", "cmp2(2, 5)")
+        assert _errors(src) == []
+        assert _run(src, fn="main") == 1
+
+    def test_int_through_generic_less_control(self) -> None:
+        # And the Less arm: `cmp2(5, 2)` → `compare(2, 5)` → Less → -1.  Two
+        # distinct non-fallback values (1 above, -1 here) pin real ordering, so
+        # a scalar mis-lowering could not coincide with both.
+        src = self._CMP2.replace("cmp2(false, true)", "cmp2(5, 2)")
+        assert _errors(src) == []
+        assert _run(src, fn="main") == -1
+
+    def test_string_through_generic_positive_control(self) -> None:
+        # POSITIVE CONTROL: String IS orderable (§4.5), so the same generic at
+        # String must compile AND run.  `cmp2("apple", "banana")` compares
+        # `@T.0` ("banana") to `@T.1` ("apple") → Greater → 1.
+        src = self._CMP2.replace('cmp2(false, true)', 'cmp2("apple", "banana")')
+        assert _errors(src) == []
+        assert _run(src, fn="main") == 1
+
+
+# =====================================================================
 # 6. #927 — String ordering is IMPLEMENTED (lexicographic), not rejected
 # =====================================================================
 
