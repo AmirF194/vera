@@ -3049,7 +3049,7 @@ The reference compiler is under active development. The current release includes
 
 - A seven-stage pipeline: parse, transform, resolve, typecheck, verify, compile, execute
 - A 14-chapter formal specification
-- 6,774 tests, including a 143-program conformance suite
+- 6,778 tests, including a 143-program conformance suite
 - 37 working example programs
 - 164 built-in functions covering strings, arrays, math, parsing, and data types
 - Four built-in abilities (Eq, Ord, Hash, Show) with constrained generics and ADT auto-derivation
@@ -3135,6 +3135,7 @@ Every diagnostic has a stable error code. Codes are grouped by compiler phase:
 - **E132**: Cyclic type alias
 - **E133**: Type alias arity mismatch
 - **E134**: Type does not take type arguments
+- **E135**: Array of a zero-size element type
 - **E140**: Arithmetic requires numeric operands
 - **E141**: Arithmetic requires matching numeric types
 - **E142**: Cannot compare incompatible types
