@@ -366,6 +366,29 @@ class CallsHandlersMixin:
         return None
 
     @staticmethod
+    def _ptype_nesting_depth(ptype: str) -> int:
+        """Max angle-bracket nesting depth of a parameterized type name (#933).
+
+        ``Int`` → 0, ``List<Int>`` → 1, ``List<List<Int>>`` → 2.  This is the
+        structural measure the derived-helper generators bound on: a UNIFORMLY-
+        recursive ADT recurs at CONSTANT nesting depth (the `List<T>` tail is
+        again `List<T>`, depth 1), whereas a POLYMORPHICALLY-recursive one
+        (`Box<T>` field `Box<Box<T>>`) climbs one level per descent without
+        limit.  Capping this depth (``DERIVED_HELPER_DEPTH_CAP``) turns that
+        runaway into a clean skip while leaving every hand-writable finite
+        nesting far below the bound.
+        """
+        depth = 0
+        max_depth = 0
+        for c in ptype:
+            if c == "<":
+                depth += 1
+                max_depth = max(max_depth, depth)
+            elif c == ">":
+                depth -= 1
+        return max_depth
+
+    @staticmethod
     def _split_param_type(ptype: str) -> tuple[str, list[str]]:
         """Split ``"Option<Int>"`` → ``("Option", ["Int"])`` (top level only).
 
@@ -531,7 +554,28 @@ class CallsHandlersMixin:
         The emitters allocate into the swapped-in scope, set ``needs_alloc``
         when they build strings, and their shadow-stack rooting is wrapped by a
         GC prologue/epilogue that saves and restores ``$gc_sp`` around the frame.
+
+        Bounded against POLYMORPHIC recursion (#933): a non-uniform ADT
+        (`Box<T>` with a `Box<Box<T>>` field) mints a strictly deeper type at
+        each descent, so the `_seen` guard never routes back to a self-call and
+        this generation recurs unboundedly.  The shared
+        ``_derived_helper_depth`` cap catches that runaway and returns None → the
+        caller falls back to the clean E602 skip (unchanged from the pre-#924
+        behaviour for such types).  Uniform shapes recur on the SAME ptype and
+        never reach the cap (measured generation depth 1).
         """
+        if self._derived_helper_depth >= self._derived_helper_depth_cap:
+            return None
+        self._derived_helper_depth += 1
+        try:
+            return self._generate_show_hash_helper_body(kind, fn_name, ptype, node)
+        finally:
+            self._derived_helper_depth -= 1
+
+    def _generate_show_hash_helper_body(
+        self, kind: str, fn_name: str, ptype: str, node: ast.Expr,
+    ) -> str | None:
+        """Body of :meth:`_generate_show_hash_helper` (depth-bound wrapper above)."""
         base, _ = self._split_param_type(ptype)
 
         # Swap in a fresh local-allocation scope so the inline emitters'
@@ -690,6 +734,18 @@ class CallsHandlersMixin:
             if fn_name is None:
                 return None
             return value_instrs + [f"call {fn_name}"]
+        # #933: bound POLYMORPHIC recursion.  A non-uniform ADT (`Box<T>` field
+        # `Box<Box<T>>`) never repeats a `ptype`, so the same-type guard above
+        # never routes to a self-call: each descent renders INLINE on a
+        # strictly-deeper, DISTINCT type whose generic NESTING climbs one level
+        # per step without limit, until the walk (and `_parse_type_name` on the
+        # ever-deeper type name) blows the Python stack on a check-green program.
+        # Past the cap, return None → the enclosing `show` falls back to the
+        # clean E602 skip (the same degradation an unrenderable field already
+        # gets).  Uniform shapes recur at CONSTANT nesting depth and never
+        # approach the cap.
+        if self._ptype_nesting_depth(ptype) >= self._derived_helper_depth_cap:
+            return None
         seen = seen | {ptype}
 
         plans = self._composite_ctor_plans(ptype)
@@ -1035,6 +1091,14 @@ class CallsHandlersMixin:
             if fn_name is None:
                 return None
             return value_instrs + [f"call {fn_name}"]
+        # #933: bound POLYMORPHIC recursion (see `_show_adt`).  A non-uniform
+        # ADT grows a strictly-deeper, DISTINCT `ptype` (one more nesting level)
+        # at each inline descent, so the same-type guard above never fires and
+        # the fold recurs unboundedly.  Past the cap, return None → the
+        # enclosing `hash` falls back to the clean E602 skip.  Uniform shapes
+        # recur at constant nesting depth and never approach the cap.
+        if self._ptype_nesting_depth(ptype) >= self._derived_helper_depth_cap:
+            return None
         seen = seen | {ptype}
 
         plans = self._composite_ctor_plans(ptype)

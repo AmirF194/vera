@@ -556,7 +556,28 @@ class OperatorsMixin:
         pointers are structurally equal, else 0.  Field dispatch is by Vera
         type (see the section comment above).  Nested-ADT fields recurse by
         requesting (and thereby generating) that ADT's own helper first.
+
+        Bounded against POLYMORPHIC recursion (#933): a non-uniform ADT
+        (`Box<T>` field `Box<Box<T>>`) mints a strictly deeper type at each
+        nested-helper request, so the `_adt_eq_pending` guard never routes back
+        to a self-call and this generation recurs unboundedly.  The
+        derivability gate (`_adt_satisfies_eq`) normally rejects such a type as
+        a clean E613 *before* generation begins; this cap is the belt-and-
+        suspenders backstop on the SAME shared depth so a program that reaches
+        the generator still degrades to a skip rather than a traceback.
         """
+        if self._derived_helper_depth >= self._derived_helper_depth_cap:
+            return None
+        self._derived_helper_depth += 1
+        try:
+            return self._generate_adt_eq_fn_body(fn_name, base, parsed)
+        finally:
+            self._derived_helper_depth -= 1
+
+    def _generate_adt_eq_fn_body(
+        self, fn_name: str, base: str, parsed: ast.NamedType,
+    ) -> str | None:
+        """Body of :meth:`_generate_adt_eq_fn` (depth-bound wrapper above)."""
         from vera.monomorphize import Monomorphizer
 
         # Concrete type args for this instantiation, mapped onto the ADT's

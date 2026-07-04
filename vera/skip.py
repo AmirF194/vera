@@ -94,6 +94,34 @@ if TYPE_CHECKING:
     from vera import ast
 
 
+# #933: nesting-depth cap for the structural derived-helper machinery — the
+# Eq-derivability gate (`_adt_satisfies_eq`), the `$eq_<type>` generator, and
+# the `$show_<type>` / `$hash_<type>` generators.  A UNIFORMLY-recursive ADT
+# (`List<T>` whose tail is again `List<T>`) recurs on the SAME parameterized
+# type and is cut off by each site's own same-type `_seen` guard at depth ~1.
+# A POLYMORPHICALLY-recursive (non-uniform) ADT (`Box<T>` with a `Box<Box<T>>`
+# field) mints a strictly deeper, DISTINCT type at every descent
+# (`Box<Box<Int>>`, `Box<Box<Box<Int>>>`, …), so those same-type guards never
+# fire and the walk recurs unboundedly into a raw Python ``RecursionError`` on
+# a check-green program.  Bounding the distinct-type descent by this cap turns
+# that runaway into the clean skip such types already take when a field is
+# structurally unsupported: E613 (eq — the derivability gate reports the type
+# not derivable) or E602 (show/hash — the generator returns None).  Set far
+# above every legitimate uniform shape (measured descent depth ~1) yet far
+# below the interpreter's recursion limit, so the bound degrades
+# DETERMINISTICALLY regardless of that limit.
+#
+# The cap is set from the nesting depth a hand-written type could plausibly
+# reach (a few levels — `List<List<List<Int>>>` is depth 3), not from Python's
+# frame budget: it fires on TYPE COMPLEXITY, independent of the interpreter
+# recursion limit.  A generous 32 sits ~10x above any realistic user type yet
+# trips long before the deepest generator (`$show_<type>`, whose per-level
+# helper-restart costs ~15 Python frames) approaches the 1000-frame default.
+# A ``RecursionError`` catch at the codegen compile boundary backstops the cap
+# for any future generator with a larger per-level frame cost.
+DERIVED_HELPER_DEPTH_CAP = 32
+
+
 class CodegenSkip(Exception):
     """Raised by a translator when an AST node shape isn't supported.
 

@@ -492,6 +492,25 @@ class ClosureLiftingMixin:
                 error_code="E602",
             )
             return None
+        except RecursionError:
+            # #933 belt-and-suspenders (see the parallel catch in
+            # functions.py::_compile_fn): a derived-helper generator whose
+            # per-level frame cost outruns `DERIVED_HELPER_DEPTH_CAP` must not
+            # surface a raw traceback from a check-green program.  Degrade to
+            # the clean [E602] skip the closure-skip path already emits, which
+            # drops the enclosing function too.
+            self._harvest_interp_inference_failures(ctx)
+            self._warning(
+                anon_fn,
+                "Closure body exceeded the codegen recursion bound (a deeply "
+                "/ non-uniformly recursive type) — closure skipped.",
+                rationale="Rendering / comparing a polymorphically-recursive "
+                "type would expand without bound at compile time. The "
+                "enclosing function will also be dropped to avoid a missing "
+                "function-table entry.",
+                error_code="E602",
+            )
+            return None
         # #657: a CodegenInvariantError from the closure body is NOT caught
         # here — it propagates to `_compile_fn`'s handler around
         # `_lift_pending_closures`, which surfaces a single [E699] for the whole

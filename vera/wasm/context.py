@@ -22,7 +22,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Callable
 
 from vera import ast
-from vera.skip import CodegenSkip
+from vera.skip import DERIVED_HELPER_DEPTH_CAP, CodegenSkip
 
 if TYPE_CHECKING:
     from vera.codegen import ConstructorLayout
@@ -229,6 +229,29 @@ class WasmContext(
         # assembly, and guarded against re-entry via `_show_hash_pending`.
         self._show_hash_helpers: dict[str, str] = {}
         self._show_hash_pending: set[str] = set()
+        # #933: nesting-depth bound for the derived-helper generators
+        # (`$show_<type>` / `$hash_<type>` / `$eq_<type>`).  A UNIFORMLY-
+        # recursive ADT (`List<T>` whose tail is again `List<T>`) recurs on the
+        # SAME parameterized type and is caught by the per-generator `_seen` /
+        # `_..._pending` guards at generation depth 1 — one helper per type.  A
+        # POLYMORPHICALLY-recursive (non-uniform) ADT
+        # (`Box<T>` with a `Box<Box<T>>` field) mints a DISTINCT, strictly
+        # deeper type at every descent (`Box<Box<Int>>`, `Box<Box<Box<Int>>>`,
+        # …), so those guards never fire and generation recurs unboundedly into
+        # a raw Python ``RecursionError`` on a check-green program — the exact
+        # traceback-on-valid-input DESIGN.md principle 1 forbids.  These fields
+        # cap the distinct-ptype expansion: on exceeding the cap the generator
+        # returns the same "unsupported" signal an unrenderable field produces,
+        # so the enclosing helper falls back to the clean E602 (show/hash) /
+        # E613 (eq) skip that non-recursive-unsupported types already take.  The
+        # cap sits far above every legitimate uniform shape (measured max
+        # generation depth 1) yet far below Python's recursion limit, so the
+        # bound degrades DETERMINISTICALLY regardless of that limit.  The cap
+        # itself is shared with the Eq-derivability gate (see
+        # ``vera.skip.DERIVED_HELPER_DEPTH_CAP``) so all three derived-helper
+        # walks bound at the same depth.
+        self._derived_helper_depth: int = 0
+        self._derived_helper_depth_cap: int = DERIVED_HELPER_DEPTH_CAP
         # Function return WASM types for type inference:
         # fn_name → return_wasm_type (str | None)
         self._fn_ret_types: dict[str, str | None] = {}

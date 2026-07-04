@@ -1243,6 +1243,126 @@ public fn main(-> @Bool)
 """
         assert _run(source, fn="main") == 1
 
+    # ---- non-uniform (polymorphic) recursion degrades cleanly (#933) ----
+    #
+    # A UNIFORMLY-recursive ADT (`List<T>` tail again `List<T>`) recurs on the
+    # SAME parameterized type and renders via a single generated helper (the
+    # #924 cases above).  A POLYMORPHICALLY-recursive ADT
+    # (`Box<T>` with a `Box<Box<T>>` field) mints a strictly deeper, DISTINCT
+    # type at every descent, so codegen's derived-helper generators would
+    # expand without bound.  #933 caps that descent so the walk terminates with
+    # the SAME clean skip a structurally-unsupported field takes — E602 for
+    # show/hash (function dropped, loud warning), E613 for eq — rather than a
+    # raw Python `RecursionError` traceback on a check-green program (which
+    # #924's guard keying regressed).  These fixtures FAIL on the pre-#933
+    # branch head with an uncaught `RecursionError`.
+
+    _BOX_DECL = "private data Box<T> { BNil, BCons(T, Box<Box<T>>) }\n"
+
+    def test_show_non_uniform_recursive_skips_cleanly(self) -> None:
+        """`show` on a `Box<Box<T>>` degrades to a clean E602, not a traceback."""
+        source = self._BOX_DECL + """
+public fn main(-> @String)
+  requires(true) ensures(true) effects(pure)
+{ show(BCons(1, BNil)) }
+"""
+        # Pre-#933 this raised an uncaught RecursionError inside codegen.
+        result = _compile(source)
+        # `main` is dropped (unsupported show), not exported — the clean skip.
+        assert "main" not in result.exports
+        e602 = [d for d in result.diagnostics if d.error_code == "E602"]
+        assert e602, "expected a clean [E602] skip, got none"
+        # No error-severity diagnostic — a dropped-fn skip is a warning.
+        assert not [d for d in result.diagnostics if d.severity == "error"]
+
+    def test_hash_non_uniform_recursive_skips_cleanly(self) -> None:
+        """`hash` on a `Box<Box<T>>` degrades to a clean E602, not a traceback."""
+        source = self._BOX_DECL + """
+public fn main(-> @Nat)
+  requires(true) ensures(true) effects(pure)
+{ hash(BCons(1, BNil)) }
+"""
+        result = _compile(source)
+        assert "main" not in result.exports
+        assert [d for d in result.diagnostics if d.error_code == "E602"]
+        assert not [d for d in result.diagnostics if d.severity == "error"]
+
+    def test_eq_non_uniform_recursive_skips_cleanly(self) -> None:
+        """`eq` on a `Box<Box<T>>` degrades to a clean E613, not a traceback.
+
+        The Eq-derivability gate (`_adt_satisfies_eq`) recurs unboundedly on
+        the same non-uniform shape and crashed on the pre-#933 branch head
+        (base crashed here too — this is a strict improvement: a loud E613
+        replaces an uncaught traceback).
+        """
+        source = self._BOX_DECL + """
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(BCons(1, BNil), BCons(2, BNil)) }
+"""
+        result = _compile(source)
+        e613 = [d for d in result.diagnostics if d.error_code == "E613"]
+        assert e613, "expected a clean [E613] not-derivable diagnostic"
+
+    def test_non_uniform_recursion_leaves_uniform_shapes_intact(self) -> None:
+        """The #933 bound must not clip legitimate uniform show/hash/eq.
+
+        Guards the bound's other direction: a uniformly-recursive `List<T>`
+        (and its `List<List<Int>>` nesting) still renders / hashes / compares
+        correctly with EXACTLY one helper per type — the bound fires only on
+        genuinely-unbounded non-uniform expansion.
+        """
+        source = """\
+private data List<T> { Nil, Cons(T, List<T>) }
+
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  eq(show(Cons(Cons(1, Nil), Cons(Cons(2, Nil), Nil))),
+     "Cons(Cons(1, Nil), Cons(Cons(2, Nil), Nil))")
+  && eq(hash(Cons(1, Cons(2, Nil))), hash(Cons(1, Cons(2, Nil))))
+  && eq(Cons(1, Nil), Cons(1, Nil))
+}
+"""
+        # Compiles with `main` exported and every clause true at run time.
+        wat = _compile_ok(source).wat
+        # Exactly one helper per distinct type — no runaway duplication.
+        assert wat.count("(func $show_List_LInt_R ") == 1
+        assert wat.count("(func $show_List_LList_LInt_R_R ") == 1
+        assert _run(source, fn="main") == 1
+
+    def test_recursion_error_backstop_degrades_to_clean_skip(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The `RecursionError` catch converts an overflow into a clean E602.
+
+        Belt-and-suspenders (#933): the nesting-depth cap normally fires first,
+        but a future generator with a larger per-level frame cost could outrun
+        it and blow Python's stack.  Simulated deterministically here — force
+        `_show_adt` to raise `RecursionError` mid-body — the compile driver's
+        `except RecursionError` MUST degrade to the same clean [E602]
+        function-skip, never a raw traceback.
+        """
+        from vera.wasm.calls_handlers import CallsHandlersMixin
+
+        def boom(*_args: object, **_kwargs: object) -> list[str] | None:
+            raise RecursionError("maximum recursion depth exceeded")
+
+        monkeypatch.setattr(CallsHandlersMixin, "_show_adt", boom)
+
+        source = """\
+private data List<T> { Nil, Cons(T, List<T>) }
+
+public fn main(-> @String)
+  requires(true) ensures(true) effects(pure)
+{ show(Cons(1, Cons(2, Nil))) }
+"""
+        result = _compile(source)
+        # Clean skip, not a crash: `main` dropped, a loud [E602], no error.
+        assert "main" not in result.exports
+        assert [d for d in result.diagnostics if d.error_code == "E602"]
+        assert not [d for d in result.diagnostics if d.severity == "error"]
+
 
 class TestSplitParamType:
     """`_split_param_type` top-level type-argument splitting (#911 finding #2)."""
