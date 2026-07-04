@@ -230,3 +230,211 @@ def test_no_sort_mismatch_traceback_in_diagnostics() -> None:
     assert errors == [], (
         f"Expected clean verify, got errors: {[e.description for e in errors]}"
     )
+
+
+# =====================================================================
+# Nat-instantiated parity (regression addendum, same PR as the Int fix).
+#
+# The first cut of the #918 fix recovered a constructor argument's Vera type
+# from its Z3 sort via `_z3_sort_to_vera_type`, which unconditionally mapped
+# Z3's shared `IntSort` back to `Int` — collapsing `Nat`.  Post-#884 the
+# datatype-sort mangling is INJECTIVE: `Option<Nat>` materialises as
+# `Option_LNat_R` and `Option<Int>` as `Option_LInt_R` — DISTINCT Z3 datatype
+# sorts.  So for a `Some(@Nat.0)` in an `Option<Nat>` context the pin computed
+# the `Int`-keyed instantiation, `_find_sort_for_ctor` MATERIALISED a fresh
+# `Option<Int>` sort that never existed in the context, and comparing it
+# against the context's `Option<Nat>` value in `_datatype_value_eq` raised an
+# uncaught `z3.z3types.Z3Exception: sort mismatch` — RE-OPENING the exact #918
+# crash mode for the (extremely common) `Nat` instantiation, on a
+# `vera check`-green program.
+#
+# The single-level `Some(@Nat.0)` case (`_NAT_SINGLE`) is a genuine NEW
+# regression: CLEAN on base (pre-#918), crashes on the first-cut #918 HEAD.
+# The nested `Option<Option<Nat>>` / `Box<Box<Nat>>` cases crashed on base too
+# (the pre-existing #918 gap), so bringing them to Int/Nat parity closes both
+# in one move.
+#
+# CRITICAL: these MUST instantiate over `Nat`, not `Int` — `Int` is the
+# collapse target, so an `Int`-typed program cannot see this bug (the recovered
+# type coincides with the fallback).
+# =====================================================================
+
+import tempfile  # noqa: E402
+
+import pytest  # noqa: E402
+
+from vera.codegen import execute  # noqa: E402
+from vera.codegen import compile as codegen_compile  # noqa: E402
+from vera.codegen.api import WasmTrapError  # noqa: E402
+from vera.parser import parse_file  # noqa: E402
+from vera.transform import transform  # noqa: E402
+
+
+def _compile(source: str):
+    """Compile a source string to a `CompileResult` (mirrors the #912 test)."""
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".vera", delete=False, encoding="utf-8"
+    ) as f:
+        f.write(source)
+        f.flush()
+        path = f.name
+    tree = parse_file(path)
+    ast = transform(tree)
+    return codegen_compile(ast, source=source, file=path)
+
+
+def _run(source: str, fn: str | None = None) -> int:
+    """Compile and execute *source*, returning the integer result."""
+    result = _compile(source)
+    errors = [d for d in result.diagnostics if d.severity == "error"]
+    assert not errors, f"Unexpected compile errors: {errors}"
+    exec_result = execute(result, fn_name=fn)
+    assert exec_result.value is not None, "Expected a return value"
+    return exec_result.value
+
+
+# Single-level `Some(@Nat.0)` returning `Option<Nat>` with a TRUE
+# `ensures(result == Some(@Nat.0))`.  This is the genuine NEW regression:
+# CLEAN on base (4 verified, Tier 1), crashes on the first-cut #918 HEAD with
+# `z3.z3types.Z3Exception: sort mismatch` while comparing the freshly
+# materialised `Option<Int>` sort against the context's `Option<Nat>`.
+_NAT_SINGLE = """
+private fn f(@Nat -> @Option<Nat>)
+  requires(true)
+  ensures(@Option<Nat>.result == Some(@Nat.0))
+  effects(pure)
+{ Some(@Nat.0) }
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ match f(7) { Some(@Nat) -> 1, None -> 0 } }
+"""
+
+
+# Nested `Option<Option<Nat>>` with a TRUE nested postcondition — Int/Nat
+# parity with `_NESTED_TRUE`.
+_NAT_NESTED_TRUE = """
+private fn f(@Nat -> @Option<Option<Nat>>)
+  requires(true)
+  ensures(@Option<Option<Nat>>.result == Some(Some(@Nat.0)))
+  effects(pure)
+{ Some(Some(@Nat.0)) }
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ match f(7) { Some(@Option<Nat>) -> 1, None -> 0 } }
+"""
+
+
+# Nested user ADT `Box<Box<Nat>>` — parity for a user-declared generic.
+_NAT_BOX_NESTED_TRUE = """
+private data Box<T> { MkBox(T) }
+
+private fn f(@Nat -> @Box<Box<Nat>>)
+  requires(true)
+  ensures(@Box<Box<Nat>>.result == MkBox(MkBox(@Nat.0)))
+  effects(pure)
+{ MkBox(MkBox(@Nat.0)) }
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ match f(7) { MkBox(@Box<Nat>) -> 1 } }
+"""
+
+
+# A FALSE single-level `Nat` postcondition: body returns `Some(@Nat.0)` but the
+# ensures claims `Some(@Nat.0 + 1)`.  Genuinely false — the soundness probe for
+# the Nat path (the input coincides with no fallback, unlike an `Int` probe).
+_NAT_SINGLE_FALSE = """
+private fn f(@Nat -> @Option<Nat>)
+  requires(true)
+  ensures(@Option<Nat>.result == Some(@Nat.0 + 1))
+  effects(pure)
+{ Some(@Nat.0) }
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ match f(7) { Some(@Nat) -> 1, None -> 0 } }
+"""
+
+
+def test_nat_single_level_postcondition_no_crash() -> None:
+    """NON-NEGOTIABLE floor: single-level `Some(@Nat.0)` verifies clean — no
+    `z3.z3types.Z3Exception: sort mismatch`.
+
+    RED on the first-cut #918 HEAD: the `Nat`->`Int` collapse in
+    `_z3_sort_to_vera_type` pins `Option<Int>`, `_find_sort_for_ctor`
+    materialises a fresh `Option<Int>` sort, and `_datatype_value_eq` crashes
+    comparing it against the context's `Option<Nat>`.  CLEAN on base (pre-#918).
+    Mutation oracle: reverting the `_find_sort_for_ctor` select-cached change
+    re-crashes this.
+    """
+    _verify_ok(_NAT_SINGLE)
+
+
+def test_nat_nested_option_parity_no_crash() -> None:
+    """Int/Nat parity: `Option<Option<Nat>>` verifies clean like its `Int`
+    sibling (`_NESTED_TRUE`).  Crashed on base too (pre-existing #918 gap)."""
+    _verify_ok(_NAT_NESTED_TRUE)
+
+
+def test_nat_nested_user_adt_parity_no_crash() -> None:
+    """Int/Nat parity: `Box<Box<Nat>>` (user generic) verifies clean.  Crashed
+    on base too (pre-existing #918 gap)."""
+    _verify_ok(_NAT_BOX_NESTED_TRUE)
+
+
+def test_nat_true_postcondition_proved_tier1() -> None:
+    """The TRUE single-level `Nat` postcondition is genuinely PROVED at Tier 1
+    (0 Tier-3 demotions), not merely non-crashing — the recovered `Nat`
+    instantiation feeds real SMT reasoning."""
+    result = _verify(_NAT_SINGLE)
+    errors = [d for d in result.diagnostics if d.severity == "error"]
+    assert errors == [], f"Unexpected verify errors: {errors}"
+    assert result.summary.tier1_verified >= 1
+    assert result.summary.tier3_runtime == 0, (
+        "The Nat postcondition must prove at Tier 1, not demote to Tier 3: "
+        f"{result.summary.tier3_runtime} tier-3 obligation(s)"
+    )
+
+
+def test_nat_true_postcondition_runs_correctly() -> None:
+    """Verify<->run differential (TRUE side): the proved `Nat` program also runs
+    without trapping and returns the expected value."""
+    assert _run(_NAT_SINGLE, fn="main") == 1
+
+
+def test_nat_false_postcondition_rejected_e500() -> None:
+    """Soundness (Nat path): a FALSE single-level `Nat` postcondition
+    (`Some(@Nat.0 + 1)` over a `Some(@Nat.0)` body) is rejected at Tier-1 E500
+    with a counterexample — NOT falsely proved and NOT blanket-demoted.
+
+    This proves the Nat fix opened neither a false Tier-1 nor a crash.  An
+    `Int`-typed version of this probe cannot distinguish the fix from the bug
+    (Int is the collapse target).
+    """
+    result = _verify(_NAT_SINGLE_FALSE)
+    errors = [d for d in result.diagnostics if d.severity == "error"]
+    assert any(d.error_code == "E500" for d in errors), (
+        f"Expected E500 for the false Nat postcondition, got {errors}"
+    )
+
+
+def test_nat_false_postcondition_traps_at_runtime() -> None:
+    """Verify<->run differential (FALSE side): the false `Nat` postcondition is
+    ENFORCED at runtime — `Some(7) == Some(8)` is structurally false, so the
+    runtime postcondition check traps.  The soundness half of the differential:
+    a codegen path that let the false claim through would make this pass."""
+    result = _compile(_NAT_SINGLE_FALSE)
+    errors = [d for d in result.diagnostics if d.severity == "error"]
+    assert not errors, f"Unexpected compile errors: {errors}"
+    with pytest.raises(WasmTrapError, match="Postcondition violation"):
+        execute(result, fn_name="main")

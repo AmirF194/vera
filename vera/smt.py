@@ -9,6 +9,7 @@ See spec/06-contracts.md, Section 6.4 "Verification Conditions".
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -226,6 +227,25 @@ def _adt_sort_key(adt_name: str, type_args: tuple[Type, ...]) -> str:
         else:
             arg_strs.append("?")
     return f"{adt_name}<{', '.join(arg_strs)}>"
+
+
+def _normalize_int_nat_sort_key(key: str) -> str:
+    """Canonicalise an ``_adt_sort_key`` for ``Nat``<->``Int`` carrier equality
+    (#918).
+
+    ``Int`` and ``Nat`` share a Z3 carrier (both translate to ``IntSort``); the
+    distinction is a refinement (``Nat = {n : Int | n >= 0}``), not a different
+    materialised datatype-argument sort's *carrier*.  But post-#884 the ADT
+    datatype-sort mangling is injective, so ``Option<Int>`` and ``Option<Nat>``
+    are DISTINCT Z3 sorts.  When a constructor argument's type is recovered from
+    its Z3 sort the ``Nat`` reads back as ``Int`` (the shared carrier is all the
+    sort carries), so a pin can name ``Option<Int>`` where the context built
+    ``Option<Nat>``.  Mapping every whole-word ``Nat`` to ``Int`` lets such keys
+    compare equal, so the pin selects the already-cached ``Nat`` instantiation
+    instead of a fresh mismatched ``Int`` one.  The word boundary is regex-based
+    so a user ADT literally named ``Nat...`` (e.g. ``NatBox``) is untouched.
+    """
+    return re.sub(r"(?<![A-Za-z0-9_])Nat(?![A-Za-z0-9_])", "Int", key)
 
 
 def _z3_sort_name(key: str) -> str:
@@ -2258,14 +2278,30 @@ class SmtContext:
         return value, regressing an unrelated ``ensures(true)``-returning ADT
         call to a false E500 (the trap the #887 review flagged for a broad
         materialisation in this method).
+
+        The pinned instantiation is resolved by :func:`_resolve_pinned_sort`,
+        which handles the ``Int``/``Nat`` carrier ambiguity: ``@Nat.0``
+        translates to a Z3 ``IntSort`` value, so a ``Some(@Nat.0)`` argument
+        recovers as ``Int`` and the pinned key is ``Option<Int>`` even when the
+        surrounding context only materialised ``Option<Nat>`` (post-#884 these
+        are DISTINCT injective Z3 datatype sorts).  Building the ``Option<Int>``
+        key would then hand back a sort that never appears in the context, and
+        comparing it against the context's ``Option<Nat>`` value crashes
+        ``_datatype_value_eq`` with ``sort mismatch``.  So a cached
+        instantiation equal to the pin **modulo ``Nat``<->``Int``** is preferred
+        over freshly building the pinned key.  A pin with NO Int/Nat-equal
+        cached match (a genuinely new instantiation, e.g. the
+        ``Option<Option<Int>>`` a nested ctor literal needs when only
+        ``Option<Int>`` is cached) is still materialised — that path is the
+        #918 fix and must keep working.
         """
         adt_name = self._ctor_to_adt.get(ctor_name)
         if adt_name is None:
             return None
         if type_args is not None and self._has_cached_instantiation(adt_name):
-            # Disambiguate among existing instantiations: fetch/build the exact
-            # one the caller pinned rather than the first base-name match.
-            sort = self._get_or_create_adt_sort(adt_name, type_args)
+            # Disambiguate among instantiations: prefer an already-cached one
+            # equal modulo Int/Nat, else materialise the pinned key exactly.
+            sort = self._resolve_pinned_sort(adt_name, type_args)
             if sort is not None and (
                 self._find_ctor_index(sort, ctor_name) is not None
             ):
@@ -2277,6 +2313,39 @@ class SmtContext:
                 if self._find_ctor_index(sort, ctor_name) is not None:
                     return sort
         return None
+
+    def _resolve_pinned_sort(
+        self, adt_name: str, type_args: tuple[Type, ...],
+    ) -> z3.SortRef | None:
+        """Resolve the Z3 sort for a pinned ADT instantiation (#918).
+
+        Precedence:
+
+        1. the exact ``_adt_sort_key`` if already cached;
+        2. any cached instantiation equal to the pin **modulo ``Nat``<->``Int``**
+           — the carrier ambiguity (``@Nat.0`` reads back as ``Int``) means the
+           pin can name ``Option<Int>`` where the context built ``Option<Nat>``;
+           post-#884 those are distinct injective sorts, so selecting the cached
+           one avoids handing back a sort the surrounding equality can't compare
+           against (a ``sort mismatch`` crash);
+        3. otherwise materialise the pinned key via ``_get_or_create_adt_sort``
+           — a genuinely new instantiation the context has not built yet (e.g.
+           the ``Option<Option<Int>>`` a nested ctor literal needs when only
+           ``Option<Int>`` is cached), which is exactly the #918 nesting fix.
+
+        Note the asymmetry: step 3 is only reached when NO Int/Nat-equal
+        instantiation is cached, so it never rebuilds an ``Int`` twin of an
+        existing ``Nat`` sort.
+        """
+        key = _adt_sort_key(adt_name, type_args)
+        exact = self._z3_sorts.get(key)
+        if exact is not None:
+            return exact
+        norm = _normalize_int_nat_sort_key(key)
+        for cached_key, sort in self._z3_sorts.items():
+            if _normalize_int_nat_sort_key(cached_key) == norm:
+                return sort
+        return self._get_or_create_adt_sort(adt_name, type_args)
 
     def _has_cached_instantiation(self, adt_name: str) -> bool:
         """Whether any instantiation of *adt_name* is already in ``_z3_sorts``
@@ -2299,9 +2368,21 @@ class SmtContext:
         unifying those against the constructor's declared (``TypeVar``-bearing)
         field types pins the enclosing generic's type parameters.
 
-        Primitives map by sort identity (``Int``/``Nat`` collapse to ``Int`` —
-        they share a Z3 sort **and** a materialised datatype sort, so the choice
-        only affects the ``_adt_sort_key`` string, never the sort fed to Z3).
+        Primitives map by sort identity.  ``Int`` and ``Nat`` are BOTH
+        recovered as ``Int`` here because they share a Z3 carrier sort
+        (``IntSort``) — a bare ``IntSort`` value carries no witness of the
+        ``>= 0`` refinement, so ``Nat`` is indistinguishable from ``Int`` at
+        this point.  Crucially this recovery is NOT lossless for the *enclosing*
+        instantiation: post-#884 the datatype-sort mangling is injective, so
+        ``Option<Nat>`` (``Option_LNat_R``) and ``Option<Int>``
+        (``Option_LInt_R``) are DISTINCT Z3 datatype sorts.  A ``Some(@Nat.0)``
+        argument therefore pins the ``Int``-keyed instantiation even in an
+        ``Option<Nat>`` context — the recovered type DOES affect which sort is
+        selected downstream.  ``_find_sort_for_ctor`` compensates by selecting
+        only among *already-cached* instantiations modulo ``Nat``<->``Int``
+        (via :func:`_normalize_int_nat_sort_key`), never materialising a fresh
+        ``Int``-keyed sort that would sort-mismatch the context's ``Nat`` one.
+
         A datatype sort is reverse-looked-up in ``_z3_sorts`` by sort identity
         and its canonical key parsed back into an :class:`AdtType`.  ``None``
         when the sort is one we can't name (an uninterpreted ``Array_<T>``, a
