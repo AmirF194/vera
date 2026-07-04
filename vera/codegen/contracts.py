@@ -108,12 +108,19 @@ class ContractsMixin:
                         error_code="E618",
                     )
                     return None
-                if (isinstance(base_node, ast.NamedType)
-                        and base_node.name == "Unit"):
-                    # `@Unit` is zero-size / erased: there is no value to load
-                    # into a boundary predicate check, so emit NO guard (the
-                    # verifier records such a refinement `tier3_unguarded`
-                    # rather than claiming a runtime check; CR db24433).
+                if self._type_expr_to_wasm_type(base_node) is None:
+                    # A zero-size / erased base — `@Unit`, or a `Future`
+                    # transparently wrapping one (`Future<Unit>`; #841/#943):
+                    # there is no WASM local to load into a boundary predicate
+                    # check, so emit NO guard (the verifier records such a
+                    # refinement `tier3_unguarded` rather than claiming a runtime
+                    # check; CR db24433).  Keyed on codegen's OWN erasure
+                    # (`_type_expr_to_wasm_type` returns None iff a type has no
+                    # WASM representation), so the guard-skip set is exactly the
+                    # set with no runtime local — #943 review found the literal
+                    # `base_node.name == "Unit"` keying missed `Future<Unit>`,
+                    # which erases identically and raised a raw `ValueError` at
+                    # the `wt is None` invariant in `_compile_fn` below.
                     return None
                 if (isinstance(base_node, ast.NamedType)
                         and base_node.name == "Nat"):
