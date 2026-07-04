@@ -1,0 +1,80 @@
+-- Conformance: Eq auto-derivation over a NESTED-generic recursive ADT on the
+-- direct `==` / `eq` constructor-inferred path (Chapter 9, #923 — sibling of
+-- #772/#898).
+-- Tests: a `List<List<Int>>` value built entirely from constructor calls
+-- derives structural Eq and compares by value, with the type argument inferred
+-- from the constructor operands.  Pre-#923 the codegen derivability recovery
+-- reconstructed only ONE level of the outer type argument (`List<List>` instead
+-- of `List<List<Int>>`), which was treated as a lost-type-arg clone and
+-- spuriously rejected with E613 — even though the checker's full-recursion gate
+-- accepts it.  The fix recovers nested type arguments FULLY, so `vera compile` /
+-- `vera run` accept the composite exactly as `vera check` does.
+-- ================================================================
+private data List<T> {
+  Nil,
+  Cons(T, List<T>)
+}
+
+-- Test: two structurally-equal List<List<Int>> values (distinct allocations)
+-- compare equal via direct `==`.
+public fn test_nested_generic_eq_equal(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 1)
+  effects(pure)
+{
+  if Cons(Cons(1, Nil), Nil) == Cons(Cons(1, Nil), Nil) then {
+    1
+  } else {
+    0
+  }
+}
+
+-- Test: an inner-element difference propagates to unequal.
+public fn test_nested_generic_eq_unequal(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 0)
+  effects(pure)
+{
+  if Cons(Cons(1, Nil), Nil) == Cons(Cons(2, Nil), Nil) then {
+    1
+  } else {
+    0
+  }
+}
+
+-- Test: the `eq(...)` builtin form of the same comparison derives identically.
+public fn test_nested_generic_eq_builtin(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 1)
+  effects(pure)
+{
+  if eq(Cons(Cons(1, Nil), Nil), Cons(Cons(1, Nil), Nil)) then {
+    1
+  } else {
+    0
+  }
+}
+
+-- Test: a THREE-level nesting (List<List<List<Int>>>) proves the recovery is
+-- genuinely recursive, not a two-level special case.
+public fn test_three_level_nested_eq(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 1)
+  effects(pure)
+{
+  if Cons(Cons(Cons(1, Nil), Nil), Nil) == Cons(Cons(Cons(1, Nil), Nil), Nil) then {
+    1
+  } else {
+    0
+  }
+}
+
+-- Drive every test from main so the derivations run and their runtime
+-- postconditions fire.  Total = 1 + 0 + 1 + 1 = 3.
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 3)
+  effects(pure)
+{
+  test_nested_generic_eq_equal(()) + test_nested_generic_eq_unequal(()) + test_nested_generic_eq_builtin(()) + test_three_level_nested_eq(())
+}

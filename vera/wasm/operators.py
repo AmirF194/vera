@@ -332,26 +332,54 @@ class OperatorsMixin:
     def _parameterize_ctor_operand(
         self, operand: ast.Expr, bare: str | None,
     ) -> str | None:
-        """Recover an `==` operand's parameterized ADT type name (#772).
+        """Recover an `==` operand's parameterized ADT type name (#772, #923).
 
         `_infer_vera_type` resolves a `ConstructorCall` to the BARE ADT name
         (`Option`, dropping `<Int>`).  For the direct structural-`==` derivation
         the type argument is load-bearing — the generated `$eq_<type>` helper
         must resolve the concrete field type — so recover it from the
-        constructor's arguments via `_get_arg_type_info_wasm` (the same routine
-        the generic-call rewriter uses).  Falls back to ``bare`` when the operand
-        is not a `ConstructorCall` or its type argument cannot be inferred.
+        constructor's type-parameter-field arguments, RECURSIVELY, so a
+        nested-generic operand (`Cons(Cons(1, Nil), Nil)`) reconstructs the
+        FULLY-qualified `List<List<Int>>` rather than the one-level `List<List>`
+        the pre-#923 flat `_get_arg_type_info_wasm` recovery produced (which then
+        spuriously E613'd on the derivable nested type).  Falls back to ``bare``
+        when the operand is not a `ConstructorCall` or a needed type argument
+        cannot be inferred — the established lost-type-arg shape the
+        derivability path already routes to the scalar lowering.
         """
-        if bare is None or not isinstance(operand, ast.ConstructorCall):
+        if bare is None:
             return bare
-        info = self._get_arg_type_info_wasm(operand)
-        if info is None:
-            return bare
-        base_name, arg_names = info
-        if arg_names and all(a is not None for a in arg_names):
-            resolved = [a for a in arg_names if a is not None]
-            return f"{base_name}<{', '.join(resolved)}>"
-        return bare
+        return self._full_ctor_type_name(operand) or bare
+
+    def _full_ctor_type_name(self, operand: ast.Expr) -> str | None:
+        """Fully-qualified Vera type name of a constructor operand (#923).
+
+        Recurses through nested `ConstructorCall` fields so every level's type
+        argument is recovered: for each field that maps to an ADT type parameter
+        (`_ctor_adt_tp_indices`), the field's own full name is reconstructed by
+        recursing on the field expression.  A non-`ConstructorCall` expression
+        yields its bare `_infer_vera_type` name (a nested `List<Int>` bottoms out
+        at the `Int` leaf, a nullary `Nil` at the bare `List`).  Returns ``None``
+        only when the base ADT name itself cannot be resolved; a field whose type
+        argument cannot be inferred leaves that position bare (the base ADT name
+        with no `<…>`), matching the lost-type-arg shape codegen already handles.
+        """
+        if not isinstance(operand, ast.ConstructorCall):
+            return self._infer_vera_type(operand)
+        base = self._ctor_to_adt_name(operand.name)
+        if base is None:
+            return None
+        tp_indices = self._ctor_adt_tp_indices.get(operand.name)
+        tp_count = self._adt_tp_counts.get(base, 0)
+        if not tp_indices or tp_count == 0:
+            return base
+        slots: list[str | None] = [None] * tp_count
+        for field_i, tp_idx in enumerate(tp_indices):
+            if tp_idx is not None and field_i < len(operand.args):
+                slots[tp_idx] = self._full_ctor_type_name(operand.args[field_i])
+        if all(s is not None for s in slots):
+            return f"{base}<{', '.join(s for s in slots if s is not None)}>"
+        return base
 
     def _recover_lost_type_arg(
         self, lv: str | None, other: ast.Expr,
