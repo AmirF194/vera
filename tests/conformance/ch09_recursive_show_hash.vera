@@ -1,0 +1,103 @@
+-- Conformance: structural show/hash on recursive ADTs (Chapter 9, #924)
+-- Tests: show/hash on a directly-recursive generic ADT (List<T>) and a
+-- directly-recursive binary tree, plus show on a non-generic
+-- mutually-recursive ADT pair, via a generated recursive helper function
+-- rather than being dropped at codegen.
+-- ================================================================
+-- ADTs used below
+-- ================================================================
+private data List<T> {
+  Nil,
+  Cons(T, List<T>)
+}
+
+private data Tree<T> {
+  Leaf,
+  Node(Tree<T>, T, Tree<T>)
+}
+
+private data Forest {
+  Empty,
+  Grove(Rose, Forest)
+}
+
+private data Rose {
+  Bloom(Int, Forest)
+}
+
+-- ================================================================
+-- Helpers: obtain fully-typed recursive-ADT values
+-- ================================================================
+private fn nil_list(@Int -> @List<Int>)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  Nil
+}
+
+-- ================================================================
+-- show: recursive generic list
+-- ================================================================
+-- Test: a directly-recursive list renders every Cons cell down to Nil
+public fn test_show_recursive_list(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result == true)
+  effects(pure)
+{
+  eq(show(Cons(1, Cons(2, Nil))), "Cons(1, Cons(2, Nil))")
+}
+
+-- Test: the base-case constructor of a recursive ADT renders as its bare name
+public fn test_show_recursive_list_nil(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result == true)
+  effects(pure)
+{
+  eq(show(nil_list(0)), "Nil")
+}
+
+-- ================================================================
+-- hash: recursive generic list
+-- ================================================================
+-- Test: hash on a recursive list is deterministic
+public fn test_hash_recursive_list_deterministic(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result == true)
+  effects(pure)
+{
+  eq(hash(Cons(1, Cons(2, Nil))), hash(Cons(1, Cons(2, Nil))))
+}
+
+-- Test: hash distinguishes structurally-different recursive values
+public fn test_hash_recursive_list_distinguishes(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result == false)
+  effects(pure)
+{
+  eq(hash(Cons(1, Cons(2, Nil))), hash(Cons(1, Cons(3, Nil))))
+}
+
+-- ================================================================
+-- show: recursive binary tree
+-- ================================================================
+-- Test: a directly-recursive tree renders both branches and the leaves
+public fn test_show_recursive_tree(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result == true)
+  effects(pure)
+{
+  eq(show(Node(Leaf, 5, Node(Leaf, 7, Leaf))), "Node(Leaf, 5, Node(Leaf, 7, Leaf))")
+}
+
+-- ================================================================
+-- show: non-generic mutually-recursive ADT pair
+-- ================================================================
+-- Test: a non-generic mutually-recursive ADT pair renders through both types
+public fn test_show_mutual_recursive_adt(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result == true)
+  effects(pure)
+{
+  eq(show(Grove(Bloom(1, Empty), Empty)), "Grove(Bloom(1, Empty), Empty)")
+}

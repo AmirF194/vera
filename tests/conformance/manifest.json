@@ -1751,6 +1751,22 @@
     ]
   },
   {
+    "id": "ch09_recursive_show_hash",
+    "file": "ch09_recursive_show_hash.vera",
+    "chapter": 9,
+    "title": "Structural show/hash on recursive ADTs (#924)",
+    "level": "run",
+    "spec_ref": "Section 9.8",
+    "features": [
+      "show_operation",
+      "hash_operation",
+      "constructor",
+      "adt_auto_derivation",
+      "recursive_adt",
+      "mutual_recursion"
+    ]
+  },
+  {
     "id": "ch09_structural_eq",
     "file": "ch09_structural_eq.vera",
     "chapter": 9,

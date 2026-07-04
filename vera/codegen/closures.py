@@ -543,6 +543,8 @@ class ClosureLiftingMixin:
         )
         # #773: structural-Eq helpers generated inside a lifted closure body.
         self._adt_eq_helpers.update(ctx._adt_eq_helpers)
+        # #924: recursive show/hash helpers generated inside a lifted closure.
+        self._show_hash_helpers.update(ctx._show_hash_helpers)
 
         # Build GC prologue/epilogue (only when closure body allocates).
         # Two-phase prologue: ``gc_prologue`` runs before ``load_instrs``

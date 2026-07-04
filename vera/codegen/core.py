@@ -205,6 +205,10 @@ class CodeGenerator(
         # closure body (merged from each WasmContext) and emitted once at
         # module assembly.
         self._adt_eq_helpers: dict[str, str] = {}
+        # #924: generated recursive show/hash helper functions ($show_<type> /
+        # $hash_<type>), merged from each WasmContext and emitted once at
+        # module assembly — the same propagate-then-emit shape as _adt_eq_helpers.
+        self._show_hash_helpers: dict[str, str] = {}
         # #573: wrap-table flag — see ``WasmContext`` for the long
         # description.  Set in ``_assemble_module`` whenever a
         # host-handle type that has migrated to heap-wrap-as-ADT is

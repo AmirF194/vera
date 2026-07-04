@@ -219,6 +219,16 @@ class WasmContext(
         # WasmContext in unit tests), the gate is skipped and generation
         # proceeds as before.
         self._adt_eq_derivable: Callable[[str], bool] | None = None
+        # #924: generated recursive show/hash helper functions, keyed by the
+        # mangled `$show_<type>` / `$hash_<type>` function name → its full WAT
+        # text.  A directly- (or mutually-) recursive ADT's `show`/`hash`
+        # cannot render inline (unbounded depth), so it emits a self-calling
+        # helper — one per recursive type — that recurses over the finite
+        # value.  Mirrors `_adt_eq_helpers` (#773): merged into the
+        # CodeGenerator core after each body compiles, emitted once at module
+        # assembly, and guarded against re-entry via `_show_hash_pending`.
+        self._show_hash_helpers: dict[str, str] = {}
+        self._show_hash_pending: set[str] = set()
         # Function return WASM types for type inference:
         # fn_name → return_wasm_type (str | None)
         self._fn_ret_types: dict[str, str | None] = {}

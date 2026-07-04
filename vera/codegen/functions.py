@@ -688,6 +688,9 @@ class FunctionCompilationMixin:
         # #773: structural-Eq helper functions generated while lowering this
         # body (deduped by name across the whole module at assembly).
         self._adt_eq_helpers.update(ctx._adt_eq_helpers)
+        # #924: recursive show/hash helper functions generated while lowering
+        # this body (deduped by name across the whole module at assembly).
+        self._show_hash_helpers.update(ctx._show_hash_helpers)
 
         # #517 — tail-call optimization fallback for functions whose
         # bodies are followed by post-body work that must run before

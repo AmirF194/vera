@@ -973,27 +973,160 @@ private fn nest(@Int -> @Option<Option<Int>>)
 """
         assert _run(source, fn="main") == 1
 
-    def test_recursive_adt_still_skips_cleanly(self) -> None:
-        """A directly-recursive ADT's `show` still skips (no infinite loop).
+    # ---- show / hash: directly-recursive ADT (#924) --------------------
+    #
+    # `List<Int> = Cons(Int, List<Int>)` recurs on the SAME parameterized
+    # type.  The inline #911 traversal cannot render unbounded depth, so it
+    # requests a GENERATED recursive helper ($show_List_LInt_R /
+    # $hash_List_LInt_R) that calls itself for the recursive field —
+    # mirroring the $eq_<type> machinery (#773).  Codegen terminates (one
+    # helper per recursive type), and the helper terminates at runtime by
+    # recursing over the finite value.
 
-        `List<Int> = Cons(Int, List<Int>)` recurs on the SAME parameterized
-        type, so the full-ptype guard correctly collapses it: codegen must
-        drop `main` cleanly (E602 warning, no export) rather than infinitely
-        expand the traversal.  Recursive-ADT show/hash is a separate scoped
-        item (needs generated recursive helpers).
-        """
+    def test_show_recursive_list(self) -> None:
+        """A directly-recursive ADT renders via a generated recursive helper."""
         source = """\
-private data List { Nil, Cons(Int, List) }
+private data List<T> { Nil, Cons(T, List<T>) }
+
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(show(Cons(1, Cons(2, Nil))), "Cons(1, Cons(2, Nil))") }
+"""
+        result = _compile_ok(source)
+        assert "main" in result.exports
+        assert _run(source, fn="main") == 1
+
+    def test_show_recursive_list_exported(self) -> None:
+        """The `main` that shows a recursive ADT is no longer dropped (#924)."""
+        source = """\
+private data List<T> { Nil, Cons(T, List<T>) }
 
 public fn main(-> @String)
   requires(true) ensures(true) effects(pure)
-{ show(Cons(1, Nil)) }
+{ show(Cons(1, Cons(2, Nil))) }
 """
-        # `main` is dropped from the exports → execute raises rather than
-        # returning a value.  (Codegen terminates — no hang — which is the
-        # load-bearing assertion; the drop is the existing clean-skip path.)
-        result = _compile(source)
-        assert "main" not in result.exports
+        # Pre-#924 this dropped `main` (E602) → "No exported functions".
+        assert "main" in _compile_ok(source).exports
+
+    def test_show_recursive_list_nil(self) -> None:
+        """The nullary base constructor renders as its bare name."""
+        source = """\
+private data List<T> { Nil, Cons(T, List<T>) }
+
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(show(nil_list(0)), "Nil") }
+
+private fn nil_list(@Int -> @List<Int>)
+  requires(true) ensures(true) effects(pure)
+{ Nil }
+"""
+        assert _run(source, fn="main") == 1
+
+    def test_hash_recursive_list_deterministic(self) -> None:
+        """hash on a recursive ADT compiles, runs, and is deterministic."""
+        source = """\
+private data List<T> { Nil, Cons(T, List<T>) }
+
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(hash(Cons(1, Cons(2, Nil))), hash(Cons(1, Cons(2, Nil)))) }
+"""
+        assert _run(source, fn="main") == 1
+
+    def test_hash_recursive_list_distinguishes(self) -> None:
+        """Structurally different recursive values hash differently."""
+        source = """\
+private data List<T> { Nil, Cons(T, List<T>) }
+
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(hash(Cons(1, Cons(2, Nil))), hash(Cons(1, Cons(3, Nil)))) }
+"""
+        assert _run(source, fn="main") == 0
+
+    def test_show_recursive_tree(self) -> None:
+        """A recursive Tree with two self-referential fields renders."""
+        source = """\
+private data Tree<T> { Leaf, Node(Tree<T>, T, Tree<T>) }
+
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(show(Node(Leaf, 5, Node(Leaf, 7, Leaf))), "Node(Leaf, 5, Node(Leaf, 7, Leaf))") }
+"""
+        assert _run(source, fn="main") == 1
+
+    def test_show_deep_list_no_shadow_overflow(self) -> None:
+        """A deep (100-element) recursive value renders without shadow overflow.
+
+        The generated helper recurses once per Cons cell; each level builds
+        strings via `$alloc`.  100 levels confirms the recursion terminates
+        (finite data) and the shadow-stack rooting holds — no `unreachable` /
+        overflow.  Run under eager GC in the dedicated CLI test below.
+        """
+        source = """\
+private data List<T> { Nil, Cons(T, List<T>) }
+
+public fn main(-> @Nat)
+  requires(true) ensures(true) effects(pure)
+{ string_length(show(build(100))) }
+
+private fn build(@Nat -> @List<Nat>)
+  requires(true) ensures(true) effects(pure)
+{
+  if @Nat.0 == 0 then { Nil } else { Cons(@Nat.0, build(@Nat.0 - 1)) }
+}
+"""
+        # "Cons(100, Cons(99, … Cons(1, Nil) …))" — hundreds of chars.
+        assert _run(source, fn="main") > 100
+
+    def test_hash_deep_list_frame_restores_gc_sp(self) -> None:
+        """A deep recursive `hash` restores `$gc_sp` and leaves it clean.
+
+        The `hash` helper allocates nothing for a `List<Nat>`, yet `_hash_adt`
+        still shadow-pushes its struct pointer per recursion.  The always-on GC
+        frame restores `$gc_sp` on each return, so (a) a 500-level hash does not
+        overflow the shadow stack, and (b) `$gc_sp` is left clean for the
+        subsequent `show`, which builds strings that would trap or mis-root if
+        the hash had leaked its pointer pushes into the caller's frame.  Pre-fix
+        (frame gated on body allocation) the hash left `$gc_sp` advanced by 500.
+        """
+        source = """\
+private data List<T> { Nil, Cons(T, List<T>) }
+
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  let @List<Nat> = build(500);
+  eq(hash(@List<Nat>.0), hash(@List<Nat>.0)) && string_length(show(@List<Nat>.0)) > 500
+}
+
+private fn build(@Nat -> @List<Nat>)
+  requires(true) ensures(true) effects(pure)
+{
+  if @Nat.0 == 0 then { Nil } else { Cons(@Nat.0, build(@Nat.0 - 1)) }
+}
+"""
+        assert _run(source, fn="main") == 1
+
+    def test_mutually_recursive_show(self) -> None:
+        """A (non-generic) mutually-recursive ADT pair renders via helpers.
+
+        `Forest` ↔ `Rose` reference each other; the generated `$show_Forest`
+        and `$show_Rose` helpers cross-call.  (Generic mutual recursion where
+        the type argument is buried in a nested generic field — `Grove(Rose<T>,
+        Forest<T>)` — is a separate, pre-existing type-argument-recovery
+        limitation shared with `$eq_<type>`; see #924.)
+        """
+        source = """\
+private data Forest { Empty, Grove(Rose, Forest) }
+private data Rose { Bloom(Int, Forest) }
+
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(show(Grove(Bloom(1, Empty), Empty)), "Grove(Bloom(1, Empty), Empty)") }
+"""
+        assert _run(source, fn="main") == 1
 
     # ---- hash: runs and is deterministic ------------------------------
 

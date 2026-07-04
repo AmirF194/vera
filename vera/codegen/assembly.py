@@ -544,6 +544,12 @@ class AssemblyMixin:
         for _name, eq_wat in sorted(self._adt_eq_helpers.items()):
             parts.append(eq_wat)
 
+        # #924: generated recursive show/hash helper functions ($show_<type> /
+        # $hash_<type>).  Deduped by name across the whole module; sorted for
+        # deterministic output.
+        for _name, sh_wat in sorted(self._show_hash_helpers.items()):
+            parts.append(sh_wat)
+
         parts.append(")")
         return "\n".join(parts)
 

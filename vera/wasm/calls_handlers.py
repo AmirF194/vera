@@ -472,6 +472,159 @@ class CallsHandlersMixin:
         offset, length = self.string_pool.intern(text)
         return [f"i32.const {offset}", f"i32.const {length}"]
 
+    # ---- recursive-ADT helper generation (#924) -----------------------
+    #
+    # A directly- (or mutually-) recursive ADT cannot be rendered / folded
+    # INLINE — the traversal would expand forever at COMPILE time.  #911
+    # detected this via the full-ptype `_seen` guard and cleanly skipped
+    # (E602), dropping the enclosing function.  #924 upgrades the skip to an
+    # actually-emitted, self-calling helper function `$show_<type>` /
+    # `$hash_<type>` — one per recursive type — that recurses over the finite
+    # VALUE at run time.  This mirrors the structural-`$eq_<type>` machinery
+    # (operators.py `_generate_adt_eq_fn` / `_request_adt_eq_helper`).
+
+    def _show_hash_fn_name(self, kind: str, ptype: str) -> str:
+        """Mangle ``ptype`` into its ``$show_<type>`` / ``$hash_<type>`` name.
+
+        Uses the shared `mangle_type_name` escape — the same injective
+        convention the `$eq_<type>` helpers and mono-clone symbols use, so a
+        `List<Int>` helper and a bare ADT literally named `List_LInt_R` cannot
+        collide.
+        """
+        return f"${kind}_{mangle_type_name(ptype)}"
+
+    def _request_show_hash_helper(
+        self, kind: str, ptype: str, node: ast.Expr,
+    ) -> str | None:
+        """Ensure a recursive ``$show``/``$hash`` helper exists; return its name.
+
+        ``kind`` is ``"show"`` or ``"hash"``.  Deduped by name and guarded
+        against re-entry via ``_show_hash_pending`` so a self- (or mutually-)
+        recursive ADT emits exactly one helper per type.  Returns None when the
+        body cannot be generated (an unrenderable / unhashable field), leaving
+        the caller to fall back to the clean E602 skip.
+        """
+        fn_name = self._show_hash_fn_name(kind, ptype)
+        if fn_name in self._show_hash_helpers or fn_name in self._show_hash_pending:
+            return fn_name
+        self._show_hash_pending.add(fn_name)
+        body = self._generate_show_hash_helper(kind, fn_name, ptype, node)
+        if body is None:
+            self._show_hash_pending.discard(fn_name)
+            return None
+        self._show_hash_helpers[fn_name] = body
+        return fn_name
+
+    def _generate_show_hash_helper(
+        self, kind: str, fn_name: str, ptype: str, node: ast.Expr,
+    ) -> str | None:
+        """Generate the full WAT of a recursive ``$show``/``$hash`` helper.
+
+        The helper takes the ADT pointer as ``$p`` (local 0) and returns the
+        rendered String ``(result i32 i32)`` (show) or the i64 hash (hash).
+        The body reuses the inline `_show_adt` / `_hash_adt` emitters (so there
+        is exactly ONE structural-render implementation) run in a FRESH
+        local-allocation scope with an EMPTY ``_seen`` — the emitter renders one
+        full level and adds ``ptype`` to ``_seen`` before descending, so the
+        recursive field (same ``ptype``) routes back through this same helper (a
+        ``call $show_<type>`` self-reference) rather than re-expanding inline.
+        The emitters allocate into the swapped-in scope, set ``needs_alloc``
+        when they build strings, and their shadow-stack rooting is wrapped by a
+        GC prologue/epilogue that saves and restores ``$gc_sp`` around the frame.
+        """
+        base, _ = self._split_param_type(ptype)
+
+        # Swap in a fresh local-allocation scope so the inline emitters'
+        # `alloc_local` calls land in THIS helper's frame, not the caller's.
+        # Local 0 is the `$p` parameter; body locals and the GC epilogue's
+        # save/return locals are allocated from index 1 up.
+        saved_locals = self._locals
+        saved_next = self._next_local
+        saved_needs_alloc = self.needs_alloc
+        self._locals = []
+        self._next_local = 1
+        self.needs_alloc = False
+        body_allocates = False
+        try:
+            # `_seen` starts EMPTY so `_show_adt` renders ONE full level of the
+            # constructor (it adds `ptype` to `seen` before descending into
+            # fields).  The recursive field — same `ptype`, now in `seen` — then
+            # hits the guard and emits a `call $<kind>_<type>` self-reference
+            # back into THIS helper, so the recursion runs over the value at run
+            # time rather than expanding inline at compile time.
+            value_instrs = ["local.get 0"]
+            if kind == "show":
+                inner = self._show_adt(base, ptype, value_instrs, node, frozenset())
+                result_part = "(result i32 i32)"
+            else:
+                inner = self._hash_adt(base, ptype, value_instrs, node, frozenset())
+                result_part = "(result i64)"
+            if inner is None:
+                return None
+            body_allocates = self.needs_alloc
+            gc_prologue, gc_epilogue = self._show_hash_gc_frame(kind)
+            local_decls = self.extra_locals_wat()
+        finally:
+            self._locals = saved_locals
+            self._next_local = saved_next
+            # A helper that allocates forces the CALLER's frame to carry a GC
+            # prologue too (the call site sees the returned pointer as a root).
+            self.needs_alloc = saved_needs_alloc or body_allocates
+
+        lines = [f"  (func {fn_name} (param $p i32) {result_part}"]
+        lines.extend(f"    {d}" for d in local_decls)
+        lines.extend(f"    {i}" for i in gc_prologue)
+        lines.extend(f"    {i}" for i in inner)
+        lines.extend(f"    {i}" for i in gc_epilogue)
+        lines.append("  )")
+        return "\n".join(lines)
+
+    def _show_hash_gc_frame(
+        self, kind: str,
+    ) -> tuple[list[str], list[str]]:
+        """Build the GC prologue/epilogue for a recursive show/hash helper.
+
+        ALWAYS emitted — the inline `_show_adt` / `_hash_adt` body
+        unconditionally shadow-pushes its struct pointer (`gc_shadow_push`),
+        and each recursive `call $<kind>_<type>` re-enters and pushes again, so
+        without a per-call ``$gc_sp`` restore a deep recursive value leaks one
+        shadow slot per level and overflows the 4 096-slot shadow stack (a
+        `hash` over a `List<Int>` allocates nothing yet still leaks the pointer
+        push).  The frame saves ``$gc_sp`` on entry, roots the pointer
+        parameter (local 0), and restores ``$gc_sp`` on exit — re-rooting the
+        returned String pointer for ``show`` so the caller does not sweep it
+        before consuming it.  Allocates its save/return locals from the CURRENT
+        (swapped-in) scope, so they share the helper's index space with the
+        body locals.
+        """
+        gc_sp_save = self.alloc_local("i32")
+        prologue = [
+            "global.get $gc_sp",
+            f"local.set {gc_sp_save}",
+            *gc_shadow_push(0),
+        ]
+        if kind == "show":
+            ret_ptr = self.alloc_local("i32")
+            ret_len = self.alloc_local("i32")
+            epilogue = [
+                f"local.set {ret_len}",
+                f"local.set {ret_ptr}",
+                f"local.get {gc_sp_save}",
+                "global.set $gc_sp",
+                *gc_shadow_push(ret_ptr),
+                f"local.get {ret_ptr}",
+                f"local.get {ret_len}",
+            ]
+        else:
+            ret_i64 = self.alloc_local("i64")
+            epilogue = [
+                f"local.set {ret_i64}",
+                f"local.get {gc_sp_save}",
+                "global.set $gc_sp",
+                f"local.get {ret_i64}",
+            ]
+        return prologue, epilogue
+
     # ---- show ---------------------------------------------------------
 
     def _show_value(
@@ -527,12 +680,16 @@ class CallsHandlersMixin:
         seen = _seen or frozenset()
         # Key the recursion guard on the FULL parameterized type, not the bare
         # head: `Option<Option<Int>>` nests `Option<Int>` — a DIFFERENT type,
-        # finite depth — and must render, whereas a directly-recursive ADT
-        # (`List<Int>` whose `Cons` field is again `List<Int>`) recurs on the
-        # SAME parameterized type and is correctly collapsed here so the
-        # traversal terminates (that skip is out of scope for #911).
+        # finite depth — and must render INLINE, whereas a directly-recursive
+        # ADT (`List<Int>` whose `Cons` field is again `List<Int>`) recurs on
+        # the SAME parameterized type.  #911 collapsed the recursive case to a
+        # clean skip; #924 routes it to a GENERATED self-calling helper
+        # (`call $show_<type>`) so the finite value renders at run time.
         if ptype in seen:
-            return None
+            fn_name = self._request_show_hash_helper("show", ptype, node)
+            if fn_name is None:
+                return None
+            return value_instrs + [f"call {fn_name}"]
         seen = seen | {ptype}
 
         plans = self._composite_ctor_plans(ptype)
@@ -870,9 +1027,14 @@ class CallsHandlersMixin:
         seen = _seen or frozenset()
         # Full-ptype recursion guard (see `_show_adt`): distinguishes finite
         # same-base nesting (`Option<Option<Int>>`) from genuine self-reference
-        # (`List<Int>`), so the former hashes and the latter terminates+skips.
+        # (`List<Int>`).  The former folds inline; the latter routes to a
+        # generated self-calling helper (`call $hash_<type>`) that folds the
+        # finite value at run time (#924).
         if ptype in seen:
-            return None
+            fn_name = self._request_show_hash_helper("hash", ptype, node)
+            if fn_name is None:
+                return None
+            return value_instrs + [f"call {fn_name}"]
         seen = seen | {ptype}
 
         plans = self._composite_ctor_plans(ptype)
