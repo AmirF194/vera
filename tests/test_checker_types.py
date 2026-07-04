@@ -1657,18 +1657,19 @@ class TestCrossArgTypeArgMerge:
 
 class TestGenericOverUnitRejected900:
     """#900: a generic type parameter instantiated at the zero-size ``Unit``
-    type is rejected at *check* time (E206) — but ONLY when the generic's body
-    reads a ``@T``-typed slot, the exact condition that crashes in codegen.
+    type is rejected at *check* time (E206) — but ONLY when the generic READS a
+    ``@T``-typed slot somewhere that lowers to WASM (its body, or a ``requires``
+    / ``ensures`` clause; #939), the exact condition that crashes in codegen.
 
     ``Unit`` is 0 bytes with no WASM representation (spec §11.2.2 / §11.3.1),
-    so a monomorphized ``forall<T>`` body's ``@T.n`` slot read resolves to no
-    local (the dangling-slot codegen invariant).  A ``@T`` parameter that is
-    never read erases cleanly from the WASM ABI, so a generic whose body does
-    NOT read ``@T`` (``firstInt(@T, @Int){ @Int.0 }``, ``ignore(@T){ 0 }``)
-    runs fine at ``T = Unit`` and MUST NOT be rejected — the discriminator is
-    a ``@T.n`` read, not merely ``T = Unit``.  The check must fire for every
-    way ``T`` is pinned to ``Unit`` *when the body reads it*, not just the one
-    repro shape from the issue.
+    so a monomorphized ``forall<T>``'s ``@T.n`` slot read resolves to no local
+    (the dangling-slot codegen invariant).  A ``@T`` parameter that is never
+    read erases cleanly from the WASM ABI, so a generic that does NOT read
+    ``@T`` (``firstInt(@T, @Int){ @Int.0 }``, ``ignore(@T){ 0 }``) runs fine at
+    ``T = Unit`` and MUST NOT be rejected — the discriminator is a ``@T.n``
+    read, not merely ``T = Unit``.  The check must fire for every way ``T`` is
+    pinned to ``Unit`` *when it is read*, not just the one repro shape from the
+    issue.
     """
 
     _IDT = (
@@ -1830,3 +1831,103 @@ class TestGenericOverUnitRejected900:
         codes = {e.error_code for e in errs}
         assert "E206" in codes, \
             f"a @T match-scrutinee read must stay E206, got {codes}"
+
+    def test_contract_requires_reads_typevar_over_unit_rejected(self) -> None:
+        # #939: a `@T.n` read in a `requires(...)` clause ALSO lowers to a
+        # `local.get` — `_compile_preconditions` emits the runtime precondition
+        # check — so a contract-clause read at `T = Unit` dangles exactly like a
+        # body read.  The body here never reads `@T` (returns `@Int.0`), so only
+        # walking the contract clauses (not just the body) can catch it.
+        # Pre-#939: `check` passed, then `vera run` crashed with a raw
+        # CodegenInvariantError traceback (the dangling-slot invariant).
+        errs = _errors(
+            "private forall<T> fn ignore_pair(@T, @T, @Int -> @Int)\n"
+            "  requires(@T.1 == @T.0) ensures(true) effects(pure)\n"
+            "{ @Int.0 }\n"
+            + "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ ignore_pair((), (), 5) }\n"
+        )
+        codes = {e.error_code for e in errs}
+        assert "E206" in codes, \
+            f"a @T read in a requires clause must be E206 at Unit, got {codes}"
+
+    def test_contract_ensures_reads_typevar_over_unit_rejected(self) -> None:
+        # #939: the `ensures(...)` clause lowers to a runtime postcondition
+        # check too, so a `@T.n` read there dangles at Unit identically.  (The
+        # postcondition codegen path already degraded to a clean E699, but E206
+        # at check is the correct, earlier diagnostic — and keeps requires and
+        # ensures uniform under one discriminator.)
+        errs = _errors(
+            "private forall<T> fn ignore_pair(@T, @T, @Int -> @Int)\n"
+            "  requires(true) ensures(@T.1 == @T.0) effects(pure)\n"
+            "{ @Int.0 }\n"
+            + "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ ignore_pair((), (), 5) }\n"
+        )
+        codes = {e.error_code for e in errs}
+        assert "E206" in codes, \
+            f"a @T read in an ensures clause must be E206 at Unit, got {codes}"
+
+    def test_generic_reads_typevar_over_future_unit_rejected(self) -> None:
+        # #939 follow-up: `Future<Unit>` is a SECOND zero-size type.  Codegen
+        # makes `Future<T>` transparent to `T` (#841), so `Future<Unit>` erases
+        # to no WASM local exactly like bare `Unit`.  A `@T` BODY read at
+        # `T = Future<Unit>` (pinned via `async(())`) dangles identically, so
+        # E206 must fire — pre-fix `check` passed and codegen degraded to E699.
+        # The discriminator now keys on `erases_to_unit`, not `base_type==UNIT`.
+        errs = _errors(
+            "private forall<T> fn idf(@T -> @T)\n"
+            "  requires(true) ensures(true) effects(pure) { @T.0 }\n"
+            + "public fn main(@Unit -> @Unit)\n"
+            "  requires(true) ensures(true) effects(<Async>)\n"
+            "{\n"
+            "  let @Future<Unit> = async(());\n"
+            "  let @Future<Unit> = idf(@Future<Unit>.0);\n"
+            "  await(@Future<Unit>.0)\n"
+            "}\n"
+        )
+        codes = {e.error_code for e in errs}
+        assert "E206" in codes, \
+            f"a @T body read at Future<Unit> must be E206, got {codes}"
+
+    def test_contract_ensures_reads_typevar_over_future_unit_rejected(self) -> None:
+        # #939 follow-up + the confirmed raw-traceback crash: a `@T` read in an
+        # `ensures` clause at `T = Future<Unit>`.  Pre-fix this slipped BOTH the
+        # E206 gate (keyed on bare `Unit`) AND the postcondition codegen net
+        # (which lacked the `CodegenInvariantError` catch), crashing with a raw
+        # Python traceback on a `check`-green + `verify`-green program.  Now
+        # E206 at check (and the postcondition net is the defensive backstop).
+        errs = _errors(
+            "private forall<T> fn pf(@T, @Int -> @Int)\n"
+            "  requires(true) ensures(@T.0 == @T.0) effects(pure) { @Int.0 }\n"
+            + "public fn main(@Unit -> @Unit)\n"
+            "  requires(true) ensures(true) effects(<Async>)\n"
+            "{\n"
+            "  let @Future<Unit> = async(());\n"
+            "  let @Int = pf(@Future<Unit>.0, 5);\n"
+            "  ()\n"
+            "}\n"
+        )
+        codes = {e.error_code for e in errs}
+        assert "E206" in codes, \
+            f"a @T ensures-read at Future<Unit> must be E206, got {codes}"
+
+    def test_generic_reads_typevar_over_future_int_accepted(self) -> None:
+        # Non-regression for the `erases_to_unit` broadening: `Future<Int>` is
+        # transparent to `Int` — a non-zero i32 — so a `@T` read at
+        # `T = Future<Int>` erases cleanly and runs.  `erases_to_unit` must flag
+        # ONLY `Future`-of-zero-size, never `Future<Int>` (nor a boxed
+        # `Option<Unit>`, which is a tag+pointer i32).
+        _check_ok(
+            "private forall<T> fn firstT(@T, @Int -> @T)\n"
+            "  requires(true) ensures(true) effects(pure) { @T.0 }\n"
+            + "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(<Async>)\n"
+            "{\n"
+            "  let @Future<Int> = async(7);\n"
+            "  let @Future<Int> = firstT(@Future<Int>.0, 3);\n"
+            "  0\n"
+            "}\n"
+        )

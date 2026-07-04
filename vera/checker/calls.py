@@ -15,7 +15,6 @@ from vera.environment import (
 )
 from vera.types import (
     ORDERABLE_TYPES,
-    UNIT,
     AdtType,
     ConcreteEffectRow,
     FunctionType,
@@ -25,6 +24,7 @@ from vera.types import (
     UnknownType,
     base_type,
     contains_typevar,
+    erases_to_unit,
     is_effect_subtype,
     is_subtype,
     pretty_effect,
@@ -171,15 +171,21 @@ class CallsMixin:
             # check time rather than letting it crash in codegen, per DESIGN.md
             # principle 1 (checkability over correctness).
             #
-            # Narrowed to bodies that actually MATERIALIZE `@T` (a `@T.n`
-            # SlotRef read — direct return, match scrutinee, etc.).  A `@T`
-            # parameter the body never reads erases cleanly from the ABI, so
-            # `firstInt(@T, @Int){ @Int.0 }` and `ignore(@T){ 0 }` run fine at
-            # `T = Unit` and must NOT be rejected (`fn_info.forall_vars_read`
-            # is the per-declaration set of body-read forall vars).
+            # Narrowed to declarations that actually MATERIALIZE `@T` (a `@T.n`
+            # SlotRef read — direct return, match scrutinee, or a `requires` /
+            # `ensures` clause, all of which lower to a `local.get`; #939).  A
+            # `@T` parameter never read — in the body OR a contract — erases
+            # cleanly from the ABI, so `firstInt(@T, @Int){ @Int.0 }` and
+            # `ignore(@T){ 0 }` run fine at `T = Unit` and must NOT be rejected
+            # (`fn_info.forall_vars_read` is the per-declaration set of forall
+            # vars read anywhere that lowers to WASM).
             #
-            # Keyed to *bare* Unit only: a boxed `Option<Unit>` (tag + pointer)
-            # is a valid, non-zero-size type argument.  A genuine built-in generic
+            # Keyed to any type with NO WASM representation — bare `Unit` OR a
+            # `Future` transparently wrapping one (`Future<Unit>`; #939 review),
+            # via `erases_to_unit` (which mirrors codegen's zero-size erasure).
+            # A boxed `Option<Unit>` (tag + pointer) and a `Future<Int>` (i32)
+            # both erase to a real local, so both are valid, non-zero-size type
+            # arguments.  A genuine built-in generic
             # (`async`, `await`, collection/prelude combinators) has hand-written
             # codegen and an EMPTY `forall_vars_read`, so it never contributes a
             # unit var (`async(IO.print(...))`, a valid `Future<Unit>`, is not an
@@ -193,7 +199,7 @@ class CallsMixin:
                     tv for tv in fn_info.forall_vars
                     if tv in fn_info.forall_vars_read
                     and (b := mapping.get(tv)) is not None
-                    and base_type(b) == UNIT
+                    and erases_to_unit(b)
                 )
                 if not type_arg_conflict
                 else []
@@ -209,7 +215,7 @@ class CallsMixin:
                               "and compiles to no WASM value), so a generic "
                               "function specialised at Unit has a parameter "
                               "slot that refers to no runtime local — the "
-                              "monomorphized body cannot be generated.",
+                              "monomorphized function cannot be generated.",
                     fix="Do not pass a Unit-typed value where a generic "
                         "parameter is inferred. If you need to thread a unit "
                         "result through, wrap it in a boxed type (e.g. "

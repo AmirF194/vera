@@ -448,6 +448,27 @@ class FunctionCompilationMixin:
         except (AdtEqNotDerivableError, CodegenSkip) as exc:
             self._emit_contract_predicate_degradation(ctx, exc, decl)
             return None
+        except CodegenInvariantError as inv:  # #939: complete the #922 net.
+            # A `@T.n` read in a `requires(...)` clause of a generic
+            # instantiated at Unit hits the dangling-slot invariant in
+            # `_translate_slot_ref`; pre-#939 this precond `try` caught only
+            # `(AdtEqNotDerivableError, CodegenSkip)`, so it escaped `_compile_fn`
+            # as a raw traceback on a `check`-green program.  Mirror the body /
+            # closure / postcondition paths: surface ONE loud [E699] (a compiler
+            # bug — E206 should have rejected it at check).  MUST follow the
+            # `(AdtEqNotDerivableError, CodegenSkip)` catch above (subclass).
+            # Covered by tests/test_codegen_invariant_e699.py.
+            self._harvest_interp_inference_failures(ctx)
+            self._error(
+                inv.node if inv.node is not None else decl,
+                f"Internal compiler error while compiling '{decl.name}': "
+                f"{inv.msg}",
+                rationale="This is a codegen invariant violation — the type "
+                "checker should have rejected the input before it reached this "
+                "point.  Please file a bug report with the offending program.",
+                error_code="E699",
+            )
+            return None
 
         pre_instrs = refine_guard_instrs + precond_instrs
 
@@ -679,6 +700,30 @@ class FunctionCompilationMixin:
             post_instrs = self._compile_postconditions(ctx, decl, env, ret_wt)
         except (AdtEqNotDerivableError, CodegenSkip) as exc:
             self._emit_contract_predicate_degradation(ctx, exc, decl)
+            return None
+        except CodegenInvariantError as inv:  # #939: complete the net here too.
+            # The last of the four contract-lowering paths to gain the
+            # `CodegenInvariantError` net (body / closure had it pre-#939; the
+            # precondition path gained it in #939's first commit).  A `@T.n`
+            # read in an `ensures(...)` clause of a generic instantiated at a
+            # zero-size type (`Unit`, `Future<Unit>`) dangles in
+            # `_translate_slot_ref`; without this catch it escaped `_compile_fn`
+            # as a raw traceback on a `check`-green program (the #939-review
+            # crash).  E206's `erases_to_unit` broadening now rejects that at
+            # check, so this is the defensive backstop — but it MUST exist for
+            # symmetry, exactly as the body/closure/precondition catches do.
+            # MUST follow the `(AdtEqNotDerivableError, CodegenSkip)` catch
+            # above (subclass).  Covered by tests/test_codegen_invariant_e699.py.
+            self._harvest_interp_inference_failures(ctx)
+            self._error(
+                inv.node if inv.node is not None else decl,
+                f"Internal compiler error while compiling '{decl.name}': "
+                f"{inv.msg}",
+                rationale="This is a codegen invariant violation — the type "
+                "checker should have rejected the input before it reached this "
+                "point.  Please file a bug report with the offending program.",
+                error_code="E699",
+            )
             return None
 
         # Propagate resource / host-import flags from ``ctx`` to the module
