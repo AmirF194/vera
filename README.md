@@ -168,6 +168,7 @@ vera run file.vera --fn f -- 42           # call function f with argument 42
 vera compile --target browser file.vera   # emit browser bundle
 vera compile --target wasi-p2 file.vera   # emit a WASI Preview 2 component (experimental)
 vera run --target wasi-p2 file.vera       # execute under the built-in WASI 0.2 host
+vera serve file.vera                      # serve handle(Request -> Response) over HTTP (default :8000)
 vera compile --target wasi-p2 --world server file.vera  # wasi:http server component for wasmtime serve
 vera test file.vera                       # contract-driven testing via Z3 + WASM
 vera fmt file.vera                        # format to canonical form
@@ -220,7 +221,7 @@ cp /path/to/vera/SKILL.md ~/.claude/skills/vera-language/SKILL.md
 
 ## Project status
 
-Vera is in **active development** at v0.1.0 — its first minor release, with **no known bugs**: 1,900+ commits, 198 releases, 6,771 tests, 91% code coverage, 143 conformance programs, 37 examples, and a 14-chapter specification. See **[HISTORY.md](HISTORY.md)** for how the compiler was built.
+Vera is in **active development** at v0.1.0 — its first minor release, with **no known bugs**: 1,900+ commits, 198 releases, 6,772 tests, 91% code coverage, 143 conformance programs, 37 examples, and a 14-chapter specification. See **[HISTORY.md](HISTORY.md)** for how the compiler was built.
 
 The reference compiler — parser, AST, type checker, contract verifier (Z3), WASM code generator, module system, browser runtime, and runtime contract insertion — is working. The language specification is in draft across [14 chapters](spec/).
 

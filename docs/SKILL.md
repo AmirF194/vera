@@ -60,6 +60,8 @@ vera run file.vera --fn f -- 3.14       # Call function f with Float64 argument
 vera run file.vera --fn f -- true       # Call function f with Bool argument
 vera run file.vera --fn f -- "hello"    # Call function f with String argument
 vera run --json file.vera         # Run with JSON output
+vera serve file.vera              # Serve handle(Request -> Response) over HTTP (default :8000)
+vera serve --port 8080 file.vera  # Serve on a specific port
 vera test file.vera               # Contract-driven testing via Z3 + WASM
 vera test --json file.vera        # Test with JSON output
 vera test --trials 50 file.vera   # Limit trials per function (default 100)
