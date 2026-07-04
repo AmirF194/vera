@@ -1064,3 +1064,164 @@ def test_898r2_e619_message_has_no_sentinel_and_valid_fix() -> None:
         f"the E619 fix's annotation ({fixed_type}) must compile + derive, "
         f"got {_errors(probe)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# #923 — direct `==` on a NESTED-generic recursive ADT, type inferred from a
+# constructor operand.
+#
+#   data List<T> { Nil, Cons(T, List<T>) }
+#   Cons(Cons(1, Nil), Nil) == Cons(Cons(1, Nil), Nil)
+#
+# The `==` operand type is inferred from the outer `ConstructorCall`; the outer
+# constructor's type argument is recovered by inferring each field's type.  Pre-
+# #923 that recovery went only ONE level deep — the inner `Cons(1, Nil)` field
+# resolved to the BARE `List` (dropping its own `<Int>`), so the outer name was
+# reconstructed as `List<List>` instead of `List<List<Int>>`.  `List<List>`
+# carries a type argument (`List`) that is a bare generic-ADT name with no
+# argument of its own, which the codegen derivability path treats as a lost-type-
+# arg clone → routed to the scalar (pointer) lowering's sibling rejection →
+# spurious E613, even though `List<List<Int>>` is fully structurally Eq-derivable
+# (the checker's `_adt_satisfies_eq` recurses fully and accepts it).
+#
+# The fix recovers nested type arguments FULLY, so codegen accepts the composite
+# exactly as the checker does — while a genuinely non-Eq nested component
+# (`List<List<Array<Int>>>`) must STILL reject with E613 (no over-accept).
+# ---------------------------------------------------------------------------
+
+_NESTED_GENERIC_LIST = "public data List<T> { Nil, Cons(T, List<T>) }\n"
+
+
+def test_923_nested_generic_direct_eq_accepts_and_runs() -> None:
+    """#923: `Cons(Cons(1, Nil), Nil) == ...` (List<List<Int>>) derives + runs.
+
+    The outer operand infers `List<List<Int>>`; pre-#923 the inner field
+    recovered only the bare `List`, reconstructing `List<List>` and spuriously
+    E613-ing.  Full nested recovery accepts it exactly as the checker does.
+    """
+    same = (
+        _NESTED_GENERIC_LIST
+        + "public fn main(@Unit -> @Int) requires(true) ensures(true)\n"
+        "  effects(pure)\n"
+        "{ if Cons(Cons(1, Nil), Nil) == Cons(Cons(1, Nil), Nil)\n"
+        "  then { 1 } else { 0 } }\n"
+    )
+    diff = (
+        _NESTED_GENERIC_LIST
+        + "public fn main(@Unit -> @Int) requires(true) ensures(true)\n"
+        "  effects(pure)\n"
+        "{ if Cons(Cons(1, Nil), Nil) == Cons(Cons(2, Nil), Nil)\n"
+        "  then { 1 } else { 0 } }\n"
+    )
+    assert _errors(same) == [], f"List<List<Int>> `==` must derive: {_errors(same)}"
+    assert _run(same) == 1
+    assert _run(diff) == 0
+
+
+def test_923_three_level_nested_generic_direct_eq() -> None:
+    """#923: a 3-level nesting (List<List<List<Int>>>) also derives + runs.
+
+    Proves the recovery is genuinely recursive (not a hardcoded two-level
+    special case): the outer field recovers `List<List<Int>>`, whose own field
+    recovers `List<Int>`.
+    """
+    same = (
+        _NESTED_GENERIC_LIST
+        + "public fn main(@Unit -> @Int) requires(true) ensures(true)\n"
+        "  effects(pure)\n"
+        "{ if Cons(Cons(Cons(1, Nil), Nil), Nil)\n"
+        "     == Cons(Cons(Cons(1, Nil), Nil), Nil)\n"
+        "  then { 1 } else { 0 } }\n"
+    )
+    diff = (
+        _NESTED_GENERIC_LIST
+        + "public fn main(@Unit -> @Int) requires(true) ensures(true)\n"
+        "  effects(pure)\n"
+        "{ if Cons(Cons(Cons(1, Nil), Nil), Nil)\n"
+        "     == Cons(Cons(Cons(9, Nil), Nil), Nil)\n"
+        "  then { 1 } else { 0 } }\n"
+    )
+    assert _errors(same) == [], (
+        f"List<List<List<Int>>> `==` must derive: {_errors(same)}"
+    )
+    assert _run(same) == 1
+    assert _run(diff) == 0
+
+
+def test_923_nested_generic_eq_builtin_form() -> None:
+    """#923: the `eq(...)` builtin form of the nested-generic `==` also derives.
+
+    `eq(a, b)` desugars to the same structural comparison as `a == b`, so it
+    must accept the nested-generic operand identically.
+    """
+    same = (
+        _NESTED_GENERIC_LIST
+        + "public fn main(@Unit -> @Int) requires(true) ensures(true)\n"
+        "  effects(pure)\n"
+        "{ if eq(Cons(Cons(1, Nil), Nil), Cons(Cons(1, Nil), Nil))\n"
+        "  then { 1 } else { 0 } }\n"
+    )
+    diff = (
+        _NESTED_GENERIC_LIST
+        + "public fn main(@Unit -> @Int) requires(true) ensures(true)\n"
+        "  effects(pure)\n"
+        "{ if eq(Cons(Cons(1, Nil), Nil), Cons(Cons(2, Nil), Nil))\n"
+        "  then { 1 } else { 0 } }\n"
+    )
+    assert _errors(same) == [], (
+        f"eq(...) nested-generic must derive: {_errors(same)}"
+    )
+    assert _run(same) == 1
+    assert _run(diff) == 0
+
+
+def test_923_mixed_nested_generic_direct_eq() -> None:
+    """#923: a mixed nested-generic (Chain<Pair<Int>>) derives + runs by value.
+
+    A distinct outer/inner generic pairing (not the self-nested `List<List>`)
+    proves the recovery reconstructs `Chain<Pair<Int>>`, not `Chain<Pair>`.
+    """
+    decls = (
+        "public data Pair<T> { MkPair(T, T) }\n"
+        "public data Chain<T> { Empty, Link(T, Chain<T>) }\n"
+    )
+    same = (
+        decls
+        + "public fn main(@Unit -> @Int) requires(true) ensures(true)\n"
+        "  effects(pure)\n"
+        "{ if Link(MkPair(1, 2), Empty) == Link(MkPair(1, 2), Empty)\n"
+        "  then { 1 } else { 0 } }\n"
+    )
+    diff = (
+        decls
+        + "public fn main(@Unit -> @Int) requires(true) ensures(true)\n"
+        "  effects(pure)\n"
+        "{ if Link(MkPair(1, 2), Empty) == Link(MkPair(1, 9), Empty)\n"
+        "  then { 1 } else { 0 } }\n"
+    )
+    assert _errors(same) == [], (
+        f"Chain<Pair<Int>> `==` must derive: {_errors(same)}"
+    )
+    assert _run(same) == 1
+    assert _run(diff) == 0
+
+
+def test_923_nested_generic_non_eq_component_still_rejected_e613() -> None:
+    """#923 soundness gate: a genuinely non-Eq nested component STILL rejects.
+
+    `List<List<Array<Int>>>` — the innermost component is `Array<Int>`, which
+    has no Eq semantics — must be a clean E613, never over-accepted by the
+    fuller recovery, and never an E699 codegen-invariant leak.
+    """
+    source = (
+        _NESTED_GENERIC_LIST
+        + "public fn main(@Unit -> @Int) requires(true) ensures(true)\n"
+        "  effects(pure)\n"
+        "{ if Cons(Cons([1], Nil), Nil) == Cons(Cons([1], Nil), Nil)\n"
+        "  then { 1 } else { 0 } }\n"
+    )
+    codes = _errors(source)
+    assert "E613" in codes, (
+        f"non-Eq nested component (Array) must reject, got {codes}"
+    )
+    assert "E699" not in codes, f"invariant leak on rejection: {codes}"
