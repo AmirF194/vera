@@ -154,6 +154,25 @@ class OperatorsMixin:
                 if op == ast.BinOp.NEQ:
                     result.append("i32.eqz")
                 return result
+            # #927: String ORDERING (`<`/`>`/`<=`/`>=`).  A String is an
+            # (i32 ptr, i32 len) pair, not a scalar — falling through to the
+            # i64 comparison table below emitted `i64.lt_s` on the pointer
+            # word (both a wrong-order result AND an i32/i64 type mismatch that
+            # crashed WASM translation).  `String` IS orderable (spec §4.5,
+            # lexicographic), so lower to a three-way `$cmp_String` helper
+            # (byte-wise, proper-prefix-is-less — matching Z3's `StringSort`
+            # ordering the verifier already uses, so verify ↔ run agree) and
+            # test its {-1,0,1} result against zero with the scalar i32 op.
+            # `compare(a, b)` on strings reaches here too: Pass 1.6 rewrites it
+            # to `a < b ? Less : (a == b ? Equal : Greater)` (#874).
+            if (ltype == "i32_pair" and rtype == "i32_pair"
+                    and op in (ast.BinOp.LT, ast.BinOp.GT,
+                               ast.BinOp.LE, ast.BinOp.GE)):
+                self._request_string_cmp_helper()
+                zero_cmp = self._CMP_OPS[op].replace("i64.", "i32.")
+                return left + right + [
+                    "call $cmp_String", "i32.const 0", zero_cmp,
+                ]
             if ltype == "i32" and rtype == "i32":
                 # Byte operands use unsigned i32 comparison
                 lv = self._infer_vera_type(expr.left)
@@ -780,6 +799,112 @@ class OperatorsMixin:
         if fn_name in self._adt_eq_helpers:
             return
         self._adt_eq_helpers[fn_name] = self._emit_string_eq_fn()
+
+    def _request_string_cmp_helper(self) -> None:
+        """Ensure the standalone ``$cmp_String`` three-way ordering helper (#927)."""
+        fn_name = "$cmp_String"
+        if fn_name in self._adt_eq_helpers:
+            return
+        self._adt_eq_helpers[fn_name] = self._emit_string_cmp_fn()
+
+    @staticmethod
+    def _emit_string_cmp_fn() -> str:
+        """Standalone String three-way lexicographic-ordering helper (#927).
+
+        ``(param $p1 i32)(param $l1 i32)(param $p2 i32)(param $l2 i32)`` →
+        i32 in {-1, 0, 1}: ``-1`` if s1 < s2, ``0`` if equal, ``1`` if s1 > s2.
+
+        Byte-wise comparison over ``min(l1, l2)`` bytes (UTF-8 preserves
+        code-point order under unsigned byte comparison); on the first
+        differing byte the smaller byte's string is less.  If one string is a
+        proper prefix of the other, the shorter is less.  This matches Z3's
+        ``StringSort`` ordering (proper-prefix-is-less, byte order), which the
+        verifier already uses for String ``<`` — so ``vera verify`` and
+        ``vera run`` agree on String ordering.
+        """
+        return (
+            "  (func $cmp_String "
+            "(param $p1 i32) (param $l1 i32) (param $p2 i32) (param $l2 i32) "
+            "(result i32)\n"
+            "    (local $idx i32)\n"
+            "    (local $min i32)\n"
+            "    (local $b1 i32)\n"
+            "    (local $b2 i32)\n"
+            # min = l1 < l2 ? l1 : l2
+            "    local.get $l1\n"
+            "    local.get $l2\n"
+            "    i32.lt_u\n"
+            "    if (result i32)\n"
+            "      local.get $l1\n"
+            "    else\n"
+            "      local.get $l2\n"
+            "    end\n"
+            "    local.set $min\n"
+            "    i32.const 0\n"
+            "    local.set $idx\n"
+            "    block $done (result i32)\n"
+            "      loop $lp\n"
+            # if idx >= min, exit the byte loop → compare lengths
+            "        local.get $idx\n"
+            "        local.get $min\n"
+            "        i32.ge_u\n"
+            "        if\n"
+            # lengths: l1 < l2 → -1 ; l1 > l2 → 1 ; equal → 0
+            "          local.get $l1\n"
+            "          local.get $l2\n"
+            "          i32.lt_u\n"
+            "          if\n"
+            "            i32.const -1\n"
+            "            br $done\n"
+            "          end\n"
+            "          local.get $l1\n"
+            "          local.get $l2\n"
+            "          i32.gt_u\n"
+            "          if\n"
+            "            i32.const 1\n"
+            "            br $done\n"
+            "          end\n"
+            "          i32.const 0\n"
+            "          br $done\n"
+            "        end\n"
+            # b1 = p1[idx], b2 = p2[idx]
+            "        local.get $p1\n"
+            "        local.get $idx\n"
+            "        i32.add\n"
+            "        i32.load8_u\n"
+            "        local.set $b1\n"
+            "        local.get $p2\n"
+            "        local.get $idx\n"
+            "        i32.add\n"
+            "        i32.load8_u\n"
+            "        local.set $b2\n"
+            # if b1 < b2 → -1
+            "        local.get $b1\n"
+            "        local.get $b2\n"
+            "        i32.lt_u\n"
+            "        if\n"
+            "          i32.const -1\n"
+            "          br $done\n"
+            "        end\n"
+            # if b1 > b2 → 1
+            "        local.get $b1\n"
+            "        local.get $b2\n"
+            "        i32.gt_u\n"
+            "        if\n"
+            "          i32.const 1\n"
+            "          br $done\n"
+            "        end\n"
+            # bytes equal → advance
+            "        local.get $idx\n"
+            "        i32.const 1\n"
+            "        i32.add\n"
+            "        local.set $idx\n"
+            "        br $lp\n"
+            "      end\n"
+            "      i32.const 0\n"
+            "    end\n"
+            "  )"
+        )
 
     @staticmethod
     def _emit_string_eq_fn() -> str:

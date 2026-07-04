@@ -16,6 +16,7 @@ from vera.environment import (
     OpInfo,
 )
 from vera.types import (
+    ORDERABLE_TYPES,
     UNIT,
     AdtType,
     ConcreteEffectRow,
@@ -700,6 +701,58 @@ class CallsMixin:
                     spec_ref='Chapter 9, Section 9.8 "Abilities"',
                     error_code="E241",
                 )
+
+        # #921: `Ord`'s `compare` is the ability spelling of the three-way
+        # `Ordering` if-chain `a < b ? Less : (a == b ? Equal : Greater)`
+        # (§6.4).  Ordering (`<`/`>`/`<=`/`>=`) is defined ONLY on the
+        # orderable primitives — Int, Nat, Float64, Byte, String (§4.5) — and
+        # `Ord`'s "Satisfied by:" set is exactly those (§9.8.1); ADTs are NOT
+        # Ord-derivable in v0.1.0 (unlike Eq/Hash/Show, whose "Satisfied by:"
+        # clauses list composite types).  Without this gate, `compare` on a
+        # user ADT type-checks (its `op` param is a bare type variable), then
+        # codegen lowers `<` to a scalar `i32.lt_s` on the boxed heap pointers
+        # — a SILENT WRONG RESULT — and the verifier raw-`<`es two Z3
+        # datatypes and crashes.  Rejecting here, the single gate both codegen
+        # and the verifier trust, keeps all three in agreement (checkability
+        # over silent miscompilation; DESIGN.md §"Checkability").  The direct
+        # `MkBox(1) < MkBox(2)` form is already rejected with E143.
+        if op_info.parent_effect == "Ord":
+            for i, arg_ty in enumerate(arg_types):
+                if arg_ty is None or isinstance(arg_ty, UnknownType):
+                    continue
+                arg_base = base_type(arg_ty)
+                # A bare type variable is deferred: inside a
+                # `forall<T where Ord<T>>` body the `Ord<T>` constraint
+                # promises orderability, and the monomorphizer re-checks each
+                # concrete instantiation of the clone (whose slots are the
+                # concrete type) — an ADT instantiation trips E242 there, and a
+                # non-Ord instantiation trips the constraint gate (E613).
+                # Rejecting the TypeVar here would break the legitimate
+                # constrained-generic form (ch09_abilities `cmp_sign`).
+                if isinstance(arg_base, TypeVar):
+                    continue
+                if arg_base not in ORDERABLE_TYPES:
+                    self._error(
+                        args[i],
+                        f"'{op_info.name}' requires an orderable operand, "
+                        f"found {pretty_type(arg_ty)}.",
+                        rationale=(
+                            "The Ord ability's 'compare' operation is the "
+                            "three-way spelling of the ordering operators "
+                            "(<, >, <=, >=), which are defined only on the "
+                            "orderable types — Int, Nat, Float64, Byte, and "
+                            "String. A user-defined ADT is not Ord-derivable, "
+                            "so it has no total order to compare by."
+                        ),
+                        fix=(
+                            f"Apply '{op_info.name}' to an orderable value "
+                            "(e.g. Int, Nat, Float64, Byte, String); reduce a "
+                            "non-orderable type to an orderable key first, or "
+                            "use 'eq' for structural equality on an ADT."
+                        ),
+                        spec_ref='Chapter 9, Section 9.8.1 "Built-in Abilities"',
+                        error_code="E242",
+                    )
 
         return return_type
 

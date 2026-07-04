@@ -1056,13 +1056,26 @@ class SmtContext:
                     return None
                 return z3.Not(eq)
             return left != right
-        if op == ast.BinOp.LT:
-            return left < right
-        if op == ast.BinOp.GT:
-            return left > right
-        if op == ast.BinOp.LE:
-            return left <= right
-        if op == ast.BinOp.GE:
+        if op in (ast.BinOp.LT, ast.BinOp.GT, ast.BinOp.LE, ast.BinOp.GE):
+            # #921 defense-in-depth: ordering (`<`/`>`/`<=`/`>=`) is defined
+            # only on the orderable primitives (§4.5); an ADT operand is a Z3
+            # `DatatypeRef`, on which Python's `<` raises `TypeError` — a hard
+            # traceback out of the verifier.  The checker now rejects
+            # `compare` / `<` on a non-orderable type at check time (E242 /
+            # E143), so this is unreachable on well-typed input reached through
+            # `vera verify`; but the direct `verify()` API skips that gate, so
+            # degrade a datatype-sorted ordering to Tier 3 rather than crash.
+            # (EQ/NEQ route datatypes through `_datatype_value_eq`; ordering
+            # has no structural counterpart, so there is nothing to translate.)
+            if (isinstance(left.sort(), z3.DatatypeSortRef)
+                    or isinstance(right.sort(), z3.DatatypeSortRef)):
+                return None
+            if op == ast.BinOp.LT:
+                return left < right
+            if op == ast.BinOp.GT:
+                return left > right
+            if op == ast.BinOp.LE:
+                return left <= right
             return left >= right
         # Boolean
         if op == ast.BinOp.AND:

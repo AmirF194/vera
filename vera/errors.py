@@ -510,6 +510,7 @@ ERROR_CODES: dict[str, str] = {
     "E233": "Function not found in module",
     "E240": "Ability operation wrong argument count",
     "E241": "Ability operation argument type mismatch",
+    "E242": "Ord ability operation on non-orderable type",
     # E3xx — Type Checker: Control Flow
     "E300": "If condition not Bool",
     "E301": "If branches incompatible types",
