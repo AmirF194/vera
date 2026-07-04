@@ -35,6 +35,12 @@ let stderrBuf = '';    // Captured IO.stderr output (#463)
 let lastViolation = ''; // Last contract violation message
 let lastOverflow = false; // #808: #798 integer-overflow guard fired this call
 const stateCells = {}; // State<T> stacks: { TypeName: [value, ...] } — top is [-1]
+// #920: the WASM value type (`i32`/`i64`/`f64`) of each State<T> cell, keyed
+// by the mangled type suffix — the SAME key as `stateCells`.  Populated from
+// the module's own `state_*` import declarations in `buildImportObject`, this
+// is the authoritative scalar-vs-pointer distinction the default cell value
+// must respect (see `stateDefaultFor`).
+const stateWasmTypes = {};
 let stdinQueue = [];   // Pre-queued input lines for IO.read_line
 let cliArgs = [];      // Command-line arguments for IO.args
 let envVars = {};      // Environment variables for IO.get_env
@@ -1321,13 +1327,160 @@ const REGEX_BINDINGS = {
   regex_replace: hostRegexReplace,
 };
 
-function buildImportObject(module) {
+// #920: WASM value types, as encoded in the type section.
+const _WASM_I32 = 0x7f;
+const _WASM_I64 = 0x7e;
+const _WASM_F64 = 0x7c;
+
+/**
+ * The correct initial value for a fresh State<T> cell, keyed on the WASM value
+ * type of the cell's `state_*` host imports (#920).
+ *
+ * Node/browser WASM boundary coercion is strict and type-specific: an `i64`
+ * result MUST be a JS BigInt (a plain number throws), while `i32`/`f64` results
+ * MUST be plain numbers (a BigInt throws).  So the default is NOT "float vs
+ * everything else" — it is exactly what `vera/runtime/state.py`'s
+ * `_DEFAULT_STATE[wasm_t]` picks natively:
+ *   - f64  → 0.0   (bare `State<Float64>`)
+ *   - i64  → 0n    (bare `State<Int>` / `State<Nat>`)
+ *   - i32  → 0     (heap pointers: every composite/ADT `State<T>`, and
+ *                   `State<Bool>` / `State<Byte>`) — a NULL pointer, as number.
+ * The pre-#920 `key.includes('Float')` heuristic mis-seeded composite pointer
+ * cells whose mangled suffix lacked `Float` (e.g. `State<Option<Int>>`) with a
+ * BigInt, which threw on the `i32` import the moment the default was read.
+ *
+ * @param {string} key Mangled type suffix (the `stateCells` / `stateWasmTypes`
+ *   key), e.g. `Int`, `Tuple_LFloat64_CInt_R`.
+ * @returns {number|bigint}
+ */
+function stateDefaultFor(key) {
+  const wt = stateWasmTypes[key];
+  if (wt === _WASM_F64) return 0.0;
+  if (wt === _WASM_I64) return BigInt(0);
+  // i32 (heap pointer / Bool / Byte) — and the defensive fallback for a key
+  // whose type was never recorded — take the plain-number null/zero default.
+  return 0;
+}
+
+/**
+ * Record the WASM value type of every `state_*` host import into
+ * `stateWasmTypes`, keyed by mangled type suffix (#920).
+ *
+ * The compiled `WebAssembly.Module` does not expose function signatures via
+ * `WebAssembly.Module.imports()` (only `{module, name, kind}`), so this reads
+ * the type + import sections of the raw module bytes directly.  Each
+ * `state_get_<suffix>` import is `() -> wt` and `state_put_<suffix>` is
+ * `(wt) -> ()`; both carry the same `wt`, which is the authoritative
+ * scalar-vs-pointer type the cell default must match.
+ *
+ * A parse failure (truncated / unexpected bytes) leaves `stateWasmTypes`
+ * as-is; unrecorded keys then fall back to the `i32`/number default in
+ * `stateDefaultFor`, which is correct for every pointer-typed composite.
+ *
+ * @param {Uint8Array} bytes Raw WASM module bytes.
+ */
+function recordStateWasmTypes(bytes) {
+  try {
+    let off = 8; // skip 4-byte magic + 4-byte version
+
+    const readU32 = () => {
+      let result = 0, shift = 0, byte;
+      do {
+        byte = bytes[off++];
+        result |= (byte & 0x7f) << shift;
+        shift += 7;
+      } while (byte & 0x80);
+      return result >>> 0;
+    };
+
+    // funcTypes[i] = the sole result/param value type of type i, or null if it
+    // is not a single-value 0->1 / 1->0 signature (state imports only use those).
+    const funcTypes = [];
+    const readValType = () => bytes[off++]; // single-byte numeric value type
+
+    while (off < bytes.byteLength) {
+      const sectionId = bytes[off++];
+      const sectionLen = readU32();
+      const sectionEnd = off + sectionLen;
+      if (sectionId === 1) {
+        // Type section
+        const count = readU32();
+        for (let i = 0; i < count; i++) {
+          const form = bytes[off++]; // 0x60 = func
+          if (form !== 0x60) { off = sectionEnd; break; }
+          const nParams = readU32();
+          const params = [];
+          for (let p = 0; p < nParams; p++) params.push(readValType());
+          const nResults = readU32();
+          const results = [];
+          for (let r = 0; r < nResults; r++) results.push(readValType());
+          // state_get: 0 params, 1 result; state_put: 1 param, 0 results.
+          if (nParams === 0 && nResults === 1) funcTypes.push(results[0]);
+          else if (nParams === 1 && nResults === 0) funcTypes.push(params[0]);
+          else funcTypes.push(null);
+        }
+      } else if (sectionId === 2) {
+        // Import section
+        const count = readU32();
+        for (let i = 0; i < count; i++) {
+          const modLen = readU32();
+          const modName = decoder.decode(bytes.subarray(off, off + modLen));
+          off += modLen;
+          const nmLen = readU32();
+          const name = decoder.decode(bytes.subarray(off, off + nmLen));
+          off += nmLen;
+          const kind = bytes[off++];
+          if (kind === 0x00) {
+            // function import: typeidx follows
+            const typeIdx = readU32();
+            if (modName === 'vera') {
+              const m = name.match(/^state_(?:get|put)_(.+)$/);
+              if (m && funcTypes[typeIdx] != null) {
+                stateWasmTypes[m[1]] = funcTypes[typeIdx];
+              }
+            }
+          } else if (kind === 0x01) {
+            // table: reftype + limits
+            off++; // reftype
+            const flags = bytes[off++];
+            readU32(); // min
+            if (flags & 0x01) readU32(); // max
+          } else if (kind === 0x02) {
+            // memory: limits
+            const flags = bytes[off++];
+            readU32(); // min
+            if (flags & 0x01) readU32(); // max
+          } else if (kind === 0x03) {
+            // global: valtype + mutability
+            off++; // valtype
+            off++; // mutability
+          } else if (kind === 0x04) {
+            // tag: attribute + typeidx
+            off++; // attribute
+            readU32(); // typeidx
+          }
+        }
+        // Imports parsed — no later section matters for state types.
+        return;
+      }
+      off = sectionEnd;
+    }
+  } catch {
+    // Leave stateWasmTypes as-is; stateDefaultFor's i32 fallback is safe.
+  }
+}
+
+function buildImportObject(module, moduleBytes) {
   const imports = { vera: {} };
   const needed = new Set();
 
   for (const imp of WebAssembly.Module.imports(module)) {
     if (imp.module === 'vera') needed.add(imp.name);
   }
+
+  // #920: learn each State<T> cell's WASM value type from the module's own
+  // import declarations, so the default cell value matches the native host.
+  if (moduleBytes) recordStateWasmTypes(moduleBytes);
 
   // IO bindings
   for (const [name, fn] of Object.entries(IO_BINDINGS)) {
@@ -1351,7 +1504,7 @@ function buildImportObject(module) {
     if (getMatch) {
       const key = getMatch[1];
       if (!(key in stateCells)) {
-        stateCells[key] = [key.includes('Float') ? 0.0 : BigInt(0)];
+        stateCells[key] = [stateDefaultFor(key)];
       }
       imports.vera[name] = () => stateCells[key][stateCells[key].length - 1];
     }
@@ -1359,14 +1512,14 @@ function buildImportObject(module) {
     if (putMatch) {
       const key = putMatch[1];
       if (!(key in stateCells)) {
-        stateCells[key] = [key.includes('Float') ? 0.0 : BigInt(0)];
+        stateCells[key] = [stateDefaultFor(key)];
       }
       imports.vera[name] = (val) => { stateCells[key][stateCells[key].length - 1] = val; };
     }
     const pushMatch = name.match(/^state_push_(.+)$/);
     if (pushMatch) {
       const key = pushMatch[1];
-      const def = key.includes('Float') ? 0.0 : BigInt(0);
+      const def = stateDefaultFor(key);
       if (!(key in stateCells)) {
         stateCells[key] = [def];
       }
@@ -1376,7 +1529,7 @@ function buildImportObject(module) {
     if (popMatch) {
       const key = popMatch[1];
       if (!(key in stateCells)) {
-        stateCells[key] = [key.includes('Float') ? 0.0 : BigInt(0)];
+        stateCells[key] = [stateDefaultFor(key)];
       }
       imports.vera[name] = () => { if (stateCells[key].length > 1) stateCells[key].pop(); };
     }
@@ -2989,18 +3142,23 @@ export async function init(wasmSource, options = {}) {
   if (options.env) envVars = { ...options.env };
 
   let module;
+  let moduleBytes; // #920: raw bytes, for state-import type reflection
   if (wasmSource instanceof ArrayBuffer || ArrayBuffer.isView(wasmSource)) {
     // Node.js path: raw bytes
+    moduleBytes = ArrayBuffer.isView(wasmSource)
+      ? new Uint8Array(wasmSource.buffer, wasmSource.byteOffset, wasmSource.byteLength)
+      : new Uint8Array(wasmSource);
     module = await WebAssembly.compile(wasmSource);
   } else {
     // Browser path: URL or Response
     const url = wasmSource ?? new URL('./module.wasm', import.meta.url);
     const response = url instanceof Response ? url : await fetch(url);
     const bytes = await response.arrayBuffer();
+    moduleBytes = new Uint8Array(bytes);
     module = await WebAssembly.compile(bytes);
   }
 
-  const importObject = buildImportObject(module);
+  const importObject = buildImportObject(module, moduleBytes);
   const instance = await WebAssembly.instantiate(module, importObject);
   wasm = instance.exports;
 }
@@ -3081,7 +3239,7 @@ export function getState() {
 /** Reset all State<T> stacks to a single default cell. */
 export function resetState() {
   for (const key of Object.keys(stateCells)) {
-    stateCells[key] = [key.includes('Float') ? 0.0 : BigInt(0)];
+    stateCells[key] = [stateDefaultFor(key)];
   }
 }
 

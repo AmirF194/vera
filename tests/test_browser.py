@@ -88,6 +88,24 @@ def _compile_vera(source: str, tmp_path: Path) -> tuple[Path, list[str]]:
     return wasm_path, result.exports
 
 
+def _compile_state_default(source: str, tmp_path: Path) -> tuple[Path, Any]:
+    """Compile inline Vera source, returning (wasm_path, codegen result).
+
+    Unlike :func:`_compile_vera` (which returns the export list), this keeps the
+    full codegen ``result`` so :func:`_run_python` can execute it — used by the
+    #920 State-default parity tests.
+    """
+    vera_file = tmp_path / "state_default.vera"
+    vera_file.write_text(source, encoding="utf-8")
+    tree = parse_file(str(vera_file))
+    ast = transform(tree)
+    result = codegen_compile(ast, source=source, file=str(vera_file))
+    assert result.ok, f"Compile errors: {result.diagnostics}"
+    wasm_path = tmp_path / "state_default.wasm"
+    wasm_path.write_bytes(result.wasm_bytes)
+    return wasm_path, result
+
+
 def _compile_file(path: Path, tmp_path: Path) -> tuple[Path, Any]:
     """Compile a .vera file, returning (wasm_path, codegen result)."""
     source = path.read_text(encoding="utf-8")
@@ -1663,6 +1681,154 @@ public fn main(@Unit -> @Int)
 
         assert py_result.value == 9
         assert node_result["value"] == py_result.value
+
+    def test_state_composite_default_read_parity(self, tmp_path: Path) -> None:
+        """#920: a composite `State<Tuple<Float64, Int>>` READ before any
+        `put` must seed the same default cell in both runtimes.
+
+        The cell is an i32 heap pointer, so its native default (`state.py`)
+        is the null pointer 0 (a plain integer).  The pre-#920 browser default
+        keyed on ``key.includes('Float')`` — the mangled composite suffix
+        ``Tuple_LFloat64_CInt_R`` matches ``Float`` *inside* the composite name
+        — accidentally seeding it with the JS float ``0.0``.  That happened to
+        coerce onto the i32 import here, so #920 fixes this in lockstep with the
+        genuinely-throwing ``Option<Int>`` sibling below by keying the default
+        on the import's actual WASM value type, not a substring.  Either way,
+        the browser value must equal the native (wasmtime) value.
+        """
+        source = """\
+public fn read_default(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<State<Tuple<Float64, Int>>>)
+{
+  let @Tuple<Float64, Int> = Tuple(9.0, 7);
+  match get(()) {
+    Tuple(@Float64, @Int) -> @Int.0
+  }
+}
+"""
+        wasm_path, result = _compile_state_default(source, tmp_path)
+
+        py_result = _run_python(result, fn_name="read_default")
+        node_result = _run_node(wasm_path, fn="read_default")
+
+        assert node_result["error"] is None, (
+            f"Node errored reading the composite State default: "
+            f"{node_result['error']!r}"
+        )
+        assert node_result["value"] == py_result.value, (
+            "Composite State<Tuple<Float64, Int>> default diverges:\n"
+            f"  Python: {py_result.value!r}\n"
+            f"  Node:   {node_result['value']!r}"
+        )
+
+    def test_state_option_default_read_parity(self, tmp_path: Path) -> None:
+        """#920: a composite `State<Option<Int>>` READ before any `put` — the
+        mangled suffix ``Option_LInt_R`` contains no ``Float`` substring, so the
+        pre-#920 browser default seeded it with ``BigInt(0)``.  A JS BigInt
+        cannot cross the i32 pointer import ("Cannot convert a BigInt value to a
+        number"), so the base runtime *threw* the moment the default was read,
+        while native (wasmtime) returned the null-pointer value.  After #920 the
+        default is the plain-number null pointer 0 and both runtimes agree.
+        """
+        source = """\
+public fn read_default(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<State<Option<Int>>>)
+{
+  let @Option<Int> = Some(7);
+  option_unwrap_or(get(()), 99)
+}
+"""
+        wasm_path, result = _compile_state_default(source, tmp_path)
+
+        py_result = _run_python(result, fn_name="read_default")
+        node_result = _run_node(wasm_path, fn="read_default")
+
+        assert node_result["error"] is None, (
+            f"Node errored reading the composite State default: "
+            f"{node_result['error']!r}"
+        )
+        assert node_result["value"] == py_result.value, (
+            "Composite State<Option<Int>> default diverges:\n"
+            f"  Python: {py_result.value!r}\n"
+            f"  Node:   {node_result['value']!r}"
+        )
+
+    def test_state_adt_default_read_parity(self, tmp_path: Path) -> None:
+        """#920: a user-ADT `State<Box>` READ before any `put`.  A bare ADT
+        name mangles to itself (`state_get_Box`, no ``Float`` substring), so the
+        pre-#920 browser default seeded it with ``BigInt(0)`` — which threw on
+        the i32 heap-pointer import exactly like ``State<Option<Int>>``.  Guards
+        the whole pointer-typed-`State` class (not just generic composites)
+        against the substring heuristic; after #920 both runtimes return the
+        null-pointer value.
+        """
+        source = """\
+private data Box {
+  Full(Int),
+  Empty
+}
+
+public fn read_default(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<State<Box>>)
+{
+  let @Box = Full(3);
+  match get(()) {
+    Full(@Int) -> @Int.0,
+    Empty -> 0
+  }
+}
+"""
+        wasm_path, result = _compile_state_default(source, tmp_path)
+
+        py_result = _run_python(result, fn_name="read_default")
+        node_result = _run_node(wasm_path, fn="read_default")
+
+        assert node_result["error"] is None, (
+            f"Node errored reading the ADT State default: "
+            f"{node_result['error']!r}"
+        )
+        assert node_result["value"] == py_result.value, (
+            "State<Box> ADT default diverges:\n"
+            f"  Python: {py_result.value!r}\n"
+            f"  Node:   {node_result['value']!r}"
+        )
+
+    def test_state_bare_float64_default_read_parity(self, tmp_path: Path) -> None:
+        """#920 regression: a BARE `State<Float64>` READ before any `put` must
+        STILL seed the JS float default ``0.0`` (its imports are ``f64``, which
+        requires a plain-number 0.0 — a BigInt would throw).  This guards
+        against over-correcting the composite fix into breaking primitive
+        Float64 state.
+        """
+        source = """\
+public fn read_default(@Unit -> @Float64)
+  requires(true)
+  ensures(true)
+  effects(<State<Float64>>)
+{
+  get(())
+}
+"""
+        wasm_path, result = _compile_state_default(source, tmp_path)
+
+        py_result = _run_python(result, fn_name="read_default")
+        node_result = _run_node(wasm_path, fn="read_default")
+
+        assert node_result["error"] is None, (
+            f"Node errored reading the bare Float64 State default: "
+            f"{node_result['error']!r}"
+        )
+        assert node_result["value"] == py_result.value, (
+            "Bare State<Float64> default diverges:\n"
+            f"  Python: {py_result.value!r}\n"
+            f"  Node:   {node_result['value']!r}"
+        )
 
 
 # =====================================================================
