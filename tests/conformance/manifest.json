@@ -615,6 +615,21 @@
     ]
   },
   {
+    "id": "ch04_nested_option_ctor",
+    "file": "ch04_nested_option_ctor.vera",
+    "chapter": 4,
+    "title": "Nested same-ADT constructor sort selection (#918)",
+    "level": "verify",
+    "spec_ref": "Section 4.4",
+    "features": [
+      "nested_constructor",
+      "option",
+      "constructor_expr",
+      "nested_adt_sort",
+      "tier1_discharge"
+    ]
+  },
+  {
     "id": "ch05_basic_function",
     "file": "ch05_basic_function.vera",
     "chapter": 5,

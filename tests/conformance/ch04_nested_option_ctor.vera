@@ -1,0 +1,25 @@
+-- Conformance: nested same-ADT constructor sort selection (Chapter 4)
+-- Tests: self-nested constructor literal (Some(Some(x))), nested constructor
+-- pattern matching, Tier 1 proof of a non-trivial postcondition over a
+-- nested Option<Option<Int>> value. Regresses #918: the verifier's
+-- constructor-sort lookup must select the full Option<Option<Int>>
+-- instantiation for the outer Some, not whichever Option<...> sort happens
+-- to be cached first.
+private fn wrap(@Int -> @Option<Option<Int>>)
+  requires(true)
+  ensures(@Option<Option<Int>>.result == Some(Some(@Int.0)))
+  effects(pure)
+{
+  Some(Some(@Int.0))
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  match wrap(7) {
+    Some(@Option<Int>) -> match @Option<Int>.0 { Some(@Int) -> @Int.0, None -> 0 },
+    None -> 0
+  }
+}
