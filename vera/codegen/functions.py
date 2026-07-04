@@ -488,6 +488,30 @@ class FunctionCompilationMixin:
                 error_code="E602",
             )
             return None
+        except RecursionError:
+            # #933 belt-and-suspenders: the structural derived-helper
+            # generators (show/hash/eq) bound their DISTINCT-type descent on
+            # `DERIVED_HELPER_DEPTH_CAP` (see vera/skip.py), which fires on a
+            # non-uniform ADT like `Box<Box<T>>` long before the interpreter's
+            # recursion limit.  This catch is the last-resort backstop for a
+            # future generator whose per-level frame cost outruns that cap: a
+            # check-green program must NEVER surface a raw Python traceback
+            # (DESIGN.md principle 1).  Degrade to the same clean [E602] skip a
+            # structurally-unsupported body already takes — the function is
+            # dropped with a loud diagnostic, not a crash.
+            self._harvest_interp_inference_failures(ctx)
+            self._warning(
+                decl,
+                f"Function '{decl.name}' body exceeded the codegen recursion "
+                f"bound (a deeply / non-uniformly recursive type) — "
+                f"function skipped.",
+                rationale="Rendering / comparing a polymorphically-recursive "
+                "type (e.g. `Box<T>` with a `Box<Box<T>>` field) would expand "
+                "without bound at compile time. This function will not appear "
+                "in the compiled output.",
+                error_code="E602",
+            )
+            return None
         except AdtEqNotDerivableError as nde:
             # #773 / PR #870 review: a direct `==` on an ADT whose Eq is not
             # structurally derivable — a USER error, not a compiler bug.
@@ -692,6 +716,9 @@ class FunctionCompilationMixin:
         # #773: structural-Eq helper functions generated while lowering this
         # body (deduped by name across the whole module at assembly).
         self._adt_eq_helpers.update(ctx._adt_eq_helpers)
+        # #924: recursive show/hash helper functions generated while lowering
+        # this body (deduped by name across the whole module at assembly).
+        self._show_hash_helpers.update(ctx._show_hash_helpers)
 
         # #517 — tail-call optimization fallback for functions whose
         # bodies are followed by post-body work that must run before

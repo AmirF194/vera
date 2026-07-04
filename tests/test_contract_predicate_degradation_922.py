@@ -21,7 +21,7 @@ predicate sites were left unguarded:
 
   3. ``ensures`` (postcondition) catch too narrow: the ``_compile_postconditions``
      backstop caught only ``AdtEqNotDerivableError``, NOT ``CodegenSkip`` — so
-     ``ensures(hash(recursiveADT) == 0)`` (or ``show``) escaped as an uncaught
+     ``ensures(hash(unsupportedType) == 0)`` (or ``show``) escaped as an uncaught
      ``CodegenSkip``.
 
 Fix: every contract-predicate ``translate_expr`` call site is guarded by the
@@ -92,12 +92,17 @@ def _diag_codes(source: str) -> list[str]:
 
 # Program bodies -------------------------------------------------------
 
-# A recursive ADT — ``hash`` / ``show`` is not supported for it in codegen, so a
-# ``hash(...)`` in a contract predicate raises ``CodegenSkip`` (the #912
+# ``hash`` is not supported for ``Decimal`` (a host-handle type) in codegen, so a
+# ``hash(@Decimal.0)`` in a contract predicate raises ``CodegenSkip`` (the #912
 # postcondition backstop caught only ``AdtEqNotDerivableError``, so it escaped).
-_LIST = """
-private data List<T> {{ Nil, Cons(T, List<T>) }}
-private fn h(@List<Int> -> @Int)
+#
+# (This was originally a directly-recursive ADT (`List<Int>`), but #924 made
+# recursive-ADT ``hash`` / ``show`` SUPPORTED via a generated recursive helper —
+# so a still-unsupported operand is needed to keep exercising the ``CodegenSkip``
+# contract-predicate degradation.  Any type without a codegen ``hash`` works;
+# ``Decimal`` is the smallest.)
+_HASH_SKIP = """
+private fn h(@Decimal -> @Int)
   requires({requires})
   ensures({ensures})
   effects(pure)
@@ -109,7 +114,7 @@ public fn main(@Unit -> @Int)
   ensures(true)
   effects(pure)
 {{
-  h(Cons(1, Nil))
+  h(decimal_from_int(1))
 }}
 """
 
@@ -152,22 +157,21 @@ class TestContractPredicateDegradation922:
         codes = _error_codes(src)
         assert "E613" in codes, f"expected E613 (no traceback), got {codes}"
 
-    def test_postcondition_hash_recursive_adt_is_clean_e602(self) -> None:
+    def test_postcondition_hash_unsupported_is_clean_e602(self) -> None:
         # Site 3 — `ensures` with a `CodegenSkip` (not `AdtEqNotDerivableError`):
-        # `hash(@List<Int>.0)` on a recursive ADT is unsupported in codegen and
-        # raises `CodegenSkip`.  Pre-fix the postcondition backstop caught only
-        # `AdtEqNotDerivableError`, so this escaped as an uncaught `CodegenSkip`.
-        # Now: a clean E602, function dropped.
-        src = _LIST.format(requires="true", ensures="hash(@List<Int>.0) == 0")
+        # `hash(@Decimal.0)` is unsupported in codegen and raises `CodegenSkip`.
+        # Pre-fix the postcondition backstop caught only `AdtEqNotDerivableError`,
+        # so this escaped as an uncaught `CodegenSkip`.  Now: a clean E602.
+        src = _HASH_SKIP.format(requires="true", ensures="hash(@Decimal.0) == 0")
         codes = _diag_codes(src)
         assert "E602" in codes, f"expected E602 (no traceback), got {codes}"
 
-    def test_precondition_hash_recursive_adt_is_clean_e602(self) -> None:
+    def test_precondition_hash_unsupported_is_clean_e602(self) -> None:
         # Site 1 with the `CodegenSkip` flavour (not just `AdtEqNotDerivableError`)
-        # — `hash(...)` on a recursive ADT in a `requires`.  Confirms the
-        # broadened precondition catch covers `CodegenSkip`, not only the ADT-eq
-        # error.  Pre-fix: uncaught `CodegenSkip` traceback.
-        src = _LIST.format(requires="hash(@List<Int>.0) == 0", ensures="true")
+        # — `hash(@Decimal.0)` in a `requires`.  Confirms the broadened
+        # precondition catch covers `CodegenSkip`, not only the ADT-eq error.
+        # Pre-fix: uncaught `CodegenSkip` traceback.
+        src = _HASH_SKIP.format(requires="hash(@Decimal.0) == 0", ensures="true")
         codes = _diag_codes(src)
         assert "E602" in codes, f"expected E602 (no traceback), got {codes}"
 

@@ -24,6 +24,7 @@ from vera.monomorphize import (
     Monomorphizer,
     declared_return_clone_key,
 )
+from vera.skip import DERIVED_HELPER_DEPTH_CAP
 
 # Types that satisfy the built-in abilities.  #773: `Eq` is structural, so a
 # field of ANY of these — String included (compared by content) — is
@@ -1055,6 +1056,19 @@ class MonomorphizationMixin:
             return False
         if type_name in _seen:        # recursive ADT (e.g. List<T>) — break cycle
             return True
+        # #933: bound POLYMORPHIC recursion.  A non-uniform ADT
+        # (`Box<T>` field `Box<Box<T>>`) never repeats a `type_name`, so the
+        # `_seen` cycle-break above never fires and each descent resolves a
+        # fresh, strictly-deeper field type (`Box<Box<Int>>`,
+        # `Box<Box<Box<Int>>>`, …) whose generic NESTING climbs one level per
+        # step — this predicate recurs into a raw `RecursionError` on a
+        # check-green program.  Past the cap, report the type NOT derivable so
+        # the caller emits a clean E613 (the same degradation a structurally
+        # non-Eq field already gets).  Uniform shapes recur at CONSTANT nesting
+        # depth and never approach this bound; it stays in lockstep with
+        # codegen's `$eq_<type>` generator, bounded at the SAME cap.
+        if type_name.count("<") >= DERIVED_HELPER_DEPTH_CAP:
+            return False
         seen = _seen | {type_name}
         # Param-NAME → concrete-arg mapping, for params nested inside a
         # parameterized declared field type (`List<T>` under `List<Int>`) —
