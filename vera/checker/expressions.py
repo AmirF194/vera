@@ -27,6 +27,7 @@ from vera.types import (
     UnknownType,
     contains_typevar,
     base_type,
+    erases_to_unit,
     is_subtype,
     numeric_join,
     pretty_type,
@@ -940,6 +941,27 @@ class ExpressionsMixin:
 
         if first is None:
             return AdtType("Array", (UnknownType(),))
+
+        # #945: a bare array literal `[()]` whose element erases to a zero-size
+        # type has no valid WASM layout (the store acts on an empty stack →
+        # invalid WASM on a check-green program).  Reject at check, mirroring
+        # the `Array<T>` type-resolution gate (E135) — this catches the
+        # un-annotated literal (`array_length([()])`) that never flows through
+        # `_resolve_type`.
+        if erases_to_unit(first):
+            self._error(
+                expr,
+                f"An array literal of a zero-size element type "
+                f"'{pretty_type(first)}' is not supported.",
+                rationale="A zero-size type (`Unit`, or a `Future` wrapping "
+                "one) occupies 0 bytes and has no runtime value, so an array "
+                "element of that type has no WASM representation to store — the "
+                "literal would compile to invalid WASM.",
+                fix="Use `Nat` for a count of zero-size items, or give the "
+                "element type a runtime value (e.g. `[1, 2, 3]`).",
+                spec_ref='Chapter 2, Section 2.2 "Primitive Types"',
+                error_code="E135",
+            )
 
         return AdtType("Array", (first,))
 

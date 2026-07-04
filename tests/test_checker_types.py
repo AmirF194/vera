@@ -1931,3 +1931,61 @@ class TestGenericOverUnitRejected900:
             "  0\n"
             "}\n"
         )
+
+
+class TestArrayZeroSizeElementRejected945:
+    """#945: an ``Array<T>`` whose element type erases to zero-size (``Unit``,
+    or a ``Future<Unit>`` that erases to it) has no valid WASM element layout.
+    ``_element_mem_size`` fell through to the 4-byte ADT default, so the
+    array-literal store (and the index load) emitted an ``i32.store`` /
+    ``i32.load`` against an empty stack — a ``check``-green + ``verify``-green
+    program that compiled to INVALID WASM (rejected by wasmtime at load).
+    Rejected cleanly at check (E135) — a zero-size element has no runtime value
+    to store, the same principle as the ``@T``-at-zero-size family (#900 / #939
+    / #943).  An ``Array<Unit>`` is degenerate anyway (isomorphic to a ``Nat``
+    count)."""
+
+    def test_array_literal_of_unit_rejected(self) -> None:
+        errs = _errors(
+            "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{\n"
+            "  let @Array<Unit> = [()];\n"
+            "  nat_to_int(array_length(@Array<Unit>.0))\n"
+            "}\n"
+        )
+        codes = {e.error_code for e in errs}
+        assert "E135" in codes, f"Array<Unit> literal must be E135, got {codes}"
+
+    def test_array_unit_param_rejected(self) -> None:
+        # No literal — the `@Array<Unit>` parameter type alone is rejected at
+        # resolution, so an index read never reaches codegen either.
+        errs = _errors(
+            "public fn f(@Array<Unit> -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ nat_to_int(array_length(@Array<Unit>.0)) }\n"
+        )
+        codes = {e.error_code for e in errs}
+        assert "E135" in codes, f"Array<Unit> param must be E135, got {codes}"
+
+    def test_bare_array_literal_of_unit_rejected(self) -> None:
+        # A bare `[()]` with NO `@Array<Unit>` annotation never flows through
+        # `_resolve_type`, so this isolates the `_check_array_lit` gate.
+        errs = _errors(
+            "public fn main(-> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ nat_to_int(array_length([()])) }\n"
+        )
+        codes = {e.error_code for e in errs}
+        assert "E135" in codes, f"bare [()] literal must be E135, got {codes}"
+
+    def test_array_of_int_still_accepted(self) -> None:
+        # Non-regression: a normal, non-zero-size element array is unaffected.
+        _check_ok(
+            "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{\n"
+            "  let @Array<Int> = [1, 2, 3];\n"
+            "  nat_to_int(array_length(@Array<Int>.0))\n"
+            "}\n"
+        )

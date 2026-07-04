@@ -22,7 +22,9 @@ from vera.types import (
     TypeVar,
     UnknownType,
     canonical_type_name,
+    erases_to_unit,
     merge_inferred_types,
+    pretty_type,
     substitute,
 )
 
@@ -148,6 +150,31 @@ class ResolutionMixin:
         if name in ("Array", "Tuple", "Map", "Set"):
             if te.type_args:
                 args = tuple(self._resolve_type(a) for a in te.type_args)
+                # #945: an `Array<T>` whose element erases to a zero-size type
+                # (`Unit`, or a `Future` transparently wrapping one) has no
+                # valid WASM element layout — the element store/load would act
+                # on a slot that holds no value, so the array compiles to
+                # INVALID WASM (rejected by wasmtime at load) on a check-green +
+                # verify-green program.  Reject at check: the element is
+                # degenerate (`Array<Unit>` is isomorphic to a `Nat` count).
+                # Same principle as the `@T`-at-zero-size family (#900/#939/#943).
+                if (name == "Array" and len(args) == 1
+                        and erases_to_unit(args[0])):
+                    self._error(
+                        te,
+                        f"'Array' of a zero-size element type "
+                        f"'{pretty_type(args[0])}' is not supported.",
+                        rationale="A zero-size type (`Unit`, or a `Future` "
+                        "wrapping one) occupies 0 bytes and has no runtime "
+                        "value, so an array element of that type has no WASM "
+                        "representation to store or load — the array would "
+                        "compile to invalid WASM.",
+                        fix="Use `Nat` for a count of zero-size items, or give "
+                        "the element type a runtime value (e.g. `Array<Int>`, "
+                        "or a boxed `Array<Option<Unit>>`).",
+                        spec_ref='Chapter 2, Section 2.2 "Primitive Types"',
+                        error_code="E135",
+                    )
                 return AdtType(name, args)
             return AdtType(name, ())
 
