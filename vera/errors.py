@@ -59,7 +59,7 @@ class Diagnostic:
     severity: str = "error"
     error_code: str = ""
     # #222 Phase D: verification tier this diagnostic concerns, when
-    # applicable.  3 on the Tier-3 fallback warnings (E520-E525);
+    # applicable.  3 on the Tier-3 fallback warnings (E520-E525, E532);
     # None elsewhere.  Surfaced in --json and the LSP diagnostic
     # payload so agents can rank edits by verification strength.
     tier: int | None = None
@@ -465,6 +465,7 @@ ERROR_CODES: dict[str, str] = {
     "E132": "Cyclic type alias",
     "E133": "Type alias arity mismatch",
     "E134": "Type does not take type arguments",
+    "E135": "Array of a zero-size element type",
     "E140": "Arithmetic requires numeric operands",
     "E141": "Arithmetic requires matching numeric types",
     "E142": "Cannot compare incompatible types",
@@ -494,6 +495,8 @@ ERROR_CODES: dict[str, str] = {
     "E202": "Argument type mismatch",
     "E203": "Effect operation wrong argument count",
     "E204": "Effect operation argument type mismatch",
+    "E205": "Conflicting type argument inference",
+    "E206": "Generic type parameter instantiated at Unit",
     "E210": "Unknown constructor",
     "E211": "Constructor is nullary",
     "E212": "Constructor wrong field count",
@@ -508,6 +511,8 @@ ERROR_CODES: dict[str, str] = {
     "E233": "Function not found in module",
     "E240": "Ability operation wrong argument count",
     "E241": "Ability operation argument type mismatch",
+    "E242": "Ord ability operation on non-orderable type",
+    "E243": "Eq ability operation on non-Eq-derivable type",
     # E3xx — Type Checker: Control Flow
     "E300": "If condition not Bool",
     "E301": "If branches incompatible types",
@@ -547,6 +552,7 @@ ERROR_CODES: dict[str, str] = {
     "E529": "float_to_int domain (NaN, infinity, or out of i64 range)",
     "E530": "Nat-to-Int widening out of i64 range",
     "E531": "Nat-to-Int widening unverified and not runtime-guarded",
+    "E532": "Cannot verify call-site precondition (undecidable)",
     # E6xx — Codegen
     "E600": "Unsupported parameter type",
     "E601": "Unsupported return type",
@@ -567,6 +573,7 @@ ERROR_CODES: dict[str, str] = {
     "E616": "Cannot infer closure return type for call_indirect",
     "E617": "Refinement predicate not compilable to runtime guard",
     "E618": "Nested refinement base unsupported",
+    "E619": "Cannot infer type argument for ability-constrained parameter",
     "E699": "Internal compiler error",
     # E7xx — Testing
     "E700": "Contract violation during testing",

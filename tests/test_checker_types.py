@@ -1572,3 +1572,474 @@ public fn f(@Unit -> @Int)
   requires(true) ensures(true) effects(pure)
 { -18446744073709551616 }
 """)
+
+
+# =====================================================================
+# #898 — cross-argument type-argument merge for a generic bound by
+# multiple sparse-multi-parameter constructor literals.
+#
+#   data Res<A, B> { MkOk(A), MkErr(B) }
+#   forall<T> fn eq2(@T, @T -> @Bool)
+#
+# `eq2(MkErr(5), MkOk("x"))` is a fully-determined `Res<String, Int>` — arg 0
+# (`MkErr(B)`) fixes `B = Int`, arg 1 (`MkOk(A)`) fixes `A = String` — but
+# first-argument-wins binding used to reject it (E202): the checker bound `@T`
+# to the first argument's whole `Res<A$1, Nat>` (with a fresh `A$1`) and the
+# concrete second argument did not unify.  The checker now MERGES per-type-
+# parameter information across the constructor arguments so a fully-determined
+# multi-parameter ADT type-checks — while a genuine per-parameter CONFLICT
+# (two arguments fixing the same parameter to different types) stays a clear
+# error.
+# =====================================================================
+
+class TestCrossArgTypeArgMerge:
+
+    _RES = "private data Res<A, B> { MkOk(A), MkErr(B) }\n"
+    _EQ2 = (
+        "private forall<T> fn eq2(@T, @T -> @Bool)\n"
+        "  requires(true) ensures(true) effects(pure) { true }\n"
+    )
+
+    def test_mergeable_cross_arg_accepts(self) -> None:
+        # arg0 fixes B=Int, arg1 fixes A=String -> fully-determined Res<String,Int>
+        _check_ok(
+            self._RES + self._EQ2
+            + "public fn main(@Unit -> @Bool)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ eq2(MkErr(5), MkOk(\"x\")) }\n"
+        )
+
+    def test_mergeable_cross_arg_reversed_order_accepts(self) -> None:
+        # order independence: arg0 fixes A, arg1 fixes B
+        _check_ok(
+            self._RES + self._EQ2
+            + "public fn main(@Unit -> @Bool)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ eq2(MkOk(\"x\"), MkErr(5)) }\n"
+        )
+
+    def test_conflicting_type_arg_rejected(self) -> None:
+        # both args are MkOk (fix A), but to DIFFERENT types (String vs Int) —
+        # a genuine conflict, must stay rejected (not silently merged) and get
+        # the clear E205 conflict diagnostic (a subtype-check E202 is the
+        # soundness backstop, but E205 is the actionable message).
+        errs = _errors(
+            self._RES + self._EQ2
+            + "public fn main(@Unit -> @Bool)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ eq2(MkOk(\"x\"), MkOk(5)) }\n"
+        )
+        codes = {e.error_code for e in errs}
+        assert "E205" in codes, f"conflict must be a clear E205, got {codes}"
+
+    def test_conflicting_nested_type_arg_rejected(self) -> None:
+        # nested conflict: arg0 gives A=String, arg1 gives A=Bool via MkOk
+        errs = _errors(
+            self._RES + self._EQ2
+            + "public fn main(@Unit -> @Bool)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ eq2(MkOk(\"x\"), MkOk(true)) }\n"
+        )
+        codes = {e.error_code for e in errs}
+        assert "E205" in codes, f"nested conflict must be a clear E205, got {codes}"
+
+    def test_fully_determined_noneq_still_typechecks(self) -> None:
+        # Res<Int, Array<Int>> is fully determined across args; it TYPE-CHECKS
+        # (the Eq rejection is a codegen concern, not a checker concern here —
+        # eq2 has no Eq bound in this fixture, so it must check cleanly).
+        _check_ok(
+            self._RES + self._EQ2
+            + "public fn main(@Unit -> @Bool)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ eq2(MkErr([1]), MkOk(2)) }\n"
+        )
+
+
+class TestGenericOverUnitRejected900:
+    """#900: a generic type parameter instantiated at the zero-size ``Unit``
+    type is rejected at *check* time (E206) — but ONLY when the generic READS a
+    ``@T``-typed slot somewhere that lowers to WASM (its body, or a ``requires``
+    / ``ensures`` clause; #939), the exact condition that crashes in codegen.
+
+    ``Unit`` is 0 bytes with no WASM representation (spec §11.2.2 / §11.3.1),
+    so a monomorphized ``forall<T>``'s ``@T.n`` slot read resolves to no local
+    (the dangling-slot codegen invariant).  A ``@T`` parameter that is never
+    read erases cleanly from the WASM ABI, so a generic that does NOT read
+    ``@T`` (``firstInt(@T, @Int){ @Int.0 }``, ``ignore(@T){ 0 }``) runs fine at
+    ``T = Unit`` and MUST NOT be rejected — the discriminator is a ``@T.n``
+    read, not merely ``T = Unit``.  The check must fire for every way ``T`` is
+    pinned to ``Unit`` *when it is read*, not just the one repro shape from the
+    issue.
+    """
+
+    _IDT = (
+        "private forall<T> fn idt(@T -> @T)\n"
+        "  requires(true) ensures(true) effects(pure) { @T.0 }\n"
+    )
+    _MKU = (
+        "private fn mku(@Int -> @Unit)\n"
+        "  requires(true) ensures(true) effects(pure) { () }\n"
+    )
+
+    def test_generic_over_unit_from_fn_return_rejected(self) -> None:
+        # The issue's repro: a @Unit-returning fn feeds the generic arg.
+        errs = _errors(
+            self._MKU + self._IDT
+            + "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ let @Unit = idt(mku(5)); 7 }\n"
+        )
+        codes = {e.error_code for e in errs}
+        assert "E206" in codes, \
+            f"generic-over-Unit must be a clean E206, got {codes}"
+
+    def test_generic_over_unit_from_unit_literal_rejected(self) -> None:
+        # T bound to Unit by a bare () unit literal passed directly.
+        errs = _errors(
+            self._IDT
+            + "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ let @Unit = idt(()); 7 }\n"
+        )
+        codes = {e.error_code for e in errs}
+        assert "E206" in codes, \
+            f"() literal into generic must be E206, got {codes}"
+
+    def test_generic_over_unit_one_of_several_params_rejected(self) -> None:
+        # Unit pins T through one of several parameters (the others are Int).
+        errs = _errors(
+            self._MKU
+            + "private forall<T> fn pair(@T, @Int -> @T)\n"
+            "  requires(true) ensures(true) effects(pure) { @T.0 }\n"
+            + "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ let @Unit = pair(mku(5), 3); 7 }\n"
+        )
+        codes = {e.error_code for e in errs}
+        assert "E206" in codes, \
+            f"Unit pinning one of several params must be E206, got {codes}"
+
+    def test_generic_over_unit_names_parameter_and_type(self) -> None:
+        # The diagnostic must name the offending type parameter and Unit so
+        # the message is actionable (checkability-over-correctness).
+        errs = _errors(
+            self._MKU + self._IDT
+            + "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ let @Unit = idt(mku(5)); 7 }\n"
+        )
+        e206 = [e for e in errs if e.error_code == "E206"]
+        assert e206, "expected an E206 diagnostic"
+        msg = e206[0].description
+        assert "T" in msg and "Unit" in msg, \
+            f"message must name the param and Unit, got: {msg!r}"
+
+    def test_boxed_option_over_unit_still_ok(self) -> None:
+        # Boundary: Option<Unit> is a *boxed* ADT (tag + pointer), not
+        # zero-size, so instantiating a generic at Option<Unit> must remain
+        # ACCEPTED — the rejection is keyed to *bare* Unit only.
+        _check_ok(
+            "private fn mko(@Int -> @Option<Unit>)\n"
+            "  requires(true) ensures(true) effects(pure) { None }\n"
+            + self._IDT
+            + "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ let @Option<Unit> = idt(mko(5)); 7 }\n"
+        )
+
+    def test_builtin_generic_over_unit_not_e206(self) -> None:
+        # E206 is scoped to USER `forall<T>` fns the monomorphizer clones.
+        # The built-in generic `async` has hand-written codegen, not a
+        # `@T`-slot body, so `async(IO.print(...))` (a valid Future<Unit>
+        # fire-and-forget) must NOT trip E206 — its W002 concurrency
+        # warning path is preserved.
+        errs = _errors(
+            "private fn f(-> @Future<Unit>)\n"
+            "  requires(true) ensures(true) effects(<IO, Async>)\n"
+            "{ async(IO.print(\"hi\")) }\n"
+        )
+        codes = {e.error_code for e in errs}
+        assert "E206" not in codes, \
+            f"built-in async over Unit must not be E206, got {codes}"
+
+    def test_user_override_of_prelude_name_over_unit_rejected(self) -> None:
+        # Release review (CodeRabbit): a USER `forall<T>` override of a
+        # prelude name (`option_map`) that READS `@T` is a genuine cloned
+        # `@T`-slot body, so instantiating it at bare Unit must trip E206.
+        # The pre-fix name-based built-in exclusion skipped any name in the
+        # registry, letting this check-green program crash codegen with a
+        # dangling-slot E699.  The discriminator is `forall_vars_read`
+        # (empty for the hand-written built-in, populated for the override).
+        errs = _errors(
+            "private forall<T> fn option_map(@T -> @T)\n"
+            "  requires(true) ensures(true) effects(pure) { @T.0 }\n"
+            "public fn main(@Unit -> @Unit)\n"
+            "  requires(true) ensures(true) effects(pure) { option_map(()) }\n"
+        )
+        codes = {e.error_code for e in errs}
+        assert "E206" in codes, \
+            f"user override of a prelude name over Unit must be E206, got {codes}"
+
+    # ---- The @T-not-read cases: VALID at T=Unit, must be ACCEPTED ----
+    # A `@T` parameter that the body never reads erases cleanly from the WASM
+    # ABI, so these run on base and E206 must not fire (the round-2 fix).
+
+    def test_generic_unread_typevar_extra_param_accepted(self) -> None:
+        # firstInt(@T, @Int){ @Int.0 } never reads @T; runs 42 on base.
+        _check_ok(
+            self._MKU
+            + "private forall<T> fn firstInt(@T, @Int -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure) { @Int.0 }\n"
+            + "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ firstInt(mku(5), 42) }\n"
+        )
+
+    def test_generic_unread_typevar_return_const_accepted(self) -> None:
+        # ignore(@T){ 0 } never reads @T; monomorphizes to $ignore$Unit, runs 0.
+        _check_ok(
+            self._MKU
+            + "private forall<T> fn ignore(@T -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure) { 0 }\n"
+            + "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ ignore(mku(5)) }\n"
+        )
+
+    def test_generic_unread_typevar_from_unit_literal_accepted(self) -> None:
+        # Same discriminator via a bare () literal, no Unit-returning helper.
+        _check_ok(
+            "private forall<T> fn ignore(@T -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure) { 0 }\n"
+            + "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ ignore(()) }\n"
+        )
+
+    def test_generic_reads_typevar_as_match_scrutinee_rejected(self) -> None:
+        # A `@T` read as a match scrutinee IS a materialization — E699 on base,
+        # so it must stay an E206 rejection (not slip through the narrowing).
+        errs = _errors(
+            self._MKU
+            + "private forall<T> fn matchT(@T, @Int -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ match @T.0 { @T -> @Int.0 } }\n"
+            + "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ matchT(mku(3), 8) }\n"
+        )
+        codes = {e.error_code for e in errs}
+        assert "E206" in codes, \
+            f"a @T match-scrutinee read must stay E206, got {codes}"
+
+    def test_contract_requires_reads_typevar_over_unit_rejected(self) -> None:
+        # #939: a `@T.n` read in a `requires(...)` clause ALSO lowers to a
+        # `local.get` — `_compile_preconditions` emits the runtime precondition
+        # check — so a contract-clause read at `T = Unit` dangles exactly like a
+        # body read.  The body here never reads `@T` (returns `@Int.0`), so only
+        # walking the contract clauses (not just the body) can catch it.
+        # Pre-#939: `check` passed, then `vera run` crashed with a raw
+        # CodegenInvariantError traceback (the dangling-slot invariant).
+        errs = _errors(
+            "private forall<T> fn ignore_pair(@T, @T, @Int -> @Int)\n"
+            "  requires(@T.1 == @T.0) ensures(true) effects(pure)\n"
+            "{ @Int.0 }\n"
+            + "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ ignore_pair((), (), 5) }\n"
+        )
+        codes = {e.error_code for e in errs}
+        assert "E206" in codes, \
+            f"a @T read in a requires clause must be E206 at Unit, got {codes}"
+
+    def test_contract_ensures_reads_typevar_over_unit_rejected(self) -> None:
+        # #939: the `ensures(...)` clause lowers to a runtime postcondition
+        # check too, so a `@T.n` read there dangles at Unit identically.  (The
+        # postcondition codegen path already degraded to a clean E699, but E206
+        # at check is the correct, earlier diagnostic — and keeps requires and
+        # ensures uniform under one discriminator.)
+        errs = _errors(
+            "private forall<T> fn ignore_pair(@T, @T, @Int -> @Int)\n"
+            "  requires(true) ensures(@T.1 == @T.0) effects(pure)\n"
+            "{ @Int.0 }\n"
+            + "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ ignore_pair((), (), 5) }\n"
+        )
+        codes = {e.error_code for e in errs}
+        assert "E206" in codes, \
+            f"a @T read in an ensures clause must be E206 at Unit, got {codes}"
+
+    def test_generic_reads_typevar_over_future_unit_rejected(self) -> None:
+        # #939 follow-up: `Future<Unit>` is a SECOND zero-size type.  Codegen
+        # makes `Future<T>` transparent to `T` (#841), so `Future<Unit>` erases
+        # to no WASM local exactly like bare `Unit`.  A `@T` BODY read at
+        # `T = Future<Unit>` (pinned via `async(())`) dangles identically, so
+        # E206 must fire — pre-fix `check` passed and codegen degraded to E699.
+        # The discriminator now keys on `erases_to_unit`, not `base_type==UNIT`.
+        errs = _errors(
+            "private forall<T> fn idf(@T -> @T)\n"
+            "  requires(true) ensures(true) effects(pure) { @T.0 }\n"
+            + "public fn main(@Unit -> @Unit)\n"
+            "  requires(true) ensures(true) effects(<Async>)\n"
+            "{\n"
+            "  let @Future<Unit> = async(());\n"
+            "  let @Future<Unit> = idf(@Future<Unit>.0);\n"
+            "  await(@Future<Unit>.0)\n"
+            "}\n"
+        )
+        codes = {e.error_code for e in errs}
+        assert "E206" in codes, \
+            f"a @T body read at Future<Unit> must be E206, got {codes}"
+
+    def test_contract_ensures_reads_typevar_over_future_unit_rejected(self) -> None:
+        # #939 follow-up + the confirmed raw-traceback crash: a `@T` read in an
+        # `ensures` clause at `T = Future<Unit>`.  Pre-fix this slipped BOTH the
+        # E206 gate (keyed on bare `Unit`) AND the postcondition codegen net
+        # (which lacked the `CodegenInvariantError` catch), crashing with a raw
+        # Python traceback on a `check`-green + `verify`-green program.  Now
+        # E206 at check (and the postcondition net is the defensive backstop).
+        errs = _errors(
+            "private forall<T> fn pf(@T, @Int -> @Int)\n"
+            "  requires(true) ensures(@T.0 == @T.0) effects(pure) { @Int.0 }\n"
+            + "public fn main(@Unit -> @Unit)\n"
+            "  requires(true) ensures(true) effects(<Async>)\n"
+            "{\n"
+            "  let @Future<Unit> = async(());\n"
+            "  let @Int = pf(@Future<Unit>.0, 5);\n"
+            "  ()\n"
+            "}\n"
+        )
+        codes = {e.error_code for e in errs}
+        assert "E206" in codes, \
+            f"a @T ensures-read at Future<Unit> must be E206, got {codes}"
+
+    def test_generic_reads_typevar_over_future_int_accepted(self) -> None:
+        # Non-regression for the `erases_to_unit` broadening: `Future<Int>` is
+        # transparent to `Int` — a non-zero i32 — so a `@T` read at
+        # `T = Future<Int>` erases cleanly and runs.  `erases_to_unit` must flag
+        # ONLY `Future`-of-zero-size, never `Future<Int>` (nor a boxed
+        # `Option<Unit>`, which is a tag+pointer i32).
+        _check_ok(
+            "private forall<T> fn firstT(@T, @Int -> @T)\n"
+            "  requires(true) ensures(true) effects(pure) { @T.0 }\n"
+            + "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(<Async>)\n"
+            "{\n"
+            "  let @Future<Int> = async(7);\n"
+            "  let @Future<Int> = firstT(@Future<Int>.0, 3);\n"
+            "  0\n"
+            "}\n"
+        )
+
+
+class TestArrayZeroSizeElementRejected945:
+    """#945: an ``Array<T>`` whose element type erases to zero-size (``Unit``,
+    or a ``Future<Unit>`` that erases to it) has no valid WASM element layout.
+    ``_element_mem_size`` fell through to the 4-byte ADT default, so the
+    array-literal store (and the index load) emitted an ``i32.store`` /
+    ``i32.load`` against an empty stack — a ``check``-green + ``verify``-green
+    program that compiled to INVALID WASM (rejected by wasmtime at load).
+    Rejected cleanly at check (E135) — a zero-size element has no runtime value
+    to store, the same principle as the ``@T``-at-zero-size family (#900 / #939
+    / #943).  An ``Array<Unit>`` is degenerate anyway (isomorphic to a ``Nat``
+    count)."""
+
+    def test_array_literal_of_unit_rejected(self) -> None:
+        # Annotation + literal for ONE zero-size array: `_resolve_type` rejects
+        # the `@Array<Unit>` annotation (E135), and the literal-level gate now
+        # DEFERS to it (PR #938 review) rather than emitting a second E135 for
+        # the same root cause — exactly one E135, not two.
+        errs = _errors(
+            "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{\n"
+            "  let @Array<Unit> = [()];\n"
+            "  nat_to_int(array_length(@Array<Unit>.0))\n"
+            "}\n"
+        )
+        e135 = [e for e in errs if e.error_code == "E135"]
+        assert len(e135) == 1, (
+            "annotated Array<Unit> literal must emit E135 exactly once "
+            f"(no double for one root cause), got {[e.error_code for e in errs]}"
+        )
+        # ...and the same when the annotation is REFINED (`{ @Array<Unit> | p }`):
+        # `expected` is then a `RefinedType`, so the guard must strip to the base
+        # (`base_type`) or the literal-level E135 double-fires again (PR #938
+        # review; the E202 type-mismatch is a separate, expected diagnostic).
+        refined = _errors(
+            "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{\n"
+            "  let @{ @Array<Unit> | true } = [()];\n"
+            "  nat_to_int(array_length(@Array<Unit>.0))\n"
+            "}\n"
+        )
+        refined_e135 = [e for e in refined if e.error_code == "E135"]
+        assert len(refined_e135) == 1, (
+            "refined Array<Unit> annotation + literal must also emit E135 "
+            f"exactly once, got {[e.error_code for e in refined]}"
+        )
+
+    def test_array_unit_param_rejected(self) -> None:
+        # No literal — the `@Array<Unit>` parameter type alone is rejected at
+        # resolution, so an index read never reaches codegen either.  A
+        # function's signature types are `_resolve_type`'d in BOTH the
+        # registration and the check pass, so this once double-reported E135
+        # at one location; the `_error` exact-duplicate dedup (PR #938)
+        # collapses it to exactly one.
+        errs = _errors(
+            "public fn f(@Array<Unit> -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ nat_to_int(array_length(@Array<Unit>.0)) }\n"
+        )
+        e135 = [e for e in errs if e.error_code == "E135"]
+        assert len(e135) == 1, (
+            "Array<Unit> param must emit E135 exactly once (signature "
+            f"double-resolution deduped), got {[e.error_code for e in errs]}"
+        )
+
+    def test_signature_diagnostics_deduplicated_per_location(self) -> None:
+        # The exact-duplicate `_error` dedup (PR #938) is general, not
+        # E135-specific: a signature with a zero-size `Array` in BOTH the
+        # param and the return position emits exactly one E135 per DISTINCT
+        # location — TWO total, not four (the registration- and check-pass
+        # resolutions of each type collapse) and not one (the two positions
+        # stay distinct, so the dedup keys on location, not just the code).
+        errs = _errors(
+            "public fn f(@Array<Unit> -> @Array<Unit>)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ @Array<Unit>.0 }\n"
+        )
+        e135 = [e for e in errs if e.error_code == "E135"]
+        assert len(e135) == 2, (
+            "param + return zero-size Array must emit E135 exactly twice "
+            f"(once per location, not 4 un-deduped nor 1 over-collapsed), "
+            f"got {[e.error_code for e in errs]}"
+        )
+
+    def test_bare_array_literal_of_unit_rejected(self) -> None:
+        # A bare `[()]` with NO `@Array<Unit>` annotation never flows through
+        # `_resolve_type`, so this isolates the `_check_array_lit` gate — which
+        # must fire exactly once (its only gate; nothing else rejects it).
+        errs = _errors(
+            "public fn main(-> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ nat_to_int(array_length([()])) }\n"
+        )
+        e135 = [e for e in errs if e.error_code == "E135"]
+        assert len(e135) == 1, (
+            "bare [()] literal must emit E135 exactly once, "
+            f"got {[e.error_code for e in errs]}"
+        )
+
+    def test_array_of_int_still_accepted(self) -> None:
+        # Non-regression: a normal, non-zero-size element array is unaffected.
+        _check_ok(
+            "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{\n"
+            "  let @Array<Int> = [1, 2, 3];\n"
+            "  nat_to_int(array_length(@Array<Int>.0))\n"
+            "}\n"
+        )

@@ -1,0 +1,22 @@
+-- Conformance: nested (transitive) fn-type alias apply_fn (Chapter 5)
+-- Tests: chained type alias to a function type, apply_fn call_indirect (#867)
+type InnerMapper = fn(String -> String) effects(pure);
+
+type Mapper = InnerMapper;
+
+private fn apply(@Mapper, @String -> @String)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  apply_fn(@Mapper.0, @String.0)
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Mapper = fn(@String -> @String) effects(pure) { string_concat(@String.0, "!") };
+  string_length(apply(@Mapper.0, "hi"))
+}

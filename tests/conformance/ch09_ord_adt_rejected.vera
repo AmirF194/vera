@@ -1,0 +1,25 @@
+-- Conformance: compare / Ord on a user ADT is a checker error (Chapter 9, Section 9.8.1)
+-- Tests: E242 — the Ord ability's `compare` operation is rejected on a
+-- non-orderable operand (#921).  Ordering (`<`/`>`/`<=`/`>=`) is defined only
+-- on Int, Nat, Float64, Byte, String (§4.5), and Ord's "Satisfied by:" set is
+-- exactly those primitives (§9.8.1); a user ADT is not Ord-derivable.  This is
+-- the exact silent-wrong-result #921 closes: without this gate `compare` on an
+-- ADT type-checked, then codegen lowered `<` to a scalar `i32.lt_s` on the
+-- boxed heap pointers (returning a constant wrong Ordering), while the verifier
+-- crashed on a raw Python `<` over two Z3 datatypes.  The checker now rejects
+-- it, keeping check, codegen, and verify in agreement.
+private data Box {
+  MkBox(Int)
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  match compare(MkBox(1), MkBox(2)) {
+    Less -> 1,
+    Equal -> 2,
+    Greater -> 3
+  }
+}

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import os
 
+from vera.monomorphize import mangle_type_name
+
 
 class AssemblyMixin:
     """Methods for assembling the WAT module."""
@@ -322,29 +324,38 @@ class AssemblyMixin:
                 "(func $vera.overflow_trap))"
             )
 
-        # Import State<T> host functions if needed
+        # Import State<T> host functions if needed.
+        # #914: composite T (`Tuple<Int, Int>`, `Option<Int>`) is routed
+        # through the injective `mangle_type_name` (#775) for BOTH the
+        # module/field string AND the `$vera.…` identifier.  A raw `<`/`,`/` `
+        # is illegal in a WAT identifier (the field string tolerates it, but
+        # mangling both keeps the host registration in `runtime/state.py` — it
+        # too mangles — matched by one consistent name).  Handler-body calls
+        # (`wasm/calls_handlers.py`, `codegen/functions.py`) mangle the same
+        # way, so import decl and call site never drift.
         for type_name, wasm_t in self._state_types:
+            m = mangle_type_name(type_name)
             parts.append(
-                f'  (import "vera" "state_get_{type_name}" '
-                f"(func $vera.state_get_{type_name} (result {wasm_t})))"
+                f'  (import "vera" "state_get_{m}" '
+                f"(func $vera.state_get_{m} (result {wasm_t})))"
             )
             parts.append(
-                f'  (import "vera" "state_put_{type_name}" '
-                f"(func $vera.state_put_{type_name} (param {wasm_t})))"
+                f'  (import "vera" "state_put_{m}" '
+                f"(func $vera.state_put_{m} (param {wasm_t})))"
             )
             parts.append(
-                f'  (import "vera" "state_push_{type_name}" '
-                f"(func $vera.state_push_{type_name}))"
+                f'  (import "vera" "state_push_{m}" '
+                f"(func $vera.state_push_{m}))"
             )
             parts.append(
-                f'  (import "vera" "state_pop_{type_name}" '
-                f"(func $vera.state_pop_{type_name}))"
+                f'  (import "vera" "state_pop_{m}" '
+                f"(func $vera.state_pop_{m}))"
             )
 
         # Exception tags for Exn<E>
         for type_name, wasm_t in self._exn_types:
             parts.append(
-                f"  (tag $exn_{type_name} (param {wasm_t}))"
+                f"  (tag $exn_{mangle_type_name(type_name)} (param {wasm_t}))"
             )
 
         # Memory (for string data and heap)
@@ -532,6 +543,12 @@ class AssemblyMixin:
         # whole module; sorted for deterministic output.
         for _name, eq_wat in sorted(self._adt_eq_helpers.items()):
             parts.append(eq_wat)
+
+        # #924: generated recursive show/hash helper functions ($show_<type> /
+        # $hash_<type>).  Deduped by name across the whole module; sorted for
+        # deterministic output.
+        for _name, sh_wat in sorted(self._show_hash_helpers.items()):
+            parts.append(sh_wat)
 
         parts.append(")")
         return "\n".join(parts)

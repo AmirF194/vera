@@ -1,0 +1,75 @@
+-- Conformance: composite equality in a postcondition lowers to structural
+-- Eq at runtime, not pointer comparison (Chapter 6 verification tiers,
+-- Section 6.5 / 6.8; Chapter 9 Section 9.8 Eq auto-derivation)
+-- Tests: `@T.result == Ctor(...)` in `ensures` for a user ADT, the built-in
+-- Option ADT, and a nested user ADT, all with the result slot as the LEFT
+-- operand of `==` -- the #912 regression (a Tier-1-proved postcondition of
+-- this shape spuriously trapped at runtime on a pointer compare instead of
+-- a structural one).  Also covers a function generic over a PARAMETERIZED ADT
+-- with a slot-vs-slot postcondition `@Box2<T>.result == @Box2<T>.0` (#912
+-- round 2): the operand carries an unresolved type variable `T`, so it must
+-- fall back to the scalar lowering (this postcondition defers to Tier 3, not
+-- Tier 1, so the fallback is sound) instead of crashing the derivability gate.
+private data Box {
+  MkBox(Int)
+}
+
+private fn mk(@Int -> @Box)
+  requires(true)
+  ensures(@Box.result == MkBox(@Int.0))
+  effects(pure)
+{
+  MkBox(@Int.0)
+}
+
+private fn some_of(@Int -> @Option<Int>)
+  requires(true)
+  ensures(@Option<Int>.result == Some(@Int.0))
+  effects(pure)
+{
+  Some(@Int.0)
+}
+
+private data Inner {
+  MkInner(Int)
+}
+
+private data Outer {
+  MkOuter(Inner)
+}
+
+private fn mk_outer(@Int -> @Outer)
+  requires(true)
+  ensures(@Outer.result == MkOuter(MkInner(@Int.0)))
+  effects(pure)
+{
+  MkOuter(MkInner(@Int.0))
+}
+
+private data Box2<T> {
+  MkBox2(T)
+}
+
+private forall<T> fn id2(@Box2<T> -> @Box2<T>)
+  requires(true)
+  ensures(@Box2<T>.result == @Box2<T>.0)
+  effects(pure)
+{
+  @Box2<T>.0
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Box = mk(2);
+  let @Option<Int> = some_of(2);
+  let @Outer = mk_outer(2);
+  let @Box2<Int> = id2(MkBox2(0));
+  let @Int = match @Box.0 { MkBox(@Int) -> @Int.0 };
+  let @Int = @Int.0 + match @Option<Int>.0 { Some(@Int) -> @Int.0, None -> 0 };
+  let @Int = @Int.0 + match @Outer.0 { MkOuter(@Inner) -> match @Inner.0 { MkInner(@Int) -> @Int.0 } };
+  let @Int = @Int.0 + match @Box2<Int>.0 { MkBox2(@Int) -> @Int.0 };
+  @Int.0 - 1
+}

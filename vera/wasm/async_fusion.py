@@ -30,6 +30,7 @@ from __future__ import annotations
 import dataclasses
 
 from vera import ast
+from vera.monomorphize import resolve_fn_type_alias
 
 # Http op name → (fused import name, expected arity).
 _FUSABLE_HTTP_OPS: dict[str, tuple[str, int]] = {
@@ -165,33 +166,14 @@ def compute_future_ret_module_fns(
     return frozenset(pairs)
 
 
-def _substitute_type_params(
-    te: ast.TypeExpr,
-    alias_map: dict[str, ast.TypeExpr],
-) -> ast.TypeExpr:
-    """Substitute generic-alias type params bound at the slot into ``te``.
-
-    A bare ``NamedType`` whose name is an alias param (``T``) is replaced
-    by the slot's bound type arg; parameterised ``NamedType``s recurse
-    into their args (``Future<T>`` → ``Future<Result<String, String>>``).
-    Anything else is returned unchanged.  This is the TypeExpr-level twin
-    of the ``alias_map`` substitution ``_infer_apply_fn_return_type``
-    performs through ``_canonical_wasm_type`` — the classification and
-    the ``call_indirect`` signature must consult the SAME resolved type,
-    or a generic alias instantiated to the fused future type classifies
-    as unresolvable while the signature builds fine: no [E616], no trap,
-    identity await, silent wrong value (PR #868 panel, critical).
-    """
-    if isinstance(te, ast.NamedType):
-        if not te.type_args and te.name in alias_map:
-            return alias_map[te.name]
-        if te.type_args:
-            new_args = tuple(
-                _substitute_type_params(a, alias_map) for a in te.type_args
-            )
-            if new_args != te.type_args:
-                return dataclasses.replace(te, type_args=new_args)
-    return te
+# `resolve_fn_type_alias` — the single transitive-alias-to-fn-type
+# resolver every consultor shares — moved to `vera/monomorphize.py`
+# (the codegen-free shared home, #732 precedent) when the PR #880
+# review extended its consumer set to the generic-HOF consultors in
+# `vera/monomorphize.py` itself: this module imports from
+# `vera.monomorphize`, so hosting the resolver here would have made
+# the monomorphizer's import an import cycle.  Imported above and
+# still consumed by `_apply_fn_closure_ret_type` below.
 
 
 def _apply_fn_closure_ret_type(
@@ -206,9 +188,10 @@ def _apply_fn_closure_ret_type(
     signature — the same shapes the checker types ``apply_fn`` against:
 
     * a ``SlotRef`` into a ``FnType`` type alias (a let-bound or
-      parameter closure ref), with the slot's bound type args
-      substituted for a generic alias's params (same guard as the
-      inference's ``alias_map`` construction), and
+      parameter closure ref), resolved **transitively** through the alias
+      chain (``type Fetcher = InnerFetcher;`` — #867) with the slot's
+      bound type args substituted for a generic alias's params, via the
+      shared :func:`resolve_fn_type_alias`, and
     * an inline ``AnonFn`` closure literal.
 
     Returns ``None`` for any other shape, signalling that the declared
@@ -220,30 +203,25 @@ def _apply_fn_closure_ret_type(
     * a **``FnCall``-shaped closure arg** (e.g. ``apply_fn(make_fn(), …)``)
       is rejected by the translation with ``[E616]`` and the function is
       skipped;
-    * a **``SlotRef`` through a non-``FnType`` alias** (the alias-of-alias
-      chain, #867) passes the translation but falls to its ``i64``
-      signature default, so the ``call_indirect`` type mismatch traps at
-      WASM validation.
+    * a **``SlotRef`` through an alias chain that never reaches a
+      ``FnType``** falls to the ``i64`` signature default, so the
+      ``call_indirect`` type mismatch traps at WASM validation.
 
     Either way no fused wrapper silently reaches an identity await
-    (#843 floor).  Keep this shape-coverage — including the substitution
-    guard — byte-equivalent to ``_infer_apply_fn_return_type``.
+    (#843 floor).  This consultor and ``_infer_apply_fn_return_type``
+    resolve the SlotRef through the same :func:`resolve_fn_type_alias`,
+    so their depth-N coverage cannot drift.
     """
     if isinstance(closure_arg, ast.SlotRef):
-        alias = type_aliases.get(closure_arg.type_name)
-        if isinstance(alias, ast.FnType):
-            ret = alias.return_type
-            alias_params = type_alias_params.get(closure_arg.type_name)
-            if (
-                alias_params
-                and closure_arg.type_args
-                and len(alias_params) == len(closure_arg.type_args)
-            ):
-                ret = _substitute_type_params(
-                    ret, dict(zip(alias_params, closure_arg.type_args)),
-                )
-            return ret
-        return None
+        fn_type = resolve_fn_type_alias(
+            ast.NamedType(
+                name=closure_arg.type_name,
+                type_args=closure_arg.type_args,
+            ),
+            type_aliases,
+            type_alias_params,
+        )
+        return fn_type.return_type if fn_type is not None else None
     if isinstance(closure_arg, ast.AnonFn):
         return closure_arg.return_type
     return None

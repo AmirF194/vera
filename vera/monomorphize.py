@@ -28,7 +28,7 @@ instantiation sets in agreement.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, field, fields, replace
 from typing import Any
 
 from vera import ast
@@ -44,10 +44,12 @@ def substitute_type_vars(
     (`vera/wasm/inference.py` — the canonicaliser, called from
     interpolation/apply_fn inference), `CodeGenerator`
     (`vera/codegen/core.py` — the compilability check
-    `_type_expr_to_wasm_type`), and the parameterised-FnType-alias
-    resolver in `Monomorphizer._resolve_arg_fn_shape` /
+    `_type_expr_to_wasm_type`), and :func:`resolve_fn_type_alias`
+    below — the shared transitive walker behind
+    `Monomorphizer._resolve_arg_fn_shape` /
     `CallsMixin._resolve_arg_fn_shape_wasm` (#604 / #659 CR-4 +
-    CR-5).  All sites need the same substitution semantics when
+    CR-5, routed through the resolver by PR #880).  All sites need
+    the same substitution semantics when
     following a parameterised alias (`type Box<T> = Array<T>`,
     `type Mapper<T> = fn(T -> T)`) so the alias's own type-param
     references in the body get bound to the concrete type arguments
@@ -102,6 +104,95 @@ def substitute_type_vars(
     return te
 
 
+def resolve_fn_type_alias(
+    te: ast.TypeExpr,
+    type_aliases: dict[str, ast.TypeExpr],
+    type_alias_params: dict[str, tuple[str, ...]],
+) -> ast.FnType | None:
+    """Resolve a ``TypeExpr`` to the ``FnType`` it aliases, transitively.
+
+    The single transitive-alias-to-fn-type resolver behind every site
+    that discovers a function type through an alias — the ``apply_fn``
+    ``call_indirect`` signature builder (``_infer_apply_fn_return_type``),
+    its Vera-type twin (``_infer_fncall_vera_type``), the fused-await
+    classifier (``_apply_fn_closure_ret_type``,
+    ``vera/wasm/async_fusion.py``), and the generic higher-order-fn
+    consultors (``Monomorphizer._resolve_arg_fn_shape`` /
+    ``_infer_fn_alias_type_args`` below, and their WASM call-rewrite
+    twins in ``vera/wasm/calls.py``).  Routing every site through this
+    one walker makes their depth-N behaviour structurally identical
+    rather than replicated per-site: a single-level unwrap at any one
+    site desynced it from the signal it must agree with (#867 — a
+    two-hop ``type Fetcher = InnerFetcher;`` resolved one hop, saw a
+    ``NamedType`` not a ``FnType``, bailed, and consultors diverged
+    into a silent identity await / an ``i64``-defaulted
+    ``call_indirect`` signature that trapped at WASM validation; the
+    PR #880 review found the same single-hop miss in the generic-HOF
+    consultors, where a closure-bound type param fell to the
+    phantom-var default).
+
+    Lives here — the deliberately codegen-free shared monomorphizer
+    module (see the module docstring / #732) — so the WASM backend,
+    the codegen-free fusion predicates, and the monomorphizer can all
+    import it without an import cycle (``vera/wasm/async_fusion.py``
+    imports this module, so it cannot host a helper this module needs).
+
+    Walks iteratively (until the terminal ``FnType``, a non-resolvable
+    shape, or a cycle):
+
+    1. Unwraps ``RefinementType`` layers (any nesting depth).
+    2. Treats a bared ``FnType`` as terminal wherever it appears —
+       including an alias body that is a refinement DIRECTLY wrapping
+       an inline fn type (``type Foo = { @fn(...) | p };`` — PR #880
+       review, CodeRabbit Major: pre-fix the peeled ``FnType`` fell
+       through the ``NamedType`` check to ``None``).
+    3. For a ``NamedType`` whose ``type_aliases`` body is a ``FnType``,
+       substitutes the current ``NamedType``'s ``type_args`` into the
+       alias's type params (for a generic alias like
+       ``type Producer<T> = fn(String -> T)``) and loops — the
+       substituted ``FnType`` terminates at step 2.
+    4. For a ``NamedType`` aliasing another ``NamedType`` /
+       ``RefinementType``, substitutes any generic type args at this hop
+       and follows the chain one step.
+    5. Anything else (a bare ``NamedType`` that is not an alias, a
+       primitive) yields ``None`` — no ``FnType`` reachable.
+
+    The ``seen`` set guards against a cyclic alias chain
+    (``type A = B; type B = A``).  The type checker rejects circular
+    aliases upstream (``[E132]``, #648), so a cycle here can only arise
+    from malformed input; the guard makes the resolver terminate with
+    ``None`` (the caller then falls to its loud backstop) rather than
+    spin forever — the same defence-in-depth
+    ``InferenceMixin._resolve_base_type_name`` and
+    ``_canonical_named_type`` carry.
+    """
+    seen: set[str] = set()
+    while True:
+        while isinstance(te, ast.RefinementType):
+            te = te.base_type
+        if isinstance(te, ast.FnType):
+            return te
+        if not isinstance(te, ast.NamedType):
+            return None
+        if te.name in seen:
+            return None
+        seen.add(te.name)
+        alias = type_aliases.get(te.name)
+        if alias is None:
+            return None
+        # Bind this hop's concrete type args to the alias's params so a
+        # generic alias body's type-var references resolve to the bound
+        # types (``type Producer<T> = fn(String -> T)`` used as
+        # ``Producer<Future<...>>`` → ``fn(String -> Future<...>)``).
+        params = type_alias_params.get(te.name)
+        if params and te.type_args and len(params) == len(te.type_args):
+            alias = substitute_type_vars(alias, dict(zip(params, te.type_args)))
+        if isinstance(alias, (ast.FnType, ast.NamedType, ast.RefinementType)):
+            te = alias
+            continue
+        return None
+
+
 def substitute_type_param_names(name: str, mapping: dict[str, str]) -> str:
     """Substitute type-parameter NAMES inside a type-name *string* (#773).
 
@@ -129,6 +220,45 @@ def substitute_type_param_names(name: str, mapping: dict[str, str]) -> str:
     if isinstance(substituted, ast.NamedType):
         return Monomorphizer._format_type_name(substituted)
     return name  # pragma: no cover — NamedType in, NamedType out
+
+
+def declared_return_clone_key(te: ast.TypeExpr | None) -> str | None:
+    """The clone-name KEY a user fn's declared return TypeExpr contributes when
+    its call result is bound to a generic's type variable.
+
+    THE single source of truth for this key — discovery
+    (:func:`vera.codegen.monomorphize._simple_return_type_name`), the #732
+    verifier (``ContractVerifier._simple_type_name``), and the WASM call-rewrite
+    (``InferenceMixin._declared_return_clone_name``) ALL delegate here, so the
+    three consultors cannot desync by construction (#878 / #899 whack-a-mole:
+    each independently re-derived this key and they diverged on parameterized
+    returns and scalar-resolving aliases, dropping ``main`` at run time on a
+    check-green program).
+
+    Convention — refinement-unwrap, then the **base name** with type args
+    DROPPED:
+
+      * ``@Decimal``                 → ``"Decimal"``
+      * ``@Age`` (``type Age = Int``) → ``"Age"``  (RAW alias, not resolved)
+      * ``@Option<Decimal>``          → ``"Option"`` (base name only)
+      * ``@{ @Int | p }``             → ``"Int"``  (refinement-unwrapped)
+      * a bare ``FnType`` / anything without a NamedType base → ``None``
+
+    The base-name-only key is **sound** for the bare-``@T`` binding it feeds:
+    a ``forall<T>`` body binding a whole ADT to ``@T`` (``pick(@T, @T -> @T)``)
+    is representation-polymorphic — it can only move/copy the ``i32`` handle,
+    never pattern-match or project ``T`` (the body doesn't know ``T``'s
+    constructors), so ``Option<Decimal>`` and ``Option<Int>`` share one identity
+    clone ``pick$Option`` with byte-identical WAT.  (A parameterized *parameter*
+    like ``Option<T>`` — where the body CAN project the field — is a different
+    path that recovers the full type argument via ``_get_arg_type_info*``; this
+    key is only the bare-``@T`` case.)
+    """
+    while isinstance(te, ast.RefinementType):
+        te = te.base_type
+    if isinstance(te, ast.NamedType):
+        return te.name
+    return None
 
 
 def mangle_type_name(type_name: str) -> str:
@@ -161,6 +291,64 @@ def mangle_type_name(type_name: str) -> str:
         .replace("<", "_L").replace(">", "_R")
         .replace(", ", "_C").replace(",", "_C").replace(" ", "_S")
     )
+
+
+# Two-char escape code -> the canonical character(s) it decodes to.
+# `_C` decodes to the canonical separator spelling `", "` (mangle collapses
+# both `", "` and `","` to `_C`, but canonical type names always spell the
+# separator `", "`, so that is the sole preimage in the domain).
+_UNMANGLE_CODES = {"_": "_", "L": "<", "R": ">", "C": ", ", "S": " "}
+
+
+def unmangle_type_name(mangled: str) -> str:
+    """Inverse of :func:`mangle_type_name` over canonical type names.
+
+    :func:`mangle_type_name` is a prefix code — the output is a concatenation
+    of code units, each either a single non-``_`` character (mapping to
+    itself) or a two-character ``_X`` code (``__``/``_L``/``_R``/``_C``/``_S``)
+    — so a left-to-right scan decodes uniquely: at a ``_`` consume two
+    characters and emit the decoded character(s), otherwise consume one and
+    emit it.  Round-trips every canonical type name
+    (``unmangle_type_name(mangle_type_name(t)) == t``), which is what lets the
+    verifier's Array-element reverse lookup (``_get_element_sort_for_array``
+    in ``vera/smt.py``) recover the ``_z3_sorts`` key (``List<Int>``) from a
+    mangled Array-element sort name (``List_LInt_R``) after #884 routed ADT
+    sort names through the mangler.
+
+    Raises ``ValueError`` on a string that is not valid mangler output (a
+    trailing lone ``_`` or an unknown ``_X`` code) — such input is outside the
+    mangler's range and has no preimage.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(mangled)
+    while i < n:
+        ch = mangled[i]
+        if ch != "_":
+            out.append(ch)
+            i += 1
+            continue
+        if i + 1 >= n:
+            raise ValueError(f"trailing lone '_' in mangled name: {mangled!r}")
+        code = mangled[i + 1]
+        decoded = _UNMANGLE_CODES.get(code)
+        if decoded is None:
+            raise ValueError(
+                f"unknown escape code '_{code}' in mangled name: {mangled!r}"
+            )
+        out.append(decoded)
+        i += 2
+    return "".join(out)
+
+
+# Sentinel marking a genuinely-FREE (un-inferred) type-parameter slot in a
+# partially-recovered sparse-multi-parameter ADT name (`Res<?, Int>`, #898).
+# `?` cannot occur in a real Vera type name, so it never collides with a
+# concrete type; such a name reaches only the ability gate (the instance is
+# always rejected), never an emitted clone, and lets the gate tell an
+# under-determined-but-would-derive type (E619, annotate the free param) from
+# one whose known component is already non-Eq (E613, annotation cannot help).
+_FREE_TYPE_PARAM = "?"
 
 
 # Builtin function name → Vera return type name.
@@ -262,6 +450,14 @@ class MonoContext:
       discovered set is a sound superset under that normalization, which the
       #732 differential test maintains (its ``collapse`` table is the one place
       that mapping lives) and pins.
+    * ``fn_ret_type_exprs`` — function name (bare-keyed, same as ``fn_ret_types``)
+      → declared return **TypeExpr** (type args RETAINED, unlike ``fn_ret_types``).
+      Lets discovery recover a user fn's *parameterized* return (`maybe → Option<Decimal>`)
+      in `Option<T>` argument position, mirroring the WASM call-rewrite's
+      ``_fn_ret_type_exprs`` so the two consultors pick the same clone (#899 issue 1).
+      Optional (defaults empty): a consumer that doesn't populate it simply
+      loses the user-fn parameterized-return recovery, degrading to the prior
+      (bare-name) behaviour rather than erroring.
     """
 
     generic_decls: dict[str, ast.FnDecl]
@@ -271,6 +467,7 @@ class MonoContext:
     type_aliases: dict[str, ast.TypeExpr]
     type_alias_params: dict[str, tuple[str, ...]]
     fn_ret_types: dict[str, str]
+    fn_ret_type_exprs: dict[str, ast.TypeExpr] = field(default_factory=dict)
 
 
 class Monomorphizer:
@@ -356,13 +553,46 @@ class Monomorphizer:
         instances: dict[str, set[tuple[str, ...]]],
     ) -> None:
         """Total AST recursion underlying :meth:`collect_calls_in_expr`."""
-        if isinstance(node, ast.FnCall) and node.name in generic_decls:
+        # #774: a qualified call `m::g(…)` to an imported generic is an
+        # ``ast.ModuleCall``, not a ``FnCall`` — discover it identically (same
+        # arg-driven type inference) so the importer monomorphizes the same
+        # instantiation for both call forms.  Keyed on ``generic_decls``: the
+        # caller merges imported (unshadowed) generics into that dict, so a
+        # ModuleCall only matches once its target is a known generic.
+        if isinstance(node, (ast.FnCall, ast.ModuleCall)) and (
+            node.name in generic_decls
+        ):
             decl = generic_decls[node.name]
-            type_args = self._infer_type_args_from_call(
-                decl, node, ctor_to_adt, generic_decls,
+            type_args = self._infer_type_args_from_args(
+                decl, node.args, ctor_to_adt, generic_decls,
             )
             if type_args is not None:
                 instances[node.name].add(type_args)
+        # #913: a generic invoked via the ``|>`` pipe — ``x |> g(…)`` — desugars
+        # to ``g(x, …)`` at BOTH the checker (`_check_pipe`) and codegen
+        # (`_translate_binary`) boundaries, prepending the piped LHS as the
+        # call's FIRST argument.  Discovery must reconstruct that same argument
+        # list, or the bare RHS ``FnCall``/``ModuleCall`` (whose own `args`
+        # omit the piped value) fails to bind the type variable that the piped
+        # value supplies — so no ``g$Type`` clone is emitted and codegen lowers
+        # the pipe to a call on a non-existent function (the enclosing fn is
+        # dropped at run).  The RHS itself is walked by the generic field
+        # recursion below, so an inner generic call reachable through the RHS
+        # is still discovered; this branch only adds the pipe-desugared
+        # instantiation.
+        if (
+            isinstance(node, ast.BinaryExpr)
+            and node.op == ast.BinOp.PIPE
+            and isinstance(node.right, (ast.FnCall, ast.ModuleCall))
+            and node.right.name in generic_decls
+        ):
+            decl = generic_decls[node.right.name]
+            piped_args = (node.left,) + node.right.args
+            type_args = self._infer_type_args_from_args(
+                decl, piped_args, ctor_to_adt, generic_decls,
+            )
+            if type_args is not None:
+                instances[node.right.name].add(type_args)
         if isinstance(node, ast.Node):
             for f in fields(node):
                 if f.name == "span":
@@ -389,14 +619,80 @@ class Monomorphizer:
         Returns a tuple of concrete type names, one per forall_var, or
         None if inference fails.
         """
+        return self._infer_type_args_from_args(
+            decl, call.args, ctor_to_adt, generic_decls,
+        )
+
+    def _infer_type_args_from_args(
+        self,
+        decl: ast.FnDecl,
+        args: tuple[ast.Expr, ...],
+        ctor_to_adt: dict[str, str],
+        generic_decls: dict[str, ast.FnDecl] | None = None,
+    ) -> tuple[str, ...] | None:
+        """Infer concrete type variable bindings from an argument tuple.
+
+        The arg-driven core shared by ``FnCall`` and ``ModuleCall`` (#774): a
+        qualified call to an imported generic carries the same positional
+        arguments, so the type-parameter inference is identical to a bare call.
+
+        Returns a tuple of concrete type names, one per forall_var, or
+        None if inference fails.
+        """
         forall_vars = decl.forall_vars
         if not forall_vars:
             return None
 
+        # Type vars carrying an ability bound (`where Eq<T>`).  For these, a
+        # `ConstructorCall` argument to a direct `@T` parameter must keep its
+        # type argument (`Box<String>`, not bare `Box`) so the clone name, the
+        # substituted slot type in the clone body, AND the E613 gate all see the
+        # concrete field type — exactly as the slot-ref call form already does
+        # (#772).  Unconstrained vars stay bare: a `Box<T>` clone is a uniform
+        # pointer, so keeping one `id$Box` for every instantiation avoids
+        # needless clone splitting for generics whose behaviour is type-blind.
+        constrained_vars = frozenset(
+            c.type_var for c in (decl.forall_constraints or ())
+        )
+
         mapping: dict[str, str] = {}
-        for param_te, arg in zip(decl.params, call.args):
+        # #898: per-constrained-forall-var accumulator of a sparse
+        # multi-parameter ADT's partial per-parameter recovery, MERGED across
+        # every constructor argument bound to that var.  Each entry is
+        # (base_name, [name-or-None per ADT type parameter]); `MkErr(5)` fills
+        # one slot, `MkOk("x")` fills the other, so the two together yield the
+        # fully-determined `Res<String, Int>` the checker's cross-argument merge
+        # (`merge_inferred_types`) already accepted — keeping the monomorphizer
+        # in lockstep so the emitted clone matches the type-checked call.
+        partial_adt: dict[str, tuple[str, list[str | None]]] = {}
+        for param_te, arg in zip(decl.params, args):
             self._unify_param_arg(param_te, arg, forall_vars, ctor_to_adt,
-                                  mapping, generic_decls)
+                                  mapping, generic_decls, constrained_vars,
+                                  partial_adt)
+
+        # Materialise any merged sparse-ADT recovery.
+        #
+        # * Fully determined (every parameter now known across all arguments):
+        #   promote the bare name to the full parameterised name so the E613
+        #   gate and clone body see the concrete field types, and the emitted
+        #   clone matches the type-checked call.
+        # * Partially determined (a genuinely free parameter remains — the
+        #   single-argument `id1(MkErr(5))` shape): materialise a name that
+        #   still carries the RECOVERED components, with each free slot marked
+        #   by the reserved `?` sentinel (`Res<?, Int>`).  This never names an
+        #   emitted clone (the instance is always rejected by the ability gate),
+        #   but it lets the gate distinguish an under-determined type whose
+        #   known components ARE Eq (→ clearer E619, annotate the free param)
+        #   from one whose known component is already non-Eq (→ accurate E613,
+        #   annotation cannot help) — #898 diagnostic-accuracy fix.
+        for tv, (base_name, slots) in partial_adt.items():
+            if all(s is not None for s in slots):
+                resolved = [s for s in slots if s is not None]
+                mapping[tv] = f"{base_name}<{', '.join(resolved)}>"
+            elif tv in constrained_vars:
+                rendered = [s if s is not None else _FREE_TYPE_PARAM
+                            for s in slots]
+                mapping[tv] = f"{base_name}<{', '.join(rendered)}>"
 
         # Check all type vars are resolved; default unresolved phantom vars to
         # Bool (NOT Unit — see the rationale just below: Bool has an i32 repr)
@@ -419,12 +715,14 @@ class Monomorphizer:
         ctor_to_adt: dict[str, str],
         mapping: dict[str, str],
         generic_decls: dict[str, ast.FnDecl] | None = None,
+        constrained_vars: frozenset[str] = frozenset(),
+        partial_adt: dict[str, tuple[str, list[str | None]]] | None = None,
     ) -> None:
         """Unify a parameter TypeExpr against an argument to bind type vars."""
         if isinstance(param_te, ast.RefinementType):
             self._unify_param_arg(
                 param_te.base_type, arg, forall_vars, ctor_to_adt, mapping,
-                generic_decls,
+                generic_decls, constrained_vars, partial_adt,
             )
             return
 
@@ -435,6 +733,40 @@ class Monomorphizer:
             # Direct type variable — infer from argument
             vera_type = self._infer_vera_type_name(
                 arg, ctor_to_adt, generic_decls)
+            if (param_te.name in constrained_vars
+                    and isinstance(arg, ast.ConstructorCall)):
+                # `_infer_vera_type_name` drops the type argument for a
+                # `ConstructorCall` (returns bare `Box`).  For a CONSTRAINED
+                # var the type argument is load-bearing (the ability check and
+                # the clone body's structural `==` both need it), so recover the
+                # parameterized name via `_get_arg_type_info` — the same routine
+                # the `Option<T>` parameterized path uses (#772).
+                info = self._get_arg_type_info(arg, ctor_to_adt)
+                if info is not None:
+                    base_name, arg_names = info
+                    if arg_names and all(a is not None for a in arg_names):
+                        resolved = [a for a in arg_names if a is not None]
+                        vera_type = f"{base_name}<{', '.join(resolved)}>"
+                    elif arg_names and partial_adt is not None:
+                        # #898: PARTIAL recovery — this constructor pins only
+                        # some of the ADT's type parameters (`MkErr(5)` fills
+                        # `B`, not `A`).  Accumulate the per-slot info under this
+                        # forall var, MERGING with any sibling argument's
+                        # recovery (`MkOk("x")` fills `A`), so the fully-
+                        # determined `Res<String, Int>` is materialised after
+                        # every argument is seen.  A later slot overwrites None,
+                        # never a concrete name (siblings agree on shared slots
+                        # because the checker already accepted the call — a
+                        # genuine conflict is an E205 there, never reaching mono).
+                        prev = partial_adt.get(param_te.name)
+                        if prev is None or prev[0] != base_name:
+                            slots: list[str | None] = list(arg_names)
+                            partial_adt[param_te.name] = (base_name, slots)
+                        else:
+                            slots = prev[1]
+                            for i, name in enumerate(arg_names):
+                                if name is not None and i < len(slots):
+                                    slots[i] = name
             if vera_type and param_te.name not in mapping:
                 mapping[param_te.name] = vera_type
             return
@@ -696,7 +1028,79 @@ class Monomorphizer:
                              "array_slice", "array_filter"):
                 if expr.args:
                     return self._get_arg_type_info(expr.args[0], ctor_to_adt)
+            # #899 issue 1: a NON-generic user fn returning a parameterized type
+            # (`maybe → Option<Decimal>`) in `Option<T>` position must expose its
+            # type args so `T` binds from THIS argument.  Mirrors the WASM
+            # call-rewrite `_get_arg_type_info_wasm` FnCall branch
+            # (vera/wasm/inference.py) so discovery and call-rewrite pick the
+            # same clone — else discovery emits `first_opt$Bool` while the call
+            # site references `first_opt$Decimal`, a dangling reference (E602).
+            # GENERIC calls are excluded: their declared return is over the
+            # callee's OWN type vars, not concrete types, so their type args
+            # would bind a phantom var — they fall through to the generic-return
+            # resolution instead (same exclusion the call-rewrite side applies).
+            if expr.name in (self.ctx.generic_decls or {}):
+                return None
+            ret_te = self.ctx.fn_ret_type_exprs.get(expr.name)
+            if isinstance(ret_te, ast.RefinementType):
+                ret_te = ret_te.base_type
+            if isinstance(ret_te, ast.NamedType) and ret_te.type_args:
+                ta_names: list[str | None] = []
+                for ta in ret_te.type_args:
+                    if isinstance(ta, ast.NamedType) and not ta.type_args:
+                        ta_names.append(self._format_type_name(ta))
+                    else:
+                        ta_names.append(None)
+                return (ret_te.name, tuple(ta_names))
         return None
+
+    def full_arg_type_name(
+        self, expr: ast.Expr, ctor_to_adt: dict[str, str],
+    ) -> str | None:
+        """Fully-qualified Vera type name of an argument expression (#932).
+
+        The DERIVABILITY-decision counterpart of the one-level names
+        :meth:`_get_arg_type_info` / :meth:`_infer_vera_type_name` recover.
+        Recurses through nested ``ConstructorCall`` fields so every level's type
+        argument is reconstructed: a `Cons(Cons(1, Nil), Nil)` operand yields the
+        FULLY-qualified ``List<List<Int>>`` rather than the one-level
+        ``List<List>`` the flat recovery produces (the residue that the
+        codegen-side Eq-derivability gate then treats as a lost-type-arg clone
+        and spuriously E613s).
+
+        This is the mono-side mirror of ``OperatorsMixin._full_ctor_type_name``
+        (vera/wasm/operators.py, #923's DIRECT-``==`` recovery).  It is consumed
+        ONLY for the Eq-derivability decision (`_check_constraints`) — the
+        mangled CLONE NAME codegen emits and looks up stays the truncated
+        one-level name (`eq2$List<List>`) that `_get_arg_type_info` produces, so
+        the clone-mangling contract `_unify_param_arg` relies on is unchanged
+        (the #772 hard constraint).
+
+        Falls back to the bare :meth:`_infer_vera_type_name` for a
+        non-``ConstructorCall`` operand (a nested `[1]` bottoms out at the bare
+        `Array`, a nullary `Nil` at the bare `List`).  Returns ``None`` only when
+        the base ADT name itself cannot be resolved; a field whose type argument
+        cannot be inferred leaves that position bare, matching the lost-type-arg
+        shape the derivability gate already handles.
+        """
+        if not isinstance(expr, ast.ConstructorCall):
+            return self._infer_vera_type_name(expr, ctor_to_adt)
+        base = ctor_to_adt.get(expr.name)
+        if base is None:
+            return None
+        tp_indices = self.ctx.ctor_tp_indices.get(expr.name)
+        tp_count = self.ctx.adt_tp_counts.get(base, 0)
+        if not tp_indices or tp_count == 0:
+            return base
+        slots: list[str | None] = [None] * tp_count
+        for field_i, tp_idx in enumerate(tp_indices):
+            if tp_idx is not None and field_i < len(expr.args):
+                slots[tp_idx] = self.full_arg_type_name(
+                    expr.args[field_i], ctor_to_adt,
+                )
+        if all(s is not None for s in slots):
+            return f"{base}<{', '.join(s for s in slots if s is not None)}>"
+        return base
 
     def _resolve_arg_fn_shape(
         self,
@@ -736,34 +1140,22 @@ class Monomorphizer:
         if isinstance(arg, ast.AnonFn):
             return (tuple(arg.params), arg.return_type)
         if isinstance(arg, ast.SlotRef):
-            type_aliases = self.ctx.type_aliases
-            type_alias_params = self.ctx.type_alias_params
-            alias_te = type_aliases.get(arg.type_name)
-            if isinstance(alias_te, ast.FnType):
-                # Parameterised alias — substitute the SlotRef's
-                # type_args into the alias body before returning.
-                # Arity-mismatch on parameterised aliases (e.g.
-                # `@Pair<Int>.0` against a `Pair<A, B>` declaration)
-                # is rejected upstream by the type checker since
-                # v0.0.148 with `[E133]` (#660); reaching here with
-                # `len(arg.type_args) != len(alias_params)` would
-                # require bypassing the checker.
-                alias_params = type_alias_params.get(arg.type_name)
-                if (alias_params
-                        and arg.type_args
-                        and len(alias_params) == len(arg.type_args)):
-                    subst: dict[str, ast.TypeExpr] = dict(
-                        zip(alias_params, arg.type_args),
-                    )
-                    substituted_params = tuple(
-                        substitute_type_vars(p, subst)
-                        for p in alias_te.params
-                    )
-                    substituted_return = substitute_type_vars(
-                        alias_te.return_type, subst,
-                    )
-                    return (substituted_params, substituted_return)
-                return (tuple(alias_te.params), alias_te.return_type)
+            # Resolved transitively through the alias chain via the
+            # shared resolver (#867 / PR #880 review — the single-hop
+            # lookup here made a two-hop-alias-typed closure slot fail
+            # shape resolution, so a closure-bound type param fell to
+            # the phantom-var default: wrong mono suffix, WASM trap).
+            # The resolver substitutes the SlotRef's type_args into a
+            # parameterised alias's body per hop (CR-5 on PR #659);
+            # arity-mismatch on parameterised aliases is rejected
+            # upstream by the type checker ([E133], #660).
+            fn_type = resolve_fn_type_alias(
+                ast.NamedType(name=arg.type_name, type_args=arg.type_args),
+                self.ctx.type_aliases,
+                self.ctx.type_alias_params,
+            )
+            if fn_type is not None:
+                return (tuple(fn_type.params), fn_type.return_type)
         return None
 
     def _infer_fn_alias_type_args(
@@ -790,16 +1182,33 @@ class Monomorphizer:
         type_aliases = self.ctx.type_aliases
         type_alias_params = self.ctx.type_alias_params
 
-        alias_te = type_aliases.get(param_te.name)
-        if not isinstance(alias_te, ast.FnType):
-            return None
-
         alias_params = type_alias_params.get(param_te.name)
         if (
             not alias_params
             or not param_te.type_args
             or len(alias_params) != len(param_te.type_args)
         ):
+            return None
+
+        # Resolve the param alias's body transitively (#867 / PR #880
+        # review): the HOF's declared fn param may itself be an alias
+        # chain (`type MapFn2<X, Y> = MapFn<X, Y>;`).  Resolving the
+        # chain instantiated at the alias's *own* param names keeps the
+        # terminal FnType body expressed in `alias_params` names —
+        # including across renaming hops — so the positional matching
+        # below is untouched.
+        alias_te = resolve_fn_type_alias(
+            ast.NamedType(
+                name=param_te.name,
+                type_args=tuple(
+                    ast.NamedType(name=p, type_args=None)
+                    for p in alias_params
+                ),
+            ),
+            type_aliases,
+            type_alias_params,
+        )
+        if alias_te is None:
             return None
 
         # Match the FnType body against the arg's shape to build an

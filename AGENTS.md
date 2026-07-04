@@ -8,7 +8,7 @@ Read `SKILL.md` for the full language reference. It covers syntax, slot referenc
 
 ### Conformance programs as reference
 
-The conformance suite in `tests/conformance/` contains 111 small programs — often one per language feature — that serve as minimal working examples. Most are self-contained; the exception is `ch07_cross_module_contracts.vera`, which imports its `ch07_cross_module_contracts_lib.vera` companion to exercise cross-module contracts. Each positive program must pass its declared verification level (see `manifest.json` for mappings: `parse`, `check`, `verify`, or `run`); the four negative fixtures (`ch05_apply_fn_arity`, `ch08_circular_import`, `ch08_visibility_private`, `ch09_builtin_redefinition`) instead must *fail* `check` with the E-code in their `expected_error` field. When you need to see how a specific construct works (e.g. effect handlers, match expressions, closures), check the corresponding conformance program before reading the spec.
+The conformance suite in `tests/conformance/` contains 143 small, self-contained programs — often one per language feature — that serve as minimal working examples (the exception is `ch07_cross_module_contracts.vera`, which imports its `ch07_cross_module_contracts_lib.vera` companion to exercise cross-module contracts). Each positive program must pass its declared verification level (see `manifest.json` for mappings: `parse`, `check`, `verify`, or `run`); the seven negative fixtures (`ch02_generic_over_unit_rejected`, `ch05_apply_fn_arity`, `ch08_circular_import`, `ch08_visibility_private`, `ch09_builtin_redefinition`, `ch09_ord_adt_rejected`, `ch09_eq_non_derivable_rejected`) instead must *fail* `check` with the E-code in their `expected_error` field. When you need to see how a specific construct works (e.g. effect handlers, match expressions, closures), check the corresponding conformance program before reading the spec.
 
 ### Workflow
 
@@ -41,6 +41,7 @@ vera compile --wat file.vera              # Print WAT text (human-readable WASM)
 vera compile --target browser file.vera   # Compile + emit browser bundle
 vera run file.vera                # Compile and execute (calls main)
 vera run file.vera --fn f -- 42   # Call function f with argument 42
+vera serve file.vera              # Serve handle(Request -> Response) over HTTP (default :8000)
 vera test file.vera               # Contract-driven testing via Z3 + WASM
 vera test --json file.vera        # Test with JSON output
 vera test --trials 50 file.vera   # Limit trials per function (default 100)
@@ -182,7 +183,7 @@ Each stage is a module with a single public API function (`parse_file`, `transfo
 pytest tests/ -v                       # Run all tests (see TESTING.md)
 pytest tests/test_conformance.py -v    # Conformance suite only
 mypy vera/                             # Type-check the compiler
-python scripts/check_conformance.py    # All 111 conformance programs hold (positives pass; negatives fail with their E-code)
+python scripts/check_conformance.py    # All 143 conformance programs hold (positives pass; negatives fail with their E-code)
 python scripts/check_examples.py       # All 37 examples must pass
 ```
 
@@ -192,7 +193,7 @@ When implementing a new language feature, write the conformance program *first* 
 
 ### Invariants
 
-- All 111 conformance programs in `tests/conformance/` must hold at their declared level — positive entries pass, and the negative fixtures (`ch05_apply_fn_arity`, `ch08_circular_import`, `ch08_visibility_private`, `ch09_builtin_redefinition`) must *fail* `check` with their `expected_error` E-code
+- All 143 conformance programs in `tests/conformance/` must hold at their declared level — positive entries pass, and the negative fixtures (`ch02_generic_over_unit_rejected`, `ch05_apply_fn_arity`, `ch08_circular_import`, `ch08_visibility_private`, `ch09_builtin_redefinition`, `ch09_ord_adt_rejected`, `ch09_eq_non_derivable_rejected`) must *fail* `check` with their `expected_error` E-code
 - All 37 examples in `examples/` must pass `vera check` and `vera verify`
 - `mypy vera/` must be clean
 - `pytest tests/ -v` must pass

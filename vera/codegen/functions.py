@@ -9,6 +9,7 @@ from __future__ import annotations
 from vera import ast
 from vera.skip import AdtEqNotDerivableError, CodegenInvariantError, CodegenSkip
 from vera.codegen.tail_position import compute_tail_call_sites
+from vera.monomorphize import mangle_type_name
 from vera.wasm import WasmContext, WasmSlotEnv
 from vera.wasm.helpers import _is_host_handle_type, gc_shadow_push
 
@@ -57,6 +58,49 @@ class FunctionCompilationMixin:
             error_code="E613",
         ))
 
+    def _emit_contract_predicate_skip(
+        self, ctx: WasmContext, skip: CodegenSkip, decl: ast.FnDecl,
+    ) -> None:
+        """Emit the E602 warning for a ``CodegenSkip`` in a contract predicate.
+
+        A ``hash`` / ``show`` (or any other unsupported construct) inside a
+        ``requires`` / ``ensures`` / refinement guard raises ``CodegenSkip``
+        during predicate lowering.  Surface the SAME clean E602 "function
+        skipped" warning the body path emits (line ~414), pointing at the
+        unsupported node's span, instead of letting the exception escape as a
+        Python traceback on a ``check``-green program (#922).
+        """
+        self._harvest_interp_inference_failures(ctx)
+        self._warning(
+            skip.node if getattr(skip.node, "span", None) else decl,
+            f"Function '{decl.name}' contract predicate contains unsupported "
+            f"{type(skip.node).__name__}: {skip.reason} — function skipped.",
+            rationale="The WASM backend does not yet support lowering all "
+            "Vera expressions to a runtime contract check. This function "
+            "will not appear in the compiled output.",
+            error_code="E602",
+        )
+
+    def _emit_contract_predicate_degradation(
+        self, ctx: WasmContext,
+        exc: AdtEqNotDerivableError | CodegenSkip,
+        decl: ast.FnDecl,
+    ) -> None:
+        """Dispatch a contract-predicate degradation to its clean diagnostic.
+
+        An ``AdtEqNotDerivableError`` (a non-Eq composite ``==``) becomes the
+        E613 the body / closure / postcondition paths emit; a ``CodegenSkip``
+        (an unsupported ``hash`` / ``show`` / …) becomes the E602 the body path
+        emits.  Shared by every contract-predicate catch site — precondition,
+        refinement-parameter guard, and postcondition — so a user program can
+        NEVER surface a Python traceback from a contract predicate (#922,
+        contract §516 / §522 / §589).
+        """
+        if isinstance(exc, AdtEqNotDerivableError):
+            self._emit_adt_eq_not_derivable(ctx, exc, decl)
+        else:
+            self._emit_contract_predicate_skip(ctx, exc, decl)
+
     def _compile_fn(
         self, decl: ast.FnDecl, *, export: bool = True,
         module_renames: dict[str, str] | None = None,
@@ -81,29 +125,45 @@ class FunctionCompilationMixin:
         if not self._is_compilable(decl):
             return None
 
-        # Build effect_ops mapping for State<T> and Exn<E> operations
+        # Build effect_ops mapping for State<T> and Exn<E> operations.
+        # `effect_op_result_wt` records each value-producing op's result WAT
+        # type (its State<T> parameter's WAT type) so `_infer_expr_wasm_type`
+        # can type a bare `get(())` in constructor-arg / match-scrutinee
+        # position (#914 A1/A2).  Composite type args (`Tuple<Int, Int>`,
+        # `Option<Int>`) are routed through the injective `mangle_type_name`
+        # escaper (#775/#914 B) so the `state_*`/`exn_*` WAT identifiers stay
+        # legal — raw `<`, `>`, `,`, ` ` are illegal in a WAT identifier.
         effect_ops: dict[str, tuple[str, bool]] = {}
+        effect_op_result_wt: dict[str, str | None] = {}
         if isinstance(decl.effect, ast.EffectSet):
             for eff in decl.effect.effects:
                 if (isinstance(eff, ast.EffectRef) and eff.name == "State"
                         and eff.type_args and len(eff.type_args) == 1):
                     type_name = self._type_expr_to_slot_name(eff.type_args[0])
                     if type_name:
+                        mangled = mangle_type_name(type_name)
                         # Only map if no user-defined function shadows the op
                         if "get" not in self._fn_sigs:
                             effect_ops["get"] = (
-                                f"$vera.state_get_{type_name}", False
+                                f"$vera.state_get_{mangled}", False
+                            )
+                            # State<T>'s T is validated non-pair /
+                            # non-unsupported by `_check_state_type` (E607),
+                            # so this yields a scalar (i64/f64/i32) or an
+                            # ADT-pointer (i32) — exactly the op's result WT.
+                            effect_op_result_wt["get"] = (
+                                self._type_expr_to_wasm_type(eff.type_args[0])
                             )
                         if "put" not in self._fn_sigs:
                             effect_ops["put"] = (
-                                f"$vera.state_put_{type_name}", True
+                                f"$vera.state_put_{mangled}", True
                             )
                 elif (isinstance(eff, ast.EffectRef) and eff.name == "Exn"
                         and eff.type_args and len(eff.type_args) == 1):
                     type_name = self._type_expr_to_slot_name(eff.type_args[0])
                     if type_name and "throw" not in self._fn_sigs:
                         effect_ops["throw"] = (
-                            f"$exn_{type_name}", False
+                            f"$exn_{mangle_type_name(type_name)}", False
                         )
 
         # Flatten ADT layouts into ctor_name -> layout for WasmContext
@@ -118,9 +178,12 @@ class FunctionCompilationMixin:
         ctx = WasmContext(
             self.string_pool,
             effect_ops=effect_ops,
+            effect_op_result_wt=effect_op_result_wt,
             ctor_layouts=ctor_layouts,
             adt_type_names=adt_type_names,
             generic_fn_info=getattr(self, "_generic_fn_info", None),
+            generic_constrained_vars=getattr(
+                self, "_generic_constrained_vars", None),
             ctor_to_adt=ctor_to_adt,
             known_fns=set(self._fn_sigs.keys()),
             ctor_adt_tp_indices=getattr(self, "_ctor_adt_tp_indices", None),
@@ -130,6 +193,10 @@ class FunctionCompilationMixin:
         # #773 / PR #870 review: the direct `==` path checks structural-Eq
         # derivability through the SAME gate the generic constraint path uses.
         ctx.set_adt_eq_derivable(self._adt_satisfies_eq)
+        # #932: share the truncated→full constrained-var name map so the direct
+        # `==` path inside a generic clone body resolves a truncated slot type
+        # (`List<List>`) on its fully-nested name for the derivability decision.
+        ctx.set_eq_full_type_names(getattr(self, "_eq_full_type_names", {}))
         # Build function return type map for FnCall type inference.
         # Include Unit-returning fns explicitly with None so `_is_void_expr`
         # in vera/wasm/context.py can distinguish "Unit return" (key present,
@@ -174,6 +241,12 @@ class FunctionCompilationMixin:
         # whose bare name is shadowed by a local resolves to the module's
         # body (emitted under a distinct ``mod$…`` name) rather than the local.
         ctx.set_module_qualified_targets(self._module_qualified_targets)
+        # #814/#774: shadowed imported-generic qualified-call bases, so a
+        # `m::gen(…)` whose bare name a local shadows resolves to the module
+        # generic's clone rather than the local shadow.
+        ctx.set_module_qualified_generic_bases(
+            self._module_qualified_generic_bases,
+        )
         # #814 C2: intra-module call renames, set ONLY when compiling a
         # ``mod$…`` body, so a bare sibling call inside it reaches the
         # module's version rather than the main program's local shadow.
@@ -318,44 +391,84 @@ class FunctionCompilationMixin:
             self_ret_wt=ret_wt if ret_wt != "unsupported" else None,
         )
 
-        # Compile precondition checks.  A `requires(...)` may *assume* the
-        # refined parameters' invariants, so it runs after the refinement
-        # guards emitted below (the call stays here so its ctx side effects
-        # are unchanged; only the emitted-instruction order is reversed).
-        precond_instrs = self._compile_preconditions(ctx, decl, env)
+        # Compile precondition checks + refinement-parameter entry guards.
+        #
+        # #922: BOTH the precondition (`_compile_preconditions`) and the
+        # refinement-guard (`_emit_refinement_check` /
+        # `_emit_component_refinement_guards`) lower a contract-position
+        # predicate via `translate_expr`, so a non-Eq composite `==` raises
+        # `AdtEqNotDerivableError` and an unsupported `hash`/`show` raises
+        # `CodegenSkip` — exactly as the body / closure / postcondition paths do.
+        # These sites sat OUTSIDE any degradation try/except, so the exception
+        # escaped uncaught (a Python traceback on a `check`-green program).
+        # Wrap them in the SAME `(AdtEqNotDerivableError, CodegenSkip)`
+        # degradation the postcondition path uses: an `AdtEqNotDerivableError`
+        # becomes a clean E613, a `CodegenSkip` a clean E602, and the function
+        # is dropped.  A `requires(...)` may *assume* the refined parameters'
+        # invariants, so it runs after the refinement guards emitted below (the
+        # call stays here so its ctx side effects are unchanged; only the
+        # emitted-instruction order is reversed).
+        try:
+            precond_instrs = self._compile_preconditions(ctx, decl, env)
 
-        # #746: refined parameters carry a runtime predicate guard at entry —
-        # a refinement is the parameter's *type* invariant, so an untrusted
-        # (incl. FFI/public) caller passing a violating value traps via
-        # $vera.contract_fail rather than the function relying on an invariant
-        # the value never established.  Emitted *before* the explicit
-        # preconditions: a `requires(...)` may itself depend on the invariant
-        # (e.g. `requires(10 / @NonZero.0 > 0)` would trap on the division
-        # before the guard could report the boundary violation), so the guard
-        # must establish the refinement first.
-        refine_guard_instrs: list[str] = []
-        # #746 PR-review: per-component boundary guards for tuple params — a
-        # `Tuple<PosInt, Int>` carries no top-level refinement, so an FFI caller
-        # passing a refinement-violating component would otherwise slip past the
-        # callee's entry checks (the verifier *assumes* the component holds).
-        # Emitted BEFORE the top-level refined guard below: a refinement OVER a
-        # tuple (`{ @Tuple<PosInt, Int> | P }`) has P potentially read the
-        # components, so the components must be established first (CR PR-review).
-        for value_local, param_te in component_param_checks:
-            refine_guard_instrs.extend(
-                self._emit_component_refinement_guards(
-                    ctx, decl, param_te, value_local, env, "parameter"))
+            # #746: refined parameters carry a runtime predicate guard at
+            # entry — a refinement is the parameter's *type* invariant, so an
+            # untrusted (incl. FFI/public) caller passing a violating value traps
+            # via $vera.contract_fail rather than the function relying on an
+            # invariant the value never established.  Emitted *before* the
+            # explicit preconditions: a `requires(...)` may itself depend on the
+            # invariant (e.g. `requires(10 / @NonZero.0 > 0)` would trap on the
+            # division before the guard could report the boundary violation), so
+            # the guard must establish the refinement first.
+            refine_guard_instrs: list[str] = []
+            # #746 PR-review: per-component boundary guards for tuple params — a
+            # `Tuple<PosInt, Int>` carries no top-level refinement, so an FFI
+            # caller passing a refinement-violating component would otherwise
+            # slip past the callee's entry checks (the verifier *assumes* the
+            # component holds).  Emitted BEFORE the top-level refined guard
+            # below: a refinement OVER a tuple (`{ @Tuple<PosInt, Int> | P }`)
+            # has P potentially read the components, so the components must be
+            # established first (CR PR-review).
+            for value_local, param_te in component_param_checks:
+                refine_guard_instrs.extend(
+                    self._emit_component_refinement_guards(
+                        ctx, decl, param_te, value_local, env, "parameter"))
 
-        for value_local, param_te in refined_param_checks:
-            parts = self._refinement_guard_parts(param_te)
-            if parts is None:  # pragma: no cover — collected only when not None
-                continue
-            predicate, base_name = parts
-            msg = self._format_refinement_message(decl, param_te, "parameter")
-            guard = self._emit_refinement_check(
-                ctx, predicate, base_name, value_local, msg, env)
-            if guard is not None:
-                refine_guard_instrs.extend(guard)
+            for value_local, param_te in refined_param_checks:
+                parts = self._refinement_guard_parts(param_te)
+                if parts is None:  # pragma: no cover — collected only when not None
+                    continue
+                predicate, base_name = parts
+                msg = self._format_refinement_message(
+                    decl, param_te, "parameter")
+                guard = self._emit_refinement_check(
+                    ctx, predicate, base_name, value_local, msg, env)
+                if guard is not None:
+                    refine_guard_instrs.extend(guard)
+        except (AdtEqNotDerivableError, CodegenSkip) as exc:
+            self._emit_contract_predicate_degradation(ctx, exc, decl)
+            return None
+        except CodegenInvariantError as inv:  # #939: complete the #922 net.
+            # A `@T.n` read in a `requires(...)` clause of a generic
+            # instantiated at Unit hits the dangling-slot invariant in
+            # `_translate_slot_ref`; pre-#939 this precond `try` caught only
+            # `(AdtEqNotDerivableError, CodegenSkip)`, so it escaped `_compile_fn`
+            # as a raw traceback on a `check`-green program.  Mirror the body /
+            # closure / postcondition paths: surface ONE loud [E699] (a compiler
+            # bug — E206 should have rejected it at check).  MUST follow the
+            # `(AdtEqNotDerivableError, CodegenSkip)` catch above (subclass).
+            # Covered by tests/test_codegen_invariant_e699.py.
+            self._harvest_interp_inference_failures(ctx)
+            self._error(
+                inv.node if inv.node is not None else decl,
+                f"Internal compiler error while compiling '{decl.name}': "
+                f"{inv.msg}",
+                rationale="This is a codegen invariant violation — the type "
+                "checker should have rejected the input before it reached this "
+                "point.  Please file a bug report with the offending program.",
+                error_code="E699",
+            )
+            return None
 
         pre_instrs = refine_guard_instrs + precond_instrs
 
@@ -392,6 +505,30 @@ class FunctionCompilationMixin:
                 f"function skipped.",
                 rationale="The WASM backend does not yet support all "
                 "Vera expression types. This function will not appear "
+                "in the compiled output.",
+                error_code="E602",
+            )
+            return None
+        except RecursionError:
+            # #933 belt-and-suspenders: the structural derived-helper
+            # generators (show/hash/eq) bound their DISTINCT-type descent on
+            # `DERIVED_HELPER_DEPTH_CAP` (see vera/skip.py), which fires on a
+            # non-uniform ADT like `Box<Box<T>>` long before the interpreter's
+            # recursion limit.  This catch is the last-resort backstop for a
+            # future generator whose per-level frame cost outruns that cap: a
+            # check-green program must NEVER surface a raw Python traceback
+            # (DESIGN.md principle 1).  Degrade to the same clean [E602] skip a
+            # structurally-unsupported body already takes — the function is
+            # dropped with a loud diagnostic, not a crash.
+            self._harvest_interp_inference_failures(ctx)
+            self._warning(
+                decl,
+                f"Function '{decl.name}' body exceeded the codegen recursion "
+                f"bound (a deeply / non-uniformly recursive type) — "
+                f"function skipped.",
+                rationale="Rendering / comparing a polymorphically-recursive "
+                "type (e.g. `Box<T>` with a `Box<Box<T>>` field) would expand "
+                "without bound at compile time. This function will not appear "
                 "in the compiled output.",
                 error_code="E602",
             )
@@ -493,12 +630,15 @@ class FunctionCompilationMixin:
         # diagnostic with the effect.
         try:
             closure_failed = self._lift_pending_closures(ctx)
-        except AdtEqNotDerivableError as nde:
+        except (AdtEqNotDerivableError, CodegenSkip) as exc:
             # #773 / PR #870 review: a direct `==` on a non-Eq-derivable ADT
             # inside a CLOSURE body — same clean E613 as the function-body
             # catch above (a user error, not a compiler bug).  MUST precede
             # the parent CodegenInvariantError catch below (subclass).
-            self._emit_adt_eq_not_derivable(ctx, nde, decl)
+            # #922: also degrade a `CodegenSkip` (an unsupported `hash`/`show`
+            # inside a closure) to a clean E602 rather than an uncaught
+            # traceback, via the shared contract-predicate dispatcher.
+            self._emit_contract_predicate_degradation(ctx, exc, decl)
             return None
         except CodegenInvariantError as inv:  # #657: a closure-body invariant
             # violation (a codegen bug) propagates out of
@@ -538,8 +678,53 @@ class FunctionCompilationMixin:
             )
             return None
 
-        # Compile postcondition checks (wrap around body result)
-        post_instrs = self._compile_postconditions(ctx, decl, env, ret_wt)
+        # Compile postcondition checks (wrap around body result).
+        # #912: a composite `==` on a genuinely non-Eq-derivable operand
+        # (a `Tuple`, or an ADT with an `Array`/`Map` field) in an `ensures`
+        # clause raises `AdtEqNotDerivableError` from the structural-Eq dispatch,
+        # exactly as the body path does — but `_compile_postconditions` runs
+        # OUTSIDE the body/closure try blocks above, so the exception escaped
+        # uncaught (a Python traceback on a `check`-green program).  Catch it
+        # here with the SAME clean E613 the body (line 407) and closure (line
+        # 504) paths emit, dropping the function.  The *provable* free-type-var
+        # shape (`@Box<T>.result == @Box<T>.0`) never reaches here — it is routed
+        # to the scalar lowering by `_is_lost_type_arg_clone` before dispatch —
+        # so this backstop only fires on operands the checker's own Eq gate
+        # would reject (it does not yet gate contract position; a distinct gap).
+        # #922: the catch also covers `CodegenSkip` — an unsupported `hash`/`show`
+        # on a composite (e.g. `ensures(hash(recursiveADT) == 0)`) raises
+        # `CodegenSkip`, not `AdtEqNotDerivableError`, and the pre-#922 narrow
+        # catch let it escape uncaught.  It now degrades to a clean E602 via the
+        # shared contract-predicate dispatcher.
+        try:
+            post_instrs = self._compile_postconditions(ctx, decl, env, ret_wt)
+        except (AdtEqNotDerivableError, CodegenSkip) as exc:
+            self._emit_contract_predicate_degradation(ctx, exc, decl)
+            return None
+        except CodegenInvariantError as inv:  # #939: complete the net here too.
+            # The last of the four contract-lowering paths to gain the
+            # `CodegenInvariantError` net (body / closure had it pre-#939; the
+            # precondition path gained it in #939's first commit).  A `@T.n`
+            # read in an `ensures(...)` clause of a generic instantiated at a
+            # zero-size type (`Unit`, `Future<Unit>`) dangles in
+            # `_translate_slot_ref`; without this catch it escaped `_compile_fn`
+            # as a raw traceback on a `check`-green program (the #939-review
+            # crash).  E206's `erases_to_unit` broadening now rejects that at
+            # check, so this is the defensive backstop — but it MUST exist for
+            # symmetry, exactly as the body/closure/precondition catches do.
+            # MUST follow the `(AdtEqNotDerivableError, CodegenSkip)` catch
+            # above (subclass).  Covered by tests/test_codegen_invariant_e699.py.
+            self._harvest_interp_inference_failures(ctx)
+            self._error(
+                inv.node if inv.node is not None else decl,
+                f"Internal compiler error while compiling '{decl.name}': "
+                f"{inv.msg}",
+                rationale="This is a codegen invariant violation — the type "
+                "checker should have rejected the input before it reached this "
+                "point.  Please file a bug report with the offending program.",
+                error_code="E699",
+            )
+            return None
 
         # Propagate resource / host-import flags from ``ctx`` to the module
         # ``self`` that ``_assemble_module`` reads.  This runs HERE — after the
@@ -576,6 +761,9 @@ class FunctionCompilationMixin:
         # #773: structural-Eq helper functions generated while lowering this
         # body (deduped by name across the whole module at assembly).
         self._adt_eq_helpers.update(ctx._adt_eq_helpers)
+        # #924: recursive show/hash helper functions generated while lowering
+        # this body (deduped by name across the whole module at assembly).
+        self._show_hash_helpers.update(ctx._show_hash_helpers)
 
         # #517 — tail-call optimization fallback for functions whose
         # bodies are followed by post-body work that must run before

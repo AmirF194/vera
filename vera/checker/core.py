@@ -171,6 +171,15 @@ class TypeChecker(
     ) -> None:
         self.env = TypeEnv()
         self.errors: list[Diagnostic] = []
+        # A single root cause can reach `_error` more than once — most
+        # visibly, a function's signature types are `_resolve_type`'d in
+        # BOTH the registration and the check pass, so a resolution
+        # diagnostic on a param/return (e.g. `E135` on an `Array<Unit>`
+        # param) would otherwise be emitted twice at one location.  Collapse
+        # exact-duplicate diagnostics — identical code, location, severity,
+        # and message are indistinguishable to the reader — to a single
+        # entry, preserving first-occurrence order (PR #938 review).
+        self._seen_diag_keys: set[tuple[str, ...]] = set()
         self.source = source
         self.file = file
         self._effect_ops_used: set[str] = set()
@@ -204,8 +213,14 @@ class TypeChecker(
         self._resolved_modules: list[ResolvedModule] = (
             resolved_modules or []
         )
+        # #890: only DIRECT imports are qualified-callable (`mid::via_mid`)
+        # from this program.  A transitively-reached module (`base`, imported
+        # only by `mid`) is in ``_resolved_modules`` so codegen can compile
+        # the bodies that call into it, but per spec §8.6.4 its declarations
+        # are not visible here — a `base::wrap40` from the top-level importer
+        # must fail resolution (E230), so it stays out of this set.
         self._resolved_module_paths: set[tuple[str, ...]] = {
-            m.path for m in self._resolved_modules
+            m.path for m in self._resolved_modules if m.direct
         }
         # C7b: per-module declaration registries (for ModuleCall path).
         self._module_functions: dict[
@@ -253,6 +268,15 @@ class TypeChecker(
         if node.span:
             loc.line = node.span.line
             loc.column = node.span.column
+        # Collapse an exact-duplicate (same code, file, position, severity,
+        # and message) to a single entry — see `_seen_diag_keys`.
+        key = (
+            error_code, str(loc.file), str(loc.line),
+            str(loc.column), severity, description,
+        )
+        if key in self._seen_diag_keys:
+            return
+        self._seen_diag_keys.add(key)
         self.errors.append(Diagnostic(
             description=description,
             location=loc,

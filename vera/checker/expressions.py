@@ -27,6 +27,7 @@ from vera.types import (
     UnknownType,
     contains_typevar,
     base_type,
+    erases_to_unit,
     is_subtype,
     numeric_join,
     pretty_type,
@@ -236,7 +237,7 @@ class ExpressionsMixin:
         if isinstance(expr, ast.HandleExpr):
             return self._check_handle(expr)
         if isinstance(expr, ast.ArrayLit):
-            return self._check_array_lit(expr)
+            return self._check_array_lit(expr, expected=expected)
         if isinstance(expr, ast.AssertExpr):
             return self._check_assert(expr)
         if isinstance(expr, ast.AssumeExpr):
@@ -478,6 +479,18 @@ class ExpressionsMixin:
                     spec_ref='Chapter 4, Section 4.5 "Comparison Expressions"',
                     error_code="E142",
                 )
+            else:
+                # #928: `==` / `!=` is the surface spelling of the `Eq` ability
+                # (§9.8.1), so the operand type must be Eq-DERIVABLE — not merely
+                # compatible.  Without this gate a non-Eq `==` (two function
+                # values, or a State<Rec>/composite whose field is a Map) passes
+                # check AND compiles: unlike the direct-ADT path (which routes
+                # through `_translate_adt_eq` and raises a clean E613), it falls
+                # to a raw i32/pointer compare that never reaches the structural-
+                # Eq derivability dispatch — a SILENT pointer-identity comparison
+                # (the equality sibling of #921's ordering hole).  Reject here,
+                # the earliest and loudest gate, mirroring #921's E242 for Ord.
+                self._check_eq_ability(expr, left_ty, right_ty)
             return BOOL
 
         if op in (ast.BinOp.LT, ast.BinOp.GT, ast.BinOp.LE, ast.BinOp.GE):
@@ -565,6 +578,65 @@ class ExpressionsMixin:
             return BOOL
 
         return UnknownType()
+
+    def _check_eq_ability(
+        self, node: ast.Node, left_ty: Type, right_ty: Type,
+    ) -> None:
+        """Reject `==` / `!=` / `eq` on a non-Eq-derivable operand type (#928).
+
+        `Eq` is the ability behind equality (§9.8.1); it derives STRUCTURALLY
+        (§9.8.2) for the Eq primitives, simple enums, and ADTs whose fields are
+        (recursively) all Eq — but NOT for function types, `Array` / `Map` /
+        `Set` / `Tuple`, or an ADT/State-composite carrying such a field.  A
+        non-derivable operand that slips past here reaches codegen and silently
+        pointer-compares (identity, not value), so this is the load-bearing
+        soundness gate — its verdict is kept in lockstep with codegen's
+        structural-Eq dispatch by the #928 differential.
+
+        A TypeVar operand (a `forall<T where Eq<T>>` body) is DEFERRED: the
+        `Eq<T>` constraint promises derivability and the monomorphizer's E613
+        gate re-checks every concrete instantiation, so rejecting here would
+        break the legitimate constrained-generic form.  `UnknownType` is
+        likewise deferred (error recovery — no cascading E243).
+        """
+        from vera.checker.eq_ability import is_eq_derivable
+
+        # Defer any operand still carrying a type variable — a constrained
+        # generic (`Eq<T>`) is decided per-instantiation downstream, exactly as
+        # #921 defers a bare-TypeVar Ord operand.  `contains_typevar` catches
+        # nested forms (`Box<T>`, `Option<T>`) too, so a generic body's `==`
+        # over a partially-generic type is never spuriously rejected here.
+        if (contains_typevar(left_ty) or contains_typevar(right_ty)
+                or isinstance(left_ty, UnknownType)
+                or isinstance(right_ty, UnknownType)):
+            return
+        # The compatibility check (E142) already ran; judge the more specific
+        # (subtype) operand — they share a type up to Nat<:Int, and Eq-ness is
+        # invariant across that pair (both Nat and Int are Eq primitives).
+        if is_eq_derivable(left_ty, self.env):
+            return
+        self._error(
+            node,
+            f"Type {pretty_type(left_ty)} does not satisfy the 'Eq' ability; "
+            f"'==' / '!=' requires both operands to be Eq-derivable.",
+            rationale=(
+                "Equality ('==' / '!=', the surface spelling of the Eq "
+                "ability) is defined only on Eq-derivable types — the Eq "
+                "primitives (Int, Nat, Bool, Float64, String, Byte, Unit) and "
+                "ADTs whose fields are (recursively) all Eq. A function type, "
+                "an Array / Map / Set / Tuple, or a composite carrying such a "
+                "field has no structural equality, so comparing it would fall "
+                "to a raw pointer comparison — identity, not value equality."
+            ),
+            fix=(
+                "Compare Eq-derivable values instead. Reduce the operand to an "
+                "Eq-derivable value first (e.g. an Eq primitive or an ADT whose "
+                "every field is itself Eq); functions and Array / Map / Set / "
+                "Tuple values are not Eq-comparable."
+            ),
+            spec_ref='Chapter 9, Section 9.8.1 "Built-in Abilities"',
+            error_code="E243",
+        )
 
     def _check_pipe(self, expr: ast.BinaryExpr) -> Type | None:
         """Type-check pipe: left |> right (right must be a FnCall/ModuleCall)."""
@@ -852,7 +924,8 @@ class ExpressionsMixin:
     # Arrays
     # -----------------------------------------------------------------
 
-    def _check_array_lit(self, expr: ast.ArrayLit) -> Type | None:
+    def _check_array_lit(self, expr: ast.ArrayLit, *,
+                         expected: Type | None = None) -> Type | None:
         """Type-check an array literal."""
         if not expr.elements:
             return AdtType("Array", (UnknownType(),))
@@ -869,6 +942,46 @@ class ExpressionsMixin:
 
         if first is None:
             return AdtType("Array", (UnknownType(),))
+
+        # #945: a bare array literal `[()]` whose element erases to a zero-size
+        # type has no valid WASM layout (the store acts on an empty stack →
+        # invalid WASM on a check-green program).  Reject at check, mirroring
+        # the `Array<T>` type-resolution gate (E135) — this catches the
+        # un-annotated literal (`array_length([()])`) that never flows through
+        # `_resolve_type`.
+        #
+        # PR #938 review: when this literal is the RHS of an annotated
+        # `Array<zero-size>` binding/return, `_resolve_type` has ALREADY emitted
+        # E135 for that annotation (it returns the `Array<Unit>` type intact —
+        # resolution.py:178), so a second, literal-level E135 would double the
+        # diagnostic for one root cause.  Suppress it when `expected` is already
+        # a zero-size array; the un-annotated literal (`expected` is None, or a
+        # non-degenerate expected type) still reports here — its only gate.
+        # `expected` may be a `RefinedType` (`{ @Array<Unit> | pred }`), so
+        # strip to the base first (as `erases_to_unit` itself does) — otherwise
+        # the refined shape misses this guard and the literal-level E135
+        # double-fires alongside the annotation's (PR #938 review).
+        expected_base = base_type(expected) if expected is not None else None
+        expected_is_zero_size_array = (
+            isinstance(expected_base, AdtType)
+            and expected_base.name == "Array"
+            and len(expected_base.type_args) == 1
+            and erases_to_unit(expected_base.type_args[0])
+        )
+        if erases_to_unit(first) and not expected_is_zero_size_array:
+            self._error(
+                expr,
+                f"An array literal of a zero-size element type "
+                f"'{pretty_type(first)}' is not supported.",
+                rationale="A zero-size type (`Unit`, or a `Future` wrapping "
+                "one) occupies 0 bytes and has no runtime value, so an array "
+                "element of that type has no WASM representation to store — the "
+                "literal would compile to invalid WASM.",
+                fix="Use `Nat` for a count of zero-size items, or give the "
+                "element type a runtime value (e.g. `[1, 2, 3]`).",
+                spec_ref='Chapter 2, Section 2.2 "Primitive Types"',
+                error_code="E135",
+            )
 
         return AdtType("Array", (first,))
 

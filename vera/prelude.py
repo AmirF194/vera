@@ -75,19 +75,41 @@ private fn html_attr(@HtmlNode, @String -> @Option<String>)
 """
 
 # Type aliases needed by closure-taking combinators.
+#
+# #869 — the type-PARAMETER identifiers below (and on the ``forall``
+# combinators further down) use the reserved ``Vera``-prefixed names
+# ``VeraA``/``VeraB``/``VeraE``/``VeraT``/``VeraU`` rather than the bare
+# single letters ``A``/``B``/``E``/``T``/``U``.  A prelude generic is a
+# *template*: it reaches WAT only through monomorphized clones (call
+# sites are rewritten to mangled clone names in ``vera/wasm/calls.py``),
+# so while a type parameter stays abstract the template body cannot lower
+# and codegen's Pass-2 attempt is skipped.  A *user* ADT named with a
+# bare single letter (``data A``) put that letter into ``_adt_layouts``,
+# and codegen then resolved the identically-named prelude type parameter
+# to the concrete user ADT — lowering the ``option_map`` template cleanly
+# and emitting it as a bare-named function whose passed-in-closure
+# ``call_indirect`` referenced a function table the module never declared
+# (``unknown table 0`` at ``vera run`` on a check/verify-green program).
+# Reserved parameter names no ordinary user ADT spells keep prelude
+# internals invisible to user namespace decisions (spec §0.2 principle 4;
+# DESIGN.md principle 2 "explicitness — no implicit behaviour").  These
+# names are substitution keys only — they never appear in a mangled clone
+# suffix (``Monomorphizer._mangle_fn_name`` escapes the concrete type
+# *arguments*), so the rename is orthogonal to the #775/#883 injective
+# name mangling.
 _OPTION_TYPE_ALIASES = """\
-type OptionMapFn<A, B> = fn(A -> B) effects(pure);
-type OptionBindFn<A, B> = fn(A -> Option<B>) effects(pure);
+type OptionMapFn<VeraA, VeraB> = fn(VeraA -> VeraB) effects(pure);
+type OptionBindFn<VeraA, VeraB> = fn(VeraA -> Option<VeraB>) effects(pure);
 """
 
 _RESULT_TYPE_ALIASES = """\
-type ResultMapFn<A, B> = fn(A -> B) effects(pure);
+type ResultMapFn<VeraA, VeraB> = fn(VeraA -> VeraB) effects(pure);
 """
 
 _ARRAY_TYPE_ALIASES = """\
-type ArrayMapFn<A, B> = fn(A -> B) effects(pure);
-type ArrayFilterFn<T> = fn(T -> Bool) effects(pure);
-type ArrayFoldFn<T, U> = fn(U, T -> U) effects(pure);
+type ArrayMapFn<VeraA, VeraB> = fn(VeraA -> VeraB) effects(pure);
+type ArrayFilterFn<VeraT> = fn(VeraT -> Bool) effects(pure);
+type ArrayFoldFn<VeraT, VeraU> = fn(VeraU, VeraT -> VeraU) effects(pure);
 """
 
 # Array higher-order operations.
@@ -351,60 +373,60 @@ private fn json_get_array(@Json, @String -> @Option<Array<Json>>)
 """
 
 _OPTION_COMBINATORS = """\
-private forall<T> fn option_unwrap_or(@Option<T>, @T -> @T)
+private forall<VeraT> fn option_unwrap_or(@Option<VeraT>, @VeraT -> @VeraT)
   requires(true)
   ensures(true)
   effects(pure)
 {
-  match @Option<T>.0 {
-    None -> @T.0,
-    Some(@T) -> @T.0
+  match @Option<VeraT>.0 {
+    None -> @VeraT.0,
+    Some(@VeraT) -> @VeraT.0
   }
 }
 
-private forall<A, B> fn option_map(@Option<A>, @OptionMapFn<A, B> -> @Option<B>)
+private forall<VeraA, VeraB> fn option_map(@Option<VeraA>, @OptionMapFn<VeraA, VeraB> -> @Option<VeraB>)
   requires(true)
   ensures(true)
   effects(pure)
 {
-  match @Option<A>.0 {
+  match @Option<VeraA>.0 {
     None -> None,
-    Some(@A) -> Some(apply_fn(@OptionMapFn<A, B>.0, @A.0))
+    Some(@VeraA) -> Some(apply_fn(@OptionMapFn<VeraA, VeraB>.0, @VeraA.0))
   }
 }
 
-private forall<A, B> fn option_and_then(@Option<A>, @OptionBindFn<A, B> -> @Option<B>)
+private forall<VeraA, VeraB> fn option_and_then(@Option<VeraA>, @OptionBindFn<VeraA, VeraB> -> @Option<VeraB>)
   requires(true)
   ensures(true)
   effects(pure)
 {
-  match @Option<A>.0 {
+  match @Option<VeraA>.0 {
     None -> None,
-    Some(@A) -> apply_fn(@OptionBindFn<A, B>.0, @A.0)
+    Some(@VeraA) -> apply_fn(@OptionBindFn<VeraA, VeraB>.0, @VeraA.0)
   }
 }
 """
 
 _RESULT_COMBINATORS = """\
-private forall<T, E> fn result_unwrap_or(@Result<T, E>, @T -> @T)
+private forall<VeraT, VeraE> fn result_unwrap_or(@Result<VeraT, VeraE>, @VeraT -> @VeraT)
   requires(true)
   ensures(true)
   effects(pure)
 {
-  match @Result<T, E>.0 {
-    Ok(@T) -> @T.0,
-    Err(@E) -> @T.0
+  match @Result<VeraT, VeraE>.0 {
+    Ok(@VeraT) -> @VeraT.0,
+    Err(@VeraE) -> @VeraT.0
   }
 }
 
-private forall<A, B, E> fn result_map(@Result<A, E>, @ResultMapFn<A, B> -> @Result<B, E>)
+private forall<VeraA, VeraB, VeraE> fn result_map(@Result<VeraA, VeraE>, @ResultMapFn<VeraA, VeraB> -> @Result<VeraB, VeraE>)
   requires(true)
   ensures(true)
   effects(pure)
 {
-  match @Result<A, E>.0 {
-    Ok(@A) -> Ok(apply_fn(@ResultMapFn<A, B>.0, @A.0)),
-    Err(@E) -> Err(@E.0)
+  match @Result<VeraA, VeraE>.0 {
+    Ok(@VeraA) -> Ok(apply_fn(@ResultMapFn<VeraA, VeraB>.0, @VeraA.0)),
+    Err(@VeraE) -> Err(@VeraE.0)
   }
 }
 """

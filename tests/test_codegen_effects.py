@@ -12,6 +12,10 @@ from vera.codegen import (
 from vera.parser import parse_file
 from vera.transform import transform
 
+import pytest
+
+from vera.codegen.api import WasmTrapError
+
 from tests.codegen_helpers import (
     _IO_PRELUDE,
     _compile,
@@ -1491,3 +1495,358 @@ public fn handle(@Request -> @Response)
             f"handler not exported; diagnostics: "
             f"{[d.description for d in result.diagnostics]}"
         )
+
+
+class TestEffectCompositeTypeArgs914:
+    """#914: effect handlers (State/Exn) and effect-op results over
+    COMPOSITE / parameterized type arguments must compile and run.
+
+    Six gaps, all ``vera check``-green but failing at codegen, split
+    across three root causes:
+
+    * A — effect-op RESULT type not inferred in constructor-argument /
+      match-scrutinee position (function silently skipped).
+    * B — effect-handler WAT names not escaped for composite type args,
+      and an emit↔call desync between the full slot name used for the
+      ``(import …)`` decl and the base name used in the handler body.
+    * C — the Exn payload ``@T`` binding pushed the base type name, so a
+      ``@Option<Int>.n`` slot ref in the handler body dangled (E699).
+
+    A primitive-effect regression pin (`State<Int>` / `Exn<Int>`) lives
+    in the sibling `TestStateEffect` / `TestExnHandlers` classes; the
+    two pins below assert the composite path does not perturb it.
+    """
+
+    # --- Root cause A ------------------------------------------------
+
+    def test_a1_state_get_directly_as_constructor_field(self) -> None:
+        """A1: `get(())` (State<Int> op result) used directly as a
+        Tuple constructor field. The op result type must be inferred at
+        the constructor-argument site, else the function is skipped."""
+        src = """\
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(<State<Int>>)
+{
+  let @Tuple<Int, Int> = Tuple(get(()), 1);
+  0
+}
+"""
+        result = _compile_ok(src)
+        assert "main" in result.exports, (
+            "main was skipped — effect-op result type not inferred in "
+            f"constructor-arg position; diagnostics: "
+            f"{[d.description for d in result.diagnostics]}"
+        )
+        assert _run(src, fn="main") == 0
+
+    def test_a2_match_scrutinee_is_effect_op_with_adt_result(self) -> None:
+        """A2: `match get(())` where `get` returns a non-primitive ADT
+        (`Box`). The op result type must be inferred at the
+        match-scrutinee site."""
+        src = """\
+private data Box { Box(Int) }
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[State<Box>](@Box = Box(0)) {
+    get(@Unit) -> { resume(@Box.0) },
+    put(@Box) -> { resume(()) }
+    with @Box = @Box.0
+  } in {
+    match get(()) {
+      Box(@Int) -> @Int.0
+    }
+  }
+}
+"""
+        result = _compile_ok(src)
+        assert "main" in result.exports, (
+            "main was skipped — effect-op result type not inferred in "
+            f"match-scrutinee position; diagnostics: "
+            f"{[d.description for d in result.diagnostics]}"
+        )
+        assert _run(src, fn="main") == 0
+
+    # --- Root cause B ------------------------------------------------
+
+    def test_b1_state_handler_over_tuple(self) -> None:
+        """B1: `handle[State<Tuple<Int, Int>>]` — the composite type arg
+        must be escaped for the `state_*` WAT identifiers (raw `<`, `,`,
+        ` ` are illegal in a WAT identifier)."""
+        src = """\
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[State<Tuple<Int, Int>>](@Tuple<Int, Int> = Tuple(20, 22)) {
+    put(@Tuple<Int, Int>) -> { resume(()) }
+    with @Tuple<Int, Int> = @Tuple<Int, Int>.0
+  } in {
+    0
+  }
+}
+"""
+        assert _run(src, fn="main") == 0
+
+    def test_b2_state_handler_over_option_get_and_put(self) -> None:
+        """B2: `handle[State<Option<Int>>]` exercising get + put — the
+        handler-body `state_push`/`get`/`put`/`pop` calls must use the
+        SAME escaped full name as the `(import …)` decls (pre-fix the
+        body used the base name `Option`, the import the full
+        `Option<Int>` → `unknown func $vera.state_push_Option`)."""
+        src = """\
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[State<Option<Int>>](@Option<Int> = Some(5)) {
+    get(@Unit) -> { resume(@Option<Int>.0) },
+    put(@Option<Int>) -> { resume(()) }
+    with @Option<Int> = @Option<Int>.0
+  } in {
+    get(());
+    7
+  }
+}
+"""
+        assert _run(src, fn="main") == 7
+
+    def test_b3_exn_handler_tag_over_tuple(self) -> None:
+        """B3: a function declaring `<Exn<Tuple<Int, Int>>>` emits an
+        `(tag $exn_Tuple<Int, Int> …)` — the composite type arg must be
+        escaped. Post-fix it compiles to valid WAT (main exported) and,
+        as an uncaught throw, traps at run exactly like the primitive
+        `Exn<Int>` case."""
+        src = """\
+effect Exn<E> {
+  op throw(E -> Never);
+}
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(<Exn<Tuple<Int, Int>>>)
+{
+  throw(Tuple(1, 2))
+}
+"""
+        result = _compile_ok(src)
+        assert "main" in result.exports, (
+            "main was skipped or emitted invalid WAT for the composite "
+            f"Exn tag; diagnostics: "
+            f"{[d.description for d in result.diagnostics]}"
+        )
+        # Uncaught throw traps at run (same as primitive Exn<Int>).
+        with pytest.raises(WasmTrapError, match="thrown Wasm exception"):
+            execute(result, fn_name="main")
+
+    # --- Root cause C ------------------------------------------------
+
+    def test_c_exn_payload_binding_over_option(self) -> None:
+        """C: `handle[Exn<Option<Int>>]` — the caught-payload `@T`
+        binding must materialize under the full canonical slot name
+        `Option<Int>`, else `@Option<Int>.0` in the handler body
+        resolves to no local (dangling @T.n, E699)."""
+        src = """\
+effect Exn<E> {
+  op throw(E -> Never);
+}
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[Exn<Option<Int>>] {
+    throw(@Option<Int>) -> { option_unwrap_or(@Option<Int>.0, 0) }
+  } in {
+    throw(Some(9))
+  }
+}
+"""
+        assert _run(src, fn="main") == 9
+
+    # --- Primitive regression pins (must be unaffected) --------------
+
+    def test_primitive_state_int_still_works(self) -> None:
+        """Pin: the common primitive `State<Int>` path is untouched."""
+        src = """\
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(<State<Int>>)
+{
+  put(42);
+  get(())
+}
+"""
+        assert _run(src, fn="main") == 42
+
+    def test_primitive_exn_int_still_works(self) -> None:
+        """Pin: the common primitive `Exn<Int>` path is untouched."""
+        src = """\
+effect Exn<E> {
+  op throw(E -> Never);
+}
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[Exn<Int>] {
+    throw(@Int) -> { @Int.0 + 100 }
+  } in {
+    throw(42)
+  }
+}
+"""
+        assert _run(src, fn="main") == 142
+
+    # --- Root cause D (round 2) --------------------------------------
+
+    def test_old_state_composite_runs(self) -> None:
+        """#914 finding 1: `old(State<Option<Int>>)` in a postcondition must
+        allocate a pre-execution snapshot local and run, not crash codegen.
+
+        Pre-fix `_extract_state_type_name` returned the BASE name (`Option`),
+        which missed the canonical-keyed `_state_types` entry (`Option<Int>`),
+        so no snapshot local was allocated and the `old` read raised an
+        uncaught `CodegenInvariantError` (`old(State<T>) has no saved
+        pre-execution state local`) at run."""
+        src = """\
+public fn keep(@Unit -> @Unit)
+  requires(true)
+  ensures(new(State<Option<Int>>) == old(State<Option<Int>>))
+  effects(<State<Option<Int>>>)
+{
+  let @Option<Int> = get(());
+  put(@Option<Int>.0);
+  ()
+}
+"""
+        result = _compile_ok(src)
+        assert "keep" in result.exports, (
+            "keep was skipped for the composite old(State) snapshot; "
+            f"diagnostics: {[d.description for d in result.diagnostics]}"
+        )
+        # get(()) defaults to a null Option pointer (0); put stores it back
+        # unchanged, so new == old holds and the postcondition passes.
+        exec_result = _run_state(src, fn="keep")
+        assert exec_result.value is None  # Unit return
+
+    def test_old_state_composite_verifies_and_runs_cli(
+        self, tmp_path: object,
+    ) -> None:
+        """#914 finding 1 (CLI end-to-end): the composite `old(State<T>)`
+        program `vera run`s with exit 0 (no traceback) and `vera verify`s."""
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        src = """\
+public fn keep(@Unit -> @Unit)
+  requires(true)
+  ensures(new(State<Option<Int>>) == old(State<Option<Int>>))
+  effects(<State<Option<Int>>>)
+{
+  let @Option<Int> = get(());
+  put(@Option<Int>.0);
+  ()
+}
+"""
+        p = Path(tmp_path) / "old_state.vera"  # type: ignore[arg-type]
+        p.write_text(src, encoding="utf-8")
+        # Invoke the CLI as a module (`python -m vera.cli`) rather than the
+        # `vera` console-script path — the latter is `vera.exe` on Windows, so
+        # `Path(sys.executable).parent / "vera"` does not exist there ([WinError 2]).
+        for cmd in (["run", "--fn", "keep"], ["verify", "--quiet"]):
+            proc = subprocess.run(
+                [sys.executable, "-m", "vera.cli", *cmd, str(p)],
+                capture_output=True, text=True, encoding="utf-8", timeout=120,
+            )
+            assert proc.returncode == 0, (
+                f"vera {cmd[0]} failed: {proc.stdout}\n{proc.stderr}"
+            )
+            assert "CodegenInvariantError" not in proc.stderr
+            assert "Traceback" not in proc.stderr
+
+    def test_nested_composite_state_distinct_names_and_values(self) -> None:
+        """#914 finding 2: two State handlers over DISTINCT nested-composite
+        types must produce DISTINCT mangled `state_*` names and independent
+        cells — pre-fix `_type_expr_to_slot_name` dropped the inner type args
+        (`Option<Tuple<Int, Int>>` and `Option<Tuple<Bool, Bool>>` both
+        collapsed to the slot name `Option<Tuple>` → the SAME import)."""
+        src = """\
+private fn use_int_pair(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[State<Option<Tuple<Int, Int>>>](@Option<Tuple<Int, Int>> = Some(Tuple(3, 4))) {
+    get(@Unit) -> { resume(@Option<Tuple<Int, Int>>.0) },
+    put(@Option<Tuple<Int, Int>>) -> { resume(()) }
+    with @Option<Tuple<Int, Int>> = @Option<Tuple<Int, Int>>.0
+  } in {
+    match get(()) {
+      Some(@Tuple<Int, Int>) -> match @Tuple<Int, Int>.0 { Tuple(@Int) -> @Int.0 },
+      None -> 0
+    }
+  }
+}
+
+private fn use_bool_pair(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[State<Option<Tuple<Bool, Bool>>>](@Option<Tuple<Bool, Bool>> = Some(Tuple(true, false))) {
+    get(@Unit) -> { resume(@Option<Tuple<Bool, Bool>>.0) },
+    put(@Option<Tuple<Bool, Bool>>) -> { resume(()) }
+    with @Option<Tuple<Bool, Bool>> = @Option<Tuple<Bool, Bool>>.0
+  } in {
+    100
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  use_int_pair(()) + use_bool_pair(())
+}
+"""
+        result = _compile_ok(src)
+        assert "main" in result.exports, (
+            "main skipped; diagnostics: "
+            f"{[d.description for d in result.diagnostics]}"
+        )
+        wat = result.wat or ""
+        # The two nested composites must NOT collapse to the same mangled
+        # import name.  Pre-fix both were `state_get_Option_LTuple_R`.
+        assert "state_get_Option_LTuple_LInt_CInt_R_R" in wat, wat[:400]
+        assert "state_get_Option_LTuple_LBool_CBool_R_R" in wat, wat[:400]
+        # use_int_pair reads the stored Some(Tuple(3, 4)) -> first field 3;
+        # use_bool_pair returns 100 -> total 103.
+        assert _run(src, fn="main") == 103
+
+    def test_nested_composite_exn_distinct_tags(self) -> None:
+        """#914 finding 2 (Exn tag): two Exn handlers over distinct
+        nested-composite payloads must emit DISTINCT tags — a shared tag
+        would be a type-confusion (a `Tuple<Int, Int>` payload caught as a
+        `Tuple<Bool, Bool>`)."""
+        src = """\
+effect Exn<E> {
+  op throw(E -> Never);
+}
+private fn a(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[Exn<Option<Tuple<Int, Int>>>] {
+    throw(@Option<Tuple<Int, Int>>) -> { 1 }
+  } in {
+    2
+  }
+}
+private fn b(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[Exn<Option<Tuple<Bool, Bool>>>] {
+    throw(@Option<Tuple<Bool, Bool>>) -> { 3 }
+  } in {
+    4
+  }
+}
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  a(()) + b(())
+}
+"""
+        result = _compile_ok(src)
+        wat = result.wat or ""
+        assert "$exn_Option_LTuple_LInt_CInt_R_R" in wat, wat[:400]
+        assert "$exn_Option_LTuple_LBool_CBool_R_R" in wat, wat[:400]
+        assert _run(src, fn="main") == 6  # a→2, b→4

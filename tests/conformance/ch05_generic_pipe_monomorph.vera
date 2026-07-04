@@ -1,0 +1,52 @@
+-- Conformance: generic monomorphization via the |> pipe + @T closure (Chapter 5)
+-- Tests: a forall<T> generic invoked through the pipe operator is discovered
+-- and monomorphized (its type arg inferred from the piped value), and an @T
+-- closure parameter inside a forall<T> body is substituted at each concrete
+-- instantiation (#913).
+private forall<T> fn ident(@T -> @T)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  @T.0
+}
+
+private forall<T> fn map_ident(@Array<T> -> @Array<T>)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  array_map(@Array<T>.0, fn(@T -> @T) effects(pure) { @T.0 })
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 42)
+  effects(pure)
+{
+  42 |> ident()
+}
+
+public fn test_pipe_chained(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 5)
+  effects(pure)
+{
+  5 |> ident() |> ident()
+}
+
+public fn test_pipe_bool(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result == true)
+  effects(pure)
+{
+  true |> ident()
+}
+
+public fn test_closure_type_var(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 3)
+  effects(pure)
+{
+  array_length(map_ident([10, 20, 30]))
+}

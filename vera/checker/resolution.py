@@ -22,6 +22,9 @@ from vera.types import (
     TypeVar,
     UnknownType,
     canonical_type_name,
+    erases_to_unit,
+    merge_inferred_types,
+    pretty_type,
     substitute,
 )
 
@@ -147,6 +150,31 @@ class ResolutionMixin:
         if name in ("Array", "Tuple", "Map", "Set"):
             if te.type_args:
                 args = tuple(self._resolve_type(a) for a in te.type_args)
+                # #945: an `Array<T>` whose element erases to a zero-size type
+                # (`Unit`, or a `Future` transparently wrapping one) has no
+                # valid WASM element layout — the element store/load would act
+                # on a slot that holds no value, so the array compiles to
+                # INVALID WASM (rejected by wasmtime at load) on a check-green +
+                # verify-green program.  Reject at check: the element is
+                # degenerate (`Array<Unit>` is isomorphic to a `Nat` count).
+                # Same principle as the `@T`-at-zero-size family (#900/#939/#943).
+                if (name == "Array" and len(args) == 1
+                        and erases_to_unit(args[0])):
+                    self._error(
+                        te,
+                        f"'Array' of a zero-size element type "
+                        f"'{pretty_type(args[0])}' is not supported.",
+                        rationale="A zero-size type (`Unit`, or a `Future` "
+                        "wrapping one) occupies 0 bytes and has no runtime "
+                        "value, so an array element of that type has no WASM "
+                        "representation to store or load — the array would "
+                        "compile to invalid WASM.",
+                        fix="Use `Nat` for a count of zero-size items, or give "
+                        "the element type a runtime value (e.g. `Array<Int>`, "
+                        "or a boxed `Array<Option<Unit>>`).",
+                        spec_ref='Chapter 2, Section 2.2 "Primitive Types"',
+                        error_code="E135",
+                    )
                 return AdtType(name, args)
             return AdtType(name, ())
 
@@ -228,19 +256,34 @@ class ResolutionMixin:
 
     def _infer_type_args(self, forall_vars: tuple[str, ...],
                          param_types: tuple[Type, ...],
-                         arg_types: list[Type | None]) -> dict[str, Type]:
-        """Infer type variable bindings by matching args against params."""
+                         arg_types: list[Type | None],
+                         conflicts: set[str] | None = None,
+                         ) -> dict[str, Type]:
+        """Infer type variable bindings by matching args against params.
+
+        When a forall var is bound by several arguments whose types share a
+        parameterised head but each pin a *different* type parameter (a sparse
+        multi-parameter ADT, `data Res<A, B> { MkOk(A), MkErr(B) }` reached via
+        `eq2(MkErr(5), MkOk("x"))`), the per-argument bindings are MERGED
+        position-wise so the fully-determined `Res<String, Int>` is recovered
+        rather than the first-argument-wins `Res<?, Int>` (#898).  A genuine
+        per-position CONFLICT (two arguments fixing the same parameter to
+        different concrete types) records the var in *conflicts* so the caller
+        emits a clear conflict diagnostic instead of a wrong-type E202.
+        """
         mapping: dict[str, Type] = {}
         forall_set = set(forall_vars)
         for param_ty, arg_ty in zip(param_types, arg_types):
             if arg_ty is None or isinstance(arg_ty, UnknownType):
                 continue
-            self._unify_for_inference(param_ty, arg_ty, mapping, forall_set)
+            self._unify_for_inference(param_ty, arg_ty, mapping, forall_set,
+                                      conflicts)
         return mapping
 
     def _unify_for_inference(self, pattern: Type, concrete: Type,
                              mapping: dict[str, Type],
                              forall_vars: set[str] | None = None,
+                             conflicts: set[str] | None = None,
                              ) -> None:
         """Simple unification for type argument inference."""
         # Skip when the concrete type has TypeVars matching the callee's
@@ -279,18 +322,29 @@ class ResolutionMixin:
                 # Overwrite a tentative fresh-TypeVar mapping with a concrete
                 # (or forall-var) resolution.
                 mapping[pattern.name] = concrete
+            else:
+                # #898: both the existing binding and the new one are (partly)
+                # concrete.  Merge them position-wise so two sparse constructor
+                # arguments each pinning a different type parameter combine into
+                # one fully-determined type (`Res<?, Int>` ⊔ `Res<String, ?>` =
+                # `Res<String, Int>`); a genuine per-position conflict is
+                # recorded so the caller can report it clearly.
+                merged, conflict = merge_inferred_types(existing, concrete)
+                if conflict and conflicts is not None:
+                    conflicts.add(pattern.name)
+                mapping[pattern.name] = merged
             return
 
         if isinstance(pattern, AdtType) and isinstance(concrete, AdtType):
             if pattern.name == concrete.name:
                 for p_arg, c_arg in zip(pattern.type_args, concrete.type_args):
                     self._unify_for_inference(
-                        p_arg, c_arg, mapping, forall_vars)
+                        p_arg, c_arg, mapping, forall_vars, conflicts)
 
         if isinstance(pattern, FunctionType) and isinstance(concrete, FunctionType):
             for p_param, c_param in zip(pattern.params, concrete.params):
                 self._unify_for_inference(
-                    p_param, c_param, mapping, forall_vars)
+                    p_param, c_param, mapping, forall_vars, conflicts)
             self._unify_for_inference(
                 pattern.return_type, concrete.return_type,
-                mapping, forall_vars)
+                mapping, forall_vars, conflicts)

@@ -24,6 +24,48 @@ ABS_VALUE = str(EXAMPLES_DIR / "absolute_value.vera")
 
 
 # =====================================================================
+# USAGE help text — completeness (drift guard)
+# =====================================================================
+
+
+def test_usage_lists_every_dispatched_command() -> None:
+    """Every ``cmd_<name>`` handler must appear as a command row in ``USAGE``.
+
+    #305 regression: ``vera serve`` (``cmd_serve``) shipped fully dispatched
+    but absent from the ``USAGE`` constant, so ``vera`` with no args never
+    listed it — the module header docstring had it, but ``USAGE`` (the text
+    actually printed) had drifted.  This guards the class: a new
+    ``cmd_<name>`` handler forces a matching ``Commands:`` row.
+
+    Anchored on the command ROW (leading whitespace + the name as a word),
+    NOT a bare substring: the ``--world server`` row's description contains
+    "wasmtime serve", which a naive ``"serve" in USAGE`` would false-pass on.
+    """
+    import re
+
+    import vera.cli as cli
+
+    handlers = {
+        name[len("cmd_"):]
+        for name in dir(cli)
+        if name.startswith("cmd_") and callable(getattr(cli, name))
+    }
+    # `typecheck` is a documented alias of `check` (no `cmd_typecheck`); it is
+    # listed in USAGE directly and needs no handler of its own.
+    usage_lines = cli.USAGE.splitlines()
+
+    def _listed(cmd: str) -> bool:
+        return any(re.match(rf"\s+{re.escape(cmd)}\b", ln) for ln in usage_lines)
+
+    missing = sorted(c for c in handlers if not _listed(c))
+    assert not missing, (
+        f"commands dispatched but absent from the USAGE help text: {missing}. "
+        "Add a Commands: row for each (and keep the module header docstring "
+        "in sync)."
+    )
+
+
+# =====================================================================
 # Helpers
 # =====================================================================
 

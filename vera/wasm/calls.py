@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 from vera import ast
-from vera.monomorphize import Monomorphizer
+from vera.monomorphize import Monomorphizer, resolve_fn_type_alias
 from vera.skip import CodegenSkip
 from vera.wasm.helpers import WasmSlotEnv
-from vera.wasm.inference import substitute_type_vars
 
 
 class CallsMixin:
@@ -614,10 +613,36 @@ class CallsMixin:
         Returns None if type inference fails.
         """
         forall_vars, param_types = self._generic_fn_info[call.name]
+        constrained_vars = self._generic_constrained_vars.get(
+            call.name, frozenset())
         mapping: dict[str, str] = {}
+        # #898: mirror the discovery-side sparse-multi-parameter merge
+        # (Monomorphizer._infer_type_args_from_args) so the call-site mangled
+        # name matches the clone Pass 1.5 emitted — else `main`'s call to
+        # `eq2(MkErr(5), MkOk("x"))` references a `$Res` clone the emitter named
+        # `$Res_LString_C_Int_R`, is dropped, and `main` vanishes (the #878 class).
+        partial_adt: dict[str, tuple[str, list[str | None]]] = {}
 
         for param_te, arg in zip(param_types, call.args):
-            self._unify_param_arg_wasm(param_te, arg, forall_vars, mapping)
+            self._unify_param_arg_wasm(
+                param_te, arg, forall_vars, mapping, constrained_vars,
+                partial_adt)
+
+        for tv, (base_name, slots) in partial_adt.items():
+            if all(s is not None for s in slots):
+                resolved = [s for s in slots if s is not None]
+                mapping[tv] = f"{base_name}<{', '.join(resolved)}>"
+            elif tv in constrained_vars:
+                # Partial recovery — mirror the discovery-side sentinel
+                # materialisation (Monomorphizer._infer_type_args_from_args) so
+                # the two stay in lockstep.  Such an instance is always rejected
+                # by the ability gate and never emitted, but keeping the names
+                # identical means the call-rewrite↔emitted-clone differential
+                # never sees a phantom mismatch for the under-determined shape.
+                from vera.monomorphize import _FREE_TYPE_PARAM
+                rendered = [s if s is not None else _FREE_TYPE_PARAM
+                            for s in slots]
+                mapping[tv] = f"{base_name}<{', '.join(rendered)}>"
 
         # Build mangled name; default phantom vars to Bool (i32 repr — Unit
         # has no WASM representation), matching Monomorphizer's clone-side
@@ -639,6 +664,8 @@ class CallsMixin:
         arg: ast.Expr,
         forall_vars: tuple[str, ...],
         mapping: dict[str, str],
+        constrained_vars: frozenset[str] = frozenset(),
+        partial_adt: dict[str, tuple[str, list[str | None]]] | None = None,
     ) -> None:
         """Unify a parameter TypeExpr against an argument to bind type vars.
 
@@ -648,6 +675,7 @@ class CallsMixin:
         if isinstance(param_te, ast.RefinementType):
             self._unify_param_arg_wasm(
                 param_te.base_type, arg, forall_vars, mapping,
+                constrained_vars, partial_adt,
             )
             return
 
@@ -656,6 +684,41 @@ class CallsMixin:
 
         if param_te.name in forall_vars:
             vera_type = self._infer_vera_type(arg)
+            if isinstance(arg, ast.FnCall):
+                # #899 issue 2: for CLONE NAMING a user fn's declared return
+                # type must be the RAW (un-alias-resolved) name discovery keys
+                # the clone on (`-> @Age` → `pick$Age`, not the alias-resolved
+                # `pick$Int` that general Vera-type inference returns).  Prefer
+                # the raw declared name when available; else keep `_infer_vera_type`.
+                raw = self._declared_return_clone_name(arg)
+                if raw is not None:
+                    vera_type = raw
+            if (param_te.name in constrained_vars
+                    and isinstance(arg, ast.ConstructorCall)):
+                # Recover the type argument a `ConstructorCall` drops, so the
+                # call-site mangled name matches the parameterized clone Pass 1.5
+                # emitted for a constrained var (`eq2$Box<String>`, not the bare
+                # `eq2$Box`).  Mirrors the discovery-side recovery in
+                # `Monomorphizer._unify_param_arg` (#772).
+                info = self._get_arg_type_info_wasm(arg)
+                if info is not None:
+                    base_name, arg_names = info
+                    if arg_names and all(a is not None for a in arg_names):
+                        resolved = [a for a in arg_names if a is not None]
+                        vera_type = f"{base_name}<{', '.join(resolved)}>"
+                    elif arg_names and partial_adt is not None:
+                        # #898: PARTIAL recovery merged across arguments —
+                        # mirrors Monomorphizer._unify_param_arg so the mangled
+                        # call name matches the emitted clone.
+                        prev = partial_adt.get(param_te.name)
+                        if prev is None or prev[0] != base_name:
+                            slots: list[str | None] = list(arg_names)
+                            partial_adt[param_te.name] = (base_name, slots)
+                        else:
+                            slots = prev[1]
+                            for i, name in enumerate(arg_names):
+                                if name is not None and i < len(slots):
+                                    slots[i] = name
             if vera_type and param_te.name not in mapping:
                 mapping[param_te.name] = vera_type
             return
@@ -702,11 +765,16 @@ class CallsMixin:
 
         Mirrors :meth:`MonomorphizationMixin._resolve_arg_fn_shape` for
         WASM call-site rewriting.  Handles both ``AnonFn`` literals and
-        ``SlotRef`` args whose static type is an FnType alias (#604).
-        For parameterised aliases like
-        ``type Mapper<T> = fn(T -> T)``, the SlotRef's type_args are
-        substituted into the alias body so the resolver returns the
-        instantiated shape (CR-5 on PR #659).  Without substitution,
+        ``SlotRef`` args whose static type is an FnType alias (#604) —
+        resolved **transitively** through the alias chain with the
+        SlotRef's type_args substituted per hop, via the shared
+        :func:`vera.monomorphize.resolve_fn_type_alias` (#867 / PR #880
+        review: the single-hop lookup here made a two-hop-alias-typed
+        closure slot fail shape resolution, so a closure-bound type
+        param fell to the phantom-var default — wrong mono suffix,
+        ``call_indirect`` trap).  For parameterised aliases like
+        ``type Mapper<T> = fn(T -> T)``, the substitution yields the
+        instantiated shape (CR-5 on PR #659); without it,
         ``_resolve_generic_call`` would mangle the call to a name like
         ``$option_map$T_JT`` that doesn't match the mono-clone names
         Pass 1.5 registered.
@@ -714,28 +782,13 @@ class CallsMixin:
         if isinstance(arg, ast.AnonFn):
             return (tuple(arg.params), arg.return_type)
         if isinstance(arg, ast.SlotRef):
-            alias_te = self._type_aliases.get(arg.type_name)
-            if isinstance(alias_te, ast.FnType):
-                # Parameterised alias — substitute the SlotRef's
-                # type_args into the alias body before returning.
-                # Arity is enforced upstream by the type checker
-                # ([E133], #660) since v0.0.148.
-                alias_params = self._type_alias_params.get(arg.type_name)
-                if (alias_params
-                        and arg.type_args
-                        and len(alias_params) == len(arg.type_args)):
-                    subst: dict[str, ast.TypeExpr] = dict(
-                        zip(alias_params, arg.type_args),
-                    )
-                    substituted_params = tuple(
-                        substitute_type_vars(p, subst)
-                        for p in alias_te.params
-                    )
-                    substituted_return = substitute_type_vars(
-                        alias_te.return_type, subst,
-                    )
-                    return (substituted_params, substituted_return)
-                return (tuple(alias_te.params), alias_te.return_type)
+            fn_type = resolve_fn_type_alias(
+                ast.NamedType(name=arg.type_name, type_args=arg.type_args),
+                self._type_aliases,
+                self._type_alias_params,
+            )
+            if fn_type is not None:
+                return (tuple(fn_type.params), fn_type.return_type)
         return None
 
     def _infer_fn_alias_type_args_wasm(
@@ -748,15 +801,19 @@ class CallsMixin:
         Mirrors :meth:`MonomorphizationMixin._infer_fn_alias_type_args`
         for use during WASM call-site rewriting.  Accepts either an
         ``AnonFn`` literal or a ``SlotRef`` typed as an FnType alias.
+
+        The param alias's body is resolved **transitively** (#867 / PR
+        #880 review): the HOF's declared fn param may itself be an alias
+        chain (``type MapFn2<X, Y> = MapFn<X, Y>;``).  The chain is
+        resolved instantiated at the alias's *own* param names, so the
+        terminal ``FnType`` body stays expressed in ``alias_params``
+        names — including across renaming hops — and the positional
+        matching below is untouched.
         """
         arg_shape = self._resolve_arg_fn_shape_wasm(arg)
         if arg_shape is None:
             return None
         arg_params, arg_return = arg_shape
-
-        alias_te = self._type_aliases.get(param_te.name)
-        if not isinstance(alias_te, ast.FnType):
-            return None
 
         alias_params = self._type_alias_params.get(param_te.name)
         if (
@@ -764,6 +821,20 @@ class CallsMixin:
             or not param_te.type_args
             or len(alias_params) != len(param_te.type_args)
         ):
+            return None
+
+        alias_te = resolve_fn_type_alias(
+            ast.NamedType(
+                name=param_te.name,
+                type_args=tuple(
+                    ast.NamedType(name=p, type_args=None)
+                    for p in alias_params
+                ),
+            ),
+            self._type_aliases,
+            self._type_alias_params,
+        )
+        if alias_te is None:
             return None
 
         alias_mapping: dict[str, str] = {}

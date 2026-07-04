@@ -15,11 +15,16 @@ from __future__ import annotations
 import z3
 
 from dataclasses import dataclass, field, replace
+from dataclasses import fields as ast_fields
 from typing import TYPE_CHECKING
 
 from vera import ast
 from vera.environment import ConstructorInfo, FunctionInfo, TypeEnv
-from vera.monomorphize import MonoContext, Monomorphizer
+from vera.monomorphize import (
+    MonoContext,
+    Monomorphizer,
+    declared_return_clone_key,
+)
 
 if TYPE_CHECKING:
     from vera.resolver import ResolvedModule
@@ -30,7 +35,7 @@ from vera.obligations.core import (
     ProofObligation,
     expr_text_for,
 )
-from vera.slots import slot_table
+from vera.slots import slot_table, type_expr_slot_name
 from vera.smt import SlotEnv, SmtContext
 from vera.types import (
     BOOL,
@@ -209,6 +214,25 @@ class ContractVerifier:
         # instantiated at; empty when the program has no generics.
         self._instances: dict[str, set[tuple[str, ...]]] = {}
         self._mono: Monomorphizer | None = None
+        # #774 (PR #888 review, CR 3519156263): a LOCAL generic that shadows an
+        # IMPORTED generic must NOT absorb the imported generic's `m::gen(...)`
+        # instantiations into the local's bare `_instances` key — that would
+        # verify the LOCAL body at type args that actually run the MODULE
+        # generic's clone (a false Tier-1: `mod$g$gen$…` runs unverified while
+        # the local's contract is proved in its place).  The shadowed MODULE
+        # generic clones are discovered + verified separately here, keyed by the
+        # `mod$…` base so they never collide with the local, and their decls are
+        # kept so `verify_program` can verify each MODULE body at its own
+        # instances (catching a lying module contract as an honest E500).  Maps
+        # the `mod$…` base → (module FnDecl, concrete-type-tuple set).
+        self._shadowed_module_generic_verify: dict[
+            str, tuple[ast.FnDecl, set[tuple[str, ...]]]
+        ] = {}
+        # #774: imported (unshadowed) generic decls the importer must verify at
+        # its own instantiations — the unshadowed twin of the shadowed-clone
+        # gap above (their bodies live in another module, unreached by the
+        # `program.declarations` verify loop).  Name → module FnDecl.
+        self._imported_generic_verify_decls: dict[str, ast.FnDecl] = {}
 
     # -----------------------------------------------------------------
     # #747: checker-provided expression types (span-keyed)
@@ -581,6 +605,18 @@ class ContractVerifier:
                 if k not in builtin_fn_names or v.span is not None
             }
 
+            # #890: a transitively-reached module (imported by an imported
+            # module, not by this program) is in ``_resolved_modules`` so the
+            # importer-side monomorphization discovery can seed return types
+            # from it (above), but per spec §8.6.4 its declarations are NOT
+            # visible to the top-level importer — ``verify_program`` only
+            # verifies THIS program's bodies, which can bare- or qualified-call
+            # only direct imports.  Skip a transitive module's bare-namespace,
+            # qualified-registry, and constructor injection so ``main`` cannot
+            # reference it (matching the checker's §8.6.4 gate).
+            if not mod.direct:
+                continue
+
             # 3. Filter to public only
             mod_fns = {
                 k: v for k, v in all_fns.items()
@@ -717,12 +753,28 @@ class ContractVerifier:
 
     @staticmethod
     def _simple_type_name(te: ast.TypeExpr) -> str | None:
-        """Return the base type name of a TypeExpr (refinement-unwrapped)."""
-        while isinstance(te, ast.RefinementType):
-            te = te.base_type
-        if isinstance(te, ast.NamedType):
-            return te.name
-        return None
+        """Return the base type name of a TypeExpr (refinement-unwrapped).
+
+        Delegates to the shared :func:`vera.monomorphize.declared_return_clone_key`
+        so the verifier's mono-discovery keys clones identically to codegen and
+        the WASM call-rewrite — the single-source-of-truth that ends the
+        #878 / #899 consultor desync.
+        """
+        return declared_return_clone_key(te)
+
+    @staticmethod
+    def _module_qualified_base(path: tuple[str, ...], name: str) -> str:
+        """The ``mod$…`` base a shadowed imported generic's clones live under.
+
+        Must match codegen's ``CrossModuleMixin._module_qualified_wasm_name``
+        byte-for-byte: it is the shared namespaced key under which BOTH sides
+        record a shadowed MODULE generic's instantiations (`_emitted_instances`
+        on codegen, ``_instances`` here), so the #732 differential distinguishes
+        the module generic's clone from a same-named LOCAL generic (CR
+        3519156263).  ``$`` is illegal in Vera identifiers, so it can never
+        collide with a user function name.
+        """
+        return "mod$" + "$".join(path) + "$" + name
 
     def _build_mono_context(
         self,
@@ -828,6 +880,10 @@ class ContractVerifier:
         type_aliases: dict[str, ast.TypeExpr] = {}
         type_alias_params: dict[str, tuple[str, ...]] = {}
         fn_ret_types: dict[str, str] = {}
+        # #899 issue 1: raw declared return TypeExprs (type args retained), so
+        # discovery can recover a user fn's parameterized return in `Option<T>`
+        # argument position identically to codegen and the WASM call-rewrite.
+        fn_ret_type_exprs: dict[str, ast.TypeExpr] = {}
 
         def record_fn_ret_type(fn: ast.FnDecl) -> None:
             # Include `where` helpers, keyed by bare name exactly as codegen
@@ -854,6 +910,8 @@ class ContractVerifier:
             ret_name = self._simple_type_name(fn.return_type)
             if ret_name is not None:
                 fn_ret_types[fn.name] = ret_name
+            if fn.return_type is not None:
+                fn_ret_type_exprs[fn.name] = fn.return_type
             for wfn in fn.where_fns or ():
                 record_fn_ret_type(wfn)
 
@@ -885,6 +943,9 @@ class ContractVerifier:
                     iret = self._simple_type_name(idecl.return_type)
                     if iret is not None:
                         fn_ret_types.setdefault(idecl.name, iret)
+                    if idecl.return_type is not None:
+                        fn_ret_type_exprs.setdefault(
+                            idecl.name, idecl.return_type)
 
         return MonoContext(
             generic_decls=generic_decls,
@@ -894,7 +955,62 @@ class ContractVerifier:
             type_aliases=type_aliases,
             type_alias_params=type_alias_params,
             fn_ret_types=fn_ret_types,
+            fn_ret_type_exprs=fn_ret_type_exprs,
         )
+
+    @staticmethod
+    def _local_fn_names(program: ast.Program) -> set[str]:
+        """All locally-declared function names, incl. recursive where-fns.
+
+        Mirrors codegen's ``CrossModuleMixin._collect_local_fn_names`` — a
+        ``where``-fn flattens to a bare ``$name`` in the single WASM module
+        just like a top-level fn, so it shadows an imported name identically.
+        Used to split imported generics into unshadowed (route bare +
+        qualified) vs shadowed (qualified-only) exactly as codegen does, so the
+        #774 discovery stays in lockstep.
+        """
+        def walk(decl: ast.FnDecl) -> set[str]:
+            names = {decl.name}
+            for wfn in decl.where_fns or ():
+                names |= walk(wfn)
+            return names
+
+        out: set[str] = set()
+        for tld in program.declarations:
+            if isinstance(tld.decl, ast.FnDecl):
+                out |= walk(tld.decl)
+        return out
+
+    def _imported_generic_decls(
+        self, program: ast.Program,
+    ) -> dict[str, ast.FnDecl]:
+        """Imported PUBLIC generics whose bare name is NOT locally shadowed.
+
+        The verifier-side mirror of codegen's ``_imported_generic_decls`` split
+        (#774): an unshadowed imported generic is monomorphized by the importer,
+        so the verifier must discover the SAME instantiations codegen emits (a
+        cross-module clone verified by neither side would be a false Tier-1).
+        Same public + import-filter gating and first-seen-wins ``setdefault`` as
+        codegen's ``_register_modules``; a shadowed generic (a local owns the
+        bare name) is excluded here — its qualified-only routing is a separate
+        codegen-side concern the verifier already resolves via the module's
+        contract, so no extra discovery is needed for the bare namespace.
+        """
+        local_fn_names = self._local_fn_names(program)
+        out: dict[str, ast.FnDecl] = {}
+        for mod in self._resolved_modules:
+            name_filter = self._import_names.get(mod.path)
+            for tld in mod.program.declarations:
+                decl = tld.decl
+                if not isinstance(decl, ast.FnDecl) or not decl.forall_vars:
+                    continue
+                is_public = (tld.visibility or "private") == "public"
+                in_filter = name_filter is None or decl.name in name_filter
+                if is_public and in_filter and (
+                    decl.name not in local_fn_names
+                ):
+                    out.setdefault(decl.name, decl)
+        return out
 
     def _collect_instantiations(
         self, program: ast.Program,
@@ -914,14 +1030,38 @@ class ContractVerifier:
 
         from vera.prelude import inject_prelude
 
+        # Reset the imported-generic verify registries — register_program may
+        # run repeatedly in a warm incremental session, and a stale entry would
+        # re-verify a clone that no longer exists.
+        self._shadowed_module_generic_verify = {}
+        self._imported_generic_verify_decls = {}
+
         disc = _replace(program)
         inject_prelude(disc)
 
         generic_decls: dict[str, ast.FnDecl] = {}
+        local_generic_names: set[str] = set()
         for tld in disc.declarations:
             decl = tld.decl
             if isinstance(decl, ast.FnDecl) and decl.forall_vars:
                 generic_decls[decl.name] = decl
+                local_generic_names.add(decl.name)
+        # #774: merge imported (unshadowed) generics so the verifier discovers
+        # the cross-module instantiations codegen emits, in lockstep.  A LOCAL
+        # generic of the same name wins (inserted above); `setdefault` keeps it.
+        # Record the ones that are ONLY imported (not shadowed by a local
+        # generic) so `verify_program` verifies their clones at the importer's
+        # instantiations — the body is defined in another module, so the
+        # `program.declarations` verify loop never reaches it, and the module
+        # itself only Tier-3s an uninstantiated generic.  Without this, an
+        # imported generic with a LYING contract runs its clone unverified: a
+        # false Tier-1 (CR 3519156263 — the same gap as the shadowed case, the
+        # unshadowed twin).
+        self._imported_generic_verify_decls = {}
+        for gname, gdecl in self._imported_generic_decls(program).items():
+            generic_decls.setdefault(gname, gdecl)
+            if gname not in local_generic_names:
+                self._imported_generic_verify_decls[gname] = gdecl
         if not generic_decls:
             return {}
 
@@ -985,7 +1125,175 @@ class ContractVerifier:
         for name, concrete_types in discovered:
             if name in generic_decls:
                 result[name].add(concrete_types)
+
+        # #814 asymmetric variant: an imported generic whose bare name a LOCAL
+        # non-generic shadows is monomorphized by codegen under a ``mod$…`` name
+        # for its qualified `m::gen` call sites (`_emitted_instances` records it
+        # keyed by the bare name).  Discover the SAME qualified instantiations
+        # here — under the bare name — so the #732 differential stays a true
+        # equality (codegen's emitted set == the verifier's discovered set).
+        # No re-verification is triggered: the local non-generic `gen` owns the
+        # bare name in `program.declarations` and is verified as itself, so this
+        # supplementary set is discovery-only bookkeeping for the differential.
+        self._collect_shadowed_qualified_instances(
+            program, mono, generic_decls, result,
+        )
         return result
+
+    def _collect_shadowed_qualified_instances(
+        self,
+        program: ast.Program,
+        mono: Monomorphizer,
+        generic_decls: dict[str, ast.FnDecl],
+        result: dict[str, set[tuple[str, ...]]],
+    ) -> None:
+        """Discover ``m::gen(...)`` instantiations of shadowed imported generics.
+
+        Mirrors codegen's ``_monomorphize_shadowed_module_generics`` discovery
+        so the differential's emitted-vs-discovered equality holds for the #814
+        variant.  Uses the shared arg-driven inference (identical to the bare
+        path) over every ``ast.ModuleCall`` whose target is a shadowed imported
+        generic, accumulating into ``result`` keyed by the bare generic name.
+
+        Runs the SAME transitive worklist codegen does (CR 3518737014): a
+        shadowed clone body that calls ANOTHER generic — an unshadowed imported
+        generic (a normal clone, keyed in ``generic_decls``) or a same-module
+        shadowed sibling — contributes that transitive instance too, or the
+        verifier would discover a strict subset of codegen's emitted set (a new
+        false Tier-1: a cross-module transitive clone runs unverified).
+        """
+        local_fn_names = self._local_fn_names(program)
+        ctor_to_adt = mono.ctx.ctor_to_adt
+        # Build the (path → {name → decl}) map of shadowed imported generics.
+        shadowed: dict[tuple[str, ...], dict[str, ast.FnDecl]] = {}
+        for mod in self._resolved_modules:
+            name_filter = self._import_names.get(mod.path)
+            for tld in mod.program.declarations:
+                decl = tld.decl
+                if not isinstance(decl, ast.FnDecl) or not decl.forall_vars:
+                    continue
+                is_public = (tld.visibility or "private") == "public"
+                in_filter = name_filter is None or decl.name in name_filter
+                if is_public and in_filter and decl.name in local_fn_names:
+                    shadowed.setdefault(mod.path, {}).setdefault(
+                        decl.name, decl,
+                    )
+        if not shadowed:
+            return
+
+        # Seed: `m::gen(...)` sites in the importer's non-generic bodies.
+        # Keyed by (path, name) so a shadowed sibling reached transitively is
+        # monomorphized against the correct module's decl.
+        seed: set[tuple[tuple[str, ...], str, tuple[str, ...]]] = set()
+
+        def walk_seed(node: object) -> None:
+            if (isinstance(node, ast.ModuleCall)
+                    and tuple(node.path) in shadowed
+                    and node.name in shadowed[tuple(node.path)]):
+                decl = shadowed[tuple(node.path)][node.name]
+                type_args = mono._infer_type_args_from_args(
+                    decl, node.args, ctor_to_adt, None,
+                )
+                if type_args is not None:
+                    seed.add((tuple(node.path), node.name, type_args))
+            if isinstance(node, ast.Node):
+                for f in ast_fields(node):
+                    if f.name == "span":
+                        continue
+                    walk_seed(getattr(node, f.name))
+            elif isinstance(node, (tuple, list)):
+                for item in node:
+                    walk_seed(item)
+
+        for tld in program.declarations:
+            decl = tld.decl
+            if isinstance(decl, ast.FnDecl) and not decl.forall_vars:
+                walk_seed(decl)
+
+        # Also seed from every NORMAL (unshadowed) generic clone body already in
+        # `result` (CR 3519063445): an unshadowed generic `caller<T>` whose body
+        # qualified-calls a SHADOWED `g::gen` reaches that shadowed generic only
+        # through its clone, mirroring codegen's scan of the emitted normal
+        # clones.  Without it the verifier discovers a strict subset of codegen's
+        # emitted set — the `mod$g$gen<Int>` clone runs unverified.
+        for gname, gcts in list(result.items()):
+            gdecl = generic_decls.get(gname)
+            if gdecl is None:
+                continue
+            for gct in list(gcts):
+                walk_seed(mono.monomorphize_fn(gdecl, gct))
+
+        # Transitive worklist over shadowed clones, mirroring codegen.
+        shadowed_seen: set[tuple[tuple[str, ...], str, tuple[str, ...]]] = set()
+        # Track normal (unshadowed) instances reached transitively so we chase
+        # their closure too — the main verifier worklist has already drained.
+        normal_seen: set[tuple[str, tuple[str, ...]]] = set()
+        worklist = list(seed)
+        while worklist:
+            key = worklist.pop()
+            if key in shadowed_seen:
+                continue
+            shadowed_seen.add(key)
+            spath, sname, sct = key
+            gdecl = shadowed[spath][sname]
+            # Namespace the MODULE generic's instance under its `mod$…` base so
+            # it never collides with a same-named LOCAL generic's bare key — the
+            # local's `_verify_fn` must NOT verify the local body at a MODULE
+            # call's type args (CR 3519156263).  The clone is verified against
+            # the MODULE contract in `verify_program` via the stashed decl.
+            base = self._module_qualified_base(spath, sname)
+            result.setdefault(base, set()).add(sct)
+            self._shadowed_module_generic_verify.setdefault(
+                base, (gdecl, set()),
+            )[1].add(sct)
+            clone = mono.monomorphize_fn(gdecl, sct)
+
+            # Unshadowed transitive generics → chase full closure into `result`.
+            self._chase_normal_from_clone(
+                clone, generic_decls, ctor_to_adt, mono, normal_seen, result,
+            )
+            # Same-module shadowed siblings → queue back.
+            sib_decls = shadowed[spath]
+            trans_shadow: dict[str, set[tuple[str, ...]]] = {
+                name: set() for name in sib_decls
+            }
+            mono.collect_calls_in_node(
+                clone, sib_decls, ctor_to_adt, trans_shadow,
+            )
+            for s_name, s_types in trans_shadow.items():
+                for s_ct in s_types:
+                    nxt = (spath, s_name, s_ct)
+                    if nxt not in shadowed_seen:
+                        worklist.append(nxt)
+
+    def _chase_normal_from_clone(
+        self,
+        root_fn: ast.FnDecl,
+        generic_decls: dict[str, ast.FnDecl],
+        ctor_to_adt: dict[str, str],
+        mono: Monomorphizer,
+        normal_seen: set[tuple[str, tuple[str, ...]]],
+        result: dict[str, set[tuple[str, ...]]],
+    ) -> None:
+        """Add the transitive closure of unshadowed clones reachable from a
+        shadowed clone body into ``result`` (verifier mirror of codegen's
+        ``_chase_normal_transitive``)."""
+        stack: list[ast.FnDecl] = [root_fn]
+        while stack:
+            fn = stack.pop()
+            transitive: dict[str, set[tuple[str, ...]]] = {
+                name: set() for name in generic_decls
+            }
+            mono.collect_calls_in_node(
+                fn, generic_decls, ctor_to_adt, transitive,
+            )
+            for t_name, t_types in transitive.items():
+                for t_ct in t_types:
+                    if (t_name, t_ct) in normal_seen:
+                        continue
+                    normal_seen.add((t_name, t_ct))
+                    result.setdefault(t_name, set()).add(t_ct)
+                    stack.append(mono.monomorphize_fn(generic_decls[t_name], t_ct))
 
     def verify_program(self, program: ast.Program) -> None:
         """Entry point: register modules, then local declarations, then verify."""
@@ -993,6 +1301,38 @@ class ContractVerifier:
         for tld in program.declarations:
             if isinstance(tld.decl, ast.FnDecl):
                 self._verify_fn(tld.decl)
+        self._verify_shadowed_module_generics()
+
+    def _verify_shadowed_module_generics(self) -> None:
+        """Verify each IMPORTED generic's clone at the type args the importer
+        instantiates it at (CR 3519156263).
+
+        An imported generic's clone is what actually RUNS for a cross-module
+        call, but its body is defined in another module and so is never reached
+        by the ``program.declarations`` loop.  The defining module only Tier-3s
+        an uninstantiated generic, so without this pass an imported generic with
+        a LYING contract runs its clone unverified — a false Tier-1 (verify
+        clean, run violates the clone's postcondition).  Verifying the MODULE
+        body here at its own instances catches a lying contract as an honest
+        E500.  Two families:
+
+        * SHADOWED generics (a same-named local shadows them): keyed by the
+          `mod$…` base so they never collide with the local generic's own
+          verification (the `program.declarations` loop verifies the local).
+        * UNSHADOWED imported generics: keyed by the bare name in `_instances`;
+          the importer verifies them here because no local declaration does.
+        """
+        for _base, (gdecl, cts) in sorted(
+            self._shadowed_module_generic_verify.items(),
+        ):
+            if cts:
+                self._verify_generic_instances(gdecl, tuple(sorted(cts)))
+        for gname, gdecl in sorted(
+            self._imported_generic_verify_decls.items(),
+        ):
+            cts = self._instances.get(gname, set())
+            if cts:
+                self._verify_generic_instances(gdecl, tuple(sorted(cts)))
 
     # -- #732: per-monomorphization verification + aggregation -------------
 
@@ -1541,6 +1881,15 @@ class ContractVerifier:
                 v.precondition, v.counterexample,
             )
 
+        # 6b. Report call sites (in the body or a requires predicate) whose
+        #     precondition obligation could not be checked statically (#882).
+        #     A second drain runs after step 8 for calls that appear inside an
+        #     ensures / refined-return / decreases predicate — those record
+        #     their demotion during step-7/8 translation, after this drain has
+        #     already run, and would otherwise vanish (the exact silent-loss
+        #     #882 closes).
+        self._report_call_demotions(decl, smt)
+
         # 7. Verify ensures clauses
         for contract in decl.contracts:
             if isinstance(contract, ast.Ensures):
@@ -1742,6 +2091,18 @@ class ContractVerifier:
                         error_code="E525",
                         tier=3,
                     )
+
+        # 8b. Second demotion drain (#882 GAP-1).  A contracted call that
+        #     appears inside an ensures / refined-return / decreases predicate
+        #     records its call-pre demotion during *this function's* clause
+        #     translation (steps 7–8), which all run AFTER the step-6b drain.
+        #     Drain again here so those demotions are reported instead of
+        #     silently vanishing when the next `_verify_fn` reset()s the shared
+        #     SMT context.  Must run before step 9 recurses into where-fns for
+        #     the same reason.  The demotion list is deduped by (precondition,
+        #     call-site span), so a call visited by both a step-5.x walk and a
+        #     step-7 translation is reported once, never double-counted.
+        self._report_call_demotions(decl, smt)
 
         # 9. Verify where-block functions
         if decl.where_fns:
@@ -5943,6 +6304,49 @@ class ContractVerifier:
             error_code="E501",
         )
 
+    def _report_call_demotions(
+        self, decl: ast.FnDecl, smt: SmtContext,
+    ) -> None:
+        """Drain and report call sites whose precondition obligation could not
+        be checked statically (#882).
+
+        An untranslatable ADT argument or an untranslatable callee precondition
+        makes the call-site precondition obligation impossible to discharge in
+        Z3.  Rather than let it vanish (which would make `verify` overstate
+        coverage), each becomes a LOUD Tier-3 obligation (E532) plus a warning;
+        the runtime guard still enforces the contract.  DESIGN.md degrades
+        loudly.
+
+        Called twice per function: once after the body/requires translation
+        (step 6b) and once after the ensures/refined-return/decreases
+        translation (step 8b).  The demotion list is drained each time, so the
+        second call reports only the calls that appear inside those later
+        clauses — the exact silent-loss the first drain missed.  Each demotion
+        is counted like the ensures Tier-3 path so the obligation/summary
+        differential stays exact, and located at the call site (span_node) like
+        E501 so repeated calls to the same callee stay distinct.
+        """
+        for d in smt.drain_call_demotions():
+            self.summary.tier3_runtime += 1
+            self._record_obligation(
+                decl.name, "call_pre", d.precondition, "tier3",
+                error_code="E532",
+                span_node=d.call_node,
+            )
+            self._warning(
+                d.call_node,
+                f"Cannot statically verify the precondition of "
+                f"'{d.callee_name}' at this call site in '{decl.name}'. "
+                f"The call uses constructs outside the decidable fragment. "
+                f"The precondition will be checked at runtime.",
+                rationale="An argument or the callee's precondition contains "
+                          "constructs that cannot be translated to SMT (e.g. "
+                          "an ADT field of a host-handle type such as Map).",
+                spec_ref='Chapter 6, Section 6.8 "Summary of Verification Tiers"',
+                error_code="E532",
+                tier=3,
+            )
+
     def _contract_source_text(self, contract: ast.Contract) -> str:
         """Extract the source text of a contract clause."""
         if contract.span:
@@ -6169,19 +6573,10 @@ class ContractVerifier:
         return len(stack)
 
     def _type_expr_to_slot_name(self, te: ast.TypeExpr) -> str:
-        """Extract the canonical slot name from a type expression."""
-        if isinstance(te, ast.NamedType):
-            if te.type_args:
-                arg_names = []
-                for a in te.type_args:
-                    if isinstance(a, ast.NamedType):
-                        arg_names.append(a.name)
-                    else:  # pragma: no cover
-                        return "?"
-                return f"{te.name}<{', '.join(arg_names)}>"
-            return te.name
-        if isinstance(te, ast.RefinementType):
-            return self._type_expr_to_slot_name(te.base_type)
-        if isinstance(te, ast.FnType):
-            return "Fn"
-        return "?"  # pragma: no cover
+        """Extract the canonical slot name from a type expression.
+
+        Delegates to the shared recursive :func:`vera.slots.type_expr_slot_name`
+        (fully-qualified over nested composites, #914 finding 2) with the
+        verifier's total-``str`` contract: an unnameable component is ``"?"``.
+        """
+        return type_expr_slot_name(te) or "?"

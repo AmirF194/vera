@@ -1,0 +1,27 @@
+-- Conformance: a zero-size Unit component in a by-value Tuple layout
+--   compiles and runs (Chapter 2, Section 2.3.1 / Chapter 11, Section 11.2.2)
+-- Tests: #902 — a `Tuple` (or any constructor) with a `Unit` field lays the
+--        field out as zero-size (0 bytes, no WASM representation per §11.2.2:
+--        `UnitLit` compiles to nothing), so the function compiles rather than
+--        being silently skipped and dangling its call.  The Int field lands at
+--        the correct offset after the zero-size Unit field, so a match-extract
+--        recovers it.  A boxed `Option<Unit>` already worked; this closes the
+--        inline by-value case.
+private fn mkt(@Int -> @Tuple<Unit, Int>)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  Tuple((), @Int.0)
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Tuple<Unit, Int> = mkt(42);
+  match @Tuple<Unit, Int>.0 {
+    Tuple(@Unit, @Int) -> if @Int.0 == 42 then { 0 } else { 1 }
+  }
+}

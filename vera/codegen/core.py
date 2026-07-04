@@ -25,6 +25,7 @@ from vera.codegen.api import CompileResult
 from vera.codegen.memory import ConstructorLayout
 from vera.errors import Diagnostic, SourceLocation
 from vera.prelude import PRELUDE_FILE, mentioned_fn_names
+from vera.slots import type_expr_slot_name
 from vera.wasm import StringPool
 from vera.wasm.async_fusion import (
     compute_future_ret_fns,
@@ -204,6 +205,10 @@ class CodeGenerator(
         # closure body (merged from each WasmContext) and emitted once at
         # module assembly.
         self._adt_eq_helpers: dict[str, str] = {}
+        # #924: generated recursive show/hash helper functions ($show_<type> /
+        # $hash_<type>), merged from each WasmContext and emitted once at
+        # module assembly — the same propagate-then-emit shape as _adt_eq_helpers.
+        self._show_hash_helpers: dict[str, str] = {}
         # #573: wrap-table flag — see ``WasmContext`` for the long
         # description.  Set in ``_assemble_module`` whenever a
         # host-handle type that has migrated to heap-wrap-as-ADT is
@@ -312,6 +317,44 @@ class CodeGenerator(
         # Pass 2.5 consults it so an imported fn shadowed by a local where-fn is
         # not emitted under a clashing bare name (#814).
         self._local_shadowed_fn_names: set[str] = set()
+        # #890: fn/ADT/ctor names contributed ONLY by a transitively-reached
+        # module (imported by an imported module, not by this program).  Their
+        # bodies ARE compiled into the flat WASM module so an imported body can
+        # call them, but the top-level program's own bodies must not reach them
+        # (spec §8.6.4 — a transitive module's declarations are not visible to
+        # the original importer).  The guard rail (`_check_cross_module_calls`)
+        # subtracts these from its "known" set, so a bare/qualified call to a
+        # transitive symbol from a *main-program* body fails loudly at compile
+        # instead of silently resolving to the emitted-for-a-sibling body.
+        self._transitive_only_names: set[str] = set()
+        # #774: imported PUBLIC generic (`forall`) FnDecls the importer must
+        # monomorphize itself — cross-module generic monomorphization.  The
+        # importer discovers instantiations from ITS OWN call sites and emits
+        # the clones into its own (flat) WASM module, since the defining module
+        # only monomorphizes its own instantiations (and never calls a generic
+        # it merely exports).  Keyed by bare name (first-seen wins, public +
+        # import-filtered), split by whether a LOCAL shadows the bare name:
+        #   * `_imported_generic_decls` — UNshadowed: merged into
+        #     `generic_decls` in `_monomorphize`, so both a bare call `gid(…)`
+        #     and a qualified `m::gid(…)` (which desugars to the bare target)
+        #     route through `_generic_fn_info` to the emitted clone.
+        #   * `_shadowed_imported_generic_decls` — a local non-generic shadows
+        #     the bare name (#814 asymmetric variant), so ONLY the qualified
+        #     form may reach the module's generic; the bare name stays on the
+        #     local.  These are monomorphized under a distinct ``mod$…$`` mono
+        #     prefix and reached via `_module_qualified_generic_targets`.
+        self._imported_generic_decls: dict[str, ast.FnDecl] = {}
+        self._shadowed_imported_generic_decls: dict[
+            tuple[str, ...], dict[str, ast.FnDecl]
+        ] = {}
+        # #814/#774: (module path, generic name) → mono base name the qualified
+        # call must mangle against, for a generic whose bare name a local
+        # shadows.  The ModuleCall desugar consults this so `m::gen(5)` resolves
+        # to the module generic's clone (`mod$m$gen$Int`) instead of falling
+        # back to the local shadow's bare `gen`.
+        self._module_qualified_generic_bases: dict[
+            tuple[tuple[str, ...], str], str
+        ] = {}
 
     # -----------------------------------------------------------------
     # Diagnostics
@@ -844,20 +887,39 @@ class CodeGenerator(
         # name-shadowing fixture and asserts there's no over-broad
         # suppression.
         forall_decl_names: set[str] = set()
+        # #913: name → span of each forall template, so a CLOSURE-level skip
+        # warning (whose description is NOT `Function 'NAME' …`-prefixed —
+        # it names the closure, not the enclosing fn) can be matched by
+        # error_code + forall-origin (the warning's source line falls within
+        # the template's declaration span).  Keeps the suppression robust
+        # against description wording rather than re-parsing a name out of it.
+        forall_decl_spans: dict[str, ast.Span] = {}
         for tld in program.declarations:
             decl = tld.decl
             if isinstance(decl, ast.FnDecl) and decl.forall_vars:
                 forall_decl_names.add(decl.name)
+                if decl.span is not None:
+                    forall_decl_spans[decl.name] = decl.span
         if forall_decl_names:
             mono_compiled = compiled_mono_bases & forall_decl_names
             if mono_compiled:
                 # Filter out template warnings for fns whose mono
                 # clones compiled.  Keep all other diagnostics intact.
-                # Match on description prefix `Function 'NAME' ` —
-                # the format used by both `_is_compilable` in
-                # `vera/codegen/compilability.py` ([E604]/[E605]) and
-                # the [E602] emit sites in `vera/codegen/functions.py`
-                # (reached via `_compile_fn`).
+                # Two match shapes, both gated on a clone having compiled
+                # (so a genuinely-broken generic with NO compilable clone
+                # keeps its warning):
+                #   1. Description prefix `Function 'NAME' ` — the
+                #      function-level [E604]/[E605] (`_is_compilable`,
+                #      `vera/codegen/compilability.py`) and the [E602]
+                #      dropped-parent warning (`vera/codegen/functions.py`,
+                #      reached via `_compile_fn`).
+                #   2. #913: a closure-level [E602] emitted while compiling
+                #      the template body (`vera/codegen/closures.py`) whose
+                #      unsubstituted `@T` param/return type has no WASM
+                #      representation.  Its description names the closure, so
+                #      the prefix match misses it; suppress it by forall-origin
+                #      — its source line sits inside a compiled-clone
+                #      template's declaration span.
                 suppressible_codes = {"E602", "E604", "E605"}
                 kept: list[Diagnostic] = []
                 for d in self.diagnostics:
@@ -866,6 +928,13 @@ class CodeGenerator(
                             d.description.startswith(f"Function '{name}' ")
                             for name in mono_compiled
                         )
+                        if not suppressed and d.error_code == "E602":
+                            line = d.location.line
+                            suppressed = any(
+                                (span := forall_decl_spans.get(name)) is not None
+                                and span.line <= line <= span.end_line
+                                for name in mono_compiled
+                            )
                         if suppressed:
                             continue
                     kept.append(d)
@@ -1082,22 +1151,14 @@ class CodeGenerator(
         return "unsupported"
 
     def _type_expr_to_slot_name(self, te: ast.TypeExpr) -> str | None:
-        """Extract the slot name from a type expression."""
-        if isinstance(te, ast.NamedType):
-            if te.type_args:
-                arg_names = []
-                for a in te.type_args:
-                    if isinstance(a, ast.NamedType):
-                        arg_names.append(a.name)
-                    else:
-                        return None
-                return f"{te.name}<{', '.join(arg_names)}>"
-            return te.name
-        if isinstance(te, ast.RefinementType):
-            return self._type_expr_to_slot_name(te.base_type)
-        if isinstance(te, ast.FnType):
-            return "Fn"
-        return None
+        """Extract the slot name from a type expression.
+
+        Delegates to the shared recursive :func:`vera.slots.type_expr_slot_name`
+        so nested composite type args (`Option<Tuple<Int, Int>>`) are
+        FULLY qualified and distinguishable (#914 finding 2), and every
+        slot-name builder agrees by construction (dedup).
+        """
+        return type_expr_slot_name(te)
 
     @staticmethod
     def _escape_wat_string(s: str) -> str:
@@ -1152,11 +1213,15 @@ class CodeGenerator(
                     tld.decl.body, ability_ops)
                 new_where = self._rewrite_where_fns(
                     tld.decl.where_fns, ability_ops)
+                new_contracts = self._rewrite_ops_in_contracts(
+                    tld.decl.contracts, ability_ops)
                 if (new_body is not tld.decl.body
-                        or new_where is not tld.decl.where_fns):
+                        or new_where is not tld.decl.where_fns
+                        or new_contracts is not tld.decl.contracts):
                     new_decl = _replace(
                         tld.decl, body=new_body,  # type: ignore[arg-type]
-                        where_fns=new_where)
+                        where_fns=new_where,
+                        contracts=new_contracts)
                     tld = _replace(tld, decl=new_decl)
                     prog_changed = True
             new_tlds.append(tld)
@@ -1169,20 +1234,76 @@ class CodeGenerator(
             new_body = self._rewrite_ops_in_expr(mdecl.body, ability_ops)
             new_where = self._rewrite_where_fns(
                 mdecl.where_fns, ability_ops)
-            if new_body is not mdecl.body or new_where is not mdecl.where_fns:
+            new_contracts = self._rewrite_ops_in_contracts(
+                mdecl.contracts, ability_ops)
+            if (new_body is not mdecl.body
+                    or new_where is not mdecl.where_fns
+                    or new_contracts is not mdecl.contracts):
                 mdecl = _replace(
                     mdecl, body=new_body,  # type: ignore[arg-type]
-                    where_fns=new_where)
+                    where_fns=new_where,
+                    contracts=new_contracts)
             new_monos.append(mdecl)
 
         return program, new_monos
+
+    def _rewrite_ops_in_contracts(
+        self,
+        contracts: tuple[ast.Contract, ...],
+        ability_ops: dict[str, str],
+    ) -> tuple[ast.Contract, ...]:
+        """Rewrite ability op calls inside a function's contract clauses.
+
+        The same Pass 1.6 canonicalisation that lowers ``eq(a, b)`` →
+        ``BinaryExpr(a, EQ, b)`` in bodies must also run over ``requires`` /
+        ``ensures`` / ``decreases`` predicates (#874).  A contract predicate
+        written with the ability op reached the WASM contract-lowering path as
+        a bare ``FnCall`` whose target is unregistered, tripping the
+        ``_translate_call`` guard-rail with an *uncaught* ``CodegenSkip`` — the
+        contract path runs outside ``_compile_fn``'s skip-to-E602 try/except.
+        Rewriting here keeps codegen on the one canonical operator form
+        (#815) so ``vera check``-green contracts compile and enforce.
+        """
+        from dataclasses import replace as _replace
+
+        new_contracts: list[ast.Contract] = []
+        changed = False
+        for contract in contracts:
+            if isinstance(contract, (ast.Requires, ast.Ensures)):
+                new_expr = self._rewrite_ops_in_expr(
+                    contract.expr, ability_ops)
+                if new_expr is not contract.expr:
+                    new_contracts.append(_replace(contract, expr=new_expr))
+                    changed = True
+                    continue
+            elif isinstance(contract, ast.Decreases):
+                new_exprs = tuple(
+                    self._rewrite_ops_in_expr(e, ability_ops)
+                    for e in contract.exprs
+                )
+                if any(n is not o
+                       for n, o in zip(new_exprs, contract.exprs)):
+                    new_contracts.append(
+                        _replace(contract, exprs=new_exprs))
+                    changed = True
+                    continue
+            new_contracts.append(contract)
+        return tuple(new_contracts) if changed else contracts
 
     def _rewrite_where_fns(
         self,
         where_fns: tuple[ast.FnDecl, ...] | None,
         ability_ops: dict[str, str],
     ) -> tuple[ast.FnDecl, ...] | None:
-        """Rewrite ability ops in where-block function bodies."""
+        """Rewrite ability ops in where-block function bodies AND contracts.
+
+        A `where`-helper carries its own full contract block, so its
+        `requires` / `ensures` / `decreases` predicates hit the same
+        contract-lowering CodegenSkip as a top-level fn when they use `eq` /
+        `compare` (#874).  Rewrite both the body and the contracts through the
+        same Pass 1.6 canonicalisation (PR #887 review found the first pass
+        covered only `wfn.body`).
+        """
         if not where_fns:
             return where_fns
         from dataclasses import replace as _replace
@@ -1191,8 +1312,14 @@ class CodeGenerator(
         changed = False
         for wfn in where_fns:
             new_body = self._rewrite_ops_in_expr(wfn.body, ability_ops)
-            if new_body is not wfn.body:
-                new_fns.append(_replace(wfn, body=new_body))  # type: ignore[arg-type]
+            new_contracts = self._rewrite_ops_in_contracts(
+                wfn.contracts, ability_ops)
+            if (new_body is not wfn.body
+                    or new_contracts is not wfn.contracts):
+                new_fns.append(_replace(
+                    wfn,
+                    body=new_body,  # type: ignore[arg-type]
+                    contracts=new_contracts))
                 changed = True
             else:
                 new_fns.append(wfn)
@@ -1346,6 +1473,22 @@ class CodeGenerator(
             )
             if any(n is not o for n, o in zip(new_args, expr.args)):
                 return _replace(expr, args=new_args)
+            return expr
+
+        # Quantifiers: rewrite the domain and the predicate body.  A `forall` /
+        # `exists` in a contract (`ensures(forall(..., |i| eq(xs[i], 0)))`) is
+        # runtime-lowered by `_translate_quantifier`, which compiles the
+        # predicate `AnonFn` body — so an `eq` / `compare` inside it hits the
+        # same unregistered-call CodegenSkip as a top-level contract op unless
+        # canonicalised here first (PR #887 review: the walker fell through
+        # quantifier nodes to the leaf return).
+        if isinstance(expr, (ast.ForallExpr, ast.ExistsExpr)):
+            new_domain = self._rewrite_ops_in_expr(expr.domain, ability_ops)
+            new_pred = self._rewrite_ops_in_expr(expr.predicate, ability_ops)
+            if new_domain is not expr.domain or new_pred is not expr.predicate:
+                return _replace(
+                    expr, domain=new_domain,
+                    predicate=new_pred)  # type: ignore[arg-type]
             return expr
 
         # Leaf nodes (literals, slot refs, etc.) — no rewriting needed

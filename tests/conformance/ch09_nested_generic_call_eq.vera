@@ -1,0 +1,76 @@
+-- Conformance: Eq auto-derivation over a NESTED-generic recursive ADT reached
+-- THROUGH an Eq-constrained generic function call (Chapter 9, #932 — the
+-- generic-call/clone sibling of #923).
+-- Tests: a `List<List<Int>>` value built entirely from constructor calls,
+-- passed as the type argument of a constrained generic call `eq2(@T, @T ->
+-- @Bool)`, derives structural Eq and compares by value.  Pre-#932 the codegen
+-- derivability recovery on the generic-call/clone path reconstructed only ONE
+-- level of the nested type argument (`List<List>` instead of
+-- `List<List<Int>>`), which the Eq-derivability gate treated as a lost-type-arg
+-- clone and spuriously rejected with E613 — even though `vera check` accepts
+-- it. The fix recurses the type-argument recovery for the derivability
+-- decision WITHOUT changing the mangled clone name.
+-- ================================================================
+private data List<T> {
+  Nil,
+  Cons(T, List<T>)
+}
+
+private forall<T where Eq<T>> fn eq2(@T, @T -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  @T.0 == @T.1
+}
+
+-- Test: two structurally-equal List<List<Int>> values (distinct allocations)
+-- compare equal through the constrained generic call.
+public fn test_nested_generic_call_eq_equal(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 1)
+  effects(pure)
+{
+  if eq2(Cons(Cons(1, Nil), Nil), Cons(Cons(1, Nil), Nil)) then {
+    1
+  } else {
+    0
+  }
+}
+
+-- Test: an inner-element difference propagates to unequal.
+public fn test_nested_generic_call_eq_unequal(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 0)
+  effects(pure)
+{
+  if eq2(Cons(Cons(1, Nil), Nil), Cons(Cons(2, Nil), Nil)) then {
+    1
+  } else {
+    0
+  }
+}
+
+-- Test: a THREE-level nesting (List<List<List<Int>>>) proves the recovery is
+-- genuinely recursive, not a two-level special case.
+public fn test_three_level_nested_call_eq(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 1)
+  effects(pure)
+{
+  if eq2(Cons(Cons(Cons(1, Nil), Nil), Nil), Cons(Cons(Cons(1, Nil), Nil), Nil)) then {
+    1
+  } else {
+    0
+  }
+}
+
+-- Drive every test from main so the generic-call derivations run and their
+-- runtime postconditions fire.  Total = 1 + 0 + 1 = 2.
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 2)
+  effects(pure)
+{
+  test_nested_generic_call_eq_equal(()) + test_nested_generic_call_eq_unequal(()) + test_three_level_nested_call_eq(())
+}

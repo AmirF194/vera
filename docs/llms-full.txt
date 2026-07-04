@@ -2,7 +2,7 @@
 
 > Vera is a statically typed, purely functional programming language designed for large language models to write. It uses typed slot references (@T.n) instead of variable names, requires contracts on every function, and compiles to WebAssembly.
 
-This file contains the core Vera language documentation — language reference, agent instructions, FAQ, error codes, and formal grammar — compiled into a single document. Version 0.0.196. For the full documentation index including the 14-chapter specification and supplementary docs, see llms.txt.
+This file contains the core Vera language documentation — language reference, agent instructions, FAQ, error codes, and formal grammar — compiled into a single document. Version 0.1.0. For the full documentation index including the 14-chapter specification and supplementary docs, see llms.txt.
 
 
 ========================================================================
@@ -66,6 +66,8 @@ vera run file.vera --fn f -- 3.14       # Call function f with Float64 argument
 vera run file.vera --fn f -- true       # Call function f with Bool argument
 vera run file.vera --fn f -- "hello"    # Call function f with String argument
 vera run --json file.vera         # Run with JSON output
+vera serve file.vera              # Serve handle(Request -> Response) over HTTP (default :8000)
+vera serve --port 8080 file.vera  # Serve on a specific port
 vera test file.vera               # Contract-driven testing via Z3 + WASM
 vera test --json file.vera        # Test with JSON output
 vera test --trials 50 file.vera   # Limit trials per function (default 100)
@@ -1777,10 +1779,10 @@ private forall<T where Eq<T>> fn are_equal(@T, @T -> @Bool)
 
 Four built-in abilities are available — no declarations needed:
 
-- **`Eq<T>`** — `eq(x, y)` returns `@Bool`. Satisfied by: Int, Nat, Bool, Float64, String, Byte, Unit, and simple enum ADTs.
-- **`Ord<T>`** — `compare(x, y)` returns `@Ordering` (`Less`, `Equal`, `Greater`). Satisfied by: Int, Nat, Bool, Float64, String, Byte.
-- **`Hash<T>`** — `hash(x)` returns `@Int`. Satisfied by: Int, Nat, Bool, Float64, String, Byte, Unit.
-- **`Show<T>`** — `show(x)` returns `@String`. Satisfied by: Int, Nat, Bool, Float64, String, Byte, Unit.
+- **`Eq<T>`** — `eq(x, y)` returns `@Bool`. Satisfied by: Int, Nat, Bool, Float64, String, Byte, Unit, and ADTs (including `Option` / `Result`, recursive, nested-generic, and mutually-recursive) whose fields are themselves `Eq` (structural derivation). Unlike `Hash`/`Show`, `Tuple`, `Array`, `Map`, and `Set` are **not** Eq-derivable — a non-Eq `==` / `eq` is rejected at check with E243.
+- **`Ord<T>`** — `compare(x, y)` returns `@Ordering` (`Less`, `Equal`, `Greater`). Satisfied by: Int, Nat, Float64, Byte, String — exactly the orderable types (the `<`/`>`/`<=`/`>=` domain). A user ADT is **not** Ord-derivable, and neither is `Bool`; `compare` on a non-orderable operand is rejected with E242 (mirroring E143 on a direct `<`).
+- **`Hash<T>`** — `hash(x)` returns `@Int`. Satisfied by: Int, Nat, Bool, Float64, String, Byte, Unit, and composite types (ADT, Tuple, Option, Result, Array) whose fields/elements are themselves `Hash` (structural derivation).
+- **`Show<T>`** — `show(x)` returns `@String`. Satisfied by: Int, Nat, Bool, Float64, String, Byte, Unit, and composite types (ADT, Tuple, Option, Result, Array) whose fields/elements are themselves `Show`; renders `Ctor(f0, f1, …)` / `(a, b)` / `Some(x)` / `Ok(x)` / `[e0, e1, …]`.
 
 The `Ordering` type is a built-in ADT with three constructors: `Less`, `Equal`, `Greater`. Use it with pattern matching:
 
@@ -2397,7 +2399,7 @@ Read `SKILL.md` for the full language reference. It covers syntax, slot referenc
 
 ### Conformance programs as reference
 
-The conformance suite in `tests/conformance/` contains 111 small programs — often one per language feature — that serve as minimal working examples. Most are self-contained; the exception is `ch07_cross_module_contracts.vera`, which imports its `ch07_cross_module_contracts_lib.vera` companion to exercise cross-module contracts. Each positive program must pass its declared verification level (see `manifest.json` for mappings: `parse`, `check`, `verify`, or `run`); the four negative fixtures (`ch05_apply_fn_arity`, `ch08_circular_import`, `ch08_visibility_private`, `ch09_builtin_redefinition`) instead must *fail* `check` with the E-code in their `expected_error` field. When you need to see how a specific construct works (e.g. effect handlers, match expressions, closures), check the corresponding conformance program before reading the spec.
+The conformance suite in `tests/conformance/` contains 143 small, self-contained programs — often one per language feature — that serve as minimal working examples (the exception is `ch07_cross_module_contracts.vera`, which imports its `ch07_cross_module_contracts_lib.vera` companion to exercise cross-module contracts). Each positive program must pass its declared verification level (see `manifest.json` for mappings: `parse`, `check`, `verify`, or `run`); the seven negative fixtures (`ch02_generic_over_unit_rejected`, `ch05_apply_fn_arity`, `ch08_circular_import`, `ch08_visibility_private`, `ch09_builtin_redefinition`, `ch09_ord_adt_rejected`, `ch09_eq_non_derivable_rejected`) instead must *fail* `check` with the E-code in their `expected_error` field. When you need to see how a specific construct works (e.g. effect handlers, match expressions, closures), check the corresponding conformance program before reading the spec.
 
 ### Workflow
 
@@ -2430,6 +2432,7 @@ vera compile --wat file.vera              # Print WAT text (human-readable WASM)
 vera compile --target browser file.vera   # Compile + emit browser bundle
 vera run file.vera                # Compile and execute (calls main)
 vera run file.vera --fn f -- 42   # Call function f with argument 42
+vera serve file.vera              # Serve handle(Request -> Response) over HTTP (default :8000)
 vera test file.vera               # Contract-driven testing via Z3 + WASM
 vera test --json file.vera        # Test with JSON output
 vera test --trials 50 file.vera   # Limit trials per function (default 100)
@@ -2571,7 +2574,7 @@ Each stage is a module with a single public API function (`parse_file`, `transfo
 pytest tests/ -v                       # Run all tests (see TESTING.md)
 pytest tests/test_conformance.py -v    # Conformance suite only
 mypy vera/                             # Type-check the compiler
-python scripts/check_conformance.py    # All 111 conformance programs hold (positives pass; negatives fail with their E-code)
+python scripts/check_conformance.py    # All 143 conformance programs hold (positives pass; negatives fail with their E-code)
 python scripts/check_examples.py       # All 37 examples must pass
 ```
 
@@ -2581,7 +2584,7 @@ When implementing a new language feature, write the conformance program *first* 
 
 ### Invariants
 
-- All 111 conformance programs in `tests/conformance/` must hold at their declared level — positive entries pass, and the negative fixtures (`ch05_apply_fn_arity`, `ch08_circular_import`, `ch08_visibility_private`, `ch09_builtin_redefinition`) must *fail* `check` with their `expected_error` E-code
+- All 143 conformance programs in `tests/conformance/` must hold at their declared level — positive entries pass, and the negative fixtures (`ch02_generic_over_unit_rejected`, `ch05_apply_fn_arity`, `ch08_circular_import`, `ch08_visibility_private`, `ch09_builtin_redefinition`, `ch09_ord_adt_rejected`, `ch09_eq_non_derivable_rejected`) must *fail* `check` with their `expected_error` E-code
 - All 37 examples in `examples/` must pass `vera check` and `vera verify`
 - `mypy vera/` must be clean
 - `pytest tests/ -v` must pass
@@ -3005,7 +3008,7 @@ None of this is Vera-specific, but it validates the design choices. The thesis i
 
 This is a real concern. LLMs are trained on trillions of tokens of Python, TypeScript, and JavaScript. A MojoBench study (NAACL 2025) found that even fine-tuned models achieved only 30–35% improvement over base models on Mojo code generation, illustrating the cold-start problem for new languages.
 
-Vera's approach has three parts. First, the agent-facing documentation (SKILL.md) is designed to be dropped into a model's context window, so the model works from the language specification rather than training data recall. Second, Vera's syntax is deliberately simple and regular — fewer constructs, each with exactly one canonical form — which reduces the surface area a model needs to learn. Third, the conformance test suite (111 programs covering every language feature) gives models concrete examples to learn from and conform to. Simon Willison argued in December 2025 that a language-agnostic conformance suite is the single most important tool for LLM adoption of a new language — LLMs can learn new languages remarkably well when given tests to conform to.
+Vera's approach has three parts. First, the agent-facing documentation (SKILL.md) is designed to be dropped into a model's context window, so the model works from the language specification rather than training data recall. Second, Vera's syntax is deliberately simple and regular — fewer constructs, each with exactly one canonical form — which reduces the surface area a model needs to learn. Third, the conformance test suite (143 programs covering every language feature) gives models concrete examples to learn from and conform to. Simon Willison argued in December 2025 that a language-agnostic conformance suite is the single most important tool for LLM adoption of a new language — LLMs can learn new languages remarkably well when given tests to conform to.
 
 
 ## How does Vera compare to Dafny / Lean / Koka / F*?
@@ -3046,8 +3049,8 @@ The reference compiler is under active development. The current release includes
 
 - A seven-stage pipeline: parse, transform, resolve, typecheck, verify, compile, execute
 - A 14-chapter formal specification
-- Over 5,900 unit tests plus a 111-program conformance suite
-- 35 working example programs
+- 6,779 tests, including a 143-program conformance suite
+- 37 working example programs
 - 164 built-in functions covering strings, arrays, math, parsing, and data types
 - Four built-in abilities (Eq, Ord, Hash, Show) with constrained generics and ADT auto-derivation
 - Full IO operations (print, read_line, read_file, write_file, args, exit, get_env, sleep, time, stderr)
@@ -3132,6 +3135,7 @@ Every diagnostic has a stable error code. Codes are grouped by compiler phase:
 - **E132**: Cyclic type alias
 - **E133**: Type alias arity mismatch
 - **E134**: Type does not take type arguments
+- **E135**: Array of a zero-size element type
 - **E140**: Arithmetic requires numeric operands
 - **E141**: Arithmetic requires matching numeric types
 - **E142**: Cannot compare incompatible types
@@ -3160,6 +3164,8 @@ Every diagnostic has a stable error code. Codes are grouped by compiler phase:
 - **E202**: Argument type mismatch
 - **E203**: Effect operation wrong argument count
 - **E204**: Effect operation argument type mismatch
+- **E205**: Conflicting type argument inference
+- **E206**: Generic type parameter instantiated at Unit
 - **E210**: Unknown constructor
 - **E211**: Constructor is nullary
 - **E212**: Constructor wrong field count
@@ -3174,6 +3180,8 @@ Every diagnostic has a stable error code. Codes are grouped by compiler phase:
 - **E233**: Function not found in module
 - **E240**: Ability operation wrong argument count
 - **E241**: Ability operation argument type mismatch
+- **E242**: Ord ability operation on non-orderable type
+- **E243**: Eq ability operation on non-Eq-derivable type
 - **E300**: If condition not Bool
 - **E301**: If branches incompatible types
 - **E302**: Match arm type mismatch
@@ -3211,6 +3219,7 @@ Every diagnostic has a stable error code. Codes are grouped by compiler phase:
 - **E529**: float_to_int domain (NaN, infinity, or out of i64 range)
 - **E530**: Nat-to-Int widening out of i64 range
 - **E531**: Nat-to-Int widening unverified and not runtime-guarded
+- **E532**: Cannot verify call-site precondition (undecidable)
 - **E600**: Unsupported parameter type
 - **E601**: Unsupported return type
 - **E602**: Unsupported body expression type
@@ -3230,6 +3239,7 @@ Every diagnostic has a stable error code. Codes are grouped by compiler phase:
 - **E616**: Cannot infer closure return type for call_indirect
 - **E617**: Refinement predicate not compilable to runtime guard
 - **E618**: Nested refinement base unsupported
+- **E619**: Cannot infer type argument for ability-constrained parameter
 - **E699**: Internal compiler error
 - **E700**: Contract violation during testing
 - **E701**: Cannot generate test inputs

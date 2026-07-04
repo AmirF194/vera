@@ -667,12 +667,19 @@ class TestTesterUnitFunctions:
         result = _type_expr_to_slot_name(te)
         assert result == "Array<Int>"
 
-    def test_type_expr_to_slot_name_named_with_non_named_type_arg(self) -> None:
-        """Cover line 722: type arg that is not NamedType returns '?'."""
+    def test_type_expr_to_slot_name_refinement_type_arg(self) -> None:
+        """A refinement type ARGUMENT resolves to its base name.
+
+        #914 finding-3 dedup: the tester copy now delegates to the shared
+        recursive `vera.slots.type_expr_slot_name`, which recurses into type
+        args and resolves a `RefinementType` component to its base name
+        (`{Int | P}` → `Int`), giving `Array<Int>` — matching how refinements
+        resolve everywhere else.  (The pre-dedup tester copy bailed to `"?"`
+        on any non-`NamedType` arg.)"""
         from vera.tester import _type_expr_to_slot_name
         from vera import ast as vera_ast
 
-        # NamedType with a non-NamedType type arg (e.g. RefinementType)
+        # NamedType with a RefinementType type arg
         pred = vera_ast.BoolLit(value=True)
         ref_type = vera_ast.RefinementType(
             base_type=vera_ast.NamedType(name="Int", type_args=[]),
@@ -680,7 +687,7 @@ class TestTesterUnitFunctions:
         )
         te = vera_ast.NamedType(name="Array", type_args=[ref_type])
         result = _type_expr_to_slot_name(te)
-        assert result == "?"
+        assert result == "Array<Int>"
 
     def test_type_expr_to_slot_name_refinement(self) -> None:
         """Cover lines 725-727: RefinementType delegates to base_type."""
@@ -695,8 +702,13 @@ class TestTesterUnitFunctions:
         result = _type_expr_to_slot_name(te)
         assert result == "Int"
 
-    def test_type_expr_to_slot_name_unknown(self) -> None:
-        """Cover line 727: unknown type expr returns '?'."""
+    def test_type_expr_to_slot_name_fntype(self) -> None:
+        """A top-level `FnType` slot name is the synthetic ``"Fn"``.
+
+        #914 finding-3 dedup: the tester copy now delegates to the shared
+        `vera.slots.type_expr_slot_name`, which returns ``"Fn"`` for a
+        top-level function type — matching the checker / codegen / slots
+        convention (the pre-dedup tester copy returned `"?"`)."""
         from vera.tester import _type_expr_to_slot_name
         from vera import ast as vera_ast
 
@@ -707,7 +719,7 @@ class TestTesterUnitFunctions:
             effect=vera_ast.PureEffect(),
         )
         result = _type_expr_to_slot_name(te)
-        assert result == "?"
+        assert result == "Fn"
 
     def test_get_source_line_no_span(self) -> None:
         """Cover line 751: _get_source_line returns '' when no span."""

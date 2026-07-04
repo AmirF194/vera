@@ -22,7 +22,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Callable
 
 from vera import ast
-from vera.skip import CodegenSkip
+from vera.skip import DERIVED_HELPER_DEPTH_CAP, CodegenSkip
 
 if TYPE_CHECKING:
     from vera.codegen import ConstructorLayout
@@ -83,11 +83,13 @@ class WasmContext(
         self,
         string_pool: StringPool,
         effect_ops: dict[str, tuple[str, bool]] | None = None,
+        effect_op_result_wt: dict[str, str | None] | None = None,
         ctor_layouts: dict[str, ConstructorLayout] | None = None,
         adt_type_names: set[str] | None = None,
         generic_fn_info: (
             dict[str, tuple[tuple[str, ...], tuple[ast.TypeExpr, ...]]] | None
         ) = None,
+        generic_constrained_vars: dict[str, frozenset[str]] | None = None,
         ctor_to_adt: dict[str, str] | None = None,
         known_fns: set[str] | None = None,
         ctor_adt_tp_indices: dict[str, tuple[int | None, ...]] | None = None,
@@ -102,6 +104,17 @@ class WasmContext(
         # e.g. {"get": ("$vera.state_get_Int", False),
         #        "put": ("$vera.state_put_Int", True)}
         self._effect_ops = effect_ops or {}
+        # #914: op_name -> the op's RESULT WAT type (e.g. "get" -> "i64" for
+        # State<Int>, "i32" for State<Box>).  `_effect_ops` carries only the
+        # dispatch target + void-ness, not the value-producing op's result
+        # type, which `_infer_expr_wasm_type` needs when a bare `get(())`
+        # sits in a constructor-argument or match-scrutinee position (A1/A2).
+        # Populated in lock-step with `_effect_ops` at every injection site
+        # (the declared-effect path in codegen/functions.py and the handler-
+        # body path in wasm/calls_handlers.py) so the two never drift.
+        self._effect_op_result_wt: dict[str, str | None] = (
+            effect_op_result_wt or {}
+        )
         # Constructor layout mapping: ctor_name -> ConstructorLayout
         self._ctor_layouts: dict[str, ConstructorLayout] = ctor_layouts or {}
         # ADT type names for slot/param type resolution
@@ -111,6 +124,13 @@ class WasmContext(
         self._generic_fn_info: dict[
             str, tuple[tuple[str, ...], tuple[ast.TypeExpr, ...]]
         ] = generic_fn_info or {}
+        # Per-generic set of type vars carrying an ability bound (`where Eq<T>`).
+        # Used by `_unify_param_arg_wasm` to keep a `ConstructorCall`'s type
+        # argument when rewriting the call site, so the mangled call name matches
+        # the parameterized clone Pass 1.5 emitted (#772).
+        self._generic_constrained_vars: dict[str, frozenset[str]] = (
+            generic_constrained_vars or {}
+        )
         # Constructor name → ADT name reverse mapping
         self._ctor_to_adt: dict[str, str] = ctor_to_adt or {}
         # Known locally-defined function names (for cross-module guard rail)
@@ -199,12 +219,64 @@ class WasmContext(
         # WasmContext in unit tests), the gate is skipped and generation
         # proceeds as before.
         self._adt_eq_derivable: Callable[[str], bool] | None = None
+        # #932: TRUNCATED one-level constrained-var name → FULLY-recovered nested
+        # name (`List<List>` → `List<List<Int>>`).  Populated by Pass 1.5
+        # monomorphization (`_collect_eq_full_type_names`) and consulted for the
+        # Eq-derivability DECISION only — by the constraint gate
+        # (`_check_constraints`) and by the direct-`==` path inside a clone body
+        # (`_translate_binary`).  Never keys a clone symbol, so the clone-mangling
+        # contract stays the truncated one-level name (the #772 hard constraint).
+        # Empty for a bare WasmContext (no mono pass) — a plain dict lookup then
+        # leaves every name unchanged.
+        self._eq_full_type_names: dict[str, str] = {}
+        # #924: generated recursive show/hash helper functions, keyed by the
+        # mangled `$show_<type>` / `$hash_<type>` function name → its full WAT
+        # text.  A directly- (or mutually-) recursive ADT's `show`/`hash`
+        # cannot render inline (unbounded depth), so it emits a self-calling
+        # helper — one per recursive type — that recurses over the finite
+        # value.  Mirrors `_adt_eq_helpers` (#773): merged into the
+        # CodeGenerator core after each body compiles, emitted once at module
+        # assembly, and guarded against re-entry via `_show_hash_pending`.
+        self._show_hash_helpers: dict[str, str] = {}
+        self._show_hash_pending: set[str] = set()
+        # #933: nesting-depth bound for the derived-helper generators
+        # (`$show_<type>` / `$hash_<type>` / `$eq_<type>`).  A UNIFORMLY-
+        # recursive ADT (`List<T>` whose tail is again `List<T>`) recurs on the
+        # SAME parameterized type and is caught by the per-generator `_seen` /
+        # `_..._pending` guards at generation depth 1 — one helper per type.  A
+        # POLYMORPHICALLY-recursive (non-uniform) ADT
+        # (`Box<T>` with a `Box<Box<T>>` field) mints a DISTINCT, strictly
+        # deeper type at every descent (`Box<Box<Int>>`, `Box<Box<Box<Int>>>`,
+        # …), so those guards never fire and generation recurs unboundedly into
+        # a raw Python ``RecursionError`` on a check-green program — the exact
+        # traceback-on-valid-input DESIGN.md principle 1 forbids.  These fields
+        # cap the distinct-ptype expansion: on exceeding the cap the generator
+        # returns the same "unsupported" signal an unrenderable field produces,
+        # so the enclosing helper falls back to the clean E602 (show/hash) /
+        # E613 (eq) skip that non-recursive-unsupported types already take.  The
+        # cap sits far above every legitimate uniform shape (measured max
+        # generation depth 1) yet far below Python's recursion limit, so the
+        # bound degrades DETERMINISTICALLY regardless of that limit.  The cap
+        # itself is shared with the Eq-derivability gate (see
+        # ``vera.skip.DERIVED_HELPER_DEPTH_CAP``) so all three derived-helper
+        # walks bound at the same depth.
+        self._derived_helper_depth: int = 0
+        self._derived_helper_depth_cap: int = DERIVED_HELPER_DEPTH_CAP
         # Function return WASM types for type inference:
         # fn_name → return_wasm_type (str | None)
         self._fn_ret_types: dict[str, str | None] = {}
         # #814 §8.5.3: (module path, fn name) → WASM target name for a
         # module-qualified call.  Lets `m::f` bypass a local shadow.
         self._module_qualified_targets: dict[
+            tuple[tuple[str, ...], str], str
+        ] = {}
+        # #814/#774: (module path, generic name) → the ``mod$…`` mono BASE for
+        # an imported generic whose bare name a local shadows.  The ModuleCall
+        # desugar rewrites `m::gen(…)` to a FnCall on this base, which is a key
+        # in `_generic_fn_info`, so `_resolve_generic_call` mangles it to the
+        # emitted clone (`mod$m$gen$Int`) instead of the local shadow's bare
+        # `gen`.  Empty unless the program qualified-calls a shadowed generic.
+        self._module_qualified_generic_bases: dict[
             tuple[tuple[str, ...], str], str
         ] = {}
         # #814 C2: bare name → mod$ name, set only while compiling a `mod$…`
@@ -329,6 +401,19 @@ class WasmContext(
         """
         self._adt_eq_derivable = oracle
 
+    def set_eq_full_type_names(self, full_names: dict[str, str]) -> None:
+        """Share the truncated→full constrained-var name map (#932).
+
+        ``full_names`` is the CodeGenerator's ``_eq_full_type_names``, populated
+        by Pass 1.5 monomorphization BEFORE any body is translated.  The direct
+        ``==`` path inside a generic clone body (`_translate_binary`) consults it
+        so a `@T` slot whose substituted type is the TRUNCATED one-level clone
+        name (`List<List>`) resolves its Eq derivability and its `$eq_<type>`
+        helper on the FULLY-nested name (`List<List<Int>>`) — matching the
+        constraint gate.  The clone SYMBOL stays the truncated name (#772).
+        """
+        self._eq_full_type_names = full_names
+
     def set_future_ret_fns(
         self,
         names: frozenset[str],
@@ -343,6 +428,13 @@ class WasmContext(
     ) -> None:
         """Set the (module path, fn name) → WASM target map (#814 §8.5.3)."""
         self._module_qualified_targets = targets
+
+    def set_module_qualified_generic_bases(
+        self, bases: dict[tuple[tuple[str, ...], str], str],
+    ) -> None:
+        """Set the (module path, generic name) → ``mod$…`` mono base map
+        for a shadowed imported generic reached via ``m::gen`` (#814/#774)."""
+        self._module_qualified_generic_bases = bases
 
     def set_intra_module_renames(self, renames: dict[str, str]) -> None:
         """Set the intra-module bare-call rename map (#814 C2).
@@ -550,9 +642,21 @@ class WasmContext(
             # when a local shadows its bare name, so resolve the WASM target
             # via the qualified-target table (mod$… name for a shadowed fn,
             # else the bare name) rather than blindly dropping the path.
-            target = self._module_qualified_targets.get(
-                (tuple(expr.path), expr.name), expr.name,
-            )
+            #
+            # #814/#774: an imported GENERIC whose bare name a local shadows
+            # resolves through a separate table to its ``mod$…`` mono BASE; the
+            # base is a `_generic_fn_info` key, so the resulting FnCall is
+            # rewritten by `_resolve_generic_call` to the per-instantiation clone
+            # (`mod$m$gen$Int`) rather than the local shadow's bare `gen`.
+            #
+            # The desugar and the statement-position result-shape predicates
+            # (`_is_void_expr` / `_is_pair_result_expr`) share ONE target
+            # resolver so they can never disagree on which function is called
+            # (CR 3518737022): `_resolve_module_call_wasm_name` returns a shadowed
+            # generic's fully-resolved clone (`mod$m$gen$Int`, which
+            # `_translate_call` then calls directly) or the bare name of an
+            # UNshadowed generic (which `_translate_call` mangles itself).
+            target = self._resolve_module_call_wasm_name(expr)
             desugared = ast.FnCall(
                 name=target,
                 args=expr.args,
@@ -830,12 +934,12 @@ class WasmContext(
             return self._fn_ret_types[expr.name] is None
         # A module-qualified call is void iff its resolved target returns
         # @Unit — mirror the FnCall clause on the resolved WASM target (bare
-        # name, or the ``mod$…`` name when the bare name is locally shadowed),
-        # so a unit-returning ``m::f()`` in statement position gets no stray
-        # drop (#814; same class as the user-@Unit-fn case #584).
+        # name, the ``mod$…`` name when the bare name is locally shadowed, or a
+        # shadowed generic's per-instantiation clone), so a unit-returning
+        # ``m::f()`` in statement position gets no stray drop (#814; same class
+        # as the user-@Unit-fn case #584).
         if isinstance(expr, ast.ModuleCall):
-            target = self._module_qualified_targets.get(
-                (tuple(expr.path), expr.name), expr.name)
+            target = self._resolve_module_call_wasm_name(expr)
             if target in self._fn_ret_types:
                 return self._fn_ret_types[target] is None
             return False
@@ -875,13 +979,42 @@ class WasmContext(
             ret = self._infer_qualified_call_wasm_type(expr)
             return ret == "i32_pair"
         if isinstance(expr, ast.ModuleCall):
-            # Resolve the qualified target (bare name, or ``mod$…`` when
-            # shadowed) and reuse the FnCall inference so a String/Array-
-            # returning ``m::f()`` in statement position drops both stack
-            # values, not one (#814).
-            target = self._module_qualified_targets.get(
-                (tuple(expr.path), expr.name), expr.name)
+            # Resolve the qualified target (bare name, the ``mod$…`` name when
+            # shadowed, or a shadowed generic's per-instantiation clone) and
+            # reuse the FnCall inference so a String/Array-returning ``m::f()``
+            # in statement position drops both stack values, not one (#814).
+            target = self._resolve_module_call_wasm_name(expr)
             ret = self._infer_fncall_wasm_type(
                 ast.FnCall(name=target, args=expr.args, span=expr.span))
             return ret == "i32_pair"
         return False
+
+    def _resolve_module_call_wasm_name(self, expr: ast.ModuleCall) -> str:
+        """Resolve a ``ast.ModuleCall`` to the WASM function name it will call.
+
+        The single target-resolution consulted by BOTH the desugar
+        (``translate_expr``) and the statement-position result-shape predicates
+        (``_is_void_expr`` / ``_is_pair_result_expr``), so they can never
+        disagree on which function ``m::f(...)`` reaches (the #774 review, CR
+        3518737022): if the result-shape checks resolved differently from the
+        desugar, a shadowed generic's ``String``/``@Unit`` clone could drop the
+        wrong number of stack values → a WASM validation failure on a
+        check-green program.
+
+        Order mirrors the desugar exactly:
+          1. a shadowed imported GENERIC (``_module_qualified_generic_bases``) →
+             its per-instantiation clone (via ``_resolve_generic_call`` on the
+             ``mod$…`` base, which mangles in the inferred type args);
+          2. a shadowed NON-generic (``_module_qualified_targets``) → its
+             ``mod$…`` name;
+          3. otherwise the bare name.
+        """
+        qkey = (tuple(expr.path), expr.name)
+        gen_base = self._module_qualified_generic_bases.get(qkey)
+        if gen_base is not None:
+            resolved = self._resolve_generic_call(
+                ast.FnCall(name=gen_base, args=expr.args, span=expr.span))
+            if resolved is not None:
+                return resolved
+            return gen_base
+        return self._module_qualified_targets.get(qkey, expr.name)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from vera import ast
 from vera.skip import AdtEqNotDerivableError, CodegenInvariantError
+from vera.slots import slot_ref_name, type_expr_slot_name
 from vera.wasm.helpers import WasmSlotEnv
 
 
@@ -25,17 +26,13 @@ class OperatorsMixin:
         self, ref: ast.SlotRef, env: WasmSlotEnv
     ) -> list[str] | None:
         """Translate @Type.n to local.get."""
-        type_name = ref.type_name
-        if ref.type_args:
-            # Parameterised type — build canonical name
-            arg_names = []
-            for ta in ref.type_args:
-                if isinstance(ta, ast.NamedType):
-                    arg_names.append(ta.name)
-                else:
-                    raise CodegenInvariantError(  # pragma: no cover
-                        "slot reference type argument is not a NamedType", ref)
-            type_name = f"{ref.type_name}<{', '.join(arg_names)}>"
+        # Shared recursive builder (#914 finding 2) — nested composite type
+        # args are FULLY qualified, matching the env-key side so the lookup
+        # cannot desync.
+        type_name = slot_ref_name(ref)
+        if type_name is None:
+            raise CodegenInvariantError(  # pragma: no cover
+                "slot reference type argument is not a NamedType", ref)
         local_idx = env.resolve(type_name, ref.index)
         if local_idx is None:
             raise CodegenInvariantError(  # pragma: no cover
@@ -157,6 +154,25 @@ class OperatorsMixin:
                 if op == ast.BinOp.NEQ:
                     result.append("i32.eqz")
                 return result
+            # #927: String ORDERING (`<`/`>`/`<=`/`>=`).  A String is an
+            # (i32 ptr, i32 len) pair, not a scalar — falling through to the
+            # i64 comparison table below emitted `i64.lt_s` on the pointer
+            # word (both a wrong-order result AND an i32/i64 type mismatch that
+            # crashed WASM translation).  `String` IS orderable (spec §4.5,
+            # lexicographic), so lower to a three-way `$cmp_String` helper
+            # (byte-wise, proper-prefix-is-less — matching Z3's `StringSort`
+            # ordering the verifier already uses, so verify ↔ run agree) and
+            # test its {-1,0,1} result against zero with the scalar i32 op.
+            # `compare(a, b)` on strings reaches here too: Pass 1.6 rewrites it
+            # to `a < b ? Less : (a == b ? Equal : Greater)` (#874).
+            if (ltype == "i32_pair" and rtype == "i32_pair"
+                    and op in (ast.BinOp.LT, ast.BinOp.GT,
+                               ast.BinOp.LE, ast.BinOp.GE)):
+                self._request_string_cmp_helper()
+                zero_cmp = self._CMP_OPS[op].replace("i64.", "i32.")
+                return left + right + [
+                    "call $cmp_String", "i32.const 0", zero_cmp,
+                ]
             if ltype == "i32" and rtype == "i32":
                 # Byte operands use unsigned i32 comparison
                 lv = self._infer_vera_type(expr.left)
@@ -168,12 +184,45 @@ class OperatorsMixin:
                 # ADT structural equality (§9.8 auto-derivation).  `lv` may be
                 # parameterized (`Box<String>`); dispatch on the base name but
                 # pass the full name so the generated helper resolves the
-                # concrete field types of *this* instantiation (#773).
+                # concrete field types of *this* instantiation (#773).  A
+                # `ConstructorCall` operand (`Some(1)`) resolves to the BARE
+                # ADT name via `_infer_vera_type`, dropping its type argument;
+                # recover the parameterized name from the argument so the direct
+                # `==` derivation sees the concrete field type, just as the
+                # slot-ref operand form does (#772).
+                lv = self._parameterize_ctor_operand(expr.left, lv)
+                # #912: a `ResultRef`/`SlotRef` operand resolves through the
+                # SlotRef name logic, which — unlike a `ConstructorCall` — has no
+                # arguments to recover a dropped type parameter from.  When such
+                # an operand is a monomorphized generic-ADT clone whose type
+                # argument was substituted to the bare base name (`@T.result` →
+                # `@Box.result`, the #772 residue, e.g. `id2<Box<Int>>`), the
+                # derivability gate cannot resolve the field type and would raise
+                # E613 on an otherwise-valid program.  Recover the concrete type
+                # argument from the OTHER operand first (`@Box.result ==
+                # MkBox(7)` → `Box<Int>`); only if that fails does the composite
+                # fall through to the scalar lowering below (the established
+                # pre-#912 behavior for this lost-type-arg shape — never an
+                # E613 on the derivable original).
+                lv = self._recover_lost_type_arg(lv, expr.right)
+                # #932: inside an Eq-constrained generic clone (`eq2$List<List>`)
+                # the `==` operands are `@T` slots whose substituted type is the
+                # TRUNCATED one-level clone name (`List<List>` for a
+                # `List<List<Int>>` instantiation — the same residue the
+                # constraint gate sees).  Recover the fully-nested name recorded
+                # at the call site so the direct-`==` derivability decision AND
+                # the generated `$eq_<type>` helper resolve the concrete inner
+                # field types, exactly as the constraint gate now does.  This
+                # only affects the derivability name + helper the clone BODY
+                # emits; the mono clone SYMBOL stays the truncated name (#772).
+                if lv is not None:
+                    lv = self._eq_full_type_names.get(lv, lv)
                 lv_base = lv.split("<", 1)[0] if lv is not None else None
                 if (op in (ast.BinOp.EQ, ast.BinOp.NEQ)
                         and lv is not None
                         and lv_base not in ("Bool", "Byte")
-                        and lv_base in self._adt_type_names):
+                        and lv_base in self._adt_type_names
+                        and not self._is_lost_type_arg_clone(lv, lv_base)):
                     adt_eq = self._translate_adt_eq(left, right, lv, expr)
                     if adt_eq is not None:
                         if op == ast.BinOp.NEQ:
@@ -311,6 +360,211 @@ class OperatorsMixin:
     # the helper generator's E699 field-dispatch invariant (PR #870 review;
     # closes the #872 hole).
 
+    def _parameterize_ctor_operand(
+        self, operand: ast.Expr, bare: str | None,
+    ) -> str | None:
+        """Recover an `==` operand's parameterized ADT type name (#772, #923).
+
+        `_infer_vera_type` resolves a `ConstructorCall` to the BARE ADT name
+        (`Option`, dropping `<Int>`).  For the direct structural-`==` derivation
+        the type argument is load-bearing — the generated `$eq_<type>` helper
+        must resolve the concrete field type — so recover it from the
+        constructor's arguments, RECURSIVELY (#923): a nested-generic operand
+        (`Cons(Cons(1, Nil), Nil)`) reconstructs the FULLY-qualified
+        `List<List<Int>>` rather than the one-level `List<List>` the pre-#923
+        flat recovery produced (which then spuriously E613'd on the derivable
+        nested type).  When that recursion bottoms out at a bare head because no
+        field IS a bare type parameter — a GENERIC mutually-recursive ADT whose
+        argument is buried in a NESTED generic field (`Grove(Rose<T>,
+        Forest<T>)`) — fall back to `_recover_ctor_ptype`, which descends into
+        the nested field's own argument to dig the parameter out (#934; without
+        the recovered `<Int>` the composite `==` silently lowered to a
+        bare-pointer `i32.eq` → a wrong `0`).  Falls back to ``bare`` when the
+        operand is not a `ConstructorCall` or a needed type argument cannot be
+        inferred — the established lost-type-arg shape the derivability path
+        already routes to the scalar lowering.
+        """
+        if bare is None:
+            return bare
+        # #923: recover the FULLY-qualified nested-generic name (List<List<Int>>)
+        # for the direct-`==` path.  #934: when that recursion bottoms out at a
+        # bare head — a GENERIC mutually-recursive ADT (`Grove(Rose<T>,
+        # Forest<T>)`) with no bare-`T` field — fall back to the nested-descent
+        # recovery that digs the parameter out of a nested generic field.  Trying
+        # `_full_ctor_type_name` first (any `<…>` result wins) means the two
+        # recoveries never disagree on a shape the direct path already handles.
+        full = self._full_ctor_type_name(operand)
+        if full is not None and "<" in full:
+            return full
+        # #934 fallback applies only to a `ConstructorCall` — `_recover_ctor_ptype`
+        # reads `.name`/args (a `SlotRef` has neither) and returns None for a
+        # non-generic ADT, so a non-descendable or non-generic operand keeps the
+        # bare name `_full_ctor_type_name` already produced (the release path).
+        if isinstance(operand, ast.ConstructorCall):
+            recovered = self._recover_ctor_ptype(operand, bare)
+            if recovered is not None and recovered != bare:
+                return recovered
+        return full or bare
+
+    def _full_ctor_type_name(self, operand: ast.Expr) -> str | None:
+        """Fully-qualified Vera type name of a constructor operand (#923).
+
+        Recurses through nested `ConstructorCall` fields so every level's type
+        argument is recovered: for each field that maps to an ADT type parameter
+        (`_ctor_adt_tp_indices`), the field's own full name is reconstructed by
+        recursing on the field expression.  A non-`ConstructorCall` expression
+        yields its bare `_infer_vera_type` name (a nested `List<Int>` bottoms out
+        at the `Int` leaf, a nullary `Nil` at the bare `List`).  Returns ``None``
+        only when the base ADT name itself cannot be resolved; a field whose type
+        argument cannot be inferred leaves that position bare (the base ADT name
+        with no `<…>`), matching the lost-type-arg shape codegen already handles.
+        """
+        if not isinstance(operand, ast.ConstructorCall):
+            return self._infer_vera_type(operand)
+        base = self._ctor_to_adt_name(operand.name)
+        if base is None:
+            return None
+        tp_indices = self._ctor_adt_tp_indices.get(operand.name)
+        tp_count = self._adt_tp_counts.get(base, 0)
+        if not tp_indices or tp_count == 0:
+            return base
+        slots: list[str | None] = [None] * tp_count
+        for field_i, tp_idx in enumerate(tp_indices):
+            if tp_idx is not None and field_i < len(operand.args):
+                slots[tp_idx] = self._full_ctor_type_name(operand.args[field_i])
+        if all(s is not None for s in slots):
+            return f"{base}<{', '.join(s for s in slots if s is not None)}>"
+        return base
+
+    def _recover_lost_type_arg(
+        self, lv: str | None, other: ast.Expr,
+    ) -> str | None:
+        """Recover a bare generic-ADT operand's type argument from its sibling.
+
+        A `ResultRef`/`SlotRef` operand of a composite `==` carries no arguments
+        of its own to recover a dropped type parameter from (unlike a
+        `ConstructorCall`, handled by `_parameterize_ctor_operand`).  When `lv`
+        is a bare generic-ADT name (its base declares type parameters but `lv`
+        has no `<…>`) — the #772 monomorphization residue where `@T.result`
+        became `@Box.result`, dropping `<Int>` — try the OTHER `==` operand: a
+        `ConstructorCall` sibling (`@Box.result == MkBox(7)`) still carries the
+        concrete argument, so `_parameterize_ctor_operand` recovers `Box<Int>`.
+        Returns the parameterized name on success, else `lv` unchanged (the
+        caller then treats the still-bare name as a lost-arg clone).
+        """
+        if lv is None or "<" in lv:
+            return lv
+        base = lv
+        if not self._adt_tp_param_names.get(base):
+            return lv  # not a generic ADT — nothing to recover
+        recovered = self._parameterize_ctor_operand(other, base)
+        return recovered if recovered is not None else lv
+
+    # Non-ADT type-name bases that are nonetheless CONCRETE (primitives +
+    # built-in containers).  A single-segment type-argument base that is none
+    # of these AND is not a registered ADT is an unresolved type VARIABLE
+    # (`T`), the #912 round-2 signal.
+    _CONCRETE_NON_ADT_BASES = frozenset(
+        {
+            "Int", "Nat", "Bool", "Float64", "String", "Byte", "Unit", "Never",
+            "Array", "Map", "Set", "Tuple", "Decimal", "Json",
+        }
+    )
+
+    def _type_arg_is_free_var(self, arg: str) -> bool:
+        """Whether a type-argument name is an unresolved type VARIABLE (#912).
+
+        `arg` is a rendered type-name string (`"Int"`, `"Box<Int>"`, `"T"`).
+        Its base is a free type variable when it is neither a known concrete
+        base (primitive or built-in container, `_CONCRETE_NON_ADT_BASES`) nor a
+        registered ADT (`_adt_type_names`) — i.e. a bare `T` left un-substituted
+        in a generic function's `@Box<T>` operand that the monomorphizer did not
+        specialize to a concrete clone.
+        """
+        base = arg.split("<", 1)[0].strip()
+        return (
+            base not in self._CONCRETE_NON_ADT_BASES
+            and base not in self._adt_type_names
+        )
+
+    def _has_free_type_var_arg(self, lv: str) -> bool:
+        """Whether `lv` carries a type argument that is an unresolved type var.
+
+        Parses the top-level type arguments out of a rendered name
+        (`"Box<T>"` → `["T"]`, `"Map<K, V>"` → `["K", "V"]`, respecting nesting)
+        and returns True if any is a free type variable (`_type_arg_is_free_var`).
+        Such a name (`Box<T>`) cannot dispatch to a concrete `$eq_<type>` helper,
+        so the composite `==` falls back to the scalar lowering rather than
+        crashing the derivability gate.
+        """
+        lt = lv.find("<")
+        if lt == -1:
+            return False
+        inner = lv[lt + 1 : lv.rfind(">")]
+        args: list[str] = []
+        depth = 0
+        start = 0
+        for i, ch in enumerate(inner):
+            if ch == "<":
+                depth += 1
+            elif ch == ">":
+                depth -= 1
+            elif ch == "," and depth == 0:
+                args.append(inner[start:i])
+                start = i + 1
+        args.append(inner[start:])
+        return any(self._type_arg_is_free_var(a) for a in args if a.strip())
+
+    def _is_lost_type_arg_clone(self, lv: str, lv_base: str | None) -> bool:
+        """Whether `lv` is a generic-ADT name that lost its type argument (#912).
+
+        Two lost-argument shapes route the composite `==` to the scalar
+        (pointer) lowering it used before #912 — rather than raising a spurious
+        E613 (or crashing the derivability gate) on an otherwise-valid program:
+
+        1. **Bare** generic-ADT name (round 1): the base ADT declares type
+           parameters yet `lv` carries no `<…>` argument — the #772
+           monomorphization residue where `@T.result` became `@Box.result` for
+           a `Box<T>` clone, dropping `<Int>`.
+
+        2. **Free-type-variable** argument (round 2, #912): `lv` carries a `<…>`
+           whose argument is an unresolved type variable (`Box<T>`) — the BASE
+           generic clone of a function generic over the parameterized ADT
+           itself, whose `@Box<T>` operands the monomorphizer left as a free
+           `T`.  Routing this to the scalar lowering is SOUND — and the scalar
+           compare NEVER runs — because the base generic clone is DEAD CODE:
+           `$id2` (the `Box<T>` clone) is emitted but is never a call target and
+           never exported (higher-order escape of a bare generic fn is a parse
+           error, E005, so it cannot be routed into a `call_indirect`/table).
+           Every *reachable* call dispatches to a monomorphized clone
+           (`$id2$Int`) whose `@Box<Int>.result == @Box<Int>.0` is lowered
+           STRUCTURALLY (`call $eq_Box_LInt_R`) — `Box<Int>` is concrete, so it
+           is NOT matched here — correctly discharging the composite `==` at its
+           Tier-1 proof.  (The `ensures` obligation IS proved at Tier 1, the
+           verifier substituting `T:=Int`; that is exactly why the reachable
+           path must be — and is — structural.)  This is verified by
+           `rebox`-style tests where the result is a FRESHLY-constructed,
+           structurally-equal, DIFFERENT-pointer box: Tier-1-verified AND runs
+           correctly (via the structural mono clone), where a reachable scalar
+           pointer compare would have trapped.  The scalar fallback here merely
+           lets the dead base clone COMPILE (as harmless dead `i32.eq`) instead
+           of E613-erroring and being dropped, which failed the whole compile.
+
+        A genuinely non-derivable operand — a `Map`/`Array`-field ADT (a
+        concrete non-Eq field, and the ADT itself has NO type parameters),
+        `Tuple` (variadic placeholder), an `Md*` builtin, or a generic ADT with
+        a present CONCRETE non-Eq argument (`Box<Array<Int>>`, whose argument is
+        a known concrete type, NOT a free variable) — is NOT a lost-arg clone,
+        so it still routes to `_translate_adt_eq` and raises the correct E613,
+        keeping the checker↔codegen lockstep the #732 differential pins.  Relies
+        on imported generic ADTs' type-parameter metadata being propagated
+        (`modules.py`, #912) so `_adt_tp_param_names` answers for cross-module
+        `Box<T>` too, not just local ADTs.
+        """
+        if "<" in lv:
+            return self._has_free_type_var_arg(lv)
+        return bool(self._adt_tp_param_names.get(lv_base or ""))
+
     def _translate_adt_eq(
         self,
         left: list[str],
@@ -385,7 +639,28 @@ class OperatorsMixin:
         pointers are structurally equal, else 0.  Field dispatch is by Vera
         type (see the section comment above).  Nested-ADT fields recurse by
         requesting (and thereby generating) that ADT's own helper first.
+
+        Bounded against POLYMORPHIC recursion (#933): a non-uniform ADT
+        (`Box<T>` field `Box<Box<T>>`) mints a strictly deeper type at each
+        nested-helper request, so the `_adt_eq_pending` guard never routes back
+        to a self-call and this generation recurs unboundedly.  The
+        derivability gate (`_adt_satisfies_eq`) normally rejects such a type as
+        a clean E613 *before* generation begins; this cap is the belt-and-
+        suspenders backstop on the SAME shared depth so a program that reaches
+        the generator still degrades to a skip rather than a traceback.
         """
+        if self._derived_helper_depth >= self._derived_helper_depth_cap:
+            return None
+        self._derived_helper_depth += 1
+        try:
+            return self._generate_adt_eq_fn_body(fn_name, base, parsed)
+        finally:
+            self._derived_helper_depth -= 1
+
+    def _generate_adt_eq_fn_body(
+        self, fn_name: str, base: str, parsed: ast.NamedType,
+    ) -> str | None:
+        """Body of :meth:`_generate_adt_eq_fn` (depth-bound wrapper above)."""
         from vera.monomorphize import Monomorphizer
 
         # Concrete type args for this instantiation, mapped onto the ADT's
@@ -609,6 +884,112 @@ class OperatorsMixin:
         if fn_name in self._adt_eq_helpers:
             return
         self._adt_eq_helpers[fn_name] = self._emit_string_eq_fn()
+
+    def _request_string_cmp_helper(self) -> None:
+        """Ensure the standalone ``$cmp_String`` three-way ordering helper (#927)."""
+        fn_name = "$cmp_String"
+        if fn_name in self._adt_eq_helpers:
+            return
+        self._adt_eq_helpers[fn_name] = self._emit_string_cmp_fn()
+
+    @staticmethod
+    def _emit_string_cmp_fn() -> str:
+        """Standalone String three-way lexicographic-ordering helper (#927).
+
+        ``(param $p1 i32)(param $l1 i32)(param $p2 i32)(param $l2 i32)`` →
+        i32 in {-1, 0, 1}: ``-1`` if s1 < s2, ``0`` if equal, ``1`` if s1 > s2.
+
+        Byte-wise comparison over ``min(l1, l2)`` bytes (UTF-8 preserves
+        code-point order under unsigned byte comparison); on the first
+        differing byte the smaller byte's string is less.  If one string is a
+        proper prefix of the other, the shorter is less.  This matches Z3's
+        ``StringSort`` ordering (proper-prefix-is-less, byte order), which the
+        verifier already uses for String ``<`` — so ``vera verify`` and
+        ``vera run`` agree on String ordering.
+        """
+        return (
+            "  (func $cmp_String "
+            "(param $p1 i32) (param $l1 i32) (param $p2 i32) (param $l2 i32) "
+            "(result i32)\n"
+            "    (local $idx i32)\n"
+            "    (local $min i32)\n"
+            "    (local $b1 i32)\n"
+            "    (local $b2 i32)\n"
+            # min = l1 < l2 ? l1 : l2
+            "    local.get $l1\n"
+            "    local.get $l2\n"
+            "    i32.lt_u\n"
+            "    if (result i32)\n"
+            "      local.get $l1\n"
+            "    else\n"
+            "      local.get $l2\n"
+            "    end\n"
+            "    local.set $min\n"
+            "    i32.const 0\n"
+            "    local.set $idx\n"
+            "    block $done (result i32)\n"
+            "      loop $lp\n"
+            # if idx >= min, exit the byte loop → compare lengths
+            "        local.get $idx\n"
+            "        local.get $min\n"
+            "        i32.ge_u\n"
+            "        if\n"
+            # lengths: l1 < l2 → -1 ; l1 > l2 → 1 ; equal → 0
+            "          local.get $l1\n"
+            "          local.get $l2\n"
+            "          i32.lt_u\n"
+            "          if\n"
+            "            i32.const -1\n"
+            "            br $done\n"
+            "          end\n"
+            "          local.get $l1\n"
+            "          local.get $l2\n"
+            "          i32.gt_u\n"
+            "          if\n"
+            "            i32.const 1\n"
+            "            br $done\n"
+            "          end\n"
+            "          i32.const 0\n"
+            "          br $done\n"
+            "        end\n"
+            # b1 = p1[idx], b2 = p2[idx]
+            "        local.get $p1\n"
+            "        local.get $idx\n"
+            "        i32.add\n"
+            "        i32.load8_u\n"
+            "        local.set $b1\n"
+            "        local.get $p2\n"
+            "        local.get $idx\n"
+            "        i32.add\n"
+            "        i32.load8_u\n"
+            "        local.set $b2\n"
+            # if b1 < b2 → -1
+            "        local.get $b1\n"
+            "        local.get $b2\n"
+            "        i32.lt_u\n"
+            "        if\n"
+            "          i32.const -1\n"
+            "          br $done\n"
+            "        end\n"
+            # if b1 > b2 → 1
+            "        local.get $b1\n"
+            "        local.get $b2\n"
+            "        i32.gt_u\n"
+            "        if\n"
+            "          i32.const 1\n"
+            "          br $done\n"
+            "        end\n"
+            # bytes equal → advance
+            "        local.get $idx\n"
+            "        i32.const 1\n"
+            "        i32.add\n"
+            "        local.set $idx\n"
+            "        br $lp\n"
+            "      end\n"
+            "      i32.const 0\n"
+            "    end\n"
+            "  )"
+        )
 
     @staticmethod
     def _emit_string_eq_fn() -> str:
@@ -1194,11 +1575,17 @@ class OperatorsMixin:
         if not effect_ref.type_args or len(effect_ref.type_args) != 1:
             raise CodegenInvariantError(  # pragma: no cover
                 "State<T> must have exactly one type argument", effect_ref)
-        arg = effect_ref.type_args[0]
-        if isinstance(arg, ast.NamedType):
-            return arg.name
-        raise CodegenInvariantError(  # pragma: no cover
-            "State<T> type argument is not a NamedType", effect_ref)
+        # #914 finding 1: return the CANONICAL slot name (`Option<Int>`), not
+        # the base name (`Option`).  `_state_types` and `get_old_state_local`
+        # are keyed canonically, so a base-name key missed the registered
+        # entry — no `old(State<T>)` snapshot local was allocated and the read
+        # raised an uncaught `CodegenInvariantError` at run.  Shared recursive
+        # builder so nested composites (`Option<Tuple<Int, Int>>`) are exact.
+        name = type_expr_slot_name(effect_ref.type_args[0])
+        if name is None:
+            raise CodegenInvariantError(  # pragma: no cover
+                "State<T> type argument is not a NamedType", effect_ref)
+        return name
 
     # -----------------------------------------------------------------
     # @Nat subtraction underflow guard (#520)

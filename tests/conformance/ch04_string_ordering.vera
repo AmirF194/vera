@@ -1,0 +1,21 @@
+-- Conformance: String ordering is lexicographic (Chapter 4, Section 4.5)
+-- Tests: `<` / `>` / `<=` / `>=` and `compare` on String operands (#927).
+-- String is orderable per §4.5; ordering is byte-wise lexicographic, with a
+-- proper prefix ordering less than the longer string — matching the Z3
+-- `StringSort` ordering the verifier uses, so verify and run agree.  This
+-- fixture pins the exact semantics that regressed: `<` on strings previously
+-- lowered to a scalar `i64.lt_s` on the (ptr, len) pair (a WASM type mismatch
+-- that crashed translation).  Encodes each Ordering outcome as a distinct
+-- digit and sums them so a single Int return witnesses every case at run level.
+public fn string_ordering_witness(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 123456)
+  effects(pure)
+{
+  let @Int = if "apple" < "banana" then { 100000 } else { 0 };
+  let @Int = @Int.0 + if "banana" > "apple" then { 20000 } else { 0 };
+  let @Int = @Int.0 + if "a" <= "a" then { 3000 } else { 0 };
+  let @Int = @Int.0 + if "b" >= "a" then { 400 } else { 0 };
+  let @Int = @Int.0 + if "a" < "ab" then { 50 } else { 0 };
+  @Int.0 + match compare("hi", "hi") { Less -> 0, Equal -> 6, Greater -> 0 }
+}

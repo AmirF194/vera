@@ -111,6 +111,30 @@ public fn use_transitive(@Int -> @Option<Int>)
   wrap_twice(@Int.0)
 }
 """,
+    # #898: cross-argument type-argument merge — the verifier's discovery
+    # (`_collect_instantiations`, which shares `_infer_type_args_from_args` with
+    # codegen) must merge the two sparse constructor arguments into the same
+    # `eq2$Res<String, Int>` clone codegen emits, or the verifier⊇codegen
+    # invariant breaks (a clone codegen emits that the verifier never proves).
+    "cross_arg_merge_eq": """
+private data Res<A, B> { MkOk(A), MkErr(B) }
+
+private forall<T where Eq<T>> fn eq2(@T, @T -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  eq(@T.1, @T.0)
+}
+
+public fn use_cross_arg(@Unit -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  eq2(MkErr(5), MkOk("x"))
+}
+""",
 }
 
 
@@ -137,6 +161,59 @@ def _verifier_discovered(
     verifier.register_program(program)  # type: ignore[arg-type]
     result = verifier._instances
     return {(name, ct) for name, cts in result.items() for ct in cts}
+
+
+def _resolved_module(path: tuple[str, ...], src: str) -> object:
+    """Build a ``ResolvedModule`` from source text (shared by the cross-module
+    differential tests, which each need one or more imported modules)."""
+    from vera.resolver import ResolvedModule
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".vera", delete=False, encoding="utf-8",
+    ) as f:
+        f.write(src)
+        f.flush()
+        fp = f.name
+    try:
+        return ResolvedModule(
+            path=path, file_path=Path(fp),
+            program=transform(parse_file(fp)), source=src,
+        )
+    finally:
+        os.unlink(fp)
+
+
+def _cross_module_sets(
+    main_src: str, modules: list[object],
+) -> tuple[set[tuple[str, tuple[str, ...]]], set[tuple[str, tuple[str, ...]]]]:
+    """Return ``(codegen_emitted, verifier_discovered)`` for ``main_src`` compiled
+    and registered against ``modules`` — the shared codegen↔verifier differential
+    harness for the cross-module generic tests.  Reads the verifier's registered
+    ``_instances`` (what per-monomorphization verification actually consumes), not
+    a fresh recompute, so a registration-seam regression surfaces here."""
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".vera", delete=False, encoding="utf-8",
+    ) as f:
+        f.write(main_src)
+        f.flush()
+        mp = f.name
+    try:
+        prog = transform(parse_file(mp))
+        gen = CodeGenerator(source=main_src, file=mp, resolved_modules=modules)
+        gen.compile_program(prog)  # type: ignore[arg-type]
+        codegen_set = getattr(gen, "_emitted_instances", set())
+        verifier = ContractVerifier(
+            source=main_src, file=mp, resolved_modules=modules,
+        )
+        verifier.register_program(prog)  # type: ignore[arg-type]
+        verifier_set = {
+            (n, ct)
+            for n, cts in verifier._instances.items()
+            for ct in cts
+        }
+    finally:
+        os.unlink(mp)
+    return codegen_set, verifier_set
 
 
 def _assert_covers(
@@ -186,6 +263,246 @@ def _assert_covers(
     )
 
 
+# =====================================================================
+# Third consultor: call-rewrite ↔ emitted-clone agreement (#899)
+# =====================================================================
+# The verifier⊇codegen differential above covers TWO of the three
+# monomorphization consultors: instantiation DISCOVERY (which clones get
+# emitted) and the VERIFIER's discovery.  It does NOT exercise the WASM
+# CALL-REWRITE (`_resolve_generic_call` / `_infer_fncall_vera_type`), which
+# independently re-derives the mangled name each generic call site references.
+# When call-rewrite and discovery disagree on a clone name, the call site
+# references a symbol Pass 1.5 never emitted — a check-green / verify-green
+# program whose `main` is dropped at `vera run` (#878's own failure class,
+# reintroduced by PR #899's one-sided consultor edits).  These corpus entries
+# exercise exactly the user-fn-return-into-generic-arg shapes that slipped.
+
+_CALL_REWRITE_CORPUS: dict[str, str] = {
+    # Issue 1: non-generic user fn returning a PARAMETERIZED type in
+    # `Option<T>` position — call-rewrite recovers `Decimal`, discovery must too.
+    "param_user_fn_return": """
+private fn maybe(@Int -> @Option<Decimal>)
+  requires(true) ensures(true) effects(pure)
+{ Some(decimal_from_int(@Int.0)) }
+
+private forall<T> fn first_opt(@Option<T>, @Int -> @Option<T>)
+  requires(true) ensures(true) effects(pure)
+{ @Option<T>.0 }
+
+public fn main(@Unit -> @Option<Decimal>)
+  requires(true) ensures(true) effects(pure)
+{ first_opt(maybe(3), 0) }
+""",
+    # Issue 1 variant: Result<Decimal, String> return.
+    "param_user_fn_result_return": """
+private fn tryit(@Int -> @Result<Decimal, String>)
+  requires(true) ensures(true) effects(pure)
+{ Ok(decimal_from_int(@Int.0)) }
+
+private forall<T> fn first_res(@Result<T, String>, @Int -> @Result<T, String>)
+  requires(true) ensures(true) effects(pure)
+{ @Result<T, String>.0 }
+
+public fn main(@Unit -> @Result<Decimal, String>)
+  requires(true) ensures(true) effects(pure)
+{ first_res(tryit(5), 0) }
+""",
+    # Issue 2: user fn returning a scalar-resolving alias in bare `@T` position
+    # — discovery/verifier key on the RAW name `Age`, call-rewrite must too.
+    "alias_scalar_return": """
+type Age = Int;
+
+private fn getage(@Int -> @Age)
+  requires(true) ensures(true) effects(pure)
+{ @Int.0 }
+
+private forall<T> fn pick_last(@T, @T -> @T)
+  requires(true) ensures(true) effects(pure)
+{ @T.0 }
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ pick_last(getage(1), getage(2)) }
+""",
+    # Issue 2 variant: named refinement of a scalar.
+    "refinement_scalar_return": """
+type PosInt = { @Int | @Int.0 > 0 };
+
+private fn getpos(@Int -> @PosInt)
+  requires(@Int.0 > 0) ensures(true) effects(pure)
+{ @Int.0 }
+
+private forall<T> fn pick_last(@T, @T -> @T)
+  requires(true) ensures(true) effects(pure)
+{ @T.0 }
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ pick_last(getpos(1), getpos(2)) }
+""",
+    # Issue 3 (#899 round 3, a NET regression vs base): a NON-generic user fn
+    # returning a LITERAL PARAMETERIZED type (`Option<…>`/`Result<…>`/`Box<…>`)
+    # bound to a generic's BARE `@T`.  Discovery keys the clone on the base
+    # name (`pick_last$Option`); pre-fix the call-rewrite's `not ret_te.type_args`
+    # gate bailed and fell through to the i32→`Bool` collapse → `pick_last$Bool`,
+    # never emitted.  (`_call_rewrite_desync` on the repro shows
+    # `emitted=['pick_last$Option'], dangling=['pick_last$Bool']`.)
+    "param_return_into_bare_typevar": """
+private fn mk(@Int -> @Option<Option<Decimal>>)
+  requires(true) ensures(true) effects(pure)
+{ Some(Some(decimal_from_int(@Int.0))) }
+
+private forall<VeraT> fn pick_last(@VeraT, @VeraT -> @VeraT)
+  requires(true) ensures(true) effects(pure)
+{ @VeraT.0 }
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ match pick_last(mk(1), mk(2)) { Some(@Option<Decimal>) -> 0, None -> 1 } }
+""",
+    "result_return_into_bare_typevar": """
+private fn mkr(@Int -> @Result<Option<Decimal>, String>)
+  requires(true) ensures(true) effects(pure)
+{ Ok(Some(decimal_from_int(@Int.0))) }
+
+private forall<VeraT> fn pick_last(@VeraT, @VeraT -> @VeraT)
+  requires(true) ensures(true) effects(pure)
+{ @VeraT.0 }
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ match pick_last(mkr(1), mkr(2)) { Ok(@Option<Decimal>) -> 0, Err(@String) -> 1 } }
+""",
+    "adt_return_into_bare_typevar": """
+private data Box<T> { MkBox(T) }
+
+private fn mkb(@Int -> @Box<Decimal>)
+  requires(true) ensures(true) effects(pure)
+{ MkBox(decimal_from_int(@Int.0)) }
+
+private forall<VeraT> fn pick_last(@VeraT, @VeraT -> @VeraT)
+  requires(true) ensures(true) effects(pure)
+{ @VeraT.0 }
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ match pick_last(mkb(1), mkb(2)) { MkBox(@Decimal) -> 0 } }
+""",
+    # #898: CROSS-ARGUMENT type-argument merge.  `eq2(MkErr(5), MkOk("x"))`
+    # over `data Res<A, B> { MkOk(A), MkErr(B) }` — the first argument fixes
+    # `B = Int`, the second fixes `A = String` — so discovery, the verifier, AND
+    # the call-rewrite must all merge the two partial recoveries into the ONE
+    # clone `eq2$Res<String, Int>`.  A one-sided merge (call-rewrite resolves
+    # the bare `eq2$Res` while discovery emits `eq2$Res<String, Int>`, or vice
+    # versa) drops `main` with an `unknown func` — exactly what this differential
+    # exists to catch.  This is the entry that was MISSING when the merge landed.
+    "cross_arg_merge_eq": """
+private data Res<A, B> { MkOk(A), MkErr(B) }
+
+private forall<T where Eq<T>> fn eq2(@T, @T -> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(@T.1, @T.0) }
+
+public fn main(@Unit -> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq2(MkErr(5), MkOk("x")) }
+""",
+    # #898: cross-argument merge, REVERSED argument order — the merge must be
+    # order-independent (arg 0 fixes `A`, arg 1 fixes `B`), and all three
+    # consultors must still agree on the ONE `eq2$Res<String, Int>` clone.  A
+    # first-argument-wins consultor would key `eq2$Res<String, ?>` here vs the
+    # `eq2$Res<?, Int>` of the non-reversed entry, so pairing the two orders
+    # pins that the merged name is stable regardless of which argument arrives
+    # first.
+    "cross_arg_merge_eq_reversed": """
+private data Res<A, B> { MkOk(A), MkErr(B) }
+
+private forall<T where Eq<T>> fn eq2(@T, @T -> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(@T.1, @T.0) }
+
+public fn main(@Unit -> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq2(MkOk("x"), MkErr(5)) }
+""",
+}
+
+def _mangle(name: str, types: tuple[str, ...]) -> str:
+    """The mono-clone symbol for ``(name, types)`` — the shared injective
+    mangler both discovery (clone emission) and call-rewrite use."""
+    from vera.monomorphize import Monomorphizer
+
+    return Monomorphizer._mangle_fn_name(name, types)
+
+
+def _call_rewrite_desync(source: str) -> tuple[set[str], list[str]]:
+    """Compile ``source`` in a FRESH CodeGenerator, capturing every mono-clone
+    symbol the WASM CALL-REWRITE (`_resolve_generic_call`) resolves to, and
+    return ``(emitted_clone_symbols, dangling_targets)``.
+
+    A dangling target is a symbol a generic call site references but that
+    discovery never emitted — the exact call-rewrite↔discovery desync #899
+    caught.  Captured at the consultor level (a monkeypatch on
+    `_resolve_generic_call`) rather than by scraping the WAT, because a desync
+    causes the CALLING function to be SKIPPED (E602), which elides its body —
+    and with it the dangling `call` — from the WAT entirely, so a WAT scan
+    can't see the very evidence it needs (the mistake this test was first
+    written with).  Each call builds its own compile pipeline so
+    `_emitted_instances` never cross-contaminates across corpus entries.
+    """
+    from vera.wasm.calls import CallsMixin
+
+    captured: list[str | None] = []
+    orig = CallsMixin._resolve_generic_call
+
+    def _spy(self: object, call: object) -> object:
+        result = orig(self, call)  # type: ignore[arg-type]
+        captured.append(result)  # type: ignore[arg-type]
+        return result
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".vera", delete=False, encoding="utf-8",
+    ) as f:
+        f.write(source)
+        f.flush()
+        path = f.name
+    try:
+        program = transform(parse_file(path))
+        gen = CodeGenerator(source=source, file=path)
+        CallsMixin._resolve_generic_call = _spy  # type: ignore[assignment]
+        try:
+            gen.compile_program(program)  # type: ignore[arg-type]
+        finally:
+            CallsMixin._resolve_generic_call = orig  # type: ignore[assignment]
+        emitted = {
+            _mangle(name, types)
+            for (name, types) in getattr(gen, "_emitted_instances", set())
+        }
+    finally:
+        os.unlink(path)
+    targets = {t for t in captured if t is not None}
+    dangling = sorted(targets - emitted)
+    return emitted, dangling
+
+
+@pytest.mark.parametrize("label", sorted(_CALL_REWRITE_CORPUS))
+def test_call_rewrite_matches_emitted_clones(label: str) -> None:
+    """Every mono-clone a generic call site references must be an emitted
+    clone — the call-rewrite consultor must pick the same name discovery /
+    the verifier did.  A dangling target is the #899 desync (`main` dropped
+    at run on a check-green program)."""
+    source = _CALL_REWRITE_CORPUS[label]
+    emitted, dangling = _call_rewrite_desync(source)
+    assert emitted, (
+        f"[{label}] no mono clones emitted — corpus entry no longer exercises "
+        f"generic instantiation, the check would pass vacuously"
+    )
+    assert not dangling, (
+        f"[{label}] call site references clone(s) never emitted (call-rewrite "
+        f"↔ discovery desync, #899): {dangling}\n  emitted = {sorted(emitted)}"
+    )
+
+
 @pytest.mark.parametrize("rel", _REPO_CORPUS)
 def test_verifier_covers_codegen_repo(rel: str) -> None:
     path = str(_REPO_ROOT / rel)
@@ -210,16 +527,28 @@ def test_verifier_covers_codegen_inline(label: str) -> None:
         os.unlink(path)
 
 
-def test_imported_generic_symmetric_between_codegen_and_verifier() -> None:
+@pytest.mark.parametrize("call_form", ["bare", "qualified"])
+def test_imported_generic_symmetric_between_codegen_and_verifier(
+    call_form: str,
+) -> None:
     """A generic imported from another module and instantiated by the importer
-    is monomorphized by NEITHER codegen nor the verifier: both build their
-    instantiation set from the local ``program.declarations`` only (codegen's
-    mono pipeline carries no module attribution — pinned for #661 in
-    test_codegen_modules).  So they stay symmetric and the differential
-    invariant (verifier covers exactly codegen's emitted set) holds with
-    equality — there is no false Tier-1 from cross-module generics.  If codegen
-    ever gains cross-module monomorphization, this test flags that the verifier's
-    discovery must match it."""
+    is monomorphized by BOTH codegen and the verifier at the SAME concrete type
+    (#774).  The importer discovers the instantiation from its own call site and
+    emits the clone into its own flat module; the verifier's discovery merges the
+    imported (unshadowed) generic identically, so the differential invariant
+    (verifier covers exactly codegen's emitted set) holds with equality — no
+    false Tier-1 from cross-module generics.
+
+    Both the bare call ``ext_id(42)`` and the module-qualified ``a::ext_id(42)``
+    (an ``ast.ModuleCall`` that the shared discovery now walks, and that desugars
+    to the bare target at codegen) must produce the SAME single ``ext_id<Int>``
+    instantiation on both sides — a divergence between the two forms, or between
+    codegen and the verifier, would reintroduce the gap this pins.
+
+    Flips the pre-#774 tripwire: this test previously asserted NEITHER side
+    monomorphized (both empty).  Now both monomorphize; the equality assertion is
+    the lockstep the #732 differential demands.
+    """
     from vera.resolver import ResolvedModule
 
     a_src = (
@@ -227,11 +556,12 @@ def test_imported_generic_symmetric_between_codegen_and_verifier() -> None:
         "  requires(true) ensures(@T.result == @T.0) effects(pure)\n"
         "{ @T.0 }\n"
     )
+    call = "ext_id(42)" if call_form == "bare" else "a::ext_id(42)"
     b_src = (
         "import a;\n\n"
         "public fn main(@Unit -> @Int)\n"
         "  requires(true) ensures(true) effects(pure)\n"
-        "{ ext_id(42) }\n"
+        f"{{ {call} }}\n"
     )
 
     def _resolved(path: tuple[str, ...], src: str) -> "ResolvedModule":
@@ -276,9 +606,153 @@ def test_imported_generic_symmetric_between_codegen_and_verifier() -> None:
     finally:
         os.unlink(bp)
 
-    # Neither side monomorphizes the imported generic → symmetric (both empty).
-    assert not any(n == "ext_id" for n, _ in codegen_set)
-    assert verifier_set == codegen_set
+    # Both sides monomorphize the imported generic at exactly ext_id<Int>.
+    assert ("ext_id", ("Int",)) in codegen_set, (
+        f"codegen must emit ext_id<Int> for the {call_form} call, "
+        f"got {sorted(codegen_set)}"
+    )
+    assert verifier_set == codegen_set, (
+        f"verifier ({sorted(verifier_set)}) must discover exactly codegen's "
+        f"emitted set ({sorted(codegen_set)}) — cross-module generic lockstep"
+    )
+
+
+def test_shadowed_imported_generic_symmetric_between_codegen_and_verifier(
+) -> None:
+    """`#814` asymmetric variant: an imported generic (`gen`) shadowed by a
+    LOCAL non-generic AND module-qualified called (`g::gen`) is monomorphized by
+    codegen under a ``mod$…`` name and recorded in ``_emitted_instances`` under
+    that ``mod$g$gen`` base (NOT the bare `gen`, which a same-named local owns —
+    CR 3519156263), so the verifier must discover the SAME qualified
+    instantiation under the SAME base — else the pre-fix false Tier-1 returns
+    (verify resolved the module generic's contract while codegen ran the local
+    shadow).
+
+    Pins the shadowed-side lockstep: the differential must catch a desync where
+    only one of the two discovers the qualified `mod$g$gen<Int>` instantiation.
+    """
+    mod_a = _resolved_module(("g",), (
+        "public forall<T> fn gen(@T -> @T)\n"
+        "  requires(true) ensures(@T.result == @T.0) effects(pure)\n"
+        "{ @T.0 }\n"
+    ))
+    b_src = (
+        "import g;\n\n"
+        "private fn gen(@Int -> @Int)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ @Int.0 + 100 }\n\n"
+        "public fn probe(@Unit -> @Int)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ g::gen(5) }\n"
+    )
+    codegen_set, verifier_set = _cross_module_sets(b_src, [mod_a])
+
+    assert ("mod$g$gen", ("Int",)) in codegen_set, (
+        f"codegen must emit the shadowed generic's clone under its mod$… base, "
+        f"got {sorted(codegen_set)}"
+    )
+    assert verifier_set == codegen_set, (
+        f"verifier ({sorted(verifier_set)}) must discover exactly codegen's "
+        f"emitted set ({sorted(codegen_set)}) — shadowed cross-module generic "
+        f"lockstep (the #814 false-Tier-1 guard)"
+    )
+
+
+@pytest.mark.parametrize("inner_shadowed", [False, True])
+def test_transitive_shadowed_generic_symmetric(inner_shadowed: bool) -> None:
+    """`#774` review (CR 3518737014): a SHADOWED imported generic whose body
+    calls ANOTHER generic emits that TRANSITIVE clone — codegen and the verifier
+    must discover the SAME transitive set, or a cross-module transitive clone
+    runs unverified (a new false Tier-1).
+
+    `outer<T>` (shadowed, calls `inner(@T.0)`) → `inner<T>`.  The parametrization
+    covers `inner` unshadowed (a normal clone keyed `inner`) and `inner` ALSO
+    shadowed (a same-module sibling keyed `mod$g$inner` — CR 3519156263: a
+    shadowed clone is namespaced by its `mod$…` base so it never collides with a
+    same-named local generic).  Both must appear on both sides — a desync of the
+    transitive scan (codegen or verifier) flips the equality.
+    """
+    mod_a = _resolved_module(("g",), (
+        "public forall<T> fn inner(@T -> @T)\n"
+        "  requires(true) ensures(@T.result == @T.0) effects(pure)\n"
+        "{ @T.0 }\n"
+        "public forall<T> fn outer(@T -> @T)\n"
+        "  requires(true) ensures(@T.result == @T.0) effects(pure)\n"
+        "{ inner(@T.0) }\n"
+    ))
+    inner_local = (
+        "private fn inner(@Int -> @Int)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ @Int.0 + 200 }\n\n"
+    ) if inner_shadowed else ""
+    b_src = (
+        "import g;\n\n"
+        "private fn outer(@Int -> @Int)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ @Int.0 + 100 }\n\n"
+        f"{inner_local}"
+        "public fn probe(@Unit -> @Int)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ g::outer(7) }\n"
+    )
+    codegen_set, verifier_set = _cross_module_sets(b_src, [mod_a])
+
+    # The shadowed outer is keyed under its mod$… base; the transitive inner is
+    # keyed `mod$g$inner` when a local shadows it, else the bare `inner`.
+    inner_key = ("mod$g$inner", ("Int",)) if inner_shadowed else (
+        ("inner", ("Int",))
+    )
+    assert ("mod$g$outer", ("Int",)) in codegen_set and (
+        inner_key in codegen_set
+    ), (
+        f"codegen must emit mod$g$outer<Int> and its transitive {inner_key[0]}"
+        f"<Int>, got {sorted(codegen_set)}"
+    )
+    assert verifier_set == codegen_set, (
+        f"verifier ({sorted(verifier_set)}) must discover exactly codegen's "
+        f"emitted set ({sorted(codegen_set)}) — transitive shadowed generic "
+        f"lockstep; a missing transitive clone is a new false Tier-1"
+    )
+
+
+def test_unshadowed_generic_calling_shadowed_sibling_symmetric() -> None:
+    """`#774` review (CR 3519063445): an UNSHADOWED generic `caller<T>` whose
+    body qualified-calls a SHADOWED `g::gen` reaches that shadowed generic only
+    through its clone (`caller$Int`) — codegen scans the emitted normal clones
+    for shadowed ModuleCalls, and the verifier must mirror that scan, or it
+    discovers a strict subset (the `mod$g$gen<Int>` clone runs unverified: a
+    false Tier-1).
+    """
+    mod_a = _resolved_module(("g",), (
+        "public forall<T> fn gen(@T -> @T)\n"
+        "  requires(true) ensures(@T.result == @T.0) effects(pure)\n"
+        "{ @T.0 }\n"
+    ))
+    b_src = (
+        "import g;\n\n"
+        "private fn gen(@Int -> @Int)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ @Int.0 + 100 }\n\n"
+        "private forall<T> fn caller(@T -> @T)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ g::gen(@T.0) }\n\n"
+        "public fn probe(@Unit -> @Int)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ caller(5) }\n"
+    )
+    codegen_set, verifier_set = _cross_module_sets(b_src, [mod_a])
+
+    assert ("caller", ("Int",)) in codegen_set and (
+        ("mod$g$gen", ("Int",)) in codegen_set
+    ), (
+        f"codegen must emit caller<Int> and the shadowed mod$g$gen<Int> it "
+        f"reaches, got {sorted(codegen_set)}"
+    )
+    assert verifier_set == codegen_set, (
+        f"verifier ({sorted(verifier_set)}) must discover exactly codegen's "
+        f"emitted set ({sorted(codegen_set)}) — an unshadowed generic reaching "
+        f"a shadowed sibling; a miss is a new false Tier-1"
+    )
 
 
 def test_generic_typearg_from_where_helper_return_is_discovered() -> None:

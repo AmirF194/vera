@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from vera import ast
+from vera.slots import slot_ref_name
 from vera.wasm.helpers import WasmSlotEnv, _align_up, gc_shadow_push
 
 
@@ -325,15 +326,14 @@ class ClosuresMixin:
         #   ResultRef         → only valid in `ensures`; not in body
         """
         if isinstance(expr, ast.SlotRef):
-            type_name = expr.type_name
-            if expr.type_args:
-                arg_names = []
-                for ta in expr.type_args:
-                    if isinstance(ta, ast.NamedType):
-                        arg_names.append(ta.name)
-                    else:
-                        return
-                type_name = f"{expr.type_name}<{', '.join(arg_names)}>"
+            # Shared recursive builder (#914 finding 2) — a captured
+            # nested-composite slot (`@Array<Array<Int>>`) must key its
+            # capture under the SAME fully-qualified name that
+            # `_translate_slot_ref` resolves, else the capture desyncs and the
+            # enclosing function drops (`unknown func`).
+            type_name = slot_ref_name(expr)
+            if type_name is None:
+                return
             count = param_counts.get(type_name, 0)
             if expr.index >= count:
                 # This refers to an outer scope binding

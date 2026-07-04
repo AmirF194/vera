@@ -66,6 +66,14 @@ class CrossModuleMixin:
         adt_provenance: dict[str, tuple[str, ...]] = {}
         ctor_provenance: dict[str, tuple[tuple[str, ...], str]] = {}
 
+        # #890: names contributed by transitive-only modules vs names visible
+        # to the top-level importer (its own locals + its direct imports'
+        # public, in-filter declarations).  A transitive name that is NOT
+        # importer-visible becomes `_transitive_only_names` (computed after the
+        # loop) so the guard rail forbids a main-program body from calling it.
+        transitive_contributed: set[str] = set()
+        importer_visible: set[str] = set(local_fn_names)
+
         # 2. Register each module in isolation
         for mod in self._resolved_modules:
             temp = CodeGenerator(source=mod.source)
@@ -105,6 +113,15 @@ class CrossModuleMixin:
                 # All module functions (including private helpers) get
                 # registered so the guard rail sees them as known
                 self._fn_sigs.setdefault(fn_name, sig)
+                # #890: track importer visibility.  A direct import contributes
+                # its public, in-filter names to the importer's namespace; a
+                # transitive-only module contributes nothing visible here even
+                # though its body is compiled into the flat module.
+                if mod.direct:
+                    if is_public and in_filter:
+                        importer_visible.add(fn_name)
+                else:
+                    transitive_contributed.add(fn_name)
 
             # Harvest return-type expressions alongside _fn_sigs.
             # #628 — _fn_ret_type_exprs (added in #614 / re-used by
@@ -195,8 +212,42 @@ class CrossModuleMixin:
 
                 if not ctor_collision and is_public and in_filter:
                     self._adt_layouts.setdefault(adt_name, layouts)
+                    # #912: propagate the imported ADT's type-parameter
+                    # metadata alongside its layout.  Without these, an imported
+                    # generic ADT (`Box<T>`) reached codegen with a layout but
+                    # NO `_adt_tp_param_names` / `_adt_tp_counts` entry, so the
+                    # structural-Eq machinery could neither substitute its
+                    # parameters nor recognise a monomorphized clone that lost
+                    # its type argument — a composite `==` on it fell back to a
+                    # pointer compare or raised a spurious E613.  The `temp`
+                    # generator computed the full metadata from this module's
+                    # `DataDecl`s; carry it over in lockstep with the layout.
+                    for _reg_name, _reg in (
+                        (n, temp._adt_tp_param_names.get(n))
+                        for n in (adt_name,)
+                    ):
+                        if _reg is not None:
+                            self._adt_tp_param_names.setdefault(_reg_name, _reg)
+                    if adt_name in temp._adt_tp_counts:
+                        self._adt_tp_counts.setdefault(
+                            adt_name, temp._adt_tp_counts[adt_name])
+                    for _ctor_name in layouts:
+                        if _ctor_name in temp._ctor_adt_tp_indices:
+                            self._ctor_adt_tp_indices.setdefault(
+                                _ctor_name,
+                                temp._ctor_adt_tp_indices[_ctor_name])
                     self._needs_alloc = True
                     self._needs_memory = True
+                    # #890: importer-visible only for a direct import; a
+                    # transitive module's public ADT + ctors are compiled in
+                    # (an imported body may construct them) but stay invisible
+                    # to the top-level program.
+                    if mod.direct:
+                        importer_visible.add(adt_name)
+                        importer_visible.update(layouts.keys())
+                    else:
+                        transitive_contributed.add(adt_name)
+                        transitive_contributed.update(layouts.keys())
 
             # Harvest type aliases
             for alias_name, alias_expr in temp._type_aliases.items():
@@ -223,11 +274,30 @@ class CrossModuleMixin:
             for tld in mod.program.declarations:
                 if not isinstance(tld.decl, ast.FnDecl):
                     continue
-                # Generics are excluded before they enter any list: cross-
-                # module generic monomorphisation is unimplemented (#774), and
-                # a generic body (or its where-fns) can't be compiled in Pass
-                # 2.5 nor emitted under a mangled name.
+                # #774: an imported PUBLIC generic is monomorphized by the
+                # importer (Pass 1.5) at its own call sites — it can't be
+                # emitted verbatim under a bare/mangled name in Pass 2.5, but
+                # its concrete clones can.  Harvest its FnDecl here so
+                # `_monomorphize` can discover instantiations of it and clone
+                # its body; a private module generic is not callable from the
+                # importer, so it never needs harvesting.  Split by local
+                # shadowing (§8.5.2): an unshadowed generic routes bare +
+                # qualified through `_generic_fn_info`; a shadowed one is
+                # qualified-only (the bare name stays on the local).
                 if tld.decl.forall_vars:
+                    is_public = (tld.visibility or "private") == "public"
+                    in_filter = (
+                        name_filter is None or tld.decl.name in name_filter
+                    )
+                    if is_public and in_filter:
+                        if tld.decl.name in local_fn_names:
+                            self._shadowed_imported_generic_decls.setdefault(
+                                mod.path, {},
+                            ).setdefault(tld.decl.name, tld.decl)
+                        else:
+                            self._imported_generic_decls.setdefault(
+                                tld.decl.name, tld.decl,
+                            )
                     continue
                 is_public = (tld.visibility or "private") == "public"
                 in_filter = name_filter is None or tld.decl.name in name_filter
@@ -249,6 +319,16 @@ class CrossModuleMixin:
                         mod.path, wfn, temp, local_fn_names,
                         qualified_eligible=False,
                     )
+
+        # #890: a name is transitive-only iff a transitive module contributes
+        # it AND it is not visible to the importer (not a local, not a direct
+        # import's public in-filter name).  A transitive symbol that a direct
+        # import ALSO exposes stays callable — the direct exposure wins.  The
+        # guard rail subtracts this set so a main-program body calling a purely
+        # transitive symbol fails loudly (spec §8.6.4), while the imported
+        # bodies that legitimately call it (compiled in Pass 2.5, not scanned
+        # by the guard rail) keep resolving to the emitted definition.
+        self._transitive_only_names = transitive_contributed - importer_visible
 
     @staticmethod
     def _collect_local_fn_names(program: ast.Program) -> set[str]:
@@ -435,6 +515,11 @@ class CrossModuleMixin:
         known: set[str] = set(self._fn_sigs.keys())
         for layouts in self._adt_layouts.values():
             known.update(layouts.keys())
+        # #890: a purely transitive symbol (compiled in for an imported body,
+        # but not visible to this program per spec §8.6.4) is NOT callable from
+        # a main-program body — drop it so such a call is reported unresolved
+        # rather than silently binding to the emitted-for-a-sibling definition.
+        known -= self._transitive_only_names
         # Built-in names handled specially in _translate_call
         known.update({
             "array_length", "array_append", "array_range", "array_concat",

@@ -1,0 +1,88 @@
+-- Conformance: Eq auto-derivation on the CONSTRUCTOR-inferred path (Chapter 9, #772)
+-- Tests: an Eq<T>-constrained generic called with a `ConstructorCall` argument
+-- (`box_eq(MkBox("a"), ...)`) recovers the type argument so the instantiation
+-- derives structural Eq — the constructor path now behaves like the slot-ref
+-- path, deriving for an Eq type argument and comparing by value.
+-- ================================================================
+-- Constrained generic Eq over a bare type variable
+-- ================================================================
+private forall<T where Eq<T>> fn box_eq(@T, @T -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  eq(@T.1, @T.0)
+}
+
+private data Inner {
+  MkInner(Int)
+}
+
+private data Box<T> {
+  MkBox(T)
+}
+
+-- Test: Box<String> inferred from a constructor argument derives Eq;
+-- equal String contents compare equal
+public fn test_ctor_string_equal(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 1)
+  effects(pure)
+{
+  if box_eq(MkBox("hi"), MkBox("hi")) then {
+    1
+  } else {
+    0
+  }
+}
+
+-- Test: different String contents compare unequal
+public fn test_ctor_string_unequal(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 0)
+  effects(pure)
+{
+  if box_eq(MkBox("hi"), MkBox("no")) then {
+    1
+  } else {
+    0
+  }
+}
+
+-- Test: Box<Inner> inferred from a constructor argument — two distinct MkInner
+-- allocations with equal payload compare equal (value comparison, not pointer)
+public fn test_ctor_nested_equal(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 1)
+  effects(pure)
+{
+  if box_eq(MkBox(MkInner(3)), MkBox(MkInner(3))) then {
+    1
+  } else {
+    0
+  }
+}
+
+-- Test: distinct payloads compare unequal
+public fn test_ctor_nested_unequal(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 0)
+  effects(pure)
+{
+  if box_eq(MkBox(MkInner(3)), MkBox(MkInner(4))) then {
+    1
+  } else {
+    0
+  }
+}
+
+-- Drive every test from main so the constructor-path derivations run and their
+-- runtime postconditions fire.  The total is 1 + 0 + 1 + 0 = 2; a mis-derived
+-- Eq (wrong value, or a false-reject that never compiled) fails this contract.
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 2)
+  effects(pure)
+{
+  test_ctor_string_equal(()) + test_ctor_string_unequal(()) + test_ctor_nested_equal(()) + test_ctor_nested_unequal(())
+}

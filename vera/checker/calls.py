@@ -14,6 +14,7 @@ from vera.environment import (
     OpInfo,
 )
 from vera.types import (
+    ORDERABLE_TYPES,
     AdtType,
     ConcreteEffectRow,
     FunctionType,
@@ -23,6 +24,7 @@ from vera.types import (
     UnknownType,
     base_type,
     contains_typevar,
+    erases_to_unit,
     is_effect_subtype,
     is_subtype,
     pretty_effect,
@@ -127,9 +129,106 @@ class CallsMixin:
         # Generic inference
         param_types = fn_info.param_types
         return_type = fn_info.return_type
+        type_arg_conflict = False
         if fn_info.forall_vars:
+            conflicts: set[str] = set()
             mapping = self._infer_type_args(
-                fn_info.forall_vars, fn_info.param_types, arg_types)
+                fn_info.forall_vars, fn_info.param_types, arg_types,
+                conflicts)
+            if conflicts:
+                # #898: two arguments pinned the same type parameter to
+                # different, irreconcilable types (`eq2(MkOk("x"), MkOk(5))`
+                # fixes `A` to both `String` and `Int`).  Report the conflict
+                # directly — a clear E205 — rather than the misleading
+                # "expected Res<String, ...>, got Res<Int, ...>" E202 the
+                # partial merge would otherwise emit for one arm.
+                type_arg_conflict = True
+                self._error(
+                    node,
+                    f"Cannot infer a consistent type for the type "
+                    f"parameter(s) {', '.join(sorted(conflicts))} of "
+                    f"'{fn_info.name}': different arguments require "
+                    f"incompatible types.",
+                    rationale="A generic call binds each type parameter to one "
+                              "type; when several arguments determine the same "
+                              "parameter, they must agree (a sparse "
+                              "multi-parameter ADT built from different "
+                              "constructors must still name one consistent "
+                              "instantiation).",
+                    fix="Make the arguments agree on the conflicting type "
+                        "parameter, or annotate the intended instantiation "
+                        "with a typed slot binding.",
+                    spec_ref='Chapter 5, Section 5.2 "Function Declaration Syntax"',
+                    error_code="E205",
+                )
+            # #900: reject instantiating a generic type parameter at the
+            # zero-size `Unit` type *when the generic's body reads it*.  Unit
+            # is 0 bytes with no WASM representation (spec §11.2.2 / §11.3.1:
+            # Unit-returning fns have no result type, and `UnitLit` compiles to
+            # nothing), so a monomorphized `forall<T>` body's `@T.n` slot READ
+            # lowers to a `local.get` with no local — the dangling-slot codegen
+            # invariant (E699).  This closes the inferred (arg-pinned) case at
+            # check time rather than letting it crash in codegen, per DESIGN.md
+            # principle 1 (checkability over correctness).
+            #
+            # Narrowed to declarations that actually MATERIALIZE `@T` (a `@T.n`
+            # SlotRef read — direct return, match scrutinee, or a `requires` /
+            # `ensures` clause, all of which lower to a `local.get`; #939).  A
+            # `@T` parameter never read — in the body OR a contract — erases
+            # cleanly from the ABI, so `firstInt(@T, @Int){ @Int.0 }` and
+            # `ignore(@T){ 0 }` run fine at `T = Unit` and must NOT be rejected
+            # (`fn_info.forall_vars_read` is the per-declaration set of forall
+            # vars read anywhere that lowers to WASM).
+            #
+            # Keyed to any type with NO WASM representation — bare `Unit` OR a
+            # `Future` transparently wrapping one (`Future<Unit>`; #939 review),
+            # via `erases_to_unit` (which mirrors codegen's zero-size erasure).
+            # A boxed `Option<Unit>` (tag + pointer) and a `Future<Int>` (i32)
+            # both erase to a real local, so both are valid, non-zero-size type
+            # arguments.  A genuine built-in generic
+            # (`async`, `await`, collection/prelude combinators) has hand-written
+            # codegen and an EMPTY `forall_vars_read`, so it never contributes a
+            # unit var (`async(IO.print(...))`, a valid `Future<Unit>`, is not an
+            # over-reject) — while a USER override of a prelude name that DOES read
+            # `@T` (`forall<T> option_map`) is correctly caught, which the old
+            # name-based exclusion wrongly skipped.  Skipped when a type-argument
+            # conflict already reported E205 (the merged mapping is arbitrary
+            # there — mirrors the E202 per-argument loop skip).
+            unit_vars = (
+                sorted(
+                    tv for tv in fn_info.forall_vars
+                    if tv in fn_info.forall_vars_read
+                    and (b := mapping.get(tv)) is not None
+                    and erases_to_unit(b)
+                )
+                if not type_arg_conflict
+                else []
+            )
+            if unit_vars:
+                joined = ", ".join(unit_vars)
+                self._error(
+                    node,
+                    f"Cannot instantiate the type parameter(s) {joined} of "
+                    f"'{fn_info.name}' at the zero-size type Unit.",
+                    rationale="Unit is a zero-size type with no runtime "
+                              "representation (a Unit value occupies 0 bytes "
+                              "and compiles to no WASM value), so a generic "
+                              "function specialised at Unit has a parameter "
+                              "slot that refers to no runtime local — the "
+                              "monomorphized function cannot be generated.",
+                    fix="Do not pass a Unit-typed value where a generic "
+                        "parameter is inferred. If you need to thread a unit "
+                        "result through, wrap it in a boxed type (e.g. "
+                        "Option<Unit>) or restructure so the generic is "
+                        "instantiated at a type with a runtime representation.",
+                    spec_ref='Chapter 11, Section 11.2.2 "Unit as Void"',
+                    error_code="E206",
+                )
+                # Return the *substituted* result type so the enclosing
+                # context (e.g. `let @Unit = idt(...)`) sees the concrete
+                # `Unit` rather than a leaked `@T`, avoiding a misleading
+                # cascade error on top of the actionable E206.
+                return substitute(return_type, mapping)
             if mapping:
                 param_types = tuple(
                     substitute(p, mapping) for p in param_types)
@@ -147,8 +246,13 @@ class CallsMixin:
                         if key is not None and not contains_typevar(c_pt):
                             self.expr_target_types[key] = c_pt
 
-        # Check each argument
+        # Check each argument.  When a type-argument conflict was already
+        # reported (#898), skip the per-argument subtype check: the merged
+        # parameter type is one arbitrary arm of the conflict, so re-checking
+        # would pile a misleading E202 on top of the clear E205.
         for i, (arg_ty, param_ty) in enumerate(zip(arg_types, param_types)):
+            if type_arg_conflict:
+                break
             if arg_ty is None or isinstance(arg_ty, UnknownType):
                 continue
             if isinstance(param_ty, (TypeVar, UnknownType)):
@@ -584,6 +688,81 @@ class CallsMixin:
                     spec_ref='Chapter 9, Section 9.8 "Abilities"',
                     error_code="E241",
                 )
+
+        # #921: `Ord`'s `compare` is the ability spelling of the three-way
+        # `Ordering` if-chain `a < b ? Less : (a == b ? Equal : Greater)`
+        # (§6.4).  Ordering (`<`/`>`/`<=`/`>=`) is defined ONLY on the
+        # orderable primitives — Int, Nat, Float64, Byte, String (§4.5) — and
+        # `Ord`'s "Satisfied by:" set is exactly those (§9.8.1); ADTs are NOT
+        # Ord-derivable in v0.1.0 (unlike Eq/Hash/Show, whose "Satisfied by:"
+        # clauses list composite types).  Without this gate, `compare` on a
+        # user ADT type-checks (its `op` param is a bare type variable), then
+        # codegen lowers `<` to a scalar `i32.lt_s` on the boxed heap pointers
+        # — a SILENT WRONG RESULT — and the verifier raw-`<`es two Z3
+        # datatypes and crashes.  Rejecting here, the single gate both codegen
+        # and the verifier trust, keeps all three in agreement (checkability
+        # over silent miscompilation; DESIGN.md §"Checkability").  The direct
+        # `MkBox(1) < MkBox(2)` form is already rejected with E143.
+        if op_info.parent_effect == "Ord":
+            for i, arg_ty in enumerate(arg_types):
+                if arg_ty is None or isinstance(arg_ty, UnknownType):
+                    continue
+                arg_base = base_type(arg_ty)
+                # A bare type variable is deferred: inside a
+                # `forall<T where Ord<T>>` body the `Ord<T>` constraint
+                # promises orderability, and the monomorphizer's E613 constraint
+                # gate re-checks each concrete instantiation against the
+                # orderable set (`_ORD_TYPES` in codegen/monomorphize.py).  Any
+                # non-Ord instantiation — a user ADT OR `Bool` (§4.5 orders
+                # neither) — trips E613 there, so deferring here can never
+                # silently miscompile.  (PR #929 review closed a hole: `Bool`
+                # was wrongly IN `_ORD_TYPES`, so `Ord<Bool>` satisfied the gate
+                # and the clone lowered `compare` on two Bool i32s to a signed
+                # `i32.lt_s` — a silent order.  Bool is now out of that set.)
+                # Rejecting the TypeVar here would break the legitimate
+                # constrained-generic form (ch09_abilities `cmp_sign`).
+                if isinstance(arg_base, TypeVar):
+                    continue
+                if arg_base not in ORDERABLE_TYPES:
+                    self._error(
+                        args[i],
+                        f"'{op_info.name}' requires an orderable operand, "
+                        f"found {pretty_type(arg_ty)}.",
+                        rationale=(
+                            "The Ord ability's 'compare' operation is the "
+                            "three-way spelling of the ordering operators "
+                            "(<, >, <=, >=), which are defined only on the "
+                            "orderable types — Int, Nat, Float64, Byte, and "
+                            "String. A user-defined ADT is not Ord-derivable, "
+                            "so it has no total order to compare by."
+                        ),
+                        fix=(
+                            f"Apply '{op_info.name}' to an orderable value "
+                            "(e.g. Int, Nat, Float64, Byte, String); reduce a "
+                            "non-orderable type to an orderable key first, or "
+                            "use 'eq' for structural equality on an ADT."
+                        ),
+                        spec_ref='Chapter 9, Section 9.8.1 "Built-in Abilities"',
+                        error_code="E242",
+                    )
+
+        # #928: `Eq`'s `eq` is the ability spelling of `==` (§9.8.1), so it
+        # inherits the same Eq-derivability requirement.  Without this gate the
+        # `eq(fn, fn)` / `eq(map_composite, map_composite)` forms type-check
+        # (the `op` params are bare type variables) and then codegen silently
+        # pointer-compares them — the exact silent miscompile the `==` binop
+        # gate (`_check_eq_ability`) closes, reached through the ability-op
+        # surface instead.  Route both through the one predicate so the checker
+        # rejects exactly what codegen cannot derive (the #928 differential).
+        if op_info.parent_effect == "Eq":
+            for i, arg_ty in enumerate(arg_types):
+                if arg_ty is None or isinstance(arg_ty, UnknownType):
+                    continue
+                # A bare/nested type variable is deferred to the caller's
+                # `Eq<T>` constraint + the codegen E613 instantiation gate,
+                # exactly as the Ord arm above and the `==` binop gate do —
+                # `_check_eq_ability` short-circuits on `contains_typevar`.
+                self._check_eq_ability(args[i], arg_ty, arg_ty)
 
         return return_type
 

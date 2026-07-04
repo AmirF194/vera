@@ -186,9 +186,17 @@ class TestReferencedPreludeWarningAttribution:
             f"{diag.source_line!r}"
         )
         # The quoted line (when present) is real prelude source — it
-        # comes from the option_map body in the injected buffer.
+        # comes from the option_map body in the injected buffer.  Its
+        # type-parameter slot refs use the reserved ``Vera``-prefixed
+        # names (``@VeraA`` etc.) since #869 renamed the prelude
+        # combinators' internal type parameters off the bare single
+        # letters that collided with user ADTs.
         if diag.source_line:
-            assert "@A" in diag.source_line or "option_map" in diag.source_line, (
+            assert (
+                "@VeraA" in diag.source_line
+                or "OptionMapFn" in diag.source_line
+                or "option_map" in diag.source_line
+            ), (
                 f"Expected the quoted line to be prelude source from "
                 f"option_map; got {diag.source_line!r}"
             )

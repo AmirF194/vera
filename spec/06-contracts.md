@@ -139,6 +139,7 @@ Everything allowed in the decidable fragment (Chapter 2, Section 2.6.1):
 - String literals
 - Linear arithmetic (`+`, `-`, `*` with literal multiplier)
 - Comparisons (`==`, `!=`, `<`, `>`, `<=`, `>=`)
+- The `Eq` / `Ord` ability operations `eq(a, b)` and `compare(a, b)` (Chapter 9, Section 9.8) — the generic-programming spelling of `==` and the three-way `Ordering` comparison.  A contract predicate may use either form; `eq(a, b)` is verified and compiled *as* `a == b`, and `compare(a, b)` *as* the canonical `Ordering` if-chain (`if a < b then Less else if a == b then Equal else Greater`).  The two spellings are semantically identical and share one internal representation (one canonical form, Section 0.2.3), so a contract written with the ability op enjoys the same Tier-1 reasoning and runtime enforcement as its operator form ([#874](https://github.com/aallan/vera/issues/874))
 - Boolean connectives (`&&`, `||`, `!`)
 - `array_length()` on arrays, `string_length()` on strings
 - Array index expressions (`@Array<T>.0[i]`) — uninterpreted `index_<T>(arr, i)` function; sound for relational facts but doesn't reason about element structure beyond what explicit predicates assert (added [#667](https://github.com/aallan/vera/issues/667))
@@ -232,6 +233,8 @@ At each call site, the compiler generates two VCs:
 2. **Postcondition assumption**: after the call, the callee's postcondition (with actual arguments and return value substituted) is assumed to hold.
 
 This means the verifier is modular: each function is verified independently, assuming its callees satisfy their contracts.
+
+The precondition VC is discharged at **Tier 1** when the actual arguments and the callee's precondition both translate to the decidable fragment.  When an argument or the precondition uses a construct outside that fragment — an ADT field of a host-handle type such as `Map`, or a precondition over a non-modelled builtin — the obligation cannot be checked statically.  Rather than let it vanish (which would make `vera verify` overstate coverage), the verifier degrades it **loudly** to a runtime-guarded **Tier 3** obligation with an **E532** warning ([#882](https://github.com/aallan/vera/issues/882)), counted in `vera verify --json`; the codegen precondition guard still enforces the contract at runtime.  This holds for calls in every position — statement, `requires`, and `ensures` predicates alike.
 
 A practical implication: if a function `bad` has an implementation that doesn't satisfy its own `ensures(...)` clause, the verifier reports E500 on `bad`'s body — but a caller `main` that uses `bad`'s declared contract is still verified.  The bug is contained to `bad`'s body-vs-contract mismatch; `main`'s reasoning is sound under the assumption that `bad` honours its declared postcondition.  This is intentional — it keeps verification compositional and bounded by per-function complexity, rather than requiring whole-program reasoning at every call site.  The cost is that an E500 on `bad` is a real failure that downstream consumers (`vera test`, `vera verify`) MUST surface; silently classifying `bad` as verified while `main` reads its contract would break the soundness chain.
 

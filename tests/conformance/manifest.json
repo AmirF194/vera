@@ -168,6 +168,19 @@
     ]
   },
   {
+    "id": "ch02_adt_single_letter_name",
+    "file": "ch02_adt_single_letter_name.vera",
+    "chapter": 2,
+    "title": "Single-letter ADT names (no prelude type-param collision)",
+    "level": "run",
+    "spec_ref": "Section 2.2",
+    "features": [
+      "adt",
+      "constructor",
+      "match"
+    ]
+  },
+  {
     "id": "ch02_refinement_types",
     "file": "ch02_refinement_types.vera",
     "chapter": 2,
@@ -206,6 +219,36 @@
     ]
   },
   {
+    "id": "ch02_generic_over_param_adt",
+    "file": "ch02_generic_over_param_adt.vera",
+    "chapter": 2,
+    "title": "Generic instantiated over a parameterized ADT",
+    "level": "run",
+    "spec_ref": "Section 2.5",
+    "features": [
+      "generics",
+      "forall",
+      "monomorphization",
+      "adt"
+    ]
+  },
+  {
+    "id": "ch02_generic_over_unit_rejected",
+    "file": "ch02_generic_over_unit_rejected.vera",
+    "chapter": 2,
+    "title": "Instantiating a generic at the zero-size Unit type is a checker error (#900)",
+    "level": "check",
+    "spec_ref": "Section 11.2.2",
+    "expected_error": "E206",
+    "features": [
+      "generics",
+      "forall",
+      "monomorphization",
+      "unit",
+      "check_error"
+    ]
+  },
+  {
     "id": "ch02_tuple_basic",
     "file": "ch02_tuple_basic.vera",
     "chapter": 2,
@@ -215,6 +258,20 @@
     "features": [
       "tuple",
       "let_destruct",
+      "match",
+      "constructor"
+    ]
+  },
+  {
+    "id": "ch02_tuple_unit_component",
+    "file": "ch02_tuple_unit_component.vera",
+    "chapter": 2,
+    "title": "A zero-size Unit component in a by-value Tuple layout compiles and runs (#902)",
+    "level": "run",
+    "spec_ref": "Section 2.3.1",
+    "features": [
+      "tuple",
+      "unit",
       "match",
       "constructor"
     ]
@@ -558,6 +615,21 @@
     ]
   },
   {
+    "id": "ch04_nested_option_ctor",
+    "file": "ch04_nested_option_ctor.vera",
+    "chapter": 4,
+    "title": "Nested same-ADT constructor sort selection (#918)",
+    "level": "verify",
+    "spec_ref": "Section 4.4",
+    "features": [
+      "nested_constructor",
+      "option",
+      "constructor_expr",
+      "nested_adt_sort",
+      "tier1_discharge"
+    ]
+  },
+  {
     "id": "ch05_basic_function",
     "file": "ch05_basic_function.vera",
     "chapter": 5,
@@ -689,6 +761,37 @@
     ]
   },
   {
+    "id": "ch05_nested_fn_type_alias",
+    "file": "ch05_nested_fn_type_alias.vera",
+    "chapter": 5,
+    "title": "Nested (transitive) fn-type alias as apply_fn closure argument (#867)",
+    "level": "run",
+    "spec_ref": "Section 5.4",
+    "features": [
+      "type_alias",
+      "nested_type_alias",
+      "function_type",
+      "apply_fn",
+      "higher_order"
+    ]
+  },
+  {
+    "id": "ch05_generic_pipe_monomorph",
+    "file": "ch05_generic_pipe_monomorph.vera",
+    "chapter": 5,
+    "title": "Generic monomorphization via the |> pipe and @T closure substitution (#913)",
+    "level": "run",
+    "spec_ref": "Section 5.4",
+    "features": [
+      "generics",
+      "forall",
+      "monomorphization",
+      "pipe",
+      "closures",
+      "higher_order"
+    ]
+  },
+  {
     "id": "ch06_requires",
     "file": "ch06_requires.vera",
     "chapter": 6,
@@ -714,6 +817,19 @@
     ]
   },
   {
+    "id": "ch06_requires_adt_arg",
+    "file": "ch06_requires_adt_arg.vera",
+    "chapter": 6,
+    "title": "Call-site preconditions over ADT-typed arguments",
+    "level": "run",
+    "spec_ref": "Section 6.1",
+    "features": [
+      "requires",
+      "precondition",
+      "adt"
+    ]
+  },
+  {
     "id": "ch06_ensures",
     "file": "ch06_ensures.vera",
     "chapter": 6,
@@ -724,6 +840,19 @@
       "ensures",
       "postcondition",
       "result_slot"
+    ]
+  },
+  {
+    "id": "ch06_adt_sort_disambiguation",
+    "file": "ch06_adt_sort_disambiguation.vera",
+    "chapter": 6,
+    "title": "ADT sort disambiguation (generic vs flat-ADT name collision)",
+    "level": "verify",
+    "spec_ref": "Section 6.4.1",
+    "features": [
+      "ensures",
+      "adt_match",
+      "sort_disambiguation"
     ]
   },
   {
@@ -762,6 +891,23 @@
     "features": [
       "forall_quantifier",
       "exists_quantifier"
+    ]
+  },
+  {
+    "id": "ch06_composite_postcondition_eq",
+    "file": "ch06_composite_postcondition_eq.vera",
+    "chapter": 6,
+    "title": "Composite equality in a postcondition lowers to structural Eq at runtime (#912)",
+    "level": "run",
+    "spec_ref": "Section 6.5 / Section 9.8",
+    "features": [
+      "ensures",
+      "postcondition",
+      "structural_eq",
+      "adt",
+      "option",
+      "nested_adt_eq",
+      "tier1_discharge"
     ]
   },
   {
@@ -919,6 +1065,49 @@
     ]
   },
   {
+    "id": "ch07_state_composite",
+    "file": "ch07_state_composite.vera",
+    "chapter": 7,
+    "title": "State effect handler over a composite type argument (#914)",
+    "level": "run",
+    "spec_ref": "Section 7.3",
+    "features": [
+      "state_effect",
+      "handler",
+      "composite_type_arg",
+      "get",
+      "put"
+    ]
+  },
+  {
+    "id": "ch07_exn_composite",
+    "file": "ch07_exn_composite.vera",
+    "chapter": 7,
+    "title": "Exception effect handler over a composite payload type (#914)",
+    "level": "run",
+    "spec_ref": "Section 7.4",
+    "features": [
+      "exn_effect",
+      "handler",
+      "composite_type_arg",
+      "throw"
+    ]
+  },
+  {
+    "id": "ch07_state_old_composite",
+    "file": "ch07_state_old_composite.vera",
+    "chapter": 7,
+    "title": "old/new State snapshot over a composite type argument (#914)",
+    "level": "run",
+    "spec_ref": "Section 7.3",
+    "features": [
+      "state_effect",
+      "old",
+      "new",
+      "composite_type_arg"
+    ]
+  },
+  {
     "id": "ch07_unit_fn_nontail",
     "file": "ch07_unit_fn_nontail.vera",
     "chapter": 7,
@@ -1012,6 +1201,83 @@
     "spec_ref": "Section 8.5.3",
     "features": [
       "module_qualified_call"
+    ]
+  },
+  {
+    "id": "ch08_ctor_field_module_call",
+    "file": "ch08_ctor_field_module_call.vera",
+    "chapter": 8,
+    "title": "Module-qualified call as a constructor field argument",
+    "level": "run",
+    "spec_ref": "Section 8.5.3",
+    "features": [
+      "module_qualified_call",
+      "constructor",
+      "tuple",
+      "adt"
+    ]
+  },
+  {
+    "id": "ch08_cross_module_generic_lib",
+    "file": "ch08_cross_module_generic_lib.vera",
+    "chapter": 8,
+    "title": "Cross-module generic library",
+    "level": "check",
+    "spec_ref": "Section 11.16",
+    "features": [
+      "cross_module_generic",
+      "generic_function"
+    ]
+  },
+  {
+    "id": "ch08_cross_module_generic",
+    "file": "ch08_cross_module_generic.vera",
+    "chapter": 8,
+    "title": "Cross-module generic monomorphization",
+    "level": "run",
+    "spec_ref": "Section 11.16",
+    "features": [
+      "cross_module_generic",
+      "monomorphization",
+      "bare_call",
+      "module_qualified_call"
+    ]
+  },
+  {
+    "id": "ch08_transitive_module_import_base",
+    "file": "ch08_transitive_module_import_base.vera",
+    "chapter": 8,
+    "title": "Transitive import chain \u2014 base module",
+    "level": "check",
+    "spec_ref": "Section 8.6.4",
+    "features": [
+      "transitive_import",
+      "cross_module"
+    ]
+  },
+  {
+    "id": "ch08_transitive_module_import_mid",
+    "file": "ch08_transitive_module_import_mid.vera",
+    "chapter": 8,
+    "title": "Transitive import chain \u2014 middle module",
+    "level": "verify",
+    "spec_ref": "Section 8.6.4",
+    "features": [
+      "transitive_import",
+      "cross_module"
+    ]
+  },
+  {
+    "id": "ch08_transitive_module_import",
+    "file": "ch08_transitive_module_import.vera",
+    "chapter": 8,
+    "title": "Transitive module import (main -> mid -> base)",
+    "level": "run",
+    "spec_ref": "Section 8.6.4",
+    "features": [
+      "transitive_import",
+      "cross_module",
+      "bare_call"
     ]
   },
   {
@@ -1313,6 +1579,20 @@
     ]
   },
   {
+    "id": "ch04_string_ordering",
+    "file": "ch04_string_ordering.vera",
+    "chapter": 4,
+    "title": "String ordering is lexicographic",
+    "level": "run",
+    "spec_ref": "Section 4.5",
+    "features": [
+      "string_ordering",
+      "compare",
+      "lexicographic",
+      "ord_ability"
+    ]
+  },
+  {
     "id": "ch09_base64",
     "file": "ch09_base64.vera",
     "chapter": 9,
@@ -1458,8 +1738,61 @@
       "adt_auto_derivation",
       "ordering_adt",
       "compare_operation",
+      "ability_op_in_contract",
       "show_operation",
       "hash_operation"
+    ]
+  },
+  {
+    "id": "ch09_user_show_hash_field",
+    "file": "ch09_user_show_hash_field.vera",
+    "chapter": 9,
+    "title": "User-defined show/hash in a constructor field or array element",
+    "level": "run",
+    "spec_ref": "Section 9.8",
+    "features": [
+      "show_operation",
+      "hash_operation",
+      "user_shadows_ability_op",
+      "module_qualified_call",
+      "constructor",
+      "tuple",
+      "array_literal"
+    ]
+  },
+  {
+    "id": "ch09_show_hash_composites",
+    "file": "ch09_show_hash_composites.vera",
+    "chapter": 9,
+    "title": "Structural show/hash for composite types (#911)",
+    "level": "run",
+    "spec_ref": "Section 9.8",
+    "features": [
+      "show_operation",
+      "hash_operation",
+      "constructor",
+      "tuple",
+      "option",
+      "result",
+      "array_literal",
+      "adt_auto_derivation",
+      "nested_adt"
+    ]
+  },
+  {
+    "id": "ch09_recursive_show_hash",
+    "file": "ch09_recursive_show_hash.vera",
+    "chapter": 9,
+    "title": "Structural show/hash on recursive ADTs (#924)",
+    "level": "run",
+    "spec_ref": "Section 9.8",
+    "features": [
+      "show_operation",
+      "hash_operation",
+      "constructor",
+      "adt_auto_derivation",
+      "recursive_adt",
+      "mutual_recursion"
     ]
   },
   {
@@ -1481,6 +1814,102 @@
     ]
   },
   {
+    "id": "ch09_generic_in_closure",
+    "file": "ch09_generic_in_closure.vera",
+    "chapter": 9,
+    "title": "Generic called only from inside a closure body (#873)",
+    "level": "run",
+    "spec_ref": "Section 11.10.3",
+    "features": [
+      "generic_function",
+      "monomorphization",
+      "closure",
+      "array_any",
+      "ability_constraint"
+    ]
+  },
+  {
+    "id": "ch09_generic_where_helper",
+    "file": "ch09_generic_where_helper.vera",
+    "chapter": 9,
+    "title": "where-helpers inside a monomorphized generic (#904)",
+    "level": "run",
+    "spec_ref": "Section 11.10.3",
+    "features": [
+      "generic_function",
+      "monomorphization",
+      "forall_where",
+      "where_block"
+    ]
+  },
+  {
+    "id": "ch09_ctor_inferred_eq",
+    "file": "ch09_ctor_inferred_eq.vera",
+    "chapter": 9,
+    "title": "Eq auto-derivation on the constructor-inferred path (#772)",
+    "level": "run",
+    "spec_ref": "Section 9.8",
+    "features": [
+      "ability_constraint",
+      "forall_where",
+      "eq_operation",
+      "adt_auto_derivation",
+      "structural_eq",
+      "constructor_inferred_type_args",
+      "nested_adt_eq"
+    ]
+  },
+  {
+    "id": "ch09_multiparam_ctor_eq",
+    "file": "ch09_multiparam_ctor_eq.vera",
+    "chapter": 9,
+    "title": "Eq auto-derivation over a sparse multi-type-parameter ADT on the constructor-inferred path (#898)",
+    "level": "run",
+    "spec_ref": "Section 9.8",
+    "features": [
+      "ability_constraint",
+      "forall_where",
+      "eq_operation",
+      "adt_auto_derivation",
+      "structural_eq",
+      "constructor_inferred_type_args",
+      "multi_type_parameter_adt"
+    ]
+  },
+  {
+    "id": "ch09_nested_generic_ctor_eq",
+    "file": "ch09_nested_generic_ctor_eq.vera",
+    "chapter": 9,
+    "title": "Eq auto-derivation over a nested-generic recursive ADT on the direct constructor-inferred path (#923)",
+    "level": "run",
+    "spec_ref": "Section 9.8",
+    "features": [
+      "eq_operation",
+      "adt_auto_derivation",
+      "structural_eq",
+      "constructor_inferred_type_args",
+      "nested_adt_eq",
+      "recursive_adt"
+    ]
+  },
+  {
+    "id": "ch09_nested_generic_call_eq",
+    "file": "ch09_nested_generic_call_eq.vera",
+    "chapter": 9,
+    "title": "Eq auto-derivation over a nested-generic recursive ADT through a constrained generic call (#932)",
+    "level": "run",
+    "spec_ref": "Section 9.8",
+    "features": [
+      "eq_operation",
+      "adt_auto_derivation",
+      "structural_eq",
+      "constructor_inferred_type_args",
+      "nested_adt_eq",
+      "recursive_adt",
+      "ability_constraint"
+    ]
+  },
+  {
     "id": "ch09_decimal_generics",
     "file": "ch09_decimal_generics.vera",
     "chapter": 9,
@@ -1498,6 +1927,23 @@
       "decimal_compare",
       "decimal_from_string",
       "match"
+    ]
+  },
+  {
+    "id": "ch09_generic_infer_user_fn_return",
+    "file": "ch09_generic_infer_user_fn_return.vera",
+    "chapter": 9,
+    "title": "Generic instantiation inferred from a user-fn return in argument position (#878)",
+    "level": "run",
+    "spec_ref": "Section 9.7.2",
+    "features": [
+      "decimal",
+      "generics",
+      "forall",
+      "monomorphization",
+      "option_unwrap_or",
+      "decimal_div",
+      "decimal_from_string"
     ]
   },
   {
@@ -1573,6 +2019,36 @@
     "expected_error": "E151",
     "features": [
       "builtin_redefinition",
+      "check_error"
+    ]
+  },
+  {
+    "id": "ch09_ord_adt_rejected",
+    "file": "ch09_ord_adt_rejected.vera",
+    "chapter": 9,
+    "title": "compare / Ord on a user ADT is a checker error",
+    "level": "check",
+    "spec_ref": "Section 9.8.1",
+    "expected_error": "E242",
+    "features": [
+      "ord_ability",
+      "compare",
+      "adt",
+      "check_error"
+    ]
+  },
+  {
+    "id": "ch09_eq_non_derivable_rejected",
+    "file": "ch09_eq_non_derivable_rejected.vera",
+    "chapter": 9,
+    "title": "== / Eq on a non-Eq-derivable type is a checker error",
+    "level": "check",
+    "spec_ref": "Section 9.8.1",
+    "expected_error": "E243",
+    "features": [
+      "eq_ability",
+      "equality",
+      "adt",
       "check_error"
     ]
   }

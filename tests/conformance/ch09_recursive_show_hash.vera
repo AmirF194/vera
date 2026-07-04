@@ -1,0 +1,155 @@
+-- Conformance: structural show/hash on recursive ADTs (Chapter 9, #924, #934)
+-- Tests: show/hash on a directly-recursive generic ADT (List<T>) and a
+-- directly-recursive binary tree, show on a non-generic mutually-recursive
+-- ADT pair, and show/hash/eq on a GENERIC mutually-recursive pair whose type
+-- argument is buried in a nested generic field (GGrove(GRose<T>, GForest<T>);
+-- #934) — all via a generated recursive helper function rather than being
+-- dropped at codegen (or, for eq, silently mis-compared by pointer).
+-- ================================================================
+-- ADTs used below
+-- ================================================================
+private data List<T> {
+  Nil,
+  Cons(T, List<T>)
+}
+
+private data Tree<T> {
+  Leaf,
+  Node(Tree<T>, T, Tree<T>)
+}
+
+private data Forest {
+  Empty,
+  Grove(Rose, Forest)
+}
+
+private data Rose {
+  Bloom(Int, Forest)
+}
+
+private data GForest<T> {
+  GEmpty,
+  GGrove(GRose<T>, GForest<T>)
+}
+
+private data GRose<T> {
+  GBloom(T, GForest<T>)
+}
+
+-- ================================================================
+-- Helpers: obtain fully-typed recursive-ADT values
+-- ================================================================
+private fn nil_list(@Int -> @List<Int>)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  Nil
+}
+
+-- ================================================================
+-- show: recursive generic list
+-- ================================================================
+-- Test: a directly-recursive list renders every Cons cell down to Nil
+public fn test_show_recursive_list(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result == true)
+  effects(pure)
+{
+  eq(show(Cons(1, Cons(2, Nil))), "Cons(1, Cons(2, Nil))")
+}
+
+-- Test: the base-case constructor of a recursive ADT renders as its bare name
+public fn test_show_recursive_list_nil(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result == true)
+  effects(pure)
+{
+  eq(show(nil_list(0)), "Nil")
+}
+
+-- ================================================================
+-- hash: recursive generic list
+-- ================================================================
+-- Test: hash on a recursive list is deterministic
+public fn test_hash_recursive_list_deterministic(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result == true)
+  effects(pure)
+{
+  eq(hash(Cons(1, Cons(2, Nil))), hash(Cons(1, Cons(2, Nil))))
+}
+
+-- Test: hash distinguishes structurally-different recursive values
+public fn test_hash_recursive_list_distinguishes(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result == false)
+  effects(pure)
+{
+  eq(hash(Cons(1, Cons(2, Nil))), hash(Cons(1, Cons(3, Nil))))
+}
+
+-- ================================================================
+-- show: recursive binary tree
+-- ================================================================
+-- Test: a directly-recursive tree renders both branches and the leaves
+public fn test_show_recursive_tree(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result == true)
+  effects(pure)
+{
+  eq(show(Node(Leaf, 5, Node(Leaf, 7, Leaf))), "Node(Leaf, 5, Node(Leaf, 7, Leaf))")
+}
+
+-- ================================================================
+-- show: non-generic mutually-recursive ADT pair
+-- ================================================================
+-- Test: a non-generic mutually-recursive ADT pair renders through both types
+public fn test_show_mutual_recursive_adt(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result == true)
+  effects(pure)
+{
+  eq(show(Grove(Bloom(1, Empty), Empty)), "Grove(Bloom(1, Empty), Empty)")
+}
+
+-- ================================================================
+-- show / hash / eq: GENERIC mutually-recursive ADT pair (#934)
+-- The type argument is buried in a nested generic field (GRose<T> inside
+-- GGrove); recovered by descending into GBloom(T, ...) which pins T = Int.
+-- ================================================================
+-- Test: a generic mutually-recursive value renders through both types
+public fn test_show_generic_mutual_recursive_adt(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result == true)
+  effects(pure)
+{
+  eq(show(GGrove(GBloom(1, GEmpty), GEmpty)), "GGrove(GBloom(1, GEmpty), GEmpty)")
+}
+
+-- Test: hash on a generic mutually-recursive value is deterministic
+public fn test_hash_generic_mutual_recursive_adt(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result == true)
+  effects(pure)
+{
+  eq(hash(GGrove(GBloom(1, GEmpty), GEmpty)), hash(GGrove(GBloom(1, GEmpty), GEmpty)))
+}
+
+-- Test: structural eq on generic mutually-recursive values (equal → true)
+public fn test_eq_generic_mutual_recursive_adt(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result == true)
+  effects(pure)
+{
+  eq(GGrove(GBloom(1, GEmpty), GEmpty), GGrove(GBloom(1, GEmpty), GEmpty))
+}
+
+-- Test: structural eq distinguishes different generic-mutual values (→ false)
+public fn test_eq_generic_mutual_recursive_adt_distinguishes(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result == false)
+  effects(pure)
+{
+  eq(GGrove(GBloom(1, GEmpty), GEmpty), GGrove(GBloom(2, GEmpty), GEmpty))
+}

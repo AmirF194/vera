@@ -521,7 +521,7 @@ Key design points:
 - `Async` is a marker effect with no operations — `async` and `await` are built-in generic functions that require `effects(<Async>)`.
 - `Future<T>` is WASM-transparent: an eagerly-evaluated future has the same runtime representation as `T`, with no overhead.  (A concurrently-evaluated future is an opaque pending handle with the same WASM value type; `await` resolves it.)
 - **Concurrency (#841):** an implementation MAY evaluate `async(e)` concurrently when `e`'s effect row is commutative — value semantics are unchanged, and all other effects retain program order.  The reference implementation evaluates `async(Http.get(...))` and `async(Http.post(...))` (with call-free argument expressions) concurrently: the request is issued on a host worker thread at the `async(...)` point (so request *issuance* keeps program order), and `await` blocks for the response.  Every other shape evaluates eagerly (sequential execution); the checker warns (`W002`) when the argument's effect row is not within the commutative whitelist (`{Http, Async}`), documenting exactly where eager evaluation is semantically forced rather than merely unoptimized.
-- The concurrent lowering keys the `await` handle-check on the literal type `Future<Result<String, String>>`, covering slots, parameters, direct compositions, and calls (bare, imported, or module-qualified) whose declared return is that type.  An alias for that type does not participate — the lowering's classification does not resolve type aliases (aliases are transparent everywhere else), so a function whose future is bound through an alias-typed `let` is skipped (`[E602]`) before any await could mis-lower.  An **indirectly-called closure** (`await(apply_fn(closure, …))`) returning this future type is classified by the closure's *declared* return type — a fn-typed slot resolved through its `FnType` alias (with the slot's bound type args substituted for a generic alias's params, so `Producer<Future<Result<String, String>>>` classifies), or an inline closure literal — so the await lowers correctly ([#843](https://github.com/aallan/vera/issues/843)).  A closure whose declared return type is not statically resolvable falls back to the identity lowering, and each such shape has its own loud backstop: a closure *argument produced by a nested call* is rejected by the `apply_fn` translation with `[E616]` (the function is skipped), while a fn-typed slot through an *alias-of-alias chain* fails at WASM validation — the `call_indirect` signature defaults to the wrong width ([#867](https://github.com/aallan/vera/issues/867)) — so in neither case is a fused wrapper silently read as the ADT.
+- The concurrent lowering keys the `await` handle-check on the literal type `Future<Result<String, String>>`, covering slots, parameters, direct compositions, and calls (bare, imported, or module-qualified) whose declared return is that type.  An alias for that type does not participate — the lowering's classification does not resolve type aliases (aliases are transparent everywhere else), so a function whose future is bound through an alias-typed `let` is skipped (`[E602]`) before any await could mis-lower.  An **indirectly-called closure** (`await(apply_fn(closure, …))`) returning this future type is classified by the closure's *declared* return type — a fn-typed slot resolved through its `FnType` alias, following the alias chain **transitively** to the terminal `FnType` (`type Fetcher = Inner;` where `Inner` aliases the fn type, [#867](https://github.com/aallan/vera/issues/867)) and substituting each generic alias's type params (so `Producer<Future<Result<String, String>>>` classifies), or an inline closure literal — so the await lowers correctly ([#843](https://github.com/aallan/vera/issues/843)).  A closure whose declared return type is not statically resolvable falls back to the identity lowering, with a loud backstop: a closure *argument produced by a nested call* (`apply_fn(make_fn(), …)`) is rejected by the `apply_fn` translation with `[E616]` (the function is skipped), so no fused wrapper is silently read as the ADT.
 - The browser runtime evaluates all futures eagerly — spec-conformant under the MAY above, with identical values; only request timing differs (documented in §12).
 - True multi-await suspension and custom scheduling strategies (thread pool, event loop) via `handle[Async]` handlers remain future work ([#406](https://github.com/aallan/vera/issues/406), [#270](https://github.com/aallan/vera/issues/270)).
 - This avoids coloured-function problems because algebraic effects already separate the description of an operation from its execution.
@@ -2377,7 +2377,7 @@ Returns the value of the named attribute if the node is an `HtmlElement` with th
 
 ## 9.8 Abilities
 
-> **Status: Implemented.** Tracked in [#60](https://github.com/aallan/vera/issues/60). Four built-in abilities (`Eq`, `Ord`, `Hash`, `Show`) are fully compilable. Supported types: Int, Nat, Bool, Float64, String, Byte, Unit. `Eq` derivation is **structural** ([#773](https://github.com/aallan/vera/issues/773)): a simple enum, or an ADT every field of which is itself `Eq` — an `Eq` primitive (`String` included, compared by content) or a nested `Eq` ADT (compared recursively, including recursive types) — supports `Eq` automatically. Fields with no `Eq` semantics (`Array`, `Map`, host handles) make the ADT non-derivable. The built-in `Ordering` ADT (`Less`, `Equal`, `Greater`) is available for `Ord`'s `compare` operation.
+> **Status: Implemented.** Tracked in [#60](https://github.com/aallan/vera/issues/60). Four built-in abilities (`Eq`, `Ord`, `Hash`, `Show`) are fully compilable. Supported types: Int, Nat, Bool, Float64, String, Byte, Unit. `Eq` derivation is **structural** ([#773](https://github.com/aallan/vera/issues/773)): a simple enum, or an ADT every field of which is itself `Eq` — an `Eq` primitive (`String` included, compared by content) or a nested `Eq` ADT (compared recursively, including recursive types) — supports `Eq` automatically. Fields with no `Eq` semantics (`Array`, `Map`, host handles) make the ADT non-derivable. `Show` and `Hash` derive **structurally** for composite types too ([#911](https://github.com/aallan/vera/issues/911)) — ADT, `Tuple`, `Option`, `Result`, and `Array`, recursing into each field/element by its own `show`/`hash` (see §9.8.2) — including directly-recursive ADTs (`List<T>`, `Tree<T>`), which lower to a generated self-calling helper ([#924](https://github.com/aallan/vera/issues/924)). The built-in `Ordering` ADT (`Less`, `Equal`, `Greater`) is available for `Ord`'s `compare` operation.
 
 Vera supports restricted abilities for constraining type variables in generic functions. To support practical generic programming — sorting, hashing, serialisation — type variables need constraints. Vera adopts restricted abilities rather than full typeclasses:
 
@@ -2451,7 +2451,7 @@ public data Ordering {
 }
 ```
 
-Satisfied by: Int, Nat, Bool, Float64, String, Byte.
+Satisfied by: Int, Nat, Float64, Byte, String — exactly the orderable types on which the ordering operators `<` / `>` / `<=` / `>=` are defined (Chapter 4, Section 4.5). `compare` is the ability spelling of the three-way if-chain `a < b ? Less : (a == b ? Equal : Greater)` (Chapter 6, Section 6.4), so it shares that domain. A user-defined ADT is **not** Ord-derivable (unlike `Eq` / `Hash` / `Show`, which derive structurally for composite types) — it has no defined total order, and neither does `Bool`. `compare` on a non-orderable operand (any ADT, or `Bool`) is rejected at check time with E242, mirroring the E143 rejection of a direct `<` on the same operand ([#921](https://github.com/aallan/vera/issues/921)).
 
 **Hash\<T\>** — Hashing.
 
@@ -2463,7 +2463,7 @@ ability Hash<T> {
 
 Operation: `hash(@T -> @Int)`. Returns a deterministic integer hash of the value.
 
-Satisfied by: Int, Nat, Bool, Float64, String, Byte, Unit.
+Satisfied by: Int, Nat, Bool, Float64, String, Byte, Unit, and composite types — ADTs, `Tuple`, `Option`, `Result`, and `Array` — whose fields/elements are themselves `Hash`-satisfying (structural auto-derivation, §9.8.2).
 
 **Show\<T\>** — String representation.
 
@@ -2475,7 +2475,7 @@ ability Show<T> {
 
 Operation: `show(@T -> @String)`. Returns a human-readable string representation.
 
-Satisfied by: Int, Nat, Bool, Float64, String, Byte, Unit.
+Satisfied by: Int, Nat, Bool, Float64, String, Byte, Unit, and composite types — ADTs, `Tuple`, `Option`, `Result`, and `Array` — whose fields/elements are themselves `Show`-satisfying (structural auto-derivation, §9.8.2).
 
 `show(@Float64)` is backed by `float_to_string` and is therefore **total** over all `Float64` values: the non-finite classes render as `"nan"`, `"inf"`, and `"-inf"` (§9.6.11, [#857](https://github.com/aallan/vera/issues/857)), with the same spellings in both the Python and browser runtimes.
 
@@ -2485,7 +2485,26 @@ For `Eq`, ADTs are automatically derivable when all constructor fields are Eq-sa
 
 Simple enums (ADTs with only nullary constructors) always satisfy `Eq` — equality reduces to tag comparison.
 
-ADTs with `String` fields derive `Eq` by content, and nested-ADT fields recurse into the nested ADT's own equality — including recursive and mutually-recursive types ([#773](https://github.com/aallan/vera/issues/773)). `Array`, `Map`, host-handle, and tuple fields remain non-derivable: an `Eq` constraint over (or a direct `==` on) such an ADT is rejected with E613.
+ADTs with `String` fields derive `Eq` by content, and nested-ADT fields recurse into the nested ADT's own equality — including recursive and mutually-recursive types ([#773](https://github.com/aallan/vera/issues/773)). `Array`, `Map`, `Set`, host-handle, function, and tuple fields remain non-derivable. `==` / `!=` (and the `eq` ability operation) is the surface spelling of `Eq`, so a non-Eq-derivable operand — a function value, an `Array` / `Map` / `Set` / `Tuple`, or a composite carrying such a field — is rejected at check time with E243 ([#928](https://github.com/aallan/vera/issues/928)), mirroring the E242 rejection of `compare` / ordering on a non-orderable operand. An `Eq` constraint over a non-derivable type on the generic path is likewise rejected, with E613 at monomorphization.
+
+`Show` and `Hash` also derive **structurally** for composite types ([#911](https://github.com/aallan/vera/issues/911)) — user ADTs, `Tuple`, `Option`, `Result`, and `Array` — recursing into each field/element by its own `show`/`hash`.
+
+`show` renders a composite value using its constructor syntax:
+
+| Type | Rendering |
+|------|-----------|
+| ADT nullary constructor | `Ctor` (bare name) |
+| ADT with fields | `Ctor(f0, f1, …)` — each field by its own `show` |
+| `Tuple` | `(a, b, …)` |
+| `Option` | `Some(x)` / `None` |
+| `Result` | `Ok(x)` / `Err(e)` |
+| `Array` | `[e0, e1, …]` (empty: `[]`) |
+
+Fields are separated by `, ` (comma + space). A `String` field renders as its raw content (no surrounding quotes), consistent with `show` on a `String` being the identity. Nesting recurses to arbitrary finite depth (ADT-of-ADT, `Option`-of-`Tuple`, `Array`-of-composite).
+
+`hash` on a composite is deterministic: it seeds with the constructor tag (or, for an `Array`, its length) and folds each field/element hash in FNV-style, so distinct constructors and distinct field values hash differently.
+
+A directly self-referential recursive ADT (`List<T>`, `Tree<T>`) `show`/`hash`es via a **generated self-calling helper function** ([#924](https://github.com/aallan/vera/issues/924)) — one `$show_<type>` / `$hash_<type>` per recursive type, recursing over the finite value at run time (mirroring how structural `Eq` derives one `$eq_<type>` helper). A composite whose element/field types still cannot be resolved at the `show`/`hash` site — e.g. a *generic* mutually-recursive ADT whose type argument is buried in a nested generic field (`Grove(Rose<T>, Forest<T>)`), the same type-argument-recovery limitation `Eq` shares — is skipped rather than mis-rendered.
 
 ### 9.8.3 Compilation Strategy
 
@@ -2493,7 +2512,7 @@ Ability operations are compiled via two mechanisms:
 
 1. **AST-level rewriting** (Pass 1.6): `eq(a, b)` is rewritten to `a == b`, and `compare(a, b)` is rewritten to `if a < b then Less else if a == b then Equal else Greater`. This reuses existing comparison codegen.
 
-2. **WASM-level dispatch**: `show(x)` and `hash(x)` are dispatched at WASM generation time based on the inferred type of the argument, routing to type-specific implementations (e.g., `to_string` for Int, FNV-1a for String hashing).
+2. **WASM-level dispatch**: `show(x)` and `hash(x)` are dispatched at WASM generation time based on the inferred type of the argument, routing to type-specific implementations (e.g., `to_string` for Int, FNV-1a for String hashing). For a composite argument the dispatch recurses over the value's layout — tag at offset 0, then each field at its concrete offset — rendering / folding each field by its own `show`/`hash`, the same structural traversal `Eq` uses.
 
 ## 9.9 Limitations
 

@@ -7,7 +7,7 @@ types across modules (C7b) or enforce visibility (C7c).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from vera import ast
@@ -23,12 +23,25 @@ from vera.transform import transform
 
 @dataclass(frozen=True)
 class ResolvedModule:
-    """A resolved and parsed module."""
+    """A resolved and parsed module.
+
+    ``direct`` marks whether the top-level program imports this module
+    directly (``import mid;``) versus only reaches it transitively through
+    another module's imports (``main`` imports ``mid`` which imports
+    ``base`` → ``base`` is transitive-only).  All reachable modules are
+    returned so the importer's flat WASM module can compile every body it
+    calls into (#890), but per spec §8.6.4 a transitive module's public
+    declarations are *not* visible to the original importer — only the
+    direct imports are injected into the importer's callable namespace.
+    Defaults to ``True`` so hand-built ``ResolvedModule`` fixtures (which
+    model a direct import) keep their existing meaning.
+    """
 
     path: tuple[str, ...]  # e.g., ("vera", "math")
     file_path: Path  # absolute path to the .vera file
     program: ast.Program  # parsed + transformed AST
     source: str  # raw source text
+    direct: bool = True  # imported by the top-level program (vs transitive)
 
 
 @dataclass
@@ -67,16 +80,51 @@ class ModuleResolver:
         program: ast.Program,
         file: Path,
     ) -> list[ResolvedModule]:
-        """Resolve all imports in a program.
+        """Resolve all imports in a program, transitively (#890).
 
-        Returns a list of successfully resolved modules.
-        Errors are accumulated in ``self.errors``.
+        Returns every module reachable through the import graph, not just
+        the top-level program's direct imports.  A module named in
+        ``program.imports`` is tagged ``direct=True``; a module reached only
+        through another module's imports is ``direct=False``.  Both are
+        returned so the importer's flat WASM module can compile every body it
+        transitively calls into — but consumers inject only the DIRECT
+        imports into the importer's callable namespace (spec §8.6.4:
+        transitive declarations are not visible to the original importer).
+
+        Each file is resolved (parsed) at most once via the cache.  Errors
+        are accumulated in ``self.errors``.
         """
-        resolved: list[ResolvedModule] = []
+        # Direct imports first — resolving each also recursively resolves and
+        # caches its own imports (``_resolve_single``), so after this loop the
+        # cache holds the full reachable closure.
+        direct_paths: set[tuple[str, ...]] = set()
         for imp in program.imports:
             mod = self._resolve_single(imp, file)
             if mod is not None:
-                resolved.append(mod)
+                direct_paths.add(mod.path)
+
+        # Assemble the closure from the cache.  Emit direct imports (in source
+        # order) first, then the transitive-only modules, deduplicated by path
+        # so a diamond (two importers of one base) yields the base once.
+        resolved: list[ResolvedModule] = []
+        seen: set[tuple[str, ...]] = set()
+
+        def _emit(mod: ResolvedModule, *, direct: bool) -> None:
+            if mod.path in seen:
+                return
+            seen.add(mod.path)
+            # ``mod`` is cached with ``direct=True`` (the dataclass default);
+            # re-tag it so a transitively-reached module is not treated as a
+            # direct import by the importer's namespace injection.
+            resolved.append(mod if direct else replace(mod, direct=False))
+
+        for imp in program.imports:
+            mod = self._cache.get(imp.path)
+            if mod is not None:
+                _emit(mod, direct=True)
+        for path, mod in self._cache.items():
+            _emit(mod, direct=path in direct_paths)
+
         return resolved
 
     # -----------------------------------------------------------------

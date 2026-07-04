@@ -198,6 +198,30 @@ def base_type(ty: Type) -> Type:
     return ty
 
 
+def erases_to_unit(ty: Type) -> bool:
+    """True if ``ty`` has NO WASM representation — it erases to no runtime local.
+
+    Mirrors codegen's ``_type_expr_to_wasm_type`` (``vera/codegen/core.py``),
+    which returns ``None`` for ``Unit`` and recurses *transparently* through
+    ``Future<T>`` (#841: a ``Future`` is representation-identical to its
+    payload) and refinement wrappers.  ``Future<Unit>`` therefore erases to
+    nothing exactly like bare ``Unit`` — reading such a value via a ``@T.n``
+    slot lowers to a ``local.get`` on a local that does not exist (the
+    dangling-slot codegen invariant behind E206 / E699).  Every other ADT is a
+    heap pointer (i32), so it is NOT zero-size: ``Option<Unit>`` (tag + pointer)
+    and ``Future<Int>`` (i32) both erase to a real local.  ``Future`` is the
+    only transparent ADT wrapper, so it is the only recursion here.  Keep in
+    sync with ``_type_expr_to_wasm_type`` (#939 review found the two had drifted:
+    the discriminator keyed on bare ``Unit`` only, missing ``Future<Unit>``).
+    """
+    ty = base_type(ty)  # strip RefinedType wrappers (matches codegen's recurse)
+    if ty == UNIT:
+        return True
+    if isinstance(ty, AdtType) and ty.name == "Future" and len(ty.type_args) == 1:
+        return erases_to_unit(ty.type_args[0])
+    return False
+
+
 def is_subtype(sub: Type, sup: Type) -> bool:
     """Check if sub <: sup under the subtyping rules.
 
@@ -390,6 +414,93 @@ def contains_typevar(ty: Type) -> bool:
     if isinstance(ty, RefinedType):
         return contains_typevar(ty.base)
     return False
+
+
+def _is_fresh_typevar(ty: Type) -> bool:
+    """A fresh, unresolved inference placeholder (`A$1` from _fresh_typevar).
+
+    Distinct from a genuine callee forall var (`T`, no `$`): a fresh var is a
+    "don't-know-yet" hole that a more-determined sibling binding should fill.
+    """
+    return isinstance(ty, TypeVar) and "$" in ty.name
+
+
+def merge_inferred_types(
+    a: Type, b: Type, nested: bool = False,
+) -> tuple[Type, bool]:
+    """Merge two candidate inferred types for one type variable (#898).
+
+    When a generic's type variable is bound by several constructor-literal
+    arguments — a sparse multi-parameter ADT where each argument pins a
+    *different* type parameter — the per-argument inferred types share a
+    parameterised head but disagree on which positions are known:
+
+        Res<?, Int>  ⊔  Res<String, ?>  =  Res<String, Int>
+
+    (`?` is a fresh inference placeholder, `A$1`).  Returns ``(merged, conflict)``:
+
+    - A fresh placeholder on either side yields to the other side (the
+      more-determined binding wins), never a conflict.
+    - Two same-named ``AdtType`` heads merge position-wise, recursively; a
+      per-position conflict propagates.
+    - Two ``Nat``/``Int`` primitives merge to their formal LUB (``Int``) — the
+      only concrete-primitive subtyping relation — and are not a conflict.
+    - Structurally-equal types merge to themselves.
+
+    ``conflict`` is reported ONLY for an irreconcilable mismatch that occurs at
+    a **nested type-argument position** of a shared parameterised head (the
+    sparse-ADT case the merge exists for, `MkOk("x")` vs `MkOk(5)` → the `A`
+    position disagrees `String` vs `Int`).  A **top-level** mismatch between two
+    otherwise-unrelated candidate bindings (e.g. `set_add(@Set<Nat>.0, "oops")`
+    binds `T` to `Nat` from the container and `String` from the element) is NOT
+    a merge scenario — it is an ordinary argument-type mismatch — so the first
+    binding is kept and ``conflict`` stays ``False``, letting the normal
+    subtype check emit the precise "expected Nat" `E202`.  ``nested`` tracks
+    whether we are already inside such a structural merge.
+    """
+    # A fresh placeholder is a hole — take the other (more-determined) side.
+    if _is_fresh_typevar(a):
+        return (b, False)
+    if _is_fresh_typevar(b):
+        return (a, False)
+    # Already structurally identical — nothing to reconcile.
+    if types_equal(a, b):
+        return (a, False)
+    # Same parameterised head — merge each type-argument position.  This is the
+    # ONLY case that improves on first-argument-wins: two sparse constructor
+    # arguments each pinning a different type parameter (`Res<?, Int>` and
+    # `Res<String, ?>`).  Positions recurse as ``nested`` so a real disagreement
+    # there is an E205 conflict.
+    if (isinstance(a, AdtType) and isinstance(b, AdtType)
+            and a.name == b.name and len(a.type_args) == len(b.type_args)):
+        merged_args: list[Type] = []
+        any_conflict = False
+        for pa, pb in zip(a.type_args, b.type_args):
+            m, c = merge_inferred_types(pa, pb, nested=True)
+            merged_args.append(m)
+            any_conflict = any_conflict or c
+        return (AdtType(a.name, tuple(merged_args)), any_conflict)
+    # A refinement merges as its base (subtyping treats it as the base).
+    if isinstance(a, RefinedType) or isinstance(b, RefinedType):
+        base_a = a.base if isinstance(a, RefinedType) else a
+        base_b = b.base if isinstance(b, RefinedType) else b
+        m, c = merge_inferred_types(base_a, base_b, nested=nested)
+        return (m, c)
+    # Nat/Int — the sole concrete-primitive subtyping pair — only when merging a
+    # NESTED type-argument position (`Res<Nat, ?>` ⊔ `Res<Int, ?>` → the LUB
+    # `Int`).  At the TOP LEVEL, keep the first binding (below) so an existing
+    # `@Nat`↔`@Int` narrowing obligation on a sibling argument (#747:
+    # `pick(@Nat.0, @Int.0)`) is preserved exactly as under first-argument-wins.
+    if (nested
+            and isinstance(a, PrimitiveType) and isinstance(b, PrimitiveType)
+            and {a.name, b.name} == {"Nat", "Int"}):
+        return (PrimitiveType("Int"), False)
+    # Anything else: keep the first binding — identical to the pre-#898
+    # first-argument-wins behaviour.  A TOP-LEVEL mismatch is an ordinary
+    # argument-type error the caller's subtype check reports precisely (no
+    # spurious E205); only a NESTED disagreement inside a shared parameterised
+    # head is a genuine conflict.
+    return (a, nested)
 
 
 def substitute(ty: Type, mapping: dict[str, Type]) -> Type:

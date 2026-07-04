@@ -7,6 +7,7 @@ postcondition checks with informative failure messages.
 from __future__ import annotations
 
 from vera import ast
+from vera.monomorphize import mangle_type_name
 from vera.skip import CodegenSkip
 from vera.wasm import WasmContext, WasmSlotEnv
 from vera.wasm.inference import substitute_type_vars
@@ -107,12 +108,19 @@ class ContractsMixin:
                         error_code="E618",
                     )
                     return None
-                if (isinstance(base_node, ast.NamedType)
-                        and base_node.name == "Unit"):
-                    # `@Unit` is zero-size / erased: there is no value to load
-                    # into a boundary predicate check, so emit NO guard (the
-                    # verifier records such a refinement `tier3_unguarded`
-                    # rather than claiming a runtime check; CR db24433).
+                if self._type_expr_to_wasm_type(base_node) is None:
+                    # A zero-size / erased base — `@Unit`, or a `Future`
+                    # transparently wrapping one (`Future<Unit>`; #841/#943):
+                    # there is no WASM local to load into a boundary predicate
+                    # check, so emit NO guard (the verifier records such a
+                    # refinement `tier3_unguarded` rather than claiming a runtime
+                    # check; CR db24433).  Keyed on codegen's OWN erasure
+                    # (`_type_expr_to_wasm_type` returns None iff a type has no
+                    # WASM representation), so the guard-skip set is exactly the
+                    # set with no runtime local — #943 review found the literal
+                    # `base_node.name == "Unit"` keying missed `Future<Unit>`,
+                    # which erases identically and raised a raw `ValueError` at
+                    # the `wt is None` invariant in `_compile_fn` below.
                     return None
                 if (isinstance(base_node, ast.NamedType)
                         and base_node.name == "Nat"):
@@ -734,8 +742,10 @@ class ContractsMixin:
                 continue
             # Allocate a temp local for the snapshot
             local_idx = ctx.alloc_local(wasm_t)
-            # Emit: call $vera.state_get_<Type> ; local.set <idx>
-            instrs.append(f"call $vera.state_get_{type_name}")
+            # Emit: call $vera.state_get_<Type> ; local.set <idx>.
+            # #914: mangle so a composite State<T> old()-read matches the
+            # mangled import identifier emitted by `assembly.py`.
+            instrs.append(f"call $vera.state_get_{mangle_type_name(type_name)}")
             instrs.append(f"local.set {local_idx}")
             old_locals[type_name] = local_idx
 

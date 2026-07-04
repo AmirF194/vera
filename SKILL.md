@@ -60,6 +60,8 @@ vera run file.vera --fn f -- 3.14       # Call function f with Float64 argument
 vera run file.vera --fn f -- true       # Call function f with Bool argument
 vera run file.vera --fn f -- "hello"    # Call function f with String argument
 vera run --json file.vera         # Run with JSON output
+vera serve file.vera              # Serve handle(Request -> Response) over HTTP (default :8000)
+vera serve --port 8080 file.vera  # Serve on a specific port
 vera test file.vera               # Contract-driven testing via Z3 + WASM
 vera test --json file.vera        # Test with JSON output
 vera test --trials 50 file.vera   # Limit trials per function (default 100)
@@ -1815,10 +1817,10 @@ private forall<T where Eq<T>> fn are_equal(@T, @T -> @Bool)
 
 Four built-in abilities are available — no declarations needed:
 
-- **`Eq<T>`** — `eq(x, y)` returns `@Bool`. Satisfied by: Int, Nat, Bool, Float64, String, Byte, Unit, and simple enum ADTs.
-- **`Ord<T>`** — `compare(x, y)` returns `@Ordering` (`Less`, `Equal`, `Greater`). Satisfied by: Int, Nat, Bool, Float64, String, Byte.
-- **`Hash<T>`** — `hash(x)` returns `@Int`. Satisfied by: Int, Nat, Bool, Float64, String, Byte, Unit.
-- **`Show<T>`** — `show(x)` returns `@String`. Satisfied by: Int, Nat, Bool, Float64, String, Byte, Unit.
+- **`Eq<T>`** — `eq(x, y)` returns `@Bool`. Satisfied by: Int, Nat, Bool, Float64, String, Byte, Unit, and ADTs (including `Option` / `Result`, recursive, nested-generic, and mutually-recursive) whose fields are themselves `Eq` (structural derivation). Unlike `Hash`/`Show`, `Tuple`, `Array`, `Map`, and `Set` are **not** Eq-derivable — a non-Eq `==` / `eq` is rejected at check with E243.
+- **`Ord<T>`** — `compare(x, y)` returns `@Ordering` (`Less`, `Equal`, `Greater`). Satisfied by: Int, Nat, Float64, Byte, String — exactly the orderable types (the `<`/`>`/`<=`/`>=` domain). A user ADT is **not** Ord-derivable, and neither is `Bool`; `compare` on a non-orderable operand is rejected with E242 (mirroring E143 on a direct `<`).
+- **`Hash<T>`** — `hash(x)` returns `@Int`. Satisfied by: Int, Nat, Bool, Float64, String, Byte, Unit, and composite types (ADT, Tuple, Option, Result, Array) whose fields/elements are themselves `Hash` (structural derivation).
+- **`Show<T>`** — `show(x)` returns `@String`. Satisfied by: Int, Nat, Bool, Float64, String, Byte, Unit, and composite types (ADT, Tuple, Option, Result, Array) whose fields/elements are themselves `Show`; renders `Ctor(f0, f1, …)` / `(a, b)` / `Some(x)` / `Ok(x)` / `[e0, e1, …]`.
 
 The `Ordering` type is a built-in ADT with three constructors: `Less`, `Equal`, `Greater`. Use it with pattern matching:
 

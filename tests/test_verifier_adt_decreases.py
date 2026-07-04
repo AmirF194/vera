@@ -521,8 +521,19 @@ private fn sum(@List<Int> -> @Int)
         # range postcondition proves statically (+4 T1) while fetch_both's
         # effectful postcondition falls to runtime (+2 T3), +6 total:
         # 277/92/369 -> 281/94/375.
+        #
+        # #882: a call-site precondition over an argument (or a precondition)
+        # outside the decidable fragment previously produced NO obligation —
+        # a silent static-coverage gap.  It now demotes LOUDLY to a Tier-3
+        # call_pre obligation (E522).  Three example call sites — `http::main`
+        # -> fetch_title, `inference::main` -> classify_sentiment, and
+        # `async_http_fanout::main` -> fetch_both — each call a helper whose
+        # `requires(string_length(...) > 0)` is undecidable, so each gains one
+        # demoted call_pre: +3 T3.  These demotions bump `tier3_runtime` but
+        # not `total` (call_pre obligations never entered `total`, matching the
+        # E501-violation convention): 281/94/375 -> 281/97/375.
         assert t1 == 281, f"Expected 281 T1, got {t1}"
-        assert t3 == 94, f"Expected 94 T3, got {t3}"
+        assert t3 == 97, f"Expected 97 T3, got {t3}"
         assert total == 375, f"Expected 375 total, got {total}"
         assert t3u == 0, f"Expected 0 tier3_unguarded, got {t3u}"
 

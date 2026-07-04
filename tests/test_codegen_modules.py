@@ -6,9 +6,12 @@ via flattening.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import wasmtime
 
+from vera import ast
 from vera.codegen import (
     CompileResult,
     compile,
@@ -17,6 +20,7 @@ from vera.codegen import (
 from vera.parser import parse_file
 from vera.resolver import ResolvedModule
 from vera.transform import transform
+from vera.monomorphize import resolve_fn_type_alias
 
 
 # =====================================================================
@@ -740,6 +744,535 @@ public fn main(@Unit -> @Unit)
 
 
 # =====================================================================
+# #774 — cross-module generic monomorphization
+# =====================================================================
+
+
+class TestCrossModuleGenerics774:
+    """`#774` — an imported generic instantiated only by the importer must be
+    monomorphized by the importer (its clone emitted into the flat module) and
+    verified in lockstep, for both the bare and module-qualified call forms.
+
+    Pre-fix: the importer's mono discovery built from its own
+    ``program.declarations`` (the imported generic isn't there) and the defining
+    module only monomorphized its own instantiations, so the clone was emitted
+    NOWHERE — ``vera check`` passed but ``vera run`` failed WASM validation at
+    ``call $gid`` (both call forms).  The #814 asymmetric variant (a generic
+    shadowed by a local AND qualified-called) false-Tier-1'd instead: verify
+    resolved the module generic's contract while codegen fell back to the local
+    shadow.
+    """
+
+    # Reuse the sibling class's module-compilation helpers.  Wrapped in
+    # ``staticmethod(...)`` so ``self._resolved(path, src)`` doesn't bind ``self``
+    # as an extra positional argument (the underlying methods are static/class
+    # methods of ``TestCrossModuleCodegen`` and take no ``self``).
+    _resolved = staticmethod(TestCrossModuleCodegen._resolved)
+    _compile_mod = staticmethod(TestCrossModuleCodegen._compile_mod)
+    _run_mod = staticmethod(TestCrossModuleCodegen._run_mod)
+
+    GEN_MODULE = """\
+public forall<T> fn gid(@T -> @T)
+  requires(true) ensures(@T.result == @T.0) effects(pure)
+{ @T.0 }
+"""
+
+    def test_imported_generic_bare_call_executes(self) -> None:
+        """`gid(42)` (bare) runs, returning 42 — the importer emits gid$Int.
+
+        Pre-fix this failed WASM validation at ``call $gid`` (no clone).  The
+        observable output (42) cannot coincide with the phantom-var default
+        (Bool/i32), so a discovery miss can't masquerade as a pass.
+        """
+        mod = self._resolved(("genmod",), self.GEN_MODULE)
+        val = self._run_mod("""\
+import genmod;
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ gid(42) }
+""", [mod], fn="main")
+        assert val == 42
+
+    def test_imported_generic_qualified_call_executes(self) -> None:
+        """`genmod::gid(42)` (qualified ModuleCall) runs, returning 42.
+
+        The qualified form is an ``ast.ModuleCall`` the shared discovery now
+        walks; it desugars to the bare mono target at codegen.  Pre-fix it
+        crashed identically at ``call $gid``.
+        """
+        mod = self._resolved(("genmod",), self.GEN_MODULE)
+        val = self._run_mod("""\
+import genmod;
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ genmod::gid(42) }
+""", [mod], fn="main")
+        assert val == 42
+
+    def test_imported_generic_two_instantiations_execute(self) -> None:
+        """Two distinct instantiations (`gid<Int>`, `gid<Bool>`) both emit and
+        run — the importer's worklist covers each concrete type it uses."""
+        mod = self._resolved(("genmod",), self.GEN_MODULE)
+        # gid(true) → true (1); if it wrongly shared gid<Int>'s i64 clone the
+        # bool result would still read 1 here, so also exercise the Int arm to
+        # pin that both symbols exist (a missing gid$Bool fails WASM validation).
+        val = self._run_mod("""\
+import genmod;
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  let @Bool = gid(true);
+  gid(41) + 1
+}
+""", [mod], fn="main")
+        assert val == 42
+
+    def test_imported_generic_verify_and_run_agree(self) -> None:
+        """The importer's ``verify`` and ``run`` agree on the imported generic's
+        contract — no false Tier-1.  ``bad_id`` has a real ``ensures`` and the
+        emitted clone carries the runtime postcondition guard.
+        """
+        import tempfile
+        from pathlib import Path
+
+        from vera.verifier import verify
+
+        mod = self._resolved(("lib",), self.GEN_MODULE.replace("gid", "bad_id"))
+        main_src = """\
+import lib;
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ bad_id(42) }
+"""
+        assert self._run_mod(main_src, [mod], fn="main") == 42
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".vera", delete=False, encoding="utf-8",
+        ) as f:
+            f.write(main_src)
+            f.flush()
+            path = f.name
+        try:
+            prog = transform(parse_file(path))
+            vres = verify(prog, main_src, resolved_modules=[mod])
+            errors = [d for d in vres.diagnostics if d.severity == "error"]
+            assert errors == [], [e.description for e in errors]
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+    def test_shadowed_imported_generic_qualified_call_no_false_tier1(
+        self,
+    ) -> None:
+        """`#814` asymmetric variant: an imported generic (`gen`, identity)
+        shadowed by a LOCAL non-generic `gen` (adds 100) AND module-qualified
+        called must run the MODULE generic — matching what verify proves — not
+        the local shadow.
+
+        Pre-fix: verify proved ``m::gen(5) == 5`` via the module's contract while
+        codegen fell back to the local shadow (`5 + 100 == 105`) — a false
+        Tier-1 (verify clean, runtime violates).  The local's ``+ 100`` (not
+        identity) makes the shadow's wrong answer (105) impossible to mistake for
+        the module generic's (5), and a bare ``gen(5)`` must STILL reach the
+        local shadow (§8.5.2), proving the qualified fix didn't hijack the bare
+        namespace.
+        """
+        import tempfile
+        from pathlib import Path
+
+        from vera.verifier import verify
+
+        gen_mod = """\
+public forall<T> fn gen(@T -> @T)
+  requires(true) ensures(@T.result == @T.0) effects(pure)
+{ @T.0 }
+"""
+        mod = self._resolved(("g",), gen_mod)
+        main_src = """\
+import g;
+private fn gen(@Int -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ @Int.0 + 100 }
+public fn qual_probe(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ g::gen(5) }
+public fn bare_probe(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ gen(5) }
+"""
+        # Codegen: qualified reaches the module identity generic (5); bare stays
+        # on the local shadow (105).
+        assert self._run_mod(main_src, [mod], fn="qual_probe") == 5
+        assert self._run_mod(main_src, [mod], fn="bare_probe") == 105
+
+        # Verifier: proving `qual_probe`'s value through the module generic's
+        # contract must be consistent with the run (no false Tier-1).
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".vera", delete=False, encoding="utf-8",
+        ) as f:
+            f.write(main_src)
+            f.flush()
+            path = f.name
+        try:
+            prog = transform(parse_file(path))
+            vres = verify(prog, main_src, resolved_modules=[mod])
+            errors = [d for d in vres.diagnostics if d.severity == "error"]
+            assert errors == [], [e.description for e in errors]
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+    def test_shadowed_generic_calling_another_generic_transitive(self) -> None:
+        """`#774` review (CR 3518737014): a SHADOWED imported generic whose body
+        calls ANOTHER generic must get that transitive clone emitted too.
+
+        `outer<T>` (identity via `inner(@T.0)`) is shadowed by a local
+        non-generic `outer` (adds 100); `inner<T>` is an unshadowed sibling.
+        `g::outer(7)` must run the module generic — `inner(7) == 7` — so the
+        transitive `inner$Int` clone MUST be emitted.  Pre-fix the shadowed path
+        appended `mod$g$outer$Int` without scanning its body, so `inner$Int` was
+        never emitted and the run failed WASM validation at
+        `unknown func $mod$g$outer$Int` (the clone body couldn't compile its
+        missing `inner$Int` call).  A bare `outer(7)` must still hit the local
+        shadow (107), proving the qualified transitive fix didn't leak.
+        """
+        gen_mod = """\
+module g;
+public forall<T> fn inner(@T -> @T)
+  requires(true) ensures(@T.result == @T.0) effects(pure)
+{ @T.0 }
+public forall<T> fn outer(@T -> @T)
+  requires(true) ensures(@T.result == @T.0) effects(pure)
+{ inner(@T.0) }
+"""
+        mod = self._resolved(("g",), gen_mod)
+        main_src = """\
+import g;
+private fn outer(@Int -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ @Int.0 + 100 }
+public fn qual_probe(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ g::outer(7) }
+public fn bare_probe(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ outer(7) }
+"""
+        assert self._run_mod(main_src, [mod], fn="qual_probe") == 7
+        assert self._run_mod(main_src, [mod], fn="bare_probe") == 107
+
+    def test_shadowed_generic_deep_transitive_chain(self) -> None:
+        """A three-deep transitive chain through a shadowed generic
+        (`outer` → `inner` → `helper`, all identity) resolves end-to-end: the
+        closure must chase past the first transitive hop.  `g::outer(9) == 9`.
+        """
+        gen_mod = """\
+module g;
+public forall<T> fn helper(@T -> @T)
+  requires(true) ensures(@T.result == @T.0) effects(pure)
+{ @T.0 }
+public forall<T> fn inner(@T -> @T)
+  requires(true) ensures(@T.result == @T.0) effects(pure)
+{ helper(@T.0) }
+public forall<T> fn outer(@T -> @T)
+  requires(true) ensures(@T.result == @T.0) effects(pure)
+{ inner(@T.0) }
+"""
+        mod = self._resolved(("g",), gen_mod)
+        main_src = """\
+import g;
+private fn outer(@Int -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ @Int.0 + 100 }
+public fn probe(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ g::outer(9) }
+"""
+        assert self._run_mod(main_src, [mod], fn="probe") == 9
+
+    def test_shadowed_generic_calling_shadowed_sibling(self) -> None:
+        """When a shadowed generic's body calls a SAME-MODULE shadowed sibling,
+        the intra-module call must reach the sibling's `mod$…` clone, not the
+        importer's local shadow of that name.
+
+        Both `outer` and `inner` are shadowed by locals (adding 100 / 200).
+        `g::outer(9)` runs the module `outer`, whose body calls the module
+        `inner` (identity) — so the result is `9`, NOT `9 + 200 == 209` (the
+        local `inner` shadow).  Pre-fix the clone body's bare `inner` resolved to
+        the local shadow and the postcondition `result == arg` failed at run.
+        """
+        gen_mod = """\
+module g;
+public forall<T> fn inner(@T -> @T)
+  requires(true) ensures(@T.result == @T.0) effects(pure)
+{ @T.0 }
+public forall<T> fn outer(@T -> @T)
+  requires(true) ensures(@T.result == @T.0) effects(pure)
+{ inner(@T.0) }
+"""
+        mod = self._resolved(("g",), gen_mod)
+        main_src = """\
+import g;
+private fn outer(@Int -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ @Int.0 + 100 }
+private fn inner(@Int -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ @Int.0 + 200 }
+public fn probe(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ g::outer(9) }
+"""
+        assert self._run_mod(main_src, [mod], fn="probe") == 9
+
+    def test_shadowed_generic_pair_result_in_statement_position(self) -> None:
+        """`#774` review (CR 3518737022): the statement-position result-shape
+        predicates (`_is_void_expr` / `_is_pair_result_expr`) must resolve a
+        shadowed-generic `m::gen(...)` to its per-instantiation clone, the same
+        way the desugar does.
+
+        `mkstr<T>` (shadowed) returns `@String` (an i32_pair — two stack values);
+        its LOCAL shadow returns `@Int` (one).  In statement position
+        (`g::mkstr(5); 42`) the result must be dropped as a PAIR.  Pre-fix the
+        predicate resolved the ModuleCall via `_module_qualified_targets` only —
+        seeing the local `@Int` shadow — so it dropped one value, leaving one on
+        the stack: a WASM `type mismatch: values remaining on stack` at run on a
+        check-green program.  Runs to `42`.
+        """
+        gen_mod = """\
+module g;
+public forall<T> fn mkstr(@T -> @String)
+  requires(true) ensures(true) effects(pure)
+{ "hi" }
+"""
+        mod = self._resolved(("g",), gen_mod)
+        main_src = """\
+import g;
+private fn mkstr(@Int -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ @Int.0 }
+public fn probe(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  g::mkstr(5);
+  42
+}
+"""
+        assert self._run_mod(main_src, [mod], fn="probe") == 42
+
+    def test_shadowed_generic_scalar_result_with_pair_local_shadow(
+        self,
+    ) -> None:
+        """The dual of the pair case: a shadowed generic returning a SCALAR whose
+        local shadow returns a pair.  The predicate must resolve to the clone's
+        scalar shape (drop ONE), not the local's pair (drop two) — else a value
+        is under-dropped.  `g::f(5); 42` runs to `42`.
+        """
+        gen_mod = """\
+module g;
+public forall<T> fn f(@T -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ 1 }
+"""
+        mod = self._resolved(("g",), gen_mod)
+        main_src = """\
+import g;
+private fn f(@Int -> @String)
+  requires(true) ensures(true) effects(pure)
+{ "x" }
+public fn probe(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  g::f(5);
+  42
+}
+"""
+        assert self._run_mod(main_src, [mod], fn="probe") == 42
+
+    # -- #774 review (CR 3519156263): the imported-generic false Tier-1 --
+
+    @pytest.mark.parametrize("local_shadow", [
+        "",  # unshadowed imported generic
+        (  # a same-named LOCAL GENERIC shadows it (the unhandled twin)
+            "private forall<T> fn tag(@T -> @Int)\n"
+            "  requires(true) ensures(@Int.result == 0) effects(pure)\n"
+            "{ 0 }\n\n"
+        ),
+        (  # a same-named LOCAL NON-generic shadows it (#814 family)
+            "private fn tag(@Int -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ 100 }\n\n"
+        ),
+    ], ids=["unshadowed", "generic_shadow", "nongeneric_shadow"])
+    def test_imported_generic_with_lying_contract_is_caught_at_verify(
+        self, local_shadow: str,
+    ) -> None:
+        """A cross-module generic whose clone RUNS in the importer must have its
+        MODULE contract verified by the importer — else a LYING module contract
+        is a false Tier-1 (verify clean, run violates the clone's postcondition).
+
+        The module `tag<T>` returns `0` but claims `ensures(@Int.result == 9)`.
+        The module itself never instantiates `tag`, so it only Tier-3s the
+        uninstantiated generic — the importer is the only site that instantiates
+        it.  Pre-fix, verify passed clean (`ok: True`, all Tier-1) while `vera
+        run` trapped the clone's postcondition; the fix verifies the imported
+        generic's clone at the importer's instantiation, turning it into an
+        honest E500 at verify time.  Covers all three shadow shapes: unshadowed,
+        a same-named local GENERIC shadow (the unhandled twin that absorbed the
+        module instance into the local key), and a local non-generic shadow.
+        """
+        from vera.verifier import verify
+
+        mod = self._resolved(("g",), (
+            "module g;\n"
+            "public forall<T> fn tag(@T -> @Int)\n"
+            "  requires(true) ensures(@Int.result == 9) effects(pure)\n"
+            "{ 0 }\n"
+        ))
+        call = "tag(5)" if local_shadow == "" else "g::tag(5)"
+        main_src = (
+            "import g;\n\n"
+            f"{local_shadow}"
+            "public fn probe(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            f"{{ {call} }}\n"
+        )
+        import tempfile
+        from pathlib import Path
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".vera", delete=False, encoding="utf-8",
+        ) as f:
+            f.write(main_src)
+            f.flush()
+            path = f.name
+        try:
+            prog = transform(parse_file(path))
+            vres = verify(prog, main_src, resolved_modules=[mod])
+            errors = [d for d in vres.diagnostics if d.severity == "error"]
+            assert any(e.error_code == "E500" for e in errors), (
+                f"the lying module generic's clone must be caught at verify "
+                f"(E500), got diagnostics {[e.error_code for e in errors]}"
+            )
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+    def test_imported_generic_honest_contract_verifies_and_runs(self) -> None:
+        """The dual of the lying-contract test: an HONEST imported generic
+        (`tag` returns `0`, `ensures(@Int.result == 0)`) with a local generic
+        shadow verifies clean AND runs — the fix must not over-reject the
+        common honest case.  `g::tag(5)` runs the module (0); a bare `tag(5)`
+        runs the local generic shadow (which here also returns 0 but with a
+        distinct contract, verified independently).
+        """
+        from vera.verifier import verify
+
+        mod = self._resolved(("g",), (
+            "module g;\n"
+            "public forall<T> fn tag(@T -> @Int)\n"
+            "  requires(true) ensures(@Int.result == 0) effects(pure)\n"
+            "{ 0 }\n"
+        ))
+        main_src = (
+            "import g;\n\n"
+            "private forall<T> fn tag(@T -> @Int)\n"
+            "  requires(true) ensures(@Int.result == 7) effects(pure)\n"
+            "{ 7 }\n\n"
+            "public fn qual(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ g::tag(5) }\n"
+            "public fn bare(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ tag(5) }\n"
+        )
+        # Module tag → 0; local generic tag → 7. Distinct clones, both honest.
+        assert self._run_mod(main_src, [mod], fn="qual") == 0
+        assert self._run_mod(main_src, [mod], fn="bare") == 7
+        import tempfile
+        from pathlib import Path
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".vera", delete=False, encoding="utf-8",
+        ) as f:
+            f.write(main_src)
+            f.flush()
+            path = f.name
+        try:
+            prog = transform(parse_file(path))
+            vres = verify(prog, main_src, resolved_modules=[mod])
+            errors = [d for d in vres.diagnostics if d.severity == "error"]
+            assert errors == [], [e.description for e in errors]
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+    def test_unshadowed_generic_calling_shadowed_sibling(self) -> None:
+        """`#774` review (CR 3519063445): the REVERSE of the shadowed→normal
+        transitive case — an UNSHADOWED (normal) local generic whose body
+        qualified-calls a SHADOWED generic must emit that shadowed clone.
+
+        `caller<T>` (local, unshadowed) calls `g::gen(@T.0)` where `gen` is
+        shadowed by a local non-generic (+100).  `caller(5)` → its clone
+        `caller$Int` calls `g::gen` → the MODULE generic (identity) → `5`.
+        Pre-fix the shadowed emission seeded only from `program.declarations`
+        non-generic bodies, never from the emitted `caller$Int` clone, so
+        `mod$g$gen$Int` was missing → `unknown func $caller$Int` at run.  A
+        lying module `gen` reached this way is caught at verify (E500), and
+        both sides discover `mod$g$gen<Int>` (the differential pins it).
+        """
+        from vera.verifier import verify
+
+        mod = self._resolved(("g",), (
+            "module g;\n"
+            "public forall<T> fn gen(@T -> @T)\n"
+            "  requires(true) ensures(@T.result == @T.0) effects(pure)\n"
+            "{ @T.0 }\n"
+        ))
+        main_src = (
+            "import g;\n\n"
+            "private fn gen(@Int -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ @Int.0 + 100 }\n\n"
+            "private forall<T> fn caller(@T -> @T)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ g::gen(@T.0) }\n\n"
+            "public fn probe(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ caller(5) }\n"
+        )
+        assert self._run_mod(main_src, [mod], fn="probe") == 5
+        import tempfile
+        from pathlib import Path
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".vera", delete=False, encoding="utf-8",
+        ) as f:
+            f.write(main_src)
+            f.flush()
+            path = f.name
+        try:
+            prog = transform(parse_file(path))
+            vres = verify(prog, main_src, resolved_modules=[mod])
+            errors = [d for d in vres.diagnostics if d.severity == "error"]
+            assert errors == [], [e.description for e in errors]
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+    def test_imported_generic_via_pipe_executes(self) -> None:
+        """`#913`: an imported generic invoked through the `|>` pipe
+        (`42 |> genmod::gid()`) is discovered and monomorphized.
+
+        The pipe RHS is an ``ast.ModuleCall`` — the ``ModuleCall`` arm of the
+        #913 pipe-discovery branch (`Monomorphizer._collect_calls`) must
+        reconstruct the pipe-desugared argument list `(42,)` so `gid$Int` is
+        emitted; pre-#913 the bare RHS `ModuleCall` (empty args) bound nothing
+        and no clone existed, dropping the caller.  42 cannot coincide with the
+        phantom-var Bool/i32 default, so a discovery miss can't masquerade.
+        """
+        mod = self._resolved(("genmod",), self.GEN_MODULE)
+        val = self._run_mod("""\
+import genmod;
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ 42 |> genmod::gid() }
+""", [mod], fn="main")
+        assert val == 42
+
+
+# =====================================================================
 # #661 — cross-module name collision in template-warning suppression
 # =====================================================================
 
@@ -1456,20 +1989,17 @@ public fn main(@Unit -> @Bool)
             "the awaited Err must carry the real fetch outcome — identity "
             "lowering reads the fused wrapper as the ADT and returns 0")
 
-    def test_nested_alias_slot_still_fails_loud(self) -> None:
-        """#867 interaction guard: an alias-of-alias fn-typed slot
-        (`type Fetcher = InnerFetcher;`) stays LOUD after the generic
-        substitution fix.  Neither consultor resolves the alias chain
-        (E616 does not fire — that gap is #867), but
-        `_infer_apply_fn_return_type` falls to its `i64` default while
-        the closure actually returns an i32 fused pointer, so the
-        call_indirect signature mismatch traps at WASM validation —
-        loud, not a silent wrong value.  The substitution added for the
-        generic-alias fix must NOT accidentally resolve this shape into
-        a silent identity-await path.  When #867 lands transitive alias
-        resolution in BOTH consultors, this pin flips and should be
-        updated to assert correct execution instead."""
-        source = """\
+    # An alias-of-alias fn-typed slot (`type Fetcher = InnerFetcher;`)
+    # where `InnerFetcher` is the fused future fn type — the #867
+    # transitive-alias case.  Pre-#867 both consultors resolved only one
+    # alias hop: the await classified as unresolvable (identity lowering
+    # smuggled the fused wrapper past the await) AND
+    # `_infer_apply_fn_return_type` fell to its `i64` default while the
+    # closure returns an i32 fused pointer, so the call_indirect signature
+    # mismatched and trapped at WASM validation.  Post-#867 the shared
+    # transitive resolver follows the chain to the terminal FnType in BOTH
+    # consultors, so the program classifies and runs correctly.
+    _NESTED_ALIAS_SLOT_SOURCE = """\
 type InnerFetcher = fn(String -> Future<Result<String, String>>) effects(<Http, Async>);
 type Fetcher = InnerFetcher;
 
@@ -1494,6 +2024,644 @@ public fn main(@Unit -> @Bool)
   )
 }
 """
-        result = _compile_ok(source)
-        with pytest.raises((wasmtime.WasmtimeError, wasmtime.Trap, RuntimeError)):
-            execute(result)
+
+    # A THREE-hop chain (`Fetcher = B = A = fn(...)`) — the transitive
+    # resolver must follow depth-N, not just depth-2.  A single-level
+    # unwrap resolves `Fetcher` to `B` (still a NamedType, not a FnType)
+    # and bails; a two-level unwrap would resolve to `A` and still bail.
+    _THREE_HOP_ALIAS_SLOT_SOURCE = """\
+type A = fn(String -> Future<Result<String, String>>) effects(<Http, Async>);
+type B = A;
+type Fetcher = B;
+
+private fn run_fetch(@Fetcher, @String -> @Bool)
+  requires(true) ensures(true) effects(<Http, Async>)
+{
+  let @Result<String, String> = await(apply_fn(@Fetcher.0, @String.0));
+  match @Result<String, String>.0 {
+    Ok(@String) -> false,
+    Err(@String) -> string_contains(@String.0, "refusing non-HTTP(S)")
+  }
+}
+
+public fn main(@Unit -> @Bool)
+  requires(true) ensures(true) effects(<Http, Async>)
+{
+  run_fetch(
+    fn(@String -> @Future<Result<String, String>>) effects(<Http, Async>) {
+      async(Http.get(@String.0))
+    },
+    "ftp://blocked.invalid/x"
+  )
+}
+"""
+
+    def test_nested_alias_slot_awaited_correctly(self) -> None:
+        """#867 (two-hop): `type Fetcher = InnerFetcher;` where
+        `InnerFetcher` is the fused future fn type — the await must import
+        `async_await` and deliver the real fetch outcome.  Flipped from the
+        pre-#867 `_still_fails_loud` pin once the shared transitive resolver
+        landed in both consultors."""
+        self._assert_awaited_correctly(self._NESTED_ALIAS_SLOT_SOURCE)
+
+    def test_three_hop_alias_slot_awaited_correctly(self) -> None:
+        """#867 (three-hop): `Fetcher = B = A = fn(...)` — the transitive
+        resolver must follow the chain to depth-N, not just one or two
+        hops."""
+        self._assert_awaited_correctly(self._THREE_HOP_ALIAS_SLOT_SOURCE)
+
+
+class TestResolveFnTypeAliasCycleGuard867:
+    """#867: the shared transitive resolver ``resolve_fn_type_alias`` must
+    TERMINATE on a malformed cyclic alias chain, returning ``None`` (the
+    caller then falls to its loud backstop) rather than spinning forever.
+
+    Circular aliases are rejected upstream by the type checker
+    (``[E132]``, #648), so a cycle only reaches codegen through malformed
+    input, but the resolver — reached before any such check on a raw
+    ``type_aliases`` map — must be self-guarding.  A watchdog (SIGALRM)
+    proves termination: a resolver without the ``seen`` guard hangs and
+    the alarm fires."""
+
+    @staticmethod
+    def _resolve_with_watchdog(
+        te: ast.NamedType,
+        aliases: dict[str, ast.TypeExpr],
+    ) -> ast.FnType | None:
+        import signal
+
+        if not hasattr(signal, "SIGALRM"):
+            pytest.skip("SIGALRM unavailable on this platform")
+
+        def _timeout(_sig: int, _frm: object) -> None:
+            raise TimeoutError("resolve_fn_type_alias did not terminate")
+
+        old = signal.signal(signal.SIGALRM, _timeout)
+        signal.alarm(5)
+        try:
+            return resolve_fn_type_alias(te, aliases, {})
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old)
+
+    def test_two_node_cycle_terminates_none(self) -> None:
+        """`type A = B; type B = A;` — resolver returns None, no hang."""
+        aliases: dict[str, ast.TypeExpr] = {
+            "A": ast.NamedType(name="B", type_args=None),
+            "B": ast.NamedType(name="A", type_args=None),
+        }
+        result = self._resolve_with_watchdog(
+            ast.NamedType(name="A", type_args=None), aliases)
+        assert result is None
+
+    def test_self_cycle_terminates_none(self) -> None:
+        """`type A = A;` — resolver returns None, no hang."""
+        aliases: dict[str, ast.TypeExpr] = {
+            "A": ast.NamedType(name="A", type_args=None),
+        }
+        result = self._resolve_with_watchdog(
+            ast.NamedType(name="A", type_args=None), aliases)
+        assert result is None
+
+    def test_prefix_into_cycle_terminates_none(self) -> None:
+        """`type X = A; type A = B; type B = A;` — X leads into an A<->B
+        cycle that does not include X; resolver still terminates None."""
+        aliases: dict[str, ast.TypeExpr] = {
+            "X": ast.NamedType(name="A", type_args=None),
+            "A": ast.NamedType(name="B", type_args=None),
+            "B": ast.NamedType(name="A", type_args=None),
+        }
+        result = self._resolve_with_watchdog(
+            ast.NamedType(name="X", type_args=None), aliases)
+        assert result is None
+
+
+class TestTransitiveModuleImport890:
+    """#890: a transitive module import (``main`` imports ``mid``, ``mid``
+    imports ``base``) must compile and run.
+
+    Codegen compiles the DIRECTLY-imported module's bodies (Pass 2.5), but
+    the importer's flat WASM module must ALSO include every module reachable
+    through the import graph — otherwise ``mid``'s body (which calls
+    ``base::wrap40``) is left with a dangling call and ``vera run`` fails at
+    WAT validation with ``unknown func``.  The fix makes
+    ``ModuleResolver.resolve_imports`` return the transitive closure of
+    reachable modules (each tagged ``direct``), and the codegen /
+    checker / verifier only inject the DIRECT imports into the importer's
+    callable namespace (spec §8.6.4: transitive declarations are not visible
+    to the original importer).
+
+    These tests drive the REAL on-disk resolver end-to-end so the resolver's
+    "return only direct imports" defect is exercised, not papered over by a
+    hand-built module list.
+    """
+
+    @staticmethod
+    def _compile_run_chain(
+        tmp_path: Path,
+        files: dict[str, str],
+        fn: str = "main",
+        args: list[int] | None = None,
+    ) -> int:
+        """Write ``files`` (rel path -> source), resolve ``main.vera`` with the
+        real resolver, compile, execute, and return the integer result."""
+        from vera.resolver import ModuleResolver
+
+        main_file: Path | None = None
+        for rel, content in files.items():
+            p = tmp_path / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding="utf-8")
+            if rel == "main.vera":
+                main_file = p
+        assert main_file is not None, "files must include 'main.vera'"
+
+        resolver = ModuleResolver(_root=tmp_path)
+        tree = parse_file(str(main_file))
+        prog = transform(tree)
+        resolved = resolver.resolve_imports(prog, main_file)
+        assert not resolver.errors, (
+            f"resolution errors: {[e.description for e in resolver.errors]}"
+        )
+        result = compile(
+            prog,
+            source=main_file.read_text(encoding="utf-8"),
+            file=str(main_file),
+            resolved_modules=resolved,
+        )
+        errors = [d for d in result.diagnostics if d.severity == "error"]
+        assert not errors, (
+            f"compile errors: {[e.description for e in errors]}"
+        )
+        exec_result = execute(result, fn_name=fn, args=args)
+        assert exec_result.value is not None, "Expected a return value"
+        return exec_result.value
+
+    BASE = """\
+module base;
+public fn wrap40(@Int -> @Int)
+  requires(true) ensures(true) effects(pure) { @Int.0 + 40 }
+"""
+
+    MID = """\
+module mid;
+import base;
+public fn via_mid(@Int -> @Int)
+  requires(true) ensures(true) effects(pure) { wrap40(@Int.0) }
+"""
+
+    def test_transitive_chain_runs(self, tmp_path: Path) -> None:
+        """main -> mid -> base: ``via_mid(2)`` returns 42.
+
+        Pre-fix this failed at WAT validation with
+        ``unknown func: failed to find name $via_mid`` because ``base`` was
+        dropped from the resolved-module list, so ``mid``'s body could not be
+        compiled with ``wrap40`` in scope.  42 is not a compiler default for
+        any type, so a stray success can't masquerade as a pass.
+        """
+        val = self._compile_run_chain(
+            tmp_path,
+            {
+                "base.vera": self.BASE,
+                "mid.vera": self.MID,
+                "main.vera": """\
+import mid;
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure) { via_mid(2) }
+""",
+            },
+        )
+        assert val == 42
+
+    def test_transitive_base_not_bare_visible_to_main(
+        self, tmp_path: Path,
+    ) -> None:
+        """spec §8.6.4: ``base``'s ``wrap40`` is NOT bare-callable from
+        ``main`` — only ``mid``'s public declarations are visible to the
+        top-level importer.  A bare ``wrap40(...)`` in ``main`` must fail to
+        compile even though ``base`` is now in the resolved-module closure."""
+        from vera.resolver import ModuleResolver
+
+        (tmp_path / "base.vera").write_text(self.BASE, encoding="utf-8")
+        (tmp_path / "mid.vera").write_text(self.MID, encoding="utf-8")
+        main_file: Path = tmp_path / "main.vera"
+        main_file.write_text(
+            """\
+import mid;
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure) { wrap40(2) }
+""",
+            encoding="utf-8",
+        )
+        resolver = ModuleResolver(_root=tmp_path)
+        tree = parse_file(str(main_file))
+        prog = transform(tree)
+        resolved = resolver.resolve_imports(prog, main_file)
+        assert not resolver.errors
+        result = compile(
+            prog,
+            source=main_file.read_text(encoding="utf-8"),
+            file=str(main_file),
+            resolved_modules=resolved,
+        )
+        errors = [d for d in result.diagnostics if d.severity == "error"]
+        assert errors, (
+            "expected a cross-module error: base::wrap40 must not be "
+            "bare-callable from main (spec §8.6.4)"
+        )
+
+    def test_diamond_transitive_runs(self, tmp_path: Path) -> None:
+        """main -> {left, right} -> base (diamond): the shared transitive
+        ``base`` is included once and both branches resolve.  ``main`` sums
+        ``via_left(1)`` (wrap40(1)+1 = 42) and ``via_right(0)`` (wrap40(0) =
+        40) → 82, guarding both the shared-module dedup and multi-branch
+        reachability."""
+        val = self._compile_run_chain(
+            tmp_path,
+            {
+                "base.vera": self.BASE,
+                "left.vera": """\
+module left;
+import base;
+public fn via_left(@Int -> @Int)
+  requires(true) ensures(true) effects(pure) { wrap40(@Int.0) + 1 }
+""",
+                "right.vera": """\
+module right;
+import base;
+public fn via_right(@Int -> @Int)
+  requires(true) ensures(true) effects(pure) { wrap40(@Int.0) }
+""",
+                "main.vera": """\
+import left;
+import right;
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ via_left(1) + via_right(0) }
+""",
+            },
+        )
+        assert val == 82
+
+
+class TestModuleCallInConstructorField905(TestCrossModuleCodegen):
+    """#905: a non-void cross-module call (``ModuleCall``) used *directly* as a
+    constructor argument (a ``Tuple``/ADT field) must compile and run.
+
+    This is the non-void sibling of #902 (which fixed only the ``Unit``-valued
+    field case via ``_is_void_expr``).  Before the fix, ``_infer_expr_wasm_type``
+    returned ``None`` for a ``ModuleCall`` argument, so
+    ``_translate_constructor_call`` raised ``CodegenSkip``; the enclosing
+    function was silently dropped and any call to it dangled at run with
+    ``unknown func: failed to find name $mkt``.
+
+    All programs here pass ``vera check`` (the checker resolves the module
+    call's return type fine); the gap was purely codegen-time WASM-type
+    inference at the constructor-arg site.
+    """
+
+    # A module exporting a NON-void @Int-returning function (magnitude) plus a
+    # @Unit-returning one (log) so we can compose with the #902 Unit-field case.
+    MAG_MODULE = """\
+public fn magnitude(@Int -> @Int)
+  requires(true)
+  ensures(@Int.result >= 0)
+  effects(pure)
+{ if @Int.0 < 0 then { 0 - @Int.0 } else { @Int.0 } }
+"""
+
+    def test_module_call_in_tuple_field_runs(self) -> None:
+        """``Tuple(m::magnitude(@Int.0), 9)`` — the canonical #905 repro.
+
+        Extracts the trailing (literal ``9``) field so the assertion is
+        decoupled from the module-call value; the point is that the function
+        compiles at all (before the fix it was dropped and ``mkt`` dangled).
+        De Bruijn: ``@Int.0`` = LAST field (the ``9``), ``@Int.1`` = first.
+        """
+        mod = self._resolved(("m",), self.MAG_MODULE)
+        val = self._run_mod("""\
+import m(magnitude);
+private fn mkt(@Int -> @Tuple<Int, Int>)
+  requires(true) ensures(true) effects(pure)
+{ Tuple(m::magnitude(@Int.0), 9) }
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Tuple<Int, Int> = mkt(-5); match @Tuple<Int, Int>.0 { Tuple(@Int, @Int) -> @Int.0 } }
+""", [mod], fn="main")
+        assert val == 9
+
+    def test_module_call_in_tuple_field_value_correct(self) -> None:
+        """Extract the FIRST field (the module-call result) itself: it must be
+        the actual ``magnitude(-5) == 5``, not garbage — proves the field is laid
+        out at the right offset with the right WASM type, not merely that the
+        function compiles.  De Bruijn: ``@Int.1`` = first field (the module
+        call)."""
+        mod = self._resolved(("m",), self.MAG_MODULE)
+        val = self._run_mod("""\
+import m(magnitude);
+private fn mkt(@Int -> @Tuple<Int, Int>)
+  requires(true) ensures(true) effects(pure)
+{ Tuple(m::magnitude(@Int.0), 9) }
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Tuple<Int, Int> = mkt(-5); match @Tuple<Int, Int>.0 { Tuple(@Int, @Int) -> @Int.1 } }
+""", [mod], fn="main")
+        assert val == 5  # magnitude(-5)
+
+    def test_module_call_in_dotted_path_tuple_field_runs(self) -> None:
+        """The dotted-path form ``vera.math::magnitude(...)`` (as in the issue
+        repro) is the same ``ModuleCall`` AST node and must also work.  Extracts
+        the module-call field (``@Int.1`` = first field)."""
+        mod = self._resolved(("vera", "math"), self.MAG_MODULE)
+        val = self._run_mod("""\
+import vera.math(magnitude);
+private fn mkt(@Int -> @Tuple<Int, Int>)
+  requires(true) ensures(true) effects(pure)
+{ Tuple(vera.math::magnitude(@Int.0), 9) }
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Tuple<Int, Int> = mkt(-5); match @Tuple<Int, Int>.0 { Tuple(@Int, @Int) -> @Int.1 } }
+""", [mod], fn="main")
+        assert val == 5
+
+    def test_module_call_non_final_field_with_unit_field(self) -> None:
+        """#905 composed with #902: a module-call field in NON-final position,
+        mixed with a zero-size ``Unit`` field — ``Tuple(m::magnitude(-5), (), 7)``.
+
+        The Unit field advances no offset, so extracting the trailing ``7``
+        checks the module-call field's WASM type feeds correct offsets for the
+        fields after it."""
+        mod = self._resolved(("m",), self.MAG_MODULE)
+        val = self._run_mod("""\
+import m(magnitude);
+private fn mkt(@Int -> @Tuple<Int, Unit, Int>)
+  requires(true) ensures(true) effects(pure)
+{ Tuple(m::magnitude(@Int.0), (), 7) }
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Tuple<Int, Unit, Int> = mkt(-5); match @Tuple<Int, Unit, Int>.0 { Tuple(@Int, @Unit, @Int) -> @Int.0 } }
+""", [mod], fn="main")
+        assert val == 7  # trailing field extracted past the module-call + Unit
+
+    def test_module_call_in_adt_constructor_field(self) -> None:
+        """A user ADT (non-Tuple) constructor with a module-call field shares
+        ``_translate_constructor_call``, so it must be fixed too."""
+        mod = self._resolved(("m",), self.MAG_MODULE)
+        val = self._run_mod("""\
+import m(magnitude);
+public data Boxed { Box(Int) }
+private fn mk(@Int -> @Boxed)
+  requires(true) ensures(true) effects(pure)
+{ Box(m::magnitude(@Int.0)) }
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Boxed = mk(-8); match @Boxed.0 { Box(@Int) -> @Int.0 } }
+""", [mod], fn="main")
+        assert val == 8  # magnitude(-8)
+
+    def test_module_call_in_array_literal_element(self) -> None:
+        """#905 array-literal sibling: a ModuleCall as the FIRST element of an
+        array literal reaches ``_infer_array_element_type`` → ``_infer_vera_type``,
+        which also returned None for ModuleCall.  The symptom was quieter than
+        the constructor crash — ``compile`` reported ``ok`` but the enclosing
+        function was dropped from the exports (its array-let binding was
+        skipped).  ``[m::magnitude(-5), 9]`` indexed at 0 must be
+        ``magnitude(-5) == 5``."""
+        mod = self._resolved(("m",), self.MAG_MODULE)
+        val = self._run_mod("""\
+import m(magnitude);
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Array<Int> = [m::magnitude(-5), 9]; @Array<Int>.0[0] }
+""", [mod], fn="main")
+        assert val == 5
+
+    def test_module_call_in_array_literal_trailing_element(self) -> None:
+        """The same array-literal, indexed at the trailing literal element (9),
+        confirms the module-call element sized the array correctly."""
+        mod = self._resolved(("m",), self.MAG_MODULE)
+        val = self._run_mod("""\
+import m(magnitude);
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Array<Int> = [m::magnitude(-5), 9]; @Array<Int>.0[1] }
+""", [mod], fn="main")
+        assert val == 9
+
+    # -- Regressions: paths that already worked must be unaffected -----------
+
+    def test_same_file_fncall_in_field_still_runs(self) -> None:
+        """A SAME-FILE ``FnCall`` in a constructor field already worked (its
+        return type is resolved); the fix must not disturb it.  Extracts the
+        same-file-call field (``@Int.1`` = first field)."""
+        val = _run("""\
+private fn magnitude(@Int -> @Int)
+  requires(true) ensures(@Int.result >= 0) effects(pure)
+{ if @Int.0 < 0 then { 0 - @Int.0 } else { @Int.0 } }
+private fn mkt(@Int -> @Tuple<Int, Int>)
+  requires(true) ensures(true) effects(pure)
+{ Tuple(magnitude(@Int.0), 9) }
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Tuple<Int, Int> = mkt(-5); match @Tuple<Int, Int>.0 { Tuple(@Int, @Int) -> @Int.1 } }
+""", fn="main")
+        assert val == 5
+
+    def test_plain_literal_field_still_runs(self) -> None:
+        """A plain-literal constructor field must NOT take the new module-call
+        path — guards against the fix over-firing.  De Bruijn: ``@Int.0`` = LAST
+        field (the literal ``9``)."""
+        val = _run("""\
+private fn mkt(@Int -> @Tuple<Int, Int>)
+  requires(true) ensures(true) effects(pure)
+{ Tuple(@Int.0, 9) }
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Tuple<Int, Int> = mkt(4); match @Tuple<Int, Int>.0 { Tuple(@Int, @Int) -> @Int.0 } }
+""", fn="main")
+        assert val == 9
+
+
+class TestUserShowHashInField908(TestCrossModuleCodegen):
+    """#908: a user-defined function literally named ``show`` or ``hash`` used
+    in a constructor field / array-literal element must be laid out at the WIDTH
+    of ITS declared return type, not the ability-op width special-case.
+
+    ``vera/wasm/inference.py`` name-special-cases the ability operations
+    (``show`` → ``i32_pair`` / String, ``hash`` → ``i64`` / Int) by bare name in
+    ``_infer_expr_wasm_type`` / ``_infer_fncall_wasm_type`` (WASM width) and
+    ``_infer_fncall_vera_type`` (Vera-type-name).  The type checker rejects
+    user redefinition of registry builtins (E151) but NOT the ability ops
+    ``show``/``hash``, so a user helper named ``show`` (returning ``@Int``) or
+    ``hash`` (returning ``@String``) was mis-sized: the constructor-field
+    inference reported the ability-op width while ``_translate_call`` (gated on
+    ``call.name not in self._known_fns``) correctly emitted a call to the USER
+    function.  The two disagreed → an ``expected i32, found i64`` WASM
+    translation error on a ``vera check``-green program.
+
+    A GENUINE ability op (``show``/``hash`` on a value whose type derives
+    ``Show``/``Hash``) has NO user-fn registry entry, so it still falls back to
+    the special-case width — the load-bearing regression at the bottom of this
+    class.
+    """
+
+    # A module exporting a user function named ``show`` that returns @Int
+    # (NOT the String the ability op returns) — the mis-width trigger.
+    SHOW_INT_MODULE = """\
+public fn show(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ @Int.0 + 1 }
+"""
+
+    # -- User-fn show/hash mis-sizing (the bug) ------------------------------
+
+    def test_module_user_show_in_tuple_field_runs(self) -> None:
+        """``Tuple(m::show(@Int.0), 9)`` where ``m::show`` returns @Int (i64) —
+        the canonical #908 repro.  Before the fix, the field was sized as the
+        ability-op ``i32_pair`` while the emitted ``call $show`` returned i64.
+        Extracts the trailing literal ``9`` (De Bruijn ``@Int.0`` = LAST)."""
+        mod = self._resolved(("m",), self.SHOW_INT_MODULE)
+        val = self._run_mod("""\
+import m(show);
+private fn mkt(@Int -> @Tuple<Int, Int>)
+  requires(true) ensures(true) effects(pure)
+{ Tuple(m::show(@Int.0), 9) }
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Tuple<Int, Int> = mkt(5); match @Tuple<Int, Int>.0 { Tuple(@Int, @Int) -> @Int.0 } }
+""", [mod], fn="main")
+        assert val == 9
+
+    def test_module_user_show_in_tuple_field_value_correct(self) -> None:
+        """Extract the module-call field itself (``@Int.1`` = FIRST field): it
+        must be ``show(5) == 6`` (the user fn's ``@Int.0 + 1``), proving the
+        field is laid out at the right offset with the i64 (not i32_pair)
+        width."""
+        mod = self._resolved(("m",), self.SHOW_INT_MODULE)
+        val = self._run_mod("""\
+import m(show);
+private fn mkt(@Int -> @Tuple<Int, Int>)
+  requires(true) ensures(true) effects(pure)
+{ Tuple(m::show(@Int.0), 9) }
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Tuple<Int, Int> = mkt(5); match @Tuple<Int, Int>.0 { Tuple(@Int, @Int) -> @Int.1 } }
+""", [mod], fn="main")
+        assert val == 6  # user show(5) = 5 + 1
+
+    def test_dotted_path_user_show_in_tuple_field_runs(self) -> None:
+        """The dotted-path form ``vera.util::show(...)`` (the issue repro) is the
+        same ``ModuleCall`` node and must also work."""
+        mod = self._resolved(("vera", "util"), self.SHOW_INT_MODULE)
+        val = self._run_mod("""\
+import vera.util(show);
+private fn mkt(@Int -> @Tuple<Int, Int>)
+  requires(true) ensures(true) effects(pure)
+{ Tuple(vera.util::show(@Int.0), 9) }
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Tuple<Int, Int> = mkt(5); match @Tuple<Int, Int>.0 { Tuple(@Int, @Int) -> @Int.0 } }
+""", [mod], fn="main")
+        assert val == 9
+
+    def test_same_file_user_show_in_tuple_field_runs(self) -> None:
+        """A SAME-FILE ``fn show(@Int -> @Int)`` used bare in a field
+        (``Tuple(show(x), 9)``) hits the same bug via the same-file ``FnCall``
+        path in ``_infer_expr_wasm_type``.  Extracts the trailing ``9``
+        (De Bruijn ``@Int.0`` = LAST field)."""
+        val = _run("""\
+private fn show(@Int -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ @Int.0 + 1 }
+private fn mkt(@Int -> @Tuple<Int, Int>)
+  requires(true) ensures(true) effects(pure)
+{ Tuple(show(@Int.0), 9) }
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Tuple<Int, Int> = mkt(5); match @Tuple<Int, Int>.0 { Tuple(@Int, @Int) -> @Int.0 } }
+""", fn="main")
+        assert val == 9
+
+    def test_same_file_user_hash_string_in_tuple_field_runs(self) -> None:
+        """A user ``fn hash(@Int -> @String)`` returns a NON-Int type (i32_pair)
+        — the opposite mis-width from ``show``.  The ability-op special-case
+        would size the field as ``i64``; the user fn emits an ``i32_pair``.
+        Extracts the trailing Int ``7`` (De Bruijn ``@Int.0`` = last field)."""
+        val = _run("""\
+private fn hash(@Int -> @String)
+  requires(true) ensures(true) effects(pure)
+{ "n" }
+private fn mkt(@Int -> @Tuple<String, Int>)
+  requires(true) ensures(true) effects(pure)
+{ Tuple(hash(@Int.0), 7) }
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Tuple<String, Int> = mkt(5); match @Tuple<String, Int>.0 { Tuple(@String, @Int) -> @Int.0 } }
+""", fn="main")
+        assert val == 7
+
+    def test_module_user_show_in_array_literal_element(self) -> None:
+        """A user ``m::show`` (returns @Int) as the FIRST element of an array
+        literal reaches ``_infer_array_element_type`` → ``_infer_vera_type`` →
+        ``_infer_fncall_vera_type``, which name-special-cased ``show`` → String.
+        ``[m::show(-5), 9]`` indexed at 1 (the literal) must be ``9``."""
+        mod = self._resolved(("m",), self.SHOW_INT_MODULE)
+        val = self._run_mod("""\
+import m(show);
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Array<Int> = [m::show(5), 9]; @Array<Int>.0[1] }
+""", [mod], fn="main")
+        assert val == 9
+
+    def test_same_file_user_show_in_array_literal_element(self) -> None:
+        """The same-file ``fn show(@Int -> @Int)`` as an array-literal element.
+        Indexed at 0 it must be the user ``show(5) == 6``."""
+        val = _run("""\
+private fn show(@Int -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ @Int.0 + 1 }
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Array<Int> = [show(5), 9]; @Array<Int>.0[0] }
+""", fn="main")
+        assert val == 6
+
+    # -- CRITICAL regression: genuine ability dispatch must still work -------
+
+    def test_genuine_show_in_tuple_field_still_runs(self) -> None:
+        """LOAD-BEARING: a GENUINE ability ``show(42)`` (no user fn; Int derives
+        Show) in a constructor field must STILL be sized as the ability-op
+        ``i32_pair`` (String).  ``Tuple(show(42), 9)`` indexed at the trailing
+        Int ``9`` proves the field after the String is at the right offset."""
+        val = _run("""\
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Tuple<String, Int> = Tuple(show(42), 9); match @Tuple<String, Int>.0 { Tuple(@String, @Int) -> @Int.0 } }
+""", fn="main")
+        assert val == 9
+
+    def test_genuine_hash_in_tuple_field_still_runs(self) -> None:
+        """LOAD-BEARING: a GENUINE ability ``hash(42)`` (no user fn; Int derives
+        Hash, identity) in a constructor field must STILL be sized as the
+        ability-op ``i64`` (Int).  ``Tuple(hash(42), 9)`` indexed at the
+        module-call field (``@Int.1`` = first) must be ``hash(42) == 42``."""
+        val = _run("""\
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Tuple<Int, Int> = Tuple(hash(42), 9); match @Tuple<Int, Int>.0 { Tuple(@Int, @Int) -> @Int.1 } }
+""", fn="main")
+        assert val == 42
+
+    def test_genuine_show_in_array_literal_element_still_runs(self) -> None:
+        """LOAD-BEARING: a GENUINE ability ``hash(42)`` as an array-literal
+        element must still size the array as ``Int`` (i64) so indexing returns
+        the correct value.  ``[hash(42), 9]`` indexed at 0 must be ``42``."""
+        val = _run("""\
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Array<Int> = [hash(42), 9]; @Array<Int>.0[0] }
+""", fn="main")
+        assert val == 42

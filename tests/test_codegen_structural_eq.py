@@ -562,21 +562,25 @@ public fn main(@Unit -> @Bool) requires(true) ensures(true) effects(pure)
         assert "E699" not in codes, f"{name}: invariant leak: {codes}"
 
 
-def test_direct_eq_bare_ctor_inferred_option_rejected_e613() -> None:
-    """Direct `==` on ctor-inferred builtin Option is E613, not E699.
+def test_direct_eq_ctor_inferred_option_accepts_and_runs() -> None:
+    """#772 direct path: `Some(1) == Some(1)` recovers `Option<Int>` and runs.
 
-    `Some(1) == Some(1)` infers the BARE name `Option` (the #772-family
-    type-argument loss), so the field type is unresolvable — the direct-path
-    gate rejects in lockstep with the generic gate.  #772 recovering the
-    type argument flips this to a working comparison.
+    The `==` operand type is inferred from the `ConstructorCall` `Some(1)`;
+    pre-#772 that resolved to the BARE `Option` (type-argument loss) and the
+    direct-path gate spuriously E613'd.  The fix recovers `<Int>`, so the
+    comparison derives and compares by value.
     """
-    source = """\
+    same = """\
 public fn main(@Unit -> @Bool) requires(true) ensures(true) effects(pure)
 { Some(1) == Some(1) }
 """
-    codes = _errors(source)
-    assert "E613" in codes, f"expected E613, got {codes}"
-    assert "E699" not in codes, f"invariant leak on the direct path: {codes}"
+    diff = """\
+public fn main(@Unit -> @Bool) requires(true) ensures(true) effects(pure)
+{ Some(1) == Some(2) }
+"""
+    assert _errors(same) == [], f"Some(1)==Some(1) must derive: {_errors(same)}"
+    assert _run(same) == 1
+    assert _run(diff) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -683,31 +687,684 @@ public fn main(@Unit -> @Bool) requires(true) ensures(true) effects(pure)
 
 
 # ---------------------------------------------------------------------------
-# #772 interaction probe (report-only; behaviour asserted, not a fix here)
+# #772 — Eq auto-derivation on the CONSTRUCTOR-inferred path is type-arg-aware
 #
-# The exact #772 constructor-path repro: `eq2(MkBox("a"), MkBox("a"))` where the
-# type argument is inferred from a `ConstructorCall`.  Under #773's structural
-# rewrite the outcome is a clean E613 rather than the pre-existing silent
-# false-accept OR a codegen invariant crash: the monomorphizer still resolves
-# the `ConstructorCall` to the BARE `Box` (dropping `<String>`), so the gate has
-# no type argument and — in lockstep with codegen, which likewise can't resolve
-# the field — rejects.  Recovering the lost type argument (so this DERIVES) is
-# #772's job.  This test pins the current, lockstep-correct behaviour so a
-# future #772 fix flips it deliberately.
+# When an Eq-constrained generic's type var is inferred from a `ConstructorCall`
+# (`eq2(MkBox("a"), …)`), the monomorphizer resolves the argument to the BARE
+# ADT name `Box` for clone mangling.  Pre-#772 that bare name also reached the
+# Eq gate, which — having no `<String>` type argument — rejected `Box<String>`
+# with a spurious E613 (an over-reject; post-#773 it no longer mis-compiles, it
+# refuses a program the slot-ref form accepts).  #772 recovers the type argument
+# for the Eq check specifically (leaving clone mangling on the bare name), so the
+# constructor path derives `Eq` exactly when the slot-ref path does.
+#
+# These assert the POST-FIX behaviour and must run correctly (content
+# comparison, not pointer identity), while a genuinely non-Eq type argument
+# (Array) is still rejected.
 # ---------------------------------------------------------------------------
 
+_BOX_STRING_CTOR_EQ = """\
+public data Box<T> { MkBox(T) }
+private forall<T where Eq<T>> fn eq2(@T, @T -> @Bool)
+  requires(true) ensures(true) effects(pure) { @T.1 == @T.0 }
+public fn same(@Unit -> @Bool) requires(true) ensures(true) effects(pure)
+{ eq2(MkBox("a"), MkBox("a")) }
+public fn diff(@Unit -> @Bool) requires(true) ensures(true) effects(pure)
+{ eq2(MkBox("a"), MkBox("b")) }
+"""
 
-def test_772_constructor_path_rejects_in_lockstep() -> None:
-    """#772 ctor-path: bare-name resolution → clean E613, no E699 crash."""
+# Nested-ADT field: two `MkInner(1)` are DISTINCT heap allocations with equal
+# content, so an equal result on `same` proves the derived Eq compares by VALUE
+# (recurses into `$eq_Inner`), not by the wrapper pointer — the run differential
+# that a pointer-identity mis-compile would fail (`same` would be 0).  This
+# exercises the constructor path WITHOUT the String-returning-builtin inference
+# gap (#769) that `string_concat` args would hit.
+_BOX_NESTED_CTOR_EQ = """\
+public data Inner { MkInner(Int) }
+public data Box<T> { MkBox(T) }
+private forall<T where Eq<T>> fn eq2(@T, @T -> @Bool)
+  requires(true) ensures(true) effects(pure) { @T.1 == @T.0 }
+public fn same(@Unit -> @Bool) requires(true) ensures(true) effects(pure)
+{ eq2(MkBox(MkInner(1)), MkBox(MkInner(1))) }
+public fn diff(@Unit -> @Bool) requires(true) ensures(true) effects(pure)
+{ eq2(MkBox(MkInner(1)), MkBox(MkInner(2))) }
+"""
+
+
+def test_772_ctor_path_box_string_accepts() -> None:
+    """#772: `eq2(MkBox("a"), ...)` (ctor-inferred Box<String>) compiles.
+
+    The type argument `String` is recovered — for the Eq gate AND the clone
+    body's slot type AND the call-site mangled name — so the constructor path
+    now derives `Eq` just as the slot-ref form does, with no spurious E613.
+    """
+    codes = _errors(_BOX_STRING_CTOR_EQ)
+    assert codes == [], f"ctor-path Box<String> must derive Eq, got {codes}"
+
+
+def test_772_ctor_path_box_string_run_differential() -> None:
+    """#772: the ctor-path Box<String> derivation compares by String content."""
+    assert _run(_BOX_STRING_CTOR_EQ, fn="same") == 1
+    assert _run(_BOX_STRING_CTOR_EQ, fn="diff") == 0
+
+
+def test_772_ctor_path_nested_adt_compares_by_value() -> None:
+    """#772: the recovered derivation recurses into the field's Eq, not pointer.
+
+    `MkInner(1)` on each side is a fresh allocation; an equal `same` result
+    proves value comparison — a pointer-identity mis-compile returns 0 here.
+    """
+    assert _run(_BOX_NESTED_CTOR_EQ, fn="same") == 1
+    assert _run(_BOX_NESTED_CTOR_EQ, fn="diff") == 0
+
+
+def test_772_ctor_path_box_array_still_rejected_e613() -> None:
+    """#772 soundness gate: a non-Eq type argument (Array) is STILL rejected.
+
+    The fix recovers the type argument; it must not over-accept.  `Box<Array>`
+    (Array has no Eq semantics) is E613 on the constructor path, with no E699
+    codegen-invariant leak.
+    """
     source = """\
 public data Box<T> { MkBox(T) }
 private forall<T where Eq<T>> fn eq2(@T, @T -> @Bool)
   requires(true) ensures(true) effects(pure) { @T.1 == @T.0 }
 public fn main(@Unit -> @Bool) requires(true) ensures(true) effects(pure)
-{ eq2(MkBox("a"), MkBox("a")) }
+{ eq2(MkBox([1, 2]), MkBox([1, 2])) }
 """
     codes = _errors(source)
-    assert "E613" in codes, f"expected E613, got {codes}"
-    assert "E699" not in codes, (
-        f"#772 ctor-path must not hit a codegen invariant: {codes}"
+    assert "E613" in codes, f"non-Eq Box<Array> must reject, got {codes}"
+    assert "E699" not in codes, f"invariant leak on rejection: {codes}"
+
+
+# ---------------------------------------------------------------------------
+# #898 — sparse multi-type-parameter ADT on the constructor-inferred Eq path.
+#
+#   data Res<A, B> { MkOk(A), MkErr(B) }
+#
+# `MkErr(5)` recovers only `B = Int`; the `MkOk(A)` constructor is ABSENT from
+# the argument, so `A` is genuinely undetermined at the call site.  Structural
+# Eq derivation checks ALL constructors' fields — `MkOk(A)` included — so
+# `Res<A, Int>` is Eq-derivable iff `A` is Eq, which cannot be decided from
+# `MkErr(5)` alone.  Rejecting is therefore CORRECT (never unsound), but the
+# old diagnostic (E613 "Res does not satisfy Eq") is misleading: the real
+# problem is an under-determined type argument.  The fix reports the clearer
+# E619 ("cannot infer type argument") for exactly this shape, while leaving the
+# fully-determined and non-Eq cases unchanged (accept / E613 respectively).
+#
+# See tests/conformance/ch09_multiparam_ctor_eq.vera for the accept-side
+# end-to-end program (annotated `Res<Int, Int>` derives + compares by value).
+# ---------------------------------------------------------------------------
+
+_RES_ADT = "public data Res<A, B> { MkOk(A), MkErr(B) }\n"
+_ID1 = (
+    "private forall<T where Eq<T>> fn id1(@T -> @Bool)\n"
+    "  requires(true) ensures(true) effects(pure) { @T.0 == @T.0 }\n"
+)
+
+
+def test_898_sparse_multiparam_ctor_underdetermined_is_e619_not_e613() -> None:
+    """#898: `id1(MkErr(5))` on `Res<A, B>` leaves `A` undetermined.
+
+    Rejection is correct (derivability depends on the free `A`), but the
+    diagnostic must be the clearer E619 (under-determined type argument),
+    NOT the misleading E613 ("Res does not satisfy Eq").
+    """
+    source = (
+        _RES_ADT + _ID1
+        + "public fn main(@Unit -> @Bool)\n"
+        "  requires(true) ensures(true) effects(pure) { id1(MkErr(5)) }\n"
     )
+    codes = _errors(source)
+    assert "E619" in codes, (
+        f"under-determined type arg must be E619, got {codes}"
+    )
+    assert "E613" not in codes, (
+        f"misleading E613 must be replaced by E619, got {codes}"
+    )
+    assert "E699" not in codes, f"invariant leak on rejection: {codes}"
+
+
+def test_898_fully_determined_multiparam_ctor_accepts_and_runs() -> None:
+    """#898 accept side: a fully-annotated `Res<Int, Int>` derives Eq.
+
+    Both type parameters are supplied (via the `let` slot annotation), so the
+    constructor path derives structural Eq exactly as the slot-ref form does
+    and compares by value — `MkErr(5) == MkErr(6)` is `false` (0).
+    """
+    source = (
+        _RES_ADT + _ID1
+        + "public fn same(@Unit -> @Bool)\n"
+        "  requires(true) ensures(true) effects(pure) {\n"
+        "  let @Res<Int, Int> = MkErr(5);\n"
+        "  id1(@Res<Int, Int>.0)\n"
+        "}\n"
+    )
+    assert _errors(source) == [], "fully-determined Res<Int,Int> must derive Eq"
+    assert _run(source, fn="same") == 1
+
+
+def test_898_fully_determined_multiparam_direct_eq_compares_by_value() -> None:
+    """#898: direct `==` on two `Res<Int,Int>` MkErr values compares by value."""
+    source = (
+        _RES_ADT
+        + "public fn diff(@Unit -> @Bool)\n"
+        "  requires(true) ensures(true) effects(pure) {\n"
+        "  let @Res<Int, Int> = MkErr(5);\n"
+        "  let @Res<Int, Int> = MkErr(6);\n"
+        "  @Res<Int, Int>.0 == @Res<Int, Int>.1\n"
+        "}\n"
+    )
+    assert _errors(source) == [], "direct == on Res<Int,Int> must derive"
+    assert _run(source, fn="diff") == 0
+
+
+def test_898_soundness_gate_nonEq_multiparam_stays_e613() -> None:
+    """#898 soundness gate: a non-Eq type argument still rejects with E613.
+
+    `Res<Array<Int>, Int>` is fully determined (both params supplied) but `A`
+    is `Array`, which has no Eq semantics — this must STAY a clean E613, not an
+    E619 (the parameter is not under-determined, it is determined-and-non-Eq)
+    and not an over-accept.
+    """
+    source = (
+        _RES_ADT + _ID1
+        + "public fn main(@Unit -> @Bool)\n"
+        "  requires(true) ensures(true) effects(pure) {\n"
+        "  let @Res<Array<Int>, Int> = MkErr(5);\n"
+        "  id1(@Res<Array<Int>, Int>.0)\n"
+        "}\n"
+    )
+    codes = _errors(source)
+    assert "E613" in codes, f"non-Eq Res<Array,Int> must reject E613, got {codes}"
+    assert "E619" not in codes, (
+        f"determined-but-non-Eq is E613, not E619, got {codes}"
+    )
+    assert "E699" not in codes, f"invariant leak on rejection: {codes}"
+
+
+# ---------------------------------------------------------------------------
+# #898 round 2 — the FULL over-reject fix (cross-argument type-arg merge) and
+# the E619 diagnostic-accuracy correction.
+#
+# Round 2, Task 1: `eq2(MkErr(5), MkOk("x"))` is a fully-determined
+# `Res<String, Int>` — arg 0 fixes `B`, arg 1 fixes `A` — and now type-checks
+# (checker cross-argument merge), monomorphizes to the `Res<String, Int>` clone
+# on both the codegen and verifier sides, and runs by VALUE.  A genuine
+# per-parameter conflict stays a clear E205; a fully-determined NON-Eq type
+# stays E613.
+#
+# Round 2, Task 2: E619 fires only when the under-determined type WOULD derive
+# once its free parameter is annotated (all KNOWN components are Eq).  A known
+# non-Eq component — recovered (`Res<A, Array<Int>>`) or structural
+# (`W<A,B>{ K(Array<A>, B) }`) — is the accurate E613 instead, since no
+# annotation of the free parameter can make it Eq.
+# ---------------------------------------------------------------------------
+
+_EQ2 = (
+    "private forall<T where Eq<T>> fn eq2(@T, @T -> @Bool)\n"
+    "  requires(true) ensures(true) effects(pure) { eq(@T.1, @T.0) }\n"
+)
+
+
+def test_898r2_cross_arg_merge_compiles_and_runs() -> None:
+    """Task 1: `eq2(MkErr(5), MkOk("x"))` cross-determines `Res<String, Int>`.
+
+    Arg 0 (`MkErr`) fixes `B = Int`, arg 1 (`MkOk`) fixes `A = String`, so the
+    monomorphizer's cross-argument merge recovers the full `Res<String, Int>`
+    clone on BOTH the discovery and call-rewrite sides — the call compiles with
+    no Eq rejection (a pre-fix bare-`Res` recovery was an E619) and runs by
+    structural comparison to 0 (the two arguments use different constructors,
+    so they are unequal).  A determined-both-params call in ONE 2-arg `eq2`
+    necessarily compares two DIFFERENT constructors; the same-constructor
+    value-equality proof lives in the conformance program
+    ``ch09_multiparam_ctor_eq`` (annotated `Res<Int, Int>`).
+    """
+    source = (
+        _RES_ADT + _EQ2
+        + "public fn diff(@Unit -> @Bool)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ eq2(MkErr(5), MkOk(\"x\")) }\n"
+    )
+    assert _errors(source) == [], (
+        f"cross-arg-determined Res<String,Int> must derive Eq, "
+        f"got {_errors(source)}"
+    )
+    assert _run(source, fn="diff") == 0  # MkErr vs MkOk — different constructors
+
+
+def test_898r2_cross_arg_determined_noneq_is_e613() -> None:
+    """Task 1 soundness: a cross-arg-determined NON-Eq type stays E613.
+
+    `eq2(MkErr([1]), MkOk(2))` is a fully-determined `Res<Int, Array<Int>>`
+    (arg 0 fixes `B = Array<Int>`, arg 1 fixes `A = Int`).  It type-checks (both
+    parameters determined) but `Array` has no Eq semantics, so it must be a
+    clean E613 — not an over-accept, not E619 (nothing is under-determined).
+    """
+    source = (
+        _RES_ADT + _EQ2
+        + "public fn main(@Unit -> @Bool)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ eq2(MkErr([1]), MkOk(2)) }\n"
+    )
+    codes = _errors(source)
+    assert "E613" in codes, f"determined non-Eq must be E613, got {codes}"
+    assert "E619" not in codes, f"determined non-Eq is not E619, got {codes}"
+    assert "E699" not in codes, f"invariant leak: {codes}"
+
+
+def test_898r2_e619_accuracy_known_noneq_recovered_is_e613() -> None:
+    """Task 2: a recovered non-Eq component is E613, not E619.
+
+    `id1(MkErr([1]))` recovers `B = Array<Int>` (non-Eq) and leaves `A` free.
+    No value of `A` makes `Res<A, Array<Int>>` derive Eq, so "annotate to fix"
+    (E619) is false advice — it must be the accurate E613.
+    """
+    source = (
+        _RES_ADT + _ID1
+        + "public fn main(@Unit -> @Bool)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ id1(MkErr([1])) }\n"
+    )
+    codes = _errors(source)
+    assert "E613" in codes, f"recovered non-Eq component must be E613, got {codes}"
+    assert "E619" not in codes, (
+        f"a known non-Eq component is E613, not E619, got {codes}"
+    )
+    assert "E699" not in codes, f"invariant leak: {codes}"
+
+
+def test_898r2_e619_accuracy_structural_noneq_field_is_e613() -> None:
+    """Task 2: a structurally non-Eq field is E613 even with a free parameter.
+
+    `data W<A, B> { K(Array<A>, B) }`, `id1(K([1], 7))` collapses to bare `W`
+    with `B = Int` recovered.  The `Array<A>` field has no Eq semantics for ANY
+    `A`, so annotating the free parameter cannot help — the accurate diagnostic
+    is E613, not E619.
+    """
+    source = (
+        "private data W<A, B> { K(Array<A>, B) }\n" + _ID1
+        + "public fn main(@Unit -> @Bool)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ id1(K([1], 7)) }\n"
+    )
+    codes = _errors(source)
+    assert "E613" in codes, f"structural non-Eq field must be E613, got {codes}"
+    assert "E619" not in codes, (
+        f"a structural non-Eq field is E613, not E619, got {codes}"
+    )
+    assert "E699" not in codes, f"invariant leak: {codes}"
+
+
+def test_898r2_e619_accuracy_all_known_eq_free_param_stays_e619() -> None:
+    """Task 2: genuinely under-determined with all-Eq known components → E619.
+
+    `id1(MkErr(5))` recovers `B = Int` (Eq) and leaves `A` free.  Annotating
+    `A` to an Eq type makes `Res<A, Int>` derive, so the clearer E619 is
+    correct — this must NOT regress to E613 under the accuracy fix.
+    """
+    source = (
+        _RES_ADT + _ID1
+        + "public fn main(@Unit -> @Bool)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ id1(MkErr(5)) }\n"
+    )
+    codes = _errors(source)
+    assert "E619" in codes, f"all-known-Eq under-determined must be E619, got {codes}"
+    assert "E613" not in codes, f"must stay E619 not E613, got {codes}"
+    assert "E699" not in codes, f"invariant leak: {codes}"
+
+
+def test_898r2_e619_message_has_no_sentinel_and_valid_fix() -> None:
+    """The E619 message and fix must not leak the internal `?` sentinel, and the
+    fix must be a syntactically valid Vera annotation (#898 round-3 review).
+
+    For `id1(MkErr(5))` the free parameter `A` used to render as the reserved
+    `_FREE_TYPE_PARAM = "?"` sentinel — `Res<?, Int>` — and the fix suggested
+    `let @Res<?, Int><...> = ...;`, which is not valid Vera (double type-args,
+    `?`, `<...>` placeholder).  The free slot now renders as its declared
+    parameter name (`Res<A, Int>`) and the fix is a concrete, compilable
+    annotation binding the free parameter to an Eq type (`let @Res<Int, Int>
+    = ...;`).
+    """
+    source = (
+        _RES_ADT + _ID1
+        + "public fn main(@Unit -> @Bool)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ id1(MkErr(5)) }\n"
+    )
+    result = _compile(source)
+    e619 = [d for d in result.diagnostics if d.error_code == "E619"]
+    assert e619, "expected an E619 diagnostic"
+    d = e619[0]
+    # No sentinel leak anywhere in the user-facing text.
+    for field in (d.description, d.fix):
+        assert "?" not in field, f"sentinel leaked in E619 text: {field!r}"
+        assert "<...>" not in field, f"placeholder syntax in E619 text: {field!r}"
+    # The description names the ADT with its declared parameter names, not `?`.
+    assert "Res<A, Int>" in d.description, (
+        f"free slot must render as its parameter name, got: {d.description!r}"
+    )
+    # The fix's suggested annotation must actually compile: extract the
+    # `let @<Type> = ...;` type and check the whole program with that binding
+    # derives (a valid, actionable fix — not `Res<?, Int><...>`).
+    import re
+    m = re.search(r"let @(Res<[^=]*?>) =", d.fix)
+    assert m, f"fix must contain a concrete `let @Res<...> =` binding, got: {d.fix!r}"
+    fixed_type = m.group(1).strip()
+    probe = (
+        _RES_ADT + _ID1
+        + "public fn main(@Unit -> @Bool)\n"
+        "  requires(true) ensures(true) effects(pure) {\n"
+        f"  let @{fixed_type} = MkErr(5);\n"
+        f"  id1(@{fixed_type}.0)\n"
+        "}\n"
+    )
+    assert _errors(probe) == [], (
+        f"the E619 fix's annotation ({fixed_type}) must compile + derive, "
+        f"got {_errors(probe)}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# #923 — direct `==` on a NESTED-generic recursive ADT, type inferred from a
+# constructor operand.
+#
+#   data List<T> { Nil, Cons(T, List<T>) }
+#   Cons(Cons(1, Nil), Nil) == Cons(Cons(1, Nil), Nil)
+#
+# The `==` operand type is inferred from the outer `ConstructorCall`; the outer
+# constructor's type argument is recovered by inferring each field's type.  Pre-
+# #923 that recovery went only ONE level deep — the inner `Cons(1, Nil)` field
+# resolved to the BARE `List` (dropping its own `<Int>`), so the outer name was
+# reconstructed as `List<List>` instead of `List<List<Int>>`.  `List<List>`
+# carries a type argument (`List`) that is a bare generic-ADT name with no
+# argument of its own, which the codegen derivability path treats as a lost-type-
+# arg clone → routed to the scalar (pointer) lowering's sibling rejection →
+# spurious E613, even though `List<List<Int>>` is fully structurally Eq-derivable
+# (the checker's `_adt_satisfies_eq` recurses fully and accepts it).
+#
+# The fix recovers nested type arguments FULLY, so codegen accepts the composite
+# exactly as the checker does — while a genuinely non-Eq nested component
+# (`List<List<Array<Int>>>`) must STILL reject with E613 (no over-accept).
+# ---------------------------------------------------------------------------
+
+_NESTED_GENERIC_LIST = "public data List<T> { Nil, Cons(T, List<T>) }\n"
+
+
+def test_923_nested_generic_direct_eq_accepts_and_runs() -> None:
+    """#923: `Cons(Cons(1, Nil), Nil) == ...` (List<List<Int>>) derives + runs.
+
+    The outer operand infers `List<List<Int>>`; pre-#923 the inner field
+    recovered only the bare `List`, reconstructing `List<List>` and spuriously
+    E613-ing.  Full nested recovery accepts it exactly as the checker does.
+    """
+    same = (
+        _NESTED_GENERIC_LIST
+        + "public fn main(@Unit -> @Int) requires(true) ensures(true)\n"
+        "  effects(pure)\n"
+        "{ if Cons(Cons(1, Nil), Nil) == Cons(Cons(1, Nil), Nil)\n"
+        "  then { 1 } else { 0 } }\n"
+    )
+    diff = (
+        _NESTED_GENERIC_LIST
+        + "public fn main(@Unit -> @Int) requires(true) ensures(true)\n"
+        "  effects(pure)\n"
+        "{ if Cons(Cons(1, Nil), Nil) == Cons(Cons(2, Nil), Nil)\n"
+        "  then { 1 } else { 0 } }\n"
+    )
+    assert _errors(same) == [], f"List<List<Int>> `==` must derive: {_errors(same)}"
+    assert _run(same) == 1
+    assert _run(diff) == 0
+
+
+def test_923_three_level_nested_generic_direct_eq() -> None:
+    """#923: a 3-level nesting (List<List<List<Int>>>) also derives + runs.
+
+    Proves the recovery is genuinely recursive (not a hardcoded two-level
+    special case): the outer field recovers `List<List<Int>>`, whose own field
+    recovers `List<Int>`.
+    """
+    same = (
+        _NESTED_GENERIC_LIST
+        + "public fn main(@Unit -> @Int) requires(true) ensures(true)\n"
+        "  effects(pure)\n"
+        "{ if Cons(Cons(Cons(1, Nil), Nil), Nil)\n"
+        "     == Cons(Cons(Cons(1, Nil), Nil), Nil)\n"
+        "  then { 1 } else { 0 } }\n"
+    )
+    diff = (
+        _NESTED_GENERIC_LIST
+        + "public fn main(@Unit -> @Int) requires(true) ensures(true)\n"
+        "  effects(pure)\n"
+        "{ if Cons(Cons(Cons(1, Nil), Nil), Nil)\n"
+        "     == Cons(Cons(Cons(9, Nil), Nil), Nil)\n"
+        "  then { 1 } else { 0 } }\n"
+    )
+    assert _errors(same) == [], (
+        f"List<List<List<Int>>> `==` must derive: {_errors(same)}"
+    )
+    assert _run(same) == 1
+    assert _run(diff) == 0
+
+
+def test_923_nested_generic_eq_builtin_form() -> None:
+    """#923: the `eq(...)` builtin form of the nested-generic `==` also derives.
+
+    `eq(a, b)` desugars to the same structural comparison as `a == b`, so it
+    must accept the nested-generic operand identically.
+    """
+    same = (
+        _NESTED_GENERIC_LIST
+        + "public fn main(@Unit -> @Int) requires(true) ensures(true)\n"
+        "  effects(pure)\n"
+        "{ if eq(Cons(Cons(1, Nil), Nil), Cons(Cons(1, Nil), Nil))\n"
+        "  then { 1 } else { 0 } }\n"
+    )
+    diff = (
+        _NESTED_GENERIC_LIST
+        + "public fn main(@Unit -> @Int) requires(true) ensures(true)\n"
+        "  effects(pure)\n"
+        "{ if eq(Cons(Cons(1, Nil), Nil), Cons(Cons(2, Nil), Nil))\n"
+        "  then { 1 } else { 0 } }\n"
+    )
+    assert _errors(same) == [], (
+        f"eq(...) nested-generic must derive: {_errors(same)}"
+    )
+    assert _run(same) == 1
+    assert _run(diff) == 0
+
+
+def test_923_mixed_nested_generic_direct_eq() -> None:
+    """#923: a mixed nested-generic (Chain<Pair<Int>>) derives + runs by value.
+
+    A distinct outer/inner generic pairing (not the self-nested `List<List>`)
+    proves the recovery reconstructs `Chain<Pair<Int>>`, not `Chain<Pair>`.
+    """
+    decls = (
+        "public data Pair<T> { MkPair(T, T) }\n"
+        "public data Chain<T> { Empty, Link(T, Chain<T>) }\n"
+    )
+    same = (
+        decls
+        + "public fn main(@Unit -> @Int) requires(true) ensures(true)\n"
+        "  effects(pure)\n"
+        "{ if Link(MkPair(1, 2), Empty) == Link(MkPair(1, 2), Empty)\n"
+        "  then { 1 } else { 0 } }\n"
+    )
+    diff = (
+        decls
+        + "public fn main(@Unit -> @Int) requires(true) ensures(true)\n"
+        "  effects(pure)\n"
+        "{ if Link(MkPair(1, 2), Empty) == Link(MkPair(1, 9), Empty)\n"
+        "  then { 1 } else { 0 } }\n"
+    )
+    assert _errors(same) == [], (
+        f"Chain<Pair<Int>> `==` must derive: {_errors(same)}"
+    )
+    assert _run(same) == 1
+    assert _run(diff) == 0
+
+
+def test_923_nested_generic_non_eq_component_still_rejected_e613() -> None:
+    """#923 soundness gate: a genuinely non-Eq nested component STILL rejects.
+
+    `List<List<Array<Int>>>` — the innermost component is `Array<Int>`, which
+    has no Eq semantics — must be a clean E613, never over-accepted by the
+    fuller recovery, and never an E699 codegen-invariant leak.
+    """
+    source = (
+        _NESTED_GENERIC_LIST
+        + "public fn main(@Unit -> @Int) requires(true) ensures(true)\n"
+        "  effects(pure)\n"
+        "{ if Cons(Cons([1], Nil), Nil) == Cons(Cons([1], Nil), Nil)\n"
+        "  then { 1 } else { 0 } }\n"
+    )
+    codes = _errors(source)
+    assert "E613" in codes, (
+        f"non-Eq nested component (Array) must reject, got {codes}"
+    )
+    assert "E699" not in codes, f"invariant leak on rejection: {codes}"
+
+
+# ---------------------------------------------------------------------------
+# #932 — the GENERIC-CALL/clone sibling of #923.  A nested-generic ADT reached
+# through an Eq-constrained generic function:
+#
+#   data List<T> { Nil, Cons(T, List<T>) }
+#   forall<T where Eq<T>> fn eq2(@T, @T -> @Bool) { @T.0 == @T.1 }
+#   eq2(Cons(Cons(1, Nil), Nil), Cons(Cons(1, Nil), Nil))     -- List<List<Int>>
+#
+# #923 fixed the DIRECT-`==` derivability path.  The generic-call path instead
+# recovers the constrained-var operand's type name via the shared clone-mangler
+# (`_get_arg_type_info_wasm` / `_get_arg_type_info`), which recovers only ONE
+# level of nested type argument → `List<List>`.  That truncated name feeds the
+# E613 derivability gate (`_check_constraints` → `_adt_satisfies_eq`), whose
+# inner `List` has no type argument → treated as a lost-type-arg clone →
+# spurious E613, even though `List<List<Int>>` is fully structurally Eq-derivable
+# (the checker accepts it, so `vera check` is green — a check↔codegen divergence).
+#
+# The fix recurses the type-argument recovery FOR THE DERIVABILITY DECISION ONLY,
+# WITHOUT altering the mangled clone name codegen emits and looks up (that clone
+# name stays `eq2$List<List>`; test_772_ctor_path_nested_adt must remain green).
+# A genuinely non-Eq nested leaf must STILL reject E613 (no over-accept).
+# ---------------------------------------------------------------------------
+
+_NESTED_GENERIC_EQ2 = (
+    "private data List<T> { Nil, Cons(T, List<T>) }\n"
+    "private forall<T where Eq<T>> fn eq2(@T, @T -> @Bool)\n"
+    "  requires(true) ensures(true) effects(pure) { @T.0 == @T.1 }\n"
+)
+
+
+def test_932_generic_call_nested_generic_accepts_and_runs() -> None:
+    """#932: `eq2(Cons(Cons(1,Nil),Nil), …)` (List<List<Int>>) derives + runs.
+
+    The constrained-var operand infers the truncated `List<List>`; pre-#932 the
+    lost inner `<Int>` spuriously E613'd on the generic-call path even though
+    `vera check` accepts it.  Full nested recovery for the derivability decision
+    accepts it exactly as the checker does — with NO change to the clone name.
+    """
+    same = (
+        _NESTED_GENERIC_EQ2
+        + "public fn main(@Unit -> @Int) requires(true) ensures(true)\n"
+        "  effects(pure)\n"
+        "{ if eq2(Cons(Cons(1, Nil), Nil), Cons(Cons(1, Nil), Nil))\n"
+        "  then { 1 } else { 0 } }\n"
+    )
+    diff = (
+        _NESTED_GENERIC_EQ2
+        + "public fn main(@Unit -> @Int) requires(true) ensures(true)\n"
+        "  effects(pure)\n"
+        "{ if eq2(Cons(Cons(1, Nil), Nil), Cons(Cons(2, Nil), Nil))\n"
+        "  then { 1 } else { 0 } }\n"
+    )
+    assert _errors(same) == [], (
+        f"List<List<Int>> via generic call must derive: {_errors(same)}"
+    )
+    assert _run(same) == 1
+    assert _run(diff) == 0
+
+
+def test_932_generic_call_three_level_nested_generic() -> None:
+    """#932: a 3-level nesting (List<List<List<Int>>>) via the generic call.
+
+    Proves the derivability recovery is genuinely recursive on the generic-call
+    path (not a hardcoded two-level special case).
+    """
+    same = (
+        _NESTED_GENERIC_EQ2
+        + "public fn main(@Unit -> @Int) requires(true) ensures(true)\n"
+        "  effects(pure)\n"
+        "{ if eq2(Cons(Cons(Cons(1, Nil), Nil), Nil),\n"
+        "         Cons(Cons(Cons(1, Nil), Nil), Nil))\n"
+        "  then { 1 } else { 0 } }\n"
+    )
+    diff = (
+        _NESTED_GENERIC_EQ2
+        + "public fn main(@Unit -> @Int) requires(true) ensures(true)\n"
+        "  effects(pure)\n"
+        "{ if eq2(Cons(Cons(Cons(1, Nil), Nil), Nil),\n"
+        "         Cons(Cons(Cons(9, Nil), Nil), Nil))\n"
+        "  then { 1 } else { 0 } }\n"
+    )
+    assert _errors(same) == [], (
+        f"List<List<List<Int>>> via generic call must derive: {_errors(same)}"
+    )
+    assert _run(same) == 1
+    assert _run(diff) == 0
+
+
+def test_932_generic_call_mixed_nested_generic() -> None:
+    """#932: a mixed nested-generic (Chain<Pair<Int>>) via the generic call.
+
+    A distinct outer/inner generic pairing (not self-nested `List<List>`)
+    proves the derivability recovery reconstructs `Chain<Pair<Int>>`, not the
+    truncated `Chain<Pair>`, on the generic-call path.
+    """
+    decls = (
+        "private data Pair<T> { MkPair(T, T) }\n"
+        "private data Chain<T> { Empty, Link(T, Chain<T>) }\n"
+        "private forall<T where Eq<T>> fn eq2(@T, @T -> @Bool)\n"
+        "  requires(true) ensures(true) effects(pure) { @T.0 == @T.1 }\n"
+    )
+    same = (
+        decls
+        + "public fn main(@Unit -> @Int) requires(true) ensures(true)\n"
+        "  effects(pure)\n"
+        "{ if eq2(Link(MkPair(1, 2), Empty), Link(MkPair(1, 2), Empty))\n"
+        "  then { 1 } else { 0 } }\n"
+    )
+    diff = (
+        decls
+        + "public fn main(@Unit -> @Int) requires(true) ensures(true)\n"
+        "  effects(pure)\n"
+        "{ if eq2(Link(MkPair(1, 2), Empty), Link(MkPair(1, 9), Empty))\n"
+        "  then { 1 } else { 0 } }\n"
+    )
+    assert _errors(same) == [], (
+        f"Chain<Pair<Int>> via generic call must derive: {_errors(same)}"
+    )
+    assert _run(same) == 1
+    assert _run(diff) == 0
+
+
+def test_932_generic_call_nested_non_eq_leaf_still_rejected_e613() -> None:
+    """#932 soundness gate: a genuinely non-Eq nested leaf STILL rejects E613.
+
+    `List<List<Array<Int>>>` reached via the generic call — innermost component
+    `Array<Int>` has no Eq semantics — must be a clean E613, never over-accepted
+    by the fuller derivability recovery, and never an E699 invariant leak.
+    """
+    source = (
+        _NESTED_GENERIC_EQ2
+        + "public fn main(@Unit -> @Int) requires(true) ensures(true)\n"
+        "  effects(pure)\n"
+        "{ if eq2(Cons(Cons([1], Nil), Nil), Cons(Cons([1], Nil), Nil))\n"
+        "  then { 1 } else { 0 } }\n"
+    )
+    codes = _errors(source)
+    assert "E613" in codes, (
+        f"non-Eq nested leaf (Array) via generic call must reject, got {codes}"
+    )
+    assert "E699" not in codes, f"invariant leak on rejection: {codes}"

@@ -1,0 +1,24 @@
+-- Conformance: == / Eq on a non-Eq-derivable type is a checker error (Chapter 9, Section 9.8.1)
+-- Tests: E243 — the Eq ability's `==` (and `eq`) operation is rejected on a
+-- non-Eq-derivable operand (#928, the equality sibling of #921).  Eq derives
+-- STRUCTURALLY (§9.8.2): the Eq primitives, simple enums, and ADTs whose fields
+-- are (recursively) all Eq — but a field with no Eq semantics (Array / Map /
+-- Set / a function / a Tuple) makes the whole type non-derivable.  `Rec` here
+-- has a `Map` field, so it is not Eq-derivable.  This is the exact silent
+-- wrong result #928 closes: without this gate a non-Eq `==` type-checked, then
+-- codegen fell to a raw i32/pointer comparison that never reached the
+-- structural-Eq derivability dispatch (identity, not value equality).  The
+-- checker now rejects it, keeping check, codegen, and verify in agreement.
+private data Rec {
+  MkRec(Map<String, Int>)
+}
+
+public fn main(@Unit -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Rec = MkRec(map_new());
+  let @Rec = MkRec(map_new());
+  @Rec.0 == @Rec.1
+}

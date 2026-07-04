@@ -222,7 +222,17 @@ class ClosureLiftingMixin:
             self.string_pool,
             ctor_layouts=ctor_layouts,
             adt_type_names=set(self._adt_layouts.keys()),
+            # #873: a generic called ONLY from inside a closure body must be
+            # rewritten to its monomorphized clone here too — mono discovery
+            # already walks closure bodies (the total AST walk) and emits the
+            # clone, but without `generic_fn_info` the lifted closure body left
+            # the call on the bare generic name (`call $are_equal`), which has
+            # no implementation → WASM validation failure at run.  `known_fns`
+            # rides along so the same cross-module guard rail the per-function
+            # context uses (functions.py) also protects closure bodies.
+            generic_fn_info=getattr(self, "_generic_fn_info", None),
             ctor_to_adt=ctor_to_adt,
+            known_fns=set(self._fn_sigs.keys()),
             ctor_adt_tp_indices=getattr(self, "_ctor_adt_tp_indices", None),
             adt_tp_counts=getattr(self, "_adt_tp_counts", None),
             adt_tp_param_names=getattr(self, "_adt_tp_param_names", None),
@@ -230,6 +240,10 @@ class ClosureLiftingMixin:
         # #773 / PR #870 review: direct `==` derivability gate inside closure
         # bodies — same oracle as the per-function ctx in functions.py.
         ctx.set_adt_eq_derivable(self._adt_satisfies_eq)
+        # #932: share the truncated→full constrained-var name map (see
+        # functions.py) so a generic clone's direct `==` inside a closure body
+        # resolves a truncated slot type on its fully-nested name.
+        ctx.set_eq_full_type_names(getattr(self, "_eq_full_type_names", {}))
         # #514: share the module-level sig dict and closure-ID counter
         # with the inner ctx so that any new sigs / IDs it registers
         # get module-unique names (avoids ``$closure_sig_0`` /
@@ -267,6 +281,14 @@ class ClosureLiftingMixin:
         ctx.set_fn_byte_params(self._fn_byte_params)
         ctx.set_type_aliases(self._type_aliases)
         ctx.set_type_alias_params(self._type_alias_params)
+        # #814/#774: a qualified call inside a closure body must resolve the
+        # same way it does in a top-level body — to the module's function
+        # (`mod$…` for a shadowed fn) and, for a shadowed imported generic, to
+        # the module generic's clone rather than the local shadow.
+        ctx.set_module_qualified_targets(self._module_qualified_targets)
+        ctx.set_module_qualified_generic_bases(
+            self._module_qualified_generic_bases,
+        )
         env = WasmSlotEnv()
 
         # Parameter 0: $env (i32 — closure environment pointer)
@@ -282,9 +304,38 @@ class ClosureLiftingMixin:
             wt = self._type_expr_to_wasm_type(param_te)
             if wt is None:  # pragma: no cover — Unit closure param
                 continue  # Unit param, skip
-            if wt == "unsupported":  # pragma: no cover — type-check rejects this
-                raise CodegenInvariantError(
-                    "closure parameter has unsupported WASM type", anon_fn)
+            if wt == "unsupported":
+                # #913: a bare type variable (`@T` inside a `forall<T>` body)
+                # is `"unsupported"` here — but it is NOT a codegen bug.  The
+                # generic TEMPLATE is body-compiled to draw its skip-warning
+                # surface (E602/E604/E605), exactly as a template's own bare
+                # `@T` *parameter* draws E604 via `_is_compilable`; only the
+                # monomorphized clone (whose closure param is the concrete
+                # type) is ever run.  So drop THIS closure cleanly — a
+                # user-facing skip that returns None, routing through
+                # `_lift_pending_closures` to `_compile_fn`'s droppable
+                # dropped-parent E602 — rather than raising the hard E699 that
+                # reported a valid generic as an internal compiler error.  Both
+                # this closure-level E602 and the function-level wrapper are
+                # suppressed once a clone compiles: the wrapper by the #604
+                # description-prefix filter, THIS one by that filter's #913
+                # forall-origin arm (`vera/codegen/core.py`), which matches a
+                # template-body E602 by its source line falling inside a
+                # compiled-clone template's span (its description names the
+                # closure, not the enclosing fn, so the prefix match misses it).
+                self._harvest_interp_inference_failures(ctx)
+                self._warning(
+                    anon_fn,
+                    "Closure parameter has unsupported WASM type — "
+                    "closure skipped.",
+                    rationale="A closure parameter typed as an unsubstituted "
+                    "type variable has no monomorphic WASM representation. "
+                    "This occurs only in an uninstantiated generic template "
+                    "body; the enclosing function is dropped, and each "
+                    "concrete instantiation compiles its own clone.",
+                    error_code="E602",
+                )
+                return None
             if wt == "i32_pair":
                 # String/Array params need two consecutive i32 slots (ptr, len).
                 # The pair convention uses ptr_idx and ptr_idx+1 implicitly, so
@@ -391,9 +442,25 @@ class ClosureLiftingMixin:
 
         # Return type
         ret_wt = self._type_expr_to_wasm_type(anon_fn.return_type)
-        if ret_wt == "unsupported":  # pragma: no cover — type-check rejects this
-            raise CodegenInvariantError(
-                "closure return type has unsupported WASM type", anon_fn)
+        if ret_wt == "unsupported":
+            # #913: same as the closure-parameter case above — an unsubstituted
+            # type variable (`-> @T`) in an uninstantiated generic template body
+            # is a clean skip, not an internal compiler error.  Drop the closure
+            # so the enclosing fn is dropped droppably (E602); the clone whose
+            # return type is concrete compiles normally.
+            self._harvest_interp_inference_failures(ctx)
+            self._warning(
+                anon_fn,
+                "Closure return type has unsupported WASM type — "
+                "closure skipped.",
+                rationale="A closure return typed as an unsubstituted type "
+                "variable has no monomorphic WASM representation. This occurs "
+                "only in an uninstantiated generic template body; the enclosing "
+                "function is dropped, and each concrete instantiation compiles "
+                "its own clone.",
+                error_code="E602",
+            )
+            return None
         if ret_wt == "i32_pair":
             result_part = " (result i32 i32)"
         elif ret_wt:
@@ -426,6 +493,25 @@ class ClosureLiftingMixin:
                 "Vera expression types. The enclosing function will "
                 "also be dropped to avoid a missing function-table "
                 "entry.",
+                error_code="E602",
+            )
+            return None
+        except RecursionError:
+            # #933 belt-and-suspenders (see the parallel catch in
+            # functions.py::_compile_fn): a derived-helper generator whose
+            # per-level frame cost outruns `DERIVED_HELPER_DEPTH_CAP` must not
+            # surface a raw traceback from a check-green program.  Degrade to
+            # the clean [E602] skip the closure-skip path already emits, which
+            # drops the enclosing function too.
+            self._harvest_interp_inference_failures(ctx)
+            self._warning(
+                anon_fn,
+                "Closure body exceeded the codegen recursion bound (a deeply "
+                "/ non-uniformly recursive type) — closure skipped.",
+                rationale="Rendering / comparing a polymorphically-recursive "
+                "type would expand without bound at compile time. The "
+                "enclosing function will also be dropped to avoid a missing "
+                "function-table entry.",
                 error_code="E602",
             )
             return None
@@ -480,6 +566,8 @@ class ClosureLiftingMixin:
         )
         # #773: structural-Eq helpers generated inside a lifted closure body.
         self._adt_eq_helpers.update(ctx._adt_eq_helpers)
+        # #924: recursive show/hash helpers generated inside a lifted closure.
+        self._show_hash_helpers.update(ctx._show_hash_helpers)
 
         # Build GC prologue/epilogue (only when closure body allocates).
         # Two-phase prologue: ``gc_prologue`` runs before ``load_instrs``

@@ -432,6 +432,42 @@ public fn id_pos(@PosInt -> @PosInt)
         assert _run(src, fn="id_pos", args=[42]) == 42
         _run_refine_trap(src, fn="id_pos", args=[-1])
 
+    def test_zero_size_future_unit_refinement_param_compiles(self) -> None:
+        """#943: a refined parameter whose base erases to a zero-size type —
+        `@{ @Future<Unit> | P }` — must emit NO runtime guard (there is no WASM
+        local to check), exactly like a bare `@{ @Unit | P }`.  `Future<T>` is
+        transparent to `T` (#841), so `Future<Unit>` erases to nothing, but the
+        guard-parts short-circuit keyed on the literal base name `"Unit"` and
+        missed it — raising a raw `ValueError` at codegen on a `check`-green +
+        `verify`-green program (the #939-review sibling).  Now it compiles and
+        runs clean (the guard is skipped, `tier3_unguarded`)."""
+        # `f(async(()))` inline: a `let @Future<Unit> = ...` binding is a
+        # *separate* unsupported-construct skip (zero-size let RHS), so the
+        # value is passed directly to isolate the refinement-guard path #943
+        # fixes.
+        src = """
+private fn f(@{ @Future<Unit> | true } -> @Int)
+  requires(true) ensures(true) effects(pure) { 0 }
+
+public fn main(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{ f(async(())) }
+"""
+        assert _run(src) == 0
+
+    def test_bare_unit_refinement_param_still_compiles(self) -> None:
+        """Non-regression: the bare `@{ @Unit | P }` zero-size case the #943 fix
+        generalises must keep compiling + running clean (guard skipped)."""
+        src = """
+private fn g(@{ @Unit | true } -> @Int)
+  requires(true) ensures(true) effects(pure) { 0 }
+
+public fn main(-> @Int)
+  requires(true) ensures(true) effects(pure)
+{ g(()) }
+"""
+        assert _run(src) == 0
+
     def test_refined_string_param_guard_traps(self) -> None:
         src = """
 type NonEmpty = { @String | string_length(@String.0) > 0 };
