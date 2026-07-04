@@ -957,11 +957,16 @@ class ExpressionsMixin:
         # diagnostic for one root cause.  Suppress it when `expected` is already
         # a zero-size array; the un-annotated literal (`expected` is None, or a
         # non-degenerate expected type) still reports here — its only gate.
+        # `expected` may be a `RefinedType` (`{ @Array<Unit> | pred }`), so
+        # strip to the base first (as `erases_to_unit` itself does) — otherwise
+        # the refined shape misses this guard and the literal-level E135
+        # double-fires alongside the annotation's (PR #938 review).
+        expected_base = base_type(expected) if expected is not None else None
         expected_is_zero_size_array = (
-            isinstance(expected, AdtType)
-            and expected.name == "Array"
-            and len(expected.type_args) == 1
-            and erases_to_unit(expected.type_args[0])
+            isinstance(expected_base, AdtType)
+            and expected_base.name == "Array"
+            and len(expected_base.type_args) == 1
+            and erases_to_unit(expected_base.type_args[0])
         )
         if erases_to_unit(first) and not expected_is_zero_size_array:
             self._error(

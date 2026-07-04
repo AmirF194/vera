@@ -1963,6 +1963,23 @@ class TestArrayZeroSizeElementRejected945:
             "annotated Array<Unit> literal must emit E135 exactly once "
             f"(no double for one root cause), got {[e.error_code for e in errs]}"
         )
+        # ...and the same when the annotation is REFINED (`{ @Array<Unit> | p }`):
+        # `expected` is then a `RefinedType`, so the guard must strip to the base
+        # (`base_type`) or the literal-level E135 double-fires again (PR #938
+        # review; the E202 type-mismatch is a separate, expected diagnostic).
+        refined = _errors(
+            "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{\n"
+            "  let @{ @Array<Unit> | true } = [()];\n"
+            "  nat_to_int(array_length(@Array<Unit>.0))\n"
+            "}\n"
+        )
+        refined_e135 = [e for e in refined if e.error_code == "E135"]
+        assert len(refined_e135) == 1, (
+            "refined Array<Unit> annotation + literal must also emit E135 "
+            f"exactly once, got {[e.error_code for e in refined]}"
+        )
 
     def test_array_unit_param_rejected(self) -> None:
         # No literal — the `@Array<Unit>` parameter type alone is rejected at
