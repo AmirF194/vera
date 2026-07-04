@@ -431,21 +431,31 @@ Demo-first: each stage ships a working capability, cut as its own release, on th
 | v0.0.195 | 2 Jul | The `wasi:http` serve backend: `--world server` packages a verified `handle(Request -> Response)` program as an incoming-handler component that stock `wasmtime serve` runs unmodified (spec §13.7). |
 | v0.0.196 | 2 Jul | Post-sprint consolidation: prelude skip-warnings silenced with `<prelude>` attribution ([#851](https://github.com/aallan/vera/issues/851)), `apply_fn` typed as a checker special form (spurious E200 gone, misuse now check-time errors), and a docs/site/examples sweep surfacing HttpServer + WASI. |
 
+## Stage 17: The v0.1.0 bug burndown (4 July onwards)
+
+*Zero known bugs, then the first minor release.*
+
+A single `release/v0.1.0` integration branch absorbed a fix for every open `bug`-labelled issue — 31 in all, surfaced by two systematic hunts for check-green programs that fail at codegen or verify — each on its own adversarially-reviewed PR.  The severe cases were silent wrong results: `compare` / ordering on a user ADT compiled to a heap-pointer comparison, and `==` on a non-`Eq` type pointer-compared instead of erroring — both now rejected at check (`E242` / `E243`).  Structural `show` / `hash` / `eq` gained composite, recursive, nested-generic, and generic-mutually-recursive support; effect handlers work over composite type arguments; transitive and alias module imports resolve; the verifier no longer crashes on nested same-ADT constructors.  With the tracker's `bug` label empty, the project cut **v0.1.0** — its first minor release — with a full documentation sweep and the literal "No known bugs."
+
+| Version | Date | What shipped |
+|---------|------|-------------|
+| v0.1.0 | 4 Jul | **Zero known bugs.** 31 `bug`-labelled issues fixed on one integration branch: silent-miscompile gates for ordering (`E242`) and equality (`E243`), structural `show`/`hash`/`eq` over composite + recursive + nested-generic + mutually-recursive ADTs, effect handlers over composites, transitive/alias module imports, and the verifier nested-ctor-sort crash — the first minor release. |
+
 ---
 
 ## By the numbers
 
-Eight releases, chosen for the capability each one unlocked rather than even spacing.
+Nine releases, chosen for the capability each one unlocked rather than even spacing.
 
-| Metric | v0.0.1 (23 Feb) | v0.0.9 (23 Feb) | v0.0.65 (4 Mar) | v0.0.101 (27 Mar) | v0.0.170 (12 Jun) | v0.0.191 (1 Jul) | v0.0.193 (2 Jul) | v0.0.195 (2 Jul) |
-|--------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| Milestone | First release | Runs end-to-end | GC + maturity | Inference effect | Language server | Soundness campaign | HttpServer effect | WASI serve backend |
-| Compiler layers | Parser | 5 (full pipeline) | 5 + modules + GC | 5 + modules + GC + browser | 5 + modules + GC + browser + LSP | 5 + modules + GC + browser + LSP | 5 + modules + GC + browser + LSP | 5 + modules + GC + browser + LSP + WASI |
-| Tests | ~50 | ~300 | ~1,400 | 3,095 | 4,342 | 5,559 | 5,615 | 5,808 |
-| Examples | 13 | 15 | 18 | 30 | 35 | 35 | 36 | 36 |
-| Built-in functions | 0 | 0 | ~30 | 122 | 164 | 164 | 164 | 164 |
-| Conformance programs | 0 | 0 | 0 | 64 | 89 | 103 | 104 | 104 |
-| Spec chapters | 7 | 10 | 12 | 13 | 13 | 13 | 13 | 14 |
-| Code coverage | — | — | 90% | 96% | 95% | 95% | 95% | 95% |
+| Metric | v0.0.1 (23 Feb) | v0.0.9 (23 Feb) | v0.0.65 (4 Mar) | v0.0.101 (27 Mar) | v0.0.170 (12 Jun) | v0.0.191 (1 Jul) | v0.0.193 (2 Jul) | v0.0.195 (2 Jul) | v0.1.0 (4 Jul) |
+|--------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| Milestone | First release | Runs end-to-end | GC + maturity | Inference effect | Language server | Soundness campaign | HttpServer effect | WASI serve backend | Zero known bugs |
+| Compiler layers | Parser | 5 (full pipeline) | 5 + modules + GC | 5 + modules + GC + browser | 5 + modules + GC + browser + LSP | 5 + modules + GC + browser + LSP | 5 + modules + GC + browser + LSP | 5 + modules + GC + browser + LSP + WASI | 5 + modules + GC + browser + LSP + WASI |
+| Tests | ~50 | ~300 | ~1,400 | 3,095 | 4,342 | 5,559 | 5,615 | 5,808 | 6,763 |
+| Examples | 13 | 15 | 18 | 30 | 35 | 35 | 36 | 36 | 37 |
+| Built-in functions | 0 | 0 | ~30 | 122 | 164 | 164 | 164 | 164 | 164 |
+| Conformance programs | 0 | 0 | 0 | 64 | 89 | 103 | 104 | 104 | 143 |
+| Spec chapters | 7 | 10 | 12 | 13 | 13 | 13 | 13 | 14 | 14 |
+| Code coverage | — | — | 90% | 96% | 95% | 95% | 95% | 95% | 95% |
 
-Total: **1,800+ commits, 195 tagged releases, 92 active development days.**
+Total: **1,900+ commits, 198 tagged releases, 94 active development days.**

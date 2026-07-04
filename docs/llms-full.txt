@@ -2,7 +2,7 @@
 
 > Vera is a statically typed, purely functional programming language designed for large language models to write. It uses typed slot references (@T.n) instead of variable names, requires contracts on every function, and compiles to WebAssembly.
 
-This file contains the core Vera language documentation — language reference, agent instructions, FAQ, error codes, and formal grammar — compiled into a single document. Version 0.0.196. For the full documentation index including the 14-chapter specification and supplementary docs, see llms.txt.
+This file contains the core Vera language documentation — language reference, agent instructions, FAQ, error codes, and formal grammar — compiled into a single document. Version 0.1.0. For the full documentation index including the 14-chapter specification and supplementary docs, see llms.txt.
 
 
 ========================================================================
@@ -1777,7 +1777,7 @@ private forall<T where Eq<T>> fn are_equal(@T, @T -> @Bool)
 
 Four built-in abilities are available — no declarations needed:
 
-- **`Eq<T>`** — `eq(x, y)` returns `@Bool`. Satisfied by: Int, Nat, Bool, Float64, String, Byte, Unit, and simple enum ADTs.
+- **`Eq<T>`** — `eq(x, y)` returns `@Bool`. Satisfied by: Int, Nat, Bool, Float64, String, Byte, Unit, and ADTs (including `Option` / `Result`, recursive, nested-generic, and mutually-recursive) whose fields are themselves `Eq` (structural derivation). Unlike `Hash`/`Show`, `Tuple`, `Array`, `Map`, and `Set` are **not** Eq-derivable — a non-Eq `==` / `eq` is rejected at check with E243.
 - **`Ord<T>`** — `compare(x, y)` returns `@Ordering` (`Less`, `Equal`, `Greater`). Satisfied by: Int, Nat, Float64, Byte, String — exactly the orderable types (the `<`/`>`/`<=`/`>=` domain). A user ADT is **not** Ord-derivable, and neither is `Bool`; `compare` on a non-orderable operand is rejected with E242 (mirroring E143 on a direct `<`).
 - **`Hash<T>`** — `hash(x)` returns `@Int`. Satisfied by: Int, Nat, Bool, Float64, String, Byte, Unit, and composite types (ADT, Tuple, Option, Result, Array) whose fields/elements are themselves `Hash` (structural derivation).
 - **`Show<T>`** — `show(x)` returns `@String`. Satisfied by: Int, Nat, Bool, Float64, String, Byte, Unit, and composite types (ADT, Tuple, Option, Result, Array) whose fields/elements are themselves `Show`; renders `Ctor(f0, f1, …)` / `(a, b)` / `Some(x)` / `Ok(x)` / `[e0, e1, …]`.
@@ -3046,7 +3046,7 @@ The reference compiler is under active development. The current release includes
 
 - A seven-stage pipeline: parse, transform, resolve, typecheck, verify, compile, execute
 - A 14-chapter formal specification
-- Over 5,900 unit tests plus a 143-program conformance suite
+- Over 6,700 unit tests plus a 143-program conformance suite
 - 35 working example programs
 - 164 built-in functions covering strings, arrays, math, parsing, and data types
 - Four built-in abilities (Eq, Ord, Hash, Show) with constrained generics and ADT auto-derivation
