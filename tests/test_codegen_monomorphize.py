@@ -1113,10 +1113,10 @@ private fn build(@Nat -> @List<Nat>)
         """A (non-generic) mutually-recursive ADT pair renders via helpers.
 
         `Forest` ↔ `Rose` reference each other; the generated `$show_Forest`
-        and `$show_Rose` helpers cross-call.  (Generic mutual recursion where
-        the type argument is buried in a nested generic field — `Grove(Rose<T>,
-        Forest<T>)` — is a separate, pre-existing type-argument-recovery
-        limitation shared with `$eq_<type>`; see #924.)
+        and `$show_Rose` helpers cross-call.  (The GENERIC mutual case — where
+        the type argument is buried in a nested generic field, `Grove(Rose<T>,
+        Forest<T>)` — is now also supported via nested type-argument descent;
+        see `test_generic_mutually_recursive_*` below and #934.)
         """
         source = """\
 private data Forest { Empty, Grove(Rose, Forest) }
@@ -1127,6 +1127,124 @@ public fn main(-> @Bool)
 { eq(show(Grove(Bloom(1, Empty), Empty)), "Grove(Bloom(1, Empty), Empty)") }
 """
         assert _run(source, fn="main") == 1
+
+    # ---- generic mutual recursion: nested type-arg recovery (#934) ------
+    #
+    # A GENERIC mutually-recursive ADT whose type argument is buried in a
+    # NESTED generic field (`Grove(Rose<T>, Forest<T>)` — neither field IS a
+    # bare `T`) could not recover its full parameterized type at a
+    # show/hash/eq site.  The type argument is dug out of the nested generic
+    # field's own constructor argument (`Bloom(T, …)` inside `Rose<T>` pins
+    # `T = Int` from the literal `1`).  eq was a SILENT wrong result (two
+    # structurally-equal values compared unequal by pointer); show/hash were
+    # dropped at codegen (E602).
+
+    _GENERIC_MUTUAL_DECLS = """\
+private data Forest<T> { Empty, Grove(Rose<T>, Forest<T>) }
+private data Rose<T> { Bloom(T, Forest<T>) }
+"""
+
+    def test_generic_mutually_recursive_eq_equal(self) -> None:
+        """Structurally-equal generic-mutual values compare equal (#934).
+
+        Pre-fix: the site fell back to a bare-pointer `i32.eq` of two freshly
+        allocated structs → a SILENT `0`.  Post-fix: the recovered
+        `Forest<Int>` routes to `$eq_Forest<Int>` → `1`.
+        """
+        source = self._GENERIC_MUTUAL_DECLS + """
+public fn main(-> @Int)
+  requires(true) ensures(true) effects(pure)
+{ if eq(Grove(Bloom(1, Empty), Empty), Grove(Bloom(1, Empty), Empty)) then { 1 } else { 0 } }
+"""
+        assert _run(source, fn="main") == 1
+
+    def test_generic_mutually_recursive_eq_unequal(self) -> None:
+        """Structurally-DIFFERENT generic-mutual values compare unequal (#934).
+
+        Proves the fix is real structural equality, not a constant-1: the same
+        constructors carrying `1` vs `2` must differ.
+        """
+        source = self._GENERIC_MUTUAL_DECLS + """
+public fn main(-> @Int)
+  requires(true) ensures(true) effects(pure)
+{ if eq(Grove(Bloom(1, Empty), Empty), Grove(Bloom(2, Empty), Empty)) then { 1 } else { 0 } }
+"""
+        assert _run(source, fn="main") == 0
+
+    def test_generic_mutually_recursive_show(self) -> None:
+        """A generic-mutual value renders exactly (#934).
+
+        Pre-fix: `show()` on `Forest` (bare head, `<Int>` lost) tripped E602
+        and dropped `main`.  Post-fix: renders `Grove(Bloom(1, Empty), Empty)`.
+        """
+        source = self._GENERIC_MUTUAL_DECLS + """
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(show(Grove(Bloom(1, Empty), Empty)), "Grove(Bloom(1, Empty), Empty)") }
+"""
+        assert "main" in _compile_ok(source).exports
+        assert _run(source, fn="main") == 1
+
+    def test_generic_mutually_recursive_hash_deterministic(self) -> None:
+        """hash on a generic-mutual value is deterministic (#934)."""
+        source = self._GENERIC_MUTUAL_DECLS + """
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(hash(Grove(Bloom(1, Empty), Empty)), hash(Grove(Bloom(1, Empty), Empty))) }
+"""
+        assert _run(source, fn="main") == 1
+
+    def test_generic_mutually_recursive_hash_discriminates(self) -> None:
+        """hash discriminates structurally-different generic-mutual values (#934)."""
+        source = self._GENERIC_MUTUAL_DECLS + """
+public fn main(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ eq(hash(Grove(Bloom(1, Empty), Empty)), hash(Grove(Bloom(2, Empty), Empty))) }
+"""
+        # Different payloads must not collide → eq of hashes is false (0).
+        assert _run(source, fn="main") == 0
+
+    def test_generic_mutual_non_eq_leaf_is_loud_e613(self) -> None:
+        """A generic-mutual ADT with a non-Eq leaf still raises E613 (#934).
+
+        No silent over-accept: an `Array<Int>` field is not Eq-derivable, so
+        `eq` on the recovered generic-mutual type must be a clean, loud E613 —
+        never a silent wrong result, never a traceback.
+        """
+        source = """\
+private data Forest<T> { Empty, Grove(Rose<T>, Forest<T>) }
+private data Rose<T> { Bloom(T, Forest<T>, Array<Int>) }
+
+public fn main(-> @Int)
+  requires(true) ensures(true) effects(pure)
+{ if eq(Grove(Bloom(1, Empty, [1]), Empty), Grove(Bloom(1, Empty, [1]), Empty)) then { 1 } else { 0 } }
+"""
+        result = _compile(source)
+        errors = [d for d in result.diagnostics if d.severity == "error"]
+        assert any(d.error_code == "E613" for d in errors), (
+            f"Expected E613, got: {[d.error_code for d in errors]}"
+        )
+
+    def test_generic_mutual_non_show_leaf_is_loud_e602(self) -> None:
+        """A generic-mutual ADT with a non-Show leaf still drops loud E602 (#934).
+
+        A `Map` field has no `show`; the recovered generic-mutual `show`
+        must E602-skip `main` (loud diagnostic) rather than silently mis-render.
+        """
+        source = """\
+private data Forest<T> { Empty, Grove(Rose<T>, Forest<T>) }
+private data Rose<T> { Bloom(T, Forest<T>, Map<Int, Int>) }
+
+public fn main(-> @String)
+  requires(true) ensures(true) effects(pure)
+{ show(Grove(Bloom(1, Empty, map_new()), Empty)) }
+"""
+        result = _compile(source)
+        assert "main" not in result.exports
+        assert any(
+            d.error_code == "E602" and "'main'" in d.description
+            for d in result.diagnostics
+        ), f"Expected E602 dropping main, got: {[(d.error_code, d.description) for d in result.diagnostics]}"
 
     # ---- hash: runs and is deterministic ------------------------------
 

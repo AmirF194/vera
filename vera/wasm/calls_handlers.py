@@ -304,6 +304,7 @@ class CallsHandlersMixin:
 
     def _recover_ctor_ptype(
         self, arg: ast.ConstructorCall, bare: str,
+        _seen: frozenset[str] = frozenset(),
     ) -> str | None:
         """Recover a constructor call's FULL parameterized type, recursively.
 
@@ -311,9 +312,18 @@ class CallsHandlersMixin:
         own parameterized types).  Any other constructor maps each argument to
         its ADT type-parameter slot (via ``_ctor_adt_tp_indices``) and resolves
         that slot's argument recursively, so `Some(Tuple(1, 2))` yields
-        ``Option<Tuple<Int, Int>>``.  Returns None when the recovery is not
-        fully ground (a slot arg whose type can't be inferred), leaving the
-        caller on its existing fallbacks.
+        ``Option<Tuple<Int, Int>>``.
+
+        A slot that no argument pins DIRECTLY (its field is not a bare ``T``)
+        is recovered by DESCENDING into a NESTED generic field whose declared
+        type carries the parameter (#934): `Grove(Rose<T>, Forest<T>)` has no
+        bare-``T`` field, but the field-0 argument `Bloom(1, …)` is a `Rose<T>`
+        whose own `Bloom(T, …)` pins `T = Int` from the literal `1` — so
+        `Grove(Bloom(1, Empty), Empty)` recovers `Forest<Int>`.  ``_seen``
+        bounds the descent (the ADTs are mutually recursive).
+
+        Returns None when the recovery is not fully ground (a slot arg whose
+        type can't be inferred), leaving the caller on its existing fallbacks.
         """
         if arg.name == "Tuple":
             elem_types = [
@@ -334,15 +344,78 @@ class CallsHandlersMixin:
         if field_tp_idx is None:
             return None
         slots: list[str | None] = [None] * tp_count
+        # Direct pass: a field that IS a bare type parameter pins its slot.
         for field_i, tp_idx in enumerate(field_tp_idx):
             if tp_idx is not None and field_i < len(arg.args):
                 a = arg.args[field_i]
                 a_bare = self._infer_vera_type(a)
                 if a_bare is not None:
                     slots[tp_idx] = self._parameterized_arg_type(a, a_bare)
+        # Nested-descent pass (#934): fill any slot the direct pass left None
+        # by digging the parameter out of a nested generic field's argument.
+        if not all(s is not None for s in slots):
+            self._recover_ptype_via_nested_fields(
+                arg, adt_name, tp_count, slots, _seen,
+            )
         if all(s is not None for s in slots):
             return f"{adt_name}<{', '.join(s for s in slots if s)}>"
         return None
+
+    def _recover_ptype_via_nested_fields(
+        self,
+        arg: ast.ConstructorCall,
+        adt_name: str,
+        tp_count: int,
+        slots: list[str | None],
+        _seen: frozenset[str],
+    ) -> None:
+        """Fill still-``None`` type-param slots via nested generic fields (#934).
+
+        For each field whose DECLARED type is a generic ADT that places a
+        parent type PARAMETER at some position (e.g. `Rose<T>` under
+        `Forest<T>`, or the recursive `Forest<T>` itself), recover that field
+        ARGUMENT's own parameterized type (`Rose<Int>` / `Forest<Int>`) and
+        read the concrete argument sitting where the parent parameter appears —
+        pinning that parent slot.  Mutates ``slots`` in place.  Bounded by
+        ``_seen`` (the mutually-recursive ADTs) to guarantee termination.
+        """
+        if adt_name in _seen:
+            return
+        seen = _seen | {adt_name}
+        tp_names = self._adt_tp_param_names.get(adt_name, ())
+        # Parent parameter NAME → its slot index (`T` → 0).
+        name_to_slot = {name: i for i, name in enumerate(tp_names)}
+        layout = self._ctor_layouts.get(arg.name)
+        field_types = layout.field_types if layout else ()
+        for field_i, decl in enumerate(field_types):
+            if field_i >= len(arg.args):
+                break
+            fbase, fargs = self._split_param_type(decl)
+            # Only nested GENERIC ADT fields carry a recoverable parameter.
+            if not fargs or fbase not in self._adt_type_names:
+                continue
+            # Which nested type-arg positions ARE a parent parameter still
+            # needing a value?  (`Rose<T>` → position 0 holds `T`.)
+            wanted = {
+                pos: name_to_slot[fa]
+                for pos, fa in enumerate(fargs)
+                if fa in name_to_slot and slots[name_to_slot[fa]] is None
+            }
+            if not wanted:
+                continue
+            field_arg = arg.args[field_i]
+            if not isinstance(field_arg, ast.ConstructorCall):
+                continue
+            nested_bare = self._infer_vera_type(field_arg)
+            recovered = self._recover_ctor_ptype(
+                field_arg, nested_bare or fbase, seen,
+            )
+            if recovered is None:
+                continue
+            _, rargs = self._split_param_type(recovered)
+            for pos, slot in wanted.items():
+                if pos < len(rargs):
+                    slots[slot] = rargs[pos]
 
     def _declared_type_expr_for_show(
         self, arg: ast.Expr,

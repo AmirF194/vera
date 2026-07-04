@@ -339,18 +339,28 @@ class OperatorsMixin:
         the type argument is load-bearing — the generated `$eq_<type>` helper
         must resolve the concrete field type — so recover it from the
         constructor's arguments via `_get_arg_type_info_wasm` (the same routine
-        the generic-call rewriter uses).  Falls back to ``bare`` when the operand
-        is not a `ConstructorCall` or its type argument cannot be inferred.
+        the generic-call rewriter uses).  When that flat routine cannot pin a
+        slot — a GENERIC mutually-recursive ADT whose type argument is buried in
+        a NESTED generic field (`Grove(Rose<T>, Forest<T>)`; no bare-`T` field)
+        — fall back to `_recover_ctor_ptype`, which descends into the nested
+        field's own argument to dig the parameter out (#934).  Without the
+        recovered `<Int>` the composite `==` silently lowered to a bare-pointer
+        `i32.eq` of two distinct heap values → a wrong `0`.  Falls back to
+        ``bare`` when the operand is not a `ConstructorCall` or its type
+        argument cannot be inferred at all.
         """
         if bare is None or not isinstance(operand, ast.ConstructorCall):
             return bare
         info = self._get_arg_type_info_wasm(operand)
-        if info is None:
-            return bare
-        base_name, arg_names = info
-        if arg_names and all(a is not None for a in arg_names):
-            resolved = [a for a in arg_names if a is not None]
-            return f"{base_name}<{', '.join(resolved)}>"
+        if info is not None:
+            base_name, arg_names = info
+            if arg_names and all(a is not None for a in arg_names):
+                resolved = [a for a in arg_names if a is not None]
+                return f"{base_name}<{', '.join(resolved)}>"
+        # #934: nested-descent recovery for a buried type argument.
+        recovered = self._recover_ctor_ptype(operand, bare)
+        if recovered is not None:
+            return recovered
         return bare
 
     def _recover_lost_type_arg(
