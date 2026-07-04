@@ -1056,13 +1056,30 @@ class SmtContext:
                     return None
                 return z3.Not(eq)
             return left != right
-        if op == ast.BinOp.LT:
-            return left < right
-        if op == ast.BinOp.GT:
-            return left > right
-        if op == ast.BinOp.LE:
-            return left <= right
-        if op == ast.BinOp.GE:
+        if op in (ast.BinOp.LT, ast.BinOp.GT, ast.BinOp.LE, ast.BinOp.GE):
+            # #921 defense-in-depth: ordering (`<`/`>`/`<=`/`>=`) is defined
+            # only on the orderable primitives (§4.5); a non-orderable operand is
+            # a Z3 `DatatypeRef` (ADT) or `BoolRef` (Bool), on which Python's `<`
+            # raises `TypeError` — a hard traceback out of the verifier.  The
+            # checker rejects `compare` / `<` on a non-orderable type at check
+            # time (E242 / E143), but that gate is NOT a backstop here: the
+            # verifier monomorphizes generics *minus* the E613 constraint filter
+            # (verifier.py), so a `forall<T where Ord<T>>` `compare(@T, @T)`
+            # instantiated at `Bool` reaches this point with two `BoolRef`
+            # operands — and the direct `verify()` API skips the checker gate
+            # entirely.  Both ADT and Bool operands are therefore genuinely
+            # reachable here; degrade the ordering to Tier 3 rather than crash.
+            # (EQ/NEQ route datatypes through `_datatype_value_eq`; ordering has
+            # no structural counterpart, so there is nothing to translate.)
+            if (isinstance(left.sort(), (z3.DatatypeSortRef, z3.BoolSortRef))
+                    or isinstance(right.sort(), (z3.DatatypeSortRef, z3.BoolSortRef))):
+                return None
+            if op == ast.BinOp.LT:
+                return left < right
+            if op == ast.BinOp.GT:
+                return left > right
+            if op == ast.BinOp.LE:
+                return left <= right
             return left >= right
         # Boolean
         if op == ast.BinOp.AND:

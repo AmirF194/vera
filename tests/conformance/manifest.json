@@ -1564,6 +1564,20 @@
     ]
   },
   {
+    "id": "ch04_string_ordering",
+    "file": "ch04_string_ordering.vera",
+    "chapter": 4,
+    "title": "String ordering is lexicographic",
+    "level": "run",
+    "spec_ref": "Section 4.5",
+    "features": [
+      "string_ordering",
+      "compare",
+      "lexicographic",
+      "ord_ability"
+    ]
+  },
+  {
     "id": "ch09_base64",
     "file": "ch09_base64.vera",
     "chapter": 9,
@@ -1957,6 +1971,21 @@
     "expected_error": "E151",
     "features": [
       "builtin_redefinition",
+      "check_error"
+    ]
+  },
+  {
+    "id": "ch09_ord_adt_rejected",
+    "file": "ch09_ord_adt_rejected.vera",
+    "chapter": 9,
+    "title": "compare / Ord on a user ADT is a checker error",
+    "level": "check",
+    "spec_ref": "Section 9.8.1",
+    "expected_error": "E242",
+    "features": [
+      "ord_ability",
+      "compare",
+      "adt",
       "check_error"
     ]
   }

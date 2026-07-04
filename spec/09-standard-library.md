@@ -2451,7 +2451,7 @@ public data Ordering {
 }
 ```
 
-Satisfied by: Int, Nat, Bool, Float64, String, Byte.
+Satisfied by: Int, Nat, Float64, Byte, String — exactly the orderable types on which the ordering operators `<` / `>` / `<=` / `>=` are defined (Chapter 4, Section 4.5). `compare` is the ability spelling of the three-way if-chain `a < b ? Less : (a == b ? Equal : Greater)` (Chapter 6, Section 6.4), so it shares that domain. A user-defined ADT is **not** Ord-derivable (unlike `Eq` / `Hash` / `Show`, which derive structurally for composite types) — it has no defined total order, and neither does `Bool`. `compare` on a non-orderable operand (any ADT, or `Bool`) is rejected at check time with E242, mirroring the E143 rejection of a direct `<` on the same operand ([#921](https://github.com/aallan/vera/issues/921)).
 
 **Hash\<T\>** — Hashing.
 

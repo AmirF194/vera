@@ -31,8 +31,13 @@ from vera.monomorphize import (
 _EQ_TYPES: frozenset[str] = frozenset({
     "Int", "Nat", "Bool", "Float64", "String", "Byte", "Unit",
 })
+# #921 (PR #929 review): `Bool` is deliberately ABSENT here.  §4.5 orders only
+# Int/Nat/Float64/Byte/String — never Bool — so `Ord<Bool>` must FAIL this
+# constraint gate.  With Bool present, a `forall<T where Ord<T>>` instantiated
+# at Bool slipped past E613 and lowered `compare`/`<` on two Bool i32 values to
+# a signed `i32.lt_s` — a silent order for an unorderable type.
 _ORD_TYPES: frozenset[str] = frozenset({
-    "Int", "Nat", "Bool", "Float64", "String", "Byte",
+    "Int", "Nat", "Float64", "String", "Byte",
 })
 _HASH_TYPES: frozenset[str] = frozenset({
     "Int", "Nat", "Bool", "Float64", "String", "Byte", "Unit",
@@ -44,7 +49,7 @@ _SHOW_TYPES: frozenset[str] = frozenset({
 # Maps ability name → (type set, error description fragment).
 _ABILITY_TYPE_SETS: dict[str, tuple[frozenset[str], str]] = {
     "Eq": (_EQ_TYPES, "primitive types (Int, Bool, Float64, String, Byte, Nat, Unit) and ADTs whose fields are themselves Eq (structural derivation)"),
-    "Ord": (_ORD_TYPES, "primitive types (Int, Nat, Bool, Float64, String, Byte)"),
+    "Ord": (_ORD_TYPES, "the orderable primitive types (Int, Nat, Float64, String, Byte)"),
     "Hash": (_HASH_TYPES, "primitive types (Int, Nat, Bool, Float64, String, Byte, Unit)"),
     "Show": (_SHOW_TYPES, "primitive types (Int, Nat, Bool, Float64, String, Byte, Unit)"),
 }
