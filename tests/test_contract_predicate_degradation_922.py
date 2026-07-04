@@ -1,0 +1,246 @@
+"""Regression tests for #922 — a non-Eq composite ``==`` / ``hash`` / ``show``
+in a CONTRACT-PREDICATE position must degrade to a clean diagnostic (E613 for a
+non-derivable ``==``, E602 for an unsupported ``hash`` / ``show``), NEVER escape
+as an uncaught Python traceback at compile.
+
+The bug (a `check`-green program crashes `vera compile` / `run` / `test`):
+
+The #912 fix wired the ``AdtEqNotDerivableError`` / ``CodegenSkip`` graceful
+degradation (emit a clean E613 / E602, drop the function) at the body, lifted-
+closure, and *postcondition* contract sites — but three sibling contract-
+predicate sites were left unguarded:
+
+  1. ``requires`` (precondition): ``_compile_preconditions`` translates the
+     predicate with NO surrounding try/except, so a non-Eq composite ``==`` in a
+     ``requires(...)`` raised an uncaught ``AdtEqNotDerivableError``.
+
+  2. Refinement-type parameter guard: ``_emit_refinement_check`` translated the
+     refinement predicate under a ``try/except CodegenSkip`` that did NOT cover
+     ``AdtEqNotDerivableError``, so a non-Eq composite ``==`` in a ``{ @T | P }``
+     guard escaped uncaught.
+
+  3. ``ensures`` (postcondition) catch too narrow: the ``_compile_postconditions``
+     backstop caught only ``AdtEqNotDerivableError``, NOT ``CodegenSkip`` — so
+     ``ensures(hash(recursiveADT) == 0)`` (or ``show``) escaped as an uncaught
+     ``CodegenSkip``.
+
+Fix: every contract-predicate ``translate_expr`` call site is guarded by the
+SAME ``(AdtEqNotDerivableError, CodegenSkip)`` degradation the postcondition path
+uses — an ``AdtEqNotDerivableError`` becomes a clean E613, a ``CodegenSkip``
+becomes a clean E602, and the enclosing function is dropped.  A user program can
+NEVER surface a Python traceback from a contract predicate (contract §516 / §522
+/ §589).
+
+Written test-first: each RED test below crashed with an uncaught traceback on the
+pre-fix compiler (``_compile`` re-raises), and produces a clean diagnostic after.
+The regression tests pin that VALID contracts (primitive ``==``, derivable-ADT
+``==``, refinements over primitives) still compile and run unchanged, and that
+the #912 postcondition backstop still degrades a concrete composite ``==`` to a
+clean E613.
+"""
+
+from __future__ import annotations
+
+import tempfile
+
+from vera.codegen import CompileResult, compile as codegen_compile, execute
+from vera.parser import parse_file
+from vera.transform import transform
+
+
+# ---------------------------------------------------------------------
+# Helpers (mirror tests/test_composite_postcondition_eq_912.py)
+# ---------------------------------------------------------------------
+
+def _compile(source: str) -> CompileResult:
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".vera", delete=False, encoding="utf-8"
+    ) as f:
+        f.write(source)
+        f.flush()
+        path = f.name
+    tree = parse_file(path)
+    ast = transform(tree)
+    return codegen_compile(ast, source=source, file=path)
+
+
+def _run(source: str, fn: str | None = None) -> int:
+    result = _compile(source)
+    errors = [d for d in result.diagnostics if d.severity == "error"]
+    assert not errors, f"Unexpected compile errors: {errors}"
+    exec_result = execute(result, fn_name=fn)
+    assert exec_result.value is not None, "Expected a return value"
+    return exec_result.value
+
+
+def _error_codes(source: str) -> list[str]:
+    """Error-severity diagnostic codes from a compile (no exception raised)."""
+    result = _compile(source)
+    return [d.error_code for d in result.diagnostics if d.severity == "error"]
+
+
+def _diag_codes(source: str) -> list[str]:
+    """ALL diagnostic codes (error + warning) from a compile.
+
+    The ``hash`` / ``show`` ``CodegenSkip`` path degrades to an E602 *warning*
+    (matching the function-body convention), so a warning-inclusive accessor is
+    needed to assert it — ``_error_codes`` would miss it.
+    """
+    result = _compile(source)
+    return [d.error_code for d in result.diagnostics]
+
+
+# Program bodies -------------------------------------------------------
+
+# A recursive ADT — ``hash`` / ``show`` is not supported for it in codegen, so a
+# ``hash(...)`` in a contract predicate raises ``CodegenSkip`` (the #912
+# postcondition backstop caught only ``AdtEqNotDerivableError``, so it escaped).
+_LIST = """
+private data List<T> {{ Nil, Cons(T, List<T>) }}
+private fn h(@List<Int> -> @Int)
+  requires({requires})
+  ensures({ensures})
+  effects(pure)
+{{
+  0
+}}
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{{
+  h(Cons(1, Nil))
+}}
+"""
+
+
+# =====================================================================
+# RED: a non-Eq composite in a CONTRACT PREDICATE degrades cleanly.
+# Each `_compile` here crashed with an uncaught traceback on the pre-fix
+# compiler; after the fix it returns a CompileResult with a clean E613/E602.
+# =====================================================================
+
+class TestContractPredicateDegradation922:
+    def test_precondition_tuple_eq_is_clean_e613(self) -> None:
+        # Site 1 — `requires`: a `Tuple<Int, Int> == Tuple<Int, Int>` in a
+        # precondition.  `Tuple` is intentionally non-Eq (spec §9.8), so this
+        # reaches the structural-Eq dispatch and raises `AdtEqNotDerivableError`.
+        # Pre-fix `_compile_preconditions` had no try/except → uncaught
+        # traceback.  Now: a clean E613, function dropped.
+        src = (
+            "private fn f(@Int -> @Int) "
+            "requires(Tuple(@Int.0, @Int.0) == Tuple(@Int.0, @Int.0)) "
+            "ensures(true) effects(pure) { @Int.0 }\n"
+            "public fn main(@Unit -> @Int) "
+            "requires(true) ensures(true) effects(pure) { 0 }\n"
+        )
+        codes = _error_codes(src)
+        assert "E613" in codes, f"expected E613 (no traceback), got {codes}"
+
+    def test_refinement_guard_tuple_eq_is_clean_e613(self) -> None:
+        # Site 2 — refinement-type param guard: a `Tuple == Tuple` inside a
+        # `{ @Int | P }` refinement predicate.  Pre-fix `_emit_refinement_check`
+        # caught only `CodegenSkip`, so `AdtEqNotDerivableError` escaped.  Now: a
+        # clean E613, function dropped.
+        src = (
+            "type Weird = { @Int | Tuple(@Int.0, @Int.0) == Tuple(@Int.0, @Int.0) };\n"
+            "private fn g(@Weird -> @Int) "
+            "requires(true) ensures(true) effects(pure) { @Weird.0 }\n"
+            "public fn main(@Unit -> @Int) "
+            "requires(true) ensures(true) effects(pure) { 0 }\n"
+        )
+        codes = _error_codes(src)
+        assert "E613" in codes, f"expected E613 (no traceback), got {codes}"
+
+    def test_postcondition_hash_recursive_adt_is_clean_e602(self) -> None:
+        # Site 3 — `ensures` with a `CodegenSkip` (not `AdtEqNotDerivableError`):
+        # `hash(@List<Int>.0)` on a recursive ADT is unsupported in codegen and
+        # raises `CodegenSkip`.  Pre-fix the postcondition backstop caught only
+        # `AdtEqNotDerivableError`, so this escaped as an uncaught `CodegenSkip`.
+        # Now: a clean E602, function dropped.
+        src = _LIST.format(requires="true", ensures="hash(@List<Int>.0) == 0")
+        codes = _diag_codes(src)
+        assert "E602" in codes, f"expected E602 (no traceback), got {codes}"
+
+    def test_precondition_hash_recursive_adt_is_clean_e602(self) -> None:
+        # Site 1 with the `CodegenSkip` flavour (not just `AdtEqNotDerivableError`)
+        # — `hash(...)` on a recursive ADT in a `requires`.  Confirms the
+        # broadened precondition catch covers `CodegenSkip`, not only the ADT-eq
+        # error.  Pre-fix: uncaught `CodegenSkip` traceback.
+        src = _LIST.format(requires="hash(@List<Int>.0) == 0", ensures="true")
+        codes = _diag_codes(src)
+        assert "E602" in codes, f"expected E602 (no traceback), got {codes}"
+
+
+# =====================================================================
+# REGRESSION: VALID contracts must compile and run unchanged.  A too-broad
+# catch that swallowed a real translate_expr result would break these.
+# =====================================================================
+
+class TestValidContractsUnaffected922:
+    def test_primitive_precondition_runs(self) -> None:
+        # A primitive `requires(@Int.0 > 0)` still compiles and runs — the new
+        # guard must not perturb the common valid case.
+        src = (
+            "private fn f(@Int -> @Int) "
+            "requires(@Int.0 > 0) ensures(true) effects(pure) { @Int.0 }\n"
+            "public fn main(@Unit -> @Int) "
+            "requires(true) ensures(true) effects(pure) { f(7) }\n"
+        )
+        assert _run(src, fn="main") == 7
+
+    def test_derivable_adt_precondition_runs(self) -> None:
+        # An Eq-DERIVABLE ADT `==` (`Box<Int>`, all-Eq fields) in a precondition
+        # must still lower structurally and run — the degradation must fire ONLY
+        # for non-derivable operands, never for a valid derivable `==`.
+        src = (
+            "private data Box { MkBox(Int) }\n"
+            "private fn f(@Box -> @Int) "
+            "requires(@Box.0 == MkBox(7)) ensures(true) effects(pure) { 0 }\n"
+            "public fn main(@Unit -> @Int) "
+            "requires(true) ensures(true) effects(pure) { f(MkBox(7)) }\n"
+        )
+        assert _run(src, fn="main") == 0
+
+    def test_primitive_refinement_param_runs(self) -> None:
+        # A refinement over a PRIMITIVE (`{ @Int | @Int.0 > 0 }`) still emits a
+        # valid runtime guard and runs — the broadened refinement catch must not
+        # disturb the valid path.
+        src = (
+            "type PosInt = { @Int | @Int.0 > 0 };\n"
+            "private fn f(@PosInt -> @Int) "
+            "requires(true) ensures(true) effects(pure) { @PosInt.0 }\n"
+            "public fn main(@Unit -> @Int) "
+            "requires(true) ensures(true) effects(pure) { f(7) }\n"
+        )
+        assert _run(src, fn="main") == 7
+
+    def test_primitive_postcondition_runs(self) -> None:
+        # A primitive `ensures(@Int.result == @Int.0)` still compiles and runs —
+        # the broadened postcondition catch (now `CodegenSkip` too) must not
+        # swallow a valid postcondition.
+        src = (
+            "private fn f(@Int -> @Int) "
+            "requires(true) ensures(@Int.result == @Int.0) effects(pure) { @Int.0 }\n"
+            "public fn main(@Unit -> @Int) "
+            "requires(true) ensures(true) effects(pure) { f(7) }\n"
+        )
+        assert _run(src, fn="main") == 7
+
+
+# =====================================================================
+# CROSS-CHECK: the #912 postcondition backstop still degrades a concrete
+# composite `==` in `ensures` to a clean E613 (the broadened catch must not
+# regress the exact case #912 fixed).
+# =====================================================================
+
+class TestPostcondition912StillDegrades922:
+    def test_tuple_postcondition_still_clean_e613(self) -> None:
+        src = (
+            "private fn mk(@Int -> @Tuple<Int, Int>) "
+            "requires(true) "
+            "ensures(@Tuple<Int, Int>.result == Tuple(@Int.0, @Int.0)) "
+            "effects(pure) { Tuple(@Int.0, @Int.0) }\n"
+        )
+        codes = _error_codes(src)
+        assert "E613" in codes, f"expected E613 (no traceback), got {codes}"
