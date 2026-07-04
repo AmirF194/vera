@@ -205,6 +205,18 @@ class OperatorsMixin:
                 # pre-#912 behavior for this lost-type-arg shape — never an
                 # E613 on the derivable original).
                 lv = self._recover_lost_type_arg(lv, expr.right)
+                # #932: inside an Eq-constrained generic clone (`eq2$List<List>`)
+                # the `==` operands are `@T` slots whose substituted type is the
+                # TRUNCATED one-level clone name (`List<List>` for a
+                # `List<List<Int>>` instantiation — the same residue the
+                # constraint gate sees).  Recover the fully-nested name recorded
+                # at the call site so the direct-`==` derivability decision AND
+                # the generated `$eq_<type>` helper resolve the concrete inner
+                # field types, exactly as the constraint gate now does.  This
+                # only affects the derivability name + helper the clone BODY
+                # emits; the mono clone SYMBOL stays the truncated name (#772).
+                if lv is not None:
+                    lv = self._eq_full_type_names.get(lv, lv)
                 lv_base = lv.split("<", 1)[0] if lv is not None else None
                 if (op in (ast.BinOp.EQ, ast.BinOp.NEQ)
                         and lv is not None

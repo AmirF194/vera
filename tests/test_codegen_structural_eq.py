@@ -1225,3 +1225,146 @@ def test_923_nested_generic_non_eq_component_still_rejected_e613() -> None:
         f"non-Eq nested component (Array) must reject, got {codes}"
     )
     assert "E699" not in codes, f"invariant leak on rejection: {codes}"
+
+
+# ---------------------------------------------------------------------------
+# #932 — the GENERIC-CALL/clone sibling of #923.  A nested-generic ADT reached
+# through an Eq-constrained generic function:
+#
+#   data List<T> { Nil, Cons(T, List<T>) }
+#   forall<T where Eq<T>> fn eq2(@T, @T -> @Bool) { @T.0 == @T.1 }
+#   eq2(Cons(Cons(1, Nil), Nil), Cons(Cons(1, Nil), Nil))     -- List<List<Int>>
+#
+# #923 fixed the DIRECT-`==` derivability path.  The generic-call path instead
+# recovers the constrained-var operand's type name via the shared clone-mangler
+# (`_get_arg_type_info_wasm` / `_get_arg_type_info`), which recovers only ONE
+# level of nested type argument → `List<List>`.  That truncated name feeds the
+# E613 derivability gate (`_check_constraints` → `_adt_satisfies_eq`), whose
+# inner `List` has no type argument → treated as a lost-type-arg clone →
+# spurious E613, even though `List<List<Int>>` is fully structurally Eq-derivable
+# (the checker accepts it, so `vera check` is green — a check↔codegen divergence).
+#
+# The fix recurses the type-argument recovery FOR THE DERIVABILITY DECISION ONLY,
+# WITHOUT altering the mangled clone name codegen emits and looks up (that clone
+# name stays `eq2$List<List>`; test_772_ctor_path_nested_adt must remain green).
+# A genuinely non-Eq nested leaf must STILL reject E613 (no over-accept).
+# ---------------------------------------------------------------------------
+
+_NESTED_GENERIC_EQ2 = (
+    "private data List<T> { Nil, Cons(T, List<T>) }\n"
+    "private forall<T where Eq<T>> fn eq2(@T, @T -> @Bool)\n"
+    "  requires(true) ensures(true) effects(pure) { @T.0 == @T.1 }\n"
+)
+
+
+def test_932_generic_call_nested_generic_accepts_and_runs() -> None:
+    """#932: `eq2(Cons(Cons(1,Nil),Nil), …)` (List<List<Int>>) derives + runs.
+
+    The constrained-var operand infers the truncated `List<List>`; pre-#932 the
+    lost inner `<Int>` spuriously E613'd on the generic-call path even though
+    `vera check` accepts it.  Full nested recovery for the derivability decision
+    accepts it exactly as the checker does — with NO change to the clone name.
+    """
+    same = (
+        _NESTED_GENERIC_EQ2
+        + "public fn main(@Unit -> @Int) requires(true) ensures(true)\n"
+        "  effects(pure)\n"
+        "{ if eq2(Cons(Cons(1, Nil), Nil), Cons(Cons(1, Nil), Nil))\n"
+        "  then { 1 } else { 0 } }\n"
+    )
+    diff = (
+        _NESTED_GENERIC_EQ2
+        + "public fn main(@Unit -> @Int) requires(true) ensures(true)\n"
+        "  effects(pure)\n"
+        "{ if eq2(Cons(Cons(1, Nil), Nil), Cons(Cons(2, Nil), Nil))\n"
+        "  then { 1 } else { 0 } }\n"
+    )
+    assert _errors(same) == [], (
+        f"List<List<Int>> via generic call must derive: {_errors(same)}"
+    )
+    assert _run(same) == 1
+    assert _run(diff) == 0
+
+
+def test_932_generic_call_three_level_nested_generic() -> None:
+    """#932: a 3-level nesting (List<List<List<Int>>>) via the generic call.
+
+    Proves the derivability recovery is genuinely recursive on the generic-call
+    path (not a hardcoded two-level special case).
+    """
+    same = (
+        _NESTED_GENERIC_EQ2
+        + "public fn main(@Unit -> @Int) requires(true) ensures(true)\n"
+        "  effects(pure)\n"
+        "{ if eq2(Cons(Cons(Cons(1, Nil), Nil), Nil),\n"
+        "         Cons(Cons(Cons(1, Nil), Nil), Nil))\n"
+        "  then { 1 } else { 0 } }\n"
+    )
+    diff = (
+        _NESTED_GENERIC_EQ2
+        + "public fn main(@Unit -> @Int) requires(true) ensures(true)\n"
+        "  effects(pure)\n"
+        "{ if eq2(Cons(Cons(Cons(1, Nil), Nil), Nil),\n"
+        "         Cons(Cons(Cons(9, Nil), Nil), Nil))\n"
+        "  then { 1 } else { 0 } }\n"
+    )
+    assert _errors(same) == [], (
+        f"List<List<List<Int>>> via generic call must derive: {_errors(same)}"
+    )
+    assert _run(same) == 1
+    assert _run(diff) == 0
+
+
+def test_932_generic_call_mixed_nested_generic() -> None:
+    """#932: a mixed nested-generic (Chain<Pair<Int>>) via the generic call.
+
+    A distinct outer/inner generic pairing (not self-nested `List<List>`)
+    proves the derivability recovery reconstructs `Chain<Pair<Int>>`, not the
+    truncated `Chain<Pair>`, on the generic-call path.
+    """
+    decls = (
+        "private data Pair<T> { MkPair(T, T) }\n"
+        "private data Chain<T> { Empty, Link(T, Chain<T>) }\n"
+        "private forall<T where Eq<T>> fn eq2(@T, @T -> @Bool)\n"
+        "  requires(true) ensures(true) effects(pure) { @T.0 == @T.1 }\n"
+    )
+    same = (
+        decls
+        + "public fn main(@Unit -> @Int) requires(true) ensures(true)\n"
+        "  effects(pure)\n"
+        "{ if eq2(Link(MkPair(1, 2), Empty), Link(MkPair(1, 2), Empty))\n"
+        "  then { 1 } else { 0 } }\n"
+    )
+    diff = (
+        decls
+        + "public fn main(@Unit -> @Int) requires(true) ensures(true)\n"
+        "  effects(pure)\n"
+        "{ if eq2(Link(MkPair(1, 2), Empty), Link(MkPair(1, 9), Empty))\n"
+        "  then { 1 } else { 0 } }\n"
+    )
+    assert _errors(same) == [], (
+        f"Chain<Pair<Int>> via generic call must derive: {_errors(same)}"
+    )
+    assert _run(same) == 1
+    assert _run(diff) == 0
+
+
+def test_932_generic_call_nested_non_eq_leaf_still_rejected_e613() -> None:
+    """#932 soundness gate: a genuinely non-Eq nested leaf STILL rejects E613.
+
+    `List<List<Array<Int>>>` reached via the generic call — innermost component
+    `Array<Int>` has no Eq semantics — must be a clean E613, never over-accepted
+    by the fuller derivability recovery, and never an E699 invariant leak.
+    """
+    source = (
+        _NESTED_GENERIC_EQ2
+        + "public fn main(@Unit -> @Int) requires(true) ensures(true)\n"
+        "  effects(pure)\n"
+        "{ if eq2(Cons(Cons([1], Nil), Nil), Cons(Cons([1], Nil), Nil))\n"
+        "  then { 1 } else { 0 } }\n"
+    )
+    codes = _errors(source)
+    assert "E613" in codes, (
+        f"non-Eq nested leaf (Array) via generic call must reject, got {codes}"
+    )
+    assert "E699" not in codes, f"invariant leak on rejection: {codes}"

@@ -183,11 +183,24 @@ class MonomorphizationMixin:
         instances: dict[str, set[tuple[str, ...]]] = {
             name: set() for name in generic_decls
         }
+        # #932: side-map from a TRUNCATED one-level constrained-var type name
+        # (`List<List>`, the clone-mangling residue) to its FULLY-recovered
+        # nested name (`List<List<Int>>`).  Consulted ONLY for the Eq-derivability
+        # DECISION — by `_check_constraints` and the direct-`==` path inside a
+        # clone body (`_translate_binary`, via each per-body WasmContext) — never
+        # to key a clone symbol, so the mangled clone name codegen emits and
+        # looks up is unchanged (the #772 hard constraint).  Populated here from
+        # every constrained-generic call site's constructor arguments, across
+        # both the seed decls and the transitively emitted mono bodies below.
+        self._eq_full_type_names: dict[str, str] = {}
         for tld in program.declarations:
             decl = tld.decl
             if isinstance(decl, ast.FnDecl) and not decl.forall_vars:
                 mono.collect_calls_in_node(
                     decl, generic_decls, ctor_to_adt, instances,
+                )
+                self._collect_eq_full_type_names(
+                    decl, mono, generic_decls, ctor_to_adt,
                 )
 
         # Generate monomorphized FnDecls with transitive closure.
@@ -222,6 +235,13 @@ class MonomorphizationMixin:
                 continue  # constraint violation — error emitted
             mono_fn = mono.monomorphize_fn(decl, concrete_types)
             mono_decls.append(mono_fn)
+            # #932: a transitively-reached nested-generic constrained call in
+            # this clone body carries the same truncated constrained-var name —
+            # record its full recovery so the next round's `_check_constraints`
+            # can decide derivability on the un-truncated name.
+            self._collect_eq_full_type_names(
+                mono_fn, mono, generic_decls, ctor_to_adt,
+            )
             self._emitted_instances.add((fn_name, concrete_types))
             # Scan the monomorphized body for further generic calls
             transitive: dict[str, set[tuple[str, ...]]] = {
@@ -656,6 +676,79 @@ class MonomorphizationMixin:
         m = Monomorphizer(self._build_mono_context({}, ctor_to_adt))
         return m._infer_type_args_from_args(decl, args, ctor_to_adt, None)
 
+    def _collect_eq_full_type_names(
+        self,
+        node: object,
+        mono: Monomorphizer,
+        generic_decls: dict[str, ast.FnDecl],
+        ctor_to_adt: dict[str, str],
+    ) -> None:
+        """Record TRUNCATED → FULLY-recovered constrained-var names (#932).
+
+        Walks ``node`` for calls to an Eq-constrained generic (``FnCall`` /
+        ``ModuleCall`` whose target has a ``where Eq<T>`` bound).  For each
+        constrained-var parameter matched positionally to a ``ConstructorCall``
+        argument, computes:
+
+        * the TRUNCATED one-level name (`List<List>`) exactly as
+          ``Monomorphizer._unify_param_arg`` does via ``_get_arg_type_info`` —
+          this is the value `_check_constraints` receives as ``concrete`` and the
+          name that keys the emitted clone; and
+        * the FULLY-recovered nested name (`List<List<Int>>`) via
+          ``Monomorphizer.full_arg_type_name``.
+
+        When the two differ (the nesting was truncated) the pair is stored in
+        ``self._eq_full_type_names``, letting ``_check_constraints`` retry the Eq
+        derivability decision on the un-truncated name WITHOUT ever changing the
+        clone-mangling tuple (the #772 hard constraint).
+        """
+        from dataclasses import fields as _fields
+
+        call: ast.FnCall | ast.ModuleCall | None = None
+        if isinstance(node, (ast.FnCall, ast.ModuleCall)) and (
+            node.name in generic_decls
+        ):
+            call = node
+        if call is not None:
+            decl = generic_decls[call.name]
+            constrained = frozenset(
+                c.type_var for c in (decl.forall_constraints or ())
+            )
+            for param_te, arg in zip(decl.params, call.args):
+                base_te = (
+                    param_te.base_type
+                    if isinstance(param_te, ast.RefinementType)
+                    else param_te
+                )
+                if (
+                    isinstance(base_te, ast.NamedType)
+                    and base_te.name in constrained
+                    and isinstance(arg, ast.ConstructorCall)
+                ):
+                    info = mono._get_arg_type_info(arg, ctor_to_adt)
+                    if info is None:
+                        continue
+                    base_name, arg_names = info
+                    if not (arg_names and all(a is not None for a in arg_names)):
+                        continue
+                    resolved = [a for a in arg_names if a is not None]
+                    truncated = f"{base_name}<{', '.join(resolved)}>"
+                    full = mono.full_arg_type_name(arg, ctor_to_adt)
+                    if full is not None and full != truncated:
+                        self._eq_full_type_names[truncated] = full
+        if isinstance(node, ast.Node):
+            for f in _fields(node):
+                if f.name == "span":
+                    continue
+                self._collect_eq_full_type_names(
+                    getattr(node, f.name), mono, generic_decls, ctor_to_adt,
+                )
+        elif isinstance(node, (tuple, list)):
+            for item in node:
+                self._collect_eq_full_type_names(
+                    item, mono, generic_decls, ctor_to_adt,
+                )
+
     def _check_constraints(
         self,
         decl: ast.FnDecl,
@@ -687,8 +780,17 @@ class MonomorphizationMixin:
                 # concrete field type (#772).
                 if concrete in type_set:
                     continue
+                # #932: the constructor-inferred name may be TRUNCATED one level
+                # (`List<List>` for a `List<List<Int>>` operand — the
+                # clone-mangling residue).  For the Eq-derivability DECISION only,
+                # substitute the fully-recovered nested name recorded at the call
+                # site (`_collect_eq_full_type_names`); the clone name codegen
+                # emits stays the truncated `concrete` (the #772 hard constraint).
+                eq_name = getattr(self, "_eq_full_type_names", {}).get(
+                    concrete, concrete,
+                )
                 if (constraint.ability_name == "Eq"
-                        and self._adt_satisfies_eq(concrete)):
+                        and self._adt_satisfies_eq(eq_name)):
                     continue
                 # #898: a SPARSE multi-type-parameter ADT reached via the
                 # constructor-inferred path (`id1(MkErr(5))` on
