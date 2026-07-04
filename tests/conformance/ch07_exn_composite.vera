@@ -1,0 +1,39 @@
+-- Conformance: Exn<E> effect handler over a COMPOSITE payload type (Chapter 7)
+-- Tests: handle[Exn<Option<Int>>] — the composite E is escaped for the WASM
+-- exception tag and the caught-payload @Option<Int> binding materializes under
+-- the full canonical slot name so @Option<Int>.0 resolves in the handler (#914).
+effect Exn<E> {
+  op throw(E -> Never);
+}
+
+public fn caught_composite(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[Exn<Option<Int>>] {
+    throw(@Option<Int>) -> { option_unwrap_or(@Option<Int>.0, 0) }
+  } in {
+    throw(Some(9))
+  }
+}
+
+public fn not_thrown(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[Exn<Tuple<Int, Int>>] {
+    throw(@Tuple<Int, Int>) -> { 0 }
+  } in {
+    7
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 9)
+  effects(pure)
+{
+  caught_composite(())
+}

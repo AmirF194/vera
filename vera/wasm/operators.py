@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from vera import ast
 from vera.skip import AdtEqNotDerivableError, CodegenInvariantError
+from vera.slots import slot_ref_name, type_expr_slot_name
 from vera.wasm.helpers import WasmSlotEnv
 
 
@@ -25,17 +26,13 @@ class OperatorsMixin:
         self, ref: ast.SlotRef, env: WasmSlotEnv
     ) -> list[str] | None:
         """Translate @Type.n to local.get."""
-        type_name = ref.type_name
-        if ref.type_args:
-            # Parameterised type — build canonical name
-            arg_names = []
-            for ta in ref.type_args:
-                if isinstance(ta, ast.NamedType):
-                    arg_names.append(ta.name)
-                else:
-                    raise CodegenInvariantError(  # pragma: no cover
-                        "slot reference type argument is not a NamedType", ref)
-            type_name = f"{ref.type_name}<{', '.join(arg_names)}>"
+        # Shared recursive builder (#914 finding 2) — nested composite type
+        # args are FULLY qualified, matching the env-key side so the lookup
+        # cannot desync.
+        type_name = slot_ref_name(ref)
+        if type_name is None:
+            raise CodegenInvariantError(  # pragma: no cover
+                "slot reference type argument is not a NamedType", ref)
         local_idx = env.resolve(type_name, ref.index)
         if local_idx is None:
             raise CodegenInvariantError(  # pragma: no cover
@@ -1368,11 +1365,17 @@ class OperatorsMixin:
         if not effect_ref.type_args or len(effect_ref.type_args) != 1:
             raise CodegenInvariantError(  # pragma: no cover
                 "State<T> must have exactly one type argument", effect_ref)
-        arg = effect_ref.type_args[0]
-        if isinstance(arg, ast.NamedType):
-            return arg.name
-        raise CodegenInvariantError(  # pragma: no cover
-            "State<T> type argument is not a NamedType", effect_ref)
+        # #914 finding 1: return the CANONICAL slot name (`Option<Int>`), not
+        # the base name (`Option`).  `_state_types` and `get_old_state_local`
+        # are keyed canonically, so a base-name key missed the registered
+        # entry — no `old(State<T>)` snapshot local was allocated and the read
+        # raised an uncaught `CodegenInvariantError` at run.  Shared recursive
+        # builder so nested composites (`Option<Tuple<Int, Int>>`) are exact.
+        name = type_expr_slot_name(effect_ref.type_args[0])
+        if name is None:
+            raise CodegenInvariantError(  # pragma: no cover
+                "State<T> type argument is not a NamedType", effect_ref)
+        return name
 
     # -----------------------------------------------------------------
     # @Nat subtraction underflow guard (#520)
