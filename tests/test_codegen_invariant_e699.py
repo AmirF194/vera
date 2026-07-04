@@ -185,3 +185,32 @@ def test_precondition_invariant_error_surfaces_as_e699(monkeypatch) -> None:
     )
     assert e699[0].severity == "error"
     assert "Internal compiler error" in e699[0].description
+
+
+def test_postcondition_invariant_error_surfaces_as_e699(monkeypatch) -> None:
+    """#939 follow-up: a CodegenInvariantError raised while lowering an
+    `ensures(...)` postcondition degrades to a loud [E699], not a raw escaping
+    traceback — completing the net across ALL four contract-lowering paths
+    (precondition, postcondition, body, closure).
+
+    Pre-fix the postcondition-compile `try/except` in `_compile_fn` caught only
+    `(AdtEqNotDerivableError, CodegenSkip)`, so a `@T.n` read in an `ensures`
+    clause of a generic instantiated at a zero-size type (`Future<Unit>`)
+    escaped `_compile_fn` uncaught — a raw traceback on a `check`-green program
+    (the confirmed #939-review crash).  Forces the raise at the
+    `_compile_postconditions` boundary to exercise the catch directly."""
+    from vera.codegen.contracts import ContractsMixin
+
+    def _boom(self, *args, **kwargs):
+        raise CodegenInvariantError("forced postcondition invariant (#939 test)", None)
+
+    monkeypatch.setattr(ContractsMixin, "_compile_postconditions", _boom)
+    result = _compile_source(_PROG)
+
+    e699 = [d for d in result.diagnostics if d.error_code == "E699"]
+    assert e699, (
+        "expected an [E699] from a postcondition-compile invariant; got "
+        f"{[(d.error_code, d.severity) for d in result.diagnostics]}"
+    )
+    assert e699[0].severity == "error"
+    assert "Internal compiler error" in e699[0].description

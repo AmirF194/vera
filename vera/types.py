@@ -198,6 +198,30 @@ def base_type(ty: Type) -> Type:
     return ty
 
 
+def erases_to_unit(ty: Type) -> bool:
+    """True if ``ty`` has NO WASM representation — it erases to no runtime local.
+
+    Mirrors codegen's ``_type_expr_to_wasm_type`` (``vera/codegen/core.py``),
+    which returns ``None`` for ``Unit`` and recurses *transparently* through
+    ``Future<T>`` (#841: a ``Future`` is representation-identical to its
+    payload) and refinement wrappers.  ``Future<Unit>`` therefore erases to
+    nothing exactly like bare ``Unit`` — reading such a value via a ``@T.n``
+    slot lowers to a ``local.get`` on a local that does not exist (the
+    dangling-slot codegen invariant behind E206 / E699).  Every other ADT is a
+    heap pointer (i32), so it is NOT zero-size: ``Option<Unit>`` (tag + pointer)
+    and ``Future<Int>`` (i32) both erase to a real local.  ``Future`` is the
+    only transparent ADT wrapper, so it is the only recursion here.  Keep in
+    sync with ``_type_expr_to_wasm_type`` (#939 review found the two had drifted:
+    the discriminator keyed on bare ``Unit`` only, missing ``Future<Unit>``).
+    """
+    ty = base_type(ty)  # strip RefinedType wrappers (matches codegen's recurse)
+    if ty == UNIT:
+        return True
+    if isinstance(ty, AdtType) and ty.name == "Future" and len(ty.type_args) == 1:
+        return erases_to_unit(ty.type_args[0])
+    return False
+
+
 def is_subtype(sub: Type, sup: Type) -> bool:
     """Check if sub <: sup under the subtyping rules.
 
