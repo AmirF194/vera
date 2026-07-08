@@ -438,7 +438,7 @@ Demo-first: each stage ships a working capability, cut as its own release, on th
 
 *Zero known bugs, then the first minor release.*
 
-A single `release/v0.1.0` integration branch absorbed a fix for every open `bug`-labelled issue — 37 in all, surfaced by systematic hunts for check-green programs that fail at codegen or verify — each on its own adversarially-reviewed PR.  The severe cases were silent wrong results: `compare` / ordering on a user ADT compiled to a heap-pointer comparison, and `==` on a non-`Eq` type pointer-compared instead of erroring — both now rejected at check (`E242` / `E243`).  Structural `show` / `hash` / `eq` gained composite, recursive, nested-generic, and generic-mutually-recursive support; effect handlers work over composite type arguments; transitive and alias module imports resolve; the verifier no longer crashes on nested same-ADT constructors.  With the tracker's `bug` label empty, the project cut **v0.1.0** — its first minor release — with a full documentation sweep and the literal "No known bugs."
+A single integration branch absorbed a fix for every open `bug`-labelled issue — 37 in all, each on its own adversarially-reviewed PR, the severest being silent wrong results (ADT ordering and non-`Eq` `==` compiled to pointer comparisons, now rejected at check).  With the tracker empty, **v0.1.0** shipped with the literal "No known bugs."
 
 | Version | Date | What shipped |
 |---------|------|-------------|
@@ -450,11 +450,11 @@ A single `release/v0.1.0` integration branch absorbed a fix for every open `bug`
 
 *The language explains itself.*
 
-The first days after v0.1.0 brought the project's first external contributions — three PRs hardening the self-checking machinery (a doc-mirror drift guard, a sharper CI-gate skip, and the verifier finally walking effect-operation arguments), the last of which led the adversarial review to a pre-existing false Tier-1 proof, fixed on the spot (#957) — plus a wasmtime floor bump off a CVE-affected release.  Then the documentation itself: a 34-figure hand-authored SVG layer across the spec, the compiler README, the top-level docs, and the veralang.dev landing page; a six-auditor consistency sweep that caught one behavioural claim still describing the pre-#957 world and a long tail of verified drift; and the retirement of the last bug-era workaround shapes from the test suite.
+Three external PRs hardened the self-checking machinery, and their adversarial review surfaced a verifier-soundness fix (#957).  Then the documentation itself: a 34-figure hand-authored SVG layer across the spec, the compiler README, the top-level docs, and the landing page; a six-auditor consistency sweep; the last bug-era shapes retired from the test suite; and the roadmap reworked into staged sprints that continue this file's numbering.
 
 | Version | Date | What shipped |
 |---------|------|-------------|
-| v0.1.1 | 8 Jul | **The visual documentation release** — 34 figures, a six-auditor consistency sweep, the first external contributions, and the #957 verifier-soundness fix. |
+| v0.1.1 | 8 Jul | **The visual documentation release** — 34 figures, a six-auditor consistency sweep, three external PRs, and the #957 verifier-soundness fix. |
 
 ---
 
