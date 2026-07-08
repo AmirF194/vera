@@ -87,13 +87,20 @@ For the string pool implementation, see Chapter 11, Section 11.5.
 
 The reference runtime uses wasmtime's Python bindings. The execution pipeline is:
 
-```
+![Embedding wasmtime: Engine, Module, Linker and Store, then define the vera.* host functions, instantiate, look up the export, and call it.](../assets/diagrams/wasmtime-embedding.svg)
+
+<details>
+<summary>Text version</summary>
+
+```text
 Engine → Module(engine, wat) → Linker(engine) → Store(engine)
   → linker.define_func(...)   [register host functions]
   → linker.instantiate(store, module)
   → instance.exports(store).get(fn_name)
   → func(store, *args)
 ```
+
+</details>
 
 Each execution creates a fresh engine, module, linker, and store. There is no persistent state between invocations.
 
@@ -426,7 +433,12 @@ The `Random` effect provides three host-backed operations for non-deterministic 
 
 ### 12.5.1 Linear Memory Layout
 
-```
+![Linear memory layout: string constants, the 4 KiB GC shadow stack, the 4 KiB mark worklist, and the heap growing toward higher addresses inside a growable 64 KiB page.](../assets/diagrams/memory-layout.svg)
+
+<details>
+<summary>Text version</summary>
+
+```text
 ┌──────────────────────────────────┐  offset 0
 │  String constants (data section) │
 ├──────────────────────────────────┤  data_end
@@ -441,6 +453,8 @@ The `Random` effect provides three host-backed operations for non-deterministic 
 │  (unused)                        │
 └──────────────────────────────────┘  65536+ (64 KiB, growable)
 ```
+
+</details>
 
 String constants occupy the lowest addresses. The GC shadow stack and mark worklist each occupy 4096 bytes after the string data. The heap grows upward from `data_end + 8192`. The GC infrastructure (shadow stack, worklist, and heap offset) is only emitted when the program allocates heap data.
 
@@ -480,6 +494,8 @@ All heap allocations are 8-byte aligned. This ensures correct access for all WAS
 ### 12.5.4 Garbage Collection
 
 The runtime implements a conservative mark-sweep garbage collector entirely in WASM (no host-side GC logic). The GC is triggered automatically when the bump allocator runs out of space.
+
+![Allocation and collection: $alloc aligns the request, tries the free list, bumps if there is room, and otherwise runs the three collector phases — clear marks, mark from shadow-stack roots with conservative scanning, sweep unmarked blocks onto the free list — before retrying and finally growing memory.](../assets/diagrams/gc-cycle.svg)
 
 **Shadow stack.** WASM does not support stack scanning, so the compiler maintains an explicit shadow stack in linear memory. The compiler pushes live heap pointers onto it at function entry (pointer-type parameters), after each `call $alloc` (newly allocated objects), and manages save/restore at function exit. Four globals track the shadow stack and GC state:
 

@@ -17,12 +17,19 @@ and [spec/](spec/).
 The CLI mirrors the compiler pipeline — one command per stage, each a gate you
 can stop at:
 
-```
+![The CLI mirrors the pipeline: parse and fmt stop at parsing; check and ast at type checking; verify at verification; compile and test at code generation; run and serve at execution.](assets/diagrams/toolchain.svg)
+
+<details>
+<summary>Text version</summary>
+
+```text
 source ──▶ parse ──▶ check ──▶ verify ──▶ compile ──▶ run
             parse     check     verify     compile     run
                       ast                  test
                       fmt
 ```
+
+</details>
 
 Two commitments from [DESIGN.md](DESIGN.md) shape every command:
 

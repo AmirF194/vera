@@ -447,6 +447,8 @@ A single `release/v0.1.0` integration branch absorbed a fix for every open `bug`
 
 Nine releases, chosen for the capability each one unlocked rather than even spacing.
 
+![Growth across the nine landmark releases: tests from ~50 to 6,821, conformance programs from 0 to 143, examples from 13 to 37, built-in functions from 0 to 164.](assets/diagrams/history-growth.svg)
+
 | Metric | v0.0.1 (23 Feb) | v0.0.9 (23 Feb) | v0.0.65 (4 Mar) | v0.0.101 (27 Mar) | v0.0.170 (12 Jun) | v0.0.191 (1 Jul) | v0.0.193 (2 Jul) | v0.0.195 (2 Jul) | v0.1.0 (4 Jul) |
 |--------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | Milestone | First release | Runs end-to-end | GC + maturity | Inference effect | Language server | Soundness campaign | HttpServer effect | WASI serve backend | Zero known bugs |

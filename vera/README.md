@@ -12,49 +12,42 @@ For other documentation:
 
 The compiler is a seven-stage pipeline. Each stage consumes the output of the previous one. Each stage has a single public entry point and is independently testable.
 
-```
+![The compiler pipeline and module map: parse, transform and resolve feed the two-pass type checker; after checking, vera verify proves each contract obligation (Tier 1) or defers it to a runtime guard (Tier 3) with a warm-verification sidecar for the LSP, while vera compile emits WAT and WASM for the wasmtime host, the browser bundle, or a WASI 0.2 component.](../assets/diagrams/architecture.svg)
+
+<details>
+<summary>Text version</summary>
+
+```text
 Source (.vera)
-  │
-  ▼
-┌──────────────────────────────────────────────────────────┐
-│  1. Parse                    grammar.lark + parser.py    │
-│     Source text → Lark parse tree                        │
-└────────────────────────┬─────────────────────────────────┘
-                         ▼
-┌──────────────────────────────────────────────────────────┐
-│  2. Transform                          transform.py      │
-│     Lark parse tree → typed AST (ast.py)                 │
-└────────────────────────┬─────────────────────────────────┘
-                         ▼
-┌──────────────────────────────────────────────────────────┐
-│  2b. Resolve                           resolver.py       │
-│      Map import paths → source files, parse + cache      │
-│      Circular import detection                           │
-└────────────────────────┬─────────────────────────────────┘
-                         ▼
-┌──────────────────────────────────────────────────────────┐
-│  3. Type Check            checker/ + environment.py      │
-│     AST → list[Diagnostic]        types.py               │
-│     Two-pass: register declarations, then check bodies   │
-└────────────────────────┬─────────────────────────────────┘
-                         ▼
-┌──────────────────────────────────────────────────────────┐
-│  4. Verify                      verifier.py + smt.py     │
-│     AST → VerifyResult               (Z3 SMT solver)    │
-│     Tier 1: Z3 proves   Tier 3: runtime fallback        │
-└────────────────────────┬─────────────────────────────────┘
-                         ▼
-┌──────────────────────────────────────────────────────────┐
-│  5. Compile                    codegen/ + wasm/           │
-│     AST → CompileResult          (WAT text + WASM binary)│
-│     Runtime contract insertion for Tier 3                │
-└────────────────────────┬─────────────────────────────────┘
-                         ▼
-┌──────────────────────────────────────────────────────────┐
-│  6. Execute                            (wasmtime)        │
-│     WASM binary → host runtime with IO bindings          │
-└──────────────────────────────────────────────────────────┘
+  |
+  v
+1   Parse        grammar.lark + parser.py     -> Lark parse tree (LALR(1))
+2   Transform    transform.py + ast.py        -> typed AST
+2b  Resolve      resolver.py                  -> transitive module closure
+3   Type Check   checker/ + environment.py    -> list[Diagnostic]
+  |              (two passes: register every signature, then check bodies)
+  |
+  +--- vera verify ------------->  4  Verify   verifier.py + smt.py (Z3)
+  |                                   each obligation proved (Tier 1) or
+  |                                   deferred to a runtime guard (Tier 3)
+  |                                   -> ok / diagnostics / tier counts
+  |                                   sidecar: obligations/ + lsp/ -- warm
+  |                                   incremental re-verification (LSP)
+  v    vera compile / vera run
+5   Compile      codegen/ + wasm/             -> WAT + .wasm
+  |              monomorphize generics / insert contract guards
+  +------------------------------>  Browser bundle   (--target browser)
+  +------------------------------>  WASI 0.2 component (--target wasi-p2)
+  v
+6   Execute      runtime/ + wasmtime          vera run / test / serve
+
+Cross-cutting: cli.py (orchestrates every stage) / errors.py (Diagnostic,
+E-codes) / formatter.py (vera fmt) / tester.py (vera test).
+Nothing exits early -- every stage accumulates diagnostics, so an agent
+gets all feedback in one pass.
 ```
+
+</details>
 
 Errors never cause early exit. Parse errors raise exceptions (the tree is incomplete), but the type checker and verifier **accumulate** all diagnostics and return them as a list. This is critical for LLM consumption — the model gets all feedback in one pass.
 
@@ -246,7 +239,12 @@ This is the most architecturally complex stage.
 
 ### Three-pass architecture
 
-```
+![The three checker passes: module registration harvests imported signatures, local registration populates the TypeEnv, and the checking pass verifies every function body against it.](../assets/diagrams/checker-passes.svg)
+
+<details>
+<summary>Text version</summary>
+
+```text
  Pass 0: Module Registration       Pass 1: Local Registration         Pass 2: Checking
   ┌──────────────────────┐          ┌────────────────────────┐          ┌──────────────────────────┐
   │  For each resolved   │          │  Walk all declarations │          │  Walk all declarations   │
@@ -261,6 +259,8 @@ This is the most architecturally complex stage.
          │   no bodies checked)   │          │   • pop scope            │
          └────────────────────────┘          └──────────────────────────┘
 ```
+
+</details>
 
 **Why two passes:** Forward references and mutual recursion. A function declared on line 50 can call a function declared on line 10, or vice versa. Pass 1 makes all signatures visible before any bodies are checked.
 
@@ -279,7 +279,12 @@ The compiler maintains two distinct type representations:
 
 See [`DE_BRUIJN.md`](../DE_BRUIJN.md) for the conceptual background and worked examples. In brief: Vera uses typed De Bruijn indices instead of variable names. `@Int.0` means "the most recent `Int` binding", `@Int.1` means "the one before that".
 
-```
+![Slot resolution: parameters bind left-to-right into scope 0, a let pushes scope 1, and @Int.n counts backwards from the most recent Int binding.](../assets/diagrams/slot-scopes.svg)
+
+<details>
+<summary>Text version</summary>
+
+```text
 private fn add(@Int, @Int -> @Int) {        Parameters bind left-to-right.
   let @Int = @Int.0 + @Int.1;       @Int.0 = param₂ (rightmost), @Int.1 = param₁
   @Int.0                             @Int.0 = let binding (shadows param₂)
@@ -298,6 +303,8 @@ resolve("Int", 0) → let_binding    (index 0 = most recent)
 resolve("Int", 1) → param₂         (index 1 = one before)
 resolve("Int", 2) → param₁         (index 2 = two before)
 ```
+
+</details>
 
 The resolver walks scopes **innermost to outermost**, counting backwards within each scope. This is implemented in `TypeEnv.resolve_slot()`.
 
@@ -429,7 +436,12 @@ When a contract or function body contains constructs that can't be translated to
 
 ### Verification condition generation
 
-```
+![Proof by refutation: the requires clauses become assumptions, the negated ensures becomes the goal, and Z3's unsat/sat/unknown answers map to Verified, Violated-with-counterexample, and Tier 3.](../assets/diagrams/z3-refutation.svg)
+
+<details>
+<summary>Text version</summary>
+
+```text
  requires(P₁), requires(P₂)           ensures(Q)
          │                                 │
          ▼                                 ▼
@@ -454,6 +466,8 @@ When a contract or function body contains constructs that can't be translated to
                   + counter-
                    example
 ```
+
+</details>
 
 **Forward symbolic execution:** The function body is translated to a Z3 expression, and `@T.result` in postconditions is substituted with this expression. This is simpler than weakest-precondition calculus and equivalent for the non-recursive straight-line code that Tier 1 handles.
 
@@ -619,7 +633,12 @@ VeraError (exception hierarchy)
 
 Every diagnostic includes eight fields designed for LLM consumption:
 
-```
+![The Diagnostic record: description, location, source line, rationale, fix, spec_ref, severity, and a stable error code.](../assets/diagrams/diagnostic-card.svg)
+
+<details>
+<summary>Text version</summary>
+
+```text
 ┌──────────────────────────────────────────────────────┐
 │  Diagnostic                                          │
 │                                                      │
@@ -633,6 +652,8 @@ Every diagnostic includes eight fields designed for LLM consumption:
 │  error_code    stable identifier ("E130", "E200")    │
 └──────────────────────────────────────────────────────┘
 ```
+
+</details>
 
 `Diagnostic.format()` produces the multi-section natural language output shown in the root README's "What Errors Look Like" section. The format is designed so the compiler's output can be fed directly back to the model that wrote the code.
 

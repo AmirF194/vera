@@ -176,6 +176,8 @@ When an effect operation is performed in the handled body:
 
 The handler may also choose NOT to call `resume`, which aborts the handled body. This is how exceptions are implemented.
 
+![Handler dispatch: an effect operation suspends the handled body, control transfers to the matching clause with the arguments and handler state in scope, and resume(value) continues the body — omitting resume aborts it.](../assets/diagrams/effect-handlers.svg)
+
 ### 7.5.3 Examples
 
 **State handler:**

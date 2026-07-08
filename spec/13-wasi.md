@@ -8,7 +8,7 @@ WASI 0.2 interfaces.  The artifact runs under any stock wasip2 host —
 `wasmtime run`, wasmtime-py's `component.Linker.add_wasip2()` — with no
 Vera-specific host bindings.
 
-```bash
+```
 vera compile --target wasi-p2 program.vera   # write a binary component
 vera compile --target wasi-p2 --wat program.vera  # print component text
 vera run --target wasi-p2 program.vera       # execute under the built-in wasip2 host
@@ -33,7 +33,12 @@ inherited, not reimplemented.
 The emitter (`vera/codegen/wasi.py`) produces a single component
 wrapping two core modules:
 
-```
+![The emitted component: core module $Main calls every vera.* op through a funcref dispatch table that core module $Adapter fills at instantiation, implementing the ops over canon-lowered WASI imports; the component exports wasi:cli/run.](../assets/diagrams/wasi-component.svg)
+
+<details>
+<summary>Text version</summary>
+
+```text
 component
 ├── core module $Main      — the ordinary Vera core module, with:
 │     · each (import "vera" "op") replaced by a same-named
@@ -49,6 +54,8 @@ component
 └── exports: wasi:cli/run@0.2.0 (+ a plain lifted `main` when the
     return type is scalar — Section 13.5)
 ```
+
+</details>
 
 Instantiation order `$Main` → lowers → `$Adapter` is a strict DAG (the
 component model forbids instantiation cycles); dispatch-table slots are

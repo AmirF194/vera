@@ -169,6 +169,8 @@ Simon Willison [argues](https://simonwillison.net/tags/conformance-suites/) that
 
 Vera has three distinct test layers, each serving a different purpose:
 
+![The three test layers — unit tests for compiler internals, spec-anchored conformance programs, end-to-end examples — and the four nested conformance levels: parse, check, verify, run.](assets/diagrams/testing-layers.svg)
+
 | Layer | Location | Purpose | What it tests |
 |-------|----------|---------|---------------|
 | **Unit tests** | `tests/test_*.py` | Test compiler internals | Error paths, edge cases, internal APIs |

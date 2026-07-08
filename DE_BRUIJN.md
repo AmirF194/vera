@@ -373,7 +373,12 @@ Coq (the Coq Development Team, INRIA) and Isabelle (Nipkow, Paulson, and Wenzel)
 
 **Right-to-left, starting at zero.** Read the parameter list from right to left. The first parameter you encounter (rightmost) is index 0. The second (next to rightmost) is index 1. Continue outward.
 
-```
+![Per-type right-to-left numbering: the rightmost binding of each type is its .0 — interleaved types never share a counter.](assets/diagrams/slot-numbering.svg)
+
+<details>
+<summary>Text version</summary>
+
+```text
 fn(@A, @B, @A, @B -> ...)
         ↑         ↑
      @B.1      @B.0   (rightmost B = 0)
@@ -382,6 +387,8 @@ fn(@A, @B, @A, @B -> ...)
     ↑       ↑
  @A.1    @A.0          (rightmost A = 0)
 ```
+
+</details>
 
 ### Let bindings
 

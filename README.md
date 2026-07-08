@@ -149,6 +149,8 @@ The macOS 15+ baseline reflects [TelemetryDeck's macOS version distribution data
 
 ### The workflow
 
+![The workflow: an LLM agent writes Vera with mandatory contracts; vera check and vera verify prove the types and contracts, feeding every diagnostic — description, rationale, fix, spec_ref — straight back to the agent; when the proofs hold, vera run executes the WebAssembly on CLI, browser, WASI or HTTP.](assets/diagrams/workflow.svg)
+
 ```
 $ vera check examples/absolute_value.vera
 OK: examples/absolute_value.vera
@@ -231,6 +233,10 @@ The reference compiler — parser, AST, type checker, contract verifier (Z3), WA
 
 Known bugs and open issues are tracked on the **[issue tracker](https://github.com/aallan/vera/issues)**. See **[KNOWN_ISSUES.md](KNOWN_ISSUES.md)** for a consolidated list.
 
+The compiler is a seven-stage pipeline — see [vera/README.md](vera/README.md) for the architecture in depth:
+
+![The compiler pipeline and module map: parse, transform and resolve feed the two-pass type checker; vera verify proves each contract obligation or defers it to a runtime guard, with a warm-verification sidecar for the LSP, while vera compile emits WAT and WASM for the wasmtime host, the browser bundle, or a WASI 0.2 component.](assets/diagrams/architecture.svg)
+
 <details>
 <summary><strong>Project structure</strong></summary>
 
@@ -257,8 +263,8 @@ vera/
 │   ├── transform.py               #   Lark parse tree → AST transformer
 │   ├── checker/                   #   Type checker (mixin package)
 │   ├── verifier.py                #   Contract verifier (Z3)
-│   ├── codegen/                   #   Code generation (11 modules)
-│   ├── wasm/                      #   WASM translation (9 modules)
+│   ├── codegen/                   #   Code generation (13 modules)
+│   ├── wasm/                      #   WASM translation (19 modules)
 │   ├── browser/                   #   Browser runtime
 │   ├── formatter.py               #   Canonical code formatter
 │   ├── errors.py                  #   LLM-oriented diagnostics
