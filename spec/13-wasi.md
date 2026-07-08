@@ -8,7 +8,7 @@ WASI 0.2 interfaces.  The artifact runs under any stock wasip2 host —
 `wasmtime run`, wasmtime-py's `component.Linker.add_wasip2()` — with no
 Vera-specific host bindings.
 
-```
+```bash
 vera compile --target wasi-p2 program.vera   # write a binary component
 vera compile --target wasi-p2 --wat program.vera  # print component text
 vera run --target wasi-p2 program.vera       # execute under the built-in wasip2 host
