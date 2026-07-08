@@ -1,4 +1,4 @@
-<svg width="1000" height="252" viewBox="0 0 1000 252" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title">
+<svg width="828" height="188" viewBox="18 58 828 188" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title">
   <title id="title">The loop: the model writes Vera with mandatory contracts; the compiler proves every type and every contract via Z3; when it's wrong, the diagnostics return — description, rationale, fix, spec_ref — and when the proofs hold, it ships as one .wasm for CLI, browser, and WASI.</title>
   <!-- Website design system (docs/index.html): paper #FFECD1 · ink #1A0B00/#5E2C08/#975526 ·
        flame #E05600 accent · JetBrains Mono / Inter · transparent bg, 2px strokes, one accent.

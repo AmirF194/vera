@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The landing page's loop figure is rebalanced and its claims audited against the tree**.  `docs/loop-web.svg` carried 70 canvas-units of dead space above the drawing and 166 to its right (vs 30 left / 18 below), so the embed rendered top-heavy and visually left-shifted; the viewBox is recropped symmetric (12 units each side, browser-measured) and the embed's margins equalised — 48px of air above and below.  The audit that rode along, every claim verified against the registry or a live run: the effect enumeration gains `Diverge` and its count corrects to nine (`vera effects --json`; the same one-word gap in `README.md` rides along); the `Inference` provider list gains Mistral (`vera/runtime/inference.py` detects four keys, both here and in the generated `index.md`); the three-tier feature card is scoped to what shipped, mirroring README's phrasing (the Z3-guided middle tier is specified, not implemented); the WASI showcase block now shows `vera compile --target wasi-p2 --world server`'s *actual* output line and a consistent `examples/http_server.wasm` artifact path (previous text was a paraphrase; the `wasmtime serve` banner was verified against a real run); and the `safe_divide` / `classify_sentiment` samples link their `examples/` counterparts the way the fizzbuzz sample always did — with the fizzbuzz link itself backfilled into the generated `index.md`, which had never carried it.
+
 ## [0.1.1] - 2026-07-08
 
 ### Added
