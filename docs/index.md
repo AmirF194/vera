@@ -16,6 +16,8 @@ The [empirical literature](https://arxiv.org/abs/2307.12488) shows models are pa
 
 The model doesn't need to be right. It needs to be *checkable*. Names are replaced by structural references. Contracts are mandatory. Effects are typed. Every function is a specification the compiler verifies against its implementation.
 
+![The loop: the model writes Vera with mandatory contracts; the compiler proves every type and every contract via Z3; when it's wrong the diagnostics return — description, rationale, fix, spec_ref — and when the proofs hold it ships as one .wasm for CLI, browser, and WASI.](https://veralang.dev/loop-web.svg)
+
 For deeper questions about the design — why no variable names, what gets verified, how Vera compares to Dafny, Lean, and Koka — see the [FAQ](https://raw.githubusercontent.com/aallan/vera/main/FAQ.md).
 
 ## What Vera Looks Like
