@@ -1,6 +1,6 @@
 # History
 
-How the Vera compiler was built, from initial commit through the ongoing server-effects sprint (Stage 16), across 92 active development days.
+How the Vera compiler was built, from initial commit through the v0.1.0 bug burndown (Stage 17) and its aftermath, across 94 active development days.
 
 Vera was developed in an interleaved spiral — each phase added a complete compiler layer with tests, documentation, and working examples before moving to the next. The compiler was built by a single developer working with Claude Code, with CodeRabbit providing AI code review on pull requests from v0.0.80 onwards. The entire project — language design, specification, compiler, test suite, documentation, website — was built from scratch starting 22 February 2026.
 
@@ -24,7 +24,9 @@ Version rows follow one rule: one sentence, at most one issue link.  [CHANGELOG.
 | 12 | 26 Apr – 8 May | The bug-killing campaign | v0.0.120–v0.0.142 |
 | 13 | 10–29 May | Stabilisation and memory safety | v0.0.143–v0.0.160 |
 | 14 | 10–12 Jun | The language server | v0.0.161–v0.0.170 |
-| 15 | 15 Jun onwards | The soundness campaign | v0.0.171– |
+| 15 | 15 Jun – 1 Jul | The soundness campaign | v0.0.171–v0.0.191 |
+| 16 | 2–3 Jul | The server-effects sprint | v0.0.192–v0.0.195 |
+| 17 | 4 Jul onwards | The v0.1.0 bug burndown | v0.1.0– |
 
 ---
 

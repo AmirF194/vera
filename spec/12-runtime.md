@@ -427,7 +427,7 @@ The `Random` effect provides three host-backed operations for non-deterministic 
 
 **Returns:** `i32` — `0` or `1`, each with probability ≈ 0.5.
 
-**Behaviour:** Both runtimes derive the bit from a uniform draw (`random.random() < 0.5` and `Math.random() < 0.5` respectively). No determinism / seeding API is offered; future work tracked alongside #465.
+**Behaviour:** Both runtimes derive the bit from a uniform draw (`random.random() < 0.5` and `Math.random() < 0.5` respectively). No determinism / seeding API is offered; a seeding API remains future work.
 
 ## 12.5 Memory Model
 
@@ -448,7 +448,7 @@ The `Random` effect provides three host-backed operations for non-deterministic 
 ├──────────────────────────────────┤  data_end + 8192 = $heap_ptr (initial)
 │  Heap-allocated data             │
 │  (ADTs, closures, arrays)        │
-│          ↓ grows downward        │
+│  ↓ grows toward higher addresses │
 ├──────────────────────────────────┤
 │  (unused)                        │
 └──────────────────────────────────┘  65536+ (64 KiB, growable)
@@ -456,7 +456,7 @@ The `Random` effect provides three host-backed operations for non-deterministic 
 
 </details>
 
-String constants occupy the lowest addresses. The GC shadow stack and mark worklist each occupy 4096 bytes after the string data. The heap grows upward from `data_end + 8192`. The GC infrastructure (shadow stack, worklist, and heap offset) is only emitted when the program allocates heap data.
+String constants occupy the lowest addresses. The GC shadow stack and mark worklist each occupy 4096 bytes after the string data. The heap grows toward higher addresses from `data_end + 8192`. The GC infrastructure (shadow stack, worklist, and heap offset) is only emitted when the program allocates heap data.
 
 ### 12.5.2 Allocator
 

@@ -71,10 +71,10 @@
   <line class="edge" x1="156" y1="356" x2="458" y2="356" marker-end="url(#arr)"/>
   <text class="m msg" x="300" y="347" text-anchor="middle">vera/proposeEdit</text>
   <g>
-    <rect class="card" x="384" y="372" width="270" height="40" rx="10"/>
+    <rect class="card" x="384" y="372" width="224" height="40" rx="10"/>
     <rect x="384.5" y="372.5" width="4" height="39" rx="2" fill="#5a9e6f"/>
     <text class="f" x="400" y="389" font-size="10.5px" fill="#2d2b28" font-weight="600">the gate</text>
-    <text class="f d" x="400" y="404">apply iff nothing newly fails to prove and no errors</text>
+    <text class="f d" x="400" y="404">apply iff no new failures, no errors</text>
   </g>
   <line class="ret" x1="464" y1="440" x2="162" y2="440"/>
   <text class="f note" x="300" y="432" text-anchor="middle">applied — or refused, with the delta that says why</text>

@@ -40,7 +40,7 @@
     <rect class="card" x="574" y="80" width="310" height="52" rx="10"/>
     <rect x="574.5" y="80.5" width="4" height="51" rx="2" fill="#5a9e6f"/>
     <text class="f t" x="592" y="102">build the import object — only those bindings</text>
-    <text class="f d" x="592" y="120">hello-world wants one (<tspan class="m" font-size="10px">print</tspan>); a markdown-heavy program, dozens</text>
+    <text class="f d" x="592" y="120">hello-world needs one (<tspan class="m" font-size="10px">print</tspan>); markdown-heavy, dozens</text>
   </g>
   <polyline class="edge" points="729,132 729,156" marker-end="url(#arr)"/>
 

@@ -582,7 +582,7 @@ text = path.read_text()
 text = path.read_text(encoding="utf-8")
 ```
 
-Surfaced via ~9 tests across `test_codegen.py`, `test_codegen_monomorphize.py`, `test_codegen_closures.py`, `test_html.py` — see PR #646 for the CI-side fix.
+Surfaced via ~9 tests across `test_codegen_monomorphize.py`, `test_codegen_closures.py`, `test_html.py`, and the other `test_codegen_*.py` split files — see PR #646 for the CI-side fix.
 
 ## Adding Tests
 

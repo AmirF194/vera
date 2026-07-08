@@ -53,9 +53,9 @@
 
   <!-- handler activation -->
   <rect x="684" y="174" width="12" height="150" rx="3" fill="#f8efdf" stroke="#d4952a" stroke-width="0.75"/>
-  <text class="f note" x="706" y="196"><tspan class="step">2</tspan> · control transfers to the matching operation clause</text>
-  <text class="f note" x="706" y="218"><tspan class="step">3</tspan> · the clause sees the op's arguments and the</text>
-  <text class="f note" x="716" y="232">current handler state (<tspan class="m" font-size="10px">@Int.0</tspan>)</text>
+  <text class="f note" x="706" y="196"><tspan class="step">2</tspan> · control moves to the matching clause</text>
+  <text class="f note" x="706" y="218"><tspan class="step">3</tspan> · the op's arguments and the current</text>
+  <text class="f note" x="716" y="232">handler state (<tspan class="m" font-size="10px">@Int.0</tspan>) are in scope</text>
 
   <!-- 4 · resume -->
   <line class="edge" x1="684" y1="324" x2="242" y2="324" marker-end="url(#arr)"/>

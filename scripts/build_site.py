@@ -188,8 +188,12 @@ def _abs_links(text: str) -> str:
     # Walk line-by-line so fenced blocks may safely contain backticks.
     # The regex-split approach (```[^`]*```) breaks when code inside a
     # fence contains inline backticks, because [^`]* stops at the first one.
+    # The optional leading ``!`` captures image embeds: an image must point
+    # at the RAW host (actual bytes) — a ``blob/`` URL is an HTML page and
+    # renders as a broken image wherever llms-full.txt is displayed.  Plain
+    # links keep the human-facing ``blob/`` pages.
     link_re = re.compile(
-        r"\[([^\]]+)\]\((?!https?://|#)([A-Za-z0-9_./#-][A-Za-z0-9_./#-]*)\)"
+        r"(!?)\[([^\]]+)\]\((?!https?://|#)([A-Za-z0-9_./#-][A-Za-z0-9_./#-]*)\)"
     )
     parts_inner: list[str] = []
     in_fence = False
@@ -210,7 +214,12 @@ def _abs_links(text: str) -> str:
             parts_inner.append(line)
         else:
             parts_inner.append(link_re.sub(
-                lambda m: f"[{m.group(1)}]({REPO}/blob/main/{m.group(2)})", line
+                lambda m: (
+                    f"![{m.group(2)}]({RAW}/{m.group(3)})"
+                    if m.group(1)
+                    else f"[{m.group(2)}]({REPO}/blob/main/{m.group(3)})"
+                ),
+                line,
             ))
     return "".join(parts_inner)
 

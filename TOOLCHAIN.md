@@ -25,8 +25,7 @@ can stop at:
 ```text
 source ──▶ parse ──▶ check ──▶ verify ──▶ compile ──▶ run
             parse     check     verify     compile     run
-                      ast                  test
-                      fmt
+            fmt       ast                  test        serve
 ```
 
 </details>

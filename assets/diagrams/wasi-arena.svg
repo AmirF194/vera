@@ -65,8 +65,9 @@
   <g>
     <rect class="card" x="60" y="312" width="824" height="56" rx="10"/>
     <rect x="60.5" y="312.5" width="4" height="55" rx="2" fill="#c45"/>
-    <text class="f t" x="78" y="334" fill="#a83838">why the exemption is load-bearing</text>
-    <text class="f d" x="78" y="352">a collection between two host writes inside one lowered call could move or sweep the half-written block — the same use-after-free class as #593/#695, from the host side.</text>
+    <text class="f t" x="78" y="332" fill="#a83838">why the exemption is load-bearing</text>
+    <text class="f d" x="78" y="349">a collection between two host writes inside one lowered call could move or sweep the</text>
+    <text class="f d" x="78" y="363">half-written block — the same use-after-free class as #593/#695, from the host side.</text>
   </g>
 
   <!-- footer -->
