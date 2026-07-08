@@ -519,6 +519,317 @@ class TestObligationKinds:
         ]
         assert len(call_pres) == 1
 
+    def test_precondition_checked_inside_effect_op_argument(self) -> None:
+        """A precondition-bearing call nested inside an effect-op
+        argument (e.g. IO.print(need_pos(...))) must still be checked:
+        the QualifiedCall is untranslatable (effects violate purity) but
+        its args are walked for the E501 side effect (#776).  Pre-fix the
+        QualifiedCall fell through to `return None` without recursing, so
+        the nested call's requires(...) was never checked.
+        """
+        source = (
+            "effect IO {\n"
+            "  op print(String -> Unit);\n"
+            "}\n"
+            "\n"
+            "private fn need_pos(@Nat -> @String)\n"
+            "  requires(@Nat.0 >= 1)\n"
+            "  ensures(true)\n"
+            "  effects(pure)\n"
+            "{\n"
+            '  "ok"\n'
+            "}\n"
+            "\n"
+            "public fn caller(@Nat -> @Unit)\n"
+            "  requires(true)\n"
+            "  ensures(true)\n"
+            "  effects(<IO>)\n"
+            "{\n"
+            "  IO.print(need_pos(@Nat.0));\n"
+            "  ()\n"
+            "}\n"
+        )
+        result = self._verify_source(source)
+        e501s = [d for d in result.diagnostics if d.error_code == "E501"]
+        assert len(e501s) == 1, e501s
+        call_pres = [
+            o for o in result.obligations if o.kind == "call_pre"
+        ]
+        assert len(call_pres) == 1
+
+    def test_precondition_checked_in_every_effect_op_argument(self) -> None:
+        """EVERY argument of an effect op is walked, not just the first.
+
+        The single-argument `IO.print(need_pos(...))` case above stays green if
+        the loop is degraded to `self.translate_expr(expr.args[0], env)`, so it
+        cannot pin the iteration.  Two violating calls in one argument list must
+        raise two independent `call_pre` obligations (#776).
+        """
+        source = (
+            "effect IO {\n"
+            "  op log(String, String -> Unit);\n"
+            "}\n"
+            "\n"
+            "private fn need_pos(@Nat -> @String)\n"
+            "  requires(@Nat.0 >= 1)\n"
+            "  ensures(true)\n"
+            "  effects(pure)\n"
+            "{\n"
+            '  "ok"\n'
+            "}\n"
+            "\n"
+            "public fn caller(@Nat, @Nat -> @Unit)\n"
+            "  requires(true)\n"
+            "  ensures(true)\n"
+            "  effects(<IO>)\n"
+            "{\n"
+            "  IO.log(need_pos(@Nat.1), need_pos(@Nat.0));\n"
+            "  ()\n"
+            "}\n"
+        )
+        result = self._verify_source(source)
+        e501s = [d for d in result.diagnostics if d.error_code == "E501"]
+        assert len(e501s) == 2, e501s
+        # Distinct call sites, not one obligation reported twice.
+        assert len({d.location.column for d in e501s}) == 2, e501s
+        call_pres = [o for o in result.obligations if o.kind == "call_pre"]
+        assert len(call_pres) == 2
+        assert all(o.status == "violated" for o in call_pres), call_pres
+
+    def test_effect_op_never_becomes_a_z3_term(self) -> None:
+        """`translate_expr` must return None for a `QualifiedCall`.
+
+        Walking the arguments is a *side effect*; the effect operation's own
+        value is chosen by the handler at run time and is not a pure term, so it
+        must never enter the solver.  Returning an argument's term instead
+        (`return last`) is UNSOUND, and nothing else in the suite notices:
+
+            effect Counter { op bump(Int -> Int); }
+            public fn echo_bump(@Int -> @Int)
+              ensures(@Int.result == @Int.0) effects(<Counter>)
+            { Counter.bump(@Int.0) }
+
+        With `return None` the postcondition is not entailed and `vera verify`
+        honestly reports it as `tier3` — not proved, deferred to the runtime
+        contract check.  With `return last` the body translates to `@Int.0`, so
+        the verifier *proves* `@Int.result == @Int.0` and reports `verified`, for
+        a claim only the handler could satisfy.  (Codegen never reads the tiers,
+        so the runtime `contract_fail` guard survives either way; what breaks is
+        `vera verify`'s claim.)  Mutating `return None` -> `return last` moves
+        this obligation from `tier3` to `verified` and leaves all 371 other tests
+        green (PR #953 review).
+        """
+        source = (
+            "effect Counter {\n"
+            "  op bump(Int -> Int);\n"
+            "}\n"
+            "\n"
+            "public fn echo_bump(@Int -> @Int)\n"
+            "  requires(true)\n"
+            "  ensures(@Int.result == @Int.0)\n"
+            "  effects(<Counter>)\n"
+            "{\n"
+            "  Counter.bump(@Int.0)\n"
+            "}\n"
+        )
+        result = self._verify_source(source)
+        posts = [o for o in result.obligations if o.kind == "ensures"]
+        assert len(posts) == 1, posts
+        assert posts[0].status == "tier3", (
+            "the effect op's result is the handler's choice — proving "
+            "`@Int.result == @Int.0` at Tier 1 is a false claim; "
+            f"got status={posts[0].status!r}"
+        )
+
+    def test_effect_op_arg_assumption_does_not_escape_its_branch(self) -> None:
+        """A callee postcondition assumed while walking an effect-op argument
+        must not leak out of the `if` branch it was translated under.
+
+        `_translate_call_with_info` assumes the callee's `ensures` with a bare
+        `self.solver.add(z3_post)`, which lands on the solver's BASE assertion
+        stack.  `check_valid` folds `_path_conditions` around the *goal* only, so
+        the callee's `requires` is checked UNDER the branch guard while its
+        `ensures` escapes it and becomes an unconditional fact about the caller's
+        own slots (`_build_callee_env` binds the callee's params to the caller's
+        terms).
+
+        Here that fact is circular: `dec5`'s `ensures(@Nat.result == @Nat.0 - 5)`
+        plus `@Nat`'s implicit `result >= 0` entails `@Nat.0 >= 5` — the very
+        precondition that licensed the assumption.  Without `_guard_fact`,
+        `main`'s FALSE `ensures(@Nat.0 >= 5)` proves at Tier 1, `vera verify`
+        reports `ok=true` with no diagnostic, and `vera run main -- 0` traps.
+        `main` (before #776) rejected this program correctly, so leaving the
+        assumption unguarded would have been a soundness REGRESSION.
+
+        `_translate_match` already guarded its injected facts this way; the call
+        translator did not.  See `test_pure_call_postcondition_does_not_escape_its_branch`
+        for the same leak with no effect operation anywhere — that one is
+        reachable on `main` today (PR #953 review).
+        """
+        source = (
+            "effect Slp {\n"
+            "  op sleep(Nat -> Unit);\n"
+            "}\n"
+            "\n"
+            "private fn dec5(@Nat -> @Nat)\n"
+            "  requires(@Nat.0 >= 5)\n"
+            "  ensures(@Nat.result == @Nat.0 - 5)\n"
+            "  effects(pure)\n"
+            "{\n"
+            "  @Nat.0 - 5\n"
+            "}\n"
+            "\n"
+            "public fn main(@Nat -> @Nat)\n"
+            "  requires(true)\n"
+            "  ensures(@Nat.0 >= 5)\n"
+            "  effects(<Slp>)\n"
+            "{\n"
+            "  if @Nat.0 >= 5 then { Slp.sleep(dec5(@Nat.0)) } else { () };\n"
+            "  @Nat.0\n"
+            "}\n"
+        )
+        result = self._verify_source(source)
+        caller_post = [
+            o for o in result.obligations
+            if o.fn_name == "main" and o.kind == "ensures"
+        ]
+        assert len(caller_post) == 1, caller_post
+        assert caller_post[0].status == "violated", (
+            "`ensures(@Nat.0 >= 5)` is false for @Nat.0 = 0; proving it at Tier 1 "
+            "means dec5's postcondition escaped its `if` guard.  "
+            f"got status={caller_post[0].status!r}"
+        )
+        e500s = [d for d in result.diagnostics if d.error_code == "E500"]
+        assert len(e500s) == 1, e500s
+        # dec5's own precondition IS legitimately discharged under the guard.
+        callee_pre = [
+            o for o in result.obligations
+            if o.fn_name == "dec5" and o.kind == "requires"
+        ]
+        assert callee_pre and all(o.status == "verified" for o in callee_pre)
+
+    def test_pure_call_postcondition_does_not_escape_its_branch(self) -> None:
+        """The same leak with NO effect operation anywhere — a false Tier-1 that
+        `main` shipped with, reachable through the #730 statement-position walk.
+
+        `_translate_call_with_info` assumed the callee's `ensures` onto the
+        solver's base stack.  `_translate_match` already guarded its injected
+        facts (`solver.add(z3.Implies(cond, f))`); the call translator did not, so
+        a fact learned under an `if` outlived the branch.
+
+        Before `_guard_fact`, `vera verify` printed "6 verified (Tier 1)" and no
+        diagnostic for this program, and `vera run main -- 0` trapped on the
+        postcondition it had just "proved".  A verifier that reports MORE
+        successes and FEWER diagnostics than a correct one is failing open — the
+        one outcome this language cannot afford.
+
+        Two calls in mutually-exclusive arms inject contradictory facts, the base
+        solver goes UNSAT, and every obligation discharges vacuously — which is
+        how this bug silently swallowed the very `E501` that #776 adds.
+        """
+        source = (
+            "private fn dec5(@Nat -> @Nat)\n"
+            "  requires(@Nat.0 >= 5)\n"
+            "  ensures(@Nat.result == @Nat.0 - 5)\n"
+            "  effects(pure)\n"
+            "{\n"
+            "  @Nat.0 - 5\n"
+            "}\n"
+            "\n"
+            "public fn main(@Nat -> @Nat)\n"
+            "  requires(true)\n"
+            "  ensures(@Nat.0 >= 5)\n"
+            "  effects(pure)\n"
+            "{\n"
+            "  if @Nat.0 >= 5 then { let @Nat = dec5(@Nat.0); () } else { () };\n"
+            "  @Nat.0\n"
+            "}\n"
+        )
+        result = self._verify_source(source)
+        caller_post = [
+            o for o in result.obligations
+            if o.fn_name == "main" and o.kind == "ensures"
+        ]
+        assert len(caller_post) == 1, caller_post
+        assert caller_post[0].status == "violated", (
+            "`ensures(@Nat.0 >= 5)` is false for @Nat.0 = 0; proving it at Tier 1 "
+            "means dec5's postcondition escaped its `if` guard.  "
+            f"got status={caller_post[0].status!r}"
+        )
+        assert [d.error_code for d in result.diagnostics] == ["E500"], (
+            result.diagnostics
+        )
+        # The callee's own precondition IS legitimately discharged under the guard,
+        # so the guard must not over-reject.
+        callee_pre = [
+            o for o in result.obligations
+            if o.fn_name == "dec5" and o.kind == "requires"
+        ]
+        assert callee_pre and all(o.status == "verified" for o in callee_pre)
+
+    def test_guard_fact_conjoins_every_path_condition(self) -> None:
+        """`_guard_fact` must conjoin ALL live path conditions, not any one of them.
+
+        With a single path condition `And(c)` and `Or(c)` are the same formula, so
+        no program with one `if` can distinguish them — mutating `z3.And` to
+        `z3.Or` survives the whole behavioural suite.  A nested `if` gives two,
+        and `Or` is then a strictly weaker premise, asserting the callee's fact on
+        paths where it was never established.
+
+        Checked semantically (Z3 equivalence), not by matching the formula's
+        printed shape.
+        """
+        import z3
+
+        from vera.smt import SmtContext
+
+        ctx = SmtContext()
+        fact = z3.Bool("fact")
+        # No path conditions: the fact is unconditional, returned untouched.
+        assert ctx._guard_fact(fact) is fact
+
+        c1, c2 = z3.Bool("c1"), z3.Bool("c2")
+        ctx._path_conditions.extend([c1, c2])
+        guarded = ctx._guard_fact(fact)
+
+        solver = z3.Solver()
+        solver.add(z3.Not(guarded == z3.Implies(z3.And(c1, c2), fact)))
+        assert solver.check() == z3.unsat, (
+            f"_guard_fact must be Implies(And(*path_conditions), fact); got {guarded}"
+        )
+
+        solver = z3.Solver()
+        solver.add(z3.Not(guarded == z3.Implies(z3.Or(c1, c2), fact)))
+        assert solver.check() == z3.sat, (
+            "_guard_fact collapsed to the Or form — the premise is too weak and "
+            "the callee's fact escapes onto paths that never established it"
+        )
+
+    def test_injected_callee_facts_route_through_guard_fact(self) -> None:
+        """Both facts `_translate_call_with_info` injects must be guarded.
+
+        A wiring test, deliberately.  The callee `ensures` has a behavioural probe
+        (`test_pure_call_postcondition_does_not_escape_its_branch`), but the
+        refined-return predicate constrains only the call's *fresh* result
+        variable, so removing its guard changes no observable verdict — un-guarding
+        it survives every behavioural test in this module.  It is still wrong: an
+        unsatisfiable predicate asserted at base level makes the solver UNSAT and
+        discharges every obligation vacuously.  Pin the wiring instead.
+        """
+        import pathlib as _pathlib
+
+        import vera.smt
+
+        src = _pathlib.Path(vera.smt.__file__).read_text(encoding="utf-8")
+        assert "self.solver.add(self._guard_fact(z3_post))" in src, (
+            "the callee postcondition must be guarded by the path conditions"
+        )
+        assert "self.solver.add(self._guard_fact(z3_pred))" in src, (
+            "the refined-return predicate must be guarded by the path conditions"
+        )
+        assert "self.solver.add(z3_post)" not in src, "bare, unguarded postcondition assumption"
+        assert "self.solver.add(z3_pred)" not in src, "bare, unguarded refined-return assumption"
+
     def test_let_nat_subtraction_records_once(self) -> None:
         """A violating call as a @Nat-subtraction operand in a let RHS
         is visited by THREE translation passes (body, walker env
