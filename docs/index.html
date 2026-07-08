@@ -268,7 +268,7 @@
         <a href="/SKILL.md" rel="agent-instructions" type="text/markdown" class="btn btn-ghost">For Agents → SKILL.md</a>
       </div>
       <p class="version">
-        <span>v<a href="https://github.com/aallan/vera/releases/tag/v0.1.0">0.1.0</a></span>
+        <span>v<a href="https://github.com/aallan/vera/releases/tag/v0.1.1">0.1.1</a></span>
         <a href="https://github.com/aallan/vera/actions/workflows/ci.yml" aria-label="CI status"><img src="https://github.com/aallan/vera/actions/workflows/ci.yml/badge.svg" alt="CI" style="height:18px"></a>
       </p>
     </div>
@@ -283,6 +283,7 @@
       <p class="thesis">The biggest problem models face isn't syntax &mdash; it's coherence over scale. Models are pattern matchers optimising for local plausibility, not architects holding the entire system in mind.</p>
       <p>The <a href="https://arxiv.org/abs/2307.12488">empirical literature</a> shows models are particularly vulnerable to naming-related errors: choosing misleading names, reusing names incorrectly, and losing track of which name refers to which value. Vera addresses this by making everything explicit and verifiable.</p>
       <p>The model doesn't need to be right. It needs to be <em>checkable</em>. Names are replaced by structural references. Contracts are mandatory. Effects are typed. Every function is a specification the compiler verifies against its implementation.</p>
+      <img src="loop-web.svg" alt="The loop: the model writes Vera with mandatory contracts; the compiler proves every type and every contract via Z3; when it's wrong the diagnostics return — description, rationale, fix, spec_ref — and when the proofs hold it ships as one .wasm for CLI, browser, and WASI." width="1000" height="252" loading="lazy" style="width:100%;max-width:940px;height:auto;display:block;margin:2.25rem auto .25rem">
       <p style="margin-top:1.5rem">For deeper questions about the design &mdash; why no variable names, what gets verified, how Vera compares to Dafny, Lean, and Koka &mdash; see the <a href="https://github.com/aallan/vera/blob/main/FAQ.md">FAQ</a>.</p>
     </div>
   </section>

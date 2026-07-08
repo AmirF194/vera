@@ -4,7 +4,7 @@
 
 From the Latin *veritas* — truth. In Vera, verification is a first-class citizen.
 
-**Current version:** [0.1.0](https://github.com/aallan/vera/releases/tag/v0.1.0)  ·  [GitHub](https://github.com/aallan/vera)  ·  [SKILL.md](https://veralang.dev/SKILL.md) (agent language reference)
+**Current version:** [0.1.1](https://github.com/aallan/vera/releases/tag/v0.1.1)  ·  [GitHub](https://github.com/aallan/vera)  ·  [SKILL.md](https://veralang.dev/SKILL.md) (agent language reference)
 
 ## Why?
 
@@ -15,6 +15,8 @@ Programming languages have always co-evolved with their users. Assembly emerged 
 The [empirical literature](https://arxiv.org/abs/2307.12488) shows models are particularly vulnerable to naming-related errors: choosing misleading names, reusing names incorrectly, and losing track of which name refers to which value. Vera addresses this by making everything explicit and verifiable.
 
 The model doesn't need to be right. It needs to be *checkable*. Names are replaced by structural references. Contracts are mandatory. Effects are typed. Every function is a specification the compiler verifies against its implementation.
+
+![The loop: the model writes Vera with mandatory contracts; the compiler proves every type and every contract via Z3; when it's wrong the diagnostics return — description, rationale, fix, spec_ref — and when the proofs hold it ships as one .wasm for CLI, browser, and WASI.](https://veralang.dev/loop-web.svg)
 
 For deeper questions about the design — why no variable names, what gets verified, how Vera compares to Dafny, Lean, and Koka — see the [FAQ](https://raw.githubusercontent.com/aallan/vera/main/FAQ.md).
 
