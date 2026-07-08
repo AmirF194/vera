@@ -85,3 +85,18 @@ reuse the arrow marker, and update the `<title>` and any paired
 | `testing-layers.svg` | `TESTING.md` | three test layers + four conformance levels |
 | `lsp-session.svg` | `LSP_SERVER.md` | the agent proof-delta session |
 | `history-growth.svg` | `HISTORY.md` | growth across the nine landmark releases |
+| `subtyping-lattice.svg` | `spec/02` | the complete subtyping relation + the checker/verifier Nat split |
+| `effect-row-lattice.svg` | `spec/07` | effect subtyping by row inclusion |
+| `module-resolution.svg` | `spec/08` | path mapping, cache, cycle rejection, transitive-≠-visible |
+| `async-model.svg` | `spec/09` | eager vs concurrent futures, the commutative-row gate |
+| `httpserver-lifecycle.svg` | `spec/09` | the vera serve request lifecycle, fresh instance per request |
+| `closure-layout.svg` | `spec/11` | closure heap struct + call_indirect dispatch |
+| `browser-bindings.svg` | `spec/12` | dynamic import introspection in the browser runtime |
+| `wasi-arena.svg` | `spec/13` | the GC-exempt cabi_realloc arena |
+| `server-world.svg` | `spec/13` | the wasi:http incoming-handler adapter sequence |
+| `faq-layers.svg` | `FAQ.md` | the three verification layers (types / Z3 / intent) |
+| `contract-testing.svg` | `FAQ.md` | the vera test generate–execute–check loop |
+| `language-comparison.svg` | `FAQ.md` | Dafny / Lean 4 / Koka / F* / Vera feature matrix |
+| `ci-gates.svg` | `CONTRIBUTING.md` | commit-stage, push-stage and CI gate rings |
+| `slot-evolution.svg` | `DE_BRUIJN.md` | the binding stack statement by statement |
+| `host-families.svg` | `vera/README.md` | family adapters into the Linker; IO inline by design |

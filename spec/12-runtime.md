@@ -604,6 +604,8 @@ The browser runtime (`vera/browser/runtime.mjs`) is a self-contained JavaScript 
 
 The runtime uses **dynamic import introspection** to work with any compiled Vera program. At initialization, it calls `WebAssembly.Module.imports(module)` to discover which host functions the module requires, then builds the import object containing only those bindings. This means the same runtime file works with every compiled Vera program — from a hello-world (1 import: `print`) to a markdown-heavy program (15+ imports).
 
+![Dynamic import introspection: the browser runtime asks the compiled module which host functions it needs via WebAssembly.Module.imports, builds an import object with only those bindings, and instantiates — one runtime file for every program, with State bindings pattern-matched from import names.](../assets/diagrams/browser-bindings.svg)
+
 State\<T\> bindings are pattern-matched from import names: `state_get_Int` and `state_put_Int` are recognized as `State<Int>` operations and dynamically paired.
 
 ### 12.9.2 Public API

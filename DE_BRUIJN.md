@@ -178,6 +178,8 @@ Trace the binding stack:
 | After `let @Int = @Int.0 + 1;` | param × 2 + 1 | param × 2 | parameter |
 | Return `@Int.0` | param × 2 + 1 | param × 2 | parameter |
 
+![The binding stack statement by statement: each let pushes a newer Int at index zero and shifts every older Int up by one — and the ensures clause evaluates in the entry environment, where index zero is still the parameter.](assets/diagrams/slot-evolution.svg)
+
 On the right-hand side of each `let`, `@Int.0` refers to the *current* most-recent `Int` — not the one being bound. The binding only becomes visible *after* the `let` completes.
 
 The `ensures` clause uses the pre-let state: `@Int.0` there refers to the parameter, because postconditions are evaluated in the function's entry environment.

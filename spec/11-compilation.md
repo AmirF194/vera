@@ -389,6 +389,8 @@ Flags:
 
 Anonymous functions (`AnonFn`) compile to closure values — heap-allocated structs containing a function table index and captured variables.
 
+![Closures at runtime: a heap struct with the function-table index at offset zero and the captures after it, invoked by apply_fn through the funcref table with call_indirect to the lifted module-level function, which loads its captures from the environment.](../assets/diagrams/closure-layout.svg)
+
 ### 11.10.1 Closure Representation
 
 A closure is an `i32` heap pointer to a struct:

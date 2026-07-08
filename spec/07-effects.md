@@ -395,6 +395,8 @@ effects(<IO>) <: effects(<IO, State<Int>>)
 
 In general, `effects(<E1>)` is a subtype of `effects(<E1, E2>)`. A function that performs no IO can safely be called in a context that allows IO.
 
+![Effect subtyping by row inclusion: pure fits where IO is allowed, IO fits where IO plus State is allowed — fewer effects always fit where more are expected.](../assets/diagrams/effect-row-lattice.svg)
+
 This means:
 - A `pure` function can be passed where `Fn(@A -> @B) effects(<IO>)` is expected.
 - A function with `effects(<IO>)` can be passed where `effects(<IO, Exn<String>>)` is expected.

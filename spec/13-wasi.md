@@ -93,6 +93,8 @@ scans or sweeps it:
 Host data larger than the arena (for example an argv list over
 64 KiB) traps cleanly rather than overflowing into the GC heap.
 
+![The GC-exempt arena: a fixed 64 KiB scratch region below gc_heap_start with a 128-byte retptr slab and a bump cabi_realloc reset at every op entry; data crossing into Vera is copied out to GC-heap blocks with shadow-stack rooting, and oversized host data traps cleanly.](../assets/diagrams/wasi-arena.svg)
+
 ## 13.4 Supported Host Surface
 
 | Vera operation | WASI 0.2 backing |
@@ -177,6 +179,8 @@ guest heap (using the compilation's own constructor layouts), calls
 `handle`, decodes the returned `Response`, and drives the
 outgoing-response resource sequence.  Guest traps map to a 500 from
 the host.
+
+![The server world: stock wasmtime serve delivers each request through wasi:http; the generated adapter builds the Request ADT in the guest heap, calls the verified handle, decodes the Response, and drives the outgoing resources — with String-keyed Map operations implemented in guest code.](../assets/diagrams/server-world.svg)
 
 **Headers without a host.**  `Request`/`Response` headers are
 `Map<String, String>`, and Map operations are host imports on the
