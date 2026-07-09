@@ -1187,12 +1187,17 @@ class Monomorphizer:
         which each consumer pre-populates (codegen from its WAT signatures,
         the verifier from declared AST return types).
         """
-        # Check builtin return types first — resolves opaque handle
-        # types (Decimal, Map, Set) that all share i32 representation.
-        builtin_ret = _BUILTIN_VERA_RETURN_TYPES.get(call.name)
-        if builtin_ret is not None:
-            return builtin_ret
-        return self.ctx.fn_ret_types.get(call.name)
+        # A name registered in fn_ret_types is a REAL declaration in this
+        # program — a user fn, or a user OVERRIDE of an E151-exempt prelude
+        # combinator (#815: option_map, the json_* family, html_attr) — and
+        # its declared type wins over the builtin table (the #908 show/hash
+        # gate, generalised; adversarial panel, PR #972).  Opaque builtins
+        # (string_chars, decimal_*, …) are never registered there, so they
+        # fall through to the table as before.
+        declared = self.ctx.fn_ret_types.get(call.name)
+        if declared is not None:
+            return declared
+        return _BUILTIN_VERA_RETURN_TYPES.get(call.name)
 
     @staticmethod
     def _parse_type_name(name: str) -> ast.NamedType:
@@ -1315,10 +1320,16 @@ class Monomorphizer:
                     return ("Array", (elem_type,))
             return ("Array", ())
         if isinstance(expr, ast.FnCall):
-            # Builtins returning parameterized types (e.g. decimal_div → Option<Decimal>)
-            param_ret = _BUILTIN_PARAMETERIZED_RETURNS.get(expr.name)
-            if param_ret is not None:
-                return param_ret
+            # Builtins returning parameterized types (e.g. decimal_div →
+            # Option<Decimal>).  Gated on non-registration: a name in
+            # fn_ret_types is a real decl — possibly a user override of an
+            # E151-exempt prelude combinator (#815) — whose DECLARED return
+            # must win (it resolves via fn_ret_type_exprs below; adversarial
+            # panel, PR #972).
+            if expr.name not in self.ctx.fn_ret_types:
+                param_ret = _BUILTIN_PARAMETERIZED_RETURNS.get(expr.name)
+                if param_ret is not None:
+                    return param_ret
             if expr.name in ("array_concat", "array_append",
                              "array_slice", "array_filter"):
                 if expr.args:
@@ -1807,11 +1818,19 @@ class Monomorphizer:
                     if clause.state_update is not None:
                         walk(clause.state_update[1])
                     del stack[mark:]
-                mark = len(stack)
-                if v.state is not None:
-                    push(v.state.type_expr)
+                # The HANDLED body carries NO state slot binding in the
+                # consumers: codegen routes handler state through host-side
+                # state cells (_translate_handle_state translates the body
+                # with the env unchanged; _walk_free_vars likewise), so the
+                # walker must not count one — a phantom binding shifts every
+                # same-named ref in the body to a dangling or wrong local
+                # (adversarial panel, PR #972).  The checker DOES bind state
+                # in the handled body's scope — a pre-existing checker/codegen
+                # divergence tracked separately; indices must match the
+                # CONSUMERS.  Clause scopes above keep params + state: that is
+                # what _walk_free_vars counts (and Exn clause compilation
+                # pushes the thrown binder).
                 walk(v.body)
-                del stack[mark:]
                 return
             if isinstance(v, ast.Node):
                 for fld in fields(v):
@@ -1830,10 +1849,14 @@ class Monomorphizer:
             for contract in fn_decl.contracts:
                 walk(contract)
             walk(fn_decl.body)
+            # ``where`` blocks nest — recurse so every helper at every depth
+            # gets its own param-rooted scope, matching the total
+            # collect_calls_in_node walk (PR #972 review; a depth-1 walk left
+            # nested helpers' collapsed indices stale).
+            for nested in fn_decl.where_fns or ():
+                walk_fn_scope(nested)
 
         walk_fn_scope(decl)
-        for where_fn in decl.where_fns or ():
-            walk_fn_scope(where_fn)
         return out
 
     def _substitute_in_ast(

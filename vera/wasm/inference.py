@@ -1090,11 +1090,16 @@ class InferenceMixin:
         # Consulted AFTER the logic arms above (apply_fn / show / hash /
         # async / await), which need call-shape context no fixed table has —
         # e.g. `async` prefers the richer "Future<Int>" over the dict's bare
-        # "Future".  Builtin names cannot be user-redefined (E151), so a hit
-        # here is always the registered builtin, never a user fn.
-        builtin_simple = _BUILTIN_VERA_RETURN_TYPES.get(call.name)
-        if builtin_simple is not None:
-            return builtin_simple
+        # "Future".  Gated on non-registration: a name in _fn_ret_types is a
+        # REAL declaration — a user fn, or a user OVERRIDE of an E151-exempt
+        # prelude combinator (#815: option_map, the json_* family, html_attr)
+        # — whose declared type must win, exactly like the #908 show/hash
+        # gate (adversarial panel, PR #972).  Opaque builtins are never
+        # registered there and fall through to the dict.
+        if call.name not in self._fn_ret_types:
+            builtin_simple = _BUILTIN_VERA_RETURN_TYPES.get(call.name)
+            if builtin_simple is not None:
+                return builtin_simple
         if call.name in self._generic_fn_info:
             forall_vars, param_types = self._generic_fn_info[call.name]
             constrained_vars = self._generic_constrained_vars.get(
@@ -1567,9 +1572,14 @@ class InferenceMixin:
             # instantiation discovery agree on the concrete instantiation.
             # Without it, `option_unwrap_or(decimal_div(a, b), …)` bound
             # nothing from arg0 and fell through to the phantom-var default.
-            param_ret = _BUILTIN_PARAMETERIZED_RETURNS.get(expr.name)
-            if param_ret is not None:
-                return param_ret
+            # Gated on non-registration, mirroring the discovery side: a
+            # registered name may be a user override of an E151-exempt
+            # prelude combinator (#815) whose declared return must win
+            # (adversarial panel, PR #972).
+            if expr.name not in self._fn_ret_types:
+                param_ret = _BUILTIN_PARAMETERIZED_RETURNS.get(expr.name)
+                if param_ret is not None:
+                    return param_ret
             if expr.name in ("array_concat", "array_append",
                              "array_slice", "array_filter"):
                 if expr.args:

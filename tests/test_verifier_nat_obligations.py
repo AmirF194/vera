@@ -1289,3 +1289,110 @@ public fn f(@Int -> @Unit)
         assert [d for d in result.diagnostics if d.severity == "error"] == []
         assert [o.status for o in result.obligations
                 if o.kind == "nat_bind"] == ["verified"]
+
+
+class TestGenericCloneInstantiatedTypes:
+    """Generic-clone verification must see INSTANTIATED types, not the
+    generic registration (PR #972 review; pre-existing on main).
+
+    A generic's instances are verified by monomorphizing a clone and running
+    it through the normal path (`_verify_generic_instances`).  The clone's
+    AST nodes keep their SOURCE spans (diagnostics anchor at the generic),
+    so the #747 span-keyed side-table (`_resolved_type_of` /
+    `_target_type_of`) returns the GENERIC type — `Option<T>`, not the
+    instance's `Option<Nat>`.  The sub-pattern narrowing walk then saw a
+    `TypeVar` field under a `@Nat` binder and obligated an IMPOSSIBLE
+    narrowing: `is_some_g<Nat>` matching `Some(@T)` on `@Option<T>.0` E503'd
+    with counterexample `Some(-1)` even though `Option<Nat>` cannot hold a
+    negative.  The fix substitutes the instance's concrete types into every
+    side-table lookup while a clone is being verified.
+    """
+
+    def test_generic_subpattern_nat_instance_not_obligated(self) -> None:
+        """`is_some_g<Nat>`: the clone's `Some(@Nat)` bind over an
+        `Option<Nat>` scrutinee is NOT a narrowing — the payload is already
+        @Nat, so no obligation may fire (the accessor carries no `>= 0`
+        fact, so a spurious obligation manufactures the impossible
+        counterexample `Some(-1)`)."""
+        result = _verify("""
+private forall<T> fn is_some_g(@Option<T> -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  match @Option<T>.0 {
+    None -> false,
+    Some(@T) -> true
+  }
+}
+
+public fn main(@Nat -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Option<Nat> = Some(@Nat.0);
+  is_some_g(@Option<Nat>.0)
+}
+""")
+        assert [d for d in result.diagnostics if d.severity == "error"] == []
+        assert not [o for o in result.obligations
+                    if o.kind == "nat_bind" and o.status == "violated"]
+
+    def test_generic_clone_genuine_subpattern_narrowing_still_obligated(
+        self,
+    ) -> None:
+        """Control: a GENUINE `Some(@Nat)` narrowing over a concrete
+        `Option<Int>` scrutinee inside a generic function's clone still
+        E503s — the instance-substitution fix must scope to the
+        impossible-counterexample case (already-@Nat instantiated field),
+        never weaken the E503 machinery on the clone path."""
+        _verify_err("""
+private forall<T> fn first_nat_g(@Option<Int>, @T -> @Nat)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  match @Option<Int>.0 {
+    None -> 0,
+    Some(@Nat) -> @Nat.0
+  }
+}
+
+public fn main(@Option<Int> -> @Nat)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  first_nat_g(@Option<Int>.0, true)
+}
+""", "may be negative")
+
+    def test_generic_subpattern_int_instance_not_obligated(self) -> None:
+        """`is_some_g<Int>`: the clone binds `Some(@Int)` — an @Int target
+        is no narrowing at all, so the Int instance stays clean too (pins
+        the substitution is per-instance, not a Nat special case)."""
+        result = _verify("""
+private forall<T> fn is_some_g(@Option<T> -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  match @Option<T>.0 {
+    None -> false,
+    Some(@T) -> true
+  }
+}
+
+public fn main(@Int -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Option<Int> = Some(@Int.0);
+  is_some_g(@Option<Int>.0)
+}
+""")
+        assert [d for d in result.diagnostics if d.severity == "error"] == []
+        assert not [o for o in result.obligations
+                    if o.kind == "nat_bind" and o.status == "violated"]
