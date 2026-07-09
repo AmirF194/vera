@@ -1147,6 +1147,13 @@ class Monomorphizer:
             if type_args and decl.forall_vars:
                 mapping = dict(zip(decl.forall_vars, type_args))
                 ret_te = decl.return_type
+                # Unwrap an inline refinement to its base, mirroring the
+                # rewrite side's generic branch (vera/wasm/inference.py) —
+                # the two consultors must land on the same name (PR #972
+                # review; both previously agreed via the WAT collapse only
+                # by coincidence for refined returns).
+                if isinstance(ret_te, ast.RefinementType):
+                    ret_te = ret_te.base_type
                 if isinstance(ret_te, ast.NamedType):
                     return mapping.get(ret_te.name, ret_te.name)
         return self._infer_fncall_vera_type_simple(call)

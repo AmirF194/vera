@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import wasmtime
 
@@ -31,9 +33,12 @@ def _compile(source: str) -> CompileResult:
         f.flush()
         path = f.name
 
-    tree = parse_file(path)
-    ast = transform(tree)
-    return compile(ast, source=source, file=path)
+    try:
+        tree = parse_file(path)
+        ast = transform(tree)
+        return compile(ast, source=source, file=path)
+    finally:
+        Path(path).unlink(missing_ok=True)
 
 
 def _compile_ok(source: str) -> CompileResult:
@@ -3369,8 +3374,11 @@ def _transform_program(source: str):
         f.write(source)
         f.flush()
         path = f.name
-    tree = parse_file(path)
-    return transform(tree)
+    try:
+        tree = parse_file(path)
+        return transform(tree)
+    finally:
+        Path(path).unlink(missing_ok=True)
 
 
 def _mono_fn(source: str, fn_name: str, concrete: tuple[str, ...]):
