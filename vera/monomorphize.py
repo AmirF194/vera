@@ -32,6 +32,7 @@ from dataclasses import dataclass, field, fields, replace
 from typing import Any
 
 from vera import ast
+from vera.slots import slot_ref_name, type_expr_slot_name
 
 
 def substitute_type_vars(
@@ -351,72 +352,272 @@ def unmangle_type_name(mangled: str) -> str:
 _FREE_TYPE_PARAM = "?"
 
 
-# Builtin function name → Vera return type name.
-# Used by Monomorphizer._infer_fncall_vera_type_simple() to resolve opaque
-# handle types that all share the same WASM representation (i32) but are
-# distinct Vera types.
+# Builtin function name → SIMPLE Vera return-type name (type args dropped).
+# Consulted by Monomorphizer._infer_fncall_vera_type_simple() (instantiation
+# discovery) AND by the WASM call-rewrite chain
+# (InferenceMixin._infer_fncall_vera_type, vera/wasm/inference.py) — the two
+# consultors that must agree on clone names, or discovery emits one mangled
+# suffix while the call site references another (dangling E602, #769 gap 1b).
+# REGISTRY-COMPLETE (#769): covers every registered builtin whose return has
+# a concrete outer constructor (TypeEnv._register_builtins is the key oracle;
+# tests/test_codegen_monomorphize.py::TestBuiltinReturnTables769 enforces it).
+# Values preserve the rewrite chain's historical names verbatim — e.g.
+# string_length is "Int" (the WAT-collapsed name), string_char_code is
+# "Nat" — because clone-NAME agreement is the invariant, not name precision;
+# changing a value is a clone-granularity decision, not a completion.
+# Bare-TypeVar returns (option_unwrap_or, await, …) must stay OUT: a fixed
+# entry would bind phantom vars.  Ability-op names (show/hash) and apply_fn
+# are not registry builtins and keep their logic arms in the chain.
 _BUILTIN_VERA_RETURN_TYPES: dict[str, str] = {
-    # Decimal builtins
-    "decimal_from_int": "Decimal",
-    "decimal_from_float": "Decimal",
+    # array
+    "array_all": "Bool",
+    "array_any": "Bool",
+    "array_append": "Array",
+    "array_concat": "Array",
+    "array_filter": "Array",
+    "array_find": "Option",
+    "array_flatten": "Array",
+    "array_length": "Int",
+    "array_map": "Array",
+    "array_mapi": "Array",
+    "array_range": "Array",
+    "array_reverse": "Array",
+    "array_slice": "Array",
+    "array_sort_by": "Array",
+    # async
+    "async": "Future",
+    # base64
+    "base64_decode": "Result",
+    "base64_encode": "String",
+    # bool_to
+    "bool_to_string": "String",
+    # byte_to
+    "byte_to_int": "Int",
+    "byte_to_string": "String",
+    # char
+    "char_to_lower": "String",
+    "char_to_upper": "String",
+    # decimal
+    "decimal_abs": "Decimal",
     "decimal_add": "Decimal",
-    "decimal_sub": "Decimal",
+    "decimal_compare": "Ordering",
+    "decimal_div": "Option",
+    "decimal_eq": "Bool",
+    "decimal_from_float": "Decimal",
+    "decimal_from_int": "Decimal",
+    "decimal_from_string": "Option",
     "decimal_mul": "Decimal",
     "decimal_neg": "Decimal",
     "decimal_round": "Decimal",
-    "decimal_abs": "Decimal",
-    "decimal_from_string": "Option",
-    "decimal_div": "Option",
-    "decimal_compare": "Ordering",
-    "decimal_eq": "Bool",
+    "decimal_sub": "Decimal",
     "decimal_to_float": "Float64",
     "decimal_to_string": "String",
-    # Map builtins
-    "map_new": "Map",
-    "map_insert": "Map",
-    "map_remove": "Map",
-    "map_get": "Option",
-    "map_contains": "Bool",
-    "map_size": "Int",
-    "map_keys": "Array",
-    "map_values": "Array",
-    # Set builtins
-    "set_new": "Set",
-    "set_add": "Set",
-    "set_remove": "Set",
-    "set_contains": "Bool",
-    "set_size": "Int",
-    "set_to_array": "Array",
-    # Json builtins
-    "json_parse": "Result",
-    "json_stringify": "String",
-    "json_get": "Option",
-    "json_array_get": "Option",
-    "json_array_length": "Int",
-    "json_keys": "Array",
-    "json_has_field": "Bool",
-    "json_type": "String",
-    # Html builtins
+    # float
+    "float_clamp": "Float64",
+    "float_is_infinite": "Bool",
+    "float_is_nan": "Bool",
+    "float_to_int": "Int",
+    "float_to_string": "String",
+    # html
+    "html_attr": "Option",
     "html_parse": "Result",
-    "html_to_string": "String",
     "html_query": "Array",
     "html_text": "String",
-    "html_attr": "Option",
+    "html_to_string": "String",
+    # int_to
+    "int_to_byte": "Option",
+    "int_to_float": "Float64",
+    "int_to_nat": "Option",
+    "int_to_string": "String",
+    # is_
+    "is_alpha": "Bool",
+    "is_alphanumeric": "Bool",
+    "is_digit": "Bool",
+    "is_lower": "Bool",
+    "is_upper": "Bool",
+    "is_whitespace": "Bool",
+    # json
+    "json_array_get": "Option",
+    "json_array_length": "Int",
+    "json_as_array": "Option",
+    "json_as_bool": "Option",
+    "json_as_int": "Option",
+    "json_as_number": "Option",
+    "json_as_object": "Option",
+    "json_as_string": "Option",
+    "json_get": "Option",
+    "json_get_array": "Option",
+    "json_get_bool": "Option",
+    "json_get_int": "Option",
+    "json_get_number": "Option",
+    "json_get_string": "Option",
+    "json_has_field": "Bool",
+    "json_keys": "Array",
+    "json_parse": "Result",
+    "json_stringify": "String",
+    "json_type": "String",
+    # map_
+    "map_contains": "Bool",
+    "map_get": "Option",
+    "map_insert": "Map",
+    "map_keys": "Array",
+    "map_new": "Map",
+    "map_remove": "Map",
+    "map_size": "Int",
+    "map_values": "Array",
+    # math/misc
+    "abs": "Nat",
+    "acos": "Float64",
+    "asin": "Float64",
+    "atan": "Float64",
+    "atan2": "Float64",
+    "ceil": "Int",
+    "clamp": "Int",
+    "cos": "Float64",
+    "e": "Float64",
+    "floor": "Int",
+    "infinity": "Float64",
+    "log": "Float64",
+    "log10": "Float64",
+    "log2": "Float64",
+    "max": "Int",
+    "min": "Int",
+    "nan": "Float64",
+    "pi": "Float64",
+    "pow": "Float64",
+    "round": "Int",
+    "sign": "Int",
+    "sin": "Float64",
+    "sqrt": "Float64",
+    "tan": "Float64",
+    # md_
+    "md_extract_code_blocks": "Array",
+    "md_has_code_block": "Bool",
+    "md_has_heading": "Bool",
+    "md_parse": "Result",
+    "md_render": "String",
+    # nat_to
+    "nat_to_int": "Int",
+    "nat_to_string": "String",
+    # option
+    "option_and_then": "Option",
+    "option_map": "Option",
+    # parse
+    "parse_bool": "Result",
+    "parse_float64": "Result",
+    "parse_int": "Result",
+    "parse_nat": "Result",
+    # regex
+    "regex_find": "Result",
+    "regex_find_all": "Result",
+    "regex_match": "Result",
+    "regex_replace": "Result",
+    # result
+    "result_map": "Result",
+    # set_
+    "set_add": "Set",
+    "set_contains": "Bool",
+    "set_new": "Set",
+    "set_remove": "Set",
+    "set_size": "Int",
+    "set_to_array": "Array",
+    # string
+    "string_char_code": "Nat",
+    "string_chars": "Array",
+    "string_concat": "String",
+    "string_contains": "Bool",
+    "string_ends_with": "Bool",
+    "string_from_char_code": "String",
+    "string_index_of": "Option",
+    "string_join": "String",
+    "string_length": "Int",
+    "string_lines": "Array",
+    "string_lower": "String",
+    "string_pad_end": "String",
+    "string_pad_start": "String",
+    "string_repeat": "String",
+    "string_replace": "String",
+    "string_reverse": "String",
+    "string_slice": "String",
+    "string_split": "Array",
+    "string_starts_with": "Bool",
+    "string_strip": "String",
+    "string_trim_end": "String",
+    "string_trim_start": "String",
+    "string_upper": "String",
+    "string_words": "Array",
+    # to_string
+    "to_string": "String",
+    # url
+    "url_decode": "Result",
+    "url_encode": "String",
+    "url_join": "String",
+    "url_parse": "Result",
 }
 
-# Builtins returning parameterized types — maps function name to
-# (outer_type, (inner_type,)) for _get_arg_type_info().
+# Builtins returning FULLY-CONCRETE parameterized types — maps function name
+# to (outer_type, (inner_type, ...)) for _get_arg_type_info() and its WASM
+# twin _get_arg_type_info_wasm (vera/wasm/inference.py imports this dict, so
+# additions fix discovery and call-rewrite atomically).  REGISTRY-COMPLETE
+# (#769): exactly the registered builtins whose return is an AdtType with
+# type args and no embedded TypeVar, values as the registry's pretty names
+# (nested inners like "Array<Json>" parse via _parse_type_name); enforced by
+# tests/test_codegen_monomorphize.py::TestBuiltinReturnTables769.  Builtins
+# whose return keeps a type var (array_map, map_get, …) must stay OUT —
+# they are handled by the generic-return / arg-forwarding resolution.
 _BUILTIN_PARAMETERIZED_RETURNS: dict[str, tuple[str, tuple[str, ...]]] = {
-    "decimal_from_string": ("Option", ("Decimal",)),
+    # array
+    "array_range": ("Array", ("Int",)),
+    # base64
+    "base64_decode": ("Result", ("String", "String")),
+    # decimal
     "decimal_div": ("Option", ("Decimal",)),
-    "json_parse": ("Result", ("Json", "String")),
-    "json_get": ("Option", ("Json",)),
-    "json_array_get": ("Option", ("Json",)),
-    "json_keys": ("Array", ("String",)),
-    # Html builtins
+    "decimal_from_string": ("Option", ("Decimal",)),
+    # html
+    "html_attr": ("Option", ("String",)),
     "html_parse": ("Result", ("HtmlNode", "String")),
     "html_query": ("Array", ("HtmlNode",)),
-    "html_attr": ("Option", ("String",)),
+    # int_to
+    "int_to_byte": ("Option", ("Byte",)),
+    "int_to_nat": ("Option", ("Nat",)),
+    # json
+    "json_array_get": ("Option", ("Json",)),
+    "json_as_array": ("Option", ("Array<Json>",)),
+    "json_as_bool": ("Option", ("Bool",)),
+    "json_as_int": ("Option", ("Int",)),
+    "json_as_number": ("Option", ("Float64",)),
+    "json_as_object": ("Option", ("Map<String, Json>",)),
+    "json_as_string": ("Option", ("String",)),
+    "json_get": ("Option", ("Json",)),
+    "json_get_array": ("Option", ("Array<Json>",)),
+    "json_get_bool": ("Option", ("Bool",)),
+    "json_get_int": ("Option", ("Int",)),
+    "json_get_number": ("Option", ("Float64",)),
+    "json_get_string": ("Option", ("String",)),
+    "json_keys": ("Array", ("String",)),
+    "json_parse": ("Result", ("Json", "String")),
+    # md_
+    "md_extract_code_blocks": ("Array", ("String",)),
+    "md_parse": ("Result", ("MdBlock", "String")),
+    # parse
+    "parse_bool": ("Result", ("Bool", "String")),
+    "parse_float64": ("Result", ("Float64", "String")),
+    "parse_int": ("Result", ("Int", "String")),
+    "parse_nat": ("Result", ("Nat", "String")),
+    # regex
+    "regex_find": ("Result", ("Option<String>", "String")),
+    "regex_find_all": ("Result", ("Array<String>", "String")),
+    "regex_match": ("Result", ("Bool", "String")),
+    "regex_replace": ("Result", ("String", "String")),
+    # string
+    "string_chars": ("Array", ("String",)),
+    "string_index_of": ("Option", ("Nat",)),
+    "string_lines": ("Array", ("String",)),
+    "string_split": ("Array", ("String",)),
+    "string_words": ("Array", ("String",)),
+    # url
+    "url_decode": ("Result", ("String", "String")),
+    "url_parse": ("Result", ("UrlParts", "String")),
 }
 
 
@@ -788,10 +989,9 @@ class Monomorphizer:
                 for param_ta, concrete_name in zip(
                     param_te.type_args, alias_concrete,
                 ):
-                    if (isinstance(param_ta, ast.NamedType)
-                            and param_ta.name in forall_vars
-                            and param_ta.name not in mapping):
-                        mapping[param_ta.name] = concrete_name
+                    self._unify_type_arg_pair(
+                        param_ta, concrete_name, forall_vars, mapping,
+                    )
                 return
 
             arg_info = self._get_arg_type_info(arg, ctor_to_adt)
@@ -801,11 +1001,50 @@ class Monomorphizer:
                 ):
                     # arg_ta_name is None for unknown type-param positions
                     # (e.g. T in Err(e) where only E can be inferred from Err).
-                    if (arg_ta_name is not None
-                            and isinstance(param_ta, ast.NamedType)
-                            and param_ta.name in forall_vars
-                            and param_ta.name not in mapping):
-                        mapping[param_ta.name] = arg_ta_name
+                    if arg_ta_name is not None:
+                        self._unify_type_arg_pair(
+                            param_ta, arg_ta_name, forall_vars, mapping,
+                        )
+
+    @staticmethod
+    def _unify_type_arg_pair(
+        param_ta: ast.TypeExpr,
+        arg_name: str,
+        forall_vars: tuple[str, ...],
+        mapping: dict[str, str],
+    ) -> None:
+        """Recursively unify ONE parameter type-argument against a concrete
+        type-argument NAME, binding forall vars at any nesting depth (#769
+        gap 2): ``Option<T>`` vs ``"Option<Int>"`` binds ``T = "Int"``, and so
+        does ``Array<Option<T>>`` vs ``"Array<Option<Int>>"`` — the pre-#769
+        zip bound only when the IMMEDIATE type argument was the variable
+        itself, so any deeper var fell to the ``Bool`` phantom default.
+
+        First binding wins (``mapping`` is never overwritten), matching
+        ``_unify_param_arg``'s outer behavior.  Static and self-contained so
+        the WASM call-rewrite twin (``_unify_param_arg_wasm``,
+        vera/wasm/calls.py) calls THIS implementation — the two clone-name
+        consultors bind identically by construction.
+        """
+        if isinstance(param_ta, ast.RefinementType):
+            param_ta = param_ta.base_type
+        if not isinstance(param_ta, ast.NamedType):
+            return
+        if param_ta.name in forall_vars:
+            if param_ta.name not in mapping:
+                mapping[param_ta.name] = arg_name
+            return
+        if not param_ta.type_args:
+            return
+        parsed = Monomorphizer._parse_type_name(arg_name)
+        if parsed.name != param_ta.name or not parsed.type_args:
+            return
+        for p_sub, a_sub in zip(param_ta.type_args, parsed.type_args):
+            if isinstance(a_sub, ast.NamedType):
+                Monomorphizer._unify_type_arg_pair(
+                    p_sub, Monomorphizer._format_type_name(a_sub),
+                    forall_vars, mapping,
+                )
 
     def _infer_vera_type_name(
         self,
@@ -876,6 +1115,30 @@ class Monomorphizer:
         For generic calls, infers type variable bindings from arguments,
         then substitutes into the return TypeExpr.
         """
+        # #769 logic-arm parity with the WASM call-rewrite chain
+        # (InferenceMixin._infer_fncall_vera_type, vera/wasm/inference.py):
+        # apply_fn / async / await need call-shape context no fixed table can
+        # hold, so each side carries the same arm — a name inferred here must
+        # equal the rewrite's, or the discovered clone dangles and the caller
+        # is skipped (E602).  These names cannot be user-redefined (E151), so
+        # the arms fire only for the real builtins.
+        if call.name == "apply_fn" and call.args:
+            ret_te: ast.TypeExpr | None = self._closure_arg_return_te(
+                call.args[0])
+            if isinstance(ret_te, ast.RefinementType):
+                ret_te = ret_te.base_type
+            if isinstance(ret_te, ast.NamedType):
+                return self._format_type_name(ret_te)
+        if call.name == "async" and call.args:
+            inner = self._infer_vera_type_name(
+                call.args[0], ctor_to_adt, generic_decls)
+            return f"Future<{inner}>" if inner else "Future"
+        if call.name == "await" and call.args:
+            inner = self._infer_vera_type_name(
+                call.args[0], ctor_to_adt, generic_decls)
+            if inner and inner.startswith("Future<") and inner.endswith(">"):
+                return inner[7:-1]
+            return inner
         if call.name in generic_decls:
             decl = generic_decls[call.name]
             type_args = self._infer_type_args_from_call(
@@ -887,6 +1150,27 @@ class Monomorphizer:
                 if isinstance(ret_te, ast.NamedType):
                     return mapping.get(ret_te.name, ret_te.name)
         return self._infer_fncall_vera_type_simple(call)
+
+    def _closure_arg_return_te(self, arg: ast.Expr) -> ast.TypeExpr | None:
+        """Declared return TypeExpr of a callable argument (#769).
+
+        The discovery-side mirror of the rewrite chain's
+        ``_closure_arg_return_type`` dispatch: an inline ``AnonFn`` yields its
+        declared return type; a ``SlotRef`` typed as an ``FnType`` alias
+        resolves TRANSITIVELY through the shared ``resolve_fn_type_alias``
+        (#867) to the terminal ``FnType``'s return type.
+        """
+        if isinstance(arg, ast.AnonFn):
+            return arg.return_type
+        if isinstance(arg, ast.SlotRef):
+            fn_te = resolve_fn_type_alias(
+                ast.NamedType(name=arg.type_name, type_args=arg.type_args),
+                self.ctx.type_aliases,
+                self.ctx.type_alias_params,
+            )
+            if fn_te is not None:
+                return fn_te.return_type
+        return None
 
     def _infer_fncall_vera_type_simple(self, call: ast.FnCall) -> str | None:
         """Infer Vera return type from registered function signatures.
@@ -1008,9 +1292,16 @@ class Monomorphizer:
                         return None
                 return (adt_name, tuple(arg_types))
         if isinstance(expr, ast.ArrayLit):
-            # Infer element type from first element
+            # Infer the element type from the first element — FULL-DEPTH when
+            # the element itself carries type-arg info (a nested literal or a
+            # constructor call), so ``Array<Array<E>>`` binds ``E`` from
+            # ``[[1, 2]]`` and ``Array<Option<T>>`` binds ``T`` from
+            # ``[Some(1)]`` via the recursive unifier (#769 gap 2).  The WASM
+            # twin's ArrayLit branch (vera/wasm/inference.py) mirrors this
+            # exactly — element-name granularity is part of the clone-name
+            # agreement contract (#772), so the two sides must move together.
             if expr.elements:
-                elem_type = self._infer_vera_type_name(
+                elem_type = self._array_elem_type_name(
                     expr.elements[0], ctor_to_adt,
                 )
                 if elem_type:
@@ -1021,9 +1312,6 @@ class Monomorphizer:
             param_ret = _BUILTIN_PARAMETERIZED_RETURNS.get(expr.name)
             if param_ret is not None:
                 return param_ret
-            # Infer from known return types (e.g. array_range → Array<Int>)
-            if expr.name == "array_range":
-                return ("Array", ("Int",))
             if expr.name in ("array_concat", "array_append",
                              "array_slice", "array_filter"):
                 if expr.args:
@@ -1053,6 +1341,24 @@ class Monomorphizer:
                         ta_names.append(None)
                 return (ret_te.name, tuple(ta_names))
         return None
+
+    def _array_elem_type_name(
+        self, elem: ast.Expr, ctor_to_adt: dict[str, str],
+    ) -> str | None:
+        """FULL-DEPTH type name of an array-literal element (#769 gap 2).
+
+        Prefers the parameterized recovery (``Some(1)`` → ``"Option<Int>"``,
+        ``[1, 2]`` → ``"Array<Int>"``) when every type-arg position is known;
+        falls back to the simple name (``"Int"``, ``"String"``) otherwise —
+        the pre-#769 behavior, so under-determined elements degrade rather
+        than mis-bind.
+        """
+        info = self._get_arg_type_info(elem, ctor_to_adt)
+        if info is not None:
+            outer, args = info
+            if args and all(a is not None for a in args):
+                return f"{outer}<{', '.join(a for a in args if a is not None)}>"
+        return self._infer_vera_type_name(elem, ctor_to_adt)
 
     def full_arg_type_name(
         self, expr: ast.Expr, ctor_to_adt: dict[str, str],
@@ -1327,10 +1633,10 @@ class Monomorphizer:
         mapping = dict(zip(decl.forall_vars, concrete_types))
         mangled = self._mangle_fn_name(decl.name, concrete_types)
 
-        # Build slot reindex map for De Bruijn index adjustment.
-        # Compute each parameter's slot name before and after substitution,
-        # then build a mapping from (old_slot_name, old_index) to new_index.
-        reindex = self._build_reindex_map(decl.params, mapping)
+        # Scope-aware De Bruijn reindexing (#769 gap 3): resolve every
+        # SlotRef against the full binding scope at its reference site and
+        # recompute its index in the collapsed (post-substitution) namespace.
+        reindex = self._compute_scoped_reindex(decl, mapping)
 
         # Substitute type variables in the entire FnDecl
         substituted = self._substitute_in_ast(decl, mapping, reindex)
@@ -1342,96 +1648,190 @@ class Monomorphizer:
             forall_vars=None, forall_constraints=None,
         )
 
-    @staticmethod
-    def _slot_name_for_param(param_te: ast.TypeExpr,
-                             mapping: dict[str, str] | None = None,
-                             ) -> str:
-        """Compute the slot name for a parameter TypeExpr.
+    def _substituted_slot_name(
+        self, te: ast.TypeExpr, mapping: dict[str, str],
+    ) -> str | None:
+        """Full-depth canonical slot name of ``te`` AFTER type-variable
+        substitution — the name this binder carries in the clone."""
+        return type_expr_slot_name(self._substitute_type_expr(te, mapping))
 
-        Optionally substitutes type variables via mapping first.
-        """
-        if isinstance(param_te, ast.RefinementType):
-            param_te = param_te.base_type
-        if not isinstance(param_te, ast.NamedType):
-            return ""
-        name = param_te.name
-        if mapping:
-            name = mapping.get(name, name)
-        if not param_te.type_args:
-            return name
-        arg_names = []
-        for ta in param_te.type_args:
-            if isinstance(ta, ast.NamedType):
-                an = ta.name
-                if mapping:
-                    an = mapping.get(an, an)
-                arg_names.append(an)
-            else:
-                return name
-        return f"{name}<{', '.join(arg_names)}>"
-
-    def _build_reindex_map(
+    def _compute_scoped_reindex(
         self,
-        params: tuple[ast.TypeExpr, ...],
+        decl: ast.FnDecl,
         mapping: dict[str, str],
-    ) -> dict[tuple[str, int], int]:
-        """Build De Bruijn reindex map for monomorphization.
+    ) -> dict[int, int]:
+        """Scope-aware De Bruijn reindex for monomorphization (#769 gap 3).
 
-        When type variables A and B both map to Int, parameters with
-        slot name Array<A> and Array<B> both become Array<Int>.
-        Their De Bruijn indices must be adjusted accordingly.
+        Returns ``{id(slot_ref_node): new_index}`` for every ``SlotRef`` in
+        ``decl`` whose index changes when type-variable substitution merges
+        formerly-distinct slot namespaces (``A -> Int, B -> Int``, or a
+        type-var namespace merging with an already-concrete one — a body
+        ``let @Int`` interposes for ``@A.0`` just the same).
 
-        Returns: {(old_slot_name, old_index): new_index}
+        The pre-#769 implementation built a static ``(name, index) -> index``
+        map from the PARAMETERS only and applied it body-wide.  That is
+        unsound twice over: a ``let`` / match-binder / closure-param of a
+        collapsing type interposes an extra binding for every LATER reference
+        (one static entry cannot be right both before and after it), and the
+        one-level slot-name truncation (``Array<Option<A>>`` ->
+        ``"Array<Option>"``) hid genuine collapses entirely.
+
+        This walker instead carries a binding stack of
+        ``(old_name, new_name)`` pairs, pushed exactly where the checker
+        binds slots — and therefore where the verifier's ``SlotEnv`` and
+        codegen's ``WasmSlotEnv`` rebuild them when they consume the clone:
+
+        * function parameters (in declaration order);
+        * ``let`` / ``let``-destructuring bindings — pushed AFTER their RHS
+          is walked (the RHS sees the pre-binding scope);
+        * match-arm pattern binders, scoped to their arm, in left-to-right
+          depth-first pattern order;
+        * closure (``AnonFn``) parameters, pushed on the SHARED stack —
+          closure bodies see enclosing bindings (spec ch. 5);
+        * handler-clause operation parameters then handler state (clause
+          scope, including the ``with`` state-update expression), and the
+          handler state alone for the handled body — mirroring
+          ``checker/control.py``;
+        * block scopes push/pop, so an arm/branch ``let`` never leaks.
+
+        Contracts (``requires``/``ensures``) resolve against a PARAMS-ONLY
+        stack — they are boundary conditions, checked by the checker before
+        the body binds anything, and both consumers rebuild exactly that
+        scope for them.  ``where``-helpers are independent param-rooted
+        scopes (their bodies cannot reference outer slots in any compiling
+        program).  Refinement predicates are isolated single-binder scopes:
+        the walker never descends into ``TypeExpr`` fields, so their indices
+        are untouched (an outer collapse cannot shift a one-binder scope).
+
+        Names are FULL-DEPTH canonical slot names (``vera/slots.py``, the
+        shared namer both consumers resolve against).  A reference that does
+        not resolve against the walked scope keeps its index — the consumers
+        surface dangling refs (hard E699 in codegen) exactly as they would
+        have pre-substitution.
         """
-        # Compute old and new slot names for each parameter
-        old_names = [self._slot_name_for_param(p) for p in params]
-        new_names = [self._slot_name_for_param(p, mapping) for p in params]
+        out: dict[int, int] = {}
+        stack: list[tuple[str | None, str | None]] = []
 
-        # Check if any reindexing is needed
-        if old_names == new_names:
-            return {}
+        def push(te: ast.TypeExpr) -> None:
+            stack.append((
+                type_expr_slot_name(te),
+                self._substituted_slot_name(te, mapping),
+            ))
 
-        # For each old slot name, compute the De Bruijn index mapping.
-        # De Bruijn: index 0 = most recent (last parameter) with that name.
-        reindex: dict[tuple[str, int], int] = {}
+        def resolve(ref: ast.SlotRef) -> None:
+            name = slot_ref_name(ref)
+            if name is None:
+                return
+            seen = 0
+            for pos in range(len(stack) - 1, -1, -1):
+                if stack[pos][0] != name:
+                    continue
+                if seen == ref.index:
+                    binder_new = stack[pos][1]
+                    if binder_new is None:
+                        return
+                    new_idx = sum(
+                        1 for later in stack[pos + 1:]
+                        if later[1] == binder_new
+                    )
+                    if new_idx != ref.index:
+                        out[id(ref)] = new_idx
+                    return
+                seen += 1
 
-        # Group parameters by old slot name (in order)
-        old_groups: dict[str, list[int]] = {}
-        for i, name in enumerate(old_names):
-            if name:
-                old_groups.setdefault(name, []).append(i)
+        def push_pattern(pat: ast.Pattern) -> None:
+            if isinstance(pat, ast.BindingPattern):
+                push(pat.type_expr)
+            elif isinstance(pat, ast.ConstructorPattern):
+                for sub in pat.sub_patterns:
+                    push_pattern(sub)
+            # Wildcard / nullary / literal patterns bind nothing.
 
-        # Group parameters by new slot name (in order)
-        new_groups: dict[str, list[int]] = {}
-        for i, name in enumerate(new_names):
-            if name:
-                new_groups.setdefault(name, []).append(i)
+        def walk_stmt(stmt: ast.Stmt) -> None:
+            if isinstance(stmt, ast.LetStmt):
+                walk(stmt.value)
+                push(stmt.type_expr)
+                return
+            if isinstance(stmt, ast.LetDestruct):
+                walk(stmt.value)
+                for te in stmt.type_bindings:
+                    push(te)
+                return
+            walk(stmt)
 
-        for old_slot_name, param_indices in old_groups.items():
-            # New slot name for these parameters
-            new_slot_name = new_names[param_indices[0]]
-            if old_slot_name == new_slot_name:
-                # No name change, no reindexing needed
-                continue
+        def walk(v: object) -> None:
+            if isinstance(v, ast.SlotRef):
+                resolve(v)
+                return  # type_args carry no slot references
+            if isinstance(v, ast.TypeExpr):
+                return  # refinement predicates: isolated scopes, untouched
+            if isinstance(v, ast.Block):
+                mark = len(stack)
+                for stmt in v.statements:
+                    walk_stmt(stmt)
+                walk(v.expr)
+                del stack[mark:]
+                return
+            if isinstance(v, ast.MatchExpr):
+                walk(v.scrutinee)
+                for arm in v.arms:
+                    mark = len(stack)
+                    push_pattern(arm.pattern)
+                    walk(arm.body)
+                    del stack[mark:]
+                return
+            if isinstance(v, ast.AnonFn):
+                mark = len(stack)
+                for param_te in v.params:
+                    push(param_te)
+                walk(v.body)
+                del stack[mark:]
+                return
+            if isinstance(v, ast.HandleExpr):
+                if v.state is not None:
+                    walk(v.state.init_expr)
+                for clause in v.clauses:
+                    mark = len(stack)
+                    for param_te in clause.params:
+                        push(param_te)
+                    if v.state is not None:
+                        push(v.state.type_expr)
+                    walk(clause.body)
+                    if clause.state_update is not None:
+                        walk(clause.state_update[1])
+                    del stack[mark:]
+                mark = len(stack)
+                if v.state is not None:
+                    push(v.state.type_expr)
+                walk(v.body)
+                del stack[mark:]
+                return
+            if isinstance(v, ast.Node):
+                for fld in fields(v):
+                    if fld.name == "span":
+                        continue
+                    walk(getattr(v, fld.name))
+                return
+            if isinstance(v, tuple):
+                for item in v:
+                    walk(item)
 
-            # For each parameter in the old group, find its new De Bruijn index
-            new_group = new_groups.get(new_slot_name, [])
-            for old_db_index, param_idx in enumerate(reversed(param_indices)):
-                # old_db_index: De Bruijn index in the old namespace
-                # param_idx: position in the parameter list
-                # Find param_idx's position in the new group
-                if param_idx in new_group:
-                    new_pos_in_group = new_group.index(param_idx)
-                    # De Bruijn: reversed — last in group = index 0
-                    new_db_index = len(new_group) - 1 - new_pos_in_group
-                    if old_db_index != new_db_index:
-                        reindex[(old_slot_name, old_db_index)] = new_db_index
+        def walk_fn_scope(fn_decl: ast.FnDecl) -> None:
+            del stack[:]
+            for param_te in fn_decl.params:
+                push(param_te)
+            for contract in fn_decl.contracts:
+                walk(contract)
+            walk(fn_decl.body)
 
-        return reindex
+        walk_fn_scope(decl)
+        for where_fn in decl.where_fns or ():
+            walk_fn_scope(where_fn)
+        return out
 
     def _substitute_in_ast(
         self, node: ast.Node, mapping: dict[str, str],
-        reindex: dict[tuple[str, int], int] | None = None,
+        reindex: dict[int, int] | None = None,
     ) -> ast.Node:
         """Recursively substitute type variable names in an AST subtree.
 
@@ -1462,19 +1862,10 @@ class Monomorphizer:
             return node
 
         # Special case: SlotRef — substitute type_name and type_args,
-        # and adjust De Bruijn index if namespace collision occurred.
+        # and adjust the De Bruijn index if namespace collapse occurred
+        # (scope-aware, keyed by node identity — see
+        # ``_compute_scoped_reindex``).
         if isinstance(node, ast.SlotRef):
-            # Compute old slot name for reindexing lookup
-            old_slot_name = node.type_name
-            if node.type_args:
-                ta_names = []
-                for ta in node.type_args:
-                    if isinstance(ta, ast.NamedType):
-                        ta_names.append(ta.name)
-                old_slot_name = (f"{node.type_name}"
-                                 f"<{', '.join(ta_names)}>"
-                                 if ta_names else node.type_name)
-
             mapped_name = mapping.get(node.type_name)
             if mapped_name is not None and "<" in mapped_name:
                 # Parameterized type — parse into base name + type_args
@@ -1493,9 +1884,7 @@ class Monomorphizer:
             # Adjust De Bruijn index if needed
             new_index = node.index
             if reindex:
-                key = (old_slot_name, node.index)
-                if key in reindex:
-                    new_index = reindex[key]
+                new_index = reindex.get(id(node), node.index)
 
             if (new_type_name != node.type_name
                     or new_slot_args is not node.type_args
@@ -1552,7 +1941,7 @@ class Monomorphizer:
 
     def _substitute_value(
         self, val: Any, mapping: dict[str, str],
-        reindex: dict[tuple[str, int], int] | None = None,
+        reindex: dict[int, int] | None = None,
     ) -> Any:
         """Recursively substitute type variables in a field value."""
         if isinstance(val, ast.Node):

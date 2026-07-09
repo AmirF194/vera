@@ -111,6 +111,81 @@ public fn use_transitive(@Int -> @Option<Int>)
   wrap_twice(@Int.0)
 }
 """,
+    # #769 gap 1: a PARAMETERIZED-return builtin (string_chars → Array<String>)
+    # in generic-arg position — both discoveries must bind T=String from the
+    # shared _BUILTIN_PARAMETERIZED_RETURNS table, never the Bool phantom.
+    "builtin_param_return_769": """
+private forall<T> fn first769(@Array<T> -> @T)
+  requires(array_length(@Array<T>.0) > 0)
+  ensures(true)
+  effects(pure)
+{
+  @Array<T>.0[0]
+}
+
+public fn use_first769(@Unit -> @String)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  first769(string_chars("abc"))
+}
+""",
+    # #769 gap 2: nested type-argument unification — E binds at depth 2 from
+    # Array<Array<Int>> on both sides via the shared _unify_type_arg_pair.
+    "nested_unify_769": """
+private forall<E> fn head_head769(@Array<Array<E>> -> @E)
+  requires(
+    array_length(@Array<Array<E>>.0) > 0
+      && array_length(@Array<Array<E>>.0[0]) > 0
+  )
+  ensures(true)
+  effects(pure)
+{
+  @Array<Array<E>>.0[0][0]
+}
+
+public fn use_head_head769(@Array<Array<Int>> -> @Int)
+  requires(
+    array_length(@Array<Array<Int>>.0) > 0
+      && array_length(@Array<Array<Int>>.0[0]) > 0
+  )
+  ensures(true)
+  effects(pure)
+{
+  head_head769(@Array<Array<Int>>.0)
+}
+""",
+    # #769 logic-arm parity: apply_fn / async / await returns binding a bare
+    # @T — the verifier's discovery must reach the same instantiations
+    # (ident769$Int, ident769$Future<Int>) codegen emits.
+    "logic_arm_returns_769": """
+private forall<T> fn ident769(@T -> @T)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  @T.0
+}
+
+private fn work769(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  @Int.0 + 1
+}
+
+public fn use_logic_arms769(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<Async>)
+{
+  let @Int = ident769(apply_fn(fn(@Int -> @Int) effects(pure) { @Int.0 * 2 }, 21));
+  let @Int = await(ident769(async(work769(@Int.0))));
+  ident769(await(async(work769(@Int.1))))
+}
+""",
     # #898: cross-argument type-argument merge — the verifier's discovery
     # (`_collect_instantiations`, which shares `_infer_type_args_from_args` with
     # codegen) must merge the two sparse constructor arguments into the same
@@ -347,6 +422,57 @@ public fn main(@Unit -> @Int)
     # gate bailed and fell through to the i32→`Bool` collapse → `pick_last$Bool`,
     # never emitted.  (`_call_rewrite_desync` on the repro shows
     # `emitted=['pick_last$Option'], dangling=['pick_last$Bool']`.)
+    # #769 gap 1b: builtin SIMPLE-name returns in bare `@T` position — the
+    # completed _BUILTIN_VERA_RETURN_TYPES dict is consulted by BOTH sides;
+    # pre-fix discovery phantom-defaulted (ident$Bool) while the rewrite
+    # chain mangled ident$String / ident$Array — dangling, main dropped.
+    "builtin_simple_return_769": """
+private forall<T> fn ident769(@T -> @T)
+  requires(true) ensures(true) effects(pure)
+{ @T.0 }
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  let @String = ident769(int_to_string(42));
+  array_length(ident769(string_chars(@String.0)))
+}
+""",
+    # #769 generic-return parity: a generic call's i32-handle / declared-Nat
+    # return in generic-arg position — the rewrite's generic branch now
+    # substitutes the DECLARED return (pass769$Option / natret769$Nat) exactly
+    # as discovery does, instead of WAT-collapsing to Bool / Int.
+    "generic_return_into_bare_typevar_769": """
+private forall<T> fn ident769(@T, @T -> @T)
+  requires(true) ensures(true) effects(pure)
+{ @T.0 }
+
+private forall<U> fn pass769(@U -> @U)
+  requires(true) ensures(true) effects(pure)
+{ @U.0 }
+
+private forall<U> fn natret769(@U -> @Nat)
+  requires(true) ensures(true) effects(pure)
+{ 7 }
+
+public fn main(@Unit -> @Nat)
+  requires(true) ensures(true) effects(pure)
+{
+  let @Option<Int> = ident769(pass769(Some(42)), pass769(Some(1)));
+  natret769(ident769(natret769(1), natret769(2)))
+}
+""",
+    # #769 logic-arm parity: apply_fn closure return in bare `@T` position —
+    # discovery's new _closure_arg_return_te arm mirrors the rewrite chain.
+    "apply_fn_return_769": """
+private forall<T> fn ident769(@T -> @T)
+  requires(true) ensures(true) effects(pure)
+{ @T.0 }
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ ident769(apply_fn(fn(@Int -> @Int) effects(pure) { @Int.0 * 2 }, 21)) }
+""",
     "param_return_into_bare_typevar": """
 private fn mk(@Int -> @Option<Option<Decimal>>)
   requires(true) ensures(true) effects(pure)

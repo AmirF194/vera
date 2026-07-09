@@ -1,0 +1,158 @@
+-- Conformance: De Bruijn slot indices under monomorphization collapse
+--   (Chapter 3)
+-- Tests: instantiating a generic function so that two DISTINCT type
+--        parameters (or a type parameter and an already-concrete type)
+--        collapse onto the SAME physical slot bucket must re-derive each
+--        `@T.n` reference's post-collapse index, not leave the
+--        pre-collapse per-bucket index unchanged (#769).  Each case below
+--        picks argument values where a stale (unreindexed) reference reads
+--        a different binding than the correct one, so a reindexing bug
+--        flips the observed result rather than hiding behind a
+--        Bool-coincident answer.
+-- ================================================================
+-- keep_first_two_var — two distinct type params (A, B) instantiated at the
+-- SAME concrete type (Int) collapse both parameter bindings into one
+-- shared Int bucket.  A `let @B = ...` between the params and the @A.0
+-- read pushes a third Int binding into that bucket, so a stale index on
+-- @A.0 would read the let (a copy of the SECOND argument) instead of the
+-- FIRST argument.
+-- ================================================================
+private forall<A, B> fn keep_first_two_var(@A, @B -> @A)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @B = @B.0;
+  @A.0
+}
+
+-- ================================================================
+-- keep_a_after_int_let — a single type param (A) instantiated at Int
+-- collapses with a PRE-EXISTING concrete @Int binding in the body.  The
+-- param is bound before the `let @Int = 5;`, so after collapse the param
+-- is the OLDER (higher-index) binding; a stale index on @A.0 would read
+-- the let (5) instead of the parameter.
+-- ================================================================
+private forall<A> fn keep_a_after_int_let(@A -> @A)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Int = 5;
+  @A.0
+}
+
+-- ================================================================
+-- keep_first_via_match — like keep_first_two_var, but the shadowing
+-- binding comes from a match-arm binder (`Some(@B) -> ...`) rather than a
+-- `let`, exercising collapse-reindexing across a match arm's own scope.
+-- ================================================================
+private forall<A, B> fn keep_first_via_match(@A, @B -> @A)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  match Some(@B.0) {
+    Some(@B) -> @A.0,
+    None -> @A.0
+  }
+}
+
+-- ================================================================
+-- first_of_first_array — two NESTED compound types (Array<Option<A>>,
+-- Array<Option<B>>) instantiated at A = B = Int collapse onto the same
+-- Array<Option<Int>> bucket.  The first array parameter is bound before
+-- the second, so after collapse it is the OLDER (higher-index) binding; a
+-- stale index would read the SECOND array's element instead of the
+-- FIRST's.
+-- ================================================================
+private forall<A, B> fn first_of_first_array(@Array<Option<A>>, @Array<Option<B>> -> @Option<A>)
+  requires(array_length(@Array<Option<A>>.0) > 0)
+  ensures(true)
+  effects(pure)
+{
+  @Array<Option<A>>.0[0]
+}
+
+-- ================================================================
+-- test_two_var_collapse
+-- keep_first_two_var(100, 3), A = B = Int, must return 100 (the FIRST
+-- argument), not 3.
+-- ================================================================
+public fn test_two_var_collapse(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 1)
+  effects(pure)
+{
+  if keep_first_two_var(100, 3) == 100 then {
+    1
+  } else {
+    0
+  }
+}
+
+-- ================================================================
+-- test_single_var_collapse
+-- keep_a_after_int_let(100), A = Int, must return 100 (the argument), not
+-- 5 (the body's own `let @Int = 5;`).
+-- ================================================================
+public fn test_single_var_collapse(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 1)
+  effects(pure)
+{
+  if keep_a_after_int_let(100) == 100 then {
+    1
+  } else {
+    0
+  }
+}
+
+-- ================================================================
+-- test_match_arm_collapse
+-- keep_first_via_match(100, 3), A = B = Int, must return 100 (the FIRST
+-- argument), not 3.
+-- ================================================================
+public fn test_match_arm_collapse(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 1)
+  effects(pure)
+{
+  if keep_first_via_match(100, 3) == 100 then {
+    1
+  } else {
+    0
+  }
+}
+
+-- ================================================================
+-- test_nested_array_collapse
+-- first_of_first_array([Some(100)], [Some(3)]), A = B = Int, must return
+-- Some(100) (the FIRST array's element), not Some(3).
+-- ================================================================
+public fn test_nested_array_collapse(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 1)
+  effects(pure)
+{
+  match first_of_first_array([Some(100)], [Some(3)]) {
+    Some(@Int) -> if @Int.0 == 100 then { 1 } else { 0 },
+    None -> 0
+  }
+}
+
+-- ================================================================
+-- main — run all four tests, return 0 if all pass (sum == 4)
+-- ================================================================
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Int = test_two_var_collapse(()) + test_single_var_collapse(()) + test_match_arm_collapse(()) + test_nested_array_collapse(());
+  if @Int.0 == 4 then {
+    0
+  } else {
+    1
+  }
+}

@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-07-10
+
+### Fixed
+
+- **The monomorphizer completeness class: generic instantiation no longer silently produces wrong programs for exotic shapes** ([#769](https://github.com/aallan/vera/issues/769)).  Three gaps, shared by codegen and the #732 verifier — both sides agreed on the *wrong* instantiation, so `vera verify` was green while the compiled program traps or does the wrong thing:
+  - **The builtin return tables were a fraction of the registry.**  `_BUILTIN_PARAMETERIZED_RETURNS` covered 9 of the 41 builtins with fully-concrete parameterized returns, so `first(string_chars("abc"))` could not bind `T = String` and fell to the `Bool` phantom default — a check-green, verify-green program that failed WASM validation at run time.  Both tables are now registry-complete (41 parameterized entries incl. nested inners like `Option<Array<Json>>`; 160 simple names), enforced by a differential test against `TypeEnv._register_builtins`, with the `array_range` special cases folded in on both sides.
+  - **Nested type-argument unification was one level deep.**  `Array<Array<E>>` matched against `Array<Array<Int>>` left `E` unbound (the `E521` warning literally reported `head_head<Bool>`) and the run trapped on the i64/i32 ABI mismatch.  A shared recursive unifier (`Monomorphizer._unify_type_arg_pair`) now binds variables at any depth on BOTH the discovery and WASM call-rewrite sides, and array-literal arguments expose full-depth element names (`[[1, 2]]` → `Array<Array<Int>>`, `[Some(1)]` → `Array<Option<Int>>`) so there is something to bind against.
+  - **The De Bruijn collapse-reindex was parameter-only and name-truncated** — the highest-severity gap: `confuse(100, 3)` returned `3`.  A body `let`, match-arm binder, or closure parameter of a collapsing type shifts every later slot reference, which a static params-only map cannot express (one type variable suffices: `let @Int = 5;` before `@A.0` at `A = Int` silently read the `5`); and the one-level slot-name truncation collapsed `Array<Option<A>>`/`Array<Option<B>>` to the same *old* name, hiding genuine merges entirely.  The map is replaced by a scope-aware walker (`_compute_scoped_reindex`) that resolves every `SlotRef` against the full binding scope at its reference site — parameters, `let`/destructuring bindings, match-arm binders (arm-scoped), closure parameters, handler clauses, with contracts as a params-only scope, `where`-helpers as independent scopes, and full-depth canonical names from `vera/slots.py` — mirroring exactly the environments the checker, verifier, and codegen build.
+- **Four sibling discovery-vs-rewrite desyncs, found probing the same class, all dropped `main` from check-green programs** (fixed in this release with [#769](https://github.com/aallan/vera/issues/769); each was an E602 dangling clone — instantiation discovery and the WASM call-site rewrite inferred different clone names): `apply_fn(closure, …)` results in generic-argument position (discovery lacked the chain's closure-return arm — added as `_closure_arg_return_te`, resolving `FnType` aliases through the shared `resolve_fn_type_alias`); `async(…)`/`await(…)` results (discovery gains the same `Future<T>` wrap/strip arms the chain has); and generic calls with i32-handle returns (`ident(pass(Some(42)))` — rewrite WAT-collapsed to `Bool`) or declared-`Nat` returns (rewrite collapsed i64 to `Int`) — the rewrite's generic branch now substitutes the callee's declared return exactly as discovery does.
+
+### Changed
+
+- **The WASM inference chain's ~130 hand-written builtin return arms are hoisted into the shared `_BUILTIN_VERA_RETURN_TYPES` dict** ([#769](https://github.com/aallan/vera/issues/769)).  Discovery and the call-rewrite previously kept two independent copies of "what does this builtin return" — the mono-side dict and the `inference.py` if-chain — and every difference between them was a dropped-`main` bug (e.g. `json_get` was dict-only, `string_chars` was chain-only; each direction desynced).  Both consultors now read the ONE dict, so an entry added for a new builtin lands on both sides atomically; the chain keeps only its logic arms (`apply_fn`, `show`/`hash` with the #908 user-shadow gate, `async`/`await`), and values are preserved verbatim (`string_length` stays `"Int"`, `string_char_code` stays `"Nat"` — clone-name agreement is the invariant, name precision is a separate decision).
+
 ## [0.1.2] - 2026-07-09
 
 ### Added
@@ -2883,7 +2897,8 @@ Small docs sweep — closes six aging documentation issues in one PR.  No code c
 - Grammar: handler body simplified to avoid LALR reduce/reduce conflict
 - `pyproject.toml`: corrected build backend, package discovery, PEP 639 compliance
 
-[Unreleased]: https://github.com/aallan/vera/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/aallan/vera/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/aallan/vera/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/aallan/vera/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/aallan/vera/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/aallan/vera/compare/v0.0.196...v0.1.0

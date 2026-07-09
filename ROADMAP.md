@@ -12,19 +12,18 @@ Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verificati
 
 ## Where we are
 
-6,851 tests, 143 conformance programs, 37 examples, 14 spec chapters.  No known bugs ([KNOWN_ISSUES.md](KNOWN_ISSUES.md)); what remains there are *limitations*, and the stages below are how they retire.
+6,909 tests, 145 conformance programs, 37 examples, 14 spec chapters.  No known bugs ([KNOWN_ISSUES.md](KNOWN_ISSUES.md)); what remains there are *limitations*, and the stages below are how they retire.
 
 ## Stage 19 — The verification completeness sprint
 
 *`vera verify` tells the whole truth.*
 
-Zero known bugs does not mean zero known gaps: KNOWN_ISSUES carries a family of verification-completeness limitations — an obligation not emitted, a guard not planted, an instantiation inferred wrong — individually small, sharing machinery, and exactly the shape the burndown model handles well.  [#769](https://github.com/aallan/vera/issues/769) leads because it is the one open class where a program silently *does the wrong thing* (codegen and the verifier share the wrong instantiation, so nothing disagrees loudly).  The guard wave shares one architectural enabler — per-component target-type metadata in codegen — which unlocks four issues at once.
+Zero known bugs does not mean zero known gaps: KNOWN_ISSUES carries a family of verification-completeness limitations — an obligation not emitted, a guard not planted, an instantiation inferred wrong — individually small, sharing machinery, and exactly the shape the burndown model handles well.  The sprint's lead, the monomorphizer completeness class (the one where a program silently *did the wrong thing*), retired at v0.1.3.  The guard wave shares one architectural enabler — per-component target-type metadata in codegen — which unlocks four issues at once.
 
 Exit criterion: every verification-completeness and guard-deferral row in KNOWN_ISSUES is retired.
 
 | Issue | What |
 |---|---|
-| [#769](https://github.com/aallan/vera/issues/769) | **Monomorphizer type-inference / reindex completeness** — builtin-return table gaps (`string_chars`, `string_split`, …), shallow nested type-argument unification (`Array<Option<T>>` leaves `T` unbound → `Bool` default), parameter-only collapse-reindex.  Shared by codegen and the #732 verifier, so both agree on the wrong instantiation.  The sprint's lead. |
 | [#764](https://github.com/aallan/vera/issues/764) | Call preconditions after an untranslatable `let` / `let`-destructure are not statically checked — `_translate_block` truncates, so E501 never fires though the runtime `requires` guard still holds. |
 | [#779](https://github.com/aallan/vera/issues/779) | Primitive-op obligations (E502/E526/E527) don't recurse into closure / quantifier / handler-clause bodies — fresh-slot scopes the walkers skip. |
 | [#909](https://github.com/aallan/vera/issues/909) | A value's postcondition / refinement is forgotten through an ADT field (box then unbox loses the fact), degrading provable programs to Tier 3. |
