@@ -637,6 +637,407 @@ class TestPlumbingSkipCountsEveryOwnScopeCtor:
         assert mod.spec_ref_violations_in_source(src, f) == []
 
 
+class TestPlumbingSkipRequiresReachability:
+    """The skip additionally requires the helper's sole own-scope ctor to be
+    reachable as the helper's *result* — return-ed, appended, or bound to a
+    local that is later return-ed/appended (#956).
+
+    A ctor merely constructed and handed to something else (e.g. dispatched
+    via a bound attribute) is not plumbing: nothing threads its literal
+    fields through a call site, so it must be inspected.  Before this fix,
+    "sole own-scope construction" alone was sufficient to elect a ctor as
+    plumbing, so a helper that builds a ``Diagnostic`` and hands it to
+    ``self.dispatch(...)`` (never returning or appending it) escaped every
+    pass despite carrying a bogus ``spec_ref`` and an unregistered
+    ``error_code``."""
+
+    F = "vera/checker/core.py"
+
+    # Sole own-scope ctor, but handed to self.dispatch — never returned or
+    # appended, so never reachable as the helper's result.
+    DISPATCHED_NOT_RETURNED = (
+        "class C:\n"
+        "    def _error(self, node, description, rationale='', fix='',\n"
+        "               spec_ref=''):\n"
+        "        d = Diagnostic(description=description, rationale='ok',\n"
+        "                       fix='ok',\n"
+        '                       spec_ref=\'Chapter 99, Section 99.1 "Nope"\',\n'
+        "                       error_code='E9999')\n"
+        "        self.dispatch(d)\n"
+    )
+
+    # Control: identical fields, but appended — the legitimately-exempt shape.
+    # This is the mutation-kill for the reachability rule: a neutered
+    # `_ctor_is_reachable_as_result` that always returns True must fail
+    # `test_dispatched_ctor_is_inspected_not_skipped` below while this test
+    # keeps passing either way.
+    APPENDED = (
+        "class C:\n"
+        "    def _error(self, node, description, rationale='', fix='',\n"
+        "               spec_ref=''):\n"
+        "        d = Diagnostic(description=description, rationale='ok',\n"
+        "                       fix='ok',\n"
+        '                       spec_ref=\'Chapter 99, Section 99.1 "Nope"\',\n'
+        "                       error_code='E9999')\n"
+        "        self.errors.append(d)\n"
+    )
+
+    def test_check_source_stays_clean_all_fields_literal_present(
+            self, mod: object) -> None:
+        # Presence pass stays clean regardless: every field is a non-empty
+        # string literal.  The reachability rule only affects spec_ref/
+        # error_code validity, not field presence.
+        assert mod.check_source(self.DISPATCHED_NOT_RETURNED, self.F) == []
+
+    def test_dispatched_ctor_is_inspected_not_skipped(self, mod: object) -> None:
+        refs = mod.spec_ref_violations_in_source(
+            self.DISPATCHED_NOT_RETURNED, self.F)
+        assert len(refs) == 1
+        assert "§99.1" in refs[0].missing[0]
+
+        codes = mod.error_code_registration_violations_in_source(
+            self.DISPATCHED_NOT_RETURNED, self.F, {"E130"})
+        assert len(codes) == 1
+        assert "E9999" in codes[0].missing[0]
+
+    def test_appended_control_stays_exempt(self, mod: object) -> None:
+        assert mod.check_source(self.APPENDED, self.F) == []
+        assert mod.spec_ref_violations_in_source(self.APPENDED, self.F) == []
+        assert mod.error_code_registration_violations_in_source(
+            self.APPENDED, self.F, {"E130"}) == []
+
+    # A ctor bound to a local that is later REASSIGNED before the return: the
+    # name-based check has no real data-flow, so on its own it cannot tell
+    # that `d` no longer holds the ctor by the time it's returned.  Being
+    # conservative (not exempting whenever the name is reassigned at all)
+    # keeps a genuinely swapped-out ctor from silently escaping as plumbing.
+    REASSIGNED_BEFORE_RETURN = (
+        "class C:\n"
+        "    def _error(self, node, description, rationale='', fix='',\n"
+        "               spec_ref=''):\n"
+        "        d = Diagnostic(description=description, rationale='ok',\n"
+        "                       fix='ok',\n"
+        '                       spec_ref=\'Chapter 99, Section 99.1 "Nope"\',\n'
+        "                       error_code='E9999')\n"
+        "        d = self.template\n"
+        "        return d\n"
+    )
+
+    def test_reassigned_local_is_not_reachable_as_result(self, mod: object) -> None:
+        refs = mod.spec_ref_violations_in_source(
+            self.REASSIGNED_BEFORE_RETURN, self.F)
+        assert len(refs) == 1
+        assert "§99.1" in refs[0].missing[0]
+
+    # A `for` loop target rebinds the same name without being an ast.Assign —
+    # a plain-Assign-only rebind check misses this and would still treat the
+    # name as reachable via the trailing `return d`.
+    REBOUND_VIA_FOR_LOOP = (
+        "class C:\n"
+        "    def _error(self, node, description, rationale='', fix='',\n"
+        "               spec_ref=''):\n"
+        "        d = Diagnostic(description=description, rationale='ok',\n"
+        "                       fix='ok',\n"
+        '                       spec_ref=\'Chapter 99, Section 99.1 "Nope"\',\n'
+        "                       error_code='E9999')\n"
+        "        for d in ():\n"
+        "            pass\n"
+        "        return d\n"
+    )
+
+    def test_for_loop_rebound_local_is_not_reachable_as_result(
+            self, mod: object) -> None:
+        refs = mod.spec_ref_violations_in_source(
+            self.REBOUND_VIA_FOR_LOOP, self.F)
+        assert len(refs) == 1
+        assert "§99.1" in refs[0].missing[0]
+
+    # `.append(...)` on an unrelated throwaway local is not a diagnostic
+    # sink — every real plumbing site appends to `self.<attr>` (e.g.
+    # `self.errors`, `self.diagnostics`).  A bare `.append` check would
+    # wrongly treat this ctor as reachable even though `tmp` is never used
+    # for anything.
+    APPENDED_TO_UNRELATED_LOCAL = (
+        "class C:\n"
+        "    def _error(self, node, description, rationale='', fix='',\n"
+        "               spec_ref=''):\n"
+        "        d = Diagnostic(description=description, rationale='ok',\n"
+        "                       fix='ok',\n"
+        '                       spec_ref=\'Chapter 99, Section 99.1 "Nope"\',\n'
+        "                       error_code='E9999')\n"
+        "        tmp = []\n"
+        "        tmp.append(d)\n"
+        "        self.dispatch(d)\n"
+    )
+
+    def test_append_to_unrelated_local_is_not_reachable_as_result(
+            self, mod: object) -> None:
+        refs = mod.spec_ref_violations_in_source(
+            self.APPENDED_TO_UNRELATED_LOCAL, self.F)
+        assert len(refs) == 1
+        assert "§99.1" in refs[0].missing[0]
+
+    # An annotated assignment (`d: object = ...`) is a binding site too —
+    # ast.AnnAssign, not ast.Assign — so a rebind through one must break
+    # reachability exactly like a plain reassignment (PR #964 review).
+    ANNASSIGN_REBIND = (
+        "class C:\n"
+        "    def _error(self, node, description, rationale='', fix='',\n"
+        "               spec_ref=''):\n"
+        "        d = Diagnostic(description=description, rationale='ok',\n"
+        "                       fix='ok',\n"
+        '                       spec_ref=\'Chapter 99, Section 99.1 "Nope"\',\n'
+        "                       error_code='E9999')\n"
+        "        d: object = self.template\n"
+        "        return d\n"
+    )
+
+    def test_annassign_rebound_local_is_not_reachable_as_result(
+            self, mod: object) -> None:
+        refs = mod.spec_ref_violations_in_source(
+            self.ANNASSIGN_REBIND, self.F)
+        assert len(refs) == 1
+        assert "§99.1" in refs[0].missing[0]
+
+    # The dual: an annotated assignment can also be the ctor's *initial*
+    # binding (`d: Diagnostic = Diagnostic(...)`).  That is genuine plumbing
+    # when the local is later returned, and must be recognised as reachable —
+    # not permanently inspected just because the binding carried an
+    # annotation (PR #964 review).
+    ANNASSIGN_INITIAL_BIND = (
+        "class C:\n"
+        "    def _error(self, node, description, rationale='', fix='',\n"
+        "               spec_ref=''):\n"
+        "        d: object = Diagnostic(description=description,\n"
+        "                               rationale='ok', fix='ok',\n"
+        '                               spec_ref=\'Chapter 99, Section 99.1 "Nope"\',\n'
+        "                               error_code='E9999')\n"
+        "        return d\n"
+    )
+
+    def test_annassign_initial_bind_is_reachable_as_result(
+            self, mod: object) -> None:
+        assert mod.spec_ref_violations_in_source(
+            self.ANNASSIGN_INITIAL_BIND, self.F) == []
+
+    # A *bare* annotation (`d: object` with no value) does not assign at
+    # runtime, so it is not a rebind and must not break reachability — pins
+    # the value-carrying distinction in the AnnAssign handling.
+    BARE_ANNOTATION_AFTER_BIND = (
+        "class C:\n"
+        "    def _error(self, node, description, rationale='', fix='',\n"
+        "               spec_ref=''):\n"
+        "        d = Diagnostic(description=description, rationale='ok',\n"
+        "                       fix='ok',\n"
+        '                       spec_ref=\'Chapter 99, Section 99.1 "Nope"\',\n'
+        "                       error_code='E9999')\n"
+        "        d: object\n"
+        "        self.errors.append(d)\n"
+    )
+
+    def test_bare_annotation_does_not_break_reachability(
+            self, mod: object) -> None:
+        assert mod.spec_ref_violations_in_source(
+            self.BARE_ANNOTATION_AFTER_BIND, self.F) == []
+
+    # The remaining ``_rebound_names`` binding forms, pinned one each so a
+    # dropped arm (With / NamedExpr / ExceptHandler) ships RED, not green
+    # (PR #965 review).
+    REBOUND_VIA_WITH = (
+        "class C:\n"
+        "    def _error(self, node, description, rationale='', fix='',\n"
+        "               spec_ref=''):\n"
+        "        d = Diagnostic(description=description, rationale='ok',\n"
+        "                       fix='ok',\n"
+        '                       spec_ref=\'Chapter 99, Section 99.1 "Nope"\',\n'
+        "                       error_code='E9999')\n"
+        "        with self.ctx() as d:\n"
+        "            pass\n"
+        "        return d\n"
+    )
+
+    def test_with_as_rebound_local_is_not_reachable_as_result(
+            self, mod: object) -> None:
+        refs = mod.spec_ref_violations_in_source(
+            self.REBOUND_VIA_WITH, self.F)
+        assert len(refs) == 1
+        assert "§99.1" in refs[0].missing[0]
+
+    REBOUND_VIA_WALRUS = (
+        "class C:\n"
+        "    def _error(self, node, description, rationale='', fix='',\n"
+        "               spec_ref=''):\n"
+        "        d = Diagnostic(description=description, rationale='ok',\n"
+        "                       fix='ok',\n"
+        '                       spec_ref=\'Chapter 99, Section 99.1 "Nope"\',\n'
+        "                       error_code='E9999')\n"
+        "        if (d := self.template):\n"
+        "            pass\n"
+        "        return d\n"
+    )
+
+    def test_walrus_rebound_local_is_not_reachable_as_result(
+            self, mod: object) -> None:
+        refs = mod.spec_ref_violations_in_source(
+            self.REBOUND_VIA_WALRUS, self.F)
+        assert len(refs) == 1
+        assert "§99.1" in refs[0].missing[0]
+
+    REBOUND_VIA_EXCEPT = (
+        "class C:\n"
+        "    def _error(self, node, description, rationale='', fix='',\n"
+        "               spec_ref=''):\n"
+        "        d = Diagnostic(description=description, rationale='ok',\n"
+        "                       fix='ok',\n"
+        '                       spec_ref=\'Chapter 99, Section 99.1 "Nope"\',\n'
+        "                       error_code='E9999')\n"
+        "        try:\n"
+        "            pass\n"
+        "        except Exception as d:\n"
+        "            pass\n"
+        "        return d\n"
+    )
+
+    def test_except_as_rebound_local_is_not_reachable_as_result(
+            self, mod: object) -> None:
+        refs = mod.spec_ref_violations_in_source(
+            self.REBOUND_VIA_EXCEPT, self.F)
+        assert len(refs) == 1
+        assert "§99.1" in refs[0].missing[0]
+
+    # The remaining binding forms the enumeration missed (PR #964 panel
+    # review) — each one a fail-OPEN shape where a swapped-out ctor kept
+    # its plumbing exemption.  Starred unpack:
+    REBOUND_VIA_STARRED = (
+        "class C:\n"
+        "    def _error(self, node, description, rationale='', fix='',\n"
+        "               spec_ref=''):\n"
+        "        d = Diagnostic(description=description, rationale='ok',\n"
+        "                       fix='ok',\n"
+        '                       spec_ref=\'Chapter 99, Section 99.1 "Nope"\',\n'
+        "                       error_code='E9999')\n"
+        "        first, *d = self.items()\n"
+        "        return d\n"
+    )
+
+    def test_starred_rebound_local_is_not_reachable_as_result(
+            self, mod: object) -> None:
+        refs = mod.spec_ref_violations_in_source(
+            self.REBOUND_VIA_STARRED, self.F)
+        assert len(refs) == 1
+        assert "§99.1" in refs[0].missing[0]
+
+    REBOUND_VIA_IMPORT_AS = (
+        "class C:\n"
+        "    def _error(self, node, description, rationale='', fix='',\n"
+        "               spec_ref=''):\n"
+        "        d = Diagnostic(description=description, rationale='ok',\n"
+        "                       fix='ok',\n"
+        '                       spec_ref=\'Chapter 99, Section 99.1 "Nope"\',\n'
+        "                       error_code='E9999')\n"
+        "        import textwrap as d\n"
+        "        return d\n"
+    )
+
+    def test_import_as_rebound_local_is_not_reachable_as_result(
+            self, mod: object) -> None:
+        refs = mod.spec_ref_violations_in_source(
+            self.REBOUND_VIA_IMPORT_AS, self.F)
+        assert len(refs) == 1
+        assert "§99.1" in refs[0].missing[0]
+
+    REBOUND_VIA_MATCH_AS = (
+        "class C:\n"
+        "    def _error(self, node, description, rationale='', fix='',\n"
+        "               spec_ref=''):\n"
+        "        d = Diagnostic(description=description, rationale='ok',\n"
+        "                       fix='ok',\n"
+        '                       spec_ref=\'Chapter 99, Section 99.1 "Nope"\',\n'
+        "                       error_code='E9999')\n"
+        "        match node:\n"
+        "            case _ as d:\n"
+        "                pass\n"
+        "        return d\n"
+    )
+
+    def test_match_as_rebound_local_is_not_reachable_as_result(
+            self, mod: object) -> None:
+        refs = mod.spec_ref_violations_in_source(
+            self.REBOUND_VIA_MATCH_AS, self.F)
+        assert len(refs) == 1
+        assert "§99.1" in refs[0].missing[0]
+
+    # A parameter is a binding too: a ctor assigned to a name that shadows
+    # a parameter has two binding sites, so its later return cannot be
+    # trusted to be the ctor on every path.
+    PARAM_SHADOWED_CTOR = (
+        "class C:\n"
+        "    def _error(self, d, description, rationale='', fix='',\n"
+        "               spec_ref=''):\n"
+        "        if description:\n"
+        "            d = Diagnostic(description=description, rationale='ok',\n"
+        "                           fix='ok',\n"
+        '                           spec_ref=\'Chapter 99, Section 99.1 "Nope"\',\n'
+        "                           error_code='E9999')\n"
+        "        return d\n"
+    )
+
+    def test_param_shadowing_ctor_is_not_reachable_as_result(
+            self, mod: object) -> None:
+        refs = mod.spec_ref_violations_in_source(
+            self.PARAM_SHADOWED_CTOR, self.F)
+        assert len(refs) == 1
+        assert "§99.1" in refs[0].missing[0]
+
+    # The name-match must be order-sensitive: a `return d` textually
+    # BEFORE the ctor binding is not evidence the ctor reaches the
+    # helper's result.
+    RETURN_BEFORE_BINDING = (
+        "class C:\n"
+        "    def _error(self, node, description, rationale='', fix='',\n"
+        "               spec_ref=''):\n"
+        "        if node is None:\n"
+        "            return d\n"
+        "        d = Diagnostic(description=description, rationale='ok',\n"
+        "                       fix='ok',\n"
+        '                       spec_ref=\'Chapter 99, Section 99.1 "Nope"\',\n'
+        "                       error_code='E9999')\n"
+        "        self.dispatch(d)\n"
+    )
+
+    def test_return_before_binding_is_not_reachable_as_result(
+            self, mod: object) -> None:
+        refs = mod.spec_ref_violations_in_source(
+            self.RETURN_BEFORE_BINDING, self.F)
+        assert len(refs) == 1
+        assert "§99.1" in refs[0].missing[0]
+
+    # A nested function declaring `nonlocal d` licenses an invisible
+    # rebind of the helper's local — the own-scope walk cannot see the
+    # assignment, so the declaration itself must break trust in the name.
+    NONLOCAL_REBIND_IN_NESTED = (
+        "class C:\n"
+        "    def _error(self, node, description, rationale='', fix='',\n"
+        "               spec_ref=''):\n"
+        "        d = Diagnostic(description=description, rationale='ok',\n"
+        "                       fix='ok',\n"
+        '                       spec_ref=\'Chapter 99, Section 99.1 "Nope"\',\n'
+        "                       error_code='E9999')\n"
+        "        def swap():\n"
+        "            nonlocal d\n"
+        "            d = None\n"
+        "        swap()\n"
+        "        return d\n"
+    )
+
+    def test_nonlocal_rebind_in_nested_fn_is_not_reachable_as_result(
+            self, mod: object) -> None:
+        refs = mod.spec_ref_violations_in_source(
+            self.NONLOCAL_REBIND_IN_NESTED, self.F)
+        assert len(refs) == 1
+        assert "§99.1" in refs[0].missing[0]
+
+
 class TestOwnScopeExcludesEnclosingScopeExpressions:
     """"Own scope" means the helper's ``body`` — not everything hanging off its
     ``FunctionDef`` node.
