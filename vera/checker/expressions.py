@@ -333,6 +333,26 @@ class ExpressionsMixin:
         resolved = self.env.resolve_slot(tname, ref.index)
         if resolved is None:
             count = self.env.count_bindings(tname)
+            # #973: a failed slot resolution whose type is the state of the
+            # INNERMOST enclosing handler's HANDLED BODY — and for which no
+            # real binding exists — is almost certainly an attempt to read
+            # handler state directly, which is not a slot there.  Steer the
+            # user to the typed operation.  The gate is deliberately narrow
+            # (PR #975 review): with a real same-typed binding in scope the
+            # likely fix is a lower index, and under nested different-typed
+            # handlers get(()) reaches the innermost state, so only its type
+            # may carry the hint.
+            if (count == 0
+                    and self._handler_body_state_tnames
+                    and tname == self._handler_body_state_tnames[-1]):
+                fix = (
+                    f"Handler state is not a slot in the handled body — read "
+                    f"it through the typed operation: get(()) returns the "
+                    f"current {tname} state, and put(<{tname}>) updates it."
+                )
+            else:
+                fix = (f"Ensure enough {tname} bindings are in scope, or use a "
+                       f"lower index.")
             self._error(
                 ref,
                 f"Cannot resolve @{tname}.{ref.index}: "
@@ -343,8 +363,7 @@ class ExpressionsMixin:
                      f"no {tname} bindings in scope.",
                 rationale=f"Slot reference @{tname}.{ref.index} requires at "
                           f"least {ref.index + 1} binding(s) of type {tname}.",
-                fix=f"Ensure enough {tname} bindings are in scope, or use a "
-                    f"lower index.",
+                fix=fix,
                 spec_ref='Chapter 3, Section 3.4 "Reference Resolution"',
                 error_code="E130",
             )

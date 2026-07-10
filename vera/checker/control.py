@@ -449,6 +449,15 @@ class ControlFlowMixin:
             state_tname_outer = self._type_expr_to_slot_name(
                 expr.state.type_expr)
 
+        # #973 hint hygiene: while checking CLAUSES, no enclosing handled
+        # body's state-type hint may apply — clauses legitimately bind state
+        # as a slot, so a failed resolution there is an ordinary E130 (bad
+        # index), not a "use get(())" case.  A nested handle expression is
+        # checked mid-body-walk, so the outer body's hint is masked here and
+        # restored before this handler's own body check below.
+        saved_body_hints = self._handler_body_state_tnames
+        self._handler_body_state_tnames = []
+
         # Check handler clauses
         for clause in expr.clauses:
             op_info = eff_info.operations.get(clause.op_name)
@@ -560,6 +569,8 @@ class ControlFlowMixin:
 
             self.env.pop_scope()
 
+        self._handler_body_state_tnames = saved_body_hints
+
         # Check handler body — temporarily add handled effect to context
         # so effect operations resolve correctly inside the body
         saved_effect = self.env.current_effect_row
@@ -577,16 +588,24 @@ class ControlFlowMixin:
         # Track ops used inside handler body separately (they're discharged)
         self._effect_ops_used = set()
 
-        # Bind handler state in handler body scope too
-        if state_type and expr.state:
-            self.env.push_scope()
-            state_tname = self._type_expr_to_slot_name(expr.state.type_expr)
-            self.env.bind(state_tname, state_type, "handler")
+        # #973: the handled body does NOT get a state slot.  State is reached
+        # only through the typed get(())/put(...) operations — spec §7.5 scopes
+        # state to handler CLAUSES, and both backends agree (codegen routes
+        # state through host-side cells and gives the body no local; the
+        # verifier consumes no body-scope state ref).  Binding state here
+        # implied a scope the backends never provide, so a body @T.n slot read
+        # passed check + verify then crashed compile with a dangling-slot E699.
+        # Instead of binding, record the state's type name so a failed slot
+        # resolution of that type inside the body carries a get(()) hint.
+        pushed_state_hint = False
+        if state_type and expr.state and state_tname_outer is not None:
+            self._handler_body_state_tnames.append(state_tname_outer)
+            pushed_state_hint = True
 
         body_type = self._synth_expr(expr.body)
 
-        if state_type and expr.state:
-            self.env.pop_scope()
+        if pushed_state_hint:
+            self._handler_body_state_tnames.pop()
 
         # Restore — the handler discharges its effect
         self.env.current_effect_row = saved_effect
