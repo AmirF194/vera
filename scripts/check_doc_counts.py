@@ -71,15 +71,17 @@ def check_refactoring_counts(known_issues_text: str, root: Path) -> list[str]:
     return errors
 
 
-_HISTORY_VERSION_ROW = re.compile(r"^\| v0\.0\.[\d.]")
+_HISTORY_VERSION_ROW = re.compile(r"^\| v\d+\.\d+\.[\d.]")
 
 
 def check_history_row_format(history_text: str) -> list[str]:
     """Enforce the HISTORY.md version-row template.
 
-    Each `| v0.0.N |` table row carries at most one issue link and no
-    " — " separator — CHANGELOG.md is the per-release log of record,
-    so secondary links and multi-clause rows belong there, not here.
+    Each `| vX.Y.N |` table row carries at most one issue link and at
+    most one " — " separator (the optional **bold lead-in** dash, the
+    v0.1.x-era template) — CHANGELOG.md is the per-release log of
+    record, so secondary links and multi-clause rows belong there,
+    not here.
     """
     errors: list[str] = []
     for lineno, line in enumerate(history_text.splitlines(), 1):
@@ -91,10 +93,12 @@ def check_history_row_format(history_text: str) -> list[str]:
                 f"HISTORY.md line {lineno}: version row has {links}"
                 f" issue links (max 1; secondary links live in CHANGELOG.md)"
             )
-        if " — " in line:
+        dashes = line.count(" — ")
+        if dashes > 1:
             errors.append(
-                f"HISTORY.md line {lineno}: version row contains a"
-                f" ' — ' separator (one plain sentence per row)"
+                f"HISTORY.md line {lineno}: version row contains {dashes}"
+                f" ' — ' separators (max 1 — the bold lead-in dash;"
+                f" multi-clause rows belong in CHANGELOG.md)"
             )
     return errors
 

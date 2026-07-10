@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import wasmtime
 
@@ -31,9 +33,12 @@ def _compile(source: str) -> CompileResult:
         f.flush()
         path = f.name
 
-    tree = parse_file(path)
-    ast = transform(tree)
-    return compile(ast, source=source, file=path)
+    try:
+        tree = parse_file(path)
+        ast = transform(tree)
+        return compile(ast, source=source, file=path)
+    finally:
+        Path(path).unlink(missing_ok=True)
 
 
 def _compile_ok(source: str) -> CompileResult:
@@ -3350,4 +3355,1151 @@ class TestGenericClosureTypeVarSubstitution:
             "an uninstantiated generic-closure template must keep its E602 "
             "skip-warning (suppression must stay conditional on a clone "
             f"compiling): {[d.description for d in result.diagnostics]}"
+        )
+
+
+# =====================================================================
+# #769: monomorphizer completeness — builtin return tables, nested
+# type-argument unification, scope-aware De Bruijn reindexing
+# =====================================================================
+
+
+def _transform_program(source: str):
+    """Parse + transform a source string to a Program (no check/codegen)."""
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".vera", delete=False, encoding="utf-8"
+    ) as f:
+        f.write(source)
+        f.flush()
+        path = f.name
+    try:
+        tree = parse_file(path)
+        return transform(tree)
+    finally:
+        Path(path).unlink(missing_ok=True)
+
+
+def _mono_fn(source: str, fn_name: str, concrete: tuple[str, ...]):
+    """Transform ``source``, find FnDecl ``fn_name``, monomorphize it.
+
+    Drives the public ``Monomorphizer.monomorphize_fn`` contract exactly the
+    way both consumers do (#732): on the transform-level AST, with a
+    context-free ``MonoContext`` (the reindex logic needs no registration
+    state).
+    """
+    from vera import ast as vera_ast
+    from vera.monomorphize import MonoContext, Monomorphizer
+
+    program = _transform_program(source)
+    decl = next(
+        tld.decl for tld in program.declarations
+        if isinstance(tld.decl, vera_ast.FnDecl) and tld.decl.name == fn_name
+    )
+    ctx = MonoContext(
+        generic_decls={}, ctor_to_adt={}, ctor_tp_indices={},
+        adt_tp_counts={}, type_aliases={}, type_alias_params={},
+        fn_ret_types={},
+    )
+    return Monomorphizer(ctx).monomorphize_fn(decl, concrete)
+
+
+def _slot_sigs(node) -> list[tuple[str, int]]:
+    """(canonical slot name, De Bruijn index) for every SlotRef under
+    ``node``, in deterministic dataclass-field order.
+
+    Uses the shared namer ``vera.slots.slot_ref_name`` — the same key both
+    codegen and the verifier resolve against — so an assertion here is an
+    assertion about what the consumers will actually look up.
+    """
+    from dataclasses import fields as dc_fields
+
+    from vera import ast as vera_ast
+    from vera.slots import slot_ref_name
+
+    out: list[tuple[str, int]] = []
+
+    def walk(v: object) -> None:
+        if isinstance(v, vera_ast.SlotRef):
+            name = slot_ref_name(v)
+            assert name is not None
+            out.append((name, v.index))
+        if isinstance(v, vera_ast.Node):
+            for fld in dc_fields(v):
+                if fld.name == "span":
+                    continue
+                walk(getattr(v, fld.name))
+        elif isinstance(v, tuple):
+            for item in v:
+                walk(item)
+
+    walk(node)
+    return out
+
+
+class TestBuiltinReturnTables769:
+    """#769 gap 1 (+1b): the two builtin return-type tables in
+    ``vera.monomorphize`` must cover every builtin the registry says has a
+    concrete return, or generic instantiation discovery falls through to the
+    ``Bool`` phantom default while the WASM call-rewrite side infers the real
+    type — mismatched clone names, dangling calls, dropped ``main``.
+
+    The registry (``TypeEnv._register_builtins``) is the source of truth for
+    KEY coverage; the WASM inference chain's historical values are the source
+    of truth for simple-name VALUES (clone-name agreement is the invariant,
+    not name precision — see the ``string_length`` → "Int" pin).
+    """
+
+    @staticmethod
+    def _registry():
+        from vera.environment import TypeEnv
+
+        return TypeEnv().functions
+
+    @staticmethod
+    def _contains_typevar(ty) -> bool:
+        from vera import types as vtypes
+
+        if isinstance(ty, vtypes.TypeVar):
+            return True
+        if isinstance(ty, vtypes.AdtType):
+            return any(
+                TestBuiltinReturnTables769._contains_typevar(a)
+                for a in ty.type_args
+            )
+        if isinstance(ty, vtypes.RefinedType):
+            return TestBuiltinReturnTables769._contains_typevar(ty.base)
+        if isinstance(ty, vtypes.FunctionType):
+            return (
+                any(
+                    TestBuiltinReturnTables769._contains_typevar(p)
+                    for p in ty.params
+                )
+                or TestBuiltinReturnTables769._contains_typevar(ty.return_type)
+            )
+        return False
+
+    def test_parameterized_table_matches_registry(self) -> None:
+        """STRICT equality: the parameterized table holds exactly the
+        builtins whose registry return is an ``AdtType`` with type args and
+        no embedded ``TypeVar`` — no gaps (the #769 miss) and no generic
+        returns (which would bind phantom vars)."""
+        from vera import types as vtypes
+        from vera.monomorphize import _BUILTIN_PARAMETERIZED_RETURNS
+
+        expected: dict[str, tuple[str, tuple[str, ...]]] = {}
+        for name, info in self._registry().items():
+            ret = info.return_type
+            if (
+                isinstance(ret, vtypes.AdtType)
+                and ret.type_args
+                and not self._contains_typevar(ret)
+            ):
+                expected[name] = (
+                    ret.name,
+                    tuple(vtypes.pretty_type(a) for a in ret.type_args),
+                )
+        missing = sorted(set(expected) - set(_BUILTIN_PARAMETERIZED_RETURNS))
+        extra = sorted(set(_BUILTIN_PARAMETERIZED_RETURNS) - set(expected))
+        wrong = sorted(
+            n for n in set(expected) & set(_BUILTIN_PARAMETERIZED_RETURNS)
+            if expected[n] != _BUILTIN_PARAMETERIZED_RETURNS[n]
+        )
+        assert not missing and not extra and not wrong, (
+            f"_BUILTIN_PARAMETERIZED_RETURNS out of sync with the registry —"
+            f" missing: {missing}; extra (would bind phantom vars): {extra};"
+            f" wrong values: {wrong}"
+        )
+
+    def test_parameterized_table_pins(self) -> None:
+        """Readable spot pins for the #769 families (incl. nested inners and
+        the ``array_range`` special-case fold-in)."""
+        from vera.monomorphize import _BUILTIN_PARAMETERIZED_RETURNS as T
+
+        assert T.get("string_chars") == ("Array", ("String",))
+        assert T.get("string_split") == ("Array", ("String",))
+        assert T.get("md_extract_code_blocks") == ("Array", ("String",))
+        assert T.get("string_index_of") == ("Option", ("Nat",))
+        assert T.get("regex_find_all") == ("Result", ("Array<String>", "String"))
+        assert T.get("json_as_object") == ("Option", ("Map<String, Json>",))
+        assert T.get("array_range") == ("Array", ("Int",))
+
+    def test_simple_table_covers_all_concrete_outer_returns(self) -> None:
+        """KEY completeness: every registry builtin whose return has a
+        concrete OUTER constructor (primitive, or ADT even with generic
+        args — cf. ``map_keys`` → "Array") must have a simple-name entry, so
+        discovery never phantom-defaults where the call-rewrite infers a
+        name.  Bare-``TypeVar`` returns must have NO entry."""
+        from vera import types as vtypes
+        from vera.monomorphize import _BUILTIN_VERA_RETURN_TYPES
+
+        required: list[str] = []
+        forbidden: list[str] = []
+        for name, info in self._registry().items():
+            ret = info.return_type
+            if isinstance(ret, vtypes.RefinedType):
+                ret = ret.base
+            if isinstance(ret, vtypes.TypeVar):
+                forbidden.append(name)
+            elif isinstance(ret, (vtypes.PrimitiveType, vtypes.AdtType)):
+                required.append(name)
+        missing = sorted(
+            n for n in required if n not in _BUILTIN_VERA_RETURN_TYPES
+        )
+        phantom = sorted(
+            n for n in forbidden if n in _BUILTIN_VERA_RETURN_TYPES
+        )
+        assert not missing, (
+            f"builtins with concrete outer returns absent from "
+            f"_BUILTIN_VERA_RETURN_TYPES (discovery phantom-defaults, the "
+            f"rewrite side does not — #769 desync): {missing}"
+        )
+        assert not phantom, (
+            f"TypeVar-returning builtins must not have fixed entries: "
+            f"{phantom}"
+        )
+
+    def test_simple_table_values_chain_parity(self) -> None:
+        """VALUE pins: the simple names must equal what the WASM call-rewrite
+        chain historically produced (clone-name agreement, warts included —
+        ``string_length`` is "Int" not "Nat" there, ``string_char_code`` is
+        "Nat").  Changing these is a clone-granularity decision out of #769's
+        scope; agreement is the invariant."""
+        from vera.monomorphize import _BUILTIN_VERA_RETURN_TYPES as S
+
+        assert S.get("string_chars") == "Array"
+        assert S.get("string_split") == "Array"
+        assert S.get("string_length") == "Int"
+        assert S.get("string_char_code") == "Nat"
+        assert S.get("parse_int") == "Result"
+        assert S.get("int_to_string") == "String"
+        assert S.get("base64_decode") == "Result"
+        assert S.get("md_parse") == "Result"
+
+    def test_simple_and_parameterized_tables_agree_on_outer(self) -> None:
+        """Internal consistency: where both tables carry a builtin, the
+        simple name equals the parameterized entry's outer name."""
+        from vera.monomorphize import (
+            _BUILTIN_PARAMETERIZED_RETURNS,
+            _BUILTIN_VERA_RETURN_TYPES,
+        )
+
+        disagree = sorted(
+            n for n, (outer, _) in _BUILTIN_PARAMETERIZED_RETURNS.items()
+            if n in _BUILTIN_VERA_RETURN_TYPES
+            and _BUILTIN_VERA_RETURN_TYPES[n] != outer
+        )
+        assert not disagree, f"outer-name disagreement: {disagree}"
+
+
+class TestScopeAwareReindex769:
+    """#769 gap 3 (unit level): when type variables collapse to one concrete
+    type, De Bruijn indices must be recomputed against the FULL binding
+    scope at each reference site — parameters, ``let`` bindings, match-arm
+    binders, and closure parameters, with contracts staying a params-only
+    scope — not via a static params-only map applied body-wide.
+
+    Assertions use ``vera.slots.slot_ref_name`` (the shared full-depth
+    namer), i.e. exactly the keys codegen and the verifier resolve, and the
+    public ``monomorphize_fn`` contract both consumers call (#732).
+    """
+
+    _BODY_LET = """\
+private forall<A, B> fn confuse(@A, @B -> @A)
+  requires(true) ensures(true) effects(pure)
+{
+  let @B = @B.0;
+  @A.0
+}
+"""
+
+    def test_body_let_two_var_collapse(self) -> None:
+        """A body ``let`` of a collapsing type interposes one extra binding:
+        the trailing ``@A.0`` must land on index 2 (let, param B, param A),
+        not the params-only 1."""
+        mono = _mono_fn(self._BODY_LET, "confuse", ("Int", "Int"))
+        assert _slot_sigs(mono.body) == [("Int", 0), ("Int", 2)], (
+            f"got {_slot_sigs(mono.body)} — the params-only reindex map is "
+            f"blind to the body let (#769 gap 3)"
+        )
+
+    def test_single_var_concrete_body_let(self) -> None:
+        """The gap needs no second type variable: a body ``let`` of the
+        CONCRETE target type interposes just the same.  ``@A.0`` after
+        ``let @Int`` must become ``@Int.1``, else it silently reads the
+        let-bound value."""
+        source = """\
+private forall<A> fn keep(@A -> @A)
+  requires(true) ensures(true) effects(pure)
+{
+  let @Int = 5;
+  @A.0
+}
+"""
+        mono = _mono_fn(source, "keep", ("Int",))
+        assert _slot_sigs(mono.body) == [("Int", 1)], (
+            f"got {_slot_sigs(mono.body)} — @A.0 was left at index 0 and now "
+            f"resolves to the let binding, not the parameter"
+        )
+
+    def test_branch_let_does_not_leak(self) -> None:
+        """A ``let`` inside an if-branch block is popped at block exit: the
+        trailing ``@A.0`` must stay index 0 (the branch's ``let @Int`` never
+        reaches its scope).  Kills the leak-block-scopes mutation — a walker
+        that forgets the block pop counts the branch let and mis-shifts every
+        later reference."""
+        source = """\
+private forall<A> fn branchy(@A, @Bool -> @A)
+  requires(true) ensures(true) effects(pure)
+{
+  let @Bool = if @Bool.0 then { let @Int = 5; true } else { false };
+  @A.0
+}
+"""
+        mono = _mono_fn(source, "branchy", ("Int",))
+        sigs = _slot_sigs(mono.body)
+        assert sigs == [("Bool", 0), ("Int", 0)], (
+            f"got {sigs} — a branch-scoped let leaked into the enclosing "
+            f"scope's reindex (#769 gap 3)"
+        )
+
+    def test_match_binder_scope(self) -> None:
+        """A match-arm binder shifts references INSIDE that arm only: the
+        ``Some`` arm's ``@A.0`` needs index 2 (binder, param B, param A);
+        the ``None`` arm's needs 1.  One function, two correct answers —
+        unrepresentable in a single static (name, index) map."""
+        source = """\
+private forall<A, B> fn pick(@A, @B -> @A)
+  requires(true) ensures(true) effects(pure)
+{
+  match Some(@B.0) {
+    Some(@B) -> @A.0,
+    None -> @A.0
+  }
+}
+"""
+        mono = _mono_fn(source, "pick", ("Int", "Int"))
+        sigs = _slot_sigs(mono.body)
+        assert sigs == [("Int", 0), ("Int", 2), ("Int", 1)], (
+            f"got {sigs} — expected scrutinee @B.0 -> 0, Some-arm @A.0 -> 2 "
+            f"(arm binder interposes), None-arm @A.0 -> 1"
+        )
+
+    def test_closure_param_scope(self) -> None:
+        """A closure parameter of a collapsing type interposes for
+        references inside the closure body: ``@A.0`` there needs index 2
+        (closure param, param B, param A)."""
+        source = """\
+private forall<A, B> fn via(@A, @B -> @A)
+  requires(true) ensures(true) effects(pure)
+{
+  apply_fn(fn(@B -> @A) effects(pure) { @A.0 }, @B.0)
+}
+"""
+        mono = _mono_fn(source, "via", ("Int", "Int"))
+        sigs = _slot_sigs(mono.body)
+        assert sigs == [("Int", 2), ("Int", 0)], (
+            f"got {sigs} — expected closure-body @A.0 -> 2 (closure param "
+            f"interposes), argument @B.0 -> 0 (evaluated outside the "
+            f"closure scope)"
+        )
+
+    def test_contracts_stay_params_only_scope(self) -> None:
+        """Contracts are checked against a params-only scope (they are
+        evaluated at the boundary, before/after the body): the ensures
+        ``@A.0`` must be index 1 even though the body's trailing ``@A.0``
+        is 2 (body let interposes there).  Guards the scope-aware walker
+        against naively counting body binders into contract references."""
+        source = """\
+private forall<A, B> fn guarded(@A, @B -> @A)
+  requires(true)
+  ensures(@A.result == @A.0)
+  effects(pure)
+{
+  let @B = @B.0;
+  @A.0
+}
+"""
+        mono = _mono_fn(source, "guarded", ("Int", "Int"))
+        contract_sigs = _slot_sigs(mono.contracts)
+        body_sigs = _slot_sigs(mono.body)
+        assert contract_sigs == [("Int", 1)], (
+            f"got {contract_sigs} — ensures @A.0 must resolve in the "
+            f"params-only scope (index 1)"
+        )
+        assert body_sigs == [("Int", 0), ("Int", 2)], (
+            f"got {body_sigs} — body @A.0 must count the interposed let "
+            f"(index 2)"
+        )
+
+    def test_nested_type_arg_slot_names_collapse(self) -> None:
+        """``Array<Option<A>>`` / ``Array<Option<B>>`` are DISTINCT slot
+        namespaces pre-mono and the SAME one post-mono at A=B=Int — the
+        one-level name truncation ("Array<Option>") must not hide the
+        collapse.  Both the requires ref and the body ref (params-only
+        scopes) must move to index 1 (param B is the more recent
+        ``Array<Option<Int>>``)."""
+        source = """\
+private forall<A, B> fn confuse2(@Array<Option<A>>, @Array<Option<B>> -> @Option<A>)
+  requires(array_length(@Array<Option<A>>.0) > 0)
+  ensures(true)
+  effects(pure)
+{
+  @Array<Option<A>>.0[0]
+}
+"""
+        mono = _mono_fn(source, "confuse2", ("Int", "Int"))
+        contract_sigs = _slot_sigs(mono.contracts)
+        body_sigs = _slot_sigs(mono.body)
+        assert contract_sigs == [("Array<Option<Int>>", 1)], (
+            f"got {contract_sigs} — the requires ref must follow the "
+            f"full-depth name collapse (#769 gap 3, truncation half)"
+        )
+        assert body_sigs == [("Array<Option<Int>>", 1)], (
+            f"got {body_sigs} — the body ref must follow the full-depth "
+            f"name collapse (#769 gap 3, truncation half)"
+        )
+
+    def test_no_collapse_leaves_indices_unchanged(self) -> None:
+        """Distinct concrete targets (A=Int, B=String) collapse nothing:
+        every index survives unchanged.  Guards the walker's fast path."""
+        mono = _mono_fn(self._BODY_LET, "confuse", ("Int", "String"))
+        assert _slot_sigs(mono.body) == [("String", 0), ("Int", 0)], (
+            f"got {_slot_sigs(mono.body)} — no-collapse monomorphization "
+            f"must not move any index"
+        )
+
+
+class TestNestedArgTypeInfo769:
+    """#769 gap 2 (unit level, argument side): ``_get_arg_type_info`` must
+    surface FULL-DEPTH element names for nested literals so the recursive
+    unifier has something to bind against."""
+
+    def test_nested_array_literal_element_name(self) -> None:
+        from vera import ast as vera_ast
+        from vera.monomorphize import MonoContext, Monomorphizer
+
+        program = _transform_program("""\
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  let @Array<Array<Int>> = [[100, 3]];
+  0
+}
+""")
+        arrays: list = []
+
+        def find(v: object) -> None:
+            from dataclasses import fields as dc_fields
+            if isinstance(v, vera_ast.ArrayLit):
+                arrays.append(v)
+            if isinstance(v, vera_ast.Node):
+                for fld in dc_fields(v):
+                    if fld.name != "span":
+                        find(getattr(v, fld.name))
+            elif isinstance(v, tuple):
+                for item in v:
+                    find(item)
+
+        find(program)
+        outer = next(
+            a for a in arrays
+            if a.elements and isinstance(a.elements[0], vera_ast.ArrayLit)
+        )
+        ctx = MonoContext(
+            generic_decls={}, ctor_to_adt={}, ctor_tp_indices={},
+            adt_tp_counts={}, type_aliases={}, type_alias_params={},
+            fn_ret_types={},
+        )
+        info = Monomorphizer(ctx)._get_arg_type_info(outer, {})
+        assert info == ("Array", ("Array<Int>",)), (
+            f"got {info} — a nested array literal must expose its element "
+            f"type full-depth so Array<Array<E>> can bind E (#769 gap 2)"
+        )
+
+
+class TestMonomorphizerCompleteness769:
+    """#769 end-to-end: the three completeness gaps, each driven through
+    compile + execute with expected values that CANNOT coincide with the
+    ``Bool`` phantom default (strings, and 100-vs-3 non-commutative picks).
+
+    Codegen and the verifier share the ``Monomorphizer``, so ``vera verify``
+    is green on every one of these while the pre-fix runtime behavior is a
+    trap, a dropped ``main``, or a silently wrong answer — the
+    agree-but-wrong signature the issue documents.
+    """
+
+    _IO = """\
+effect IO {
+  op print(String -> Unit);
+}
+
+"""
+
+    # -- gap 1: parameterized builtin return in generic-arg position --------
+
+    _FIRST_CHARS = _IO + """\
+private forall<T> fn first(@Array<T> -> @T)
+  requires(array_length(@Array<T>.0) > 0)
+  ensures(true)
+  effects(pure)
+{
+  @Array<T>.0[0]
+}
+
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  IO.print(first(string_chars("abc")))
+}
+"""
+
+    def test_builtin_parameterized_return_runs(self) -> None:
+        """``first(string_chars("abc"))`` must bind T=String and print "a".
+        Pre-fix both sides agree on the wrong ``first$Bool`` clone and the
+        emitted module fails WASM validation at run time."""
+        out = _run_io(self._FIRST_CHARS, fn="main")
+        assert out.strip() == "a", (
+            f"expected 'a'; got {out!r} — string_chars' Array<String> return "
+            f"did not bind T (#769 gap 1)"
+        )
+
+    def test_builtin_parameterized_return_mangles_string(self) -> None:
+        result = _compile_ok(self._FIRST_CHARS)
+        wat = result.wat or ""
+        assert "$first$String" in wat
+        assert "$first$Bool" not in wat, (
+            "phantom Bool clone emitted — _BUILTIN_PARAMETERIZED_RETURNS is "
+            "missing string_chars (#769 gap 1)"
+        )
+
+    # -- gap 1b: simple-name divergence (discovery vs call-rewrite) ---------
+
+    _IDENT_SCALAR = _IO + """\
+private forall<T> fn ident(@T -> @T)
+  requires(true) ensures(true) effects(pure)
+{ @T.0 }
+
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  IO.print(ident(int_to_string(42)))
+}
+"""
+
+    _IDENT_CONTAINER = _IO + """\
+private forall<T> fn ident(@T -> @T)
+  requires(true) ensures(true) effects(pure)
+{ @T.0 }
+
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  IO.print(to_string(array_length(ident(string_chars("abc")))))
+}
+"""
+
+    def test_builtin_simple_return_scalar_runs(self) -> None:
+        """``ident(int_to_string(42))`` at a bare ``@T`` formal: discovery
+        must bind T=String exactly like the call-rewrite chain does.
+        Pre-fix discovery phantom-defaults to Bool while the rewrite mangles
+        ``ident$String`` — dangling clone, ``main`` dropped (#769 gap 1b)."""
+        out = _run_io(self._IDENT_SCALAR, fn="main")
+        assert out.strip() == "42", (
+            f"expected '42'; got {out!r} — simple-name table diverged from "
+            f"the call-rewrite chain (#769 gap 1b)"
+        )
+
+    def test_builtin_simple_return_container_runs(self) -> None:
+        """Same divergence, container family: ``ident(string_chars(...))``
+        must bind T=Array on BOTH sides."""
+        out = _run_io(self._IDENT_CONTAINER, fn="main")
+        assert out.strip() == "3", (
+            f"expected '3'; got {out!r} — simple-name table diverged from "
+            f"the call-rewrite chain (#769 gap 1b)"
+        )
+
+    def test_builtin_simple_return_no_skip_notes(self) -> None:
+        """Compile-time discriminator for the desync: no dangling-clone
+        skip notes, and the call site must reference ``$ident$String``."""
+        result = _compile_ok(self._IDENT_SCALAR)
+        wat = result.wat or ""
+        assert "$ident$String" in wat
+        assert "$ident$Bool" not in wat, (
+            "discovery emitted the phantom Bool clone the rewrite never "
+            "calls (#769 gap 1b)"
+        )
+        skip_notes = [
+            d for d in result.diagnostics
+            if "function skipped" in str(d.description)
+            or "No exported functions" in str(d.description)
+        ]
+        assert not skip_notes, (
+            f"main was dropped over a dangling clone: "
+            f"{[str(d.description) for d in skip_notes]}"
+        )
+
+    # -- gap 2: nested type-argument unification ----------------------------
+
+    _HEAD_HEAD = _IO + """\
+private forall<E> fn head_head(@Array<Array<E>> -> @E)
+  requires(
+    array_length(@Array<Array<E>>.0) > 0
+      && array_length(@Array<Array<E>>.0[0]) > 0
+  )
+  ensures(true)
+  effects(pure)
+{
+  @Array<Array<E>>.0[0][0]
+}
+
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  let @Array<Array<Int>> = [[100, 3]];
+  let @Int = head_head(@Array<Array<Int>>.0);
+  IO.print(to_string(@Int.0))
+}
+"""
+
+    def test_nested_unification_runs(self) -> None:
+        """``Array<Array<E>>`` matched against ``Array<Array<Int>>`` must
+        bind E=Int at depth 2.  Pre-fix E stays unbound, the Bool clone is
+        instantiated (the E521 warning literally names ``head_head<Bool>``)
+        and the run traps on the i64/i32 ABI mismatch."""
+        out = _run_io(self._HEAD_HEAD, fn="main")
+        assert out.strip() == "100", (
+            f"expected '100'; got {out!r} — nested type-arg unification "
+            f"stayed one level deep (#769 gap 2)"
+        )
+
+    def test_nested_unification_mangles_int(self) -> None:
+        result = _compile_ok(self._HEAD_HEAD)
+        wat = result.wat or ""
+        assert "$head_head$Int" in wat
+        assert "$head_head$Bool" not in wat, (
+            "phantom Bool clone — _unify_param_arg did not recurse into "
+            "nested type args (#769 gap 2)"
+        )
+
+    # -- gap 3: scope-aware De Bruijn reindexing -----------------------------
+
+    _CONFUSE_LET = _IO + """\
+private forall<A, B> fn confuse(@A, @B -> @A)
+  requires(true) ensures(true) effects(pure)
+{
+  let @B = @B.0;
+  @A.0
+}
+
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  let @Int = confuse(100, 3);
+  IO.print(to_string(@Int.0))
+}
+"""
+
+    _KEEP_CONCRETE_LET = _IO + """\
+private forall<A> fn keep(@A -> @A)
+  requires(true) ensures(true) effects(pure)
+{
+  let @Int = 5;
+  @A.0
+}
+
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  let @Int = keep(100);
+  IO.print(to_string(@Int.0))
+}
+"""
+
+    _CONFUSE2_NESTED = _IO + """\
+private forall<A, B> fn confuse2(@Array<Option<A>>, @Array<Option<B>> -> @Option<A>)
+  requires(array_length(@Array<Option<A>>.0) > 0)
+  ensures(true)
+  effects(pure)
+{
+  @Array<Option<A>>.0[0]
+}
+
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  let @Array<Option<Int>> = [Some(3)];
+  let @Array<Option<Int>> = [Some(100)];
+  match confuse2(@Array<Option<Int>>.0, @Array<Option<Int>>.1) {
+    Some(@Int) -> IO.print(to_string(@Int.0)),
+    None -> IO.print("NONE")
+  }
+}
+"""
+
+    _PICK_MATCH = _IO + """\
+private forall<A, B> fn pick(@A, @B -> @A)
+  requires(true) ensures(true) effects(pure)
+{
+  match Some(@B.0) {
+    Some(@B) -> @A.0,
+    None -> @A.0
+  }
+}
+
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  let @Int = pick(100, 3);
+  IO.print(to_string(@Int.0))
+}
+"""
+
+    _VIA_CLOSURE = _IO + """\
+private forall<A, B> fn via(@A, @B -> @A)
+  requires(true) ensures(true) effects(pure)
+{
+  apply_fn(fn(@B -> @A) effects(pure) { @A.0 }, @B.0)
+}
+
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  let @Int = via(100, 3);
+  IO.print(to_string(@Int.0))
+}
+"""
+
+    _GUARDED_ENSURES = _IO + """\
+private forall<A, B> fn guarded(@A, @B -> @A)
+  requires(true)
+  ensures(@A.result == @A.0)
+  effects(pure)
+{
+  let @B = @B.0;
+  @A.0
+}
+
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  let @Int = guarded(100, 3);
+  IO.print(to_string(@Int.0))
+}
+"""
+
+    def test_reindex_body_let(self) -> None:
+        """A body ``let`` of a collapsing type shifts the later ``@A.0``:
+        the answer is the FIRST argument (100), not the second (3)."""
+        out = _run_io(self._CONFUSE_LET, fn="main")
+        assert out.strip() == "100", (
+            f"expected '100'; got {out!r} — params-only reindex read the "
+            f"wrong slot after a body let (#769 gap 3)"
+        )
+
+    def test_reindex_single_var_concrete_let(self) -> None:
+        """One type variable suffices: a body ``let @Int`` interposes and
+        ``@A.0`` must still reach the parameter (100), not the let (5)."""
+        out = _run_io(self._KEEP_CONCRETE_LET, fn="main")
+        assert out.strip() == "100", (
+            f"expected '100'; got {out!r} — @A.0 resolved to the body let "
+            f"after collapse (#769 gap 3)"
+        )
+
+    def test_reindex_nested_slot_name_collapse(self) -> None:
+        """``Array<Option<A>>``/``Array<Option<B>>`` collapse at A=B=Int;
+        the body ref must follow its ORIGINAL binder (arrA -> Some(100))."""
+        out = _run_io(self._CONFUSE2_NESTED, fn="main")
+        assert out.strip() == "100", (
+            f"expected '100'; got {out!r} — one-level slot-name truncation "
+            f"hid the collapse (#769 gap 3)"
+        )
+
+    def test_reindex_branch_let_scoped(self) -> None:
+        """Behavioral twin of the leak test: with the branch let correctly
+        popped, ``@A.0`` still resolves to the parameter (100); a leaking
+        walker shifts it to a dangling index and the program fails to
+        compile (E699)."""
+        source = self._IO + """\
+private forall<A> fn branchy(@A, @Bool -> @A)
+  requires(true) ensures(true) effects(pure)
+{
+  let @Bool = if @Bool.0 then { let @Int = 5; true } else { false };
+  @A.0
+}
+
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  let @Int = branchy(100, true);
+  IO.print(to_string(@Int.0))
+}
+"""
+        out = _run_io(source, fn="main")
+        assert out.strip() == "100", (
+            f"expected '100'; got {out!r} — branch-scoped let leaked into "
+            f"the reindex scope (#769 gap 3)"
+        )
+
+    def test_reindex_match_binder(self) -> None:
+        """A match-arm binder interposes inside its arm only."""
+        out = _run_io(self._PICK_MATCH, fn="main")
+        assert out.strip() == "100", (
+            f"expected '100'; got {out!r} — match-arm binder not counted "
+            f"by the reindex (#769 gap 3)"
+        )
+
+    def test_reindex_closure_param(self) -> None:
+        """A closure parameter interposes inside the closure body only."""
+        out = _run_io(self._VIA_CLOSURE, fn="main")
+        assert out.strip() == "100", (
+            f"expected '100'; got {out!r} — closure param not counted by "
+            f"the reindex (#769 gap 3)"
+        )
+
+    def test_reindex_contracts_params_only(self) -> None:
+        """The ensures scope is params-only even with a body let present;
+        the proved postcondition must describe the CORRECT body (result ==
+        first argument)."""
+        out = _run_io(self._GUARDED_ENSURES, fn="main")
+        assert out.strip() == "100", (
+            f"expected '100'; got {out!r} — contract/body scope confusion "
+            f"in the reindex (#769 gap 3)"
+        )
+
+    # -- gap 1b, logic-arm parity: call shapes with no fixed table entry ----
+
+    _APPLY_FN_ARG = _IO + """\
+private forall<T> fn ident(@T -> @T)
+  requires(true) ensures(true) effects(pure)
+{ @T.0 }
+
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  let @Int = ident(apply_fn(fn(@Int -> @Int) effects(pure) { @Int.0 * 2 }, 21));
+  IO.print(to_string(@Int.0))
+}
+"""
+
+    _GENERIC_I32_RET_ARG = _IO + """\
+private forall<T> fn ident(@T -> @T)
+  requires(true) ensures(true) effects(pure)
+{ @T.0 }
+
+private forall<U> fn pass(@U -> @U)
+  requires(true) ensures(true) effects(pure)
+{ @U.0 }
+
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  match ident(pass(Some(42))) {
+    Some(@Int) -> IO.print(to_string(@Int.0)),
+    None -> IO.print("NONE")
+  }
+}
+"""
+
+    _GENERIC_NAT_RET_ARG = _IO + """\
+private forall<T> fn ident(@T -> @T)
+  requires(true) ensures(true) effects(pure)
+{ @T.0 }
+
+private forall<U> fn passnat(@U -> @Nat)
+  requires(true) ensures(true) effects(pure)
+{ 7 }
+
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  let @Nat = ident(passnat(1));
+  IO.print(to_string(@Nat.0))
+}
+"""
+
+    _ASYNC_ARG = _IO + """\
+private forall<T> fn ident(@T -> @T)
+  requires(true) ensures(true) effects(pure)
+{ @T.0 }
+
+private fn work(@Int -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ @Int.0 + 1 }
+
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO, Async>)
+{
+  let @Int = await(ident(async(work(41))));
+  IO.print(to_string(@Int.0))
+}
+"""
+
+    _AWAIT_ARG = _IO + """\
+private forall<T> fn ident(@T -> @T)
+  requires(true) ensures(true) effects(pure)
+{ @T.0 }
+
+private fn work(@Int -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ @Int.0 + 1 }
+
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO, Async>)
+{
+  let @Future<Int> = async(work(41));
+  let @Int = ident(await(@Future<Int>.0));
+  IO.print(to_string(@Int.0))
+}
+"""
+
+    def test_apply_fn_return_in_generic_arg(self) -> None:
+        """``ident(apply_fn(closure, 21))``: the rewrite chain infers the
+        closure's declared return (Int); discovery must infer the SAME name,
+        not the phantom default — else ``ident$Int`` is called but never
+        emitted and ``main`` is dropped (#769, logic-arm parity)."""
+        out = _run_io(self._APPLY_FN_ARG, fn="main")
+        assert out.strip() == "42", (
+            f"expected '42'; got {out!r} — discovery lacks the apply_fn "
+            f"closure-return arm the rewrite chain has (#769)"
+        )
+
+    def test_apply_fn_arg_mangles_int(self) -> None:
+        result = _compile_ok(self._APPLY_FN_ARG)
+        wat = result.wat or ""
+        assert "$ident$Int" in wat
+        assert "$ident$Bool" not in wat, (
+            "discovery emitted the phantom Bool clone for an apply_fn "
+            "argument the rewrite manglings as $Int (#769)"
+        )
+
+    def test_generic_i32_return_in_generic_arg(self) -> None:
+        """``ident(pass(Some(42)))``: discovery substitutes the callee's
+        declared return (``Option``); the rewrite's generic branch must do
+        the SAME substitution instead of WAT-collapsing i32 to "Bool"
+        (#769, generic-return parity)."""
+        out = _run_io(self._GENERIC_I32_RET_ARG, fn="main")
+        assert out.strip() == "42", (
+            f"expected '42'; got {out!r} — the rewrite WAT-collapsed a "
+            f"generic i32-handle return to Bool (#769)"
+        )
+
+    def test_generic_nat_return_in_generic_arg(self) -> None:
+        """``ident(passnat(1))``: declared ``Nat`` return — discovery says
+        ``Nat``; the rewrite's i64 WAT-collapse said ``Int`` (#769)."""
+        out = _run_io(self._GENERIC_NAT_RET_ARG, fn="main")
+        assert out.strip() == "7", (
+            f"expected '7'; got {out!r} — generic declared-Nat return "
+            f"desynced from the i64 WAT collapse (#769)"
+        )
+
+    def test_async_future_in_generic_arg(self) -> None:
+        """``ident(async(work(41)))``: both sides must name the instantiation
+        ``Future<Int>`` (#769, logic-arm parity)."""
+        out = _run_io(self._ASYNC_ARG, fn="main")
+        assert out.strip() == "42", (
+            f"expected '42'; got {out!r} — async in generic-arg position "
+            f"desynced (#769)"
+        )
+
+    def test_await_result_in_generic_arg(self) -> None:
+        """``ident(await(@Future<Int>.0))``: both sides must strip the
+        ``Future<>`` wrapper identically (#769, logic-arm parity)."""
+        out = _run_io(self._AWAIT_ARG, fn="main")
+        assert out.strip() == "42", (
+            f"expected '42'; got {out!r} — await in generic-arg position "
+            f"desynced (#769)"
+        )
+
+    # -- adversarial-panel round: handler-state scope + prelude overrides ---
+
+    _STATE_BODY = _IO + """\
+private forall<A> fn through_state(@A -> @A)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[State<Int>](@Int = 0) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) } with @Int = @Int.0
+  } in {
+    put(7);
+    @A.0
+  }
+}
+
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  IO.print(to_string(through_state(100)))
+}
+"""
+
+    _STATE_BODY_SILENT = _IO + """\
+private forall<A> fn through_state2(@Int, @A -> @A)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[State<Int>](@Int = 0) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) } with @Int = @Int.0
+  } in {
+    put(7);
+    @A.0
+  }
+}
+
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  IO.print(to_string(through_state2(3, 100)))
+}
+"""
+
+    _OVERRIDE_OPTION_MAP = _IO + """\
+public fn option_map(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 42)
+  effects(pure)
+{
+  42
+}
+
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  IO.print("value=\\(option_map(()))")
+}
+"""
+
+    _OVERRIDE_JSON_TYPE = _IO + """\
+public fn json_type(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 7)
+  effects(pure)
+{
+  7
+}
+
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  IO.print("x=\\(json_type(()))")
+}
+"""
+
+    def test_reindex_state_handler_body(self) -> None:
+        """A ``State<T>``-handled body carries NO state slot binding in
+        codegen (state lives in host-side cells; ``_translate_handle_state``
+        translates the body with the env unchanged) — the reindex walker
+        must not count one.  A walker that mirrors the CHECKER's extra
+        body-scope state binding shifts ``@A.0`` to a dangling index (E699)
+        here (adversarial panel, PR #972)."""
+        out = _run_io(self._STATE_BODY, fn="main")
+        assert out.strip() == "100", (
+            f"expected '100'; got {out!r} — the reindex counted a handler "
+            f"state binding codegen never pushes"
+        )
+
+    def test_reindex_state_handler_body_silent(self) -> None:
+        """Same shape with a second param below ``@A``: the phantom state
+        binding lands the ref on an IN-RANGE but wrong local — silent wrong
+        answer (3), not an E699."""
+        out = _run_io(self._STATE_BODY_SILENT, fn="main")
+        assert out.strip() == "100", (
+            f"expected '100'; got {out!r} — the reindex counted a handler "
+            f"state binding codegen never pushes (silent variant)"
+        )
+
+    def test_prelude_override_not_shadowed_by_dict(self) -> None:
+        """``option_map`` is an E151-EXEMPT, user-overridable prelude
+        combinator (#815).  The shared builtin-name dict must not shadow a
+        user's override: the interpolation types the call by the USER's
+        declared return (Int), not the prelude signature — pre-gate the
+        literal segments were silently dropped (adversarial panel, PR #972)."""
+        out = _run_io(self._OVERRIDE_OPTION_MAP, fn="main")
+        assert out.strip() == "value=42", (
+            f"expected 'value=42'; got {out!r} — the builtin-name dict "
+            f"shadowed a user override of a prelude combinator"
+        )
+
+    def test_prelude_override_json_type_no_trap(self) -> None:
+        """Same gate, trap variant: an overridden ``json_type`` returning
+        Int must not be typed as the prelude's String (pre-gate: WASM
+        validation failure at run time)."""
+        out = _run_io(self._OVERRIDE_JSON_TYPE, fn="main")
+        assert out.strip() == "x=7", (
+            f"expected 'x=7'; got {out!r} — the builtin-name dict shadowed "
+            f"a user override of json_type"
+        )
+
+    _OVERRIDE_INTO_GENERIC = _IO + """\
+public fn option_map(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 42)
+  effects(pure)
+{
+  42
+}
+
+private forall<T> fn ident_ov(@T -> @T)
+  requires(true) ensures(true) effects(pure)
+{ @T.0 }
+
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  IO.print(to_string(ident_ov(option_map(()))))
+}
+"""
+
+    def test_prelude_override_binds_generic_by_declared_type(self) -> None:
+        """The override gate must hold on the DISCOVERY side too: a generic
+        bound from an overridden combinator's return must instantiate at the
+        user's declared type (Int), not the prelude signature — else
+        discovery emits ``ident_ov$Option`` while the gated rewrite calls
+        ``ident_ov$Int`` (dangling, ``main`` dropped)."""
+        out = _run_io(self._OVERRIDE_INTO_GENERIC, fn="main")
+        assert out.strip() == "42", (
+            f"expected '42'; got {out!r} — discovery and rewrite gate the "
+            f"override differently"
+        )
+
+    _NESTED_WHERE = _IO + """\
+private forall<A> fn outer(@A -> @A)
+  requires(true) ensures(true) effects(pure)
+{
+  helper(@A.0)
+}
+where {
+  fn helper(@A -> @A)
+    requires(true) ensures(true) effects(pure)
+  {
+    inner(@A.0)
+  }
+  where {
+    fn inner(@A -> @A)
+      requires(true) ensures(true) effects(pure)
+    {
+      let @Int = 5;
+      @A.0
+    }
+  }
+}
+
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  IO.print(to_string(outer(100)))
+}
+"""
+
+    def test_reindex_nested_where_fn(self) -> None:
+        """``where`` blocks nest; the reindex walker must recurse into a
+        helper's OWN ``where_fns`` (each an independent param-rooted scope)
+        — a depth-1 walk leaves the nested helper's collapsed indices stale
+        and it silently reads its body ``let`` (5) instead of the parameter
+        (PR #972 review)."""
+        out = _run_io(self._NESTED_WHERE, fn="main")
+        assert out.strip() == "100", (
+            f"expected '100'; got {out!r} — nested where-fn indices were "
+            f"not reindexed"
         )

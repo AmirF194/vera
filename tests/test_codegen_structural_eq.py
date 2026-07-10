@@ -717,8 +717,9 @@ public fn diff(@Unit -> @Bool) requires(true) ensures(true) effects(pure)
 # content, so an equal result on `same` proves the derived Eq compares by VALUE
 # (recurses into `$eq_Inner`), not by the wrapper pointer — the run differential
 # that a pointer-identity mis-compile would fail (`same` would be 0).  This
-# exercises the constructor path WITHOUT the String-returning-builtin inference
-# gap (#769) that `string_concat` args would hit.
+# exercises the constructor path in isolation from builtin-return inference
+# (the pre-#769 String-returning-builtin gap that `string_concat` args once
+# hit — since fixed by the registry-complete builtin tables).
 _BOX_NESTED_CTOR_EQ = """\
 public data Inner { MkInner(Int) }
 public data Box<T> { MkBox(T) }

@@ -150,11 +150,24 @@ class TestHistoryRowFormat:
         assert len(errors) == 1
         assert "2 issue links" in errors[0]
 
-    def test_em_dash_separator_fails(self) -> None:
-        text = "| v0.0.5 | 1 Mar | Feature — detail clause. |\n"
+    def test_single_lead_in_dash_passes(self) -> None:
+        # The v0.1.x-era template: **bold lead-in** — clauses (one dash).
+        text = "| v0.1.5 | 1 Mar | **Feature** — detail clause. |\n"
+        assert _MOD.check_history_row_format(text) == []
+
+    def test_second_em_dash_fails(self) -> None:
+        text = "| v0.0.5 | 1 Mar | Feature — detail — second clause. |\n"
         errors = _MOD.check_history_row_format(text)
         assert len(errors) == 1
         assert "separator" in errors[0]
+
+    def test_v01_rows_are_inspected(self) -> None:
+        # The pre-#972 regex was pinned to v0.0.x; v0.1.x rows went
+        # uninspected entirely.
+        text = f"| v0.1.5 | 1 Mar | Two fixes ({_LINK}, {_LINK2}). |\n"
+        errors = _MOD.check_history_row_format(text)
+        assert len(errors) == 1
+        assert "2 issue links" in errors[0]
 
     def test_dateless_rows_exempt(self) -> None:
         text = f"| — | 1 Mar | Tooling row — with links {_LINK} {_LINK2}. |\n"
@@ -169,6 +182,6 @@ class TestHistoryRowFormat:
         assert _MOD.check_history_row_format(text) == []
 
     def test_reports_line_numbers(self) -> None:
-        text = "line one\n| v0.0.9 | 2 Mar | Bad — row. |\n"
+        text = "line one\n| v0.0.9 | 2 Mar | Bad — row — twice. |\n"
         errors = _MOD.check_history_row_format(text)
         assert "line 2" in errors[0]

@@ -5,6 +5,7 @@ from __future__ import annotations
 from vera import ast
 from vera.monomorphize import (
     _BUILTIN_PARAMETERIZED_RETURNS,
+    _BUILTIN_VERA_RETURN_TYPES,
     Monomorphizer,
     declared_return_clone_key,
     resolve_fn_type_alias,
@@ -1030,99 +1031,6 @@ class InferenceMixin:
         the return TypeExpr.  For non-generic calls, maps from WASM
         return type back to Vera type name.
         """
-        if call.name == "array_length":
-            return "Int"
-        if call.name in ("array_range", "array_slice"):
-            return "Array"
-        # Array utilities (#466 phase 1).
-        if call.name in (
-            "array_mapi", "array_reverse", "array_flatten", "array_sort_by",
-        ):
-            return "Array"
-        if call.name == "array_find":
-            return "Option"
-        if call.name in ("array_any", "array_all"):
-            return "Bool"
-        if call.name == "string_length":
-            return "Int"
-        if call.name in ("string_concat", "string_slice", "string_strip",
-                          "to_string", "int_to_string",
-                          "bool_to_string", "nat_to_string",
-                          "byte_to_string", "float_to_string"):
-            return "String"
-        if call.name == "string_char_code":
-            return "Nat"
-        if call.name == "string_from_char_code":
-            return "String"
-        if call.name == "string_repeat":
-            return "String"
-        # String search builtins
-        if call.name in ("string_contains", "string_starts_with",
-                          "string_ends_with"):
-            return "Bool"
-        if call.name == "string_index_of":
-            return "Option"
-        # String transformation builtins
-        if call.name in ("string_upper", "string_lower", "string_replace",
-                          "string_join"):
-            return "String"
-        if call.name == "string_split":
-            return "Array"
-        # String utility built-ins (#470).
-        if call.name in (
-            "string_pad_start", "string_pad_end",
-            "string_reverse", "string_trim_start", "string_trim_end",
-            "char_to_upper", "char_to_lower",
-        ):
-            return "String"
-        if call.name in ("string_chars", "string_lines", "string_words"):
-            return "Array"
-        # Character classification (#471) → Bool.
-        if call.name in (
-            "is_digit", "is_alpha", "is_alphanumeric",
-            "is_whitespace", "is_upper", "is_lower",
-        ):
-            return "Bool"
-        if call.name in (
-            "parse_nat", "parse_int", "parse_float64", "parse_bool",
-            "base64_decode", "url_decode",
-        ):
-            return "Result"
-        if call.name in ("base64_encode", "url_encode", "url_join"):
-            return "String"
-        if call.name == "url_parse":
-            return "Result"
-        # Markdown builtins
-        if call.name == "md_parse":
-            return "Result"
-        if call.name == "md_render":
-            return "String"
-        # Json builtins
-        if call.name == "json_parse":
-            return "Result"
-        if call.name == "json_stringify":
-            return "String"
-        # Html builtins
-        if call.name == "html_parse":
-            return "Result"
-        if call.name == "html_to_string":
-            return "String"
-        if call.name == "html_query":
-            return "Array"
-        if call.name == "html_text":
-            return "String"
-        if call.name == "html_attr":
-            return "Option"
-        if call.name in ("md_has_heading", "md_has_code_block"):
-            return "Bool"
-        if call.name == "md_extract_code_blocks":
-            return "Array"
-        # Regex builtins — all return Result
-        if call.name in (
-            "regex_match", "regex_find", "regex_find_all",
-            "regex_replace",
-        ):
-            return "Result"
         # apply_fn(closure, args...) — infer from closure's return type.
         #
         # The closure-arg return TypeExpr is extracted by the shared
@@ -1146,43 +1054,6 @@ class InferenceMixin:
                 canonical = self._canonical_named_type(ret_te)
                 if canonical is not None:
                     return self._format_named_type(canonical)
-        # Map builtins
-        if call.name in ("map_new", "map_insert", "map_remove"):
-            return "Map"
-        if call.name == "map_get":
-            return "Option"
-        if call.name == "map_contains":
-            return "Bool"
-        if call.name == "map_size":
-            return "Int"
-        if call.name in ("map_keys", "map_values"):
-            return "Array"
-        # Set builtins
-        if call.name in ("set_new", "set_add", "set_remove"):
-            return "Set"
-        if call.name == "set_contains":
-            return "Bool"
-        if call.name == "set_size":
-            return "Int"
-        if call.name == "set_to_array":
-            return "Array"
-        # Decimal builtins
-        if call.name in ("decimal_from_int", "decimal_from_float",
-                          "decimal_add", "decimal_sub", "decimal_mul",
-                          "decimal_neg", "decimal_round", "decimal_abs"):
-            return "Decimal"
-        if call.name == "decimal_from_string":
-            return "Option"
-        if call.name == "decimal_div":
-            return "Option"
-        if call.name == "decimal_to_string":
-            return "String"
-        if call.name == "decimal_to_float":
-            return "Float64"
-        if call.name == "decimal_compare":
-            return "Ordering"
-        if call.name == "decimal_eq":
-            return "Bool"
         # Ability operations: show → String, hash → Int.  #908: skip the name
         # special-case when the user has defined `fn show` / `fn hash` (the
         # checker doesn't reserve these ability-op names), so the Vera element
@@ -1212,39 +1083,23 @@ class InferenceMixin:
             if inner and inner.startswith("Future<") and inner.endswith(">"):
                 return inner[7:-1]
             return inner
-        # Numeric math builtins
-        if call.name == "abs":
-            return "Nat"
-        if call.name in ("min", "max", "floor", "ceil", "round"):
-            return "Int"
-        if call.name in ("sqrt", "pow"):
-            return "Float64"
-        # Math builtins (#467) — mirror the WASM-type branches
-        # above so Vera-level type inference also handles these.
-        # Without these, code that nests a math call inside an
-        # expression whose Vera type is needed upstream (e.g.
-        # generics inference, `show`, `hash`) falls back to None
-        # and triggers mis-compiles.
-        if call.name in (
-            "log", "log2", "log10",
-            "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
-            "pi", "e", "float_clamp",
-        ):
-            return "Float64"
-        if call.name in ("sign", "clamp"):
-            return "Int"
-        # Numeric type conversions
-        if call.name == "int_to_float":
-            return "Float64"
-        if call.name in ("float_to_int", "nat_to_int", "byte_to_int"):
-            return "Int"
-        if call.name in ("int_to_nat", "int_to_byte"):
-            return "Option"
-        # Float64 predicates and constants
-        if call.name in ("float_is_nan", "float_is_infinite"):
-            return "Bool"
-        if call.name in ("nan", "infinity"):
-            return "Float64"
+        # Registry-complete builtin simple-name table (#769 gap 1b) — the SAME
+        # dict instantiation discovery consults
+        # (Monomorphizer._infer_fncall_vera_type_simple), so the two clone-name
+        # consultors cannot drift: an entry added there lands here atomically.
+        # Consulted AFTER the logic arms above (apply_fn / show / hash /
+        # async / await), which need call-shape context no fixed table has —
+        # e.g. `async` prefers the richer "Future<Int>" over the dict's bare
+        # "Future".  Gated on non-registration: a name in _fn_ret_types is a
+        # REAL declaration — a user fn, or a user OVERRIDE of an E151-exempt
+        # prelude combinator (#815: option_map, the json_* family, html_attr)
+        # — whose declared type must win, exactly like the #908 show/hash
+        # gate (adversarial panel, PR #972).  Opaque builtins are never
+        # registered there and fall through to the dict.
+        if call.name not in self._fn_ret_types:
+            builtin_simple = _BUILTIN_VERA_RETURN_TYPES.get(call.name)
+            if builtin_simple is not None:
+                return builtin_simple
         if call.name in self._generic_fn_info:
             forall_vars, param_types = self._generic_fn_info[call.name]
             constrained_vars = self._generic_constrained_vars.get(
@@ -1267,6 +1122,19 @@ class InferenceMixin:
             # built by the same encoding.  (The pre-#775 site joined RAW
             # type names with "_", which additionally missed every
             # parameterized instantiation like Map<String, Int>.)
+            # #769: prefer the callee's DECLARED return TypeExpr substituted
+            # with the inferred instantiation — exactly the substitution
+            # discovery performs (Monomorphizer._infer_fncall_vera_type), so
+            # both sides mangle the same clone for a generic call in
+            # argument position.  The WAT collapse below names an i32-handle
+            # return "Bool" and a declared-Nat i64 return "Int" — names
+            # discovery never emits (dangling-E602 desyncs pre-#769).
+            decl_ret = self._fn_ret_type_exprs.get(call.name)
+            if isinstance(decl_ret, ast.RefinementType):
+                decl_ret = decl_ret.base_type
+            if isinstance(decl_ret, ast.NamedType):
+                sub_map = dict(zip(forall_vars, parts))
+                return sub_map.get(decl_ret.name, decl_ret.name)
             mangled = Monomorphizer._mangle_fn_name(call.name, tuple(parts))
             # Look up WASM return type and map back
             ret_wt = self._fn_ret_types.get(mangled)
@@ -1675,8 +1543,22 @@ class InferenceMixin:
             # phantom-var `Bool` default, and mangled the call to
             # `map_ident$Bool` while discovery emitted `map_ident$Int` — a
             # dangling reference that dropped the enclosing fn.
+            # #769 gap 2: FULL-DEPTH element name (nested literal /
+            # constructor element), mirroring the discovery-side
+            # `_array_elem_type_name` exactly — element-name granularity is
+            # part of the clone-name agreement contract (#772), so the two
+            # sides must move together.
             if expr.elements:
-                elem_type = self._infer_vera_type(expr.elements[0])
+                elem = expr.elements[0]
+                elem_type: str | None = None
+                elem_info = self._get_arg_type_info_wasm(elem)
+                if elem_info is not None:
+                    outer, args = elem_info
+                    if args and all(a is not None for a in args):
+                        joined = ", ".join(a for a in args if a is not None)
+                        elem_type = f"{outer}<{joined}>"
+                if elem_type is None:
+                    elem_type = self._infer_vera_type(elem)
                 if elem_type:
                     return ("Array", (elem_type,))
             return ("Array", ())
@@ -1690,11 +1572,14 @@ class InferenceMixin:
             # instantiation discovery agree on the concrete instantiation.
             # Without it, `option_unwrap_or(decimal_div(a, b), …)` bound
             # nothing from arg0 and fell through to the phantom-var default.
-            param_ret = _BUILTIN_PARAMETERIZED_RETURNS.get(expr.name)
-            if param_ret is not None:
-                return param_ret
-            if expr.name == "array_range":
-                return ("Array", ("Int",))
+            # Gated on non-registration, mirroring the discovery side: a
+            # registered name may be a user override of an E151-exempt
+            # prelude combinator (#815) whose declared return must win
+            # (adversarial panel, PR #972).
+            if expr.name not in self._fn_ret_types:
+                param_ret = _BUILTIN_PARAMETERIZED_RETURNS.get(expr.name)
+                if param_ret is not None:
+                    return param_ret
             if expr.name in ("array_concat", "array_append",
                              "array_slice", "array_filter"):
                 if expr.args:

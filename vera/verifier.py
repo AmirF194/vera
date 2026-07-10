@@ -233,6 +233,15 @@ class ContractVerifier:
         # gap above (their bodies live in another module, unreached by the
         # `program.declarations` verify loop).  Name → module FnDecl.
         self._imported_generic_verify_decls: dict[str, ast.FnDecl] = {}
+        # PR #972 review (pre-existing): the instance's TypeVar → concrete-Type
+        # mapping while a monomorphized clone is being verified, None otherwise.
+        # The #747 side-tables are SPAN-keyed and clone nodes keep their source
+        # spans, so a lookup inside a clone returns the GENERIC type
+        # (`Option<T>`); `_resolved_type_of` / `_target_type_of` substitute
+        # through this mapping so the clone sees its instantiated types
+        # (`Option<Nat>`) — without it, `is_some_g<Nat>` matching `Some(@T)`
+        # E503'd with the impossible counterexample `Some(-1)`.
+        self._instance_subst: dict[str, Type] | None = None
 
     # -----------------------------------------------------------------
     # #747: checker-provided expression types (span-keyed)
@@ -253,7 +262,8 @@ class ContractVerifier:
         pre-#747 static checks, never as a positive @Nat answer.
         """
         key = self._span_key(expr)
-        return self._expr_types.get(key) if key is not None else None
+        ty = self._expr_types.get(key) if key is not None else None
+        return self._substitute_instance(ty)
 
     def _target_type_of(self, expr: ast.Expr) -> Type | None:
         """The instantiated *expected* type *expr* was checked against
@@ -261,7 +271,23 @@ class ContractVerifier:
         ``None`` semantics as :py:meth:`_resolved_type_of`.
         """
         key = self._span_key(expr)
-        return self._expr_target_types.get(key) if key is not None else None
+        ty = self._expr_target_types.get(key) if key is not None else None
+        return self._substitute_instance(ty)
+
+    def _substitute_instance(self, ty: Type | None) -> Type | None:
+        """Apply the in-flight clone's TypeVar → concrete-Type mapping.
+
+        The side-tables record the GENERIC types at the generic body's spans
+        (the checker checks a generic once, abstractly), while clone nodes
+        keep those source spans — so under `_verify_generic_instances` a raw
+        lookup answers `Option<T>` for a scrutinee the clone types as
+        `Option<Nat>`.  Substituting the instance mapping restores the
+        clone's view (PR #972 review; pre-existing).  Outside clone
+        verification (`_instance_subst is None`) this is the identity.
+        """
+        if ty is None or not self._instance_subst or not contains_typevar(ty):
+            return ty
+        return substitute(ty, self._instance_subst)
 
     def _nat_binding_target(
         self, arg: ast.Expr, formal: Type | None
@@ -1353,6 +1379,7 @@ class ContractVerifier:
         per_instance: list[
             tuple[tuple[str, ...], list[ProofObligation], list[Diagnostic]]
         ] = []
+        assert decl.forall_vars is not None  # generic by construction  # noqa: S101
         for concrete in instances:
             clone = self._mono.monomorphize_fn(decl, concrete)
             clone = replace(clone, name=decl.name)  # keep the source name
@@ -1360,9 +1387,22 @@ class ContractVerifier:
             self.summary, self.errors, self.obligations = (
                 VerifySummary(), [], [],
             )
+            # PR #972 review (pre-existing): the #747 side-tables are span-keyed
+            # and the clone keeps its source spans, so lookups inside the clone
+            # answer the GENERIC types.  Publish this instance's TypeVar →
+            # concrete-Type mapping so `_resolved_type_of` / `_target_type_of`
+            # substitute through it — else `Some(@T)` on `@Option<T>.0` at
+            # T = Nat reads an `Option<T>` scrutinee, sees a TypeVar field
+            # under a @Nat binder, and E503s an impossible narrowing.
+            saved_subst = self._instance_subst
+            self._instance_subst = {
+                tv: self._resolve_type(Monomorphizer._parse_type_name(cn))
+                for tv, cn in zip(decl.forall_vars, concrete)
+            }
             try:
                 self._verify_fn(clone)  # forall_vars=None → normal path
             finally:
+                self._instance_subst = saved_subst
                 inst_obl, inst_err = self.obligations, self.errors
                 self.summary, self.errors, self.obligations = saved
             per_instance.append((concrete, inst_obl, inst_err))

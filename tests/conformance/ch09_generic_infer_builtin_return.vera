@@ -1,0 +1,138 @@
+-- Conformance: generic instantiation inferred from BUILTIN returns in
+--   argument position (Chapter 9)
+-- Tests: a generic function's type parameter recovered from a builtin
+--        call's return type used in argument position, across four shapes
+--        (#769): a parameterized builtin return binding a generic
+--        `Array<T> -> T` formal, a simple builtin return at a bare `@T`
+--        formal, an `apply_fn` result at a bare `@T` formal, and a nested
+--        generic call's return at a bare `@T` formal.  Pre-fix, the
+--        monomorphizer's instantiation-discovery pass did not walk into
+--        these argument-position shapes and fell back to the phantom-var
+--        default, silently monomorphizing at the wrong type on a
+--        check-green program.
+-- ================================================================
+-- first — user generic whose type parameter is bound by indexing into a
+-- builtin call's return value (string_chars returns @Array<String>).
+-- ================================================================
+private forall<T> fn first(@Array<T> -> @T)
+  requires(array_length(@Array<T>.0) > 0)
+  ensures(true)
+  effects(pure)
+{
+  @Array<T>.0[0]
+}
+
+-- ================================================================
+-- ident — a bare @T -> @T generic, used below with builtin, apply_fn, and
+-- nested-generic-call returns supplied directly in argument position.
+-- ================================================================
+private forall<T> fn ident(@T -> @T)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  @T.0
+}
+
+-- ================================================================
+-- pass — a generic call whose OWN return (Option<T>) is, in turn, used to
+-- drive ident's instantiation below.
+-- ================================================================
+private forall<T> fn pass(@Option<T> -> @Option<T>)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  @Option<T>.0
+}
+
+type IntToInt = fn(Int -> Int) effects(pure);
+
+-- ================================================================
+-- test_builtin_return_typevar
+-- first(string_chars("abc")) — string_chars is a parameterized builtin
+-- return (Array<String>) that must drive first's T = String instantiation.
+-- ================================================================
+public fn test_builtin_return_typevar(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 1)
+  effects(pure)
+{
+  let @String = first(string_chars("abc"));
+  if @String.0 == "a" then {
+    1
+  } else {
+    0
+  }
+}
+
+-- ================================================================
+-- test_bare_typevar_builtin_return
+-- ident(int_to_string(42)) — a simple builtin return (String) supplied at
+-- ident's bare @T formal; T must resolve to String, not the phantom Bool
+-- default.
+-- ================================================================
+public fn test_bare_typevar_builtin_return(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 1)
+  effects(pure)
+{
+  let @String = ident(int_to_string(42));
+  if @String.0 == "42" then {
+    1
+  } else {
+    0
+  }
+}
+
+-- ================================================================
+-- test_apply_fn_bare_typevar
+-- ident(apply_fn(closure, 21)) — apply_fn's result (Int, the closure
+-- doubles its input) supplied at ident's bare @T formal.
+-- ================================================================
+public fn test_apply_fn_bare_typevar(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 1)
+  effects(pure)
+{
+  let @IntToInt = fn(@Int -> @Int) effects(pure) { @Int.0 * 2 };
+  let @Int = ident(apply_fn(@IntToInt.0, 21));
+  if @Int.0 == 42 then {
+    1
+  } else {
+    0
+  }
+}
+
+-- ================================================================
+-- test_generic_call_return_bare_typevar
+-- ident(pass(Some(42))) — pass's own return (a generic call's return,
+-- Option<Int>) supplied at ident's bare @T formal; matched to extract 42.
+-- ================================================================
+public fn test_generic_call_return_bare_typevar(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 1)
+  effects(pure)
+{
+  let @Option<Int> = ident(pass(Some(42)));
+  match @Option<Int>.0 {
+    Some(@Int) -> if @Int.0 == 42 then { 1 } else { 0 },
+    None -> 0
+  }
+}
+
+-- ================================================================
+-- main — run all four tests, return 0 if all pass (sum == 4)
+-- ================================================================
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Int = test_builtin_return_typevar(()) + test_bare_typevar_builtin_return(()) + test_apply_fn_bare_typevar(()) + test_generic_call_return_bare_typevar(());
+  if @Int.0 == 4 then {
+    0
+  } else {
+    1
+  }
+}

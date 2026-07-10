@@ -738,10 +738,11 @@ class CallsMixin:
                 for param_ta, concrete_name in zip(
                     param_te.type_args, alias_concrete,
                 ):
-                    if (isinstance(param_ta, ast.NamedType)
-                            and param_ta.name in forall_vars
-                            and param_ta.name not in mapping):
-                        mapping[param_ta.name] = concrete_name
+                    # #769 gap 2: recursive — binds vars at any depth, via
+                    # the SAME shared implementation discovery uses.
+                    Monomorphizer._unify_type_arg_pair(
+                        param_ta, concrete_name, forall_vars, mapping,
+                    )
                 return
 
             arg_info = self._get_arg_type_info_wasm(arg)
@@ -751,11 +752,12 @@ class CallsMixin:
                 ):
                     # arg_ta_name is None for unknown ADT type-param positions
                     # (e.g. T in Err(e) where only E is inferred from Err's field).
-                    if (arg_ta_name is not None
-                            and isinstance(param_ta, ast.NamedType)
-                            and param_ta.name in forall_vars
-                            and param_ta.name not in mapping):
-                        mapping[param_ta.name] = arg_ta_name
+                    # #769 gap 2: recursive — binds vars at any depth, via the
+                    # SAME shared implementation discovery uses.
+                    if arg_ta_name is not None:
+                        Monomorphizer._unify_type_arg_pair(
+                            param_ta, arg_ta_name, forall_vars, mapping,
+                        )
 
     def _resolve_arg_fn_shape_wasm(
         self,

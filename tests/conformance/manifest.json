@@ -324,6 +324,20 @@
     ]
   },
   {
+    "id": "ch03_mono_collapse_reindex",
+    "file": "ch03_mono_collapse_reindex.vera",
+    "chapter": 3,
+    "title": "De Bruijn slot indices under monomorphization collapse (#769)",
+    "level": "run",
+    "spec_ref": "Section 3.2",
+    "features": [
+      "slot_indexing",
+      "de_bruijn",
+      "generics",
+      "monomorphization"
+    ]
+  },
+  {
     "id": "ch03_slot_let_chains",
     "file": "ch03_slot_let_chains.vera",
     "chapter": 3,
@@ -1945,6 +1959,21 @@
       "option_unwrap_or",
       "decimal_div",
       "decimal_from_string"
+    ]
+  },
+  {
+    "id": "ch09_generic_infer_builtin_return",
+    "file": "ch09_generic_infer_builtin_return.vera",
+    "chapter": 9,
+    "title": "Generic instantiation inferred from builtin returns in argument position (#769)",
+    "level": "run",
+    "spec_ref": "Section 9.1",
+    "features": [
+      "generics",
+      "forall",
+      "monomorphization",
+      "string_chars",
+      "apply_fn"
     ]
   },
   {

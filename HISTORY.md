@@ -468,6 +468,7 @@ Stages 19 and 20 run dual-threaded: community PRs against the single-source spri
 | Version | Date | What shipped |
 |---------|------|-------------|
 | v0.1.2 | 9 Jul | **The gate-hardening batch** — scheduled limitations-sync, the arm64 advisory lane, the gate-honesty pair ([#956](https://github.com/aallan/vera/issues/956)), and the E009 crash fix from the pre-release sweep. |
+| v0.1.3 | 10 Jul | **Monomorphizer completeness** ([#769](https://github.com/aallan/vera/issues/769)) — registry-complete builtin return tables (one dict, both consultors), recursive type-argument unification, the scope-aware De Bruijn collapse-reindex walker, and four sibling discovery-vs-rewrite desyncs (`apply_fn`/`async`/`await`/generic returns) found and fixed probing the class. |
 
 ---
 
