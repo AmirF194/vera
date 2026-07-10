@@ -12,13 +12,13 @@ Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verificati
 
 ## Where we are
 
-6,918 tests, 145 conformance programs, 37 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks four open bugs — all checker-front-end scoping/inference defects filed by the #769 audit (PR #972), burndown material rather than stage work — plus the *limitations* the stages below retire.
+6,918 tests, 145 conformance programs, 37 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
 
 ## Stage 19 — The verification completeness sprint
 
 *`vera verify` tells the whole truth.*
 
-Zero known bugs does not mean zero known gaps: KNOWN_ISSUES carries a family of verification-completeness limitations — an obligation not emitted, a guard not planted, an instantiation inferred wrong — individually small, sharing machinery, and exactly the shape the burndown model handles well.  The sprint's lead, the monomorphizer completeness class (the one where a program silently *did the wrong thing*), retired at v0.1.3.  The guard wave shares one architectural enabler — per-component target-type metadata in codegen — which unlocks four issues at once.
+Zero known bugs does not mean zero known gaps: KNOWN_ISSUES carries a family of verification-completeness limitations — an obligation not emitted, a guard not planted, an instantiation inferred wrong — individually small, sharing machinery, and exactly the shape the burndown model handles well.  The sprint's lead, the monomorphizer completeness class (the one where a program silently *did the wrong thing*), retired at v0.1.3.  Three family members carry the `bug` label and live in KNOWN_ISSUES' Bugs table rather than in this stage's rows ([#758](https://github.com/aallan/vera/issues/758), [#820](https://github.com/aallan/vera/issues/820), [#967](https://github.com/aallan/vera/issues/967)) — bugs are burndown material, not stage work — but the guard wave's shared architectural enabler (per-component target-type metadata in codegen) unblocks them alongside the staged rows.
 
 Exit criterion: every verification-completeness and guard-deferral row in KNOWN_ISSUES is retired.
 
@@ -27,13 +27,10 @@ Exit criterion: every verification-completeness and guard-deferral row in KNOWN_
 | [#764](https://github.com/aallan/vera/issues/764) | Call preconditions after an untranslatable `let` / `let`-destructure are not statically checked — `_translate_block` truncates, so E501 never fires though the runtime `requires` guard still holds. |
 | [#779](https://github.com/aallan/vera/issues/779) | Primitive-op obligations (E502/E526/E527) don't recurse into closure / quantifier / handler-clause bodies — fresh-slot scopes the walkers skip. |
 | [#909](https://github.com/aallan/vera/issues/909) | A value's postcondition / refinement is forgotten through an ADT field (box then unbox loses the fact), degrading provable programs to Tier 3. |
-| [#758](https://github.com/aallan/vera/issues/758) | `@Nat` narrowing not obligated at function return position or value-position tuple/constructor components — the static half of the guard-deferral family. |
 | [#754](https://github.com/aallan/vera/issues/754) | Effect-operation-argument runtime guard for `@Nat` narrowing, with a dedicated trap kind — first consumer of the per-component metadata enabler. |
 | [#757](https://github.com/aallan/vera/issues/757) | Generic-instantiated constructor-field runtime guard — second consumer of the same enabler. |
 | [#765](https://github.com/aallan/vera/issues/765) | Nested constructor sub-pattern binds (`Some(Some(@PosInt))`) runtime-guarded to match their static obligation. |
-| [#820](https://github.com/aallan/vera/issues/820) | The `@Nat` → `@Int` widening residuals: tuple / array-element / generic-field coercions guarded (today disclosed as E531 only), and the effect-op / closure / genuine-`@Int`-arm sites obligated at all. |
 | [#860](https://github.com/aallan/vera/issues/860) | Harden the four sibling shadow-stack bounds (WAT `gc_shadow_push` emitter, `$register_wrapper` slow path, browser `gcRooted`/`gcShadowPush`) to the slot-complete form #791 gave `_ShadowGuard.push` — rides here because the WAT sites re-baseline golden pins. |
-| [#967](https://github.com/aallan/vera/issues/967) | `verify --json` summary off-by-one on three examples — derive the summary from the reified obligations list instead of ~15 manual counter sites, with a summary==derived differential across examples + conformance. |
 | [#958](https://github.com/aallan/vera/issues/958) | Decide and align spec §11.8 with codegen truth: contract guards are always emitted today — either implement tier-aware omission as a deliberate optimisation or fix the spec's promise. |
 
 ## Stage 20 — The single-source sprint
