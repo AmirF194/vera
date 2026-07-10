@@ -2352,9 +2352,14 @@ These are known limitations in the current reference implementation. Most are tr
 
 ## Known Bugs and Workarounds
 
-Current reference-implementation bugs that an agent writing Vera code is likely to hit. The full curated list is in [KNOWN_ISSUES.md](https://github.com/aallan/vera/blob/main/KNOWN_ISSUES.md); the issue tracker is the source of truth.
+Current reference-implementation bugs that an agent writing Vera code is likely to hit. Every entry has a confirmed reproducer and a known workaround. The full curated list is in [KNOWN_ISSUES.md](https://github.com/aallan/vera/blob/main/KNOWN_ISSUES.md); the issue tracker is the source of truth.
 
-No known bugs.
+| Shape | Bug summary | Workaround | Issue |
+|---|---|---|---|
+| Handler state slot | Referencing the state SLOT inside a `State<T>`-handled body (`@Int.0` under `handle[State<Int>](@Int = 0)`) silently reads an enclosing same-typed binding (a parameter or `let`) instead of the state — check-green, wrong value, no diagnostic. | Always read state via `get(())` inside the handled body; never via the state slot name. | [#973](https://github.com/aallan/vera/issues/973) |
+| `where` helpers | A helper body referencing the OUTER function's parameter slot passes `check` and `verify` but fails compile with E699 (dangling slot). | Pass everything a helper needs as explicit arguments; treat `where` helpers as closed param-rooted scopes. | [#969](https://github.com/aallan/vera/issues/969) |
+| Type param named `T` | `forall<T>` collides with the builtin registry's internal generic `T` (e.g. `array_length`), producing a spurious E202/E302/E121 cascade on valid programs. | Name user type parameters anything but `T` (`E`, `A`, `B`, ...). | [#970](https://github.com/aallan/vera/issues/970) |
+| Bare `None` under `forall` | Returning a bare `None` from a `forall<T>` function declared `-> @Option<T>` is rejected with E121 (`Option<T$1>` vs `Option<T>` — a false mismatch; the fresh constructor var is never unified with the declared forall var). | Restructure so the `Option` value's type argument is determined by an expression (e.g. build it via `option_map` over a determined value), or make the function non-generic. | [#971](https://github.com/aallan/vera/issues/971) |
 
 When a Vera program type-checks cleanly, compiles without errors, and then produces a runtime trap you can't explain, runtime trap diagnostics are now Vera-native end-to-end: each trap carries a `kind` label (`divide_by_zero` / `out_of_bounds` / `stack_exhausted` / `unreachable` / `overflow` / `contract_violation` / `unknown`), a per-kind `Fix:` paragraph naming the canonical remediation, and a source backtrace pointing at the offending Vera function and line — not just `wasm trap: <reason>`.  Tail-recursive iteration runs in constant WASM stack space for both non-allocating ([#517](https://github.com/aallan/vera/issues/517), v0.0.126) and allocating ([#549](https://github.com/aallan/vera/issues/549), v0.0.154) tail calls — the latter prepends a `$gc_sp` restore before each `return_call` to keep the shadow stack bounded across iterations.
 

@@ -6,7 +6,12 @@ Bugs and limitations tracked against the [issue tracker](https://github.com/aall
 
 Defects in shipped compiler, runtime, or tooling behaviour — this table matches the issue tracker's open [`bug`-labelled issues](https://github.com/aallan/vera/issues?q=is%3Aissue%20state%3Aopen%20label%3Abug) one-to-one. Verification-soundness gaps carry the `limitation` label instead and are tracked under [Limitations](#limitations).
 
-No known bugs.
+| Bug | Issue |
+|-----|-------|
+| A `State<T>`-handled body that references the state SLOT (`@Int.0` under `handle[State<Int>](@Int = 0)`) silently reads an enclosing same-typed binding instead of the state — the checker binds handler state into the handled body's slot scope, but codegen routes state through host-side cells and never pushes the binding, so the checker-resolved index lands on whatever same-named binding encloses the handler (or fails compile with E699 when none does). Check-green, runs, wrong value, no diagnostic. Read state via `get(())`, never via the state slot name. Found by the PR #972 adversarial panel. | [#973](https://github.com/aallan/vera/issues/973) |
+| A `where`-helper body that references the OUTER function's parameter slot passes `vera check` and `vera verify`, then hard-fails compile with an E699 dangling-slot error — the checker checks helper bodies before the parent scope pops, the backends compile each helper as an independent param-rooted scope. Loud (never a wrong value), but check-green-then-compile-fail. Needs a semantics decision: reject at check, or implement closure semantics. Found by the #769 grounding audit. | [#969](https://github.com/aallan/vera/issues/969) |
+| Naming a user type parameter `T` collides with the builtin registry's internal generic parameter (e.g. `array_length`'s `forall T`), producing a spurious E202/E302/E121 cascade on otherwise-valid programs; renaming the type parameter (`forall<E>`) makes the identical program check clean. | [#970](https://github.com/aallan/vera/issues/970) |
+| A bare `None` in return position of a `forall<T>` function declared `-> @Option<T>` is rejected with E121 (`body has type Option<T$1>, expected Option<T>`) — the fresh constructor type variable is never unified with the declared forall var, so a well-typed program is refused with a message describing two types that unify trivially. | [#971](https://github.com/aallan/vera/issues/971) |
 
 ## Limitations
 
