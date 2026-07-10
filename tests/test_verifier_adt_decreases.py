@@ -7,7 +7,8 @@ from __future__ import annotations
 import pytest
 
 from vera.parser import parse_to_ast
-from vera.checker import typecheck
+from vera.checker import typecheck, typecheck_with_artifacts
+from vera.resolver import ModuleResolver
 from vera.verifier import verify
 
 from tests.verifier_helpers import (
@@ -342,7 +343,7 @@ private fn sum(@List<Int> -> @Int)
         assert result.summary.tier1_verified == 8
 
     def test_overall_tier_counts(self) -> None:
-        """All examples together: 281 T1 / 97 T3 / 378 total (current).
+        """All examples together: 284 T1 / 96 T3 / 380 total (current).
 
         Counts move when examples are added or their contracts become
         more / less verifiable.  Trajectory:
@@ -482,8 +483,21 @@ private fn sum(@List<Int> -> @Int)
         for f in sorted(EXAMPLES_DIR.glob("*.vera")):
             text = f.read_text(encoding="utf-8")
             prog = parse_to_ast(text)
-            typecheck(prog, text)
-            result = verify(prog, text, file=str(f))
+            # CLI parity (cmd_verify): resolve imports AND thread the #747
+            # semantic-type side-tables into verify().  Without the resolver,
+            # modules.vera's two imported-function obligations demote to
+            # Tier-3; without the artifacts, target-type-dependent
+            # obligations do — either way this pin would measure a pipeline
+            # no user runs (PR #983 review).
+            resolver = ModuleResolver(_root=f.parent)
+            resolved = resolver.resolve_imports(prog, f)
+            _diags, artifacts = typecheck_with_artifacts(
+                prog, text, file=str(f), resolved_modules=resolved,
+            )
+            result = verify(prog, text, file=str(f),
+                            resolved_modules=resolved,
+                            expr_types=artifacts.expr_semantic_types,
+                            expr_target_types=artifacts.expr_target_types)
             t1 += result.summary.tier1_verified
             t3 += result.summary.tier3_runtime
             total += result.summary.total
@@ -537,9 +551,27 @@ private fn sum(@List<Int> -> @Int)
         # `total`, leaving total short by three (one per demotion).  Deriving
         # the summary from the obligation stream closes it:
         # 281/94/375 -> 281/97/378.
-        assert t1 == 281, f"Expected 281 T1, got {t1}"
-        assert t3 == 97, f"Expected 97 T3, got {t3}"
-        assert total == 378, f"Expected 378 total, got {total}"
+        #
+        # #758: the @Int -> @Nat narrowing obligation (nat_bind) now fires at
+        # the RETURN position too (the dual of #813's 7c widen-return).  Two
+        # corpus returns narrow into @Nat: `absolute_value.vera::absolute_value`
+        # (`if @Int.0 >= 0 then @Int.0 else -@Int.0`) proves `>= 0` per-arm at
+        # Tier 1 (+1 T1), and `nested_closures.vera::three_d_count`
+        # (`array_length(...)` over an opaque let-bound array — array_length
+        # returns @Int) is an honest Tier-3 runtime-guarded narrowing (+1 T3).
+        #
+        # Method correction (PR #983 review): every trajectory entry above
+        # was measured through a bare `verify(prog, text)` call WITHOUT the
+        # #747 semantic-type side-tables and WITHOUT resolved modules — both
+        # of which the CLI always passes.  modules.vera's two
+        # imported-function obligations therefore read Tier-3 here while
+        # `vera verify` proves them Tier-1 (the bare-call figures were
+        # 281/97/378 pre-#758).  The loop now resolves imports and threads
+        # the artifacts (CLI parity), so the pin matches what
+        # `vera verify --json` reports: 283/95/378 -> 284/96/380.
+        assert t1 == 284, f"Expected 284 T1, got {t1}"
+        assert t3 == 96, f"Expected 96 T3, got {t3}"
+        assert total == 380, f"Expected 380 total, got {total}"
         assert t3u == 0, f"Expected 0 tier3_unguarded, got {t3u}"
 
 

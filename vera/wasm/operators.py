@@ -1689,6 +1689,16 @@ class OperatorsMixin:
         a single @Int component makes the result @Int.  Must agree with the
         verifier's ``_result_is_nat`` so the codegen guard fires at exactly the
         sites the verifier obligates (the verifier<->codegen differential).
+
+        Caveat (no-side-table fallback): when the checker's resolved-type table
+        is absent (an unverified ``transform -> compile``), the ``FnCall`` arm
+        recovers a callee's @Nat return from its *declared* return type — the
+        same coarse basis as :py:meth:`_is_static_nat_typed`, NOT the verifier's
+        precise ``_result_is_nat``.  This is deliberate: the precise join is
+        unavailable without the side-table, and over-classifying a call result
+        as @Nat here only ever suppresses a (dead) guard on a provably-@Nat
+        value — never a wrong runtime verdict — so a verified build (which
+        supplies the table) still matches the verifier site-for-site.
         """
         if isinstance(expr, ast.Block):
             return expr.expr is not None and self._result_is_nat(expr.expr)
@@ -1748,6 +1758,20 @@ class OperatorsMixin:
             resolved = self._resolved_codegen_type(expr)
             if resolved is not None:
                 return resolved == "Nat"
+            # No side-table (an unverified `vera compile`): recover a user
+            # callee's declared @Nat return from `_fn_ret_type_exprs`, mirroring
+            # the verifier's `env.lookup_function().return_type` path.
+            # `_infer_fncall_vera_type` cannot — it maps the erased i64 return
+            # back to "Int" (both @Nat and @Int lower to i64), which would make
+            # a genuine @Nat -> @Nat tail call (`count_down(@Nat.0 - 1)`) look
+            # like a narrowing and break its return_call TCO (#758).
+            decl_ret = self._fn_ret_type_exprs.get(expr.name)
+            if isinstance(decl_ret, ast.RefinementType):
+                decl_ret = decl_ret.base_type
+            if (isinstance(decl_ret, ast.NamedType)
+                    and not decl_ret.type_args
+                    and self._resolve_base_type_name(decl_ret.name) == "Nat"):
+                return True
             call = (
                 expr if isinstance(expr, ast.FnCall)
                 else ast.FnCall(name=expr.name, args=expr.args, span=expr.span)
@@ -1953,6 +1977,69 @@ class OperatorsMixin:
         if not self._is_static_nat_typed(value):
             return True
         return self._has_underflow_leaf(value)
+
+    def _collect_narrowing_return_leaves(self, body: ast.Expr) -> set[int]:
+        """The ``id()`` of every tail-position return leaf that narrows into a
+        @Nat return — the codegen mirror of the verifier's
+        ``_return_narrows_into_nat`` leaf descent (#758), but collecting leaf
+        identities so ``CodeGenerator._compile_fn`` can guard EACH narrowing
+        leaf inline instead of wrapping the whole body (#983 review).
+
+        The whole-body ``_emit_nat_bind_guard(body_instrs)`` wrap appended the
+        sign check after the entire body, which forced EVERY ``return_call`` to
+        revert to ``call`` — losing TCO for a non-narrowing @Nat->@Nat recursive
+        tail call (`drain(@Int.0 - 1)`, itself @Nat->@Nat) that then
+        stack-exhausted at depth.  Descending to each leaf and guarding only the
+        genuine narrowings (`@Int.0`, `0 - x`, an @Int-returning tail call)
+        leaves the non-narrowing recursive tail call structurally untouched, so
+        its ``return_call`` survives and the chain runs constant-stack.
+
+        A leaf narrows exactly when ``_narrows_into_nat`` says binding it into a
+        @Nat slot needs a ``>= 0`` guard AND it is not intrinsically @Nat
+        (`_result_is_nat` — a genuine @Nat->@Nat tail call resolves its callee's
+        @Nat return here and so is NOT collected), the per-leaf form of the
+        whole-body ``narrow_guarded`` gate.  Descends ``Block`` / ``IfExpr`` /
+        ``MatchExpr`` joins exactly as the verifier does.
+        """
+        leaves: set[int] = set()
+        self._collect_narrowing_return_leaves_into(body, leaves)
+        return leaves
+
+    def _collect_narrowing_return_leaves_into(
+        self, expr: ast.Expr, leaves: set[int],
+    ) -> None:
+        """Recursive worker for :py:meth:`_collect_narrowing_return_leaves`."""
+        if isinstance(expr, ast.Block):
+            self._collect_narrowing_return_leaves_into(expr.expr, leaves)
+            return
+        if isinstance(expr, ast.IfExpr):
+            if expr.else_branch is None:
+                return
+            self._collect_narrowing_return_leaves_into(expr.then_branch, leaves)
+            self._collect_narrowing_return_leaves_into(expr.else_branch, leaves)
+            return
+        if isinstance(expr, ast.MatchExpr):
+            for arm in expr.arms:
+                self._collect_narrowing_return_leaves_into(arm.body, leaves)
+            return
+        if self._narrows_into_nat(expr) and not self._result_is_nat(expr):
+            leaves.add(id(expr))
+
+    def _guard_nat_return_leaf(
+        self, expr: ast.Expr, instrs: list[str],
+    ) -> list[str]:
+        """Wrap a tail-position leaf's WAT with the #758 @Int->@Nat narrowing
+        guard when *expr* is a designated narrowing return leaf (per-leaf
+        emission — #983 review; replaces the whole-body wrap that broke TCO).
+
+        A no-op unless ``id(expr)`` was collected into ``_nat_return_leaf_ids``
+        for the function currently being compiled, so only the genuine
+        narrowing leaves pay the guard; a non-narrowing @Nat->@Nat recursive
+        tail leaf keeps its ``return_call`` untouched.
+        """
+        if id(expr) in self._nat_return_leaf_ids:
+            return self._emit_nat_bind_guard(instrs)
+        return instrs
 
     def _has_underflow_leaf(self, value: ast.Expr) -> bool:
         """Codegen mirror of ``ContractVerifier._has_underflow_leaf`` (#552).
