@@ -544,6 +544,95 @@ class TestCmdVerify:
         assert v["tier3_runtime"] > 0
         assert len(data["warnings"]) > 0
 
+    def test_json_obligations_array(
+        self, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """verify --json exposes the reified obligation stream, and the
+        `verification` summary is reproducible from it (#967)."""
+        rc = cmd_verify(INCREMENT, as_json=True)
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        obls = data["obligations"]
+        assert obls, "expected a non-empty obligations array"
+        for o in obls:
+            assert set(o) >= {"kind", "status", "description", "location"}
+            assert set(o["location"]) >= {"line", "column"}
+        # The summary is derived from this stream: the tier counts a consumer
+        # recomputes from `obligations` must equal the `verification` block.
+        v = data["verification"]
+        tier1 = sum(1 for o in obls if o["status"] == "verified")
+        tier3 = sum(1 for o in obls if o["status"] in ("tier3", "timeout"))
+        assert v["tier1_verified"] == tier1
+        assert v["tier3_runtime"] == tier3
+        assert v["total"] == tier1 + tier3
+
+    def test_json_obligation_file_matches_diagnostics(
+        self, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """An obligation's location.file must equal the NORMALIZED path
+        diagnostics carry, so a consumer can join the two arrays on
+        (file, line, column) — a raw dot-segment CLI argument must not
+        leak through (PR #974 review)."""
+        dotted = str(EXAMPLES_DIR) + "/./increment.vera"
+        rc = cmd_verify(dotted, as_json=True)
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        obls = data["obligations"]
+        assert obls, "expected a non-empty obligations array"
+        normalized = str(Path(dotted))
+        assert dotted != normalized  # the probe must exercise the divergence
+        for o in obls:
+            assert o["location"]["file"] == normalized
+        # Diagnostics/warnings must carry the same normalized path — checked
+        # per entry, not just via the join below, so a dotted path cannot
+        # hide behind one other entry that happens to join.
+        reported = data["diagnostics"] + data["warnings"]
+        assert reported, "fixture must expose a diagnostic or warning"
+        for entry in reported:
+            assert entry["location"]["file"] == normalized
+        # The join must actually work: at least one obligation shares its
+        # full (file, line, column) key with a reported diagnostic
+        # (increment.vera's W-diagnostic sits on an obligated contract).
+        diag_keys = {
+            (d["location"]["file"], d["location"]["line"],
+             d["location"]["column"])
+            for d in data["diagnostics"] + data["warnings"]
+        }
+        obl_keys = {
+            (o["location"]["file"], o["location"]["line"],
+             o["location"]["column"])
+            for o in obls
+        }
+        assert diag_keys & obl_keys, (
+            f"no (file, line, column) join between obligations {obl_keys} "
+            f"and diagnostics {diag_keys}"
+        )
+
+    def test_json_summary_consistent_on_demotion_example(
+        self, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The #967 symptom at the layer it was reported: `verify --json`
+        on a call-demotion example must emit a self-consistent summary
+        that a consumer can reproduce from the obligations array.
+        increment.vera has no demotions, so only a demotion program
+        (http.vera: one call-pre demotion) pins the derivation here."""
+        rc = cmd_verify(str(EXAMPLES_DIR / "http.vera"), as_json=True)
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        v = data["verification"]
+        assert v["total"] == v["tier1_verified"] + v["tier3_runtime"]
+        obls = data["obligations"]
+        # Keep the fixture non-vacuous: the arithmetic above only pins the
+        # bug while http.vera actually emits a demoted call-pre obligation.
+        assert any(
+            o["kind"] == "call_pre" and o["status"] in ("tier3", "timeout")
+            for o in obls
+        ), "http.vera must exercise the call-pre demotion"
+        tier1 = sum(1 for o in obls if o["status"] == "verified")
+        tier3 = sum(1 for o in obls if o["status"] in ("tier3", "timeout"))
+        assert v["tier1_verified"] == tier1
+        assert v["tier3_runtime"] == tier3
+
     def test_json_type_error(
         self,
         tmp_path: Path,

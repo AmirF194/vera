@@ -72,12 +72,44 @@ _U64_MAX = 2**64 - 1
 
 @dataclass
 class VerifySummary:
-    """Counts of contracts by verification outcome."""
+    """Counts of contracts by verification outcome.
+
+    Derived from the reified obligation stream (see :func:`summarize`) rather
+    than accumulated by hand, so the fields cannot drift out of step with the
+    obligations a consumer reads (#967).  ``assumptions`` is retained for
+    backward shape compatibility and is always ``0`` — no obligation kind maps
+    to it (it was never incremented on the historical hand-counted path).
+    """
 
     tier1_verified: int = 0
     tier3_runtime: int = 0
     assumptions: int = 0
     total: int = 0
+
+
+def summarize(obligations: list[ProofObligation]) -> VerifySummary:
+    """Derive a :class:`VerifySummary` from the reified obligation stream.
+
+    The single source of truth for the tier counts, replacing ~50 hand-written
+    counter increments once scattered through :class:`ContractVerifier` (#967).
+    The status → counter mapping mirrors :mod:`vera.obligations.core`:
+
+    - ``verified`` → ``tier1_verified`` (discharged statically at Tier 1);
+    - ``tier3`` / ``timeout`` → ``tier3_runtime`` (falls to a runtime check);
+    - ``violated`` / ``tier3_unguarded`` → excluded from every count (surfaced
+      as an error / warning diagnostic instead).
+
+    ``total`` is exactly ``tier1_verified + tier3_runtime`` — the count of
+    obligations that discharged to *some* tier — so the summary is internally
+    arithmetic-consistent by construction.
+    """
+    tier1 = sum(1 for o in obligations if o.status == "verified")
+    tier3 = sum(1 for o in obligations if o.status in ("tier3", "timeout"))
+    return VerifySummary(
+        tier1_verified=tier1,
+        tier3_runtime=tier3,
+        total=tier1 + tier3,
+    )
 
 
 @dataclass
@@ -160,7 +192,6 @@ class ContractVerifier:
     ) -> None:
         self.env = TypeEnv()
         self.errors: list[Diagnostic] = []
-        self.summary = VerifySummary()
         # #222 Phase A: reified obligations in discharge order.
         self.obligations: list[ProofObligation] = []
         # #680 review: fresh consts pushed to shadow a stale outer slot when an
@@ -436,11 +467,13 @@ class ContractVerifier:
     ) -> None:
         """Reify one obligation at its discharge site.
 
-        Purely observational: called at the moment an obligation's
-        outcome is known, never altering discharge order or solver
-        state.  The summary counters and diagnostics remain the source
-        of truth for behaviour; obligations mirror them one-to-one
-        (asserted by the differential tests in test_obligations.py).
+        Called at the moment an obligation's outcome is known, never
+        altering discharge order or solver state.  The reified obligation
+        stream is the source of truth for the tier counts: the
+        :class:`VerifySummary` is *derived* from it by :func:`summarize`
+        (#967), so recording an obligation here is what moves the counters
+        — there are no separate counter increments to keep in step.  The
+        differential tests in test_obligations.py pin the mapping.
 
         *span_node* overrides where the obligation is located when that
         differs from where its expression text comes from — call-site
@@ -1321,6 +1354,19 @@ class ContractVerifier:
                     result.setdefault(t_name, set()).add(t_ct)
                     stack.append(mono.monomorphize_fn(generic_decls[t_name], t_ct))
 
+    @property
+    def summary(self) -> VerifySummary:
+        """Derived on read from the reified obligation stream (#967).
+
+        A computed property, not a stored field, so a caller that drives
+        verification piecemeal (``register_program`` + ``_verify_fn``, the
+        :class:`~vera.obligations.session.VerificationSession` pattern) can
+        never observe a stale value — the tier counts always reflect exactly
+        the obligations recorded so far.  The warm session derives its own
+        summaries the same way, per function slice.
+        """
+        return summarize(self.obligations)
+
     def verify_program(self, program: ast.Program) -> None:
         """Entry point: register modules, then local declarations, then verify."""
         self.register_program(program)
@@ -1383,10 +1429,13 @@ class ContractVerifier:
         for concrete in instances:
             clone = self._mono.monomorphize_fn(decl, concrete)
             clone = replace(clone, name=decl.name)  # keep the source name
-            saved = (self.summary, self.errors, self.obligations)
-            self.summary, self.errors, self.obligations = (
-                VerifySummary(), [], [],
-            )
+            # Verify each instance into scratch error/obligation buffers so its
+            # per-instance obligations don't pollute the aggregate stream; the
+            # meet-collapsed obligations are re-appended below.  The summary is
+            # derived from the final obligation stream (#967), so it needs no
+            # save/restore here.
+            saved = (self.errors, self.obligations)
+            self.errors, self.obligations = [], []
             # PR #972 review (pre-existing): the #747 side-tables are span-keyed
             # and the clone keeps its source spans, so lookups inside the clone
             # answer the GENERIC types.  Publish this instance's TypeVar →
@@ -1404,7 +1453,7 @@ class ContractVerifier:
             finally:
                 self._instance_subst = saved_subst
                 inst_obl, inst_err = self.obligations, self.errors
-                self.summary, self.errors, self.obligations = saved
+                self.errors, self.obligations = saved
             per_instance.append((concrete, inst_obl, inst_err))
         self._aggregate_generic_instances(decl, per_instance)
 
@@ -1419,9 +1468,12 @@ class ContractVerifier:
 
         Each source obligation recurs once per instantiation at the same span.
         Group by content key, take the worst status across instantiations (so
-        any reachable counterexample dominates — never a false Tier-1), and
-        re-derive the summary counters + diagnostics from the met set so the
-        obligations<->summary<->diagnostics mirror (test_obligations.py) holds.
+        any reachable counterexample dominates — never a false Tier-1), append
+        one met-status obligation per source site, and re-emit the
+        representative diagnostic.  The summary is derived from the resulting
+        obligation stream (#967, :func:`summarize`), so the appended obligation
+        is the whole count — obligations<->summary<->diagnostics stay in the
+        mirror the test_obligations.py differential pins.
         """
         source_statuses: dict[str, tuple[str, ...]] = {
             "verified": ("verified",),
@@ -1471,20 +1523,15 @@ class ContractVerifier:
                 members[0],
             )
             self.obligations.append(replace(rep_ob, status=met))
-            if met == "verified":
-                self.summary.tier1_verified += 1
-                self.summary.total += 1
-            elif met == "tier3":
-                self.summary.tier3_runtime += 1
-                self.summary.total += 1
-                # Re-emit the representative Tier-3 warning (E506 etc.) so an
-                # instantiated generic surfaces it like the non-generic path,
-                # not only bumping the counter (PR #767 review).  Informational, so no
-                # diagnostic is synthesized if the instance emitted none.
-                self._emit_aggregated_diagnostic(
-                    decl, members, rep_concrete, rep_ob, errs_by_instance,
-                )
-            else:  # "violated" | "tier3_unguarded" — diagnostic, no count
+            # The summary is derived from the obligation stream (#967), so the
+            # append above is the whole count.  A non-`verified` met status
+            # still re-surfaces its representative diagnostic: `tier3` re-emits
+            # the Tier-3 warning (E506 etc.) so an instantiated generic warns
+            # like the non-generic path, and `violated` / `tier3_unguarded`
+            # re-emit their error / warning (PR #767 review).  `verified` is
+            # silent.  Informational tier3 diagnostics are not synthesized if
+            # the instance emitted none.
+            if met != "verified":
                 self._emit_aggregated_diagnostic(
                     decl, members, rep_concrete, rep_ob, errs_by_instance,
                 )
@@ -1615,8 +1662,6 @@ class ContractVerifier:
             # statically (#746).
             for contract in decl.contracts:
                 if not self._is_trivial(contract):
-                    self.summary.tier3_runtime += 1
-                    self.summary.total += 1
                     self._record_obligation(
                         decl.name, self._contract_kind(contract),
                         contract, "tier3", error_code="E520",
@@ -1639,8 +1684,6 @@ class ContractVerifier:
                         tier=3,
                     )
                 else:
-                    self.summary.tier1_verified += 1
-                    self.summary.total += 1
                     self._record_obligation(
                         decl.name, self._contract_kind(contract),
                         contract, "verified",
@@ -1765,9 +1808,7 @@ class ContractVerifier:
         self._opaque_shadows = []
         for contract in decl.contracts:
             if isinstance(contract, ast.Requires):
-                self.summary.total += 1
                 if self._is_trivial(contract):
-                    self.summary.tier1_verified += 1
                     self._record_obligation(
                         decl.name, "requires", contract, "verified",
                     )
@@ -1789,7 +1830,6 @@ class ContractVerifier:
                 )
                 z3_pre = smt.translate_expr(contract.expr, slot_env)
                 if z3_pre is None:
-                    self.summary.tier3_runtime += 1
                     self._record_obligation(
                         decl.name, "requires", contract, "tier3",
                         error_code="E521",
@@ -1809,7 +1849,6 @@ class ContractVerifier:
                     )
                     continue
                 assumptions.append(z3_pre)
-                self.summary.tier1_verified += 1
                 self._record_obligation(
                     decl.name, "requires", contract, "verified",
                 )
@@ -1905,8 +1944,9 @@ class ContractVerifier:
             # successful call-pre checks discharge silently inside the
             # SMT layer's _translate_call and are not yet enumerated
             # (Phase B extends the SMT layer to record successes for
-            # the discharge cache).  Summary counters are untouched
-            # here, mirroring the existing bookkeeping.  The span comes
+            # the discharge cache).  The summary needs no handling
+            # here: it is derived from the obligation stream, and a
+            # violated obligation is excluded by summarize().  The span comes
             # from the CALL SITE (not the callee's contract node) so
             # two calls violating the same precondition remain distinct
             # obligations; E501 matches _report_call_violation.
@@ -1933,16 +1973,13 @@ class ContractVerifier:
         # 7. Verify ensures clauses
         for contract in decl.contracts:
             if isinstance(contract, ast.Ensures):
-                self.summary.total += 1
                 if self._is_trivial(contract):
-                    self.summary.tier1_verified += 1
                     self._record_obligation(
                         decl.name, "ensures", contract, "verified",
                     )
                     continue
 
                 if body_expr is None:
-                    self.summary.tier3_runtime += 1
                     self._record_obligation(
                         decl.name, "ensures", contract, "tier3",
                         error_code="E522",
@@ -1968,7 +2005,6 @@ class ContractVerifier:
                 z3_post = smt.translate_expr(contract.expr, slot_env)
 
                 if z3_post is None:
-                    self.summary.tier3_runtime += 1
                     self._record_obligation(
                         decl.name, "ensures", contract, "tier3",
                         error_code="E523",
@@ -1990,12 +2026,10 @@ class ContractVerifier:
                 smt_result = smt.check_valid(z3_post, assumptions)
 
                 if smt_result.status == "verified":
-                    self.summary.tier1_verified += 1
                     self._record_obligation(
                         decl.name, "ensures", contract, "verified",
                     )
                 elif smt_result.status == "violated":
-                    self.summary.total -= 1  # don't count — it's an error
                     self._record_obligation(
                         decl.name, "ensures", contract, "violated",
                         counterexample=smt_result.counterexample,
@@ -2005,7 +2039,6 @@ class ContractVerifier:
                     )
                 else:  # pragma: no cover
                     # unknown / timeout
-                    self.summary.tier3_runtime += 1
                     self._record_obligation(
                         decl.name, "ensures", contract, "timeout",
                         error_code="E524",
@@ -2035,7 +2068,6 @@ class ContractVerifier:
         #     @Nat is a RefinedType and IS checked (`>= 0 && P`).
         if decl.body is not None and self._is_refined_type(ret_type):
             ret_node: ast.Expr = decl.body
-            self.summary.total += 1
             goal = (
                 self._translate_refined_predicate(smt, ret_type, body_expr)
                 if body_expr is not None else None
@@ -2050,11 +2082,9 @@ class ContractVerifier:
             else:
                 ret_result = smt.check_valid(goal, list(assumptions))
                 if ret_result.status == "verified":
-                    self.summary.tier1_verified += 1
                     self._record_obligation(
                         decl.name, "refine_bind", ret_node, "verified")
                 elif ret_result.status == "violated":
-                    self.summary.total -= 1  # don't count — it's an error
                     self._record_obligation(
                         decl.name, "refine_bind", ret_node, "violated",
                         error_code="E505",
@@ -2103,16 +2133,13 @@ class ContractVerifier:
 
         for contract in decl.contracts:
             if isinstance(contract, ast.Decreases):
-                self.summary.total += 1
                 if self._verify_decreases(
                     decl, contract, smt, slot_env, group_decls,
                 ):
-                    self.summary.tier1_verified += 1
                     self._record_obligation(
                         decl.name, "decreases", contract, "verified",
                     )
                 else:
-                    self.summary.tier3_runtime += 1
                     self._record_obligation(
                         decl.name, "decreases", contract, "tier3",
                         error_code="E525",
@@ -3645,23 +3672,21 @@ class ContractVerifier:
     ) -> None:
         """Discharge the ``lhs >= rhs`` obligation at a single site.
 
-        On success, increments ``tier1_verified``.  On failure, emits an
-        E502 error with a Z3 counterexample.  Path conditions in
+        On success, records a ``verified`` obligation (Tier 1).  On failure,
+        records a ``violated`` obligation and emits an E502 error with a Z3
+        counterexample.  Path conditions in
         ``smt._path_conditions`` are picked up automatically by
         :py:meth:`SmtContext.check_valid`.
         """
-        self.summary.total += 1
         lhs = smt.translate_expr(expr.left, slot_env)
         rhs = smt.translate_expr(expr.right, slot_env)
         if lhs is None or rhs is None:  # pragma: no cover — both Nat
-            self.summary.tier3_runtime += 1
             self._record_obligation(decl.name, "nat_sub", expr, "tier3")
             return
         if self._is_opaque_shadow(lhs) or self._is_opaque_shadow(rhs):
             # An operand is an opaque shadow (an untranslatable let that
             # rebound a stale outer slot): its value is unknown, so Tier-3
             # rather than a false E502 on the unconstrained shadow.
-            self.summary.tier3_runtime += 1
             self._record_obligation(decl.name, "nat_sub", expr, "tier3")
             return
 
@@ -3680,15 +3705,12 @@ class ContractVerifier:
             # `lhs < rhs` isn't valid either, so Tier-3 — not a false E502.
             # The direct-shadow guard above catches only a bare operand (#680
             # review, the subtraction analogue of the compound-divisor fix).
-            self.summary.tier3_runtime += 1
             self._record_obligation(decl.name, "nat_sub", expr, "tier3")
             return
 
         if result.status == "verified":
-            self.summary.tier1_verified += 1
             self._record_obligation(decl.name, "nat_sub", expr, "verified")
         elif result.status == "violated":
-            self.summary.total -= 1  # don't count — it's an error
             self._record_obligation(
                 decl.name, "nat_sub", expr, "violated",
                 error_code="E502",
@@ -3696,7 +3718,6 @@ class ContractVerifier:
             )
             self._report_underflow(decl, expr, result.counterexample)
         else:  # pragma: no cover — solver timeout
-            self.summary.tier3_runtime += 1
             self._record_obligation(
                 decl.name, "nat_sub", expr, "timeout",
             )
@@ -3735,8 +3756,6 @@ class ContractVerifier:
         if divisor is None:
             # Untranslatable divisor — no Tier-1 term to check; the runtime
             # `divide_by_zero` trap is the guarantee.
-            self.summary.total += 1
-            self.summary.tier3_runtime += 1
             self._record_obligation(decl.name, "div_zero", expr, "tier3")
             return
         if self._is_opaque_shadow(divisor):
@@ -3744,8 +3763,6 @@ class ContractVerifier:
             # rebound a stale outer slot): its value is unknown, so Tier-3 —
             # a stale outer's `requires(... != 0)` must not falsely discharge
             # it, and its unconstrained zero is not a real counterexample.
-            self.summary.total += 1
-            self.summary.tier3_runtime += 1
             self._record_obligation(decl.name, "div_zero", expr, "tier3")
             return
         if divisor.sort() != z3.IntSort():
@@ -3753,7 +3770,6 @@ class ContractVerifier:
             # `f64.div` produces inf/NaN.  Not a primitive-safety obligation.
             return
 
-        self.summary.total += 1
         obligation = divisor != z3.IntVal(0)
         result = smt.check_valid(obligation, list(assumptions))
 
@@ -3768,15 +3784,12 @@ class ContractVerifier:
             # provable, but neither is `== 0` — the counterexample depends on
             # the unknown shadow, so Tier-3, not a false E526.  `_is_opaque_
             # shadow` above catches only a *direct* shadow operand (#680 review).
-            self.summary.tier3_runtime += 1
             self._record_obligation(decl.name, "div_zero", expr, "tier3")
             return
 
         if result.status == "verified":
-            self.summary.tier1_verified += 1
             self._record_obligation(decl.name, "div_zero", expr, "verified")
         elif result.status == "violated":
-            self.summary.total -= 1  # don't count — it's an error
             self._record_obligation(
                 decl.name, "div_zero", expr, "violated",
                 error_code="E526",
@@ -3784,7 +3797,6 @@ class ContractVerifier:
             )
             self._report_div_by_zero(decl, expr, result.counterexample)
         else:  # pragma: no cover — solver timeout
-            self.summary.tier3_runtime += 1
             self._record_obligation(
                 decl.name, "div_zero", expr, "timeout",
             )
@@ -3814,21 +3826,16 @@ class ContractVerifier:
         if pred is None or pred.sort() != z3.BoolSort():
             # Untranslatable / non-Bool predicate — the runtime trap is the
             # only guarantee.
-            self.summary.total += 1
-            self.summary.tier3_runtime += 1
             self._record_obligation(decl.name, "assert", expr, "tier3")
             return
-        self.summary.total += 1
         result = smt.check_valid(pred, list(assumptions))
         if result.status == "verified":
-            self.summary.tier1_verified += 1
             self._record_obligation(decl.name, "assert", expr, "verified")
             return
         # Not provable.  Is it provably FALSE (the assert can never hold)?
         if smt.check_valid(
             z3.Not(pred), list(assumptions),
         ).status == "verified":
-            self.summary.total -= 1  # an error, not a counted obligation
             self._record_obligation(
                 decl.name, "assert", expr, "violated",
                 error_code="E507",
@@ -3837,7 +3844,6 @@ class ContractVerifier:
             self._report_assert_violation(decl, expr, result.counterexample)
             return
         # Sometimes true, sometimes false (or solver unknown) → Tier 3.
-        self.summary.tier3_runtime += 1
         self._record_obligation(decl.name, "assert", expr, "tier3")
 
     def _check_index_bounds_obligation(
@@ -3877,18 +3883,14 @@ class ContractVerifier:
                 or not str(coll.sort()).startswith("Array_")):
             # Untranslatable, or an unrecognised array representation — no
             # Tier-1 length model.  The runtime `out_of_bounds` trap guards it.
-            self.summary.total += 1
-            self.summary.tier3_runtime += 1
             self._record_obligation(decl.name, "index_bounds", expr, "tier3")
             return
 
         length = smt._get_length_fn(coll.sort())(coll)
-        self.summary.total += 1
 
         in_bounds = z3.And(idx >= 0, idx < length)
         result = smt.check_valid(in_bounds, list(assumptions))
         if result.status == "verified":
-            self.summary.tier1_verified += 1
             self._record_obligation(
                 decl.name, "index_bounds", expr, "verified",
             )
@@ -3899,7 +3901,6 @@ class ContractVerifier:
         out_of_bounds = z3.Or(idx < 0, idx >= length)
         oob = smt.check_valid(out_of_bounds, list(assumptions))
         if oob.status == "verified":
-            self.summary.total -= 1  # don't count — it's an error
             self._record_obligation(
                 decl.name, "index_bounds", expr, "violated",
                 error_code="E527",
@@ -3908,7 +3909,6 @@ class ContractVerifier:
             self._report_index_oob(decl, expr, result.counterexample)
         else:
             # Opaque / dynamic length — beyond Tier 1 (#427); runtime-guarded.
-            self.summary.tier3_runtime += 1
             self._record_obligation(decl.name, "index_bounds", expr, "tier3")
 
     def _overflow_int_type(self, expr: ast.Expr) -> str | None:
@@ -3982,8 +3982,6 @@ class ContractVerifier:
         if (result is None
                 or result.sort() != z3.IntSort()
                 or self._contains_opaque_shadow(result)):
-            self.summary.total += 1
-            self.summary.tier3_runtime += 1
             self._record_obligation(decl.name, "int_overflow", expr, "tier3")
             return
 
@@ -3992,11 +3990,9 @@ class ContractVerifier:
         else:
             lo, hi = z3.IntVal(_I64_MIN), z3.IntVal(_I64_MAX)
 
-        self.summary.total += 1
         in_range = z3.And(result >= lo, result <= hi)
         safe = smt.check_valid(in_range, list(assumptions))
         if safe.status == "verified":
-            self.summary.tier1_verified += 1
             self._record_obligation(decl.name, "int_overflow", expr, "verified")
             return
 
@@ -4005,7 +4001,6 @@ class ContractVerifier:
         out_of_range = z3.Or(result < lo, result > hi)
         bad = smt.check_valid(out_of_range, list(assumptions))
         if bad.status == "verified":
-            self.summary.total -= 1  # don't count — it's an error
             self._record_obligation(
                 decl.name, "int_overflow", expr, "violated",
                 error_code="E528",
@@ -4014,7 +4009,6 @@ class ContractVerifier:
             self._report_overflow(decl, expr, safe.counterexample)
         else:
             # Dynamic operands — beyond Tier 1; the codegen overflow trap guards.
-            self.summary.tier3_runtime += 1
             self._record_obligation(decl.name, "int_overflow", expr, "tier3")
 
     def _check_float_to_int_domain_obligation(
@@ -4047,10 +4041,8 @@ class ContractVerifier:
         change the value of a literal.
         """
         x = smt.translate_expr(call.args[0], slot_env)
-        self.summary.total += 1
         if not isinstance(x, z3.FPRef):
             # Untranslatable argument → Tier 3.
-            self.summary.tier3_runtime += 1
             self._record_obligation(
                 decl.name, "float_to_int_domain", call, "tier3",
             )
@@ -4058,7 +4050,6 @@ class ContractVerifier:
         xs = z3.simplify(x)
         if not z3.is_fp_value(xs):
             # Symbolic argument → Tier 3 (codegen trunc trap guards).
-            self.summary.tier3_runtime += 1
             self._record_obligation(
                 decl.name, "float_to_int_domain", call, "tier3",
             )
@@ -4075,12 +4066,10 @@ class ContractVerifier:
                 in_range = _I64_MIN <= truncated <= _I64_MAX
 
         if not is_nan and not is_inf and in_range:
-            self.summary.tier1_verified += 1
             self._record_obligation(
                 decl.name, "float_to_int_domain", call, "verified",
             )
         else:
-            self.summary.total -= 1  # don't count — it's an error
             self._record_obligation(
                 decl.name, "float_to_int_domain", call, "violated",
                 error_code="E529",
@@ -4183,11 +4172,12 @@ class ContractVerifier:
         """Discharge a ``value >= 0`` obligation at one @Nat binding site.
 
         Mirrors :py:meth:`_check_subtraction_obligation`: on success
-        increments ``tier1_verified``; on a Z3 counterexample emits an
-        E503 error.  When the value is untranslatable or the solver times
+        records a ``verified`` obligation (Tier 1); on a Z3 counterexample a
+        ``violated`` obligation plus an E503 error.  When the value is
+        untranslatable or the solver times
         out the outcome depends on the caller-supplied ``guarded`` flag —
-        codegen-guarded sites (``guarded=True``) are counted
-        ``tier3_runtime``, while the unguarded ones (effect-operation
+        codegen-guarded sites (``guarded=True``) record a ``tier3`` obligation
+        (``tier3_runtime``), while the unguarded ones (effect-operation
         argument and generic-instantiated constructor field —
         ``guarded=False``) are surfaced as an E504 warning and excluded
         from the totals
@@ -4195,7 +4185,6 @@ class ContractVerifier:
         ``smt._path_conditions`` are folded in automatically by
         :py:meth:`SmtContext.check_valid`.
         """
-        self.summary.total += 1
         val = smt.translate_expr(value_node, slot_env)
         if val is None:
             self._record_nat_bind_tier3(
@@ -4206,10 +4195,8 @@ class ContractVerifier:
         result = smt.check_valid(obligation, list(assumptions))
 
         if result.status == "verified":
-            self.summary.tier1_verified += 1
             self._record_obligation(decl.name, "nat_bind", value_node, "verified")
         elif result.status == "violated":
-            self.summary.total -= 1  # don't count — it's an error
             self._record_obligation(
                 decl.name, "nat_bind", value_node, "violated",
                 error_code="E503",
@@ -4243,14 +4230,11 @@ class ContractVerifier:
         this method's accounting is purely the static verdict.  *node*
         gives the diagnostic location.
         """
-        self.summary.total += 1
         obligation = term >= 0  # type: ignore[operator]
         result = smt.check_valid(obligation, list(assumptions))
         if result.status == "verified":
-            self.summary.tier1_verified += 1
             self._record_obligation(decl.name, "nat_bind", node, "verified")
         elif result.status == "violated":
-            self.summary.total -= 1
             self._record_obligation(
                 decl.name, "nat_bind", node, "violated",
                 error_code="E503", counterexample=result.counterexample,
@@ -4291,7 +4275,6 @@ class ContractVerifier:
         get.  Path conditions in ``smt._path_conditions`` are folded in by
         :py:meth:`SmtContext.check_valid`.
         """
-        self.summary.total += 1
         val = smt.translate_expr(value_node, slot_env)
         if val is None:  # pragma: no cover — untranslatable value
             self._record_int_widen_tier3(
@@ -4301,7 +4284,6 @@ class ContractVerifier:
         hi = z3.IntVal(_I64_MAX)
         safe = smt.check_valid(val <= hi, list(assumptions))
         if safe.status == "verified":
-            self.summary.tier1_verified += 1
             self._record_obligation(
                 decl.name, "nat_to_int_coerce", value_node, "verified")
             return
@@ -4309,7 +4291,6 @@ class ContractVerifier:
         # Not provably in range — is it provably OUT of range (a real bug)?
         bad = smt.check_valid(val > hi, list(assumptions))
         if bad.status == "verified":
-            self.summary.total -= 1  # don't count — it's an error
             self._record_obligation(
                 decl.name, "nat_to_int_coerce", value_node, "violated",
                 error_code="E530", counterexample=safe.counterexample,
@@ -4339,11 +4320,9 @@ class ContractVerifier:
         are excluded from the discharged totals rather than silently counting
         a runtime check they never get."""
         if guarded:
-            self.summary.tier3_runtime += 1
             self._record_obligation(
                 decl.name, "nat_to_int_coerce", value_node, status)
         else:
-            self.summary.total -= 1
             self._record_obligation(
                 decl.name, "nat_to_int_coerce", value_node, "tier3_unguarded",
                 error_code="E531",
@@ -4408,17 +4387,14 @@ class ContractVerifier:
         ``_extract_constructor_fields`` runtime-guards a concrete @Nat field
         extracted into an @Int sub-pattern (``guarded=True`` -> tier3_runtime).
         """
-        self.summary.total += 1
         hi = z3.IntVal(_I64_MAX)
         safe = smt.check_valid(term <= hi, list(assumptions))
         if safe.status == "verified":
-            self.summary.tier1_verified += 1
             self._record_obligation(
                 decl.name, "nat_to_int_coerce", node, "verified")
             return
         bad = smt.check_valid(term > hi, list(assumptions))
         if bad.status == "verified":
-            self.summary.total -= 1
             self._record_obligation(
                 decl.name, "nat_to_int_coerce", node, "violated",
                 error_code="E530", counterexample=safe.counterexample,
@@ -4457,7 +4433,6 @@ class ContractVerifier:
         guard, is ``True``; an internal narrowing is ``False``) — see
         :py:meth:`_record_refined_bind_tier3`.
         """
-        self.summary.total += 1
         # A `@Unit` refinement is codegen-UNguarded (erased binder), so its
         # Tier-3 fallback must not claim a runtime guard (CR db24433).
         eff_guarded = guarded and not self._is_unit_refinement(refined_ty)
@@ -4476,11 +4451,9 @@ class ContractVerifier:
         result = smt.check_valid(goal, list(assumptions))
 
         if result.status == "verified":
-            self.summary.tier1_verified += 1
             self._record_obligation(
                 decl.name, "refine_bind", value_node, "verified")
         elif result.status == "violated":
-            self.summary.total -= 1  # don't count — it's an error
             self._record_obligation(
                 decl.name, "refine_bind", value_node, "violated",
                 error_code="E505",
@@ -4516,14 +4489,12 @@ class ContractVerifier:
         ``guarded=False`` — surfaced as an E506 warning and excluded from the
         totals rather than overstating a runtime check it never gets (R7)."""
         if guarded:
-            self.summary.tier3_runtime += 1
             self._record_obligation(
                 decl.name, "refine_bind", value_node, "tier3",
                 error_code="E506",
             )
             self._report_refined_runtime(decl, value_node, site)
         else:
-            self.summary.total -= 1
             self._record_obligation(
                 decl.name, "refine_bind", value_node, "tier3_unguarded",
                 error_code="E506",
@@ -4608,7 +4579,6 @@ class ContractVerifier:
             smt.solver.add(a)
 
         body_expr = smt.translate_expr(decl.body, slot_env)
-        self.summary.total += 1
         goal = (
             self._translate_refined_predicate(smt, ret_type, body_expr)
             if body_expr is not None else None
@@ -4620,11 +4590,9 @@ class ContractVerifier:
             return
         result = smt.check_valid(goal, list(assumptions))
         if result.status == "verified":
-            self.summary.tier1_verified += 1
             self._record_obligation(
                 decl.name, "refine_bind", decl.body, "verified")
         elif result.status == "violated":
-            self.summary.total -= 1
             self._record_obligation(
                 decl.name, "refine_bind", decl.body, "violated",
                 error_code="E505", counterexample=result.counterexample,
@@ -4668,7 +4636,6 @@ class ContractVerifier:
         with no codegen guard, hence ``guarded=False``.  *node* gives the
         diagnostic location.
         """
-        self.summary.total += 1
         goal = self._translate_refined_predicate(smt, refined_ty, term)
         if goal is None:
             self._record_refined_bind_tier3(decl, node, site, guarded=False)
@@ -4680,10 +4647,8 @@ class ContractVerifier:
                 local_assumptions.append(src_fact)
         result = smt.check_valid(goal, local_assumptions)
         if result.status == "verified":
-            self.summary.tier1_verified += 1
             self._record_obligation(decl.name, "refine_bind", node, "verified")
         elif result.status == "violated":
-            self.summary.total -= 1
             self._record_obligation(
                 decl.name, "refine_bind", node, "violated",
                 error_code="E505", counterexample=result.counterexample,
@@ -5020,7 +4985,6 @@ class ContractVerifier:
                     # Opaque, unprojectable scrutinee: an internal narrowing with
                     # no codegen guard, so this is an unguarded E506 Tier-3
                     # (excluded from totals), not a silent pass (R7).
-                    self.summary.total += 1
                     self._record_refined_bind_tier3(
                         decl, scrutinee, "ADT sub-pattern bind", guarded=False)
                 continue
@@ -5043,11 +5007,8 @@ class ContractVerifier:
                     # function call returning the ADT): the narrowing is real
                     # but unprojectable here, yet codegen still guards the @Nat
                     # sub-pattern bind at run time — so record a guarded Tier-3
-                    # outcome rather than dropping it silently.  The +1 counts
-                    # the obligation (a guarded site leaves total untouched in
-                    # _record_nat_bind_tier3, mirroring the let / destructure
-                    # path).
-                    self.summary.total += 1
+                    # obligation rather than dropping it silently (the summary
+                    # derives its count from it, #967).
                     self._record_nat_bind_tier3(
                         decl, scrutinee, "ADT sub-pattern bind", "tier3",
                         guarded=True)
@@ -5069,7 +5030,6 @@ class ContractVerifier:
                         site="ADT sub-pattern bind", node=scrutinee,
                     )
                 else:
-                    self.summary.total += 1
                     self._record_int_widen_tier3(
                         decl, scrutinee, "ADT sub-pattern bind", "tier3",
                         guarded=True)
@@ -5149,18 +5109,15 @@ class ContractVerifier:
             # codegen runtime guard yet, so a refined component is an E506
             # Tier-3 excluded from totals — never a silent pass (R7).
             for _ in nat_narrowing:
-                self.summary.total += 1
                 self._record_nat_bind_tier3(
                     decl, stmt.value, "tuple destructure", "tier3",
                     guarded=True)
             for _ in refined_narrowing:
-                self.summary.total += 1
                 self._record_refined_bind_tier3(
                     decl, stmt.value, "tuple destructure", guarded=False)
             for _ in int_widening:
                 # #813: codegen does not guard a tuple-destructure component
                 # widening (like tuple construction), so disclose E531.
-                self.summary.total += 1
                 self._record_int_widen_tier3(
                     decl, stmt.value, "tuple destructure", "tier3",
                     guarded=False)
@@ -5220,10 +5177,8 @@ class ContractVerifier:
         the broad *site* string.
         """
         if guarded:
-            self.summary.tier3_runtime += 1
             self._record_obligation(decl.name, "nat_bind", value_node, status)
         else:
-            self.summary.total -= 1
             self._record_obligation(
                 decl.name, "nat_bind", value_node, "tier3_unguarded",
                 error_code="E504",
@@ -6362,12 +6317,14 @@ class ContractVerifier:
         translation (step 8b).  The demotion list is drained each time, so the
         second call reports only the calls that appear inside those later
         clauses — the exact silent-loss the first drain missed.  Each demotion
-        is counted like the ensures Tier-3 path so the obligation/summary
-        differential stays exact, and located at the call site (span_node) like
-        E501 so repeated calls to the same callee stay distinct.
+        records a ``tier3`` ``call_pre`` obligation, so the derived summary
+        (#967) counts it toward both ``tier3_runtime`` and ``total`` — the
+        hand-counted path here once bumped ``tier3_runtime`` alone, leaving
+        ``total`` short by one on every example that hit this path.  Located at
+        the call site (span_node) like E501 so repeated calls to the same
+        callee stay distinct.
         """
         for d in smt.drain_call_demotions():
-            self.summary.tier3_runtime += 1
             self._record_obligation(
                 decl.name, "call_pre", d.precondition, "tier3",
                 error_code="E532",
