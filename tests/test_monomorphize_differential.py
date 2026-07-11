@@ -210,6 +210,76 @@ public fn use_cross_arg(@Unit -> @Bool)
   eq2(MkErr(5), MkOk("x"))
 }
 """,
+    # #990: a forall<T> where-helper under a NON-generic parent is a mono base
+    # — codegen emits its concrete clones (`gid$Int`, `gid$Bool`), so the
+    # verifier's discovery must collect nested generics identically or the
+    # clones run with contracts the verifier never proved (verifier⊇codegen
+    # breaks).  Two instantiations, one reached from the parent body and one
+    # from a sibling plain helper, so both discovery walks are exercised.
+    "nested_generic_where_helper": """
+private fn parent(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  if flag(true) then { gid(@Int.0) + 5 } else { 0 }
+}
+where {
+  forall<T> fn gid(@T -> @T)
+    requires(true)
+    ensures(@T.result == @T.0)
+    effects(pure)
+  {
+    @T.0
+  }
+  fn flag(@Bool -> @Bool)
+    requires(true)
+    ensures(true)
+    effects(pure)
+  {
+    gid(@Bool.0)
+  }
+}
+
+public fn use_nested(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  parent(10)
+}
+""",
+    # #990 + PR #1001 review: a nested generic reached ONLY from contract
+    # clauses (requires/ensures, never a body).  Contract reachability flows
+    # through the same shared node-level walk, and Vera lowers contracts to
+    # runtime checks — so codegen must emit the clone and the verifier must
+    # discover the identical instantiation set.
+    "nested_generic_contract_only": """
+private fn parent(@Int -> @Int)
+  requires(gok(@Int.0))
+  ensures(gok(@Int.result))
+  effects(pure)
+{
+  @Int.0 + 5
+}
+where {
+  forall<T> fn gok(@T -> @Bool)
+    requires(true)
+    ensures(true)
+    effects(pure)
+  {
+    true
+  }
+}
+
+public fn use_contract_only(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  parent(10)
+}
+""",
 }
 
 
