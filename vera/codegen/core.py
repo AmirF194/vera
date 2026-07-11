@@ -645,7 +645,22 @@ class CodeGenerator(
                 math_ops_used=set(),
             )
 
-        # Pass 0: register imported module declarations (C7e)
+        # Pass 0: hoist non-generic where-helpers to parent-qualified
+        # top-level decls (#991) so same-named helpers in different parent trees
+        # (or a helper named like a top-level function) don't collide in the
+        # flat WAT namespace.  Runs before EVERY other pass — including module
+        # registration below, whose `_collect_local_fn_names` shadow set must
+        # see the post-hoist program: a hoisted helper no longer occupies its
+        # bare source name, so it must no longer suppress a same-named import's
+        # bare emission (PR #1013 round 4 — the stale pre-hoist shadow left the
+        # import unemitted and the bare call dangling `unknown func`; at base
+        # the helper's bare emission silently CAPTURED the import-bound call, a
+        # wrong body under spec §5 helper locality).  Codegen-only: the checker
+        # and verifier keep the original nested AST (both scope helper
+        # resolution lexically, #991).
+        program = self._hoist_nongeneric_where_helpers(program)
+
+        # Pass 0.5: register imported module declarations (C7e)
         self._register_modules(program)
 
         # Pass 1: register local function signatures (shadows imports)
@@ -782,6 +797,21 @@ class CodeGenerator(
             if isinstance(tld.decl, ast.FnDecl):
                 fn_visibility[tld.decl.name] = tld.visibility or "private"
 
+        # Generic bases with REGISTERED clones (Pass 1.5) — gates the dead
+        # T-unused-template emission in the where-fn sweep below (PR #1013
+        # review).  Registered, not compiled: the sweep runs before the mono
+        # compile loop, and a clone that later fails to compile is a loud
+        # diagnostic either way.  The base is the name minus the LAST
+        # `$`-suffix (the single type-args vector `_mangle_fn_name` appends;
+        # the vector itself can't contain `$` — type names can't lex it), so
+        # an entry whose base is itself `$`-qualified (a shadowed module
+        # clone `mod$path$gen$Int`, a per-clone hoisted helper
+        # `gen$Int$where$h$…`) reduces to that qualified base, which can
+        # never equal a bare helper name — a first-`$` split would collapse
+        # them all to their first segment and could false-match a bare
+        # helper coincidentally named `mod`/`gen` (Greptile PR #1013 review).
+        mono_base_names = {m.name.rsplit("$", 1)[0] for m in mono_decls}
+
         for tld in program.declarations:
             decl = tld.decl
             if isinstance(decl, ast.FnDecl):
@@ -805,6 +835,23 @@ class CodeGenerator(
                     for wfn in self._flatten_where_fns(decl):
                         wfn_wat = self._compile_fn(wfn, export=False)
                         if wfn_wat is not None:
+                            # PR #1013 review: a fully-concrete (T-unused)
+                            # generic helper TEMPLATE compiles — unlike a
+                            # `@T`-param one — but is dead code once clones are
+                            # registered (every call site rewrites to a clone
+                            # via `_generic_fn_info`).  Emitting it dangles:
+                            # its body's calls to its OWN where-helpers target
+                            # per-clone symbols (`gen$Bool$where$shared`) that
+                            # exist under no bare name (pre-#991 they resolved
+                            # to a same-named ancestor's bare emission only by
+                            # collision luck).  Drop the dead WAT; the compile
+                            # attempt above keeps the `@T`-template warning
+                            # surface intact, and an uninstantiated generic
+                            # (no registered clones) still emits so a bare
+                            # call has a target.
+                            if (wfn.forall_vars
+                                    and wfn.name in mono_base_names):
+                                continue
                             functions_wat.append(wfn_wat)
 
         # Compile monomorphized functions.
@@ -1244,6 +1291,178 @@ class CodeGenerator(
         slot-name builder agrees by construction (dedup).
         """
         return type_expr_slot_name(te)
+
+    def _hoist_nongeneric_where_helpers(
+        self, program: ast.Program,
+    ) -> ast.Program:
+        """Hoist every NON-generic ``where``-helper to a parent-qualified
+        top-level decl (#991), so same-named helpers in different parent trees
+        (or a helper named like a top-level function) never collide in the flat
+        WAT namespace.
+
+        This is the non-generic mirror of the generic path's
+        ``_hoist_clone_where_fns`` (#904): a helper ``leaf`` under ``branchA``
+        becomes ``compute$where$branchA$where$leaf`` and every lexically-visible
+        bare call to it — in the parent's body and in any nested helper body that
+        can see it — is redirected to the mangled name.  ``$`` cannot appear in a
+        source identifier and ``where`` is reserved, so the mangled name collides
+        with neither a user function nor a generic clone (``gid$Int``) nor a
+        generic helper's per-clone hoist (``gid$Int$where$…``).
+
+        The DESIGN call is mangling, not a checker rejection: spec §5
+        (``spec/05-functions.md``) makes where-helpers "always local to the
+        parent function", so two same-named helpers under different parents are a
+        semantically VALID program — the collision was codegen's flat namespace
+        leaking, not a user error — and mangling gives one canonical treatment of
+        helper symbols across the generic and non-generic paths (DESIGN
+        principle 3).
+
+        GENERIC helpers are left structurally nested: each is a monomorphization
+        base whose clones (and their own where-helpers) are emitted and hoisted
+        per-instantiation by the mono path, exactly as ``_flatten_where_fns``
+        and ``collect_nested_generic_decls`` stop at a generic node.  Their
+        BODIES are rewritten, though — shadow-aware
+        (``_rewrite_generic_subtree_shadowed``): an ancestor-helper call inside
+        one is redirected to the hoisted name, while a name the generic subtree
+        re-defines stays bare for the mono path's per-clone redirect (PR #1013
+        review).  The hoisted non-generic decls become ordinary top-level
+        declarations, so registration, monomorphization discovery, and Pass-2
+        emission all handle them uniformly with no special-casing.
+        """
+        new_tlds: list[ast.TopLevelDecl] = []
+        for tld in program.declarations:
+            decl = tld.decl
+            # Skip GENERIC top-level functions entirely: their where-helpers
+            # (non-generic or otherwise) are carried into each clone and hoisted
+            # per-instantiation by `_hoist_clone_where_fns` under the
+            # clone-qualified prefix (`outer$Int$where$helper`, #904).  Hoisting
+            # them here would strip them from the template and dangle the clone's
+            # call.
+            if (isinstance(decl, ast.FnDecl)
+                    and decl.where_fns
+                    and not decl.forall_vars):
+                hoisted: list[ast.FnDecl] = []
+                rewritten = self._hoist_nongeneric_where_fns_under(
+                    decl, decl.name, hoisted, {},
+                )
+                new_tlds.append(dataclasses.replace(tld, decl=rewritten))
+                # Hoisted helpers are always private: they are internal to the
+                # parent and must never be exported (their bare source name is
+                # gone, and only top-level names back exports / `execute` lookup).
+                for h in hoisted:
+                    new_tlds.append(
+                        dataclasses.replace(tld, visibility="private", decl=h)
+                    )
+            else:
+                new_tlds.append(tld)
+        return dataclasses.replace(program, declarations=tuple(new_tlds))
+
+    def _hoist_nongeneric_where_fns_under(
+        self,
+        fn: ast.FnDecl,
+        prefix: str,
+        hoisted: list[ast.FnDecl],
+        scope: dict[str, str],
+    ) -> ast.FnDecl:
+        """Hoist ``fn``'s NON-generic ``where``-helpers under ``prefix``,
+        recursively; return ``fn`` with those helpers stripped and every bare
+        call to a lexically-visible helper (in ``fn``'s body and in its retained
+        generic helpers' bodies) redirected to the mangled name.
+
+        *scope* is the ``{helper name: mangled name}`` map of every non-generic
+        helper visible from ENCLOSING ``where`` scopes (ancestors), so full
+        lexical resolution holds: a helper's body resolves a bare call to the
+        NEAREST same-named helper in the enclosing tree — its own children first
+        (this level), then any ancestor's (a grandchild calling an "aunt" — a
+        sibling of its parent — is redirected too), and an inner helper shadows
+        an outer same-named one for its subtree.  A name absent from the combined
+        scope is a top-level / generic / builtin call and stays bare.  Generic
+        helpers are retained structurally nested for the mono path, but their
+        bodies ARE rewritten — shadow-aware, via
+        ``_rewrite_generic_subtree_shadowed`` — so an ancestor-helper call
+        inside one reaches the hoisted name while a name the subtree re-defines
+        stays bare for the per-clone redirect.  A generic helper's NAME also
+        shadows a same-named ancestor entry for its level's whole subtree (the
+        call must route through ``_resolve_generic_call`` to its clone,
+        `gid$Int`, not be captured by the ancestor's hoisted helper).
+        """
+        where_fns = fn.where_fns or ()
+        # This level's non-generic helpers map to their mangled names; this
+        # level's GENERIC helper names ERASE any same-named ancestor entry —
+        # both directions of "inner shadows outer" (PR #1013 review: a shadow
+        # map built from non-generic names only captured a call to a nested
+        # generic onto the ancestor's hoisted helper — at base a loud
+        # duplicate-identifier crash, silently the wrong body here).
+        this_level = {
+            wfn.name: f"{prefix}$where${wfn.name}"
+            for wfn in where_fns
+            if not wfn.forall_vars
+        }
+        generic_names = {wfn.name for wfn in where_fns if wfn.forall_vars}
+        combined = {
+            k: v for k, v in scope.items() if k not in generic_names
+        }
+        combined.update(this_level)
+        kept_generic: list[ast.FnDecl] = []
+        for wfn in where_fns:
+            if wfn.forall_vars:
+                kept_generic.append(wfn)
+                continue
+            # The child body sees `combined` (this level + all ancestors); its
+            # own nested helpers extend that scope inside the recursion.
+            child = self._hoist_nongeneric_where_fns_under(
+                wfn, this_level[wfn.name], hoisted, combined,
+            )
+            hoisted.append(
+                dataclasses.replace(child, name=this_level[wfn.name])
+            )
+        # Rewrite the parent's OWN body/contracts with the full scope, then
+        # descend into each retained generic subtree shadow-aware.  A blunt
+        # whole-decl rewrite (body + retained generics in one walk) captured a
+        # generic helper's call to its OWN nested helper onto the ancestor's
+        # mangled name — mono clones the generic with the call already
+        # rewritten, so `_hoist_clone_where_fns`'s per-clone redirect never
+        # fires: silent wrong body, and a false Tier-1 when contracted (the
+        # verifier's scoped lookup resolves the call correctly while the
+        # compiled program runs the ancestor's helper) — PR #1013 review.
+        body_only = dataclasses.replace(fn, where_fns=None)
+        rewritten = self._rewrite_call_names(body_only, combined)
+        assert isinstance(rewritten, ast.FnDecl)  # noqa: S101
+        new_generic = tuple(
+            self._rewrite_generic_subtree_shadowed(gfn, combined)
+            for gfn in kept_generic
+        )
+        return dataclasses.replace(
+            rewritten, where_fns=new_generic or None,
+        )
+
+    def _rewrite_generic_subtree_shadowed(
+        self, fn: ast.FnDecl, rename: dict[str, str],
+    ) -> ast.FnDecl:
+        """Redirect ancestor-helper calls inside a RETAINED generic subtree,
+        honouring the subtree's own shadowing (PR #1013 review).
+
+        A generic helper stays structurally nested for the mono path, but its
+        body may legitimately call an ancestor's (now hoisted) non-generic
+        helper — that call must be redirected to the mangled name.  A name the
+        subtree RE-DEFINES at any level, however, is resolved per-clone by
+        ``_hoist_clone_where_fns``, so its ancestor entry must be dropped for
+        that level's body and everything below it; rewriting it here would bind
+        the call to the ancestor's helper and the per-clone redirect (keyed on
+        the bare name) would never fire.
+        """
+        level_names = {wfn.name for wfn in fn.where_fns or ()}
+        visible = {k: v for k, v in rename.items() if k not in level_names}
+        body_only = dataclasses.replace(fn, where_fns=None)
+        rewritten = self._rewrite_call_names(body_only, visible)
+        assert isinstance(rewritten, ast.FnDecl)  # noqa: S101
+        new_where = tuple(
+            self._rewrite_generic_subtree_shadowed(wfn, visible)
+            for wfn in fn.where_fns or ()
+        )
+        return dataclasses.replace(
+            rewritten, where_fns=new_where or None,
+        )
 
     @staticmethod
     def _flatten_where_fns(decl: ast.FnDecl) -> list[ast.FnDecl]:
