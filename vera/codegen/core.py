@@ -762,12 +762,21 @@ class CodeGenerator(
                     functions_wat.append(fn_wat)
                     if is_public:
                         exports.append(decl.name)
-                    # Also compile where-block functions
-                    if decl.where_fns:
-                        for wfn in decl.where_fns:
-                            wfn_wat = self._compile_fn(wfn, export=False)
-                            if wfn_wat is not None:
-                                functions_wat.append(wfn_wat)
+                    # Also compile where-block functions — recursively, so a
+                    # helper's OWN where-helpers (grandchildren) are emitted
+                    # too.  The checker, verifier, and registration paths all
+                    # recurse into nested `where` blocks (`_check_fn` /
+                    # `_verify_fn` / `_register_fn`), so a grandchild's name is
+                    # registered and the parent's body lowers its call to
+                    # `$grandchild` — but before #978 only the direct helpers
+                    # were emitted, so a nested helper's body dangled
+                    # (`unknown func` at WAT assembly).  The generic path
+                    # already flattens nested helpers via
+                    # `monomorphize._hoist_where_fns_under`.
+                    for wfn in self._flatten_where_fns(decl):
+                        wfn_wat = self._compile_fn(wfn, export=False)
+                        if wfn_wat is not None:
+                            functions_wat.append(wfn_wat)
 
         # Compile monomorphized functions.
         #
@@ -1175,6 +1184,28 @@ class CodeGenerator(
         return type_expr_slot_name(te)
 
     @staticmethod
+    def _flatten_where_fns(decl: ast.FnDecl) -> list[ast.FnDecl]:
+        """Every ``where``-helper reachable from *decl*, at any depth (#978).
+
+        Pre-order, depth-first, so a helper precedes its own nested helpers.
+        WAT function order is irrelevant to assembly, but a stable order keeps
+        emitted output deterministic.  An ``id``-keyed visited guard makes the
+        walk total against a pathological (shared-node) AST shape — a plain
+        ``where``-block tree has none, so the guard is pure insurance.
+        """
+        out: list[ast.FnDecl] = []
+        seen: set[int] = set()
+        stack: list[ast.FnDecl] = list(reversed(decl.where_fns or ()))
+        while stack:
+            wfn = stack.pop()
+            if id(wfn) in seen:
+                continue
+            seen.add(id(wfn))
+            out.append(wfn)
+            stack.extend(reversed(wfn.where_fns or ()))
+        return out
+
+    @staticmethod
     def _escape_wat_string(s: str) -> str:
         """Escape a string for WAT data section literal."""
         result: list[str] = []
@@ -1309,7 +1340,8 @@ class CodeGenerator(
         where_fns: tuple[ast.FnDecl, ...] | None,
         ability_ops: dict[str, str],
     ) -> tuple[ast.FnDecl, ...] | None:
-        """Rewrite ability ops in where-block function bodies AND contracts.
+        """Rewrite ability ops in where-block function bodies AND contracts,
+        recursing into nested (grandchild) helpers.
 
         A `where`-helper carries its own full contract block, so its
         `requires` / `ensures` / `decreases` predicates hit the same
@@ -1317,6 +1349,13 @@ class CodeGenerator(
         `compare` (#874).  Rewrite both the body and the contracts through the
         same Pass 1.6 canonicalisation (PR #887 review found the first pass
         covered only `wfn.body`).
+
+        A helper's OWN `where_fns` must be rewritten too (#989): the #978
+        emission fix flattens `decl.where_fns` at any depth so a grandchild's
+        body reaches `_compile_fn`, but if its `eq` / `compare` was never
+        lowered here it stays a raw FnCall — `_compile_fn` trips CodegenSkip,
+        drops the body, and the parent's `return_call $grandchild` dangles
+        (`unknown func`).  Recurse to mirror `_flatten_where_fns`.
         """
         if not where_fns:
             return where_fns
@@ -1328,12 +1367,16 @@ class CodeGenerator(
             new_body = self._rewrite_ops_in_expr(wfn.body, ability_ops)
             new_contracts = self._rewrite_ops_in_contracts(
                 wfn.contracts, ability_ops)
+            new_nested = self._rewrite_where_fns(
+                wfn.where_fns, ability_ops)
             if (new_body is not wfn.body
-                    or new_contracts is not wfn.contracts):
+                    or new_contracts is not wfn.contracts
+                    or new_nested is not wfn.where_fns):
                 new_fns.append(_replace(
                     wfn,
                     body=new_body,  # type: ignore[arg-type]
-                    contracts=new_contracts))
+                    contracts=new_contracts,
+                    where_fns=new_nested))
                 changed = True
             else:
                 new_fns.append(wfn)
