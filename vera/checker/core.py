@@ -20,7 +20,7 @@ each handle a specific concern:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -34,6 +34,7 @@ from vera.environment import (
 )
 from vera.types import (
     BOOL,
+    ModuleArtifacts,
     PureEffectRow,
     Type,
     TypeVar,
@@ -111,6 +112,15 @@ class CheckArtifacts:
     # #747: semantic-type side-tables for the verifier (see TypeChecker).
     expr_semantic_types: dict[tuple[int, int, int, int], Type]
     expr_target_types: dict[tuple[int, int, int, int], Type]
+    # #987: per-resolved-module span-keyed side-tables, keyed by module path.
+    # Each entry is that module's OWN ``(expr_semantic_types,
+    # expr_target_types)`` — the top-level tables above are keyed by bare span
+    # with no file identity, so an imported body compiled into the flat WASM
+    # module (Pass 2.5 / 2.6) cannot recover its component targets from them.
+    # Codegen threads the matching entry when compiling each module's body, so
+    # the #820 @Nat -> @Int widening guard fires at the array-element /
+    # tuple-construction sites through the import door, not just same-file.
+    module_artifacts: ModuleArtifacts
 
 
 def typecheck_with_artifacts(
@@ -118,6 +128,7 @@ def typecheck_with_artifacts(
     source: str = "",
     file: str | None = None,
     resolved_modules: list[ResolvedModule] | None = None,
+    collect_module_artifacts: bool = False,
 ) -> tuple[list[Diagnostic], CheckArtifacts]:
     """Type-check and additionally collect LSP artifacts (#222 Phase D).
 
@@ -126,6 +137,16 @@ def typecheck_with_artifacts(
     of the #222 plan chose this eager side-table over re-synthesis at
     query time).  Existing callers keep using :func:`typecheck`; only
     the LSP layer pays the collection cost.
+
+    ``collect_module_artifacts`` (#987, opt-in per PR #997 review) gates the
+    per-resolved-module side-table pass.  Only the codegen-bound callers
+    (``vera compile`` / ``run`` / ``serve`` / ``test``) consume
+    ``CheckArtifacts.module_artifacts`` — they pass ``True``.  ``vera verify``
+    and the warm ``VerificationSession`` read only the top-level
+    ``expr_semantic_types`` / ``expr_target_types`` tables and would pay a full
+    extra ``check_program`` per resolved module for nothing, so they leave it
+    ``False`` (``module_artifacts`` is then an empty dict, which ``_compile_fn``
+    already tolerates — the #986 imported-body suppression fallback).
     """
     checker = TypeChecker(
         source=source, file=file, resolved_modules=resolved_modules,
@@ -140,7 +161,80 @@ def typecheck_with_artifacts(
         holes=checker.hole_sites,
         expr_semantic_types=checker.expr_semantic_types,
         expr_target_types=checker.expr_target_types,
+        module_artifacts=(
+            _collect_module_artifacts(resolved_modules)
+            if collect_module_artifacts
+            else {}
+        ),
     )
+
+
+def _collect_module_artifacts(
+    resolved_modules: list[ResolvedModule] | None,
+) -> ModuleArtifacts:
+    """Collect each resolved module's OWN span-keyed side-tables (#987).
+
+    The top-level program's ``expr_target_types`` / ``expr_semantic_types`` are
+    keyed by bare span ``(line, col, end_line, end_col)`` with no file identity,
+    so an imported body compiled into the flat WASM module (Pass 2.5 / 2.6) has
+    no entries there — codegen dropped the #820 @Nat -> @Int widening guard at
+    the array-element / tuple-construction sites through the import door, while
+    the library's own ``vera verify`` reported them Tier-3-guarded (the broken
+    promise).  Run the full check over each module in isolation to collect ITS
+    table, keyed by module path, so codegen can thread the right one when it
+    compiles that module's body.
+
+    Each module's ``direct`` flags are re-derived from its OWN ``import``
+    declarations — the closure ``resolved_modules`` was tagged relative to the
+    top-level program (a module the program reaches only transitively is
+    ``direct=False`` there, but is a DIRECT import of whichever module imports
+    it) — so name injection (gated on ``mod.direct``) and qualified-call
+    resolution match a standalone check of that module.  Over-inclusion of
+    modules the checked one never imports is inert: they are registered but,
+    tagged ``direct=False`` and absent from its ``program.imports``, never
+    injected or qualified-callable.
+
+    Honesty note (PR #997 review): no BEHAVIOURAL fixture has been found where
+    the re-derivation vs reusing the top-level flags changes an emitted guard —
+    the necessity at the guard level is therefore unproven.  What IS proven is
+    that the re-derivation changes the collected ARTIFACT: in a transitive
+    fixture (main -> alib -> blib) ``alib``'s own target table gains its second
+    entry only because ``blib`` is re-tagged a DIRECT import of ``alib`` for its
+    sub-check.  That artifact-level difference is pinned by
+    ``tests/test_xmod_artifact_collection.py::TestTransitiveArtifactContent``.
+
+    Cost note (PR #997 review): this is quadratic on the codegen paths that
+    opt in — N resolved modules each get a full ``check_program`` that
+    re-registers the other N-1, so the pass is O(N^2) sub-checks (measured
+    ~85ms at 20 modules vs ~4ms for the main-file-only check).  It runs only
+    for ``vera compile``/``run``/``serve``/``test`` (``vera verify`` and the
+    warm session skip it entirely).  Memoising each module's per-check
+    registration (its declarations are re-derived identically every pass) is a
+    future optimisation candidate that would collapse it toward O(N).
+    """
+    mods = resolved_modules or []
+    result: ModuleArtifacts = {}
+    for mod in mods:
+        mod_direct = {imp.path for imp in mod.program.imports}
+        sub_resolved = [
+            replace(other, direct=(other.path in mod_direct))
+            for other in mods
+            if other.path != mod.path
+        ]
+        sub_semantic: dict[tuple[int, int, int, int], Type] = {}
+        sub_target: dict[tuple[int, int, int, int], Type] = {}
+        sub = TypeChecker(
+            source=mod.source,
+            file=str(mod.file_path),
+            resolved_modules=sub_resolved,
+        )
+        sub.expr_types = {}
+        sub.expr_semantic_types = sub_semantic
+        sub.expr_target_types = sub_target
+        sub.hole_sites = []
+        sub.check_program(mod.program)
+        result[mod.path] = (sub_semantic, sub_target)
+    return result
 
 
 # =====================================================================

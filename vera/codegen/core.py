@@ -44,7 +44,7 @@ from vera.codegen.compilability import CompilabilityMixin
 
 if TYPE_CHECKING:
     from vera.resolver import ResolvedModule
-    from vera.types import Type
+    from vera.types import ModuleArtifacts, SpanTypeTable, Type
     from vera.wasm.context import WasmContext
 
 
@@ -96,6 +96,7 @@ class CodeGenerator(
         expr_target_types: (
             dict[tuple[int, int, int, int], Type] | None
         ) = None,
+        module_artifacts: ModuleArtifacts | None = None,
     ) -> None:
         self.source = source
         self.file = file
@@ -119,6 +120,21 @@ class CodeGenerator(
         self._expr_target_types: (
             dict[tuple[int, int, int, int], Type] | None
         ) = expr_target_types
+        # #987: per-resolved-module span-keyed side-tables, keyed by module path
+        # (``CheckArtifacts.module_artifacts``).  The two tables above hold
+        # MAIN-file entries only, so an imported body compiled in Pass 2.5 / 2.6
+        # cannot recover its component targets from them.  ``_compile_fn``
+        # selects the entry for the module being compiled — via the ``path`` its
+        # ``_imported_fn_decls`` / ``_shadowed_module_fns`` entry carries — so the
+        # imported body's array-element / tuple-construction @Nat -> @Int
+        # widening guard fires exactly as the module's standalone compile emits
+        # it.  Empty when a caller skipped ``typecheck_with_artifacts`` (or has no
+        # imports); the imported body then falls back to suppressed lookups
+        # (#986), never a wrong-file-keyed guard.
+        self._module_artifacts: dict[
+            tuple[str, ...],
+            tuple[SpanTypeTable | None, SpanTypeTable | None],
+        ] = dict(module_artifacts or {})
 
         # Registered function signatures: name -> (param_types, return_type)
         self._fn_sigs: dict[str, tuple[list[str | None], str | None]] = {}
@@ -822,6 +838,9 @@ class CodeGenerator(
                 idecl, export=False,
                 module_renames=self._module_intra_renames.get(path, {}),
                 imported=True,  # #986: don't consult the main-file span tables
+                # #987: thread THIS module's own span-keyed tables so the
+                # imported body's @Nat -> @Int widening guard fires.
+                module_tables=self._module_artifacts.get(path),
             )
             if fn_wat is not None:
                 functions_wat.append(fn_wat)
@@ -845,6 +864,10 @@ class CodeGenerator(
                 export=False,
                 module_renames=self._module_intra_renames.get(path, {}),
                 imported=True,  # #986: don't consult the main-file span tables
+                # #987: the ``mod$…`` rename only changes the WASM function name;
+                # the body's node spans are unchanged, so THIS module's table
+                # still keys them correctly and its widen guard fires.
+                module_tables=self._module_artifacts.get(path),
             )
             if fn_wat is not None:
                 functions_wat.append(fn_wat)

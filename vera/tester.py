@@ -21,7 +21,7 @@ from vera import ast
 from vera.errors import Diagnostic, SourceLocation
 from vera.slots import type_expr_slot_name
 from vera.smt import SlotEnv, SmtContext
-from vera.types import BOOL, BYTE, FLOAT64, INT, NAT, STRING, UNIT, PrimitiveType, RefinedType, Type, base_type
+from vera.types import BOOL, BYTE, FLOAT64, INT, NAT, STRING, UNIT, ModuleArtifacts, PrimitiveType, RefinedType, Type, base_type
 
 if TYPE_CHECKING:
     from vera.resolver import ResolvedModule
@@ -153,6 +153,7 @@ def test(
     resolved_modules: list[ResolvedModule] | None = None,
     expr_semantic_types: dict[tuple[int, int, int, int], Type] | None = None,
     expr_target_types: dict[tuple[int, int, int, int], Type] | None = None,
+    module_artifacts: ModuleArtifacts | None = None,
 ) -> TestResult:
     """Test a type-checked Vera program by generating inputs from contracts.
 
@@ -168,6 +169,10 @@ def test(
     the verifier obligates — without them a tuple/array-component widen guard
     (recovered only from the target table) silently vanished from the
     tester-compiled WASM while the verifier still classified it tier3-guarded.
+
+    ``module_artifacts`` (#987) carries each resolved module's OWN side-tables so
+    the tester-compiled WASM also emits the widen guards for IMPORTED bodies —
+    the same threading ``vera run`` / ``vera compile`` use.
     """
     engine = _TestEngine(
         program=program,
@@ -178,6 +183,7 @@ def test(
         resolved_modules=resolved_modules,
         expr_semantic_types=expr_semantic_types,
         expr_target_types=expr_target_types,
+        module_artifacts=module_artifacts,
     )
     return engine.run()
 
@@ -201,6 +207,7 @@ class _TestEngine:
             dict[tuple[int, int, int, int], Type] | None) = None,
         expr_target_types: (
             dict[tuple[int, int, int, int], Type] | None) = None,
+        module_artifacts: ModuleArtifacts | None = None,
     ) -> None:
         self.program = program
         self.source = source
@@ -213,6 +220,9 @@ class _TestEngine:
         # the same widen guards the verifier obligates.
         self.expr_semantic_types = expr_semantic_types
         self.expr_target_types = expr_target_types
+        # #987: per-module tables so the tester's WASM emits the widen guards for
+        # imported bodies too (threaded into `codegen_compile` below).
+        self.module_artifacts = module_artifacts
 
     def run(self) -> TestResult:
         """Execute the full test pipeline."""
@@ -246,6 +256,7 @@ class _TestEngine:
             resolved_modules=self.resolved_modules,
             expr_semantic_types=self.expr_semantic_types,
             expr_target_types=self.expr_target_types,
+            module_artifacts=self.module_artifacts,
         )
         compile_errors = [
             d for d in compile_result.diagnostics
