@@ -245,6 +245,13 @@ class ContractVerifier:
         # instantiated at; empty when the program has no generics.
         self._instances: dict[str, set[tuple[str, ...]]] = {}
         self._mono: Monomorphizer | None = None
+        # #820: raw type-alias TypeExprs (populated in `_build_mono_context`),
+        # so the @Nat -> @Int closure-argument widening obligation can recover a
+        # `SlotRef` closure's formal types via `resolve_fn_type_alias` — the
+        # same terminal-FnType resolution codegen's `_closure_arg_param_types`
+        # uses, keeping the two sides in lockstep at the closure boundary.
+        self._closure_type_aliases: dict[str, ast.TypeExpr] = {}
+        self._closure_type_alias_params: dict[str, tuple[str, ...]] = {}
         # #774 (PR #888 review, CR 3519156263): a LOCAL generic that shadows an
         # IMPORTED generic must NOT absorb the imported generic's `m::gen(...)`
         # instantiations into the local's bare `_instances` key — that would
@@ -1005,6 +1012,14 @@ class ContractVerifier:
                     if idecl.return_type is not None:
                         fn_ret_type_exprs.setdefault(
                             idecl.name, idecl.return_type)
+
+        # #820: retain the raw alias TypeExprs so the closure-argument widening
+        # obligation resolves a `SlotRef` closure's formal types the same way
+        # codegen does (`resolve_fn_type_alias`).  First non-empty build wins —
+        # per-monomorphization rebuilds carry the same program-global aliases.
+        if type_aliases and not self._closure_type_aliases:
+            self._closure_type_aliases = type_aliases
+            self._closure_type_alias_params = type_alias_params
 
         return MonoContext(
             generic_decls=generic_decls,
@@ -3062,6 +3077,47 @@ class ContractVerifier:
                 return
             # A non-call pipe RHS falls through to the generic walk below.
 
+        if (isinstance(expr, ast.FnCall) and expr.name == "apply_fn"
+                and expr.args):
+            # #820: `apply_fn(closure, a0, a1, …)` — a @Nat argument widening
+            # into an @Int closure formal reinterprets above i64.MAX.  apply_fn
+            # is a checker special form (no `param_types`), so it is excluded
+            # from the generic call-arg path below; obligate each @Nat value
+            # argument against its recovered @Int formal here.  Codegen guards
+            # the call_indirect argument (`_translate_apply_fn`), so guarded.
+            formals = self._closure_arg_param_types(expr.args[0])
+            if formals is not None:
+                for arg, formal in zip(expr.args[1:], formals):
+                    if (self._is_int_type(self._resolve_type(formal))
+                            and self._result_is_nat(arg)):
+                        self._check_int_widening_obligation(
+                            decl, arg, smt, slot_env, list(assumptions),
+                            site="closure argument",
+                        )
+            for arg in expr.args:
+                self._walk_for_nat_binding_obligations(
+                    decl, arg, smt, slot_env, assumptions,
+                )
+            return
+
+        if isinstance(expr, ast.AnonFn):
+            # #820: a @Nat closure body widening into an @Int closure RETURN.
+            # The closure body is opaque to the SMT layer (its params/captures
+            # are not in the outer slot env — translating the body here would
+            # mis-resolve a closure param onto an outer same-named slot and
+            # could prove a FALSE Tier-1), so obligate it SHALLOW-syntactically
+            # as tier3 (never Tier-1 / E530): codegen guards the body's @Int
+            # return value (`_compile_lifted_closure`), the definition-side dual
+            # of the closure-argument obligation.  The body is deliberately NOT
+            # walked — AnonFn stays a terminal for the SMT walk (see
+            # `_walk_for_primitive_op_obligations`'s docstring for the
+            # closure-opacity rationale), matching what the #984 dual shares.
+            if (self._is_int_type(self._resolve_type(expr.return_type))
+                    and self._result_is_nat(expr.body)):
+                self._record_int_widen_tier3(
+                    decl, expr.body, "closure return", "tier3", guarded=True)
+            return
+
         if isinstance(expr, (ast.FnCall, ast.ModuleCall)):
             # Site 2: @Nat formal parameters narrowing an @Int argument.
             if isinstance(expr, ast.FnCall):
@@ -3208,14 +3264,18 @@ class ContractVerifier:
                         )
                     elif (self._is_int_type(comp_ty)
                             and self._result_is_nat(arg)):
-                        # #813: dual — a @Nat component widening into an @Int
-                        # tuple slot.  guarded=False, like the @Nat path above:
-                        # codegen does not component-guard a tuple at
-                        # construction (the boundary guard is a separate site),
-                        # so disclose the unguarded widening via E531.
+                        # #813/#820: dual — a @Nat component widening into an
+                        # @Int tuple slot.  Codegen recovers the tuple's target
+                        # component types (`Tuple<Int, Int>`) from the threaded
+                        # target-type table (the #820 enabler) and guards each
+                        # @Nat component AT CONSTRUCTION, so this is now
+                        # runtime-guarded (`guarded=True`) rather than E531 —
+                        # the #813-disclosed tuple-component widening residual
+                        # (the widening dual of #758's tuple-component
+                        # narrowing) the enabler unlocks.
                         self._check_int_widening_obligation(
                             decl, arg, smt, slot_env, list(assumptions),
-                            site="tuple component", guarded=False,
+                            site="tuple component", guarded=True,
                         )
             for arg in expr.args:
                 self._walk_for_nat_binding_obligations(
@@ -3263,6 +3323,14 @@ class ContractVerifier:
             return
 
         if isinstance(expr, ast.IfExpr):
+            # #820: a heterogeneous @Int-join `if` (one @Nat arm, one genuine
+            # @Int-slot arm) widens the @Nat arm per-arm — the boundary guard
+            # cannot fire without false-trapping the @Int arm.  Obligate each
+            # @Nat arm under its own path condition (so `if c then @Nat.0 …`
+            # discharges assuming `c`), mirroring codegen's per-arm guard in
+            # `_translate_if`.  The homogeneous @Nat case stays on the whole-if
+            # boundary path (`_is_hetero_int_widen_join` excludes it).
+            hetero_int = self._is_hetero_int_widen_join(expr)
             self._walk_for_nat_binding_obligations(
                 decl, expr.condition, smt, slot_env, assumptions,
             )
@@ -3271,6 +3339,11 @@ class ContractVerifier:
                 import z3 as z3mod
                 smt._path_conditions.append(z3_cond)
                 try:
+                    if hetero_int and self._result_is_nat(expr.then_branch):
+                        self._check_int_widening_obligation(
+                            decl, expr.then_branch, smt, slot_env,
+                            list(assumptions), site="heterogeneous if arm",
+                        )
                     self._walk_for_nat_binding_obligations(
                         decl, expr.then_branch, smt, slot_env, assumptions,
                     )
@@ -3279,6 +3352,13 @@ class ContractVerifier:
                 if expr.else_branch is not None:
                     smt._path_conditions.append(z3mod.Not(z3_cond))
                     try:
+                        if (hetero_int
+                                and self._result_is_nat(expr.else_branch)):
+                            self._check_int_widening_obligation(
+                                decl, expr.else_branch, smt, slot_env,
+                                list(assumptions),
+                                site="heterogeneous if arm",
+                            )
                         self._walk_for_nat_binding_obligations(
                             decl, expr.else_branch, smt, slot_env,
                             assumptions,
@@ -3398,15 +3478,15 @@ class ContractVerifier:
                                 )
                             elif (self._is_int_type(comp_ty)
                                     and self._result_is_nat(sub)):
-                                # #813: dual — a @Nat literal component
+                                # #813/#820: dual — a @Nat literal component
                                 # destructured into an @Int slot widens it.
-                                # Codegen does not guard the tuple-component
-                                # coercion (like construction), so disclose
-                                # E531 (guarded=False).
+                                # Codegen guards the field load at the destructure
+                                # read (mirroring this literal-source path), so
+                                # this is now runtime-guarded (`guarded=True`).
                                 self._check_int_widening_obligation(
                                     decl, sub, smt, cur_env,
                                     list(block_assumptions),
-                                    site="tuple destructure", guarded=False,
+                                    site="tuple destructure", guarded=True,
                                 )
                     else:
                         # Non-literal source (#747): project the tuple
@@ -3531,6 +3611,10 @@ class ContractVerifier:
             return
 
         if isinstance(expr, ast.MatchExpr):
+            # #820: a heterogeneous @Int-join `match` (a @Nat arm body alongside
+            # a genuine @Int-slot arm body) widens the @Nat arm per-arm — the
+            # boundary guard cannot fire without false-trapping the @Int arm.
+            match_hetero_int = self._is_hetero_int_widen_join(expr)
             self._walk_for_nat_binding_obligations(
                 decl, expr.scrutinee, smt, slot_env, assumptions,
             )
@@ -3610,6 +3694,14 @@ class ContractVerifier:
                                 arm.pattern, smt, slot_env, assumptions,
                             )
                         )
+                    # #820: obligate a @Nat arm body widening into the @Int join
+                    # (under this arm's discriminant condition), mirroring
+                    # codegen's per-arm guard in `_translate_match`.
+                    if match_hetero_int and self._result_is_nat(arm.body):
+                        self._check_int_widening_obligation(
+                            decl, arm.body, smt, arm_env,
+                            list(arm_assumptions), site="heterogeneous match arm",
+                        )
                     self._walk_for_nat_binding_obligations(
                         decl, arm.body, smt, arm_env, arm_assumptions,
                     )
@@ -3623,13 +3715,11 @@ class ContractVerifier:
         # still be visited.  (The #520 subtraction walker has the same
         # pre-existing container gap; aligning it is out of #552's scope.)
         if isinstance(expr, ast.ArrayLit):
-            # #813: a @Nat element widening into an @Array<Int> literal.  The
-            # literal codegen types the array by its element *values* (source),
-            # and the `let @Array<Int> = …` binding is a pointer-pair copy with
-            # no element-wise coercion — so this site is NOT runtime-guarded.
-            # Disclose the unguarded widening (E531) rather than a silent false
-            # Tier-1; codegen-guarding it (threading the target element type) is
-            # a tracked follow-up.
+            # #813/#820: a @Nat element widening into an @Array<Int> literal.
+            # Codegen recovers the target element type (`Array<Int>`) from the
+            # threaded target-type table and guards the element store at the
+            # widening boundary (the #820 enabler), so this site is now
+            # runtime-guarded (`guarded=True`) rather than E531-disclosed.
             target = self._target_type_of(expr)
             base = target.base if isinstance(target, RefinedType) else target
             if (isinstance(base, AdtType) and base.name == "Array"
@@ -3639,7 +3729,7 @@ class ContractVerifier:
                     if self._result_is_nat(elem):
                         self._check_int_widening_obligation(
                             decl, elem, smt, slot_env, list(assumptions),
-                            site="array element", guarded=False,
+                            site="array element", guarded=True,
                         )
             for elem in expr.elements:
                 self._walk_for_nat_binding_obligations(
@@ -4334,14 +4424,15 @@ class ContractVerifier:
     ) -> None:
         """Record a Tier-3 ``nat_to_int_coerce`` outcome, the #813 dual of
         :py:meth:`_record_nat_bind_tier3`.  A codegen-guarded widening
-        (``guarded=True`` — return, let, call-arg, and the concrete @Int
-        constructor field) genuinely falls to a runtime coercion trap
-        (``tier3_runtime``).  The unguarded cases (``guarded=False`` — the
-        tuple-construction component and the generic-instantiated @Int field,
-        which erases to i64 with no per-field mono metadata) are neither
-        statically proven nor runtime-checked, so surface an E531 warning and
-        are excluded from the discharged totals rather than silently counting
-        a runtime check they never get."""
+        (``guarded=True`` — return, let, call-arg, concrete @Int constructor
+        field, and the #820 per-component sites: tuple component, array
+        element, heterogeneous if/match arm, closure argument/return/capture)
+        genuinely falls to a runtime coercion trap (``tier3_runtime``).  The
+        sole unguarded case (``guarded=False`` — the generic-instantiated @Int
+        field, which erases to i64 with no per-field mono metadata) is neither
+        statically proven nor runtime-checked, so surfaces an E531 warning and
+        is excluded from the discharged totals rather than silently counting
+        a runtime check it never gets."""
         if guarded:
             self._record_obligation(
                 decl.name, "nat_to_int_coerce", value_node, status)
@@ -4375,9 +4466,10 @@ class ContractVerifier:
                 "reinterprets to a negative @Int when widened.  The value is "
                 "outside Z3's decidable fragment (untranslatable or the solver "
                 "timed out), so the `<= i64.MAX` obligation could not be "
-                "discharged.  Codegen runtime-guards the concrete @Int "
-                "coercion sites (return, let, call-argument, concrete @Int "
-                "field) but not this one — a tuple-construction component, or a "
+                "discharged.  Codegen runtime-guards every concrete @Int "
+                "coercion site (return, let, call-argument, constructor field, "
+                "tuple component, array element, heterogeneous arm, closure "
+                "argument/return/capture) but not this one — a "
                 "generic-instantiated @Int field with no per-field mono "
                 "metadata — so here the widening is neither statically proven "
                 "nor runtime-checked."
@@ -4426,6 +4518,54 @@ class ContractVerifier:
         else:
             self._record_int_widen_tier3(
                 decl, node, site, "tier3", guarded=guarded)
+
+    def _closure_arg_param_types(
+        self, closure_arg: ast.Expr,
+    ) -> tuple[ast.TypeExpr, ...] | None:
+        """Declared *parameter* TypeExprs of the closure an ``apply_fn`` applies
+        (#820) — the verifier mirror of codegen's ``_closure_arg_param_types``.
+
+        An inline ``AnonFn`` yields its declared params directly; a ``SlotRef``
+        is resolved through the shared :func:`resolve_fn_type_alias` (the same
+        terminal-``FnType`` resolution codegen uses) over the retained raw alias
+        TypeExprs, so the obligation and the codegen guard recover an identical
+        formal type at the closure boundary.  Any other shape yields ``None``.
+        """
+        if isinstance(closure_arg, ast.AnonFn):
+            return tuple(closure_arg.params)
+        if isinstance(closure_arg, ast.SlotRef):
+            from vera.monomorphize import resolve_fn_type_alias
+            fn_type = resolve_fn_type_alias(
+                ast.NamedType(
+                    name=closure_arg.type_name,
+                    type_args=closure_arg.type_args,
+                ),
+                self._closure_type_aliases,
+                self._closure_type_alias_params,
+            )
+            return tuple(fn_type.params) if fn_type is not None else None
+        return None
+
+    def _is_hetero_int_widen_join(self, expr: ast.Expr) -> bool:
+        """True iff *expr* is an ``if``/``match`` that widens a @Nat *arm* into
+        an @Int join (#820).
+
+        The homogeneous @Nat case (`_result_is_nat(expr)` — every arm @Nat-
+        compatible) is covered by the whole-expression boundary guard at the
+        return / let / call-arg site, so it is excluded here.  What remains is a
+        HETEROGENEOUS join — at least one genuine @Int-*slot* arm makes the join
+        genuinely @Int (it can be legitimately negative), so the boundary guard
+        cannot fire without false-trapping that arm.  The @Nat arm(s) must be
+        obligated/guarded PER-ARM.  The @Int-join context is read from the
+        checker's target-type table (``_target_type_of``), the dual of codegen's
+        ``result_type == "i64"`` heterogeneous-if classification.
+        """
+        if not isinstance(expr, (ast.IfExpr, ast.MatchExpr)):
+            return False
+        if self._result_is_nat(expr):
+            return False
+        target = self._target_type_of(expr)
+        return target is not None and self._is_int_type(target)
 
     def _check_refined_binding_obligation(
         self,
@@ -5910,8 +6050,9 @@ class ContractVerifier:
         at the single boundary site — without needing the per-arm join type,
         which the checker's sparse side-tables do not record.  A genuine @Int arm
         (a slot/call that can be negative) is NOT @Nat-compatible: it makes the
-        result @Int, and a @Nat sibling widening into it is the architecturally
-        deferred site-2b case (tracked in #820), not a boundary widening."""
+        result @Int, and a @Nat sibling widening into it is the heterogeneous
+        per-arm case — obligated via :py:meth:`_is_hetero_int_widen_join` and
+        guarded per-arm by codegen (#820), not a boundary widening."""
         return self._result_is_nat(expr) or self._is_nonneg_int_literal(expr)
 
     @staticmethod

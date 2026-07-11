@@ -420,6 +420,7 @@ def cmd_compile(
         result = codegen_compile(
             ast, source=source, file=str(p), resolved_modules=resolved,
             expr_semantic_types=artifacts.expr_semantic_types,
+            expr_target_types=artifacts.expr_target_types,
         )
 
         errors = [d for d in result.diagnostics if d.severity == "error"]
@@ -584,6 +585,7 @@ def cmd_serve(
         result = codegen_compile(
             ast, source=source, file=str(p), resolved_modules=resolved,
             expr_semantic_types=artifacts.expr_semantic_types,
+            expr_target_types=artifacts.expr_target_types,
         )
         errors = [d for d in result.diagnostics if d.severity == "error"]
         if errors:  # pragma: no cover — codegen errors after typecheck pass
@@ -717,6 +719,7 @@ def cmd_run(
         result = codegen_compile(
             ast, source=source, file=str(p), resolved_modules=resolved,
             expr_semantic_types=artifacts.expr_semantic_types,
+            expr_target_types=artifacts.expr_target_types,
         )
 
         if not result.ok:  # pragma: no cover — codegen errors after typecheck pass
@@ -1169,7 +1172,7 @@ def cmd_test(
     fn_name: str | None = None,
 ) -> int:
     """Parse, type-check, and test a .vera file via contract-driven testing."""
-    from vera.checker import typecheck
+    from vera.checker import typecheck_with_artifacts
     from vera.resolver import ModuleResolver
     from vera.tester import test as run_test
 
@@ -1182,10 +1185,16 @@ def cmd_test(
         resolver = ModuleResolver(_root=p.parent)
         resolved = resolver.resolve_imports(ast, p)
 
-        # Type-check first
-        type_diags = resolver.errors + typecheck(
+        # Type-check first.  #986: use the artifact-returning check and thread the
+        # resolved- / target-type side-tables into the tester (below) so the WASM
+        # the tester compiles carries the SAME @Nat->@Int widen guards
+        # (tuple/array components, recovered only from the target table) the
+        # verifier obligates — without them the tester executed guard-free WASM
+        # the verifier had classified tier3-guarded (a `vera test` desync).
+        check_diags, artifacts = typecheck_with_artifacts(
             ast, source, file=str(p), resolved_modules=resolved,
         )
+        type_diags = resolver.errors + check_diags
         type_errors = [d for d in type_diags if d.severity == "error"]
 
         if type_errors:
@@ -1209,6 +1218,8 @@ def cmd_test(
             trials=trials,
             fn_name=fn_name,
             resolved_modules=resolved,
+            expr_semantic_types=artifacts.expr_semantic_types,
+            expr_target_types=artifacts.expr_target_types,
         )
 
         has_errors = any(d.severity == "error" for d in result.diagnostics)
