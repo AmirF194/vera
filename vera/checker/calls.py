@@ -23,6 +23,7 @@ from vera.types import (
     TypeVar,
     UnknownType,
     base_type,
+    contains_fresh_typevar,
     contains_typevar,
     erases_to_unit,
     is_effect_subtype,
@@ -32,6 +33,65 @@ from vera.types import (
     strip_builtin_typevar_marker,
     substitute,
 )
+
+
+def _compatible_modulo_typevars(
+        a: Type, b: Type, rigid: frozenset[str]) -> bool:
+    """Structural compatibility treating UNRESOLVED TypeVars as wildcards
+    (#993).
+
+    Used only when a subtype check between two types has failed AND at
+    least one side still carries unresolved type variables — i.e. the
+    call's instantiation could not be pinned down (every argument is
+    itself polymorphic, e.g. `option_unwrap_or(nothing(()), None)`).
+    An unresolved var on either side matches anything: there EXISTS an
+    instantiation making the two sides agree, so rejecting would be a
+    false E202.  Unresolved means a fresh `T$n`, a `#b`-marked builtin
+    var, or a callee forall var leaked raw from an uninferrable call —
+    everything EXCEPT the enclosing function's own declared forall params
+    (*rigid*, passed by name from `env.type_params`).  A rigid var is NOT
+    a wildcard — inside its own body it is an opaque, already-quantified
+    type, so `Option<T>` passed where `Option<Int>` is required must stay
+    E202 (the body must be valid for EVERY `T`, PR #1009 review); two
+    rigid vars agree only by name.  (A callee var leaked under a
+    same-named enclosing forall is conservatively treated as rigid —
+    the safe direction.)  Concrete structure must still line up —
+    `Option<...>` never matches `Result<...>`, a function's effect row
+    must still be permitted by the parameter's (`<IO>` never satisfies
+    `pure`), and a genuinely concrete leaf mismatch (`Int` vs `String`)
+    is rejected via the subtype fallback.
+    """
+    a = base_type(a)
+    b = base_type(b)
+    if isinstance(a, UnknownType) or isinstance(b, UnknownType):
+        return True
+    if isinstance(a, TypeVar) or isinstance(b, TypeVar):
+        a_rigid = (isinstance(a, TypeVar)
+                   and "$" not in a.name and a.name in rigid)
+        b_rigid = (isinstance(b, TypeVar)
+                   and "$" not in b.name and b.name in rigid)
+        if isinstance(a, TypeVar) and not a_rigid:
+            return True
+        if isinstance(b, TypeVar) and not b_rigid:
+            return True
+        # Every TypeVar side is rigid here: only the same var matches.
+        return (isinstance(a, TypeVar) and isinstance(b, TypeVar)
+                and a.name == b.name)
+    if isinstance(a, AdtType) and isinstance(b, AdtType):
+        return (a.name == b.name
+                and len(a.type_args) == len(b.type_args)
+                and all(_compatible_modulo_typevars(x, y, rigid)
+                        for x, y in zip(a.type_args, b.type_args)))
+    if isinstance(a, FunctionType) and isinstance(b, FunctionType):
+        return (len(a.params) == len(b.params)
+                and all(_compatible_modulo_typevars(x, y, rigid)
+                        for x, y in zip(a.params, b.params))
+                and _compatible_modulo_typevars(
+                    a.return_type, b.return_type, rigid)
+                and is_effect_subtype(a.effect, b.effect))
+    # Leaves (primitives): the instantiation direction is unknown, so
+    # accept a subtype relationship either way (Nat vs Int).
+    return is_subtype(a, b) or is_subtype(b, a)
 
 
 class CallsMixin:
@@ -281,6 +341,18 @@ class CallsMixin:
                         arg_ty = re
                         arg_types[i] = re
             if not is_subtype(arg_ty, param_ty):
+                # #993: when unresolved variables remain on either side
+                # (e.g. `option_unwrap_or(nothing(()), None)` — the callee's
+                # instantiation never resolves because every argument is
+                # itself polymorphic), a structural match treating type
+                # variables as wildcards means the call is satisfiable at
+                # SOME instantiation — rejecting it is a false E202.  Fully
+                # concrete mismatches are unaffected.
+                if ((contains_typevar(arg_ty) or contains_typevar(param_ty))
+                        and _compatible_modulo_typevars(
+                            arg_ty, param_ty,
+                            frozenset(self.env.type_params))):
+                    continue
                 self._error(
                     args[i],
                     f"Argument {i} of '{fn_info.name}' has type "
@@ -680,6 +752,28 @@ class CallsMixin:
             if isinstance(param_ty, (TypeVar, UnknownType)):
                 continue
             if not is_subtype(arg_ty, param_ty):
+                # #993: the args were synthesized with no expected type, so
+                # a bare constructor argument (`eq(x, None)`) minted a fresh
+                # ctor var that never met the parameter type.  Re-synth the
+                # ctor argument against the resolved param so the #971
+                # bidirectional fill can adopt it (works for concrete AND
+                # rigid-forall-var parameter args).  Restricted to
+                # constructor expressions — re-synthesizing an arbitrary
+                # expression could re-emit its own diagnostics — and to a
+                # fresh-FREE param: a param still carrying a `$` hole
+                # (`eq(None, None)`) is not a resolved type to adopt, and
+                # adopting it would let an unresolvable comparison through.
+                if (contains_typevar(arg_ty)
+                        and not contains_fresh_typevar(param_ty)
+                        and isinstance(args[i], (
+                            ast.ConstructorCall, ast.NullaryConstructor))):
+                    resynth = self._synth_expr(args[i], expected=param_ty)
+                    if (resynth is not None
+                            and not isinstance(resynth, UnknownType)):
+                        arg_ty = resynth
+                        arg_types[i] = resynth
+                        if is_subtype(arg_ty, param_ty):
+                            continue
                 self._error(
                     args[i],
                     f"Argument {i} of '{op_info.name}' has type "
@@ -792,7 +886,17 @@ class CallsMixin:
                 continue
             if (isinstance(param_ty, TypeVar)
                     and param_ty.name in ab_info.type_params):
-                if param_ty.name not in mapping:
+                # #993 (PR #1009 review): first-arg-wins locked the mapping
+                # onto a bare ctor's fresh var — `eq(None, Some(5))` bound
+                # A := Option<T$1> and the concrete second argument could
+                # never re-anchor it.  A later fresh-FREE candidate
+                # overrides a fresh-containing tentative one (the #293
+                # precedence); `eq(None, None)` keeps its fresh binding and
+                # stays rejected.
+                existing = mapping.get(param_ty.name)
+                if existing is None or (
+                        contains_fresh_typevar(existing)
+                        and not contains_fresh_typevar(arg_ty)):
                     mapping[param_ty.name] = arg_ty
         return mapping
 
@@ -1053,7 +1157,16 @@ class CallsMixin:
                     and len(expected.type_args) == len(ci.parent_type_params)):
                 for tv, exp_arg in zip(ci.parent_type_params,
                                        expected.type_args):
-                    if tv not in mapping:
+                    # #993: a binding whose value is a bare FRESH var is a
+                    # tentative non-answer (a nested nullary ctor leaked its
+                    # own placeholder, e.g. MkA(None) binding A's param to
+                    # None's T$n) — the declared expected arg overrides it,
+                    # exactly the #293 fresh-is-tentative precedence
+                    # `_unify_for_inference` applies between arguments.
+                    existing = mapping.get(tv)
+                    if existing is None or (
+                            isinstance(existing, TypeVar)
+                            and "$" in existing.name):
                         mapping[tv] = exp_arg
 
             # Use fresh TypeVars for any that remain unresolved — prevents

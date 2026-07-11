@@ -2474,3 +2474,303 @@ class TestArrayZeroSizeElementRejected945:
             "  nat_to_int(array_length(@Array<Int>.0))\n"
             "}\n"
         )
+
+
+class TestForallNullaryCtorCallArg993:
+    """#993: a bare ``None`` in the remaining fresh-ctor-var positions must
+    adopt the expected type instead of minting an unresolvable ``T$n``.
+    Fifth mechanism of the family after #971 (return/let/match), #979
+    (nested fields), and #981 (comparison operands): call arguments, ability
+    op arguments, effect op arguments, constructor arguments under a bare
+    forall var, and both-constructor comparisons.
+    """
+
+    def test_generic_call_arg_sibling_unresolved(self) -> None:
+        """`option_unwrap_or(nothing(()), None)` — both arguments carry
+        fresh/instantiation vars; the polymorphic None must not reject
+        against the (still-generic) parameter type (was E202)."""
+        _check_ok("""
+private forall<T> fn nothing(@Unit -> @Option<T>)
+  requires(true) ensures(true) effects(pure)
+{
+  None
+}
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  option_unwrap_or(nothing(()), None);
+  0
+}
+""")
+
+    def test_eq_call_arg_concrete_expected(self) -> None:
+        """`ensures(eq(@Option<Int>.result, None))` at a fully concrete
+        expected type (was E241 — the operator form `== None` of the same
+        comparison already checks clean via #981)."""
+        _check_ok("""
+private fn nothing(@Unit -> @Option<Int>)
+  requires(true)
+  ensures(eq(@Option<Int>.result, None))
+  effects(pure)
+{
+  None
+}
+""")
+
+    def test_eq_call_arg_under_forall(self) -> None:
+        """The same eq-call shape under forall<T> (was E241)."""
+        _check_ok("""
+private forall<T> fn nothing(@Unit -> @Option<T>)
+  requires(true)
+  ensures(eq(@Option<T>.result, None))
+  effects(pure)
+{
+  None
+}
+""")
+
+    def test_effect_op_arg_adopts_state_type(self) -> None:
+        """`handle[State<Option<Int>>](@Option<Int> = None)` with a
+        `put(None)` in the body — the handler-state initializer synths with
+        the declared state type (was E331; the effect-op argument loop
+        already synthesizes against the resolved param type)."""
+        _check_ok("""
+public fn test(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[State<Option<Int>>](@Option<Int> = None) {
+    get(@Unit) -> { resume(@Option<Int>.0) },
+    put(@Option<Int>) -> { resume(()) }
+  } in {
+    put(None);
+    0
+  }
+}
+""")
+
+    def test_ctor_arg_under_bare_forall_var(self) -> None:
+        """`MkA(None)` where the field type is Option<T> with T the
+        enclosing forall var (was E121; the concrete-nested-outer-arg form
+        was fixed by #994/#979)."""
+        _check_ok("""
+private data A<T> { MkA(Option<T>) }
+
+private forall<T> fn make(@Unit -> @A<T>)
+  requires(true) ensures(true) effects(pure)
+{
+  MkA(None)
+}
+""")
+
+    def test_both_ctor_comparison_concrete(self) -> None:
+        """`Some(5) == None` — both sides constructors, one nullary-fresh;
+        the fresh side must adopt the other side's type (was E142)."""
+        _check_ok("""
+public fn main(@Unit -> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  Some(5) == None
+}
+""")
+
+    def test_cross_adt_call_arg_still_rejected(self) -> None:
+        """Guardrail: the typevar-wildcard skip is structural — a cross-ADT
+        argument (Box vs Option) is still E202 even with unresolved vars on
+        both sides and matching inner structure."""
+        _check_err("""
+private data Box<T> { MkBox(Option<T>) }
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  option_unwrap_or(MkBox(None), None);
+  0
+}
+""", "Argument 0 of 'option_unwrap_or'")
+
+    def test_none_eq_none_still_rejected(self) -> None:
+        """Guardrail: two unresolved ctor operands have no side to adopt
+        from — `None == None` stays rejected."""
+        _check_err("""
+public fn main(@Unit -> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  None == None
+}
+""", "Cannot compare")
+
+    # -- PR #1009 review round: reversed operand orders + rigidity ------
+
+    def test_generic_call_arg_reversed(self) -> None:
+        """The mirrored order `option_unwrap_or(None, nothing(()))` — the
+        bare None first, the polymorphic sibling second."""
+        _check_ok("""
+private forall<T> fn nothing(@Unit -> @Option<T>)
+  requires(true) ensures(true) effects(pure)
+{
+  None
+}
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  option_unwrap_or(None, nothing(()));
+  0
+}
+""")
+
+    def test_eq_call_both_ctor(self) -> None:
+        """`eq(None, Some(5))` — the ability mapping must not lock onto the
+        first argument's fresh var; the concrete second argument re-anchors
+        it and the None re-synths (was E241)."""
+        _check_ok("""
+public fn main(@Unit -> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  eq(None, Some(5))
+}
+""")
+
+    def test_eq_call_arg_reversed_concrete(self) -> None:
+        """`eq(None, @Option<Int>.result)` — bare None as the FIRST
+        argument at a concrete sibling (was E241)."""
+        _check_ok("""
+private fn nothing(@Unit -> @Option<Int>)
+  requires(true)
+  ensures(eq(None, @Option<Int>.result))
+  effects(pure)
+{
+  None
+}
+""")
+
+    def test_eq_call_arg_reversed_forall(self) -> None:
+        """The same reversed eq-call shape under forall<T> (was E241)."""
+        _check_ok("""
+private forall<T> fn nothing(@Unit -> @Option<T>)
+  requires(true)
+  ensures(eq(None, @Option<T>.result))
+  effects(pure)
+{
+  None
+}
+""")
+
+    def test_both_ctor_comparison_reversed(self) -> None:
+        """`None == Some(5)` — the mirrored both-ctor comparison."""
+        _check_ok("""
+public fn main(@Unit -> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  None == Some(5)
+}
+""")
+
+    def test_both_ctor_rigid_forall_sibling(self) -> None:
+        """`Some(@T.0) == None` under forall<T where Eq<T>> — the adopted-
+        FROM ctor side carries only a RIGID var, which is a fully-resolved
+        type inside its own body (was E142)."""
+        _check_ok("""
+public forall<T where Eq<T>> fn f(@T -> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  Some(@T.0) == None
+}
+""")
+
+    def test_rigid_forall_arg_still_rejected(self) -> None:
+        """Guardrail: a RIGID forall var is not a wildcard — passing
+        `@Option<T>.0` where `Option<Int>` is required must stay E202 (the
+        body must be valid for EVERY T)."""
+        _check_err("""
+private fn g(@Option<Int> -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  match @Option<Int>.0 {
+    Some(@Int) -> @Int.0,
+    None -> 0
+  }
+}
+
+public forall<T> fn f(@Option<T> -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  g(@Option<T>.0)
+}
+""", "Argument 0 of 'g'")
+
+    def test_eq_none_none_still_rejected(self) -> None:
+        """Guardrail: `eq(None, None)` — a param still carrying a fresh
+        hole is not a resolved type to adopt, so the unresolvable
+        comparison stays rejected."""
+        _check_err("""
+public fn main(@Unit -> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  eq(None, None)
+}
+""", "Argument 1 of 'eq'")
+
+    def test_handler_init_intlit_coercion(self) -> None:
+        """The init-expected change also enables IntLit coercion for
+        non-ctor inits: `@Byte = 5` checks (bidirectional IntLit -> Byte,
+        as at every other expected-type site); out-of-range stays E331."""
+        _check_ok("""
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[State<Byte>](@Byte = 5) {
+    get(@Unit) -> { resume(@Byte.0) },
+    put(@Byte) -> { resume(()) }
+  } in {
+    0
+  }
+}
+""")
+        _check_err("""
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[State<Byte>](@Byte = 999) {
+    get(@Unit) -> { resume(@Byte.0) },
+    put(@Byte) -> { resume(()) }
+  } in {
+    0
+  }
+}
+""", "Handler state initial value")
+
+    def test_compat_fn_effect_row_not_wildcarded(self) -> None:
+        """Unit-level guardrail on `_compatible_modulo_typevars`: a fresh
+        var in a function type's params makes the STRUCTURE matchable, but
+        the effect row is never wildcarded — `<IO>` cannot satisfy a pure
+        formal.  (Not constructible from surface syntax today: builtin
+        unresolved vars print as `?`/UnknownType, which bypasses the
+        typevar-guarded compat path; user-generic fn params resolve their
+        vars from the closure argument itself.)"""
+        from vera.checker.calls import _compatible_modulo_typevars
+        from vera.types import (
+            INT,
+            ConcreteEffectRow,
+            EffectInstance,
+            FunctionType,
+            PureEffectRow,
+            TypeVar,
+        )
+        io_row = ConcreteEffectRow(
+            effects=frozenset({EffectInstance(name="IO", type_args=())}))
+        arg = FunctionType(
+            params=(INT,), return_type=INT, effect=io_row)
+        param = FunctionType(
+            params=(TypeVar("T$1"),), return_type=INT,
+            effect=PureEffectRow())
+        assert not _compatible_modulo_typevars(arg, param, frozenset())
+        pure_arg = FunctionType(
+            params=(INT,), return_type=INT, effect=PureEffectRow())
+        assert _compatible_modulo_typevars(pure_arg, param, frozenset())
+        # rigid discrimination: the same bare `T` is a wildcard outside a
+        # forall<T> body but opaque inside one
+        assert _compatible_modulo_typevars(TypeVar("T"), INT, frozenset())
+        assert not _compatible_modulo_typevars(
+            TypeVar("T"), INT, frozenset({"T"}))
