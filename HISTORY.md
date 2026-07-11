@@ -469,6 +469,7 @@ Stages 19 and 20 run dual-threaded: community PRs against the single-source spri
 |---------|------|-------------|
 | v0.1.2 | 9 Jul | **The gate-hardening batch** — scheduled limitations-sync, the arm64 advisory lane, the gate-honesty pair ([#956](https://github.com/aallan/vera/issues/956)), and the E009 crash fix from the pre-release sweep. |
 | v0.1.3 | 10 Jul | **Monomorphizer completeness** ([#769](https://github.com/aallan/vera/issues/769)) — registry-complete builtin return tables (one dict, both consultors), recursive type-argument unification, the scope-aware De Bruijn collapse-reindex walker, and four sibling discovery-vs-rewrite desyncs (`apply_fn`/`async`/`await`/generic returns) found and fixed probing the class. |
+| v0.1.4 | 11 Jul | **The second burndown** — 19 bug fixes driven one-PR-per-bug into an integration branch across the checker, verifier, and codegen: the fresh-ctor-var family under `forall`, the where-helper scoping triple, `handle[State<T>]` clause execution, the `@Nat`/`@Int` narrowing-and-widening obligations, and the imported-body compilation gaps ([#991](https://github.com/aallan/vera/issues/991) closed the checker/verifier/codegen helper-scoping disagreement). Each fix's own review surfaced the next edge case; the mono/import-door residuals it found open the next sprint. |
 
 ---
 
