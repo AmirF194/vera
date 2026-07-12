@@ -25,6 +25,7 @@ from vera.types import (
     FunctionType,
     Type,
     UnknownType,
+    contains_fresh_typevar,
     contains_typevar,
     base_type,
     erases_to_unit,
@@ -333,6 +334,43 @@ class ExpressionsMixin:
         resolved = self.env.resolve_slot(tname, ref.index)
         if resolved is None:
             count = self.env.count_bindings(tname)
+            # #973: a failed slot resolution whose type is the state of the
+            # INNERMOST enclosing handler's HANDLED BODY — and for which no
+            # real binding exists — is almost certainly an attempt to read
+            # handler state directly, which is not a slot there.  Steer the
+            # user to the typed operation.  The gate is deliberately narrow
+            # (PR #975 review): with a real same-typed binding in scope the
+            # likely fix is a lower index, and under nested different-typed
+            # handlers get(()) reaches the innermost state, so only its type
+            # may carry the hint.
+            if (count == 0
+                    and self._handler_body_state_tnames
+                    and tname == self._handler_body_state_tnames[-1]):
+                fix = (
+                    f"Handler state is not a slot in the handled body — read "
+                    f"it through the typed operation: get(()) returns the "
+                    f"current {tname} state, and put(<{tname}>) updates it."
+                )
+            elif (count == 0
+                    and self._where_helper_outer_tnames
+                    and tname in self._where_helper_outer_tnames[-1]):
+                # #969: inside a where-helper body, an unresolved slot whose
+                # type the PARENT function binds is almost certainly an attempt
+                # to read the outer parameter.  where-helpers are closed,
+                # param-rooted scopes — steer the user to pass the value in.
+                # The gate is narrow (PR review discipline mirroring #973):
+                # empty outside helper bodies, and only the parent's own param
+                # types carry the hint, so an unrelated unresolved slot keeps
+                # the generic lower-index message.
+                fix = (
+                    f"where-helpers are closed, param-rooted scopes (spec §5): "
+                    f"the outer function's @{tname} slot is not in scope here. "
+                    f"Pass it as an explicit argument — add @{tname} to the "
+                    f"helper's parameters and pass the value at the call site."
+                )
+            else:
+                fix = (f"Ensure enough {tname} bindings are in scope, or use a "
+                       f"lower index.")
             self._error(
                 ref,
                 f"Cannot resolve @{tname}.{ref.index}: "
@@ -343,8 +381,7 @@ class ExpressionsMixin:
                      f"no {tname} bindings in scope.",
                 rationale=f"Slot reference @{tname}.{ref.index} requires at "
                           f"least {ref.index + 1} binding(s) of type {tname}.",
-                fix=f"Ensure enough {tname} bindings are in scope, or use a "
-                    f"lower index.",
+                fix=fix,
                 spec_ref='Chapter 3, Section 3.4 "Reference Resolution"',
                 error_code="E130",
             )
@@ -412,6 +449,15 @@ class ExpressionsMixin:
             return UnknownType()
 
         op = expr.op
+
+        # #981: a bare nullary constructor operand of `==`/`!=` (e.g. `None`)
+        # is synthesized with no expected type, so `@Option<T>.result == None`
+        # compares Option<T> with an unrelated Option<T$1> and is rejected
+        # E142 — for both operand orders, and even at a concrete Option<Int>.
+        # Give the constructor operand its sibling's known ADT type as expected
+        # so the #971 fill in `_ctor_result_type` adopts the declared var.
+        left_ty, right_ty = self._resynth_eq_ctor_operand(
+            op, expr, left_ty, right_ty)
 
         # Arithmetic: +, -, *, /, %
         if op in (ast.BinOp.ADD, ast.BinOp.SUB, ast.BinOp.MUL,
@@ -578,6 +624,63 @@ class ExpressionsMixin:
             return BOOL
 
         return UnknownType()
+
+    def _resynth_eq_ctor_operand(
+        self, op: ast.BinOp, expr: ast.BinaryExpr,
+        left_ty: Type, right_ty: Type,
+    ) -> tuple[Type, Type]:
+        """Re-synth a bare constructor operand of `==`/`!=` bidirectionally.
+
+        #981: the operands of a comparison are each synthesized with no
+        expected type, so a nullary constructor (`None`) mints a fresh ctor var
+        that never unifies with its sibling's declared type — `Option<T>` vs
+        `Option<T$1>` (a `forall<T>` postcondition) or even `Option<Int>` vs
+        `Option<T$1>` (a concrete comparison), both rejected E142.  When an
+        operand is a constructor expression whose type still carries an
+        unresolved var and the other operand has a resolved ADT type, re-synth
+        the constructor operand against that type so the #971 bidirectional fill
+        can adopt the sibling's type arguments.  The sibling may itself be a
+        constructor (`Some(5) == None`, #993) — what matters is that the
+        adopted-FROM side carries no FRESH (`$`-marked) var.  A rigid forall
+        var is fine: `Some(@T.0) == None` under `forall<T where Eq<T>>`
+        adopts `Option<T>`, a fully-resolved type inside its own body (PR
+        #1009 review).  Two unresolved ctor operands (`None == None`) still
+        fall through to E142.  Restricting to `==`/`!=`
+        (ADTs are neither numeric nor orderable) and to a still-unresolved ctor
+        type keeps this from re-typing (and possibly re-diagnosing) any operand
+        that was already well-typed, and the fill's
+        `expected.name == ci.parent_type` guard rejects a genuinely cross-ADT
+        comparison (`Result<..> == None`) exactly as before.
+        """
+        if op not in (ast.BinOp.EQ, ast.BinOp.NEQ):
+            return left_ty, right_ty
+        left_base = base_type(left_ty)
+        right_base = base_type(right_ty)
+        if is_subtype(left_base, right_base) or is_subtype(
+            right_base, left_base
+        ):
+            return left_ty, right_ty  # already compatible — nothing to fix
+        left_ctor = isinstance(
+            expr.left, (ast.ConstructorCall, ast.NullaryConstructor))
+        right_ctor = isinstance(
+            expr.right, (ast.ConstructorCall, ast.NullaryConstructor))
+        if (right_ctor
+                and contains_typevar(right_ty)
+                and isinstance(left_ty, AdtType)
+                and not (left_ctor and contains_fresh_typevar(left_ty))):
+            new_right = self._synth_expr(expr.right, expected=left_ty)
+            if new_right is not None and not isinstance(
+                    new_right, UnknownType):
+                right_ty = new_right
+        elif (left_ctor
+                and contains_typevar(left_ty)
+                and isinstance(right_ty, AdtType)
+                and not (right_ctor and contains_fresh_typevar(right_ty))):
+            new_left = self._synth_expr(expr.left, expected=right_ty)
+            if new_left is not None and not isinstance(
+                    new_left, UnknownType):
+                left_ty = new_left
+        return left_ty, right_ty
 
     def _check_eq_ability(
         self, node: ast.Node, left_ty: Type, right_ty: Type,

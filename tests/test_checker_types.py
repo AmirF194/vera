@@ -541,6 +541,437 @@ private fn f(@Int -> @Int)
 """)
 
 
+class TestForallNullaryCtorInference971:
+    """#971: a bare nullary constructor (`None`) under `forall<T>` must
+    unify its fresh constructor type variable with the declared forall var
+    supplied by the surrounding type context — return type, let binding, or
+    match arm — instead of minting a fresh `T$n` and then rejecting the
+    program with a message describing two types that unify trivially.
+
+    Each case below fails today (return -> E121, let -> E170, match -> E302)
+    and must check clean once `_ctor_result_type` maps the fresh ctor var to
+    an expected TypeVar.
+    """
+
+    def test_bare_none_return_position(self) -> None:
+        """Shape (a): `None` returned where the declared type is Option<T>."""
+        _check_ok("""
+private forall<T> fn nothing(@Unit -> @Option<T>)
+  requires(true) ensures(true) effects(pure)
+{
+  None
+}
+""")
+
+    def test_bare_none_return_position_alt_param_name(self) -> None:
+        """Shape (a) with a param named E, not T — a fix keyed on the literal
+        name "T" would leave this failing E121."""
+        _check_ok("""
+private forall<E> fn nothing_e(@Unit -> @Option<E>)
+  requires(true) ensures(true) effects(pure)
+{
+  None
+}
+""")
+
+    def test_bare_none_let_position(self) -> None:
+        """Shape (b): `let @Option<T> = None` under forall<T>."""
+        _check_ok("""
+private forall<T> fn via_let(@Unit -> @Option<T>)
+  requires(true) ensures(true) effects(pure)
+{
+  let @Option<T> = None;
+  @Option<T>.0
+}
+""")
+
+    def test_bare_none_match_arm_position(self) -> None:
+        """Shape (c): every match arm is `None` under forall<T>; the arms
+        must agree at Option<T> instead of each minting its own T$n."""
+        _check_ok("""
+private forall<T> fn via_match(@Bool -> @Option<T>)
+  requires(true) ensures(true) effects(pure)
+{
+  match @Bool.0 {
+    true -> None,
+    false -> None
+  }
+}
+""")
+
+    def test_two_adts_share_param_no_cross_contamination(self) -> None:
+        """The relaxed bidirectional fill must resolve each nullary ctor to
+        ITS OWN parent: under forall<T>, `BNil` in a `let @Beta<T>` stays
+        Beta<T> and the returned `ANil` stays Alpha<T>. If the fresh ctor var
+        were mapped to the wrong parent's var the body would type as Beta<T>
+        and re-raise E121 — so a clean check proves no cross-contamination."""
+        _check_ok("""
+private data Alpha<T> { ANil, ACons(T) }
+private data Beta<T> { BNil, BCons(T) }
+
+private forall<T> fn mix(@T -> @Alpha<T>)
+  requires(true) ensures(true) effects(pure)
+{
+  let @Beta<T> = BNil;
+  ANil
+}
+""")
+
+    def test_two_adts_share_param_fresh_var_path_unchanged(self) -> None:
+        """Regression guard for the fresh-var minting path the relaxation does
+        NOT touch: two ADTs sharing "T" whose nullary ctors are resolved by
+        cross-argument inference (expected concrete, not a forall var) still
+        check clean. Green before and after — pins the invariant, not the fix.
+
+        The same-ADT guard `expected.name == ci.parent_type` in
+        `_ctor_result_type` is defense-in-depth masked downstream: removing it
+        is caught by NO test, because the result type's name is always the
+        constructor's own parent (`AdtType(ci.parent_type, ...)`), never
+        `expected.name`, so a cross-ADT expected still mismatches on the
+        nominal parent name (E121/E170/E302) regardless of which var the fill
+        adopts. Verified empirically for PR #980 by removing the guard: an
+        adversarial `ANil` returned where `@Beta<T>` is expected still reports
+        E121, only the resolved type arg changes (`Alpha<T$1>` -> `Alpha<T>`).
+        A vacuous pin would only assert that downstream check, so none is added.
+        """
+        _check_ok("""
+private data Alpha<T> { ANil, ACons(T) }
+private data Beta<T> { BNil, BCons(T) }
+
+private forall<T> fn alpha_or(@Alpha<T>, @T -> @T)
+  requires(true) ensures(true) effects(pure)
+{
+  match @Alpha<T>.0 { ACons(@T) -> @T.0, ANil -> @T.0 }
+}
+
+private forall<T> fn beta_or(@Beta<T>, @T -> @T)
+  requires(true) ensures(true) effects(pure)
+{
+  match @Beta<T>.0 { BCons(@T) -> @T.0, BNil -> @T.0 }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  let @Int = alpha_or(ANil, 7);
+  let @Int = beta_or(BNil, 9);
+  @Int.1 + @Int.0
+}
+""")
+
+    # -----------------------------------------------------------------
+    # Ill-typed direction pins: the relaxed bidirectional fill must not
+    # over-admit.  When a payload-bearing sibling `Some(<Nat literal>)`
+    # pins the body to Option<Nat>, the program is genuinely ill-typed
+    # against the declared Option<T> and must still be rejected E121.  The
+    # fresh-var adoption only ties a *bare nullary* ctor to the declared
+    # forall var; it never launders a concrete Option<Nat> into Option<T>.
+    # (The diagnostic names Option<Nat> because 5/3 are Nat literals.)
+    # -----------------------------------------------------------------
+
+    def test_some_literal_return_rejected(self) -> None:
+        """Shape (a) ill-typed: `Some(5)` returned under forall<T> ->
+        @Option<T> is Option<Nat>, not Option<T>, and must still fail E121."""
+        errs = _check_err("""
+private forall<T> fn bad_some(@Unit -> @Option<T>)
+  requires(true) ensures(true) effects(pure)
+{
+  Some(5)
+}
+""", "Option<Nat>")
+        assert any(e.error_code == "E121" for e in errs), \
+            f"Expected E121, got: {[e.error_code for e in errs]}"
+
+    def test_mixed_if_arms_rejected(self) -> None:
+        """Shape (b) ill-typed: `if @Bool.0 then None else Some(3)` types the
+        whole `if` at Option<Nat> (the concrete arm wins), so against
+        forall<T> -> @Option<T> it is E121 — None does not force Option<T>."""
+        errs = _check_err("""
+private forall<T> fn bad_mixed(@Bool -> @Option<T>)
+  requires(true) ensures(true) effects(pure)
+{
+  if @Bool.0 then { None } else { Some(3) }
+}
+""", "Option<Nat>")
+        assert any(e.error_code == "E121" for e in errs), \
+            f"Expected E121, got: {[e.error_code for e in errs]}"
+
+    def test_mixed_match_arms_rejected(self) -> None:
+        """Shape (c) ill-typed: a match with arms `None` / `Some(3)` unifies
+        at Option<Nat>; against forall<T> -> @Option<T> that is E121."""
+        errs = _check_err("""
+private forall<T> fn bad_mixed_match(@Bool -> @Option<T>)
+  requires(true) ensures(true) effects(pure)
+{
+  match @Bool.0 {
+    true -> None,
+    false -> Some(3)
+  }
+}
+""", "Option<Nat>")
+        assert any(e.error_code == "E121" for e in errs), \
+            f"Expected E121, got: {[e.error_code for e in errs]}"
+
+
+class TestForallNullaryCtorNested979:
+    """#979: a NESTED bare nullary constructor under `forall<T>` — `Some(None)`
+    where the declared type is `Option<Option<T>>` — must thread the declared
+    forall var through the nested-constructor FIELD propagation path, instead
+    of the inner `None` minting an unrelated `T$n` one level down.  #971 fixed
+    only the top-level result/let/match positions; the inner ctor's expected
+    field type (`Option<T>`) still carries the declared var, and the
+    field-propagation guard (`not contains_typevar(ft)`) suppressed it, so the
+    inner `None` was typed with no expected and the well-typed program was
+    rejected (return -> E121, let -> E170, match -> E302).
+    """
+
+    def test_nested_none_return_position(self) -> None:
+        """`Some(None)` returned where the declared type is Option<Option<T>>."""
+        _check_ok("""
+private forall<T> fn pick(@Unit -> @Option<Option<T>>)
+  requires(true) ensures(true) effects(pure)
+{
+  Some(None)
+}
+""")
+
+    def test_nested_none_three_levels(self) -> None:
+        """Deeper nesting: `Some(Some(None))` at Option<Option<Option<T>>> —
+        the fill must descend through every level, not just one."""
+        _check_ok("""
+private forall<T> fn pick3(@Unit -> @Option<Option<Option<T>>>)
+  requires(true) ensures(true) effects(pure)
+{
+  Some(Some(None))
+}
+""")
+
+    def test_nested_none_alt_param_name(self) -> None:
+        """The declared var is E, not T — a fix keyed on the literal name "T"
+        (or on Option's own param name) would leave this failing E121."""
+        _check_ok("""
+private forall<E> fn pick_e(@Unit -> @Option<Option<E>>)
+  requires(true) ensures(true) effects(pure)
+{
+  Some(None)
+}
+""")
+
+    def test_nested_none_let_position(self) -> None:
+        """`let @Option<Option<T>> = Some(None)` under forall<T> (was E170)."""
+        _check_ok("""
+private forall<T> fn pick_let(@Unit -> @Option<Option<T>>)
+  requires(true) ensures(true) effects(pure)
+{
+  let @Option<Option<T>> = Some(None);
+  @Option<Option<T>>.0
+}
+""")
+
+    def test_nested_none_match_arm_position(self) -> None:
+        """Both match arms are `Some(None)`; they must agree at
+        Option<Option<T>> instead of each minting its own T$n (was E302)."""
+        _check_ok("""
+private forall<T> fn pick_match(@Bool -> @Option<Option<T>>)
+  requires(true) ensures(true) effects(pure)
+{
+  match @Bool.0 {
+    true -> Some(None),
+    false -> Some(None)
+  }
+}
+""")
+
+    def test_nested_none_concrete_control(self) -> None:
+        """Control — a monomorphic Option<Option<Int>> already checked clean
+        before the fix (there is no declared var to adopt) and must stay OK."""
+        _check_ok("""
+private fn pick_concrete(@Unit -> @Option<Option<Int>>)
+  requires(true) ensures(true) effects(pure)
+{
+  Some(None)
+}
+""")
+
+    def test_nested_cross_adt_resolves_each_to_own_parent(self) -> None:
+        """The nested fill must resolve each ctor to ITS OWN parent: `ACons`
+        stays Alpha, the inner `BNil` stays Beta, and the shared param name T
+        threads through both.  A miss would re-raise E121/E213."""
+        _check_ok("""
+private data Alpha<T> { ANil, ACons(T) }
+private data Beta<T> { BNil, BCons(T) }
+
+private forall<T> fn mix(@Unit -> @Alpha<Beta<T>>)
+  requires(true) ensures(true) effects(pure)
+{
+  ACons(BNil)
+}
+""")
+
+    def test_nested_cross_adt_no_cross_contamination(self) -> None:
+        """Cross-contamination pin: the inner `BNil` (parent Beta) cannot adopt
+        Alpha's var to satisfy an Alpha<Alpha<T>> field.  The per-level
+        `expected.name == ci.parent_type` guard makes it mint fresh, and the
+        field-type check then rejects the genuinely ill-typed nesting."""
+        errs = _check_err("""
+private data Alpha<T> { ANil, ACons(T) }
+private data Beta<T> { BNil, BCons(T) }
+
+private forall<T> fn bad(@Unit -> @Alpha<Alpha<T>>)
+  requires(true) ensures(true) effects(pure)
+{
+  ACons(BNil)
+}
+""", "Alpha")
+        assert any(e.error_code in ("E121", "E213") for e in errs), \
+            f"Expected E121/E213, got: {[e.error_code for e in errs]}"
+
+    def test_nested_some_literal_still_rejected(self) -> None:
+        """Ill-typed pin: `Some(Some(5))` is Option<Option<Nat>>, not
+        Option<Option<T>>; the fill ties only a bare nullary ctor to the
+        declared var, never launders a concrete payload, so this stays E121."""
+        errs = _check_err("""
+private forall<T> fn bad2(@Unit -> @Option<Option<T>>)
+  requires(true) ensures(true) effects(pure)
+{
+  Some(Some(5))
+}
+""", "Option<Option<Nat>>")
+        assert any(e.error_code == "E121" for e in errs), \
+            f"Expected E121, got: {[e.error_code for e in errs]}"
+
+
+class TestForallNullaryCtorComparison981:
+    """#981: a bare `None` used as a `==` / `!=` operand against a known Option
+    type must adopt that type instead of minting a fresh `T$n`.  The
+    comparison-synthesis path typed each operand with no expected type, so
+    `@Option<T>.result == None` compared Option<T> with Option<T$1> and was
+    rejected E142 — for BOTH operand orders, and (the bug is wider than the
+    forall case) even at a concrete Option<Int>, which also failed at HEAD.
+    """
+
+    def test_eq_result_left(self) -> None:
+        """`@Option<T>.result == None` in an ensures under forall<T> (was E142)."""
+        _check_ok("""
+private forall<T> fn nothing(@Unit -> @Option<T>)
+  requires(true)
+  ensures(@Option<T>.result == None)
+  effects(pure)
+{
+  None
+}
+""")
+
+    def test_eq_none_left(self) -> None:
+        """Reversed operand order: `None == @Option<T>.result` (was E142)."""
+        _check_ok("""
+private forall<T> fn nothing(@Unit -> @Option<T>)
+  requires(true)
+  ensures(None == @Option<T>.result)
+  effects(pure)
+{
+  None
+}
+""")
+
+    def test_neq_result_left(self) -> None:
+        """`!=` must also type-check (was E142).  The postcondition is FALSE
+        here, so verify correctly defers it to a Tier-3 runtime check — this
+        pins only that the comparison is well-typed."""
+        _check_ok("""
+private forall<T> fn nothing(@Unit -> @Option<T>)
+  requires(true)
+  ensures(@Option<T>.result != None)
+  effects(pure)
+{
+  None
+}
+""")
+
+    def test_neq_none_left(self) -> None:
+        """Reversed order with `!=`: `None != @Option<T>.result` (was E142)."""
+        _check_ok("""
+private forall<T> fn nothing(@Unit -> @Option<T>)
+  requires(true)
+  ensures(None != @Option<T>.result)
+  effects(pure)
+{
+  None
+}
+""")
+
+    def test_requires_position(self) -> None:
+        """A `requires` comparison over a parameter: `@Option<T>.0 == None`
+        (was E142) — the fix point is operand typing, not the clause kind."""
+        _check_ok("""
+private forall<T> fn is_none(@Option<T> -> @Bool)
+  requires(@Option<T>.0 == None)
+  ensures(true)
+  effects(pure)
+{
+  true
+}
+""")
+
+    def test_concrete_option_int_eq_none(self) -> None:
+        """Wider-than-forall: a monomorphic `@Option<Int>.result == None` ALSO
+        failed E142 at HEAD (None mints a fresh var regardless of forall), so
+        this is a RED->GREEN case, not a control."""
+        _check_ok("""
+private fn nothing_int(@Unit -> @Option<Int>)
+  requires(true)
+  ensures(@Option<Int>.result == None)
+  effects(pure)
+{
+  None
+}
+""")
+
+    def test_concrete_option_int_none_eq(self) -> None:
+        """Reversed order at a concrete type: `None == @Option<Int>.result`."""
+        _check_ok("""
+private fn nothing_int(@Unit -> @Option<Int>)
+  requires(true)
+  ensures(None == @Option<Int>.result)
+  effects(pure)
+{
+  None
+}
+""")
+
+    def test_eq_option_vs_non_option_still_rejected(self) -> None:
+        """Over-admission pin: comparing an Option against a non-Option value
+        (`None == 5`) stays E142 — the re-synth only fires when the sibling is
+        an AdtType, and `5` is Nat."""
+        errs = _check_err("""
+private forall<T> fn bad(@Unit -> @Bool)
+  requires(None == 5)
+  ensures(true)
+  effects(pure)
+{
+  true
+}
+""", "compare")
+        assert any(e.error_code == "E142" for e in errs), \
+            f"Expected E142, got: {[e.error_code for e in errs]}"
+
+    def test_eq_cross_adt_still_rejected(self) -> None:
+        """Cross-ADT pin: `@Result<T, Int>.result == None` stays E142 — the
+        `expected.name == ci.parent_type` guard blocks None (parent Option)
+        from adopting Result's type args, so the operands never unify."""
+        errs = _check_err("""
+private forall<T> fn bad(@Unit -> @Result<T, Int>)
+  requires(true)
+  ensures(@Result<T, Int>.result == None)
+  effects(pure)
+{
+  Err(0)
+}
+""", "compare")
+        assert any(e.error_code == "E142" for e in errs), \
+            f"Expected E142, got: {[e.error_code for e in errs]}"
+
+
 # =====================================================================
 # Refinement types
 # =====================================================================
@@ -2043,3 +2474,303 @@ class TestArrayZeroSizeElementRejected945:
             "  nat_to_int(array_length(@Array<Int>.0))\n"
             "}\n"
         )
+
+
+class TestForallNullaryCtorCallArg993:
+    """#993: a bare ``None`` in the remaining fresh-ctor-var positions must
+    adopt the expected type instead of minting an unresolvable ``T$n``.
+    Fifth mechanism of the family after #971 (return/let/match), #979
+    (nested fields), and #981 (comparison operands): call arguments, ability
+    op arguments, effect op arguments, constructor arguments under a bare
+    forall var, and both-constructor comparisons.
+    """
+
+    def test_generic_call_arg_sibling_unresolved(self) -> None:
+        """`option_unwrap_or(nothing(()), None)` — both arguments carry
+        fresh/instantiation vars; the polymorphic None must not reject
+        against the (still-generic) parameter type (was E202)."""
+        _check_ok("""
+private forall<T> fn nothing(@Unit -> @Option<T>)
+  requires(true) ensures(true) effects(pure)
+{
+  None
+}
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  option_unwrap_or(nothing(()), None);
+  0
+}
+""")
+
+    def test_eq_call_arg_concrete_expected(self) -> None:
+        """`ensures(eq(@Option<Int>.result, None))` at a fully concrete
+        expected type (was E241 — the operator form `== None` of the same
+        comparison already checks clean via #981)."""
+        _check_ok("""
+private fn nothing(@Unit -> @Option<Int>)
+  requires(true)
+  ensures(eq(@Option<Int>.result, None))
+  effects(pure)
+{
+  None
+}
+""")
+
+    def test_eq_call_arg_under_forall(self) -> None:
+        """The same eq-call shape under forall<T> (was E241)."""
+        _check_ok("""
+private forall<T> fn nothing(@Unit -> @Option<T>)
+  requires(true)
+  ensures(eq(@Option<T>.result, None))
+  effects(pure)
+{
+  None
+}
+""")
+
+    def test_effect_op_arg_adopts_state_type(self) -> None:
+        """`handle[State<Option<Int>>](@Option<Int> = None)` with a
+        `put(None)` in the body — the handler-state initializer synths with
+        the declared state type (was E331; the effect-op argument loop
+        already synthesizes against the resolved param type)."""
+        _check_ok("""
+public fn test(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[State<Option<Int>>](@Option<Int> = None) {
+    get(@Unit) -> { resume(@Option<Int>.0) },
+    put(@Option<Int>) -> { resume(()) }
+  } in {
+    put(None);
+    0
+  }
+}
+""")
+
+    def test_ctor_arg_under_bare_forall_var(self) -> None:
+        """`MkA(None)` where the field type is Option<T> with T the
+        enclosing forall var (was E121; the concrete-nested-outer-arg form
+        was fixed by #994/#979)."""
+        _check_ok("""
+private data A<T> { MkA(Option<T>) }
+
+private forall<T> fn make(@Unit -> @A<T>)
+  requires(true) ensures(true) effects(pure)
+{
+  MkA(None)
+}
+""")
+
+    def test_both_ctor_comparison_concrete(self) -> None:
+        """`Some(5) == None` — both sides constructors, one nullary-fresh;
+        the fresh side must adopt the other side's type (was E142)."""
+        _check_ok("""
+public fn main(@Unit -> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  Some(5) == None
+}
+""")
+
+    def test_cross_adt_call_arg_still_rejected(self) -> None:
+        """Guardrail: the typevar-wildcard skip is structural — a cross-ADT
+        argument (Box vs Option) is still E202 even with unresolved vars on
+        both sides and matching inner structure."""
+        _check_err("""
+private data Box<T> { MkBox(Option<T>) }
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  option_unwrap_or(MkBox(None), None);
+  0
+}
+""", "Argument 0 of 'option_unwrap_or'")
+
+    def test_none_eq_none_still_rejected(self) -> None:
+        """Guardrail: two unresolved ctor operands have no side to adopt
+        from — `None == None` stays rejected."""
+        _check_err("""
+public fn main(@Unit -> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  None == None
+}
+""", "Cannot compare")
+
+    # -- PR #1009 review round: reversed operand orders + rigidity ------
+
+    def test_generic_call_arg_reversed(self) -> None:
+        """The mirrored order `option_unwrap_or(None, nothing(()))` — the
+        bare None first, the polymorphic sibling second."""
+        _check_ok("""
+private forall<T> fn nothing(@Unit -> @Option<T>)
+  requires(true) ensures(true) effects(pure)
+{
+  None
+}
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  option_unwrap_or(None, nothing(()));
+  0
+}
+""")
+
+    def test_eq_call_both_ctor(self) -> None:
+        """`eq(None, Some(5))` — the ability mapping must not lock onto the
+        first argument's fresh var; the concrete second argument re-anchors
+        it and the None re-synths (was E241)."""
+        _check_ok("""
+public fn main(@Unit -> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  eq(None, Some(5))
+}
+""")
+
+    def test_eq_call_arg_reversed_concrete(self) -> None:
+        """`eq(None, @Option<Int>.result)` — bare None as the FIRST
+        argument at a concrete sibling (was E241)."""
+        _check_ok("""
+private fn nothing(@Unit -> @Option<Int>)
+  requires(true)
+  ensures(eq(None, @Option<Int>.result))
+  effects(pure)
+{
+  None
+}
+""")
+
+    def test_eq_call_arg_reversed_forall(self) -> None:
+        """The same reversed eq-call shape under forall<T> (was E241)."""
+        _check_ok("""
+private forall<T> fn nothing(@Unit -> @Option<T>)
+  requires(true)
+  ensures(eq(None, @Option<T>.result))
+  effects(pure)
+{
+  None
+}
+""")
+
+    def test_both_ctor_comparison_reversed(self) -> None:
+        """`None == Some(5)` — the mirrored both-ctor comparison."""
+        _check_ok("""
+public fn main(@Unit -> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  None == Some(5)
+}
+""")
+
+    def test_both_ctor_rigid_forall_sibling(self) -> None:
+        """`Some(@T.0) == None` under forall<T where Eq<T>> — the adopted-
+        FROM ctor side carries only a RIGID var, which is a fully-resolved
+        type inside its own body (was E142)."""
+        _check_ok("""
+public forall<T where Eq<T>> fn f(@T -> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  Some(@T.0) == None
+}
+""")
+
+    def test_rigid_forall_arg_still_rejected(self) -> None:
+        """Guardrail: a RIGID forall var is not a wildcard — passing
+        `@Option<T>.0` where `Option<Int>` is required must stay E202 (the
+        body must be valid for EVERY T)."""
+        _check_err("""
+private fn g(@Option<Int> -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  match @Option<Int>.0 {
+    Some(@Int) -> @Int.0,
+    None -> 0
+  }
+}
+
+public forall<T> fn f(@Option<T> -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  g(@Option<T>.0)
+}
+""", "Argument 0 of 'g'")
+
+    def test_eq_none_none_still_rejected(self) -> None:
+        """Guardrail: `eq(None, None)` — a param still carrying a fresh
+        hole is not a resolved type to adopt, so the unresolvable
+        comparison stays rejected."""
+        _check_err("""
+public fn main(@Unit -> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  eq(None, None)
+}
+""", "Argument 1 of 'eq'")
+
+    def test_handler_init_intlit_coercion(self) -> None:
+        """The init-expected change also enables IntLit coercion for
+        non-ctor inits: `@Byte = 5` checks (bidirectional IntLit -> Byte,
+        as at every other expected-type site); out-of-range stays E331."""
+        _check_ok("""
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[State<Byte>](@Byte = 5) {
+    get(@Unit) -> { resume(@Byte.0) },
+    put(@Byte) -> { resume(()) }
+  } in {
+    0
+  }
+}
+""")
+        _check_err("""
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[State<Byte>](@Byte = 999) {
+    get(@Unit) -> { resume(@Byte.0) },
+    put(@Byte) -> { resume(()) }
+  } in {
+    0
+  }
+}
+""", "Handler state initial value")
+
+    def test_compat_fn_effect_row_not_wildcarded(self) -> None:
+        """Unit-level guardrail on `_compatible_modulo_typevars`: a fresh
+        var in a function type's params makes the STRUCTURE matchable, but
+        the effect row is never wildcarded — `<IO>` cannot satisfy a pure
+        formal.  (Not constructible from surface syntax today: builtin
+        unresolved vars print as `?`/UnknownType, which bypasses the
+        typevar-guarded compat path; user-generic fn params resolve their
+        vars from the closure argument itself.)"""
+        from vera.checker.calls import _compatible_modulo_typevars
+        from vera.types import (
+            INT,
+            ConcreteEffectRow,
+            EffectInstance,
+            FunctionType,
+            PureEffectRow,
+            TypeVar,
+        )
+        io_row = ConcreteEffectRow(
+            effects=frozenset({EffectInstance(name="IO", type_args=())}))
+        arg = FunctionType(
+            params=(INT,), return_type=INT, effect=io_row)
+        param = FunctionType(
+            params=(TypeVar("T$1"),), return_type=INT,
+            effect=PureEffectRow())
+        assert not _compatible_modulo_typevars(arg, param, frozenset())
+        pure_arg = FunctionType(
+            params=(INT,), return_type=INT, effect=PureEffectRow())
+        assert _compatible_modulo_typevars(pure_arg, param, frozenset())
+        # rigid discrimination: the same bare `T` is a wildcard outside a
+        # forall<T> body but opaque inside one
+        assert _compatible_modulo_typevars(TypeVar("T"), INT, frozenset())
+        assert not _compatible_modulo_typevars(
+            TypeVar("T"), INT, frozenset({"T"}))

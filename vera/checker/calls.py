@@ -23,14 +23,75 @@ from vera.types import (
     TypeVar,
     UnknownType,
     base_type,
+    contains_fresh_typevar,
     contains_typevar,
     erases_to_unit,
     is_effect_subtype,
     is_subtype,
     pretty_effect,
     pretty_type,
+    strip_builtin_typevar_marker,
     substitute,
 )
+
+
+def _compatible_modulo_typevars(
+        a: Type, b: Type, rigid: frozenset[str]) -> bool:
+    """Structural compatibility treating UNRESOLVED TypeVars as wildcards
+    (#993).
+
+    Used only when a subtype check between two types has failed AND at
+    least one side still carries unresolved type variables — i.e. the
+    call's instantiation could not be pinned down (every argument is
+    itself polymorphic, e.g. `option_unwrap_or(nothing(()), None)`).
+    An unresolved var on either side matches anything: there EXISTS an
+    instantiation making the two sides agree, so rejecting would be a
+    false E202.  Unresolved means a fresh `T$n`, a `#b`-marked builtin
+    var, or a callee forall var leaked raw from an uninferrable call —
+    everything EXCEPT the enclosing function's own declared forall params
+    (*rigid*, passed by name from `env.type_params`).  A rigid var is NOT
+    a wildcard — inside its own body it is an opaque, already-quantified
+    type, so `Option<T>` passed where `Option<Int>` is required must stay
+    E202 (the body must be valid for EVERY `T`, PR #1009 review); two
+    rigid vars agree only by name.  (A callee var leaked under a
+    same-named enclosing forall is conservatively treated as rigid —
+    the safe direction.)  Concrete structure must still line up —
+    `Option<...>` never matches `Result<...>`, a function's effect row
+    must still be permitted by the parameter's (`<IO>` never satisfies
+    `pure`), and a genuinely concrete leaf mismatch (`Int` vs `String`)
+    is rejected via the subtype fallback.
+    """
+    a = base_type(a)
+    b = base_type(b)
+    if isinstance(a, UnknownType) or isinstance(b, UnknownType):
+        return True
+    if isinstance(a, TypeVar) or isinstance(b, TypeVar):
+        a_rigid = (isinstance(a, TypeVar)
+                   and "$" not in a.name and a.name in rigid)
+        b_rigid = (isinstance(b, TypeVar)
+                   and "$" not in b.name and b.name in rigid)
+        if isinstance(a, TypeVar) and not a_rigid:
+            return True
+        if isinstance(b, TypeVar) and not b_rigid:
+            return True
+        # Every TypeVar side is rigid here: only the same var matches.
+        return (isinstance(a, TypeVar) and isinstance(b, TypeVar)
+                and a.name == b.name)
+    if isinstance(a, AdtType) and isinstance(b, AdtType):
+        return (a.name == b.name
+                and len(a.type_args) == len(b.type_args)
+                and all(_compatible_modulo_typevars(x, y, rigid)
+                        for x, y in zip(a.type_args, b.type_args)))
+    if isinstance(a, FunctionType) and isinstance(b, FunctionType):
+        return (len(a.params) == len(b.params)
+                and all(_compatible_modulo_typevars(x, y, rigid)
+                        for x, y in zip(a.params, b.params))
+                and _compatible_modulo_typevars(
+                    a.return_type, b.return_type, rigid)
+                and is_effect_subtype(a.effect, b.effect))
+    # Leaves (primitives): the instantiation direction is unknown, so
+    # accept a subtype relationship either way (Nat vs Int).
+    return is_subtype(a, b) or is_subtype(b, a)
 
 
 class CallsMixin:
@@ -57,8 +118,12 @@ class CallsMixin:
         if name == "apply_fn":
             return self._check_apply_fn(args, node)
 
-        # Look up function
-        fn_info = self.env.lookup_function(name)
+        # Look up function — lexically (#991): the nearest same-named
+        # where-helper in the enclosing scope stack wins over the flat
+        # last-wins registry, so a diamond of same-named helpers with
+        # DIFFERENT signatures checks each parent against its OWN helper
+        # (the flat lookup falsely E121'd a valid program).
+        fn_info = self._lookup_function_scoped(name)
         if fn_info:
             return self._check_fn_call_with_info(fn_info, args, node)
 
@@ -143,10 +208,17 @@ class CallsMixin:
                 # "expected Res<String, ...>, got Res<Int, ...>" E202 the
                 # partial merge would otherwise emit for one arm.
                 type_arg_conflict = True
+                # #970 (PR #982 review): ``conflicts`` holds raw callee
+                # forall-var names; for a built-in generic these carry the
+                # internal namespacing marker (``T#b``).  Strip it so the
+                # user-facing message names the parameter as ``T``.
+                conflict_names = ", ".join(
+                    strip_builtin_typevar_marker(c) for c in sorted(conflicts)
+                )
                 self._error(
                     node,
                     f"Cannot infer a consistent type for the type "
-                    f"parameter(s) {', '.join(sorted(conflicts))} of "
+                    f"parameter(s) {conflict_names} of "
                     f"'{fn_info.name}': different arguments require "
                     f"incompatible types.",
                     rationale="A generic call binds each type parameter to one "
@@ -272,7 +344,37 @@ class CallsMixin:
                     if is_subtype(re, param_ty):
                         arg_ty = re
                         arg_types[i] = re
+            # #1010: a constructor argument against a PARTIALLY-generic
+            # param (`MkPair(0 - 5, None)` as `@Pair<Nat, T>`) was never
+            # re-synthesized — every re-synth above is gated on the WHOLE
+            # param being typevar-free — so the concrete `Nat` component's
+            # narrowing target went unrecorded and the E503 obligation was
+            # silently lost (the fully-concrete analogue obligates).
+            # Re-synth ctor expressions against the instantiated param:
+            # the #971 fill adopts component-wise, typevar components stay
+            # unconstrained, and the ctor check records each field's
+            # target exactly as on the concrete path.
+            if (contains_typevar(param_ty)
+                    and isinstance(param_ty, AdtType)
+                    and isinstance(args[i], (
+                        ast.ConstructorCall, ast.NullaryConstructor))):
+                re = self._synth_expr(args[i], expected=param_ty)
+                if re is not None and not isinstance(re, UnknownType):
+                    arg_ty = re
+                    arg_types[i] = re
             if not is_subtype(arg_ty, param_ty):
+                # #993: when unresolved variables remain on either side
+                # (e.g. `option_unwrap_or(nothing(()), None)` — the callee's
+                # instantiation never resolves because every argument is
+                # itself polymorphic), a structural match treating type
+                # variables as wildcards means the call is satisfiable at
+                # SOME instantiation — rejecting it is a false E202.  Fully
+                # concrete mismatches are unaffected.
+                if ((contains_typevar(arg_ty) or contains_typevar(param_ty))
+                        and _compatible_modulo_typevars(
+                            arg_ty, param_ty,
+                            frozenset(self.env.type_params))):
+                    continue
                 self._error(
                     args[i],
                     f"Argument {i} of '{fn_info.name}' has type "
@@ -545,7 +647,10 @@ class CallsMixin:
             if op_info is not None:
                 acc.add(op_info.parent_effect)
             else:
-                fn_info = self.env.lookup_function(node.name)
+                # #991: resolve lexically like the call checker above, so a
+                # same-named helper in a sibling tree can't contribute the
+                # WRONG effect row to the commutativity analysis.
+                fn_info = self._lookup_function_scoped(node.name)
                 if fn_info is None:
                     acc.add(f"<{node.name}>")
                 elif isinstance(fn_info.effect, ConcreteEffectRow):
@@ -672,6 +777,28 @@ class CallsMixin:
             if isinstance(param_ty, (TypeVar, UnknownType)):
                 continue
             if not is_subtype(arg_ty, param_ty):
+                # #993: the args were synthesized with no expected type, so
+                # a bare constructor argument (`eq(x, None)`) minted a fresh
+                # ctor var that never met the parameter type.  Re-synth the
+                # ctor argument against the resolved param so the #971
+                # bidirectional fill can adopt it (works for concrete AND
+                # rigid-forall-var parameter args).  Restricted to
+                # constructor expressions — re-synthesizing an arbitrary
+                # expression could re-emit its own diagnostics — and to a
+                # fresh-FREE param: a param still carrying a `$` hole
+                # (`eq(None, None)`) is not a resolved type to adopt, and
+                # adopting it would let an unresolvable comparison through.
+                if (contains_typevar(arg_ty)
+                        and not contains_fresh_typevar(param_ty)
+                        and isinstance(args[i], (
+                            ast.ConstructorCall, ast.NullaryConstructor))):
+                    resynth = self._synth_expr(args[i], expected=param_ty)
+                    if (resynth is not None
+                            and not isinstance(resynth, UnknownType)):
+                        arg_ty = resynth
+                        arg_types[i] = resynth
+                        if is_subtype(arg_ty, param_ty):
+                            continue
                 self._error(
                     args[i],
                     f"Argument {i} of '{op_info.name}' has type "
@@ -784,7 +911,17 @@ class CallsMixin:
                 continue
             if (isinstance(param_ty, TypeVar)
                     and param_ty.name in ab_info.type_params):
-                if param_ty.name not in mapping:
+                # #993 (PR #1009 review): first-arg-wins locked the mapping
+                # onto a bare ctor's fresh var — `eq(None, Some(5))` bound
+                # A := Option<T$1> and the concrete second argument could
+                # never re-anchor it.  A later fresh-FREE candidate
+                # overrides a fresh-containing tentative one (the #293
+                # precedence); `eq(None, None)` keeps its fresh binding and
+                # stays rejected.
+                existing = mapping.get(param_ty.name)
+                if existing is None or (
+                        contains_fresh_typevar(existing)
+                        and not contains_fresh_typevar(arg_ty)):
                     mapping[param_ty.name] = arg_ty
         return mapping
 
@@ -843,6 +980,24 @@ class CallsMixin:
             if field_types_for_expected and i < len(field_types_for_expected):
                 ft = field_types_for_expected[i]
                 if not contains_typevar(ft):
+                    field_expected = ft
+                elif isinstance(
+                    arg, (ast.ConstructorCall, ast.NullaryConstructor)
+                ):
+                    # #979: a NESTED constructor argument whose expected field
+                    # type still carries the declared forall var (`Some(None)`
+                    # where the field resolves to `Option<T>`) must receive that
+                    # expected type so its OWN bidirectional fill can adopt the
+                    # declared var — otherwise the inner ctor mints an unrelated
+                    # `T$n` and the well-typed program is rejected (E121/E170/
+                    # E302).  Feeding a typevar-bearing expected is safe ONLY
+                    # into a nested constructor: `_ctor_result_type`'s per-level
+                    # `expected.name == ci.parent_type` guard means the inner
+                    # ctor adopts a var solely from ITS OWN parent's declared
+                    # position, so two ADTs sharing a param name still cannot
+                    # cross-contaminate (an inner ctor of a different parent
+                    # sees a name mismatch, mints fresh, and the field-type
+                    # check then rejects the genuinely ill-typed nesting).
                     field_expected = ft
             arg_types.append(self._synth_expr(arg, expected=field_expected))
 
@@ -1009,13 +1164,34 @@ class CallsMixin:
             # Try to infer type args from argument types
             mapping = self._infer_ctor_type_args(ci, arg_types)
 
-            # Fill unresolved TypeVars from expected type (bidirectional)
+            # Fill unresolved TypeVars from expected type (bidirectional).
+            # The same-ADT guard (expected.name == ci.parent_type) means every
+            # exp_arg here is the type the surrounding declaration names for
+            # THIS constructor's parent, so adopting it can never pull in
+            # another ADT's parameter.  #971: adopt exp_arg even when it is a
+            # TypeVar — under `forall<T> ... -> @Option<T>` the declared arg is
+            # the forall var itself, and mapping the fresh ctor var to it is
+            # exactly the var-to-var unification the expected-type fill
+            # otherwise lacks for a nullary constructor (the argument-driven
+            # path in _unify_for_inference does record forall-to-forall
+            # mappings, but a nullary ctor has no arguments to drive it);
+            # without it a bare `None` mints an unrelated `T$n` and the program
+            # is rejected against a type that unifies trivially (E121/E170/E302).
             if (isinstance(expected, AdtType)
                     and expected.name == ci.parent_type
                     and len(expected.type_args) == len(ci.parent_type_params)):
                 for tv, exp_arg in zip(ci.parent_type_params,
                                        expected.type_args):
-                    if tv not in mapping and not isinstance(exp_arg, TypeVar):
+                    # #993: a binding whose value is a bare FRESH var is a
+                    # tentative non-answer (a nested nullary ctor leaked its
+                    # own placeholder, e.g. MkA(None) binding A's param to
+                    # None's T$n) — the declared expected arg overrides it,
+                    # exactly the #293 fresh-is-tentative precedence
+                    # `_unify_for_inference` applies between arguments.
+                    existing = mapping.get(tv)
+                    if existing is None or (
+                            isinstance(existing, TypeVar)
+                            and "$" in existing.name):
                         mapping[tv] = exp_arg
 
             # Use fresh TypeVars for any that remain unresolved — prevents

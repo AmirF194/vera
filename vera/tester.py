@@ -21,7 +21,7 @@ from vera import ast
 from vera.errors import Diagnostic, SourceLocation
 from vera.slots import type_expr_slot_name
 from vera.smt import SlotEnv, SmtContext
-from vera.types import BOOL, BYTE, FLOAT64, INT, NAT, STRING, UNIT, PrimitiveType, RefinedType, Type, base_type
+from vera.types import BOOL, BYTE, FLOAT64, INT, NAT, STRING, UNIT, ModuleArtifacts, PrimitiveType, RefinedType, Type, base_type
 
 if TYPE_CHECKING:
     from vera.resolver import ResolvedModule
@@ -151,6 +151,9 @@ def test(
     trials: int = 100,
     fn_name: str | None = None,
     resolved_modules: list[ResolvedModule] | None = None,
+    expr_semantic_types: dict[tuple[int, int, int, int], Type] | None = None,
+    expr_target_types: dict[tuple[int, int, int, int], Type] | None = None,
+    module_artifacts: ModuleArtifacts | None = None,
 ) -> TestResult:
     """Test a type-checked Vera program by generating inputs from contracts.
 
@@ -158,6 +161,18 @@ def test(
     2. For Tier 3 functions, generate inputs via Z3 from requires() clauses.
     3. Compile to WASM and execute each trial.
     4. Report results.
+
+    ``expr_semantic_types`` / ``expr_target_types`` are the checker's
+    resolved- and target-type side-tables (``CheckerArtifacts``).  #986: they
+    are threaded into BOTH the verifier (classification) and codegen (the WASM
+    the tester executes) so the tester compiles the SAME @Nat->@Int widen guards
+    the verifier obligates — without them a tuple/array-component widen guard
+    (recovered only from the target table) silently vanished from the
+    tester-compiled WASM while the verifier still classified it tier3-guarded.
+
+    ``module_artifacts`` (#987) carries each resolved module's OWN side-tables so
+    the tester-compiled WASM also emits the widen guards for IMPORTED bodies —
+    the same threading ``vera run`` / ``vera compile`` use.
     """
     engine = _TestEngine(
         program=program,
@@ -166,6 +181,9 @@ def test(
         trials=trials,
         fn_name=fn_name,
         resolved_modules=resolved_modules,
+        expr_semantic_types=expr_semantic_types,
+        expr_target_types=expr_target_types,
+        module_artifacts=module_artifacts,
     )
     return engine.run()
 
@@ -185,6 +203,11 @@ class _TestEngine:
         trials: int,
         fn_name: str | None,
         resolved_modules: list[ResolvedModule] | None,
+        expr_semantic_types: (
+            dict[tuple[int, int, int, int], Type] | None) = None,
+        expr_target_types: (
+            dict[tuple[int, int, int, int], Type] | None) = None,
+        module_artifacts: ModuleArtifacts | None = None,
     ) -> None:
         self.program = program
         self.source = source
@@ -192,6 +215,14 @@ class _TestEngine:
         self.trials = trials
         self.fn_name = fn_name
         self.resolved_modules = resolved_modules or []
+        # #986: the checker's resolved- / target-type side-tables, threaded into
+        # both `verify` and `codegen_compile` below so the tester's WASM carries
+        # the same widen guards the verifier obligates.
+        self.expr_semantic_types = expr_semantic_types
+        self.expr_target_types = expr_target_types
+        # #987: per-module tables so the tester's WASM emits the widen guards for
+        # imported bodies too (threaded into `codegen_compile` below).
+        self.module_artifacts = module_artifacts
 
     def run(self) -> TestResult:
         """Execute the full test pipeline."""
@@ -204,6 +235,8 @@ class _TestEngine:
             source=self.source,
             file=self.file,
             resolved_modules=self.resolved_modules,
+            expr_types=self.expr_semantic_types,
+            expr_target_types=self.expr_target_types,
         )
         classification = _classify_functions(
             self.program, verify_result.diagnostics,
@@ -221,6 +254,9 @@ class _TestEngine:
             source=self.source,
             file=self.file,
             resolved_modules=self.resolved_modules,
+            expr_semantic_types=self.expr_semantic_types,
+            expr_target_types=self.expr_target_types,
+            module_artifacts=self.module_artifacts,
         )
         compile_errors = [
             d for d in compile_result.diagnostics

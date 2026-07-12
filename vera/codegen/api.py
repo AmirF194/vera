@@ -64,7 +64,7 @@ if TYPE_CHECKING:
 
     from vera.errors import Diagnostic
     from vera.resolver import ResolvedModule
-    from vera.types import Type
+    from vera.types import ModuleArtifacts, Type
 
 
 # =====================================================================
@@ -202,6 +202,8 @@ def compile(
     file: str | None = None,
     resolved_modules: list[ResolvedModule] | None = None,
     expr_semantic_types: dict[tuple[int, int, int, int], Type] | None = None,
+    expr_target_types: dict[tuple[int, int, int, int], Type] | None = None,
+    module_artifacts: ModuleArtifacts | None = None,
 ) -> CompileResult:
     """Compile a type-checked Vera Program AST to WebAssembly.
 
@@ -221,12 +223,37 @@ def compile(
     which is sound for slot-/call-typed operands but cannot disambiguate a
     bare-literal operand's Int-vs-Nat context — such callers should thread
     the table to stay precise.
+
+    ``expr_target_types`` is the checker's *target*-type side-table
+    (``CheckerArtifacts.expr_target_types``): the ``expected`` type each
+    expression was checked against, keyed by ``ast.span_key``.  It is the
+    codegen dual of the verifier's ``_target_type_of`` (#747), and the #820
+    enabler: it lets code generation recover the per-component *target* type
+    at a construction / array / if-join site — which the erased WASM layout
+    cannot — so the @Nat -> @Int widening guard (#813) fires at a tuple
+    component, array element, and heterogeneous-arm slot exactly where the
+    verifier obligates it.  Omitted callers keep the pre-#820 behaviour (those
+    per-component sites stay E531-disclosed, never falsely runtime-counted).
+
+    ``module_artifacts`` (#987) maps each resolved module's path to ITS own
+    ``(expr_semantic_types, expr_target_types)`` pair (from
+    ``CheckArtifacts.module_artifacts``).  The two tables above are keyed by
+    bare span with no file identity, so an imported body compiled into this flat
+    WASM module (Pass 2.5 / 2.6) cannot recover its component targets from them.
+    Codegen threads the matching entry when compiling each module's body, so the
+    @Nat -> @Int widening guard fires at the array-element / tuple-construction
+    sites through the import door.  A module absent from this map (or an omitted
+    argument) falls back to the pre-#987 behaviour: that imported body's
+    span-keyed lookups are suppressed (never wrong-file-keyed), so those
+    component sites stay unguarded rather than risk a spurious guard.
     """
     from vera.codegen.core import CodeGenerator
 
     gen = CodeGenerator(
         source=source, file=file, resolved_modules=resolved_modules,
         expr_semantic_types=expr_semantic_types,
+        expr_target_types=expr_target_types,
+        module_artifacts=module_artifacts,
     )
     return gen.compile_program(program)
 

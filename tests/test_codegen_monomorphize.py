@@ -248,6 +248,41 @@ public fn main(-> @Int)
         # the unwrap also proves the ADT round-trips its payload intact.
         assert _run(source, fn="main") == 42
 
+    def test_generic_nullary_ctor_leaf_runs(self) -> None:
+        """#971: a bare nullary constructor `Leaf` returned under
+        forall<T> -> @Tree<T> (a user-defined generic ADT) type-checks after
+        the fix, monomorphizes at T = Int, and runs.  `empty_tree(())` yields
+        Leaf; `tree_or` funnels both arms to the sentinel default, so the Leaf
+        arm carries 555 through the compiled module — the run-level companion
+        to the checker/verify pins for the bare-None-under-forall family."""
+        source = """\
+private data Tree<T> { Leaf, Node(T) }
+
+private forall<T> fn empty_tree(@Unit -> @Tree<T>)
+  requires(true) ensures(true) effects(pure)
+{
+  Leaf
+}
+
+private forall<T> fn tree_or(@Tree<T>, @T -> @T)
+  requires(true) ensures(true) effects(pure)
+{
+  match @Tree<T>.0 {
+    Node(@T) -> @T.0,
+    Leaf -> @T.0
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  tree_or(empty_tree(()), 555)
+}
+"""
+        # 555 is not a codegen fallback/default; a wrong lowering of the
+        # nullary Leaf arm would trap at compile or produce a different value.
+        assert _run(source, fn="main") == 555
+
     def test_generic_fn_wat_has_mangled_name(self) -> None:
         """WAT output contains mangled function name."""
         source = """\
@@ -3149,6 +3184,245 @@ public fn main(@Unit -> @Int) requires(true) ensures(true) effects(pure)
 { outer(99) }
 """
         assert _run(source, fn="main") == 5
+
+
+class TestNestedWhereHelperEmission978:
+    """#978 — a where-helper's OWN where-helpers must be emitted (non-generic).
+
+    A non-generic ``fn outer { ... } where { fn child { ... } where { fn
+    grandchild ... } }`` passes ``vera check`` and ``vera verify`` but crashed
+    at codegen: the Pass-2 emission loop compiled only ONE level of
+    ``decl.where_fns`` (``child``), never a helper's OWN ``where_fns``
+    (``grandchild``).  The checker (`_check_fn`), verifier (`_verify_fn`), and
+    registration (`_register_fn`) all recurse into nested ``where`` blocks, so
+    ``grandchild``'s NAME is registered — ``child``'s body lowers its call to
+    ``return_call $grandchild`` — but the body was never emitted, so WAT
+    assembly failed with ``unknown func: $grandchild``.  The generic path was
+    unaffected: ``monomorphize._hoist_where_fns_under`` recurses.
+
+    The run-level values distinguish the leaf actually executing from any
+    default/passthrough: each level transforms its argument non-trivially.
+    """
+
+    def test_nested_where_grandchild_runs(self) -> None:
+        """The #978 repro: outer → child → grandchild, all non-generic.
+
+        ``outer(10)`` → ``child(10)`` → ``grandchild(10 + 1)`` → ``11 * 2`` =
+        22.  Before the fix this failed to compile (``unknown func:
+        $grandchild``); the ``* 2`` on ``arg + 1`` makes 22 reachable only if
+        ``grandchild`` genuinely runs (a default/passthrough would not give 22).
+        """
+        source = """\
+public fn outer(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{ child(@Int.0) }
+where {
+  fn child(@Int -> @Int) requires(true) ensures(true) effects(pure)
+  { grandchild(@Int.0 + 1) }
+  where {
+    fn grandchild(@Int -> @Int) requires(true) ensures(true) effects(pure)
+    { @Int.0 * 2 }
+  }
+}
+public fn main(@Unit -> @Int) requires(true) ensures(true) effects(pure)
+{ outer(10) }
+"""
+        assert _run(source, fn="main") == 22
+
+    def test_nested_where_three_levels_run(self) -> None:
+        """Three levels of nesting: outer → a → b → c, all non-generic.
+
+        ``outer(5)`` → ``a(5)`` → ``b(5 + 1)`` → ``c(6 + 10)`` → ``16 * 3`` =
+        48.  Before the fix this failed at ``unknown func: $b`` (only ``a``,
+        outer's direct helper, was emitted).
+        """
+        source = """\
+public fn outer(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{ a(@Int.0) }
+where {
+  fn a(@Int -> @Int) requires(true) ensures(true) effects(pure)
+  { b(@Int.0 + 1) }
+  where {
+    fn b(@Int -> @Int) requires(true) ensures(true) effects(pure)
+    { c(@Int.0 + 10) }
+    where {
+      fn c(@Int -> @Int) requires(true) ensures(true) effects(pure)
+      { @Int.0 * 3 }
+    }
+  }
+}
+public fn main(@Unit -> @Int) requires(true) ensures(true) effects(pure)
+{ outer(5) }
+"""
+        assert _run(source, fn="main") == 48
+
+    def test_generic_parent_nested_where_still_runs(self) -> None:
+        """Control (pin): the generic-parent path already emits nested helpers.
+
+        ``monomorphize._hoist_where_fns_under`` recurses, so a ``forall<T>``
+        parent carrying a nested ``where`` block was never affected by #978.
+        ``outer<Int>(99)`` → ``child(5)`` → ``grandchild(5 + 1)`` → ``6 * 2`` =
+        12.  This must stay green through the non-generic-path fix.
+        """
+        source = """\
+private forall<T> fn outer(@T -> @Int) requires(true) ensures(true) effects(pure)
+{ child(5) }
+where {
+  fn child(@Int -> @Int) requires(true) ensures(true) effects(pure)
+  { grandchild(@Int.0 + 1) }
+  where {
+    fn grandchild(@Int -> @Int) requires(true) ensures(true) effects(pure)
+    { @Int.0 * 2 }
+  }
+}
+public fn main(@Unit -> @Int) requires(true) ensures(true) effects(pure)
+{ outer(99) }
+"""
+        assert _run(source, fn="main") == 12
+
+    # -- PR #989 review: ability-op rewrite must recurse into grandchildren ---
+    #
+    # The #978 emission-loop fix flattens `decl.where_fns` at any depth so a
+    # grandchild's body IS handed to `_compile_fn`.  But Pass 1.6
+    # (`_rewrite_where_fns`, called from `_rewrite_ability_ops`) only rewrote
+    # each DIRECT child's body + contracts, never recursing into
+    # `wfn.where_fns`.  So a grandchild using `eq`/`compare` kept a raw FnCall
+    # to the unregistered ability op; `_compile_fn` tripped CodegenSkip and
+    # returned None, the body was silently dropped, and the parent's
+    # `return_call $grandchild` dangled (`unknown func`).  The values below are
+    # chosen so a passthrough/default can't coincide with the leaf result.
+
+    def test_nested_where_grandchild_eq_body_runs(self) -> None:
+        """#989 (probeF1): a grandchild using `eq` in its BODY must compile.
+
+        ``outer(5)`` → ``child(5)`` → ``grandchild(5)`` → ``eq(5, 5)`` = true
+        (1).  Before the ability-op recursion, ``grandchild``'s raw ``eq(...)``
+        was never rewritten, so its body was dropped and ``child``'s
+        ``return_call $grandchild`` dangled (``unknown func: $grandchild``).
+        """
+        source = """\
+public fn outer(@Int -> @Bool) requires(true) ensures(true) effects(pure)
+{ child(@Int.0) }
+where {
+  fn child(@Int -> @Bool) requires(true) ensures(true) effects(pure)
+  { grandchild(@Int.0) }
+  where {
+    fn grandchild(@Int -> @Bool) requires(true) ensures(true) effects(pure)
+    { eq(@Int.0, 5) }
+  }
+}
+public fn main(@Unit -> @Bool) requires(true) ensures(true) effects(pure)
+{ outer(5) }
+"""
+        assert _run(source, fn="main") == 1
+
+    def test_nested_where_grandchild_eq_contract_runs(self) -> None:
+        """#989 (probeF2): a grandchild using `eq` in its CONTRACT must compile.
+
+        ``grandchild``'s ``ensures(eq(@Int.result, @Int.result))`` is a
+        contract-position ability op; the same Pass 1.6 rewrite must reach a
+        grandchild's contracts, not just its body.  ``outer(7)`` returns 7 (the
+        body is a passthrough), which is unreachable if ``grandchild``'s
+        contract ``eq`` dangles at codegen.
+        """
+        source = """\
+public fn outer(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{ child(@Int.0) }
+where {
+  fn child(@Int -> @Int) requires(true) ensures(true) effects(pure)
+  { grandchild(@Int.0) }
+  where {
+    fn grandchild(@Int -> @Int)
+      requires(true)
+      ensures(eq(@Int.result, @Int.result))
+      effects(pure)
+    { @Int.0 }
+  }
+}
+public fn main(@Unit -> @Int) requires(true) ensures(true) effects(pure)
+{ outer(7) }
+"""
+        assert _run(source, fn="main") == 7
+
+    def test_nested_where_grandchild_compare_contract_runs(self) -> None:
+        """#989: a grandchild using `compare` in its CONTRACT must compile.
+
+        Completes the ``{eq, compare} x {body, contract}`` matrix:
+        ``compare``'s rewrite builds a nested ``IfExpr`` chain (a materially
+        different AST than ``eq``'s single ``BinaryExpr``), and the contract
+        position routes through ``_rewrite_ops_in_contracts`` — a different
+        entry point than body rewriting — so neither sibling test proves this
+        cell.  ``outer(7)`` returns 8, unreachable if ``grandchild``'s
+        contract ``compare`` dangles at codegen.
+        """
+        source = """\
+public fn outer(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{ child(@Int.0) }
+where {
+  fn child(@Int -> @Int) requires(true) ensures(true) effects(pure)
+  { grandchild(@Int.0) }
+  where {
+    fn grandchild(@Int -> @Int)
+      requires(true)
+      ensures(match compare(@Int.result, 0) { Greater -> true, Equal -> false, Less -> false })
+      effects(pure)
+    { @Int.0 + 1 }
+  }
+}
+public fn main(@Unit -> @Int) requires(true) ensures(true) effects(pure)
+{ outer(7) }
+"""
+        assert _run(source, fn="main") == 8
+
+    def test_nested_where_grandchild_compare_body_runs(self) -> None:
+        """#989 (probeF4): a grandchild using `compare` in its BODY must compile.
+
+        ``outer(9)`` → ``child(9)`` → ``grandchild(9)`` →
+        ``match compare(9, 5) { Less->1, Equal->2, Greater->3 }`` = 3.  The
+        ``Greater`` arm (3) is reachable only if ``compare`` lowered to the
+        three-way ``if`` inside the grandchild — a dropped body would dangle.
+        """
+        source = """\
+public fn outer(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{ child(@Int.0) }
+where {
+  fn child(@Int -> @Int) requires(true) ensures(true) effects(pure)
+  { grandchild(@Int.0) }
+  where {
+    fn grandchild(@Int -> @Int) requires(true) ensures(true) effects(pure)
+    { match compare(@Int.0, 5) { Less -> 1, Equal -> 2, Greater -> 3 } }
+  }
+}
+public fn main(@Unit -> @Int) requires(true) ensures(true) effects(pure)
+{ outer(9) }
+"""
+        assert _run(source, fn="main") == 3
+
+    def test_nested_where_branching_helpers_run(self) -> None:
+        """#989 (test-analyzer): a node with TWO nested helpers emits BOTH.
+
+        ``outer(10)`` → ``ha(10)`` → ``ha1(10) + ha2(10)`` → ``20 + 30`` = 50.
+        Both sibling grandchildren are load-bearing, so the shape kills a
+        drop-non-first-nested-subtree mutant (``[:1]`` on the flatten stack →
+        ``ha2`` never emitted → ``unknown func: $ha2``) and a leftmost-path
+        mutant.
+        """
+        source = """\
+public fn outer(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{ ha(@Int.0) }
+where {
+  fn ha(@Int -> @Int) requires(true) ensures(true) effects(pure)
+  { ha1(@Int.0) + ha2(@Int.0) }
+  where {
+    fn ha1(@Int -> @Int) requires(true) ensures(true) effects(pure)
+    { @Int.0 * 2 }
+    fn ha2(@Int -> @Int) requires(true) ensures(true) effects(pure)
+    { @Int.0 * 3 }
+  }
+}
+public fn main(@Unit -> @Int) requires(true) ensures(true) effects(pure)
+{ outer(10) }
+"""
+        assert _run(source, fn="main") == 50
 
 
 # =====================================================================

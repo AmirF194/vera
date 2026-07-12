@@ -301,6 +301,40 @@ def mangle_type_name(type_name: str) -> str:
 _UNMANGLE_CODES = {"_": "_", "L": "<", "R": ">", "C": ", ", "S": " "}
 
 
+def collect_nested_generic_decls(
+    decl: ast.FnDecl,
+    out: dict[str, ast.FnDecl],
+) -> None:
+    """Collect ``forall<T>`` where-helpers under an all-NON-generic ancestor
+    chain into *out* (#990).
+
+    A generic helper nested in a non-generic function's ``where`` block is a
+    monomorphization base exactly like a top-level generic: its concrete call
+    sites need clones emitted (codegen Pass 1.5) and verified per
+    instantiation (the #732 loop).  This is the SHARED collector both sides
+    build their base set with, so they collect the identical set by
+    construction — the verifier⊇codegen differential
+    (``tests/test_monomorphize_differential.py``) pins the lockstep.
+
+    Stops at the first generic node: a generic helper's own subtree is NOT
+    descended (each clone carries it and codegen hoists it per-instantiation,
+    #904 — collecting it here would double-emit the NON-generic descendants),
+    and callers only pass non-generic roots.  Note the hoisting path only
+    substitutes the generic ANCESTOR's type variables — a descendant with its
+    own ``forall`` is hoisted as a still-generic template and never
+    instantiated, so that shape still dangles at compile (#1002); this
+    collector deliberately does not paper over it.  ``setdefault`` keeps
+    first-seen-wins on a bare-name collision, matching how plain where-helpers
+    flatten into the bare WASM namespace; per-scope duplicate-name semantics
+    are #991's subject.
+    """
+    for wfn in decl.where_fns or ():
+        if wfn.forall_vars:
+            out.setdefault(wfn.name, wfn)
+        else:
+            collect_nested_generic_decls(wfn, out)
+
+
 def unmangle_type_name(mangled: str) -> str:
     """Inverse of :func:`mangle_type_name` over canonical type names.
 
@@ -1824,12 +1858,11 @@ class Monomorphizer:
                 # with the env unchanged; _walk_free_vars likewise), so the
                 # walker must not count one — a phantom binding shifts every
                 # same-named ref in the body to a dangling or wrong local
-                # (adversarial panel, PR #972).  The checker DOES bind state
-                # in the handled body's scope — a pre-existing checker/codegen
-                # divergence tracked separately; indices must match the
-                # CONSUMERS.  Clause scopes above keep params + state: that is
-                # what _walk_free_vars counts (and Exn clause compilation
-                # pushes the thrown binder).
+                # (adversarial panel, PR #972).  The checker agrees since
+                # #973: it binds no body-scope state either, rejecting such
+                # refs with E130.  Clause scopes above keep params + state:
+                # that is what _walk_free_vars counts (and Exn clause
+                # compilation pushes the thrown binder).
                 walk(v.body)
                 return
             if isinstance(v, ast.Node):

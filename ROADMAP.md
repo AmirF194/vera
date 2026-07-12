@@ -6,19 +6,33 @@ The goal is unchanged: **a stable, working, usable language that doesn't silentl
 
 ## How this file works
 
-The roadmap is a sequence of **stages** — concentrated sprints over a coherent class of issues — continuing the numbering from [HISTORY.md](HISTORY.md), which closed Stage 18.  The v0.1.0 bug burndown (Stage 17) set the model: pick a themed set, drive it to zero as one campaign, release, move on.  When a stage's table empties, the stage moves to HISTORY.md with its releases and the next one starts.
+The roadmap is a sequence of **stages** — concentrated sprints over a coherent class of issues — continuing the numbering from [HISTORY.md](HISTORY.md).  A stage is a campaign: pick a themed set, drive it to zero, release, move on.  When a stage's table empties, the stage moves to HISTORY.md with its releases and the next one starts.
 
-Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verification truth first, then structural drift-proofing, then the capabilities the flagship needs, then the experience around them.  Priority lives in this file and nowhere else — issues carry kind and area labels, not priority labels.  Completed items are deleted from these tables and noted in HISTORY.md.  Stages beyond the next one or two are a forecast, not a commitment — they reorder freely as reality intervenes, and a new bug class outranks everything and becomes its own burndown, as Stage 17 did.
+Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verification truth first, then structural drift-proofing, then the capabilities the flagship needs, then the experience around them.  Priority lives in this file and nowhere else — issues carry kind and area labels, not priority labels.  Completed items are deleted from these tables and noted in HISTORY.md.  Stages beyond the next one or two are a forecast, not a commitment — they reorder freely as reality intervenes, and a new bug class outranks everything and becomes its own burndown.
 
 ## Where we are
 
-6,920 tests, 145 conformance programs, 37 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
+7,391 tests, 157 conformance programs, 37 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
 
 ## Stage 19 — The verification completeness sprint
 
 *`vera verify` tells the whole truth.*
 
-KNOWN_ISSUES carries a family of verification-completeness gaps — an obligation not emitted, a guard not planted — individually small, sharing machinery, and exactly the shape the burndown model handles well.  The bug-labelled members of the family ([#758](https://github.com/aallan/vera/issues/758), [#820](https://github.com/aallan/vera/issues/820), [#967](https://github.com/aallan/vera/issues/967)) live in KNOWN_ISSUES' Bugs table rather than in this stage's rows — bugs are burndown material, not stage work — and the guard wave's shared architectural enabler (per-component target-type metadata in codegen) unblocks them alongside the staged rows.
+### Bug sprint — monomorphizer and verifier gaps first
+
+Eleven bugs span the monomorphizer/import pipeline, the verifier's obligation walkers, effect-op codegen lowering, and CLI diagnostics. Clear them as a short sprint before the verification-completeness rows below, grouped by shared fix machinery so each PR touches one code path:
+
+**PR A — the mono/import-door cluster (7).** All seven are passes that only cover top-level or local declarations, so imported and monomorphized bodies fall through — one provenance-carrying fix (hoist/discovery/rewrite/keying threaded through resolved-module programs and clone bases) serves the family. [#999](https://github.com/aallan/vera/issues/999) imported bodies get no generic-instantiation discovery; [#1000](https://github.com/aallan/vera/issues/1000) a private module generic reached transitively is never harvested; [#1002](https://github.com/aallan/vera/issues/1002) a generic helper under a generic ancestor is never monomorphized; [#1008](https://github.com/aallan/vera/issues/1008) a module fn's own ADT layouts are gated on the importer's type import; [#1012](https://github.com/aallan/vera/issues/1012) the generic clone hoister lacks ancestor-scope call rewriting (aunt-call dangles); [#1014](https://github.com/aallan/vera/issues/1014) nested generic where-helpers are keyed flat first-seen-wins (silent wrong body); [#1015](https://github.com/aallan/vera/issues/1015) imported module where-helpers aren't parent-qualified (silent wrong body). Fix #1014's keying **first** — expanding discovery multiplies clone bases, and every new base is another first-seen-wins collision candidate.
+
+**PR B — effect-op positional lowering (2).** [#1005](https://github.com/aallan/vera/issues/1005) a `get` clause's `@Unit` op-parameter read is check-green but E699 at codegen; [#1006](https://github.com/aallan/vera/issues/1006) effect ops in array-literal-element / `let @Unit` positions `CodegenSkip` the enclosing fn. Same translator region; both must route through the post-#976 clause-aware effect-op dispatch, not the raw host cell.
+
+**PR C — CLI diagnostic surfacing (1).** [#1004](https://github.com/aallan/vera/issues/1004) `CodegenSkip` of a called fn surfaces as an opaque `unknown func`; print warnings on `cmd_compile`'s error path so the E602 skip diagnostic is not suppressed.
+
+**PR D — verifier narrowing dual (1).** [#1017](https://github.com/aallan/vera/issues/1017) the `@Int -> @Nat` narrowing into an `apply_fn` closure formal is not obligated (false Tier-1) — mirror the #820 widening handler's dual at this site. Groups with the verification-completeness rows below.
+
+[#996](https://github.com/aallan/vera/issues/996) stays a watch-only row — an unreproducible conformance flake, not a fix target.
+
+KNOWN_ISSUES carries a family of verification-completeness gaps — an obligation not emitted, a guard not planted — individually small and sharing machinery. This stage retires each. The per-component target-type table threaded into codegen (the enabler [#820](https://github.com/aallan/vera/issues/820) built) is the shared metadata the staged narrowing rows below reuse.
 
 Exit criterion: every verification-completeness and guard-deferral row in KNOWN_ISSUES is retired.
 
@@ -26,6 +40,7 @@ Exit criterion: every verification-completeness and guard-deferral row in KNOWN_
 |---|---|
 | [#764](https://github.com/aallan/vera/issues/764) | Call preconditions after an untranslatable `let` / `let`-destructure are not statically checked — `_translate_block` truncates, so E501 never fires though the runtime `requires` guard still holds. |
 | [#779](https://github.com/aallan/vera/issues/779) | Primitive-op obligations (E502/E526/E527) don't recurse into closure / quantifier / handler-clause bodies — fresh-slot scopes the walkers skip. |
+| [#985](https://github.com/aallan/vera/issues/985) | A nested closure's return coercion is runtime-guarded but not reported in `vera verify`'s stream — the `AnonFn` handler is deliberately shallow (it won't recurse into a closure body); same fresh-scope-body family as #779. |
 | [#909](https://github.com/aallan/vera/issues/909) | A value's postcondition / refinement is forgotten through an ADT field (box then unbox loses the fact), degrading provable programs to Tier 3. |
 | [#754](https://github.com/aallan/vera/issues/754) | Effect-operation-argument runtime guard for `@Nat` narrowing, with a dedicated trap kind — first consumer of the per-component metadata enabler. |
 | [#757](https://github.com/aallan/vera/issues/757) | Generic-instantiated constructor-field runtime guard — second consumer of the same enabler. |
@@ -37,7 +52,7 @@ Exit criterion: every verification-completeness and guard-deferral row in KNOWN_
 
 *One fact, one home, drift caught by a gate.*
 
-The Stage 18 consistency sweep fixed a long tail of drift **by hand**; this stage makes those classes structural so the next sweep finds nothing.  It inherits the June 2026 audit's second theme and the gate-honesty findings the July external contributions surfaced: a gate that doesn't check its own premise is drift waiting to happen.  The release-process holdouts ride here too — automation is single-sourcing for process.
+This stage makes drift-prone consistency classes structural — each gets a generator or a gate, so a doc fact lives in one place and the next consistency pass finds nothing. A gate that doesn't check its own premise is itself drift waiting to happen. Release-process automation rides here too: automation is single-sourcing for process.
 
 Exit criterion: each listed drift class has a generator or a gate, and a release requires no manual tag/publish steps.
 
@@ -164,7 +179,7 @@ Not stage-gated; advanced alongside whatever stage is active.
 
 Deliberate trade-offs, recorded so they aren't re-litigated by accident.
 
-- **No typed IR for WAT emission.**  The audit floated one; the cost-benefit doesn't clear while string-based emission is held safe by the walker-completeness gate and the planned canonical WAT formatter ([#672](https://github.com/aallan/vera/issues/672)).
+- **No typed IR for WAT emission.**  The cost-benefit doesn't clear while string-based emission is held safe by the walker-completeness gate and the planned canonical WAT formatter ([#672](https://github.com/aallan/vera/issues/672)).
 - **No parser fuzzing yet** ([#402](https://github.com/aallan/vera/issues/402), bookmark).  Trigger: a parser crash from the wild, or spare CI budget.
 - **No full Tier 2 verification yet** ([#427](https://github.com/aallan/vera/issues/427)).  Its old blocker is gone — per-monomorphization verification shipped and provides the differential oracle — but the staged sprints above outrank it; it stays on the horizon by priority, not dependency.
 

@@ -20,7 +20,7 @@ each handle a specific concern:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -30,10 +30,12 @@ from vera import ast
 from vera.errors import Diagnostic, SourceLocation
 from vera.environment import (
     AdtInfo,
+    FunctionInfo,
     TypeEnv,
 )
 from vera.types import (
     BOOL,
+    ModuleArtifacts,
     PureEffectRow,
     Type,
     TypeVar,
@@ -111,6 +113,15 @@ class CheckArtifacts:
     # #747: semantic-type side-tables for the verifier (see TypeChecker).
     expr_semantic_types: dict[tuple[int, int, int, int], Type]
     expr_target_types: dict[tuple[int, int, int, int], Type]
+    # #987: per-resolved-module span-keyed side-tables, keyed by module path.
+    # Each entry is that module's OWN ``(expr_semantic_types,
+    # expr_target_types)`` — the top-level tables above are keyed by bare span
+    # with no file identity, so an imported body compiled into the flat WASM
+    # module (Pass 2.5 / 2.6) cannot recover its component targets from them.
+    # Codegen threads the matching entry when compiling each module's body, so
+    # the #820 @Nat -> @Int widening guard fires at the array-element /
+    # tuple-construction sites through the import door, not just same-file.
+    module_artifacts: ModuleArtifacts
 
 
 def typecheck_with_artifacts(
@@ -118,6 +129,7 @@ def typecheck_with_artifacts(
     source: str = "",
     file: str | None = None,
     resolved_modules: list[ResolvedModule] | None = None,
+    collect_module_artifacts: bool = False,
 ) -> tuple[list[Diagnostic], CheckArtifacts]:
     """Type-check and additionally collect LSP artifacts (#222 Phase D).
 
@@ -126,6 +138,16 @@ def typecheck_with_artifacts(
     of the #222 plan chose this eager side-table over re-synthesis at
     query time).  Existing callers keep using :func:`typecheck`; only
     the LSP layer pays the collection cost.
+
+    ``collect_module_artifacts`` (#987, opt-in per PR #997 review) gates the
+    per-resolved-module side-table pass.  Only the codegen-bound callers
+    (``vera compile`` / ``run`` / ``serve`` / ``test``) consume
+    ``CheckArtifacts.module_artifacts`` — they pass ``True``.  ``vera verify``
+    and the warm ``VerificationSession`` read only the top-level
+    ``expr_semantic_types`` / ``expr_target_types`` tables and would pay a full
+    extra ``check_program`` per resolved module for nothing, so they leave it
+    ``False`` (``module_artifacts`` is then an empty dict, which ``_compile_fn``
+    already tolerates — the #986 imported-body suppression fallback).
     """
     checker = TypeChecker(
         source=source, file=file, resolved_modules=resolved_modules,
@@ -140,7 +162,80 @@ def typecheck_with_artifacts(
         holes=checker.hole_sites,
         expr_semantic_types=checker.expr_semantic_types,
         expr_target_types=checker.expr_target_types,
+        module_artifacts=(
+            _collect_module_artifacts(resolved_modules)
+            if collect_module_artifacts
+            else {}
+        ),
     )
+
+
+def _collect_module_artifacts(
+    resolved_modules: list[ResolvedModule] | None,
+) -> ModuleArtifacts:
+    """Collect each resolved module's OWN span-keyed side-tables (#987).
+
+    The top-level program's ``expr_target_types`` / ``expr_semantic_types`` are
+    keyed by bare span ``(line, col, end_line, end_col)`` with no file identity,
+    so an imported body compiled into the flat WASM module (Pass 2.5 / 2.6) has
+    no entries there — codegen dropped the #820 @Nat -> @Int widening guard at
+    the array-element / tuple-construction sites through the import door, while
+    the library's own ``vera verify`` reported them Tier-3-guarded (the broken
+    promise).  Run the full check over each module in isolation to collect ITS
+    table, keyed by module path, so codegen can thread the right one when it
+    compiles that module's body.
+
+    Each module's ``direct`` flags are re-derived from its OWN ``import``
+    declarations — the closure ``resolved_modules`` was tagged relative to the
+    top-level program (a module the program reaches only transitively is
+    ``direct=False`` there, but is a DIRECT import of whichever module imports
+    it) — so name injection (gated on ``mod.direct``) and qualified-call
+    resolution match a standalone check of that module.  Over-inclusion of
+    modules the checked one never imports is inert: they are registered but,
+    tagged ``direct=False`` and absent from its ``program.imports``, never
+    injected or qualified-callable.
+
+    Honesty note (PR #997 review): no BEHAVIOURAL fixture has been found where
+    the re-derivation vs reusing the top-level flags changes an emitted guard —
+    the necessity at the guard level is therefore unproven.  What IS proven is
+    that the re-derivation changes the collected ARTIFACT: in a transitive
+    fixture (main -> alib -> blib) ``alib``'s own target table gains its second
+    entry only because ``blib`` is re-tagged a DIRECT import of ``alib`` for its
+    sub-check.  That artifact-level difference is pinned by
+    ``tests/test_xmod_artifact_collection.py::TestTransitiveArtifactContent``.
+
+    Cost note (PR #997 review): this is quadratic on the codegen paths that
+    opt in — N resolved modules each get a full ``check_program`` that
+    re-registers the other N-1, so the pass is O(N^2) sub-checks (measured
+    ~85ms at 20 modules vs ~4ms for the main-file-only check).  It runs only
+    for ``vera compile``/``run``/``serve``/``test`` (``vera verify`` and the
+    warm session skip it entirely).  Memoising each module's per-check
+    registration (its declarations are re-derived identically every pass) is a
+    future optimisation candidate that would collapse it toward O(N).
+    """
+    mods = resolved_modules or []
+    result: ModuleArtifacts = {}
+    for mod in mods:
+        mod_direct = {imp.path for imp in mod.program.imports}
+        sub_resolved = [
+            replace(other, direct=(other.path in mod_direct))
+            for other in mods
+            if other.path != mod.path
+        ]
+        sub_semantic: dict[tuple[int, int, int, int], Type] = {}
+        sub_target: dict[tuple[int, int, int, int], Type] = {}
+        sub = TypeChecker(
+            source=mod.source,
+            file=str(mod.file_path),
+            resolved_modules=sub_resolved,
+        )
+        sub.expr_types = {}
+        sub.expr_semantic_types = sub_semantic
+        sub.expr_target_types = sub_target
+        sub.hole_sites = []
+        sub.check_program(mod.program)
+        result[mod.path] = (sub_semantic, sub_target)
+    return result
 
 
 # =====================================================================
@@ -183,11 +278,48 @@ class TypeChecker(
         self.source = source
         self.file = file
         self._effect_ops_used: set[str] = set()
+        # #973: canonical type names of the handler state(s) whose HANDLED
+        # BODY is currently being checked.  State is in scope as a slot only in
+        # handler clauses, never the handled body — the body reaches state
+        # through the typed get(())/put(...) operations (spec §7.5; DESIGN
+        # principles 2/3/6).  This stack lets a failed slot resolution of a
+        # state type inside the body carry a get(()) hint instead of a bare
+        # unbound-slot error.  Push/pop straddles the body check in
+        # _check_handle; empty everywhere else.
+        self._handler_body_state_tnames: list[str] = []
+        # #969: canonical slot-type names bound by the PARENT function whose
+        # where-block is currently being checked.  A where-helper is a closed,
+        # param-rooted scope (spec §5): its body cannot read the outer
+        # function's parameter slots — the parent's value scope is popped
+        # before helper bodies are checked, so an outer slot becomes an
+        # ordinary E130.  This stack lets that failed resolution carry a
+        # "pass it as an explicit argument" hint when the failing type is one
+        # the parent bound.  Push/pop straddles the where-fn loop in
+        # _check_fn; empty everywhere else (so no non-helper diagnostic sees
+        # the hint).  Parent TYPE params stay in scope through the loop.
+        self._where_helper_outer_tnames: list[frozenset[str]] = []
         # #815: ids of FnDecls rejected for redefining a built-in (E151).
         # They are not registered (the built-in stays canonical), so the
         # check phase skips them — re-checking would resolve their own body
         # against the built-in and emit bogus secondary diagnostics.
         self._rejected_builtin_redefs: set[int] = set()
+        # #991 checker leg (PR #1013 review): lexically-scoped where-helper
+        # resolution, mirroring the verifier and codegen.  ``env.functions``
+        # is flat and last-wins, so a bare call to a same-named helper in a
+        # DIFFERENT parent tree resolved against whichever helper registered
+        # last — a diamond whose two `leaf`s differ in signature was falsely
+        # REJECTED (E121 against the wrong leaf's return type) on a valid
+        # program.  `_fn_scope_stack` holds the chain of functions whose
+        # `where` blocks are lexically in scope (outermost first; maintained
+        # by `_check_fn`); `_top_level_fn_infos` pins each top-level
+        # function's own info (a nested same-named helper would otherwise
+        # clobber it in the flat registry); `_scoped_fn_info_cache` memoizes
+        # per-decl infos for the scoped lookup.
+        self._fn_scope_stack: list[ast.FnDecl] = []
+        self._top_level_fn_infos: dict[str, FunctionInfo] = {}
+        self._scoped_fn_info_cache: dict[
+            tuple[int, str | None], FunctionInfo
+        ] = {}
         # #222 Phase D: opt-in artifact collection for LSP features.
         # None = off (the default for every existing caller; zero
         # cost).  When dicts are installed by typecheck_with_artifacts,
@@ -306,6 +438,19 @@ class TypeChecker(
         """Entry point: register modules, then local declarations, then check."""
         self._register_modules(program)  # C7b: cross-module imports
         self._register_all(program)  # local declarations shadow imports
+        # #991 checker leg: pin each LOCAL top-level function's own info so
+        # the scoped lookup prefers it over a nested helper of the same name
+        # that clobbered the flat registry (helpers register last) — the
+        # checker then resolves helper calls exactly as the verifier and
+        # codegen do.  Rejected built-in redefinitions stay out (the built-in
+        # is canonical, #815).
+        for tld in program.declarations:
+            decl = tld.decl
+            if (isinstance(decl, ast.FnDecl)
+                    and id(decl) not in self._rejected_builtin_redefs):
+                self._top_level_fn_infos[decl.name] = self._fn_info_for_decl(
+                    decl, visibility=tld.visibility,
+                )
         for tld in program.declarations:
             # #815: a built-in redefinition (E151) is already reported and not
             # registered; skip checking its body so it isn't re-checked against
@@ -408,6 +553,14 @@ class TypeChecker(
         saved_params = dict(self.env.type_params)
         saved_return = self.env.current_return_type
         saved_effect = self.env.current_effect_row
+        # #991 checker leg: this function's frame joins the lexical scope
+        # stack for the duration of its body, contracts, AND its where-helper
+        # recursion (step 8) — a helper's body must see this function's
+        # helpers as ancestors.  Popped alongside the step-9 restores below
+        # (the same non-finally discipline as the type-param save/restore:
+        # an exception here aborts check_program entirely, so a leaked frame
+        # is unobservable).
+        self._fn_scope_stack.append(decl)
 
         # 1. Bind forall type parameters
         if decl.forall_vars:
@@ -468,9 +621,11 @@ class TypeChecker(
 
         # 4. Push scope and bind parameters
         self.env.push_scope()
+        param_slot_names: set[str] = set()
         for i, (param_te, param_ty) in enumerate(
                 zip(decl.params, param_types)):
             tname = self._type_expr_to_slot_name(param_te)
+            param_slot_names.add(tname)
             self.env.bind(tname, param_ty, "param")
 
         # 5. Check contracts
@@ -509,21 +664,94 @@ class TypeChecker(
                 error_code="E122",
             )
 
-        # 8. Check where-block functions
+        # 8. Check where-block functions.
+        #    Pop the parent's VALUE-slot scope FIRST so a helper body cannot
+        #    resolve the outer function's parameter slots (#969).  spec §5:
+        #    where-helpers are always local to the parent and carry their own
+        #    mandatory contracts over their own params; an implicit outer-frame
+        #    capture would move a value across a contract boundary uncontracted
+        #    (DESIGN principles 2 and 5).  The backends already compile each
+        #    helper param-rooted, so a body @T.n reaching an outer slot passed
+        #    check + verify then crashed compile with a dangling-slot E699.
+        #    Now it is an ordinary E130.  Parent TYPE params stay in scope
+        #    (restored below, after the loop), matching spec §5's intent that
+        #    a generic parent's helpers may be written over @T.  Note the
+        #    retention is not load-bearing for resolution today — an absent
+        #    type name falls through to the opaque AdtType branch in
+        #    _resolve_named_type and monomorphization is call-site-driven —
+        #    so no test fails if it is removed; it is kept as the semantics
+        #    the spec states.
+        self.env.pop_scope()
         if decl.where_fns:
-            for wfn in decl.where_fns:
-                # #815: skip a where-helper rejected for redefining a built-in
-                # (E151 already emitted; it is not registered, so re-checking
-                # would resolve its body against the built-in).
-                if id(wfn) in self._rejected_builtin_redefs:
-                    continue
-                self._check_fn(wfn)
+            # Record the parent's param slot types so a failed slot resolution
+            # of one of them inside a helper body carries the pass-as-argument
+            # hint instead of the generic lower-index hint.
+            self._where_helper_outer_tnames.append(frozenset(param_slot_names))
+            try:
+                for wfn in decl.where_fns:
+                    # #815: skip a where-helper rejected for redefining a
+                    # built-in (E151 already emitted; it is not registered, so
+                    # re-checking would resolve its body against the built-in).
+                    if id(wfn) in self._rejected_builtin_redefs:
+                        continue
+                    self._check_fn(wfn)
+            finally:
+                self._where_helper_outer_tnames.pop()
 
         # 9. Restore context
-        self.env.pop_scope()
+        self._fn_scope_stack.pop()
         self.env.type_params = saved_params
         self.env.current_return_type = saved_return
         self.env.current_effect_row = saved_effect
+
+    def _fn_info_for_decl(
+        self, decl: ast.FnDecl, visibility: str | None = None,
+    ) -> FunctionInfo:
+        """Build (memoized) the :class:`FunctionInfo` for a specific FnDecl,
+        bypassing the flat, last-wins ``env.functions`` registry (#991).
+
+        The checker twin of the verifier's method of the same name: the
+        scoped lookup resolves a same-named ``where``-helper to the exact
+        decl in scope, not whichever one registered last.  Reuses the shared
+        ``build_fn_info`` so the resolved signature is byte-for-byte what
+        ``register_fn`` would have stored.  Keyed on ``(id, visibility)`` so
+        a cache hit can never return an info built for another visibility.
+        """
+        key = (id(decl), visibility)
+        info = self._scoped_fn_info_cache.get(key)
+        if info is None:
+            from vera.registration import build_fn_info
+            info = build_fn_info(
+                self.env, decl,
+                self._resolve_type, self._resolve_effect_row,
+                visibility=visibility,
+            )
+            self._scoped_fn_info_cache[key] = info
+        return info
+
+    def _lookup_function_scoped(self, name: str) -> FunctionInfo | None:
+        """Resolve a bare call name lexically (#991 checker leg).
+
+        The nearest same-named ``where``-helper visible from the function
+        currently being checked wins: the innermost stack frame's helpers
+        first, then each ancestor's, then the top-level function of that
+        name, and finally the flat registry (built-ins / prelude / imports).
+        Matches the verifier's ``_scoped_fn_lookup`` and codegen's
+        parent-qualified hoist, so all three subsystems agree on
+        helper-name scoping.  A helper rejected for redefining a built-in
+        (E151, #815) is skipped — the built-in stays canonical.  With an
+        empty stack (data invariants, op signatures) this is exactly the
+        old flat lookup.
+        """
+        for frame in reversed(self._fn_scope_stack):
+            for wfn in frame.where_fns or ():
+                if (wfn.name == name
+                        and id(wfn) not in self._rejected_builtin_redefs):
+                    return self._fn_info_for_decl(wfn)
+        top = self._top_level_fn_infos.get(name)
+        if top is not None:
+            return top
+        return self.env.lookup_function(name)
 
     def _type_expr_to_slot_name(self, te: ast.TypeExpr) -> str:
         """Extract the canonical slot name from a type expression used as a

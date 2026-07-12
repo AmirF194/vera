@@ -3,7 +3,8 @@
 The warm session (Phase A) re-verified every function on every call.
 Phase B adds a per-function discharge cache behind the same API: a
 function whose verification *inputs* are unchanged replays its cached
-obligations, diagnostics, and summary delta instead of re-entering Z3.
+obligations and diagnostics instead of re-entering Z3 (the summary is
+derived from the replayed obligations, #967).
 
 Soundness model — what a function's verification reads, and therefore
 what its cache key must cover:
@@ -178,15 +179,14 @@ class FnCacheEntry:
 
     Replay appends these lists verbatim (the entries are treated as
     immutable after creation — nothing in the session or verifier
-    mutates a recorded Diagnostic or ProofObligation) and adds the
-    summary deltas to the run's summary.
+    mutates a recorded Diagnostic or ProofObligation).  The run's
+    :class:`~vera.verifier.VerifySummary` is *derived* from the assembled
+    obligation stream at report-assembly time (#967), so no per-function
+    summary deltas are cached — the cached ``obligations`` are the count.
     """
 
     diagnostics: list[Diagnostic]
     obligations: list[ProofObligation]
-    tier1_delta: int
-    tier3_delta: int
-    total_delta: int
 
 
 class DischargeCache:

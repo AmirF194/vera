@@ -270,6 +270,9 @@ class ClosureLiftingMixin:
         # #798: resolved-type side-table for the integer-overflow guard's
         # Int/Nat operand classifier, inside closure bodies too.
         ctx.set_expr_semantic_types(self._expr_semantic_types)
+        # #820: target-type side-table for the @Nat -> @Int widening guard's
+        # per-component target-type recovery, inside closure bodies too.
+        ctx.set_expr_target_types(self._expr_target_types)
         # #747: per-parameter concrete-@Nat flags for the call-site
         # runtime narrowing guard inside closure bodies too.
         ctx.set_fn_nat_params(self._fn_nat_params)
@@ -468,6 +471,31 @@ class ClosureLiftingMixin:
         else:
             result_part = ""  # pragma: no cover — Unit closure return
 
+        # #984: an @Int body narrowing into a @Nat closure RETURN can be
+        # negative (`fn(@Int -> @Nat) { @Int.0 }` applied to -5 returned -5
+        # through the @Nat slot on a verify-clean program — the #758 return
+        # nat-bind hole reachable only through this closure path).  Guard it
+        # PER NARROWING LEAF, exactly as `_compile_fn` does for the top-level
+        # return (`_nat_return_leaf_ids` threaded into the body translation,
+        # applied by `_guard_nat_return_leaf` at each Block / if-branch / match
+        # arm leaf): a whole-body wrap would false-trap a legitimate @Nat leaf
+        # of a heterogeneous body (a captured @Nat above i64.MAX reads as a
+        # negative i64), and closures emit no `return_call` so no TCO revert is
+        # needed.  Alias-aware + refinement-excluded gate (a refinement over
+        # @Nat stays on the refinement-boundary path), mirroring the top-level
+        # narrow-return gate.  MUST run before `translate_block` so the leaf
+        # ids are in place when the body is lowered.
+        if (ctx._type_expr_base_is_nat(anon_fn.return_type)
+                and self._refinement_guard_parts(anon_fn.return_type) is None):
+            ctx._nat_return_leaf_ids = ctx._collect_narrowing_return_leaves(
+                anon_fn.body)
+        else:
+            # Reset unconditionally, as `_compile_fn` does for the top-level
+            # return: each closure gets a fresh WasmContext today, so this
+            # branch is insurance against a future shared-ctx refactor
+            # leaking a @Nat closure's leaf set into a non-@Nat sibling.
+            ctx._nat_return_leaf_ids = set()
+
         # Compile the body.  Three failure modes are handled:
         #   1. CodegenSkip — translator hit unsupported shape (#626 L3)
         #   2. CodegenInvariantError — codegen bug (#626 L3)
@@ -543,6 +571,20 @@ class ClosureLiftingMixin:
             # `_translate_interpolated_string`.
             self._harvest_interp_inference_failures(ctx)
             return None
+
+        # #820: a @Nat closure body widening into an @Int closure RETURN
+        # reinterprets above i64.MAX (u64.MAX -> -1) — the definition-side dual
+        # of the closure-argument guard (`_translate_apply_fn`).  The verifier
+        # obligates this shallow-syntactically (the AnonFn body is opaque to its
+        # SMT layer, so it records tier3), and codegen guards the body's @Int
+        # return value here.  Fires only when the declared return is @Int and the
+        # body is intrinsically @Nat (`_result_is_nat`) — never a genuine @Int
+        # body (which may be legitimately negative).  The #984 narrowing dual
+        # is guarded per-leaf during body translation above (`_nat_return_leaf_ids`),
+        # not as a whole-body wrap here — see that block for why.
+        if (ctx._type_expr_base_is_int(anon_fn.return_type)
+                and ctx._result_is_nat(anon_fn.body)):
+            body_instrs = ctx._emit_int_widen_guard(body_instrs)
 
         # Propagate host-import tracking from closure ctx to module level
         self._map_ops_used.update(ctx._map_ops_used)

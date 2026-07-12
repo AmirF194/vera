@@ -72,6 +72,7 @@ def _run(source: str, fn: str, arg: int) -> int | None:
         result = codegen_compile(
             program, source=source, file=path, resolved_modules=resolved,
             expr_semantic_types=arts.expr_semantic_types,
+            expr_target_types=arts.expr_target_types,
         )
         try:
             exec_result = execute(result, fn_name=fn, args=[arg])
@@ -180,24 +181,99 @@ public fn f(@Nat -> @Int) requires(true) ensures(true) effects(pure)
 public fn f(@Nat -> @Int) requires(true) ensures(true) effects(pure)
 { match @Nat.0 { 0 -> 0, _ -> @Nat.0 } }
 """, "f"),
-]
-
-_DISCLOSED = [
-    ("tuple_construct", """
-public fn tc(@Nat -> @Int)
-  requires(true) ensures(true) effects(pure)
-{ let @Tuple<Int, Int> = Tuple(@Nat.0, @Nat.0); match @Tuple<Int, Int>.0 { Tuple(@Int, @Int) -> @Int.0 } }
-""", "tc"),
-    ("tuple_destr", """
-public fn td(@Nat -> @Int)
-  requires(true) ensures(true) effects(pure)
-{ let Tuple<@Int, @Int> = Tuple(@Nat.0, @Nat.0); @Int.0 }
-""", "td"),
+    # #820 enabler unlocks the following per-component target-type sites.
+    # array element: a @Nat element widening into an @Array<Int> literal.  The
+    # target element type (`Array<Int>`) is recovered from the checker's
+    # target-type table, so the element store is guarded (was E531-disclosed).
     ("array_elem", """
 public fn ae(@Nat -> @Int)
   requires(true) ensures(true) effects(pure)
 { let @Array<Int> = [@Nat.0]; @Array<Int>.0[0] }
 """, "ae"),
+    # tuple construction: a @Nat component widening into an @Int tuple slot.
+    # The Tuple carrier's layout has no per-component int flags; the target
+    # type `Tuple<Int, Int>` supplies them, so construction guards each @Nat
+    # component (was E531-disclosed) — the #813-disclosed widening residual,
+    # the widening dual of #758's tuple-component narrowing.
+    ("tuple_construct", """
+public fn tc(@Nat -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Tuple<Int, Int> = Tuple(@Nat.0, @Nat.0); match @Tuple<Int, Int>.0 { Tuple(@Int, @Int) -> @Int.0 } }
+""", "tc"),
+    # tuple destructure: the widening happens at CONSTRUCTION (guarded above),
+    # so the destructure form traps at construction before the bind runs.
+    ("tuple_destr", """
+public fn td(@Nat -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let Tuple<@Int, @Int> = Tuple(@Nat.0, @Nat.0); @Int.0 }
+""", "td"),
+    # #820 heterogeneous if with a genuine @Int-*slot* alternative: the join is
+    # genuinely @Int (the else arm can be a legitimately-negative @Int), so the
+    # whole-if boundary guard cannot fire; the @Nat then-arm is obligated and
+    # guarded PER-ARM.  `if true` forces the @Nat arm; u64.MAX traps there.
+    ("hetero_if_slot", """
+public fn f(@Nat -> @Int) requires(true) ensures(true) effects(pure)
+{ let @Int = 0 - 1; if true then { @Nat.0 } else { @Int.0 } }
+""", "f"),
+    # #820 heterogeneous match with a genuine @Int-slot arm: the `0 -> @Int.0`
+    # arm is genuinely @Int, so the `_ -> @Nat.0` arm is obligated/guarded
+    # per-arm.  u64.MAX falls to `_`.
+    ("hetero_match_slot", """
+public fn f(@Nat -> @Int) requires(true) ensures(true) effects(pure)
+{ let @Int = 0 - 1; match @Nat.0 { 0 -> @Int.0, _ -> @Nat.0 } }
+""", "f"),
+    # #820 closure argument: `apply_fn(clo, @Nat.0)` where the closure's formal
+    # is @Int widens the @Nat argument.  The formal type is recovered from the
+    # closure's function-type; the call_indirect argument is guarded.
+    ("closure_arg", """
+type IntToInt = fn(Int -> Int) effects(pure);
+public fn f(@Nat -> @Int) requires(true) ensures(true) effects(pure)
+{ let @IntToInt = fn(@Int -> @Int) effects(pure) { @Int.0 }; apply_fn(@IntToInt.0, @Nat.0) }
+""", "f"),
+    # #820 closure return: a @Nat closure body widening into the closure's @Int
+    # return.  The body is opaque to the verifier's SMT layer, so it is obligated
+    # shallow-syntactically (tier3) and codegen guards the closure body's return.
+    ("closure_return", """
+type NatToInt = fn(Nat -> Int) effects(pure);
+public fn f(@Nat -> @Int) requires(true) ensures(true) effects(pure)
+{ let @NatToInt = fn(@Nat -> @Int) effects(pure) { @Nat.0 }; apply_fn(@NatToInt.0, @Nat.0) }
+""", "f"),
+    # #820 closure capture: a captured @Nat used as the closure's @Int return —
+    # same body-return guard as `closure_return` (the captured @Nat.0 is the
+    # body's trailing value).  `@Unit` arg so the ONLY widening is the return.
+    ("closure_capture", """
+type UnitToInt = fn(Unit -> Int) effects(pure);
+public fn f(@Nat -> @Int) requires(true) ensures(true) effects(pure)
+{ let @UnitToInt = fn(@Unit -> @Int) effects(pure) { @Nat.0 }; apply_fn(@UnitToInt.0, ()) }
+""", "f"),
+    # #820 per-arm guard POSITION — the @Nat arm in the MIDDLE (non-terminal)
+    # slot of a flat 3-arm hetero match.  The committed hetero_match_slot always
+    # routes u64.MAX to the terminal `_` arm (a distinct codegen guard site), so
+    # the non-terminal conditional-arm widen guard is otherwise untested —
+    # neutering it lets the middle @Nat arm silently reinterpret to -1.  A local
+    # `let @Int = 1` scrutinee routes to the middle `1 -> @Nat.0` arm (the arg
+    # value can't double as the scrutinee — u64.MAX would fall to `_`); the
+    # `0 -> @Int.0` arm makes the join genuinely @Int (hetero, guarded per-arm).
+    ("hetero_match_middle_arm", """
+public fn f(@Nat -> @Int) requires(true) ensures(true) effects(pure)
+{ let @Int = 1; match @Int.0 { 0 -> @Int.0, 1 -> @Nat.0, _ -> @Nat.0 } }
+""", "f"),
+    # #820 per-arm guard POSITION — the @Nat arm in the ELSE branch of a hetero
+    # if.  The committed hetero_if_slot always puts the @Nat arm in THEN (a
+    # distinct guard site), so the else-branch widen guard is otherwise untested
+    # — neutering it lets an else @Nat arm silently reinterpret to -1.  `if
+    # false` routes to the else `@Nat.0` arm; `let @Int = 0 - 1` makes the then
+    # arm a genuine (negative) @Int slot so the join is genuinely @Int (hetero).
+    ("hetero_if_else_arm", """
+public fn f(@Nat -> @Int) requires(true) ensures(true) effects(pure)
+{ let @Int = 0 - 1; if false then { @Int.0 } else { @Nat.0 } }
+""", "f"),
+]
+
+_DISCLOSED = [
+    # A generic-instantiated @Int field (`Some(@Nat.0)` into `Option<Int>`)
+    # erases to i64 with no per-field mono metadata — the #757 narrowing-dual
+    # blocker — so it stays honestly E531-disclosed, NOT runtime-guarded.
     ("generic_field", """
 public fn gf(@Nat -> @Int)
   requires(true) ensures(true) effects(pure)

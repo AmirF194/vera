@@ -35,6 +35,13 @@ class OperatorsMixin:
                 "slot reference type argument is not a NamedType", ref)
         local_idx = env.resolve(type_name, ref.index)
         if local_idx is None:
+            # Defensive invariant: a check-green slot reference must map to a
+            # local.  The two source routes that used to reach here — reading
+            # handler state as a slot in a handled body (#973) and a
+            # where-helper body reading the OUTER function's parameter slot
+            # (#969) — are both now rejected at check with E130, so no known
+            # valid-source program trips this.  It stays as a soundness net for
+            # any future checker/backend scope desync (never delete the guard).
             raise CodegenInvariantError(  # pragma: no cover
                 "slot reference resolved to no local (dangling @T.n)", ref)
         # Pair types (String, Array<T>) push (ptr, len) — two locals
@@ -184,45 +191,37 @@ class OperatorsMixin:
                 # ADT structural equality (§9.8 auto-derivation).  `lv` may be
                 # parameterized (`Box<String>`); dispatch on the base name but
                 # pass the full name so the generated helper resolves the
-                # concrete field types of *this* instantiation (#773).  A
-                # `ConstructorCall` operand (`Some(1)`) resolves to the BARE
-                # ADT name via `_infer_vera_type`, dropping its type argument;
-                # recover the parameterized name from the argument so the direct
-                # `==` derivation sees the concrete field type, just as the
-                # slot-ref operand form does (#772).
-                lv = self._parameterize_ctor_operand(expr.left, lv)
-                # #912: a `ResultRef`/`SlotRef` operand resolves through the
-                # SlotRef name logic, which — unlike a `ConstructorCall` — has no
-                # arguments to recover a dropped type parameter from.  When such
-                # an operand is a monomorphized generic-ADT clone whose type
-                # argument was substituted to the bare base name (`@T.result` →
-                # `@Box.result`, the #772 residue, e.g. `id2<Box<Int>>`), the
-                # derivability gate cannot resolve the field type and would raise
-                # E613 on an otherwise-valid program.  Recover the concrete type
-                # argument from the OTHER operand first (`@Box.result ==
-                # MkBox(7)` → `Box<Int>`); only if that fails does the composite
-                # fall through to the scalar lowering below (the established
-                # pre-#912 behavior for this lost-type-arg shape — never an
-                # E613 on the derivable original).
-                lv = self._recover_lost_type_arg(lv, expr.right)
-                # #932: inside an Eq-constrained generic clone (`eq2$List<List>`)
-                # the `==` operands are `@T` slots whose substituted type is the
-                # TRUNCATED one-level clone name (`List<List>` for a
-                # `List<List<Int>>` instantiation — the same residue the
-                # constraint gate sees).  Recover the fully-nested name recorded
-                # at the call site so the direct-`==` derivability decision AND
-                # the generated `$eq_<type>` helper resolve the concrete inner
-                # field types, exactly as the constraint gate now does.  This
-                # only affects the derivability name + helper the clone BODY
-                # emits; the mono clone SYMBOL stays the truncated name (#772).
-                if lv is not None:
-                    lv = self._eq_full_type_names.get(lv, lv)
+                # concrete field types of *this* instantiation (#773).  Recover
+                # the left operand's fully-qualified name via the shared chain:
+                # `_parameterize_ctor_operand` (a `Some(1)` operand → `Option<Int>`,
+                # #772), `_recover_lost_type_arg` (a bare generic-ADT slot →
+                # `Box<Int>` from its sibling, #912) and the `_eq_full_type_names`
+                # map (a truncated `List<List>` clone → `List<List<Int>>`, #932).
+                lv = self._eq_operand_full_name(expr.left, expr.right, lv)
+                # #994 F2: a payload-less nested constructor (`Some(None)` →
+                # `Option<Option>`, inner argument erased) or a dead base generic
+                # clone's slot (`Option<Option<T>>`, nested free `T`) leaves `lv`
+                # only PARTIALLY resolved — the structural-Eq derivation cannot
+                # lower it and raised a spurious E613.  Both operands share a type
+                # (checker E142 otherwise), and a monomorphized *reachable* clone
+                # substitutes the sibling slot to a fully concrete name, so
+                # recover the concrete name from the OTHER operand when this one
+                # is under-resolved.  When NEITHER resolves (the dead base clone),
+                # `lv` stays partial and the concreteness gate below routes it to
+                # the harmless scalar (dead-code) lowering, exactly as the #912
+                # lost-type-arg clone does.
+                if lv is not None and not self._eq_type_name_fully_concrete(lv):
+                    rv_full = self._eq_operand_full_name(expr.right, expr.left, rv)
+                    if (rv_full is not None
+                            and self._eq_type_name_fully_concrete(rv_full)):
+                        lv = rv_full
                 lv_base = lv.split("<", 1)[0] if lv is not None else None
                 if (op in (ast.BinOp.EQ, ast.BinOp.NEQ)
                         and lv is not None
                         and lv_base not in ("Bool", "Byte")
                         and lv_base in self._adt_type_names
-                        and not self._is_lost_type_arg_clone(lv, lv_base)):
+                        and not self._is_lost_type_arg_clone(lv, lv_base)
+                        and self._eq_type_name_fully_concrete(lv)):
                     adt_eq = self._translate_adt_eq(left, right, lv, expr)
                     if adt_eq is not None:
                         if op == ast.BinOp.NEQ:
@@ -564,6 +563,98 @@ class OperatorsMixin:
         if "<" in lv:
             return self._has_free_type_var_arg(lv)
         return bool(self._adt_tp_param_names.get(lv_base or ""))
+
+    @staticmethod
+    def _split_type_name(name: str) -> tuple[str, list[str]]:
+        """Split a rendered type name into ``(base, top-level args)`` (#994 F2).
+
+        ``"Option<Option<Int>>"`` → ``("Option", ["Option<Int>"])`` (respecting
+        nesting depth so a comma inside a nested ``<…>`` does not split).  A bare
+        name yields ``(name, [])``.
+        """
+        lt = name.find("<")
+        if lt == -1:
+            return name.strip(), []
+        base = name[:lt].strip()
+        inner = name[lt + 1 : name.rfind(">")]
+        args: list[str] = []
+        depth = 0
+        start = 0
+        for i, ch in enumerate(inner):
+            if ch == "<":
+                depth += 1
+            elif ch == ">":
+                depth -= 1
+            elif ch == "," and depth == 0:
+                args.append(inner[start:i].strip())
+                start = i + 1
+        tail = inner[start:].strip()
+        if tail:
+            args.append(tail)
+        return base, args
+
+    def _eq_type_name_fully_concrete(self, name: str) -> bool:
+        """Whether a rendered ADT type name is fully instantiated (#994 F2).
+
+        Fully concrete = no free type variable and no under-parameterized ADT
+        at ANY nesting level: every registered-ADT segment carries EXACTLY its
+        declared type-parameter count and every argument is itself fully
+        concrete.  This rejects the two shapes the structural-Eq derivation
+        cannot lower on a check-green ``forall<T>`` program:
+
+        * a payload-less nested constructor operand — ``Some(None)`` recovers as
+          the erased ``Option<Option>`` (inner ``Option`` missing its argument,
+          since a bare ``None`` carries none to recover ``<Int>`` from); and
+        * a dead base generic clone's slot operand — ``Option<Option<T>>``, whose
+          nested free ``T`` the top-level-only ``_has_free_type_var_arg`` misses.
+
+        A GENUINELY concrete-but-non-Eq name (``Box<Array<Int>>`` — ``Array`` is
+        not Eq, but the argument is a known concrete type; or ``Tuple<Int, Int>``
+        — variadic, never Eq) is fully concrete, so it still routes to
+        ``_translate_adt_eq`` and raises the CORRECT E613, keeping the
+        checker↔codegen lockstep the #732 differential pins.
+        """
+        base, args = self._split_type_name(name)
+        if base in self._CONCRETE_NON_ADT_BASES:
+            # Primitive / built-in container (``Int``, ``Array<T>``, ``Tuple<…>``):
+            # concrete iff every argument is (``Array<Int>`` yes, ``Array<T>`` no,
+            # bare ``Int`` yes).  Checked BEFORE the ADT branch because a variadic
+            # container (``Tuple``) is registered as a 0-type-parameter ADT yet
+            # renders WITH arguments, which the exact tp-count check below would
+            # wrongly flag as under-parameterized — silently dropping the loud
+            # E613 that a non-Eq ``Tuple`` comparison must raise.
+            return all(self._eq_type_name_fully_concrete(a) for a in args)
+        if base in self._adt_type_names:
+            if len(args) != self._adt_tp_counts.get(base, 0):
+                return False  # under-parameterized: an argument was erased
+            return all(self._eq_type_name_fully_concrete(a) for a in args)
+        # A single-segment name that is neither a registered ADT nor a known
+        # concrete base is an unresolved type VARIABLE (``T``).
+        return False
+
+    def _eq_operand_full_name(
+        self, operand: ast.Expr, other: ast.Expr, bare: str | None,
+    ) -> str | None:
+        """Fully-recover an ``==`` operand's ADT type name (#994 F2).
+
+        Factors the established recovery chain (used for the left operand since
+        #772/#912/#932) so it can be applied to EITHER operand symmetrically:
+
+        * ``_parameterize_ctor_operand`` — recover a ``ConstructorCall``'s dropped
+          type argument from its own arguments (``Some(1)`` → ``Option<Int>``);
+        * ``_recover_lost_type_arg`` — recover a bare generic-ADT slot operand's
+          argument from the *other* operand (``@Box.result == MkBox(7)`` →
+          ``Box<Int>``);
+        * the ``_eq_full_type_names`` map — expand a truncated one-level clone
+          name to its fully-nested form (#932).
+
+        ``bare`` is *operand*'s already-computed ``_infer_vera_type`` name.
+        """
+        name = self._parameterize_ctor_operand(operand, bare)
+        name = self._recover_lost_type_arg(name, other)
+        if name is not None:
+            name = self._eq_full_type_names.get(name, name)
+        return name
 
     def _translate_adt_eq(
         self,
@@ -1212,6 +1303,21 @@ class OperatorsMixin:
                 + ["end"]
             )
 
+        # #820: a HETEROGENEOUS @Int-join if (one @Nat arm, one genuine @Int
+        # arm) widens the @Nat arm into the @Int join.  The whole-if boundary
+        # guard cannot fire (it would false-trap the legitimately-negative @Int
+        # arm), so guard the @Nat arm PER-ARM here.  `_is_hetero_int_widen_join`
+        # is the shared gate: i64 join, NOT wholly @Nat (`_result_is_nat`), AND
+        # TARGET @Int (FIX-4 — without the target check this false-trapped a
+        # legal @Nat arm of a hetero join in a @Nat-RETURNING context).  The same
+        # gate drives the FIX-1 tail-call collector, so the two stay in lockstep.
+        if self._is_hetero_int_widen_join(expr):
+            if self._result_is_nat(expr.then_branch):
+                then = self._emit_int_widen_guard(then)
+            if (expr.else_branch is not None
+                    and self._result_is_nat(expr.else_branch)):
+                else_ = self._emit_int_widen_guard(else_)
+
         # i32_pair → two i32 results (ptr, len)
         if result_type == "i32_pair":
             result_annot = "if (result i32 i32)"
@@ -1682,6 +1788,16 @@ class OperatorsMixin:
         a single @Int component makes the result @Int.  Must agree with the
         verifier's ``_result_is_nat`` so the codegen guard fires at exactly the
         sites the verifier obligates (the verifier<->codegen differential).
+
+        Caveat (no-side-table fallback): when the checker's resolved-type table
+        is absent (an unverified ``transform -> compile``), the ``FnCall`` arm
+        recovers a callee's @Nat return from its *declared* return type — the
+        same coarse basis as :py:meth:`_is_static_nat_typed`, NOT the verifier's
+        precise ``_result_is_nat``.  This is deliberate: the precise join is
+        unavailable without the side-table, and over-classifying a call result
+        as @Nat here only ever suppresses a (dead) guard on a provably-@Nat
+        value — never a wrong runtime verdict — so a verified build (which
+        supplies the table) still matches the verifier site-for-site.
         """
         if isinstance(expr, ast.Block):
             return expr.expr is not None and self._result_is_nat(expr.expr)
@@ -1741,6 +1857,20 @@ class OperatorsMixin:
             resolved = self._resolved_codegen_type(expr)
             if resolved is not None:
                 return resolved == "Nat"
+            # No side-table (an unverified `vera compile`): recover a user
+            # callee's declared @Nat return from `_fn_ret_type_exprs`, mirroring
+            # the verifier's `env.lookup_function().return_type` path.
+            # `_infer_fncall_vera_type` cannot — it maps the erased i64 return
+            # back to "Int" (both @Nat and @Int lower to i64), which would make
+            # a genuine @Nat -> @Nat tail call (`count_down(@Nat.0 - 1)`) look
+            # like a narrowing and break its return_call TCO (#758).
+            decl_ret = self._fn_ret_type_exprs.get(expr.name)
+            if isinstance(decl_ret, ast.RefinementType):
+                decl_ret = decl_ret.base_type
+            if (isinstance(decl_ret, ast.NamedType)
+                    and not decl_ret.type_args
+                    and self._resolve_base_type_name(decl_ret.name) == "Nat"):
+                return True
             call = (
                 expr if isinstance(expr, ast.FnCall)
                 else ast.FnCall(name=expr.name, args=expr.args, span=expr.span)
@@ -1763,6 +1893,50 @@ class OperatorsMixin:
                 return False
             expr = expr.expr
         return isinstance(expr, ast.IntLit) and expr.value >= 0
+
+    def _is_hetero_int_widen_join(self, expr: ast.Expr) -> bool:
+        """Codegen mirror of ``ContractVerifier._is_hetero_int_widen_join``
+        (#820) — the single source of truth for the heterogeneous @Nat -> @Int
+        per-arm widen gate, shared by both emitters (``_translate_if`` /
+        ``_translate_match``) and the FIX-1 tail-call collector so collection
+        and emission cannot desync.
+
+        True iff *expr* is an ``if`` / ``match`` whose i64 result is a
+        HETEROGENEOUS @Int join — at least one genuine @Int-*slot* arm makes the
+        join genuinely @Int (``not _result_is_nat``), so the whole-expression
+        boundary guard cannot fire without false-trapping that arm — AND whose
+        TARGET type is @Int, recovered from the threaded target-type table.  Each
+        intrinsically-@Nat arm then widens into that @Int join and is guarded
+        PER-ARM.
+
+        The target-@Int requirement mirrors the verifier's
+        ``_is_int_type(_target_type_of(expr))`` and is the FIX-4 correction: the
+        pre-existing ``result_type == "i64" and not _result_is_nat`` gate was
+        TARGET-BLIND, so a hetero i64 join in a @Nat-RETURNING context (where the
+        @Int arm narrows into the @Nat return via the #983 nat_bind machinery,
+        and the @Nat arm is a LEGAL @Nat) had its @Nat arm falsely wrapped in the
+        widen guard — trapping a verify-clean Tier-1 program on a value like
+        2^63.  When the target-type table carries no entry for the join (an
+        unverified ``transform -> compile``), there is no widen claim to honour,
+        so we do NOT guard — matching the verifier, which likewise emits no
+        per-arm obligation without the table.  ``_resolve_base_type_name`` makes
+        the target check alias-aware, as the sibling widen gates are.
+        """
+        if isinstance(expr, ast.IfExpr):
+            result_type = self._infer_block_result_type(expr.then_branch)
+            if result_type is None and expr.else_branch is not None:
+                result_type = self._infer_block_result_type(expr.else_branch)
+        elif isinstance(expr, ast.MatchExpr):
+            result_type = self._infer_match_result_type(expr)
+        else:
+            return False
+        if result_type != "i64" or self._result_is_nat(expr):
+            return False
+        target = self._target_codegen_type_full(expr)
+        if target is None:
+            return False
+        name = getattr(target, "name", None)
+        return name is not None and self._resolve_base_type_name(name) == "Int"
 
     def _has_nat_origin_codegen(self, expr: ast.Expr) -> bool:
         """Return True iff *expr* derives from a definitely-@Nat source.
@@ -1947,6 +2121,135 @@ class OperatorsMixin:
             return True
         return self._has_underflow_leaf(value)
 
+    def _collect_narrowing_return_leaves(self, body: ast.Expr) -> set[int]:
+        """The ``id()`` of every tail-position return leaf that narrows into a
+        @Nat return — the codegen mirror of the verifier's
+        ``_return_narrows_into_nat`` leaf descent (#758), but collecting leaf
+        identities so ``CodeGenerator._compile_fn`` can guard EACH narrowing
+        leaf inline instead of wrapping the whole body (#983 review).
+
+        The whole-body ``_emit_nat_bind_guard(body_instrs)`` wrap appended the
+        sign check after the entire body, which forced EVERY ``return_call`` to
+        revert to ``call`` — losing TCO for a non-narrowing @Nat->@Nat recursive
+        tail call (`drain(@Int.0 - 1)`, itself @Nat->@Nat) that then
+        stack-exhausted at depth.  Descending to each leaf and guarding only the
+        genuine narrowings (`@Int.0`, `0 - x`, an @Int-returning tail call)
+        leaves the non-narrowing recursive tail call structurally untouched, so
+        its ``return_call`` survives and the chain runs constant-stack.
+
+        A leaf narrows exactly when ``_narrows_into_nat`` says binding it into a
+        @Nat slot needs a ``>= 0`` guard AND it is not intrinsically @Nat
+        (`_result_is_nat` — a genuine @Nat->@Nat tail call resolves its callee's
+        @Nat return here and so is NOT collected), the per-leaf form of the
+        whole-body ``narrow_guarded`` gate.  Descends ``Block`` / ``IfExpr`` /
+        ``MatchExpr`` joins exactly as the verifier does.
+        """
+        leaves: set[int] = set()
+        self._collect_narrowing_return_leaves_into(body, leaves)
+        return leaves
+
+    def _collect_narrowing_return_leaves_into(
+        self, expr: ast.Expr, leaves: set[int],
+    ) -> None:
+        """Recursive worker for :py:meth:`_collect_narrowing_return_leaves`."""
+        if isinstance(expr, ast.Block):
+            self._collect_narrowing_return_leaves_into(expr.expr, leaves)
+            return
+        if isinstance(expr, ast.IfExpr):
+            if expr.else_branch is None:
+                return
+            self._collect_narrowing_return_leaves_into(expr.then_branch, leaves)
+            self._collect_narrowing_return_leaves_into(expr.else_branch, leaves)
+            return
+        if isinstance(expr, ast.MatchExpr):
+            for arm in expr.arms:
+                self._collect_narrowing_return_leaves_into(arm.body, leaves)
+            return
+        if self._narrows_into_nat(expr) and not self._result_is_nat(expr):
+            leaves.add(id(expr))
+
+    def _guard_nat_return_leaf(
+        self, expr: ast.Expr, instrs: list[str],
+    ) -> list[str]:
+        """Wrap a tail-position leaf's WAT with the #758 @Int->@Nat narrowing
+        guard when *expr* is a designated narrowing return leaf (per-leaf
+        emission — #983 review; replaces the whole-body wrap that broke TCO).
+
+        A no-op unless ``id(expr)`` was collected into ``_nat_return_leaf_ids``
+        for the function currently being compiled, so only the genuine
+        narrowing leaves pay the guard; a non-narrowing @Nat->@Nat recursive
+        tail leaf keeps its ``return_call`` untouched.
+        """
+        if id(expr) in self._nat_return_leaf_ids:
+            return self._emit_nat_bind_guard(instrs)
+        return instrs
+
+    def _collect_hetero_widen_arm_calls(self, body: ast.Expr) -> set[int]:
+        """The ``id()`` of every ``FnCall`` / ``ModuleCall`` that sits inside a
+        heterogeneous @Nat->@Int per-arm widen guard (#820, FIX-1) — collected
+        so ``CodeGenerator._compile_fn`` can subtract them from ``tail_sites``,
+        forcing those calls to lower to a plain ``call`` instead of
+        ``return_call``.
+
+        The per-arm widen guard (``_emit_int_widen_guard``) is appended AFTER the
+        arm body's WAT, so a ``return_call`` inside that arm would return before
+        the guard runs — the guard would be DEAD and a @Nat above i64.MAX would
+        silently reinterpret to a negative @Int (the same hazard the #983
+        narrowing-leaf collector defends against at the return position).  This
+        collector descends ``Block`` trailing exprs / ``IfExpr`` branches /
+        ``MatchExpr`` arms and, at each join for which
+        :py:meth:`_is_hetero_int_widen_join` holds — THE EXACT gate both emitters
+        use, so collection and emission stay in lockstep — collects EVERY call
+        under each arm that ``_result_is_nat`` marks (i.e. the arms that ARE
+        widen-guarded).  Over-collection is safe: subtraction only affects
+        ``tail_sites`` members, and any call inside a guarded arm must not be a
+        ``return_call`` (the guard is appended after the arm).  Non-@Nat arms are
+        recursed into, so a nested join is still covered.
+        """
+        ids: set[int] = set()
+        self._collect_hetero_widen_arm_calls_into(body, ids)
+        return ids
+
+    def _collect_hetero_widen_arm_calls_into(
+        self, expr: ast.Expr, ids: set[int],
+    ) -> None:
+        """Recursive worker for :py:meth:`_collect_hetero_widen_arm_calls`."""
+        if isinstance(expr, ast.Block):
+            self._collect_hetero_widen_arm_calls_into(expr.expr, ids)
+            return
+        if isinstance(expr, ast.IfExpr):
+            hetero = self._is_hetero_int_widen_join(expr)
+            branches = [expr.then_branch]
+            if expr.else_branch is not None:
+                branches.append(expr.else_branch)
+            for branch in branches:
+                if hetero and self._result_is_nat(branch):
+                    self._collect_all_call_ids(branch, ids)
+                else:
+                    self._collect_hetero_widen_arm_calls_into(branch, ids)
+            return
+        if isinstance(expr, ast.MatchExpr):
+            hetero = self._is_hetero_int_widen_join(expr)
+            for arm in expr.arms:
+                if hetero and self._result_is_nat(arm.body):
+                    self._collect_all_call_ids(arm.body, ids)
+                else:
+                    self._collect_hetero_widen_arm_calls_into(arm.body, ids)
+            return
+        # A leaf (or a non-tail-transparent construct): nothing to descend.
+
+    @staticmethod
+    def _collect_all_call_ids(expr: ast.Expr, ids: set[int]) -> None:
+        """Add ``id()`` of every ``FnCall`` / ``ModuleCall`` anywhere under
+        *expr* (a widen-guarded arm) — the whole arm body's WAT is wrapped, so
+        any call in it (not only its tail leaf) must not be a ``return_call``.
+        Generic dataclass-field walk (via :func:`walk_nodes`) so new AST call
+        shapes are covered structurally."""
+        from vera.obligations.cache import walk_nodes
+        for node in walk_nodes(expr):
+            if isinstance(node, (ast.FnCall, ast.ModuleCall)):
+                ids.add(id(node))
+
     def _has_underflow_leaf(self, value: ast.Expr) -> bool:
         """Codegen mirror of ``ContractVerifier._has_underflow_leaf`` (#552).
 
@@ -2061,6 +2364,43 @@ class OperatorsMixin:
         if name == "Int":
             return "Int"
         return None
+
+    def _target_codegen_type_full(self, expr: ast.Expr) -> object | None:
+        """The checker-recorded *target* type of *expr* (the ``expected`` it was
+        checked against), unwrapping any refinement to its base — the codegen
+        dual of ``ContractVerifier._target_type_of`` (#820).
+
+        Returns the raw ``Type`` so callers can inspect an ``AdtType``'s
+        ``type_args`` (a ``Tuple<Int, Int>`` component target, an ``Array<Int>``
+        element target).  ``None`` when the target-type table was not threaded
+        (an unverified ``transform -> compile``) or the span carries no target,
+        so those component sites stay E531-disclosed rather than falsely guarded.
+        """
+        table = self._expr_target_types
+        if table is None:
+            return None
+        key = ast.span_key(expr)
+        if key is None:
+            return None
+        ty = table.get(key)
+        if ty is None:
+            return None
+        return getattr(ty, "base", ty)
+
+    @staticmethod
+    def _adt_arg_is_int(target: object | None, index: int) -> bool:
+        """True iff *target* is an ``AdtType`` whose ``index``-th type argument
+        resolves (through a refinement) to ``@Int`` — used to decide the
+        @Nat -> @Int widening guard at a tuple component / array element from
+        the per-component *target* type recovered by ``_target_codegen_type_full``
+        (#820).  Deliberately narrow (concrete ``Int`` only): a generic ``T`` or
+        a ``@Nat`` slot is not ``Int`` and must not be guarded here."""
+        args = getattr(target, "type_args", None)
+        if not args or index >= len(args):
+            return False
+        arg = args[index]
+        base = getattr(arg, "base", arg)
+        return getattr(base, "name", None) == "Int"
 
     def _is_static_int_typed(self, expr: ast.Expr) -> bool:
         """Return True iff *expr* has static type @Int by AST shape alone.

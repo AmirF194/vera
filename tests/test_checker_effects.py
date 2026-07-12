@@ -129,6 +129,185 @@ private fn foo(@Unit -> @Int)
 }
 """)
 
+    def test_handled_body_state_slot_rejected(self) -> None:
+        """#973: reading handler state as a @T.n slot in the handled body is an
+        unresolved-slot error (E130).  State reaches the body only through the
+        typed get(())/put(...) operations; codegen and the verifier give the
+        body no state slot, so binding one in the checker desynced the front
+        end (previously check+verify passed, then compile crashed with E699).
+        The @Unit param means @Int.0 has no other binding to shadow the miss."""
+        errs = _check_err("""
+private fn foo(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[State<Int>](@Int = 0) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) } with @Int = @Int.0
+  } in {
+    @Int.0
+  }
+}
+""", "Cannot resolve @Int.0")
+        e130 = [e for e in errs if e.error_code == "E130"]
+        assert e130, f"Expected E130, got {[e.error_code for e in errs]}"
+        # The fix text must steer the user to the typed operation.
+        assert "get(())" in e130[0].fix, \
+            f"Expected a get(()) hint in the fix, got: {e130[0].fix!r}"
+
+    def test_hint_only_when_no_same_typed_binding(self) -> None:
+        """PR #975 panel: with a REAL same-typed binding in scope (the fn
+        param), an out-of-range index keeps the generic lower-index hint —
+        a get(()) hint would contradict the description's valid-indices
+        line, since `@Int.0` here is the param and resolves fine."""
+        errs = _check_err("""
+private fn foo(@Int -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[State<Int>](@Int = 0) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) } with @Int = @Int.0
+  } in {
+    @Int.5
+  }
+}
+""", "Cannot resolve @Int.5")
+        e130 = [e for e in errs if e.error_code == "E130"]
+        assert e130, f"Expected E130, got {[e.error_code for e in errs]}"
+        assert "get(())" not in e130[0].fix, \
+            f"param is in scope; expected the generic hint, got: {e130[0].fix!r}"
+        assert "lower index" in e130[0].fix
+
+    def test_hint_not_leaked_into_nested_clause(self) -> None:
+        """PR #975 panel: a nested handler's CLAUSES are checked while the
+        outer body's hint is live — it must be masked there.  The inner
+        Exn<String> clause has no Int binding, so without masking this
+        would wrongly claim `get(())` (which is the OUTER handler's op)."""
+        errs = _check_err("""
+effect Exn<E> {
+  op throw(E -> Never);
+}
+
+private fn foo(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[State<Int>](@Int = 0) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) } with @Int = @Int.0
+  } in {
+    handle[Exn<String>] {
+      throw(@String) -> { @Int.0 }
+    } in {
+      get(())
+    }
+  }
+}
+""", "Cannot resolve @Int.0")
+        e130 = [e for e in errs if e.error_code == "E130"]
+        assert e130, f"Expected E130, got {[e.error_code for e in errs]}"
+        assert "get(())" not in e130[0].fix, \
+            f"clause scope; expected the generic hint, got: {e130[0].fix!r}"
+
+    def test_hint_innermost_state_type_only(self) -> None:
+        """PR #975 review: under nested different-typed state handlers,
+        get(()) reaches the INNERMOST handler — an unresolved outer-typed
+        slot in the inner body must keep the generic hint, not claim that
+        get(()) returns the outer type."""
+        errs = _check_err("""
+private fn foo(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[State<Int>](@Int = 0) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) } with @Int = @Int.0
+  } in {
+    handle[State<Bool>](@Bool = true) {
+      get(@Unit) -> { resume(@Bool.0) },
+      put(@Bool) -> { resume(()) } with @Bool = @Bool.0
+    } in {
+      @Int.0
+    };
+    get(())
+  }
+}
+""", "Cannot resolve @Int.0")
+        e130 = [e for e in errs if e.error_code == "E130"]
+        assert e130, f"Expected E130, got {[e.error_code for e in errs]}"
+        assert "get(())" not in e130[0].fix, \
+            f"outer state type; expected the generic hint, got: {e130[0].fix!r}"
+
+    def test_nested_same_type_inner_body_gets_hint(self) -> None:
+        """Nested same-typed state handlers: an unresolved state-typed slot
+        in the INNER body still earns the get(()) hint (the stack top is
+        the innermost handler's type)."""
+        errs = _check_err("""
+private fn foo(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[State<Int>](@Int = 1) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) } with @Int = @Int.0
+  } in {
+    handle[State<Int>](@Int = 2) {
+      get(@Unit) -> { resume(@Int.0) },
+      put(@Int) -> { resume(()) } with @Int = @Int.0
+    } in {
+      @Int.0
+    }
+  }
+}
+""", "Cannot resolve @Int.0")
+        e130 = [e for e in errs if e.error_code == "E130"]
+        assert e130, f"Expected E130, got {[e.error_code for e in errs]}"
+        assert "get(())" in e130[0].fix, \
+            f"Expected the get(()) hint, got: {e130[0].fix!r}"
+
+    def test_hint_not_leaked_after_handler(self) -> None:
+        """PR #975 review: the hint stack pops when the handler's body check
+        completes — a LATER function's unresolved same-typed slot gets the
+        generic hint, never a stale get(()) suggestion."""
+        errs = _check_err("""
+private fn uses_state(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[State<Int>](@Int = 0) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) } with @Int = @Int.0
+  } in {
+    get(())
+  }
+}
+
+private fn plain(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  @Int.0
+}
+""", "Cannot resolve @Int.0")
+        e130 = [e for e in errs if e.error_code == "E130"]
+        assert e130, f"Expected E130, got {[e.error_code for e in errs]}"
+        assert "get(())" not in e130[0].fix, \
+            f"no enclosing handler; expected the generic hint, got: {e130[0].fix!r}"
+
+    def test_handler_clause_state_slot_still_ok(self) -> None:
+        """#973 guard: handler CLAUSE bodies keep their state slot — the fix
+        removes ONLY the handled body's binding, not the clause-scope one that
+        codegen, the captures walk, and Exn compilation all agree on.  Here
+        `resume(@Int.0)` and `with @Int = @Int.0` both read state as a slot
+        inside clauses, which must remain valid."""
+        _check_ok("""
+private fn foo(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[State<Int>](@Int = 0) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) } with @Int = @Int.0
+  } in {
+    put(get(()) + 1);
+    get(())
+  }
+}
+""")
+
     def test_with_clause_type_mismatch(self) -> None:
         """Handler with-clause value must match state type (E335)."""
         errs = _check_err("""

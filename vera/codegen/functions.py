@@ -6,12 +6,17 @@ parameter allocation, body translation, and function assembly.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, cast
+
 from vera import ast
 from vera.skip import AdtEqNotDerivableError, CodegenInvariantError, CodegenSkip
 from vera.codegen.tail_position import compute_tail_call_sites
 from vera.monomorphize import mangle_type_name
 from vera.wasm import WasmContext, WasmSlotEnv
 from vera.wasm.helpers import _is_host_handle_type, gc_shadow_push
+
+if TYPE_CHECKING:
+    from vera.types import SpanTypeTable
 
 
 class FunctionCompilationMixin:
@@ -104,12 +109,55 @@ class FunctionCompilationMixin:
     def _compile_fn(
         self, decl: ast.FnDecl, *, export: bool = True,
         module_renames: dict[str, str] | None = None,
+        imported: bool = False,
+        module_tables: (
+            tuple[SpanTypeTable | None, SpanTypeTable | None] | None
+        ) = None,
     ) -> str | None:
         """Compile a single function to WAT.
 
         Returns the WAT function string, or None if not compilable
         (with a warning diagnostic).
+
+        *imported* is True when *decl* is an imported module body compiled into
+        this flat WASM module (Pass 2.5 / 2.6).  The checker's resolved- /
+        target-type side-tables are keyed by span alone (``(line, col, end_line,
+        end_col)`` — no file identity), so the MAIN-file tables
+        (``self._expr_semantic_types`` / ``self._expr_target_types``) must NOT be
+        consulted for an imported body: an imported expression whose span
+        coincides with a main-file entry would pick up the WRONG type and, at a
+        tuple/array widen site, emit a SPURIOUS @Nat -> @Int guard that traps a
+        legal @Nat (confirmed cross-module collision, #986 review).
+
+        *module_tables* (#987) is the imported module's OWN
+        ``(expr_semantic_types, expr_target_types)`` pair, keyed by that module's
+        node spans — so looking *decl*'s spans up in it is correct, not a
+        cross-file collision.  When supplied (the normal path from Pass 2.5 / 2.6
+        via ``CheckArtifacts.module_artifacts``), the imported body gets the same
+        per-component target-type recovery a same-file body does, so its
+        array-element / tuple-construction @Nat -> @Int widening guard fires
+        through the import door.  When absent (a caller that threaded no module
+        artifacts), we fall back to suppression (both tables ``None``) — the
+        pre-#987 behaviour: those component sites stay unguarded, never
+        false-guarded.  Fn-type-based recovery (closure formal / return types) is
+        NOT span-keyed and is unaffected either way.
         """
+        # #987: an imported body's span-keyed tables are ITS module's own (or
+        # None when none were threaded) — never the main-file tables, whose
+        # colliding span would mis-key an imported operand.  Bound here so the
+        # two ``ctx.set_expr_*`` calls below stay readable.  Cast to the
+        # ``object``-valued shape the ``WasmContext`` setters expect: a ``Type``
+        # dict is not a ``dict[..., object]`` under mypy's dict invariance, but
+        # the values genuinely are ``Type`` instances (which ARE objects), so
+        # the widening is sound.
+        imported_semantic = cast(
+            "dict[tuple[int, int, int, int], object] | None",
+            module_tables[0] if module_tables is not None else None,
+        )
+        imported_target = cast(
+            "dict[tuple[int, int, int, int], object] | None",
+            module_tables[1] if module_tables is not None else None,
+        )
         # #851 — diagnostics emitted while compiling a prelude-injected
         # function (or a mono clone of one — the mangler's `base$Types`
         # names strip back to a prelude base) must resolve their spans
@@ -222,7 +270,19 @@ class FunctionCompilationMixin:
         )
         # #798: resolved-type side-table for the integer-overflow guard's
         # Int/Nat operand classifier (kept in lockstep with the verifier).
-        ctx.set_expr_semantic_types(self._expr_semantic_types)
+        # #987: for an imported body this is ITS module's table (correct spans)
+        # or None — never the main-file table, whose colliding span would
+        # mis-classify an imported operand (see the *imported* note above).
+        ctx.set_expr_semantic_types(
+            imported_semantic if imported else self._expr_semantic_types)
+        # #820: target-type side-table for the @Nat -> @Int widening guard's
+        # per-component target-type recovery (tuple component / array element
+        # / heterogeneous if-arm), the codegen dual of ``_target_type_of``.
+        # #987: an imported body uses its own module's table (so its widen guard
+        # fires through the import door) or None; the main-file table would
+        # false-guard a colliding span.
+        ctx.set_expr_target_types(
+            imported_target if imported else self._expr_target_types)
         # #747: per-parameter concrete-@Nat flags for the call-site
         # runtime narrowing guard.
         ctx.set_fn_nat_params(self._fn_nat_params)
@@ -386,8 +446,44 @@ class FunctionCompilationMixin:
         # for the analyzer rules and ``_translate_call`` in
         # ``vera/wasm/calls.py`` for the emit site.
         tail_sites = compute_tail_call_sites(decl)
+
+        # #758/#983 — per-narrowing-leaf @Int->@Nat return guard.  Collect the
+        # tail-position return leaves that narrow into a bare @Nat return so
+        # each is guarded inline at emission (mirroring the verifier 7d leaf
+        # descent), instead of wrapping the WHOLE body — which reverted EVERY
+        # `return_call` and broke TCO for a non-narrowing @Nat->@Nat recursive
+        # tail call (`drain`, which stack-exhausted at depth).  Alias-aware
+        # (`type Count = Nat`) via `_resolve_base_type_name` and refined-excluded
+        # (`{ @Nat | P }` / an alias to one stays on the 7b refinement-boundary
+        # path) via `_refinement_guard_parts`, exactly as the whole-body
+        # narrow-return gate below.  A narrowing leaf that is itself a tail call
+        # (an @Int-returning call) is removed from `tail_sites` so it lowers to
+        # a plain `call` — the appended guard runs AFTER it, which `return_call`
+        # would skip.
+        nat_leaf_ids: set[int] = set()
+        if (decl.body is not None
+                and ctx._resolve_base_type_name(
+                    self._type_expr_to_slot_name(decl.return_type) or "")
+                == "Nat"
+                and self._refinement_guard_parts(decl.return_type) is None):
+            nat_leaf_ids = ctx._collect_narrowing_return_leaves(decl.body)
+        ctx._nat_return_leaf_ids = nat_leaf_ids
+
+        # #820 FIX-1 — a @Nat arm of a heterogeneous @Int-join if/match is
+        # widen-guarded PER-ARM (`_emit_int_widen_guard`, appended AFTER the arm
+        # body).  A call inside such an arm that lowered to `return_call` would
+        # return before the appended guard runs, leaving it DEAD (a @Nat above
+        # i64.MAX silently reinterprets to a negative @Int) — the widen sibling
+        # of the #983 narrowing-leaf hazard.  Subtract those call ids from
+        # `tail_sites` so they lower to a plain `call` the guard can follow.  The
+        # collector uses the SAME `_is_hetero_int_widen_join` gate as the emitters,
+        # so a call is only stripped if its arm is actually guarded.
+        hetero_widen_ids: set[int] = set()
+        if decl.body is not None:
+            hetero_widen_ids = ctx._collect_hetero_widen_arm_calls(decl.body)
+
         ctx.set_tail_call_context(
-            tail_sites,
+            tail_sites - nat_leaf_ids - hetero_widen_ids,
             self_ret_wt=ret_wt if ret_wt != "unsupported" else None,
         )
 
@@ -604,12 +700,35 @@ class FunctionCompilationMixin:
         # so trap rather than silently return it — the runtime backstop for the
         # verifier's nat_to_int_coerce obligation (7c).  @Int is i64, so this
         # runs before (and is unaffected by) the i32 coercion below.
+        # Alias-aware (`type MyInt = Int`) via `_resolve_base_type_name` so an
+        # alias-typed @Int return is guarded too — matching the verifier's 7c
+        # gate (`_is_int_type` over the *resolved* return type), whereas the raw
+        # `_type_expr_to_slot_name` returns the opaque alias name and missed it
+        # (#983 review, the widen sibling of the alias-blind narrow gate).  A
+        # refinement over @Int stays here (the verifier's 7c fires on refined
+        # @Int too: the `<= i64.MAX` bound is not subsumed by the predicate).
         widen_guarded = (
-            self._type_expr_to_slot_name(decl.return_type) == "Int"
+            ctx._resolve_base_type_name(
+                self._type_expr_to_slot_name(decl.return_type) or "") == "Int"
             and ctx._result_is_nat(decl.body)
         )
         if widen_guarded:
             body_instrs = ctx._emit_int_widen_guard(body_instrs)
+
+        # #758/#983: an @Int body narrowing into a @Nat return can be negative
+        # (`to_nat(0 - 5)` = -5), so trap rather than store a negative in the
+        # @Nat slot — the runtime backstop for the verifier's return nat_bind
+        # obligation (7d), the dual of the #813 widen guard above.  This is
+        # emitted PER NARROWING LEAF during body translation (via the
+        # `_nat_return_leaf_ids` set threaded above), NOT as a whole-body wrap:
+        # the whole-body wrap appended the guard after the entire body and so
+        # reverted EVERY `return_call`, losing TCO for a non-narrowing
+        # @Nat->@Nat recursive tail call (`drain`) that then stack-exhausted at
+        # depth (#983 regression).  Guarding only the genuine narrowing leaves
+        # inline leaves the recursive tail call's `return_call` structurally
+        # intact — nothing is appended after the body — so, unlike the widen
+        # guard, this no longer forces a revert below.  The alias-aware +
+        # refinement-excluded gate lives where `nat_leaf_ids` is computed.
 
         # Coerce body result if return type is i32 but body produces i64
         # (e.g. IntLit in a Byte-returning function)
@@ -809,11 +928,17 @@ class FunctionCompilationMixin:
 
         if post_instrs or widen_guarded:
             # Postcondition checks must run; return_call would skip them.  The
-            # #813 @Nat->@Int return widen guard (above) is the same case: it is
-            # appended *after* the trailing tail call, so a `return_call` would
-            # return before the guard runs, silently leaking a reinterpreted
-            # negative @Int (e.g. `fn f(@Nat -> @Int) { make_nat(@Nat.0) }`).
-            # Revert every return_call to plain call so the guard is reached.
+            # #813 @Nat->@Int return widen guard is the same case: it is appended
+            # *after* the trailing tail call (whole-body wrap), so a
+            # `return_call` would return before the guard runs, silently leaking
+            # a reinterpreted negative @Int (e.g. `fn f(@Nat -> @Int) {
+            # make_nat(@Nat.0) }`).  Revert every return_call to plain call so
+            # the guard is reached.  The #758 @Int->@Nat narrow guard is NOT
+            # here: it is emitted per narrowing LEAF during body translation, so
+            # a non-narrowing @Nat->@Nat recursive tail call keeps its
+            # `return_call` (a narrowing-leaf call was already excluded from
+            # `tail_sites` above, so it lowers to a plain `call` reached by its
+            # own inline guard) — this is what restores TCO for `drain` (#983).
             body_instrs = [
                 instr.replace("return_call ", "call ", 1)
                 if instr.lstrip().startswith("return_call ")

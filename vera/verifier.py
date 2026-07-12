@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import z3
 
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from dataclasses import fields as ast_fields
 from typing import TYPE_CHECKING
@@ -23,6 +24,7 @@ from vera.environment import ConstructorInfo, FunctionInfo, TypeEnv
 from vera.monomorphize import (
     MonoContext,
     Monomorphizer,
+    collect_nested_generic_decls,
     declared_return_clone_key,
 )
 
@@ -72,12 +74,44 @@ _U64_MAX = 2**64 - 1
 
 @dataclass
 class VerifySummary:
-    """Counts of contracts by verification outcome."""
+    """Counts of contracts by verification outcome.
+
+    Derived from the reified obligation stream (see :func:`summarize`) rather
+    than accumulated by hand, so the fields cannot drift out of step with the
+    obligations a consumer reads (#967).  ``assumptions`` is retained for
+    backward shape compatibility and is always ``0`` — no obligation kind maps
+    to it (it was never incremented on the historical hand-counted path).
+    """
 
     tier1_verified: int = 0
     tier3_runtime: int = 0
     assumptions: int = 0
     total: int = 0
+
+
+def summarize(obligations: list[ProofObligation]) -> VerifySummary:
+    """Derive a :class:`VerifySummary` from the reified obligation stream.
+
+    The single source of truth for the tier counts, replacing ~50 hand-written
+    counter increments once scattered through :class:`ContractVerifier` (#967).
+    The status → counter mapping mirrors :mod:`vera.obligations.core`:
+
+    - ``verified`` → ``tier1_verified`` (discharged statically at Tier 1);
+    - ``tier3`` / ``timeout`` → ``tier3_runtime`` (falls to a runtime check);
+    - ``violated`` / ``tier3_unguarded`` → excluded from every count (surfaced
+      as an error / warning diagnostic instead).
+
+    ``total`` is exactly ``tier1_verified + tier3_runtime`` — the count of
+    obligations that discharged to *some* tier — so the summary is internally
+    arithmetic-consistent by construction.
+    """
+    tier1 = sum(1 for o in obligations if o.status == "verified")
+    tier3 = sum(1 for o in obligations if o.status in ("tier3", "timeout"))
+    return VerifySummary(
+        tier1_verified=tier1,
+        tier3_runtime=tier3,
+        total=tier1 + tier3,
+    )
 
 
 @dataclass
@@ -160,7 +194,6 @@ class ContractVerifier:
     ) -> None:
         self.env = TypeEnv()
         self.errors: list[Diagnostic] = []
-        self.summary = VerifySummary()
         # #222 Phase A: reified obligations in discharge order.
         self.obligations: list[ProofObligation] = []
         # #680 review: fresh consts pushed to shadow a stale outer slot when an
@@ -213,7 +246,27 @@ class ContractVerifier:
         # function name to the set of concrete type-name tuples it is
         # instantiated at; empty when the program has no generics.
         self._instances: dict[str, set[tuple[str, ...]]] = {}
+        # #991: lexically-scoped where-helper resolution.  ``env.functions`` is
+        # flat and last-wins, so a bare call to a same-named helper in a
+        # different parent tree (the diamond shape) resolved to the WRONG
+        # helper's contract — a false E500.  `_top_level_fn_infos` pins each
+        # top-level function's own info (a nested helper of the same name would
+        # otherwise clobber it in the flat registry, since helpers register
+        # last), and `_scoped_fn_info_cache` memoizes per-helper infos built on
+        # demand for the scoped lookup (`_scoped_fn_lookup`), keyed
+        # (id, visibility) so a hit never returns another visibility's info.
+        self._top_level_fn_infos: dict[str, FunctionInfo] = {}
+        self._scoped_fn_info_cache: dict[
+            tuple[int, str | None], FunctionInfo
+        ] = {}
         self._mono: Monomorphizer | None = None
+        # #820: raw type-alias TypeExprs (populated in `_build_mono_context`),
+        # so the @Nat -> @Int closure-argument widening obligation can recover a
+        # `SlotRef` closure's formal types via `resolve_fn_type_alias` — the
+        # same terminal-FnType resolution codegen's `_closure_arg_param_types`
+        # uses, keeping the two sides in lockstep at the closure boundary.
+        self._closure_type_aliases: dict[str, ast.TypeExpr] = {}
+        self._closure_type_alias_params: dict[str, tuple[str, ...]] = {}
         # #774 (PR #888 review, CR 3519156263): a LOCAL generic that shadows an
         # IMPORTED generic must NOT absorb the imported generic's `m::gen(...)`
         # instantiations into the local's bare `_instances` key — that would
@@ -436,11 +489,13 @@ class ContractVerifier:
     ) -> None:
         """Reify one obligation at its discharge site.
 
-        Purely observational: called at the moment an obligation's
-        outcome is known, never altering discharge order or solver
-        state.  The summary counters and diagnostics remain the source
-        of truth for behaviour; obligations mirror them one-to-one
-        (asserted by the differential tests in test_obligations.py).
+        Called at the moment an obligation's outcome is known, never
+        altering discharge order or solver state.  The reified obligation
+        stream is the source of truth for the tier counts: the
+        :class:`VerifySummary` is *derived* from it by :func:`summarize`
+        (#967), so recording an obligation here is what moves the counters
+        — there are no separate counter increments to keep in step.  The
+        differential tests in test_obligations.py pin the mapping.
 
         *span_node* overrides where the obligation is located when that
         differs from where its expression text comes from — call-site
@@ -506,6 +561,61 @@ class ContractVerifier:
             self._resolve_type, self._resolve_effect_row,
             visibility=visibility,
         )
+
+    def _fn_info_for_decl(
+        self, decl: ast.FnDecl, visibility: str | None = None,
+    ) -> FunctionInfo:
+        """Build (memoized) the :class:`FunctionInfo` for a specific FnDecl,
+        bypassing the flat, last-wins ``env.functions`` registry (#991).
+
+        Used by the scoped lookup so a same-named ``where``-helper resolves to
+        the exact decl in scope, not whichever one registered last.  Reuses the
+        shared ``build_fn_info`` so a helper's resolved signature is byte-for-byte
+        what ``register_fn`` would have stored.  Keyed on ``(id, visibility)``
+        so a cache hit can never return an info built for another visibility
+        (Greptile PR #1013 review — latent today, since each decl object is
+        looked up under one visibility, but cheap to make impossible).
+        """
+        key = (id(decl), visibility)
+        info = self._scoped_fn_info_cache.get(key)
+        if info is None:
+            from vera.registration import build_fn_info
+            info = build_fn_info(
+                self.env, decl,
+                self._resolve_type, self._resolve_effect_row,
+                visibility=visibility,
+            )
+            self._scoped_fn_info_cache[key] = info
+        return info
+
+    def _scoped_fn_lookup(
+        self, decl: ast.FnDecl, enclosing: tuple[ast.FnDecl, ...],
+    ) -> Callable[[str], FunctionInfo | None]:
+        """A lexically-scoped ``fn_lookup`` for the SMT translator (#991).
+
+        Resolves a bare call name to the nearest same-named ``where``-helper
+        visible from ``decl``'s body: ``decl``'s own helpers first, then each
+        enclosing parent's helpers (innermost first), then the top-level
+        function of that name, and finally the flat registry (built-ins /
+        imports).  This makes the verifier resolve helper calls the same way
+        codegen does after parent-qualified mangling — so a diamond of
+        same-named helpers proves each parent against its OWN helper's contract.
+        """
+        # Nearest scope first: decl's own where_fns, then each ancestor's,
+        # innermost (direct parent) before outermost.
+        visible_groups = (decl, *reversed(enclosing))
+
+        def _lookup(name: str) -> FunctionInfo | None:
+            for group in visible_groups:
+                for wfn in group.where_fns or ():
+                    if wfn.name == name:
+                        return self._fn_info_for_decl(wfn)
+            top = self._top_level_fn_infos.get(name)
+            if top is not None:
+                return top
+            return self.env.lookup_function(name)
+
+        return _lookup
 
     def _register_data(self, decl: ast.DataDecl) -> None:
         """Register an ADT with constructor info for SMT translation."""
@@ -769,6 +879,17 @@ class ContractVerifier:
         """
         self._register_modules(program)  # C7d: cross-module imports
         self._register_all(program)      # local declarations shadow imports
+        # #991: pin each LOCAL top-level function's own info so the scoped
+        # helper lookup can prefer it over a nested helper of the same name that
+        # clobbered the flat registry (nested helpers register last).  This
+        # mirrors codegen, which keeps top-level names bare and mangles nested
+        # helpers — so a call that escapes every enclosing where-scope resolves
+        # to the top-level function on both sides.
+        for tld in program.declarations:
+            if isinstance(tld.decl, ast.FnDecl):
+                self._top_level_fn_infos[tld.decl.name] = self._fn_info_for_decl(
+                    tld.decl, visibility=tld.visibility,
+                )
         # #732: discover every concrete instantiation of each generic NOW, off
         # the registered env, so both verify_program (cold) and the warm
         # incremental session — which both go through register_program — verify
@@ -973,6 +1094,14 @@ class ContractVerifier:
                         fn_ret_type_exprs.setdefault(
                             idecl.name, idecl.return_type)
 
+        # #820: retain the raw alias TypeExprs so the closure-argument widening
+        # obligation resolves a `SlotRef` closure's formal types the same way
+        # codegen does (`resolve_fn_type_alias`).  First non-empty build wins —
+        # per-monomorphization rebuilds carry the same program-global aliases.
+        if type_aliases and not self._closure_type_aliases:
+            self._closure_type_aliases = type_aliases
+            self._closure_type_alias_params = type_alias_params
+
         return MonoContext(
             generic_decls=generic_decls,
             ctor_to_adt=ctor_to_adt,
@@ -1066,12 +1195,21 @@ class ContractVerifier:
         inject_prelude(disc)
 
         generic_decls: dict[str, ast.FnDecl] = {}
-        local_generic_names: set[str] = set()
         for tld in disc.declarations:
             decl = tld.decl
-            if isinstance(decl, ast.FnDecl) and decl.forall_vars:
-                generic_decls[decl.name] = decl
-                local_generic_names.add(decl.name)
+            if isinstance(decl, ast.FnDecl):
+                if decl.forall_vars:
+                    generic_decls[decl.name] = decl
+                else:
+                    # #990: nested generic where-helpers are mono bases too —
+                    # the SHARED collector keeps this build in lockstep with
+                    # codegen Pass 1.5 (identical set by construction).  Their
+                    # instances then flow through the same `_verify_fn`
+                    # per-instantiation dispatch when the parent's where-tree
+                    # is verified.
+                    collect_nested_generic_decls(decl, generic_decls)
+        # Everything collected so far — top-level AND nested — is local.
+        local_generic_names: set[str] = set(generic_decls)
         # #774: merge imported (unshadowed) generics so the verifier discovers
         # the cross-module instantiations codegen emits, in lockstep.  A LOCAL
         # generic of the same name wins (inserted above); `setdefault` keeps it.
@@ -1321,6 +1459,19 @@ class ContractVerifier:
                     result.setdefault(t_name, set()).add(t_ct)
                     stack.append(mono.monomorphize_fn(generic_decls[t_name], t_ct))
 
+    @property
+    def summary(self) -> VerifySummary:
+        """Derived on read from the reified obligation stream (#967).
+
+        A computed property, not a stored field, so a caller that drives
+        verification piecemeal (``register_program`` + ``_verify_fn``, the
+        :class:`~vera.obligations.session.VerificationSession` pattern) can
+        never observe a stale value — the tier counts always reflect exactly
+        the obligations recorded so far.  The warm session derives its own
+        summaries the same way, per function slice.
+        """
+        return summarize(self.obligations)
+
     def verify_program(self, program: ast.Program) -> None:
         """Entry point: register modules, then local declarations, then verify."""
         self.register_program(program)
@@ -1363,7 +1514,10 @@ class ContractVerifier:
     # -- #732: per-monomorphization verification + aggregation -------------
 
     def _verify_generic_instances(
-        self, decl: ast.FnDecl, instances: tuple[tuple[str, ...], ...],
+        self,
+        decl: ast.FnDecl,
+        instances: tuple[tuple[str, ...], ...],
+        enclosing: tuple[ast.FnDecl, ...] = (),
     ) -> None:
         """Verify each concrete instantiation of a generic, then aggregate.
 
@@ -1374,6 +1528,13 @@ class ContractVerifier:
         are then aggregated one-per-source-site with meet semantics, so a
         generic-body bug surfaces once (naming the failing instantiation)
         rather than once per instantiation.
+
+        *enclosing* is the generic's ancestor chain (non-empty exactly when it
+        is a nested where-helper), threaded into each clone's ``_verify_fn`` so
+        the clone's scoped helper lookup sees the ancestors' helpers (#991 /
+        PR #1013 review).  The top-level call sites (shadowed / imported
+        generic verification) pass nothing — those generics are genuinely
+        top-level and an empty chain is correct there.
         """
         assert self._mono is not None  # set by register_program  # noqa: S101
         per_instance: list[
@@ -1383,10 +1544,13 @@ class ContractVerifier:
         for concrete in instances:
             clone = self._mono.monomorphize_fn(decl, concrete)
             clone = replace(clone, name=decl.name)  # keep the source name
-            saved = (self.summary, self.errors, self.obligations)
-            self.summary, self.errors, self.obligations = (
-                VerifySummary(), [], [],
-            )
+            # Verify each instance into scratch error/obligation buffers so its
+            # per-instance obligations don't pollute the aggregate stream; the
+            # meet-collapsed obligations are re-appended below.  The summary is
+            # derived from the final obligation stream (#967), so it needs no
+            # save/restore here.
+            saved = (self.errors, self.obligations)
+            self.errors, self.obligations = [], []
             # PR #972 review (pre-existing): the #747 side-tables are span-keyed
             # and the clone keeps its source spans, so lookups inside the clone
             # answer the GENERIC types.  Publish this instance's TypeVar →
@@ -1400,11 +1564,14 @@ class ContractVerifier:
                 for tv, cn in zip(decl.forall_vars, concrete)
             }
             try:
-                self._verify_fn(clone)  # forall_vars=None → normal path
+                # forall_vars=None → normal path; the ancestor chain rides
+                # along so a nested generic's clone resolves helper calls
+                # lexically (PR #1013 review).
+                self._verify_fn(clone, enclosing=enclosing)
             finally:
                 self._instance_subst = saved_subst
                 inst_obl, inst_err = self.obligations, self.errors
-                self.summary, self.errors, self.obligations = saved
+                self.errors, self.obligations = saved
             per_instance.append((concrete, inst_obl, inst_err))
         self._aggregate_generic_instances(decl, per_instance)
 
@@ -1419,9 +1586,12 @@ class ContractVerifier:
 
         Each source obligation recurs once per instantiation at the same span.
         Group by content key, take the worst status across instantiations (so
-        any reachable counterexample dominates — never a false Tier-1), and
-        re-derive the summary counters + diagnostics from the met set so the
-        obligations<->summary<->diagnostics mirror (test_obligations.py) holds.
+        any reachable counterexample dominates — never a false Tier-1), append
+        one met-status obligation per source site, and re-emit the
+        representative diagnostic.  The summary is derived from the resulting
+        obligation stream (#967, :func:`summarize`), so the appended obligation
+        is the whole count — obligations<->summary<->diagnostics stay in the
+        mirror the test_obligations.py differential pins.
         """
         source_statuses: dict[str, tuple[str, ...]] = {
             "verified": ("verified",),
@@ -1471,20 +1641,15 @@ class ContractVerifier:
                 members[0],
             )
             self.obligations.append(replace(rep_ob, status=met))
-            if met == "verified":
-                self.summary.tier1_verified += 1
-                self.summary.total += 1
-            elif met == "tier3":
-                self.summary.tier3_runtime += 1
-                self.summary.total += 1
-                # Re-emit the representative Tier-3 warning (E506 etc.) so an
-                # instantiated generic surfaces it like the non-generic path,
-                # not only bumping the counter (PR #767 review).  Informational, so no
-                # diagnostic is synthesized if the instance emitted none.
-                self._emit_aggregated_diagnostic(
-                    decl, members, rep_concrete, rep_ob, errs_by_instance,
-                )
-            else:  # "violated" | "tier3_unguarded" — diagnostic, no count
+            # The summary is derived from the obligation stream (#967), so the
+            # append above is the whole count.  A non-`verified` met status
+            # still re-surfaces its representative diagnostic: `tier3` re-emits
+            # the Tier-3 warning (E506 etc.) so an instantiated generic warns
+            # like the non-generic path, and `violated` / `tier3_unguarded`
+            # re-emit their error / warning (PR #767 review).  `verified` is
+            # silent.  Informational tier3 diagnostics are not synthesized if
+            # the instance emitted none.
+            if met != "verified":
                 self._emit_aggregated_diagnostic(
                     decl, members, rep_concrete, rep_ob, errs_by_instance,
                 )
@@ -1597,8 +1762,15 @@ class ContractVerifier:
         self,
         decl: ast.FnDecl,
         parent_where_group: ast.FnDecl | None = None,
+        enclosing: tuple[ast.FnDecl, ...] = (),
     ) -> None:
-        """Verify all contracts on a single function."""
+        """Verify all contracts on a single function.
+
+        *enclosing* is the chain of ancestor functions whose ``where`` blocks
+        are lexically in scope for *decl*'s body, outermost first — threaded so a
+        bare helper call resolves to the nearest same-named helper (#991) rather
+        than through the flat, last-wins registry.
+        """
         if decl.forall_vars:
             instances = tuple(sorted(self._instances.get(decl.name, set())))
             if instances:
@@ -1607,7 +1779,12 @@ class ContractVerifier:
                 # obligation (meet across instantiations).  Strictly stronger
                 # than the Tier-3 fallback below, and it subsumes the #746
                 # concrete-refined-return fast path for instantiated generics.
-                self._verify_generic_instances(decl, instances)
+                # The `enclosing` chain rides along (PR #1013 review): a
+                # generic where-helper's clone must resolve a bare call to an
+                # ancestor's helper lexically, not through the flat last-wins
+                # registry (where a same-named decoy helper under any other
+                # function could capture it — a wrong-body verification).
+                self._verify_generic_instances(decl, instances, enclosing)
                 return
             # Never instantiated in this program: the body's type variables
             # can't be represented in Z3, so non-trivial contracts fall to
@@ -1615,8 +1792,6 @@ class ContractVerifier:
             # statically (#746).
             for contract in decl.contracts:
                 if not self._is_trivial(contract):
-                    self.summary.tier3_runtime += 1
-                    self.summary.total += 1
                     self._record_obligation(
                         decl.name, self._contract_kind(contract),
                         contract, "tier3", error_code="E520",
@@ -1639,8 +1814,6 @@ class ContractVerifier:
                         tier=3,
                     )
                 else:
-                    self.summary.tier1_verified += 1
-                    self.summary.total += 1
                     self._record_obligation(
                         decl.name, self._contract_kind(contract),
                         contract, "verified",
@@ -1657,6 +1830,10 @@ class ContractVerifier:
                 self._check_generic_refined_return(decl, generic_ret)
             return
 
+        # #991: resolve bare calls in this body through the lexically-scoped
+        # where-helper lookup, so a same-named helper in a sibling subtree can't
+        # be assumed at this call site (the diamond false-E500).
+        fn_lookup = self._scoped_fn_lookup(decl, enclosing)
         if self._shared_smt is not None:
             # Warm session (#222 Phase A): reuse one z3.Solver across
             # functions.  reset() clears all per-function state (vars,
@@ -1665,12 +1842,12 @@ class ContractVerifier:
             # rebound because they close over this verifier's env.
             smt = self._shared_smt
             smt.reset()
-            smt._fn_lookup = self.env.lookup_function
+            smt._fn_lookup = fn_lookup
             smt._module_fn_lookup = self._lookup_module_function
         else:
             smt = SmtContext(
                 timeout_ms=self.timeout_ms,
-                fn_lookup=self.env.lookup_function,
+                fn_lookup=fn_lookup,
                 module_fn_lookup=self._lookup_module_function,
             )
         # CR PR-review: let the SMT match translation assume a constructor
@@ -1678,6 +1855,12 @@ class ContractVerifier:
         # arm body's call PRECONDITIONS — the E501 path the narrowing-walk fact
         # carry never reaches.  Stateless, so safe on the warm (shared) smt too.
         smt._subpattern_fact_hook = self._subpattern_source_facts
+        # #994 F1: let the SMT nullary-ctor translation resolve a bare tag's
+        # exact instantiation from the checker's recorded (instance-substituted)
+        # semantic type, instead of the ambiguous base-name scan that crashed Z3
+        # on `Some(None) == None` / `!= None`.  Stateless (reads the live
+        # `_instance_subst` per clone), so safe on the warm (shared) smt too.
+        smt._recorded_type_hook = self._resolved_type_of
         # Register all known ADTs with the SMT context.  Idempotent on
         # the warm path (same AdtInfo re-registered into the persistent
         # registry); kept per-function so cold and warm stay identical.
@@ -1765,9 +1948,7 @@ class ContractVerifier:
         self._opaque_shadows = []
         for contract in decl.contracts:
             if isinstance(contract, ast.Requires):
-                self.summary.total += 1
                 if self._is_trivial(contract):
-                    self.summary.tier1_verified += 1
                     self._record_obligation(
                         decl.name, "requires", contract, "verified",
                     )
@@ -1789,7 +1970,6 @@ class ContractVerifier:
                 )
                 z3_pre = smt.translate_expr(contract.expr, slot_env)
                 if z3_pre is None:
-                    self.summary.tier3_runtime += 1
                     self._record_obligation(
                         decl.name, "requires", contract, "tier3",
                         error_code="E521",
@@ -1809,7 +1989,6 @@ class ContractVerifier:
                     )
                     continue
                 assumptions.append(z3_pre)
-                self.summary.tier1_verified += 1
                 self._record_obligation(
                     decl.name, "requires", contract, "verified",
                 )
@@ -1905,8 +2084,9 @@ class ContractVerifier:
             # successful call-pre checks discharge silently inside the
             # SMT layer's _translate_call and are not yet enumerated
             # (Phase B extends the SMT layer to record successes for
-            # the discharge cache).  Summary counters are untouched
-            # here, mirroring the existing bookkeeping.  The span comes
+            # the discharge cache).  The summary needs no handling
+            # here: it is derived from the obligation stream, and a
+            # violated obligation is excluded by summarize().  The span comes
             # from the CALL SITE (not the callee's contract node) so
             # two calls violating the same precondition remain distinct
             # obligations; E501 matches _report_call_violation.
@@ -1933,16 +2113,13 @@ class ContractVerifier:
         # 7. Verify ensures clauses
         for contract in decl.contracts:
             if isinstance(contract, ast.Ensures):
-                self.summary.total += 1
                 if self._is_trivial(contract):
-                    self.summary.tier1_verified += 1
                     self._record_obligation(
                         decl.name, "ensures", contract, "verified",
                     )
                     continue
 
                 if body_expr is None:
-                    self.summary.tier3_runtime += 1
                     self._record_obligation(
                         decl.name, "ensures", contract, "tier3",
                         error_code="E522",
@@ -1968,7 +2145,6 @@ class ContractVerifier:
                 z3_post = smt.translate_expr(contract.expr, slot_env)
 
                 if z3_post is None:
-                    self.summary.tier3_runtime += 1
                     self._record_obligation(
                         decl.name, "ensures", contract, "tier3",
                         error_code="E523",
@@ -1990,12 +2166,10 @@ class ContractVerifier:
                 smt_result = smt.check_valid(z3_post, assumptions)
 
                 if smt_result.status == "verified":
-                    self.summary.tier1_verified += 1
                     self._record_obligation(
                         decl.name, "ensures", contract, "verified",
                     )
                 elif smt_result.status == "violated":
-                    self.summary.total -= 1  # don't count — it's an error
                     self._record_obligation(
                         decl.name, "ensures", contract, "violated",
                         counterexample=smt_result.counterexample,
@@ -2005,7 +2179,6 @@ class ContractVerifier:
                     )
                 else:  # pragma: no cover
                     # unknown / timeout
-                    self.summary.tier3_runtime += 1
                     self._record_obligation(
                         decl.name, "ensures", contract, "timeout",
                         error_code="E524",
@@ -2035,7 +2208,6 @@ class ContractVerifier:
         #     @Nat is a RefinedType and IS checked (`>= 0 && P`).
         if decl.body is not None and self._is_refined_type(ret_type):
             ret_node: ast.Expr = decl.body
-            self.summary.total += 1
             goal = (
                 self._translate_refined_predicate(smt, ret_type, body_expr)
                 if body_expr is not None else None
@@ -2050,11 +2222,9 @@ class ContractVerifier:
             else:
                 ret_result = smt.check_valid(goal, list(assumptions))
                 if ret_result.status == "verified":
-                    self.summary.tier1_verified += 1
                     self._record_obligation(
                         decl.name, "refine_bind", ret_node, "verified")
                 elif ret_result.status == "violated":
-                    self.summary.total -= 1  # don't count — it's an error
                     self._record_obligation(
                         decl.name, "refine_bind", ret_node, "violated",
                         error_code="E505",
@@ -2084,6 +2254,29 @@ class ContractVerifier:
                 site="return type",
             )
 
+        # 7d. #758: a bare @Int body narrowing into a @Nat return can be
+        #     negative — `to_nat(@Int -> @Nat) { @Int.0 }` verified clean yet
+        #     `to_nat(0 - 5)` returned -5 through the @Nat slot with no
+        #     obligation and no trap.  Obligate `result >= 0` at the return
+        #     slot — the return-position analogue of #552's let/call-arg
+        #     narrowing and the dual of 7c's @Nat -> @Int widen-return.  The
+        #     obligation folds in path conditions (via `check_valid`), so an
+        #     `if @Int.0 >= 0 then @Int.0 else -@Int.0` tail proves per-arm
+        #     at Tier 1 (`examples/absolute_value.vera`).  A refinement OVER
+        #     @Nat is a RefinedType handled by 7b (`>= 0 && P`), so gate on the
+        #     bare @Nat primitive — refined-first, R9, the two never co-fire on
+        #     one site.  Codegen backs the undischarged/Tier-3 case with the
+        #     return nat-bind guard so the function traps before returning a
+        #     negative.
+        if (decl.body is not None
+                and self._is_nat_type(ret_type)
+                and not self._is_refined_type(ret_type)
+                and self._return_narrows_into_nat(decl.body)):
+            self._check_nat_binding_obligation(
+                decl, decl.body, smt, slot_env, list(assumptions),
+                site="return type",
+            )
+
         # #804: drop the top-level assert/assume facts pushed before step 5.8 —
         # they are scoped to the post-body checks (5.8–7b) and must not bleed
         # into the decreases checking below.
@@ -2103,16 +2296,13 @@ class ContractVerifier:
 
         for contract in decl.contracts:
             if isinstance(contract, ast.Decreases):
-                self.summary.total += 1
                 if self._verify_decreases(
                     decl, contract, smt, slot_env, group_decls,
                 ):
-                    self.summary.tier1_verified += 1
                     self._record_obligation(
                         decl.name, "decreases", contract, "verified",
                     )
                 else:
-                    self.summary.tier3_runtime += 1
                     self._record_obligation(
                         decl.name, "decreases", contract, "tier3",
                         error_code="E525",
@@ -2147,7 +2337,10 @@ class ContractVerifier:
         # 9. Verify where-block functions
         if decl.where_fns:
             for wfn in decl.where_fns:
-                self._verify_fn(wfn, parent_where_group=decl)
+                self._verify_fn(
+                    wfn, parent_where_group=decl,
+                    enclosing=(*enclosing, decl),
+                )
 
     # -----------------------------------------------------------------
     # Decreases verification (termination)
@@ -3012,6 +3205,65 @@ class ContractVerifier:
                 return
             # A non-call pipe RHS falls through to the generic walk below.
 
+        if (isinstance(expr, ast.FnCall) and expr.name == "apply_fn"
+                and expr.args):
+            # #820: `apply_fn(closure, a0, a1, …)` — a @Nat argument widening
+            # into an @Int closure formal reinterprets above i64.MAX.  apply_fn
+            # is a checker special form (no `param_types`), so it is excluded
+            # from the generic call-arg path below; obligate each @Nat value
+            # argument against its recovered @Int formal here.  Codegen guards
+            # the call_indirect argument (`_translate_apply_fn`), so guarded.
+            formals = self._closure_arg_param_types(expr.args[0])
+            if formals is not None:
+                for arg, formal in zip(expr.args[1:], formals):
+                    if (self._is_int_type(self._resolve_type(formal))
+                            and self._result_is_nat(arg)):
+                        self._check_int_widening_obligation(
+                            decl, arg, smt, slot_env, list(assumptions),
+                            site="closure argument",
+                        )
+            for arg in expr.args:
+                self._walk_for_nat_binding_obligations(
+                    decl, arg, smt, slot_env, assumptions,
+                )
+            return
+
+        if isinstance(expr, ast.AnonFn):
+            # #820: a @Nat closure body widening into an @Int closure RETURN.
+            # The closure body is opaque to the SMT layer (its params/captures
+            # are not in the outer slot env — translating the body here would
+            # mis-resolve a closure param onto an outer same-named slot and
+            # could prove a FALSE Tier-1), so obligate it SHALLOW-syntactically
+            # as tier3 (never Tier-1 / E530): codegen guards the body's @Int
+            # return value (`_compile_lifted_closure`), the definition-side dual
+            # of the closure-argument obligation.  The body is deliberately NOT
+            # walked — AnonFn stays a terminal for the SMT walk (see
+            # `_walk_for_primitive_op_obligations`'s docstring for the
+            # closure-opacity rationale), matching what the #984 narrowing dual
+            # below shares.
+            resolved_ret = self._resolve_type(expr.return_type)
+            if (self._is_int_type(resolved_ret)
+                    and self._result_is_nat(expr.body)):
+                self._record_int_widen_tier3(
+                    decl, expr.body, "closure return", "tier3", guarded=True)
+            # #984: the @Int -> @Nat NARROWING dual of the widen arm above — a
+            # bare @Int closure body narrowing into a @Nat closure RETURN can be
+            # negative (`fn(@Int -> @Nat) { @Int.0 }` applied to -5 returned -5
+            # through the @Nat slot on a verify-clean program: the #758 return
+            # nat-bind hole reachable only through `_compile_lifted_closure`).
+            # Same shallow-syntactic, opacity-forced treatment as the widen arm
+            # (never a FALSE Tier-1): record tier3 guarded, backed by codegen's
+            # per-narrowing-leaf `>= 0` guard in `_compile_lifted_closure`.  A
+            # refinement OVER @Nat is a RefinedType with its own boundary
+            # predicate (7b at the top level), so gate on the bare @Nat
+            # primitive — the two never co-fire on one site.
+            elif (self._is_nat_type(resolved_ret)
+                    and not self._is_refined_type(resolved_ret)
+                    and self._return_narrows_into_nat(expr.body)):
+                self._record_nat_bind_tier3(
+                    decl, expr.body, "closure return", "tier3", guarded=True)
+            return
+
         if isinstance(expr, (ast.FnCall, ast.ModuleCall)):
             # Site 2: @Nat formal parameters narrowing an @Int argument.
             if isinstance(expr, ast.FnCall):
@@ -3158,14 +3410,18 @@ class ContractVerifier:
                         )
                     elif (self._is_int_type(comp_ty)
                             and self._result_is_nat(arg)):
-                        # #813: dual — a @Nat component widening into an @Int
-                        # tuple slot.  guarded=False, like the @Nat path above:
-                        # codegen does not component-guard a tuple at
-                        # construction (the boundary guard is a separate site),
-                        # so disclose the unguarded widening via E531.
+                        # #813/#820: dual — a @Nat component widening into an
+                        # @Int tuple slot.  Codegen recovers the tuple's target
+                        # component types (`Tuple<Int, Int>`) from the threaded
+                        # target-type table (the #820 enabler) and guards each
+                        # @Nat component AT CONSTRUCTION, so this is now
+                        # runtime-guarded (`guarded=True`) rather than E531 —
+                        # the #813-disclosed tuple-component widening residual
+                        # (the widening dual of #758's tuple-component
+                        # narrowing) the enabler unlocks.
                         self._check_int_widening_obligation(
                             decl, arg, smt, slot_env, list(assumptions),
-                            site="tuple component", guarded=False,
+                            site="tuple component", guarded=True,
                         )
             for arg in expr.args:
                 self._walk_for_nat_binding_obligations(
@@ -3213,6 +3469,14 @@ class ContractVerifier:
             return
 
         if isinstance(expr, ast.IfExpr):
+            # #820: a heterogeneous @Int-join `if` (one @Nat arm, one genuine
+            # @Int-slot arm) widens the @Nat arm per-arm — the boundary guard
+            # cannot fire without false-trapping the @Int arm.  Obligate each
+            # @Nat arm under its own path condition (so `if c then @Nat.0 …`
+            # discharges assuming `c`), mirroring codegen's per-arm guard in
+            # `_translate_if`.  The homogeneous @Nat case stays on the whole-if
+            # boundary path (`_is_hetero_int_widen_join` excludes it).
+            hetero_int = self._is_hetero_int_widen_join(expr)
             self._walk_for_nat_binding_obligations(
                 decl, expr.condition, smt, slot_env, assumptions,
             )
@@ -3221,6 +3485,11 @@ class ContractVerifier:
                 import z3 as z3mod
                 smt._path_conditions.append(z3_cond)
                 try:
+                    if hetero_int and self._result_is_nat(expr.then_branch):
+                        self._check_int_widening_obligation(
+                            decl, expr.then_branch, smt, slot_env,
+                            list(assumptions), site="heterogeneous if arm",
+                        )
                     self._walk_for_nat_binding_obligations(
                         decl, expr.then_branch, smt, slot_env, assumptions,
                     )
@@ -3229,6 +3498,13 @@ class ContractVerifier:
                 if expr.else_branch is not None:
                     smt._path_conditions.append(z3mod.Not(z3_cond))
                     try:
+                        if (hetero_int
+                                and self._result_is_nat(expr.else_branch)):
+                            self._check_int_widening_obligation(
+                                decl, expr.else_branch, smt, slot_env,
+                                list(assumptions),
+                                site="heterogeneous if arm",
+                            )
                         self._walk_for_nat_binding_obligations(
                             decl, expr.else_branch, smt, slot_env,
                             assumptions,
@@ -3348,15 +3624,15 @@ class ContractVerifier:
                                 )
                             elif (self._is_int_type(comp_ty)
                                     and self._result_is_nat(sub)):
-                                # #813: dual — a @Nat literal component
+                                # #813/#820: dual — a @Nat literal component
                                 # destructured into an @Int slot widens it.
-                                # Codegen does not guard the tuple-component
-                                # coercion (like construction), so disclose
-                                # E531 (guarded=False).
+                                # Codegen guards the field load at the destructure
+                                # read (mirroring this literal-source path), so
+                                # this is now runtime-guarded (`guarded=True`).
                                 self._check_int_widening_obligation(
                                     decl, sub, smt, cur_env,
                                     list(block_assumptions),
-                                    site="tuple destructure", guarded=False,
+                                    site="tuple destructure", guarded=True,
                                 )
                     else:
                         # Non-literal source (#747): project the tuple
@@ -3481,6 +3757,10 @@ class ContractVerifier:
             return
 
         if isinstance(expr, ast.MatchExpr):
+            # #820: a heterogeneous @Int-join `match` (a @Nat arm body alongside
+            # a genuine @Int-slot arm body) widens the @Nat arm per-arm — the
+            # boundary guard cannot fire without false-trapping the @Int arm.
+            match_hetero_int = self._is_hetero_int_widen_join(expr)
             self._walk_for_nat_binding_obligations(
                 decl, expr.scrutinee, smt, slot_env, assumptions,
             )
@@ -3560,6 +3840,14 @@ class ContractVerifier:
                                 arm.pattern, smt, slot_env, assumptions,
                             )
                         )
+                    # #820: obligate a @Nat arm body widening into the @Int join
+                    # (under this arm's discriminant condition), mirroring
+                    # codegen's per-arm guard in `_translate_match`.
+                    if match_hetero_int and self._result_is_nat(arm.body):
+                        self._check_int_widening_obligation(
+                            decl, arm.body, smt, arm_env,
+                            list(arm_assumptions), site="heterogeneous match arm",
+                        )
                     self._walk_for_nat_binding_obligations(
                         decl, arm.body, smt, arm_env, arm_assumptions,
                     )
@@ -3573,13 +3861,11 @@ class ContractVerifier:
         # still be visited.  (The #520 subtraction walker has the same
         # pre-existing container gap; aligning it is out of #552's scope.)
         if isinstance(expr, ast.ArrayLit):
-            # #813: a @Nat element widening into an @Array<Int> literal.  The
-            # literal codegen types the array by its element *values* (source),
-            # and the `let @Array<Int> = …` binding is a pointer-pair copy with
-            # no element-wise coercion — so this site is NOT runtime-guarded.
-            # Disclose the unguarded widening (E531) rather than a silent false
-            # Tier-1; codegen-guarding it (threading the target element type) is
-            # a tracked follow-up.
+            # #813/#820: a @Nat element widening into an @Array<Int> literal.
+            # Codegen recovers the target element type (`Array<Int>`) from the
+            # threaded target-type table and guards the element store at the
+            # widening boundary (the #820 enabler), so this site is now
+            # runtime-guarded (`guarded=True`) rather than E531-disclosed.
             target = self._target_type_of(expr)
             base = target.base if isinstance(target, RefinedType) else target
             if (isinstance(base, AdtType) and base.name == "Array"
@@ -3589,7 +3875,7 @@ class ContractVerifier:
                     if self._result_is_nat(elem):
                         self._check_int_widening_obligation(
                             decl, elem, smt, slot_env, list(assumptions),
-                            site="array element", guarded=False,
+                            site="array element", guarded=True,
                         )
             for elem in expr.elements:
                 self._walk_for_nat_binding_obligations(
@@ -3645,23 +3931,21 @@ class ContractVerifier:
     ) -> None:
         """Discharge the ``lhs >= rhs`` obligation at a single site.
 
-        On success, increments ``tier1_verified``.  On failure, emits an
-        E502 error with a Z3 counterexample.  Path conditions in
+        On success, records a ``verified`` obligation (Tier 1).  On failure,
+        records a ``violated`` obligation and emits an E502 error with a Z3
+        counterexample.  Path conditions in
         ``smt._path_conditions`` are picked up automatically by
         :py:meth:`SmtContext.check_valid`.
         """
-        self.summary.total += 1
         lhs = smt.translate_expr(expr.left, slot_env)
         rhs = smt.translate_expr(expr.right, slot_env)
         if lhs is None or rhs is None:  # pragma: no cover — both Nat
-            self.summary.tier3_runtime += 1
             self._record_obligation(decl.name, "nat_sub", expr, "tier3")
             return
         if self._is_opaque_shadow(lhs) or self._is_opaque_shadow(rhs):
             # An operand is an opaque shadow (an untranslatable let that
             # rebound a stale outer slot): its value is unknown, so Tier-3
             # rather than a false E502 on the unconstrained shadow.
-            self.summary.tier3_runtime += 1
             self._record_obligation(decl.name, "nat_sub", expr, "tier3")
             return
 
@@ -3680,15 +3964,12 @@ class ContractVerifier:
             # `lhs < rhs` isn't valid either, so Tier-3 — not a false E502.
             # The direct-shadow guard above catches only a bare operand (#680
             # review, the subtraction analogue of the compound-divisor fix).
-            self.summary.tier3_runtime += 1
             self._record_obligation(decl.name, "nat_sub", expr, "tier3")
             return
 
         if result.status == "verified":
-            self.summary.tier1_verified += 1
             self._record_obligation(decl.name, "nat_sub", expr, "verified")
         elif result.status == "violated":
-            self.summary.total -= 1  # don't count — it's an error
             self._record_obligation(
                 decl.name, "nat_sub", expr, "violated",
                 error_code="E502",
@@ -3696,7 +3977,6 @@ class ContractVerifier:
             )
             self._report_underflow(decl, expr, result.counterexample)
         else:  # pragma: no cover — solver timeout
-            self.summary.tier3_runtime += 1
             self._record_obligation(
                 decl.name, "nat_sub", expr, "timeout",
             )
@@ -3735,8 +4015,6 @@ class ContractVerifier:
         if divisor is None:
             # Untranslatable divisor — no Tier-1 term to check; the runtime
             # `divide_by_zero` trap is the guarantee.
-            self.summary.total += 1
-            self.summary.tier3_runtime += 1
             self._record_obligation(decl.name, "div_zero", expr, "tier3")
             return
         if self._is_opaque_shadow(divisor):
@@ -3744,8 +4022,6 @@ class ContractVerifier:
             # rebound a stale outer slot): its value is unknown, so Tier-3 —
             # a stale outer's `requires(... != 0)` must not falsely discharge
             # it, and its unconstrained zero is not a real counterexample.
-            self.summary.total += 1
-            self.summary.tier3_runtime += 1
             self._record_obligation(decl.name, "div_zero", expr, "tier3")
             return
         if divisor.sort() != z3.IntSort():
@@ -3753,7 +4029,6 @@ class ContractVerifier:
             # `f64.div` produces inf/NaN.  Not a primitive-safety obligation.
             return
 
-        self.summary.total += 1
         obligation = divisor != z3.IntVal(0)
         result = smt.check_valid(obligation, list(assumptions))
 
@@ -3768,15 +4043,12 @@ class ContractVerifier:
             # provable, but neither is `== 0` — the counterexample depends on
             # the unknown shadow, so Tier-3, not a false E526.  `_is_opaque_
             # shadow` above catches only a *direct* shadow operand (#680 review).
-            self.summary.tier3_runtime += 1
             self._record_obligation(decl.name, "div_zero", expr, "tier3")
             return
 
         if result.status == "verified":
-            self.summary.tier1_verified += 1
             self._record_obligation(decl.name, "div_zero", expr, "verified")
         elif result.status == "violated":
-            self.summary.total -= 1  # don't count — it's an error
             self._record_obligation(
                 decl.name, "div_zero", expr, "violated",
                 error_code="E526",
@@ -3784,7 +4056,6 @@ class ContractVerifier:
             )
             self._report_div_by_zero(decl, expr, result.counterexample)
         else:  # pragma: no cover — solver timeout
-            self.summary.tier3_runtime += 1
             self._record_obligation(
                 decl.name, "div_zero", expr, "timeout",
             )
@@ -3814,21 +4085,16 @@ class ContractVerifier:
         if pred is None or pred.sort() != z3.BoolSort():
             # Untranslatable / non-Bool predicate — the runtime trap is the
             # only guarantee.
-            self.summary.total += 1
-            self.summary.tier3_runtime += 1
             self._record_obligation(decl.name, "assert", expr, "tier3")
             return
-        self.summary.total += 1
         result = smt.check_valid(pred, list(assumptions))
         if result.status == "verified":
-            self.summary.tier1_verified += 1
             self._record_obligation(decl.name, "assert", expr, "verified")
             return
         # Not provable.  Is it provably FALSE (the assert can never hold)?
         if smt.check_valid(
             z3.Not(pred), list(assumptions),
         ).status == "verified":
-            self.summary.total -= 1  # an error, not a counted obligation
             self._record_obligation(
                 decl.name, "assert", expr, "violated",
                 error_code="E507",
@@ -3837,7 +4103,6 @@ class ContractVerifier:
             self._report_assert_violation(decl, expr, result.counterexample)
             return
         # Sometimes true, sometimes false (or solver unknown) → Tier 3.
-        self.summary.tier3_runtime += 1
         self._record_obligation(decl.name, "assert", expr, "tier3")
 
     def _check_index_bounds_obligation(
@@ -3877,18 +4142,14 @@ class ContractVerifier:
                 or not str(coll.sort()).startswith("Array_")):
             # Untranslatable, or an unrecognised array representation — no
             # Tier-1 length model.  The runtime `out_of_bounds` trap guards it.
-            self.summary.total += 1
-            self.summary.tier3_runtime += 1
             self._record_obligation(decl.name, "index_bounds", expr, "tier3")
             return
 
         length = smt._get_length_fn(coll.sort())(coll)
-        self.summary.total += 1
 
         in_bounds = z3.And(idx >= 0, idx < length)
         result = smt.check_valid(in_bounds, list(assumptions))
         if result.status == "verified":
-            self.summary.tier1_verified += 1
             self._record_obligation(
                 decl.name, "index_bounds", expr, "verified",
             )
@@ -3899,7 +4160,6 @@ class ContractVerifier:
         out_of_bounds = z3.Or(idx < 0, idx >= length)
         oob = smt.check_valid(out_of_bounds, list(assumptions))
         if oob.status == "verified":
-            self.summary.total -= 1  # don't count — it's an error
             self._record_obligation(
                 decl.name, "index_bounds", expr, "violated",
                 error_code="E527",
@@ -3908,7 +4168,6 @@ class ContractVerifier:
             self._report_index_oob(decl, expr, result.counterexample)
         else:
             # Opaque / dynamic length — beyond Tier 1 (#427); runtime-guarded.
-            self.summary.tier3_runtime += 1
             self._record_obligation(decl.name, "index_bounds", expr, "tier3")
 
     def _overflow_int_type(self, expr: ast.Expr) -> str | None:
@@ -3982,8 +4241,6 @@ class ContractVerifier:
         if (result is None
                 or result.sort() != z3.IntSort()
                 or self._contains_opaque_shadow(result)):
-            self.summary.total += 1
-            self.summary.tier3_runtime += 1
             self._record_obligation(decl.name, "int_overflow", expr, "tier3")
             return
 
@@ -3992,11 +4249,9 @@ class ContractVerifier:
         else:
             lo, hi = z3.IntVal(_I64_MIN), z3.IntVal(_I64_MAX)
 
-        self.summary.total += 1
         in_range = z3.And(result >= lo, result <= hi)
         safe = smt.check_valid(in_range, list(assumptions))
         if safe.status == "verified":
-            self.summary.tier1_verified += 1
             self._record_obligation(decl.name, "int_overflow", expr, "verified")
             return
 
@@ -4005,7 +4260,6 @@ class ContractVerifier:
         out_of_range = z3.Or(result < lo, result > hi)
         bad = smt.check_valid(out_of_range, list(assumptions))
         if bad.status == "verified":
-            self.summary.total -= 1  # don't count — it's an error
             self._record_obligation(
                 decl.name, "int_overflow", expr, "violated",
                 error_code="E528",
@@ -4014,7 +4268,6 @@ class ContractVerifier:
             self._report_overflow(decl, expr, safe.counterexample)
         else:
             # Dynamic operands — beyond Tier 1; the codegen overflow trap guards.
-            self.summary.tier3_runtime += 1
             self._record_obligation(decl.name, "int_overflow", expr, "tier3")
 
     def _check_float_to_int_domain_obligation(
@@ -4047,10 +4300,8 @@ class ContractVerifier:
         change the value of a literal.
         """
         x = smt.translate_expr(call.args[0], slot_env)
-        self.summary.total += 1
         if not isinstance(x, z3.FPRef):
             # Untranslatable argument → Tier 3.
-            self.summary.tier3_runtime += 1
             self._record_obligation(
                 decl.name, "float_to_int_domain", call, "tier3",
             )
@@ -4058,7 +4309,6 @@ class ContractVerifier:
         xs = z3.simplify(x)
         if not z3.is_fp_value(xs):
             # Symbolic argument → Tier 3 (codegen trunc trap guards).
-            self.summary.tier3_runtime += 1
             self._record_obligation(
                 decl.name, "float_to_int_domain", call, "tier3",
             )
@@ -4075,12 +4325,10 @@ class ContractVerifier:
                 in_range = _I64_MIN <= truncated <= _I64_MAX
 
         if not is_nan and not is_inf and in_range:
-            self.summary.tier1_verified += 1
             self._record_obligation(
                 decl.name, "float_to_int_domain", call, "verified",
             )
         else:
-            self.summary.total -= 1  # don't count — it's an error
             self._record_obligation(
                 decl.name, "float_to_int_domain", call, "violated",
                 error_code="E529",
@@ -4183,11 +4431,12 @@ class ContractVerifier:
         """Discharge a ``value >= 0`` obligation at one @Nat binding site.
 
         Mirrors :py:meth:`_check_subtraction_obligation`: on success
-        increments ``tier1_verified``; on a Z3 counterexample emits an
-        E503 error.  When the value is untranslatable or the solver times
+        records a ``verified`` obligation (Tier 1); on a Z3 counterexample a
+        ``violated`` obligation plus an E503 error.  When the value is
+        untranslatable or the solver times
         out the outcome depends on the caller-supplied ``guarded`` flag —
-        codegen-guarded sites (``guarded=True``) are counted
-        ``tier3_runtime``, while the unguarded ones (effect-operation
+        codegen-guarded sites (``guarded=True``) record a ``tier3`` obligation
+        (``tier3_runtime``), while the unguarded ones (effect-operation
         argument and generic-instantiated constructor field —
         ``guarded=False``) are surfaced as an E504 warning and excluded
         from the totals
@@ -4195,7 +4444,6 @@ class ContractVerifier:
         ``smt._path_conditions`` are folded in automatically by
         :py:meth:`SmtContext.check_valid`.
         """
-        self.summary.total += 1
         val = smt.translate_expr(value_node, slot_env)
         if val is None:
             self._record_nat_bind_tier3(
@@ -4206,10 +4454,8 @@ class ContractVerifier:
         result = smt.check_valid(obligation, list(assumptions))
 
         if result.status == "verified":
-            self.summary.tier1_verified += 1
             self._record_obligation(decl.name, "nat_bind", value_node, "verified")
         elif result.status == "violated":
-            self.summary.total -= 1  # don't count — it's an error
             self._record_obligation(
                 decl.name, "nat_bind", value_node, "violated",
                 error_code="E503",
@@ -4243,14 +4489,11 @@ class ContractVerifier:
         this method's accounting is purely the static verdict.  *node*
         gives the diagnostic location.
         """
-        self.summary.total += 1
         obligation = term >= 0  # type: ignore[operator]
         result = smt.check_valid(obligation, list(assumptions))
         if result.status == "verified":
-            self.summary.tier1_verified += 1
             self._record_obligation(decl.name, "nat_bind", node, "verified")
         elif result.status == "violated":
-            self.summary.total -= 1
             self._record_obligation(
                 decl.name, "nat_bind", node, "violated",
                 error_code="E503", counterexample=result.counterexample,
@@ -4291,7 +4534,6 @@ class ContractVerifier:
         get.  Path conditions in ``smt._path_conditions`` are folded in by
         :py:meth:`SmtContext.check_valid`.
         """
-        self.summary.total += 1
         val = smt.translate_expr(value_node, slot_env)
         if val is None:  # pragma: no cover — untranslatable value
             self._record_int_widen_tier3(
@@ -4301,7 +4543,6 @@ class ContractVerifier:
         hi = z3.IntVal(_I64_MAX)
         safe = smt.check_valid(val <= hi, list(assumptions))
         if safe.status == "verified":
-            self.summary.tier1_verified += 1
             self._record_obligation(
                 decl.name, "nat_to_int_coerce", value_node, "verified")
             return
@@ -4309,7 +4550,6 @@ class ContractVerifier:
         # Not provably in range — is it provably OUT of range (a real bug)?
         bad = smt.check_valid(val > hi, list(assumptions))
         if bad.status == "verified":
-            self.summary.total -= 1  # don't count — it's an error
             self._record_obligation(
                 decl.name, "nat_to_int_coerce", value_node, "violated",
                 error_code="E530", counterexample=safe.counterexample,
@@ -4330,20 +4570,19 @@ class ContractVerifier:
     ) -> None:
         """Record a Tier-3 ``nat_to_int_coerce`` outcome, the #813 dual of
         :py:meth:`_record_nat_bind_tier3`.  A codegen-guarded widening
-        (``guarded=True`` — return, let, call-arg, and the concrete @Int
-        constructor field) genuinely falls to a runtime coercion trap
-        (``tier3_runtime``).  The unguarded cases (``guarded=False`` — the
-        tuple-construction component and the generic-instantiated @Int field,
-        which erases to i64 with no per-field mono metadata) are neither
-        statically proven nor runtime-checked, so surface an E531 warning and
-        are excluded from the discharged totals rather than silently counting
-        a runtime check they never get."""
+        (``guarded=True`` — return, let, call-arg, concrete @Int constructor
+        field, and the #820 per-component sites: tuple component, array
+        element, heterogeneous if/match arm, closure argument/return/capture)
+        genuinely falls to a runtime coercion trap (``tier3_runtime``).  The
+        sole unguarded case (``guarded=False`` — the generic-instantiated @Int
+        field, which erases to i64 with no per-field mono metadata) is neither
+        statically proven nor runtime-checked, so surfaces an E531 warning and
+        is excluded from the discharged totals rather than silently counting
+        a runtime check it never gets."""
         if guarded:
-            self.summary.tier3_runtime += 1
             self._record_obligation(
                 decl.name, "nat_to_int_coerce", value_node, status)
         else:
-            self.summary.total -= 1
             self._record_obligation(
                 decl.name, "nat_to_int_coerce", value_node, "tier3_unguarded",
                 error_code="E531",
@@ -4373,9 +4612,10 @@ class ContractVerifier:
                 "reinterprets to a negative @Int when widened.  The value is "
                 "outside Z3's decidable fragment (untranslatable or the solver "
                 "timed out), so the `<= i64.MAX` obligation could not be "
-                "discharged.  Codegen runtime-guards the concrete @Int "
-                "coercion sites (return, let, call-argument, concrete @Int "
-                "field) but not this one — a tuple-construction component, or a "
+                "discharged.  Codegen runtime-guards every concrete @Int "
+                "coercion site (return, let, call-argument, constructor field, "
+                "tuple component, array element, heterogeneous arm, closure "
+                "argument/return/capture) but not this one — a "
                 "generic-instantiated @Int field with no per-field mono "
                 "metadata — so here the widening is neither statically proven "
                 "nor runtime-checked."
@@ -4408,17 +4648,14 @@ class ContractVerifier:
         ``_extract_constructor_fields`` runtime-guards a concrete @Nat field
         extracted into an @Int sub-pattern (``guarded=True`` -> tier3_runtime).
         """
-        self.summary.total += 1
         hi = z3.IntVal(_I64_MAX)
         safe = smt.check_valid(term <= hi, list(assumptions))
         if safe.status == "verified":
-            self.summary.tier1_verified += 1
             self._record_obligation(
                 decl.name, "nat_to_int_coerce", node, "verified")
             return
         bad = smt.check_valid(term > hi, list(assumptions))
         if bad.status == "verified":
-            self.summary.total -= 1
             self._record_obligation(
                 decl.name, "nat_to_int_coerce", node, "violated",
                 error_code="E530", counterexample=safe.counterexample,
@@ -4427,6 +4664,54 @@ class ContractVerifier:
         else:
             self._record_int_widen_tier3(
                 decl, node, site, "tier3", guarded=guarded)
+
+    def _closure_arg_param_types(
+        self, closure_arg: ast.Expr,
+    ) -> tuple[ast.TypeExpr, ...] | None:
+        """Declared *parameter* TypeExprs of the closure an ``apply_fn`` applies
+        (#820) — the verifier mirror of codegen's ``_closure_arg_param_types``.
+
+        An inline ``AnonFn`` yields its declared params directly; a ``SlotRef``
+        is resolved through the shared :func:`resolve_fn_type_alias` (the same
+        terminal-``FnType`` resolution codegen uses) over the retained raw alias
+        TypeExprs, so the obligation and the codegen guard recover an identical
+        formal type at the closure boundary.  Any other shape yields ``None``.
+        """
+        if isinstance(closure_arg, ast.AnonFn):
+            return tuple(closure_arg.params)
+        if isinstance(closure_arg, ast.SlotRef):
+            from vera.monomorphize import resolve_fn_type_alias
+            fn_type = resolve_fn_type_alias(
+                ast.NamedType(
+                    name=closure_arg.type_name,
+                    type_args=closure_arg.type_args,
+                ),
+                self._closure_type_aliases,
+                self._closure_type_alias_params,
+            )
+            return tuple(fn_type.params) if fn_type is not None else None
+        return None
+
+    def _is_hetero_int_widen_join(self, expr: ast.Expr) -> bool:
+        """True iff *expr* is an ``if``/``match`` that widens a @Nat *arm* into
+        an @Int join (#820).
+
+        The homogeneous @Nat case (`_result_is_nat(expr)` — every arm @Nat-
+        compatible) is covered by the whole-expression boundary guard at the
+        return / let / call-arg site, so it is excluded here.  What remains is a
+        HETEROGENEOUS join — at least one genuine @Int-*slot* arm makes the join
+        genuinely @Int (it can be legitimately negative), so the boundary guard
+        cannot fire without false-trapping that arm.  The @Nat arm(s) must be
+        obligated/guarded PER-ARM.  The @Int-join context is read from the
+        checker's target-type table (``_target_type_of``), the dual of codegen's
+        ``result_type == "i64"`` heterogeneous-if classification.
+        """
+        if not isinstance(expr, (ast.IfExpr, ast.MatchExpr)):
+            return False
+        if self._result_is_nat(expr):
+            return False
+        target = self._target_type_of(expr)
+        return target is not None and self._is_int_type(target)
 
     def _check_refined_binding_obligation(
         self,
@@ -4457,7 +4742,6 @@ class ContractVerifier:
         guard, is ``True``; an internal narrowing is ``False``) — see
         :py:meth:`_record_refined_bind_tier3`.
         """
-        self.summary.total += 1
         # A `@Unit` refinement is codegen-UNguarded (erased binder), so its
         # Tier-3 fallback must not claim a runtime guard (CR db24433).
         eff_guarded = guarded and not self._is_unit_refinement(refined_ty)
@@ -4476,11 +4760,9 @@ class ContractVerifier:
         result = smt.check_valid(goal, list(assumptions))
 
         if result.status == "verified":
-            self.summary.tier1_verified += 1
             self._record_obligation(
                 decl.name, "refine_bind", value_node, "verified")
         elif result.status == "violated":
-            self.summary.total -= 1  # don't count — it's an error
             self._record_obligation(
                 decl.name, "refine_bind", value_node, "violated",
                 error_code="E505",
@@ -4516,14 +4798,12 @@ class ContractVerifier:
         ``guarded=False`` — surfaced as an E506 warning and excluded from the
         totals rather than overstating a runtime check it never gets (R7)."""
         if guarded:
-            self.summary.tier3_runtime += 1
             self._record_obligation(
                 decl.name, "refine_bind", value_node, "tier3",
                 error_code="E506",
             )
             self._report_refined_runtime(decl, value_node, site)
         else:
-            self.summary.total -= 1
             self._record_obligation(
                 decl.name, "refine_bind", value_node, "tier3_unguarded",
                 error_code="E506",
@@ -4557,6 +4837,10 @@ class ContractVerifier:
         # `match` arm would otherwise false-E505/E501 (the arm accessor is
         # translated without the field's source refinement fact).
         smt._subpattern_fact_hook = self._subpattern_source_facts
+        # #994 F1: same recorded-type hint as the main path — a bare nullary
+        # ctor in this generic body's refined return must resolve its sort from
+        # the recorded type, not the ambiguous base-name scan.
+        smt._recorded_type_hook = self._resolved_type_of
         slot_env = SlotEnv()
         assumptions: list[object] = []
         for param_te in decl.params:
@@ -4608,7 +4892,6 @@ class ContractVerifier:
             smt.solver.add(a)
 
         body_expr = smt.translate_expr(decl.body, slot_env)
-        self.summary.total += 1
         goal = (
             self._translate_refined_predicate(smt, ret_type, body_expr)
             if body_expr is not None else None
@@ -4620,11 +4903,9 @@ class ContractVerifier:
             return
         result = smt.check_valid(goal, list(assumptions))
         if result.status == "verified":
-            self.summary.tier1_verified += 1
             self._record_obligation(
                 decl.name, "refine_bind", decl.body, "verified")
         elif result.status == "violated":
-            self.summary.total -= 1
             self._record_obligation(
                 decl.name, "refine_bind", decl.body, "violated",
                 error_code="E505", counterexample=result.counterexample,
@@ -4668,7 +4949,6 @@ class ContractVerifier:
         with no codegen guard, hence ``guarded=False``.  *node* gives the
         diagnostic location.
         """
-        self.summary.total += 1
         goal = self._translate_refined_predicate(smt, refined_ty, term)
         if goal is None:
             self._record_refined_bind_tier3(decl, node, site, guarded=False)
@@ -4680,10 +4960,8 @@ class ContractVerifier:
                 local_assumptions.append(src_fact)
         result = smt.check_valid(goal, local_assumptions)
         if result.status == "verified":
-            self.summary.tier1_verified += 1
             self._record_obligation(decl.name, "refine_bind", node, "verified")
         elif result.status == "violated":
-            self.summary.total -= 1
             self._record_obligation(
                 decl.name, "refine_bind", node, "violated",
                 error_code="E505", counterexample=result.counterexample,
@@ -5020,7 +5298,6 @@ class ContractVerifier:
                     # Opaque, unprojectable scrutinee: an internal narrowing with
                     # no codegen guard, so this is an unguarded E506 Tier-3
                     # (excluded from totals), not a silent pass (R7).
-                    self.summary.total += 1
                     self._record_refined_bind_tier3(
                         decl, scrutinee, "ADT sub-pattern bind", guarded=False)
                 continue
@@ -5043,11 +5320,8 @@ class ContractVerifier:
                     # function call returning the ADT): the narrowing is real
                     # but unprojectable here, yet codegen still guards the @Nat
                     # sub-pattern bind at run time — so record a guarded Tier-3
-                    # outcome rather than dropping it silently.  The +1 counts
-                    # the obligation (a guarded site leaves total untouched in
-                    # _record_nat_bind_tier3, mirroring the let / destructure
-                    # path).
-                    self.summary.total += 1
+                    # obligation rather than dropping it silently (the summary
+                    # derives its count from it, #967).
                     self._record_nat_bind_tier3(
                         decl, scrutinee, "ADT sub-pattern bind", "tier3",
                         guarded=True)
@@ -5069,7 +5343,6 @@ class ContractVerifier:
                         site="ADT sub-pattern bind", node=scrutinee,
                     )
                 else:
-                    self.summary.total += 1
                     self._record_int_widen_tier3(
                         decl, scrutinee, "ADT sub-pattern bind", "tier3",
                         guarded=True)
@@ -5149,18 +5422,15 @@ class ContractVerifier:
             # codegen runtime guard yet, so a refined component is an E506
             # Tier-3 excluded from totals — never a silent pass (R7).
             for _ in nat_narrowing:
-                self.summary.total += 1
                 self._record_nat_bind_tier3(
                     decl, stmt.value, "tuple destructure", "tier3",
                     guarded=True)
             for _ in refined_narrowing:
-                self.summary.total += 1
                 self._record_refined_bind_tier3(
                     decl, stmt.value, "tuple destructure", guarded=False)
             for _ in int_widening:
                 # #813: codegen does not guard a tuple-destructure component
                 # widening (like tuple construction), so disclose E531.
-                self.summary.total += 1
                 self._record_int_widen_tier3(
                     decl, stmt.value, "tuple destructure", "tier3",
                     guarded=False)
@@ -5220,10 +5490,8 @@ class ContractVerifier:
         the broad *site* string.
         """
         if guarded:
-            self.summary.tier3_runtime += 1
             self._record_obligation(decl.name, "nat_bind", value_node, status)
         else:
-            self.summary.total -= 1
             self._record_obligation(
                 decl.name, "nat_bind", value_node, "tier3_unguarded",
                 error_code="E504",
@@ -5932,8 +6200,9 @@ class ContractVerifier:
         at the single boundary site — without needing the per-arm join type,
         which the checker's sparse side-tables do not record.  A genuine @Int arm
         (a slot/call that can be negative) is NOT @Nat-compatible: it makes the
-        result @Int, and a @Nat sibling widening into it is the architecturally
-        deferred site-2b case (tracked in #820), not a boundary widening."""
+        result @Int, and a @Nat sibling widening into it is the heterogeneous
+        per-arm case — obligated via :py:meth:`_is_hetero_int_widen_join` and
+        guarded per-arm by codegen (#820), not a boundary widening."""
         return self._result_is_nat(expr) or self._is_nonneg_int_literal(expr)
 
     @staticmethod
@@ -6038,6 +6307,36 @@ class ContractVerifier:
         if not self._is_nat_typed(value):
             return True
         return self._has_underflow_leaf(value)
+
+    def _return_narrows_into_nat(self, body: ast.Expr) -> bool:
+        """Whether a @Nat function-return slot receives a value that can be
+        negative — the return-boundary narrowing check for #758.
+
+        Mirrors codegen's ``_narrows_into_nat(decl.body)`` at the return
+        boundary.  The top-level body is *target-typed* to the @Nat return, so
+        the checker's side-table reports the whole expression as @Nat even when
+        a join arm narrows (``match @Int.0 { 0 -> 0, _ -> @Int.0 }`` records
+        @Nat for the match, masking the raw-@Int ``_`` arm); consulting
+        :py:meth:`_narrows_into_nat` on the whole body would then miss it.
+        Descend the ``Block`` / ``IfExpr`` / ``MatchExpr`` join to each leaf
+        return expression and apply the per-value ``_narrows_into_nat`` there —
+        the value narrows iff ANY leaf narrows, exactly the set codegen's
+        ``_is_static_nat_typed`` (an all-arms-@Nat test) guards.  The whole-body
+        ``>= 0`` obligation (translated in :py:meth:`_check_nat_binding_obligation`)
+        still folds in each arm's path condition, so a provable join proves.
+        """
+        if isinstance(body, ast.Block):
+            return (body.expr is not None
+                    and self._return_narrows_into_nat(body.expr))
+        if isinstance(body, ast.IfExpr):
+            if body.else_branch is None:
+                return False
+            return (self._return_narrows_into_nat(body.then_branch)
+                    or self._return_narrows_into_nat(body.else_branch))
+        if isinstance(body, ast.MatchExpr):
+            return any(self._return_narrows_into_nat(arm.body)
+                       for arm in body.arms)
+        return self._narrows_into_nat(body)
 
     def _has_underflow_leaf(self, value: ast.Expr) -> bool:
         """True iff a statically-@Nat *value* can still be negative
@@ -6362,12 +6661,14 @@ class ContractVerifier:
         translation (step 8b).  The demotion list is drained each time, so the
         second call reports only the calls that appear inside those later
         clauses — the exact silent-loss the first drain missed.  Each demotion
-        is counted like the ensures Tier-3 path so the obligation/summary
-        differential stays exact, and located at the call site (span_node) like
-        E501 so repeated calls to the same callee stay distinct.
+        records a ``tier3`` ``call_pre`` obligation, so the derived summary
+        (#967) counts it toward both ``tier3_runtime`` and ``total`` — the
+        hand-counted path here once bumped ``tier3_runtime`` alone, leaving
+        ``total`` short by one on every example that hit this path.  Located at
+        the call site (span_node) like E501 so repeated calls to the same
+        callee stay distinct.
         """
         for d in smt.drain_call_demotions():
-            self.summary.tier3_runtime += 1
             self._record_obligation(
                 decl.name, "call_pre", d.precondition, "tier3",
                 error_code="E532",

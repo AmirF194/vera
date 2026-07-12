@@ -115,6 +115,21 @@ class WasmContext(
         self._effect_op_result_wt: dict[str, str | None] = (
             effect_op_result_wt or {}
         )
+        # #976 option C: op_name -> (HandlerClause, state type name,
+        # get import, put import) for the innermost enclosing
+        # ``handle[State<T>]``.  When a get/put call site has an entry here,
+        # the clause BODY is inlined at the site (intrinsic-hybrid
+        # semantics: intrinsic store/read, clause executes, ``resume(v)`` is
+        # the op's result, ``with`` overrides the store).  Empty for a
+        # declared-``effects(<State<T>>)`` function with no handler — those
+        # keep the bare host-cell call.  Saved/restored around each handler
+        # body exactly like ``_effect_ops`` (nested handlers).
+        self._state_clause_ops: dict[
+            str, tuple[ast.HandlerClause, str, str, str]
+        ] = {}
+        # True while translating an inlined State clause body/`with` expr —
+        # gates the ``resume(v)`` lowering (v IS the op's result value).
+        self._in_state_clause: bool = False
         # Constructor layout mapping: ctor_name -> ConstructorLayout
         self._ctor_layouts: dict[str, ConstructorLayout] = ctor_layouts or {}
         # ADT type names for slot/param type resolution
@@ -339,6 +354,17 @@ class WasmContext(
         # ``vera/codegen/closures.py``) emit plain ``call``.
         self._tail_call_sites: set[int] = set()
         self._self_ret_wt: str | None = None
+        # #758/#983 — per-narrowing-leaf @Int->@Nat return guard.  The set of
+        # ``id(leaf)`` tail-position return leaves that narrow into a @Nat
+        # return, so ``translate_expr`` / the block-trailing / match-arm
+        # emission sites wrap EACH such leaf with ``_emit_nat_bind_guard``
+        # inline (mirroring the verifier 7d leaf descent) rather than wrapping
+        # the whole body.  The whole-body wrap reverted EVERY ``return_call`` —
+        # breaking TCO for a non-narrowing @Nat->@Nat recursive tail call
+        # (`drain`) that stack-exhausted at depth (the #983 regression).
+        # Populated per-fn by ``CodeGenerator._compile_fn``; defaults empty so
+        # closure bodies and untargeted contexts guard nothing.
+        self._nat_return_leaf_ids: set[int] = set()
         # #630 Tier 2 — interpolation-segment inference failures.
         # When `_translate_interpolated_string` can't classify a segment's
         # Vera type, it appends the offending `Expr` here and returns
@@ -374,6 +400,15 @@ class WasmContext(
         self._expr_semantic_types: (
             dict[tuple[int, int, int, int], object] | None
         ) = None
+        # #820: the checker's TARGET-type side-table (``expected`` per expr
+        # span).  Consulted by ``_target_codegen_type`` — the codegen dual of
+        # the verifier's ``_target_type_of`` — so the @Nat -> @Int widening
+        # guard fires at a tuple component / array element / heterogeneous
+        # if-arm exactly where the verifier obligates it.  ``None`` when
+        # typecheck was skipped (those component sites stay E531-disclosed).
+        self._expr_target_types: (
+            dict[tuple[int, int, int, int], object] | None
+        ) = None
 
     def set_expr_semantic_types(
         self,
@@ -383,6 +418,16 @@ class WasmContext(
         guard's Int/Nat operand classifier (mirrors the verifier's
         ``_resolved_type_of`` / ``_overflow_int_type``)."""
         self._expr_semantic_types = types
+
+    def set_expr_target_types(
+        self,
+        types: dict[tuple[int, int, int, int], object] | None,
+    ) -> None:
+        """Seed the checker's TARGET-type side-table (#820) for the
+        @Nat -> @Int widening guard's per-component target-type recovery
+        (``_target_codegen_type`` — the dual of the verifier's
+        ``_target_type_of``)."""
+        self._expr_target_types = types
 
     def set_fn_ret_types(
         self, ret_types: dict[str, str | None],
@@ -843,6 +888,12 @@ class WasmContext(
         expr_instrs = self.translate_expr(block.expr, current_env)
         if expr_instrs is None:
             return None
+        # #758/#983 — guard a narrowing @Nat-return leaf inline (per-leaf, not
+        # whole-body).  A no-op unless this exact trailing expr is a collected
+        # narrowing return leaf; this covers the top-level body's trailing expr
+        # AND every if-branch trailing expr (branches are Blocks routed here by
+        # `_translate_if`).
+        expr_instrs = self._guard_nat_return_leaf(block.expr, expr_instrs)
         instructions.extend(expr_instrs)
         return instructions
 
