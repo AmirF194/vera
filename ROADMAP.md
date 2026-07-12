@@ -40,6 +40,7 @@ Exit criterion: every verification-completeness and guard-deferral row in KNOWN_
 |---|---|
 | [#764](https://github.com/aallan/vera/issues/764) | Call preconditions after an untranslatable `let` / `let`-destructure are not statically checked — `_translate_block` truncates, so E501 never fires though the runtime `requires` guard still holds. |
 | [#779](https://github.com/aallan/vera/issues/779) | Primitive-op obligations (E502/E526/E527) don't recurse into closure / quantifier / handler-clause bodies — fresh-slot scopes the walkers skip. |
+| [#985](https://github.com/aallan/vera/issues/985) | A nested closure's return coercion is runtime-guarded but not reported in `vera verify`'s stream — the `AnonFn` handler is deliberately shallow (it won't recurse into a closure body); same fresh-scope-body family as #779. |
 | [#909](https://github.com/aallan/vera/issues/909) | A value's postcondition / refinement is forgotten through an ADT field (box then unbox loses the fact), degrading provable programs to Tier 3. |
 | [#754](https://github.com/aallan/vera/issues/754) | Effect-operation-argument runtime guard for `@Nat` narrowing, with a dedicated trap kind — first consumer of the per-component metadata enabler. |
 | [#757](https://github.com/aallan/vera/issues/757) | Generic-instantiated constructor-field runtime guard — second consumer of the same enabler. |
