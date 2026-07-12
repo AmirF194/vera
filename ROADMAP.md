@@ -6,9 +6,9 @@ The goal is unchanged: **a stable, working, usable language that doesn't silentl
 
 ## How this file works
 
-The roadmap is a sequence of **stages** — concentrated sprints over a coherent class of issues — continuing the numbering from [HISTORY.md](HISTORY.md), which closed Stage 18.  The v0.1.0 bug burndown (Stage 17) set the model: pick a themed set, drive it to zero as one campaign, release, move on.  When a stage's table empties, the stage moves to HISTORY.md with its releases and the next one starts.
+The roadmap is a sequence of **stages** — concentrated sprints over a coherent class of issues — continuing the numbering from [HISTORY.md](HISTORY.md).  A stage is a campaign: pick a themed set, drive it to zero, release, move on.  When a stage's table empties, the stage moves to HISTORY.md with its releases and the next one starts.
 
-Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verification truth first, then structural drift-proofing, then the capabilities the flagship needs, then the experience around them.  Priority lives in this file and nowhere else — issues carry kind and area labels, not priority labels.  Completed items are deleted from these tables and noted in HISTORY.md.  Stages beyond the next one or two are a forecast, not a commitment — they reorder freely as reality intervenes, and a new bug class outranks everything and becomes its own burndown, as Stage 17 did.
+Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verification truth first, then structural drift-proofing, then the capabilities the flagship needs, then the experience around them.  Priority lives in this file and nowhere else — issues carry kind and area labels, not priority labels.  Completed items are deleted from these tables and noted in HISTORY.md.  Stages beyond the next one or two are a forecast, not a commitment — they reorder freely as reality intervenes, and a new bug class outranks everything and becomes its own burndown.
 
 ## Where we are
 
@@ -51,7 +51,7 @@ Exit criterion: every verification-completeness and guard-deferral row in KNOWN_
 
 *One fact, one home, drift caught by a gate.*
 
-The Stage 18 consistency sweep fixed a long tail of drift **by hand**; this stage makes those classes structural so the next sweep finds nothing.  It inherits the June 2026 audit's second theme and the gate-honesty findings the July external contributions surfaced: a gate that doesn't check its own premise is drift waiting to happen.  The release-process holdouts ride here too — automation is single-sourcing for process.
+This stage makes drift-prone consistency classes structural — each gets a generator or a gate, so a doc fact lives in one place and the next consistency pass finds nothing. A gate that doesn't check its own premise is itself drift waiting to happen. Release-process automation rides here too: automation is single-sourcing for process.
 
 Exit criterion: each listed drift class has a generator or a gate, and a release requires no manual tag/publish steps.
 
@@ -178,7 +178,7 @@ Not stage-gated; advanced alongside whatever stage is active.
 
 Deliberate trade-offs, recorded so they aren't re-litigated by accident.
 
-- **No typed IR for WAT emission.**  The audit floated one; the cost-benefit doesn't clear while string-based emission is held safe by the walker-completeness gate and the planned canonical WAT formatter ([#672](https://github.com/aallan/vera/issues/672)).
+- **No typed IR for WAT emission.**  The cost-benefit doesn't clear while string-based emission is held safe by the walker-completeness gate and the planned canonical WAT formatter ([#672](https://github.com/aallan/vera/issues/672)).
 - **No parser fuzzing yet** ([#402](https://github.com/aallan/vera/issues/402), bookmark).  Trigger: a parser crash from the wild, or spare CI budget.
 - **No full Tier 2 verification yet** ([#427](https://github.com/aallan/vera/issues/427)).  Its old blocker is gone — per-monomorphization verification shipped and provides the differential oracle — but the staged sprints above outrank it; it stays on the horizon by priority, not dependency.
 
