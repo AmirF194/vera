@@ -18,9 +18,9 @@ Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verificati
 
 *`vera verify` tells the whole truth.*
 
-### Bug sprint first — the v0.1.4 burndown residuals
+### Bug sprint — monomorphizer and verifier gaps first
 
-The v0.1.4 burndown closed 19 bugs; its own reviews found eleven more, clustered in the monomorphizer/import pipeline and the verifier's obligation walkers. Clear them as a short sprint before the verification-completeness rows below, grouped by shared fix machinery so each PR touches one code path:
+Eleven bugs cluster in the monomorphizer/import pipeline and the verifier's obligation walkers. Clear them as a short sprint before the verification-completeness rows below, grouped by shared fix machinery so each PR touches one code path:
 
 **PR A — the mono/import-door cluster (7).** All seven are passes that only cover top-level or local declarations, so imported and monomorphized bodies fall through — one provenance-carrying fix (hoist/discovery/rewrite/keying threaded through resolved-module programs and clone bases) serves the family. [#999](https://github.com/aallan/vera/issues/999) imported bodies get no generic-instantiation discovery; [#1000](https://github.com/aallan/vera/issues/1000) a private module generic reached transitively is never harvested; [#1002](https://github.com/aallan/vera/issues/1002) a generic helper under a generic ancestor is never monomorphized; [#1008](https://github.com/aallan/vera/issues/1008) a module fn's own ADT layouts are gated on the importer's type import; [#1012](https://github.com/aallan/vera/issues/1012) the generic clone hoister lacks ancestor-scope call rewriting (aunt-call dangles); [#1014](https://github.com/aallan/vera/issues/1014) nested generic where-helpers are keyed flat first-seen-wins (silent wrong body); [#1015](https://github.com/aallan/vera/issues/1015) imported module where-helpers aren't parent-qualified (silent wrong body). Fix #1014's keying **first** — expanding discovery multiplies clone bases, and every new base is another first-seen-wins collision candidate.
 
@@ -32,7 +32,7 @@ The v0.1.4 burndown closed 19 bugs; its own reviews found eleven more, clustered
 
 [#996](https://github.com/aallan/vera/issues/996) stays a watch-only row — an unreproducible conformance flake, not a fix target.
 
-KNOWN_ISSUES carries a family of verification-completeness gaps — an obligation not emitted, a guard not planted — individually small, sharing machinery, and exactly the shape the burndown model handles well.  The guard wave's shared architectural enabler — per-component target-type metadata in codegen (the checker's target-type table threaded into code generation) — landed with the bug-labelled member of the family ([#820](https://github.com/aallan/vera/issues/820)), which is now retired: the `@Nat` → `@Int` widening is guarded at the array-element, tuple-component, heterogeneous-arm, and closure argument/return sites.  The same enabler now unblocks the staged narrowing rows below.
+KNOWN_ISSUES carries a family of verification-completeness gaps — an obligation not emitted, a guard not planted — individually small and sharing machinery. This stage retires each. The per-component target-type table threaded into codegen (the enabler [#820](https://github.com/aallan/vera/issues/820) built) is the shared metadata the staged narrowing rows below reuse.
 
 Exit criterion: every verification-completeness and guard-deferral row in KNOWN_ISSUES is retired.
 
