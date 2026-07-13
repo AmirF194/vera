@@ -413,6 +413,12 @@ def cmd_compile(
                 }
                 print(json.dumps(result_dict, indent=2))
                 return 1
+            # Print warnings on the error path too (#1004 review): the text
+            # branch must not silently drop type_warnings when a type error is
+            # also present, mirroring the codegen-error branch below.  (The JSON
+            # branch already includes them.)
+            for w in type_warnings:
+                print(f"warning: {w.format()}", file=sys.stderr)
             for e in type_errors:
                 print(e.format(), file=sys.stderr)
             return 1
@@ -429,7 +435,7 @@ def cmd_compile(
         warnings = [d for d in result.diagnostics if d.severity == "warning"]
         all_warnings = type_warnings + warnings
 
-        if errors:  # pragma: no cover — codegen errors after typecheck pass
+        if errors:
             if as_json:
                 result_dict = {
                     "ok": False,
@@ -439,6 +445,14 @@ def cmd_compile(
                 }
                 print(json.dumps(result_dict, indent=2))
                 return 1
+            # Print accumulated warnings on the error path too (#1004): a
+            # CodegenSkip drops a called function with an explanatory E602
+            # "function skipped" warning, then the caller's dangling `call $f`
+            # fails WAT assembly with an opaque `unknown func`.  Emitting only
+            # the error would leave the user without the reason the function was
+            # dropped.  (The JSON branch above already includes `warnings`.)
+            for w in all_warnings:
+                print(f"warning: {w.format()}", file=sys.stderr)
             for e in errors:
                 print(e.format(), file=sys.stderr)
             return 1
