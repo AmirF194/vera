@@ -290,7 +290,12 @@ jobs:
           cd "$RUNNER_TEMP"
           "$RUNNER_TEMP/veralang-wheel-smoke/bin/vera" version
           "$RUNNER_TEMP/veralang-wheel-smoke/bin/vera" check hello_world.vera
-          "$RUNNER_TEMP/veralang-wheel-smoke/bin/vera" run hello_world.vera
+          run_out="$("$RUNNER_TEMP/veralang-wheel-smoke/bin/vera" run hello_world.vera)"
+          printf '%s\n' "$run_out"
+          case "$run_out" in
+            *"Hello, World!"*) ;;
+            *) echo "::error::wheel smoke: unexpected 'vera run' output"; exit 1 ;;
+          esac
 
   sbom:
     permissions:

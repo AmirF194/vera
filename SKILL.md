@@ -12,7 +12,7 @@ Vera is a programming language designed for LLMs to write. It uses typed slot re
 Vera requires Python 3.11 or later. Node.js 22+ is optional (only needed for `vera compile --target browser` and browser parity tests). Install the released `veralang` distribution from PyPI:
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 python -m pip install veralang
 ```
 
@@ -22,7 +22,7 @@ The GitHub source route remains supported for unreleased changes and compiler de
 
 ```bash
 git clone https://github.com/aallan/vera.git && cd vera
-python -m venv .venv && source .venv/bin/activate
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 python -m pip install -e .
 ```
 

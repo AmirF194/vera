@@ -119,12 +119,12 @@ Install the released `veralang` distribution from PyPI:
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
 python -m pip install veralang
 ```
 
 The distribution is named `veralang`, but the installed command remains
-`vera`. For editor and agent integration through the language server, install
+`vera`, and Python code still imports it as `import vera`. For editor and agent integration through the language server, install
 `python -m pip install "veralang[lsp]"`. Do not run `pip install vera`: that
 name belongs to an unrelated project on PyPI.
 
@@ -135,7 +135,7 @@ changes, and testing the current `main` branch:
 git clone https://github.com/aallan/vera.git
 cd vera
 python -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
 python -m pip install -e ".[dev]"
 ```
 

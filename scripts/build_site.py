@@ -86,7 +86,7 @@ All side effects (IO, Http, HttpServer, State, Exceptions, Async, Inference, \
 Random) are tracked in the type system via algebraic effects.
 
 Current version: {version}. The reference compiler is written in Python. \
-Install the `veralang` distribution from PyPI or use `pip install -e .` from \
+Install the `veralang` distribution from PyPI or use `pip install -e ".[dev]"` from \
 the repository.
 
 ## Homepage

@@ -28,7 +28,7 @@ python -m pip install "veralang[lsp]"
 ```
 
 The distribution is named `veralang`, but the installed command remains
-`vera`. **Do not run `pip install vera`**: that name belongs to an unrelated
+`vera`, and Python code still imports it as `import vera`. **Do not run `pip install vera`**: that name belongs to an unrelated
 ERAV citizen-science project on PyPI.
 
 ## Install from GitHub source
