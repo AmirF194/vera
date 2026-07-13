@@ -639,10 +639,13 @@ public fn main(-> @Int)
 
         result = _compile_example("inference_json.vera")
         completions = (
-            '{"score": 82}',
-            '```json\n{"score": 82}\n```',
+            ('{"score": 82}', 82),
+            ('```json\n{"score": 82}\n```', 82),
+            ('```\n{"score": 82}\n```', 82),
+            ('{"score": -7}', 0),
+            ('{"score": 140}', 100),
         )
-        for completion in completions:
+        for completion, expected_score in completions:
             with patch(
                 "vera.runtime.inference._call_inference_provider",
                 return_value=completion,
@@ -652,7 +655,7 @@ public fn main(-> @Int)
                     env_vars={"VERA_ANTHROPIC_API_KEY": "sk-test"},
                 )
             assert exec_result.value == 0
-            assert exec_result.stdout == "Clarity score: 82/100"
+            assert exec_result.stdout == f"Clarity score: {expected_score}/100"
 
         with patch(
             "vera.runtime.inference._call_inference_provider",
