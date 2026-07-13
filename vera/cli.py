@@ -481,6 +481,12 @@ def cmd_compile(
                         "warnings": [w.to_dict() for w in all_warnings],
                     }, indent=2))
                     return 1
+                # Print warnings on this error path too (#1004 review): the
+                # wasi-p2 family gate rejects AFTER a successful compile, so
+                # accumulated warnings must not be dropped in text mode —
+                # the third sibling of the type-error and codegen-error paths.
+                for w in all_warnings:
+                    print(f"warning: {w.format()}", file=sys.stderr)
                 print(f"Error: {msg}", file=sys.stderr)
                 return 1
 

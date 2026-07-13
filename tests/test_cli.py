@@ -815,6 +815,39 @@ class TestCmdCompile:
         assert "[E121]" in err  # the type error still shows
         assert "[E200]" in err  # the type warning previously dropped in text mode
 
+    # `main` uses `<Http>` (unsupported by wasi-p2), so `emit_wasi_component`
+    # raises AFTER a successful compile; `unused` is dropped with an E602 skip
+    # warning but is uncalled, so codegen still succeeds and the warning
+    # survives into `all_warnings`.
+    _WASI_P2_UNSUPPORTED_WITH_WARNING = (
+        "private fn unused(@Decimal -> @Int) "
+        "requires(true) ensures(hash(@Decimal.0) == 0) effects(pure) { 0 }\n"
+        "public fn main(@Unit -> @Int) "
+        "requires(true) ensures(true) effects(<Http>) "
+        '{ let @Result<String, String> = Http.get("http://example.com"); 0 }\n'
+    )
+
+    def test_compile_wasi_p2_warnings_shown_on_error_path_1004(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """#1004 review: the ``--target wasi-p2`` family-gate error prints warnings.
+
+        The family gate rejects ``<Http>`` *after* a successful compile, so its
+        text error path must print accumulated warnings too — the third sibling
+        of the type-error and codegen-error paths.  (The JSON envelope already
+        carried them.)
+        """
+        path = _bad_vera(tmp_path, self._WASI_P2_UNSUPPORTED_WITH_WARNING)
+        rc = cmd_compile(path, target="wasi-p2")
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "does not support" in err  # the family-gate error still shows
+        assert "[E602]" in err  # the skip warning previously dropped in text mode
+        # Ordering is the contract: warnings are flushed BEFORE the error.
+        assert err.index("[E602]") < err.index("Error: --target wasi-p2:")
+
     def test_compile_syntax_error(
         self,
         tmp_path: Path,
