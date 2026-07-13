@@ -591,9 +591,9 @@ def test_tier1_proved_contract_still_emits_its_guard_958() -> None:
     summary = _verify(src).summary
     assert summary.tier1_verified >= 1
     assert summary.tier3_runtime == 0
-    # ... yet code generation still emits the guard CALL — matching the exact
-    # instruction, not the always-present `contract_fail` import declaration
-    # (a substring check would pass on the import alone and miss an omission).
+    # ... yet code generation still emits the guard CALL.  Assert the exact
+    # `call $vera.contract_fail` instruction — a direct check that the guard is
+    # invoked, rather than a substring match on the `contract_fail` symbol.
     wat = _compile(src).wat
     assert any(
         line.strip() == "call $vera.contract_fail"
