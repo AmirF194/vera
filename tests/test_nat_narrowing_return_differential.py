@@ -632,6 +632,23 @@ public fn go(@Nat -> @Nat) requires(true) ensures(true) effects(pure)
 """, "go", U64_MAX, 5),
 ]
 
+# (label, source, fn) — the TIER-3 quadrant: an OPAQUE @Int argument the solver
+# cannot translate (`float_to_int` parses a machine float, which Z3 does not
+# model) narrowing into a @Nat formal, so the verifier records the arg nat_bind
+# `tier3` — a PROMISE that codegen guards it at run time — and codegen MUST emit
+# the guard.  Directly exercises the `guarded=True` deferral path (the crux of
+# the cross-component soundness argument); the mirror of the #758 return `_TIER3`
+# quadrant.  Not run (the int-arg `_run` helper cannot drive a @Float64 param).
+_APPLYFN_ARG_TIER3 = [
+    ("opaque_float_arg", """
+type NatToNat = fn(Nat -> Nat) effects(pure);
+private fn mk(@Unit -> @NatToNat) requires(true) ensures(true) effects(pure)
+{ fn(@Nat -> @Nat) effects(pure) { 5 } }
+public fn go(@Float64 -> @Nat) requires(true) ensures(true) effects(pure)
+{ let @NatToNat = mk(()); apply_fn(@NatToNat.0, float_to_int(@Float64.0)) }
+""", "go"),
+]
+
 
 class TestApplyFnArgNarrowingDifferential1017:
     @pytest.mark.parametrize("label,source", _APPLYFN_ARG_VIOLATED,
@@ -701,4 +718,28 @@ class TestApplyFnArgNarrowingDifferential1017:
         assert _run(source, fn, arg) == expect, (
             f"{label}: a non-narrowing @Nat argument was altered or trapped — a "
             f"spurious guard (u64.MAX reads as -1 in the i64 slot)"
+        )
+
+    @pytest.mark.parametrize("label,source,fn", _APPLYFN_ARG_TIER3,
+                             ids=[c[0] for c in _APPLYFN_ARG_TIER3])
+    def test_tier3_arg_promised_guard_is_emitted(
+        self, label: str, source: str, fn: str,
+    ) -> None:
+        """The tier-3 quadrant, cross-checked in ONE pipeline run: an opaque @Int
+        argument the solver cannot translate records the arg narrowing `tier3` (a
+        runtime-guard promise) AND the SAME compiled program carries the codegen
+        guard in the applying function — so `guarded=True` can never mean
+        "promised but never emitted" (the false-tier3 soundness hole this whole
+        differential exists to catch)."""
+        statuses, wat = _statuses_and_wat(source)
+        assert statuses == ["tier3"], (
+            f"{label}: expected a single tier3 arg nat_bind, got {statuses}"
+        )
+        idx = wat.find(f"(func ${fn} ")
+        assert idx >= 0, f"{label}: function {fn} not found in WAT"
+        end = wat.find("\n  (func ", idx + 1)
+        body = wat[idx:end if end >= 0 else len(wat)]
+        assert "i64.lt_s" in body and "unreachable" in body, (
+            f"{label}: the verifier promised a tier3 runtime guard, but codegen "
+            f"emitted none in {fn}:\n{body}"
         )
