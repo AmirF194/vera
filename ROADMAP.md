@@ -12,7 +12,7 @@ Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verificati
 
 ## Where we are
 
-7,404 tests, 157 conformance programs, 38 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
+7,405 tests, 157 conformance programs, 38 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
 
 ## Stage 19 — The verification completeness sprint
 
@@ -44,7 +44,6 @@ Exit criterion: every verification-completeness and guard-deferral row in KNOWN_
 | [#757](https://github.com/aallan/vera/issues/757) | Generic-instantiated constructor-field runtime guard — second consumer of the same enabler. |
 | [#765](https://github.com/aallan/vera/issues/765) | Nested constructor sub-pattern binds (`Some(Some(@PosInt))`) runtime-guarded to match their static obligation. |
 | [#860](https://github.com/aallan/vera/issues/860) | Harden the four sibling shadow-stack bounds (WAT `gc_shadow_push` emitter, `$register_wrapper` slow path, browser `gcRooted`/`gcShadowPush`) to the slot-complete form #791 gave `_ShadowGuard.push` — rides here because the WAT sites re-baseline golden pins. |
-| [#958](https://github.com/aallan/vera/issues/958) | Decide and align spec §11.8 with codegen truth: contract guards are always emitted today — either implement tier-aware omission as a deliberate optimisation or fix the spec's promise. |
 
 ## Stage 20 — The single-source sprint
 

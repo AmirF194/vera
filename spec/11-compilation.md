@@ -280,9 +280,9 @@ Each concrete `State<T>` type (`State<Int>`, `State<Bool>`, `State<Nat>`, `State
 
 ## 11.8 Runtime Contract Insertion
 
-Contracts that the verifier proved (Tier 1) are omitted from the compiled output — they are statically guaranteed and need no runtime check.
+Every **non-trivial** contract is compiled as a runtime check, regardless of the verifier's tier. Code generation is tier-agnostic — it never consults the `VerifyResult`, and `vera/codegen/contracts.py` has no notion of tiers — exactly as the arithmetic-safety guards of §11.2 are type-driven, not tier-driven. Only *trivial* contracts are eliminated (§11.8.1).
 
-Contracts that the verifier could not prove (Tier 3) are compiled as runtime assertions.
+The verifier's **Tier 1 / Tier 3** classification records whether Z3 discharged an obligation *statically*, not whether a runtime check is emitted. A **Tier 1** contract is one the verifier proved holds for all inputs, so its compiled check provably never fires — but it is emitted anyway, as a defensive backstop; a **Tier 3** contract is one the solver could not decide, and its check is the primary line of defence. Because the guard is present either way, a site where the verifier is unsound — a *false* Tier 1 — surfaces as a loud runtime trap rather than a silent wrong answer: the runtime check is the backstop the static proof is deliberately not trusted to replace.
 
 ### 11.8.1 Trivial Contract Elimination
 
