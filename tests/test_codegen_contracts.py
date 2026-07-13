@@ -17,6 +17,8 @@ from vera.codegen import (
 from vera.parser import parse_file
 from vera.transform import transform
 
+from tests.verifier_helpers import _verify
+
 
 # =====================================================================
 # Helpers
@@ -568,3 +570,26 @@ public fn add_five(@Unit -> @Unit)
             initial_state={"State_Int": 100},
         )
         assert exec_result.value is None  # Unit, no trap
+
+
+def test_tier1_proved_contract_still_emits_its_guard_958() -> None:
+    """#958: code generation is tier-agnostic — a Tier-1-*proved* contract
+    keeps its runtime guard in the compiled output.
+
+    ``ensures(@Int.result == @Int.0)`` over ``{ @Int.0 }`` is trivially proved
+    by Z3 (Tier 1, zero Tier-3), yet the compiled WAT still contains the
+    ``contract_fail`` postcondition guard.  This pins the always-emit backstop
+    (spec §11.8) that keeps a *false* Tier 1 a loud runtime trap rather than a
+    silent wrong answer; were §11.8's omission optimisation ever implemented,
+    this differential would fail loudly.
+    """
+    src = (
+        "public fn id(@Int -> @Int) "
+        "requires(true) ensures(@Int.result == @Int.0) effects(pure) { @Int.0 }\n"
+    )
+    # The postcondition is discharged statically — Tier 1, nothing deferred.
+    summary = _verify(src).summary
+    assert summary.tier1_verified >= 1
+    assert summary.tier3_runtime == 0
+    # ... yet code generation still emits the runtime guard.
+    assert "contract_fail" in _compile(src).wat

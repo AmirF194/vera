@@ -14,6 +14,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **`vera compile` prints the E602 "function skipped" warning on the text error path** ([#1004](https://github.com/aallan/vera/issues/1004)). When a `CodegenSkip` drops a *called* function, the caller's dangling `call $f` fails WAT assembly with an opaque `unknown func`; the warning explaining *why* the function was dropped was suppressed on the text error path (the `--json` envelope already carried it) and is now printed alongside the error. The type-error and `--target wasi-p2` family-gate text paths are corrected the same way, so a warning alongside those errors is no longer dropped.
 
+### Documentation
+
+- **Spec §11.8 now matches code generation: every non-trivial contract is compiled as a runtime check regardless of the verifier's tier** ([#958](https://github.com/aallan/vera/issues/958)). The section previously claimed Tier-1-proved contracts are omitted from the compiled output; code generation is tier-agnostic (`vera/codegen/contracts.py` has no notion of tiers), so a Tier-1 proof means the emitted check provably never fires, not that it is absent — the runtime guard is the deliberate backstop that keeps a *false* Tier 1 a loud trap rather than a silent wrong answer.
+
 ## [0.1.4] - 2026-07-11
 
 ### Fixed
