@@ -32,7 +32,13 @@ python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\act
 python -m pip install -e .
 ```
 
-For an editable source install with the language server, use `python -m pip install -e ".[lsp]"`. After either installation route, verify it works:
+For an editable source install with the language server, use `python -m pip install -e ".[lsp]"`. Verify the installed CLI — works for either route, with no checkout required:
+
+```bash
+vera version
+```
+
+From a source checkout you can also run the bundled example end to end:
 
 ```bash
 vera check examples/hello_world.vera    # should print "OK: examples/hello_world.vera"
