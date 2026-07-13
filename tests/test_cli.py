@@ -845,6 +845,8 @@ class TestCmdCompile:
         err = capsys.readouterr().err
         assert "does not support" in err  # the family-gate error still shows
         assert "[E602]" in err  # the skip warning previously dropped in text mode
+        # Ordering is the contract: warnings are flushed BEFORE the error.
+        assert err.index("[E602]") < err.index("Error: --target wasi-p2:")
 
     def test_compile_syntax_error(
         self,
