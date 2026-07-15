@@ -1,0 +1,83 @@
+-- Conformance: effect ops in array-literal element position (Chapter 7,
+-- Section 7.3; Chapter 4, Section 4.xx arrays).
+-- Tests: get(()) as an array-literal element compiles and dispatches
+-- through the clause-aware op lowering (#1006) — under a handler whose
+-- get clause is the identity, under a TRANSFORMING get clause (+100,
+-- the #976 intrinsic-hybrid semantics), and inside a helper with a
+-- declared effects(<State<Int>>) row and no handler of its own (the
+-- second op-injection site).
+private fn snapshot_pair(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<State<Int>>)
+{
+  let @Array<Int> = [get(()), 4];
+  @Array<Int>.0[0] * 10 + @Array<Int>.0[1]
+}
+
+-- Identity get clause: state 3 -> [3, 1] -> 31.
+private fn elem_identity(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>](@Int = 3) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) }
+  } in {
+    let @Array<Int> = [get(()), 1];
+    @Array<Int>.0[0] * 10 + @Array<Int>.0[1]
+  }
+}
+
+-- Transforming get clause: the element sees the +100 transform -> 1031.
+private fn elem_transformed(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>](@Int = 3) {
+    get(@Unit) -> { resume(@Int.0 + 100) },
+    put(@Int) -> { resume(()) }
+  } in {
+    let @Array<Int> = [get(()), 1];
+    @Array<Int>.0[0] * 10 + @Array<Int>.0[1]
+  }
+}
+
+-- Declared-effect helper under a handler: state 7 -> [7, 4] -> 74.
+private fn elem_declared_effect(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>](@Int = 7) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) }
+  } in {
+    snapshot_pair(())
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 0)
+  effects(pure)
+{
+  let @Int = elem_identity(());
+  if @Int.0 != 31 then {
+    1
+  } else {
+    let @Int = elem_transformed(());
+    if @Int.0 != 1031 then {
+      2
+    } else {
+      let @Int = elem_declared_effect(());
+      if @Int.0 != 74 then {
+        3
+      } else {
+        0
+      }
+    }
+  }
+}

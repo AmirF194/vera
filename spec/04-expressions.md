@@ -114,6 +114,8 @@ let @Bool = @Int.0 > 0;
 
 The type on the left is mandatory — there is no type inference for let bindings. This ensures that the slot reference type is always explicit and locally determinable.
 
+The declared type must have a runtime representation: a `let` of a zero-size type (`let @Unit = put(5);`) is a checker error (**E183**, §2.2.2), since the binding could never be read — evaluate the expression as a statement instead (`put(5);`).
+
 Let bindings are immutable. There is no reassignment. To "update" a value, bind a new slot:
 
 ```

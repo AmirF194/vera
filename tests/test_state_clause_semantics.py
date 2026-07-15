@@ -620,3 +620,77 @@ public fn test(@Unit -> @Int)
 }
 """
         assert _run(src, "test") == 10
+
+
+class TestOpInArrayLiteral1006:
+    """`#1006`: an effect op as an array-literal ELEMENT compiles and
+    dispatches through the clause-aware op lowering.
+
+    Pre-fix, ``[get(()), 1]`` was check/verify-green but codegen's local
+    element-type inference did not know effect ops, so the literal — and
+    the whole enclosing function — was skipped (E602).  The handler
+    injection site now records ``get``'s VERA result type (State<T>'s T)
+    alongside the WAT type it already recorded, and the FnCall arm of
+    ``_infer_vera_type`` consults it.
+    """
+
+    def test_get_as_array_element(self) -> None:
+        # State 3 -> [3, 1]; 3*10 + 1 = 31.
+        src = """\
+public fn test(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[State<Int>](@Int = 3) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) }
+  } in {
+    let @Array<Int> = [get(()), 1];
+    @Array<Int>.0[0] * 10 + @Array<Int>.0[1]
+  }
+}
+"""
+        assert _run(src, "test") == 31
+
+    def test_transformed_get_as_array_element(self) -> None:
+        # The element goes through the CLAUSE-AWARE dispatch, not the
+        # bare intrinsic: the +100 transform must apply -> [103, 1].
+        src = """\
+public fn test(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[State<Int>](@Int = 3) {
+    get(@Unit) -> { resume(@Int.0 + 100) },
+    put(@Int) -> { resume(()) }
+  } in {
+    let @Array<Int> = [get(()), 1];
+    @Array<Int>.0[0] * 10 + @Array<Int>.0[1]
+  }
+}
+"""
+        assert _run(src, "test") == 1031
+
+    def test_get_as_array_element_declared_effect_fn(self) -> None:
+        # The SECOND injection site (codegen/functions.py declared-effect
+        # path): a helper with declared `effects(<State<Int>>)` and no
+        # handler of its own must type the element the same way — the two
+        # sites populate the op registries in lock-step.
+        src = """\
+private fn snapshot(@Unit -> @Int)
+  requires(true) ensures(true) effects(<State<Int>>)
+{
+  let @Array<Int> = [get(()), 4];
+  @Array<Int>.0[0] * 10 + @Array<Int>.0[1]
+}
+
+public fn test(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[State<Int>](@Int = 7) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) }
+  } in {
+    snapshot(())
+  }
+}
+"""
+        assert _run(src, "test") == 74

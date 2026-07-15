@@ -1,0 +1,28 @@
+-- Conformance: reading a get clause's @Unit operation parameter is a
+-- checker error (Chapter 2, Section 2.2; Chapter 7, Section 7.5).
+-- Tests: E182 — a Unit value is zero-size and compiles to no WASM local,
+-- so a @Unit.n slot read resolves to no runtime location (#1005).  The
+-- clause may DECLARE the @Unit op parameter (it erases from the ABI);
+-- only the read is rejected, identically to a normal fn's @Unit param.
+-- Previously this passed check and died at codegen with the E699
+-- dangling-slot internal error.
+private fn takes_unit(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  7
+}
+
+public fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>](@Int = 3) {
+    get(@Unit) -> { resume(@Int.0 + takes_unit(@Unit.0)) },
+    put(@Int) -> { resume(()) }
+  } in {
+    get(())
+  }
+}

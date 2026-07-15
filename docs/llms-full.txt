@@ -428,7 +428,7 @@ array, useful when processing diagnostics programmatically.
 - `Float64` — 64-bit IEEE 754 floating-point
 - `Byte` — unsigned 8-bit integer (0–255)
 - `String` — text
-- `Unit` — singleton type, value is `()`
+- `Unit` — singleton type, value is `()`. Zero-size and **declaration-only**: a `@Unit` parameter (function or handler-clause op) is legal but reading it (`@Unit.0`) is a checker error (E182) — write the literal `()` instead — and a `let` of a zero-size type (`let @Unit = put(5);`) is a checker error (E183) — call the expression as a statement (`put(5);`). Applies to anything with no runtime representation, including `Future<Unit>`.
 - `Never` — bottom type (used for non-terminating expressions like `throw`)
 
 **`Int` and `Nat` are interchangeable in both directions.**  `@Nat <: @Int` is a formal subtyping rule at the *type* level (use a `@Nat` anywhere `@Int` is expected, no `nat_to_int` call), and `@Int <: @Nat` is permitted by the type checker with a verifier-discharged obligation (`@Int.0 >= 0`).  This means `array_length` (declared `@Int`) flows freely into `@Nat` positions without explicit conversion — the verifier proves non-negativity from context or falls back to a runtime check.  Both directions carry a *value*-level obligation, because `@Nat` is a u64 and `@Int` an i64: narrowing requires `>= 0` (`E503`/`E504`), and widening requires `<= i64.MAX` (`E530`; or an `E531` warning at the generic-instantiated `@Int`-field component site code generation cannot guard) — a `@Nat` above i64.MAX bit-reinterprets to a negative `@Int`.  Runtime guards and verifier obligations mostly correspond, with documented residuals in both directions.  Guarded-but-not-reported: a closure nested inside *another closure's* body is runtime-guarded but not obligated ([#985](https://github.com/aallan/vera/issues/985)), so a guard can fire there that `vera verify` did not report.  Obligated-but-not-guarded: three narrowing sites are statically obligated yet carry no runtime guard — the effect-operation argument and the generic-instantiated constructor field ([#754](https://github.com/aallan/vera/issues/754)/[#757](https://github.com/aallan/vera/issues/757)), and the `nat_to_int`/`nat_to_string` conversion builtins — where an `E504` warning discloses the unguarded residual rather than claiming a check the runtime never performs.  **Do not** insert `nat_to_int` defensively; it's only needed when the value is genuinely allowed to be negative.  See spec §2.2.1 for the formal rule.
@@ -2378,8 +2378,6 @@ Current reference-implementation bugs that an agent writing Vera code is likely 
 | Shape | Bug summary | Workaround | Issue |
 |---|---|---|---|
 | Rare conformance-gate flake | `ch05_closure_nat_return` trapped once in a full conformance run and never again (~960 clean attempts) — suspected runtime/GC timing interaction, not a compiler defect. | If CI reds on this program with `Reached unreachable` in `main`, re-run and report on the issue with wasmtime version + load conditions — do not chase the compiler. | [#996](https://github.com/aallan/vera/issues/996) |
-| `@Unit` param read in a `get` clause | Reading the `get` clause's `@Unit` op parameter passes `check` but fails codegen with an E699 internal error. | Don't reference the `@Unit` parameter — it carries no value; read the state slot (`@T.0`) instead. | [#1005](https://github.com/aallan/vera/issues/1005) |
-| Effect op in an array literal / `let @Unit` | `[get(()), 1]` or `let @Unit = put(x)` compiles to a skipped function (opaque `unknown func` if called). | Bind the op result first (`let @Int = get(());`) and use the slot in the array; call `put(...)` as a statement, not a `let`. | [#1006](https://github.com/aallan/vera/issues/1006) |
 | Refinement predicate into an `apply_fn` refined formal | `apply_fn(f, <v>)` where `f` takes `{ @Nat \| P }` obligates only the `@Nat` base (`>= 0`, since #1017), not the full predicate `P` — a value satisfying `>= 0` but violating `P` verifies clean. | Call the function by name instead of `apply_fn` (the named-call path checks the full refinement), or bind into the refined slot first (`let @T = <v>;`). | [#1024](https://github.com/aallan/vera/issues/1024) |
 
 When a Vera program type-checks cleanly, compiles without errors, and then produces a runtime trap you can't explain, runtime trap diagnostics are now Vera-native end-to-end: each trap carries a `kind` label (`divide_by_zero` / `out_of_bounds` / `stack_exhausted` / `unreachable` / `overflow` / `contract_violation` / `unknown`), a per-kind `Fix:` paragraph naming the canonical remediation, and a source backtrace pointing at the offending Vera function and line — not just `wasm trap: <reason>`.  Tail-recursive iteration runs in constant WASM stack space for both non-allocating ([#517](https://github.com/aallan/vera/issues/517), v0.0.126) and allocating ([#549](https://github.com/aallan/vera/issues/549), v0.0.154) tail calls — the latter prepends a `$gc_sp` restore before each `return_call` to keep the shadow stack bounded across iterations.
@@ -2420,7 +2418,7 @@ Read `SKILL.md` for the full language reference. It covers syntax, slot referenc
 
 ### Conformance programs as reference
 
-The conformance suite in `tests/conformance/` contains 157 small, self-contained programs — often one per language feature — that serve as minimal working examples (the exceptions are `ch07_cross_module_contracts.vera` and `ch08_cross_module_generic.vera`, which import their `ch07_cross_module_contracts_lib.vera` companion to exercise cross-module contracts). Each positive program must pass its declared verification level (see `manifest.json` for mappings: `parse`, `check`, `verify`, or `run`); the nine negative fixtures (`ch02_generic_over_unit_rejected`, `ch05_apply_fn_arity`, `ch05_where_helper_outer_slot_rejected`, `ch07_handler_state_body_scope_rejected`, `ch08_circular_import`, `ch08_visibility_private`, `ch09_builtin_redefinition`, `ch09_ord_adt_rejected`, `ch09_eq_non_derivable_rejected`) instead must *fail* `check` with the E-code in their `expected_error` field. When you need to see how a specific construct works (e.g. effect handlers, match expressions, closures), check the corresponding conformance program before reading the spec.
+The conformance suite in `tests/conformance/` contains 160 small, self-contained programs — often one per language feature — that serve as minimal working examples (the exceptions are `ch07_cross_module_contracts.vera` and `ch08_cross_module_generic.vera`, which import their `ch07_cross_module_contracts_lib.vera` companion to exercise cross-module contracts). Each positive program must pass its declared verification level (see `manifest.json` for mappings: `parse`, `check`, `verify`, or `run`); the eleven negative fixtures (`ch02_generic_over_unit_rejected`, `ch04_let_unit_rejected`, `ch05_apply_fn_arity`, `ch05_where_helper_outer_slot_rejected`, `ch07_handler_state_body_scope_rejected`, `ch07_state_unit_op_param_read_rejected`, `ch08_circular_import`, `ch08_visibility_private`, `ch09_builtin_redefinition`, `ch09_ord_adt_rejected`, `ch09_eq_non_derivable_rejected`) instead must *fail* `check` with the E-code in their `expected_error` field. When you need to see how a specific construct works (e.g. effect handlers, match expressions, closures), check the corresponding conformance program before reading the spec.
 
 ### Workflow
 
@@ -2595,7 +2593,7 @@ Each stage is a module with a single public API function (`parse_file`, `transfo
 pytest tests/ -v                       # Run all tests (see TESTING.md)
 pytest tests/test_conformance.py -v    # Conformance suite only
 mypy vera/                             # Type-check the compiler
-python scripts/check_conformance.py    # All 157 conformance programs hold (positives pass; negatives fail with their E-code)
+python scripts/check_conformance.py    # All 160 conformance programs hold (positives pass; negatives fail with their E-code)
 python scripts/check_examples.py       # All 38 examples must pass
 ```
 
@@ -2605,7 +2603,7 @@ When implementing a new language feature, write the conformance program *first* 
 
 ### Invariants
 
-- All 157 conformance programs in `tests/conformance/` must hold at their declared level — positive entries pass, and the negative fixtures (`ch02_generic_over_unit_rejected`, `ch05_apply_fn_arity`, `ch05_where_helper_outer_slot_rejected`, `ch07_handler_state_body_scope_rejected`, `ch08_circular_import`, `ch08_visibility_private`, `ch09_builtin_redefinition`, `ch09_ord_adt_rejected`, `ch09_eq_non_derivable_rejected`) must *fail* `check` with their `expected_error` E-code
+- All 160 conformance programs in `tests/conformance/` must hold at their declared level — positive entries pass, and the negative fixtures (`ch02_generic_over_unit_rejected`, `ch05_apply_fn_arity`, `ch05_where_helper_outer_slot_rejected`, `ch07_handler_state_body_scope_rejected`, `ch08_circular_import`, `ch08_visibility_private`, `ch09_builtin_redefinition`, `ch09_ord_adt_rejected`, `ch09_eq_non_derivable_rejected`) must *fail* `check` with their `expected_error` E-code
 - All 38 examples in `examples/` must pass `vera check` and `vera verify`
 - `mypy vera/` must be clean
 - `pytest tests/ -v` must pass
@@ -3042,7 +3040,7 @@ None of this is Vera-specific, but it validates the design choices. The thesis i
 
 This is a real concern. LLMs are trained on trillions of tokens of Python, TypeScript, and JavaScript. A MojoBench study (NAACL 2025) found that even fine-tuned models achieved only 30–35% improvement over base models on Mojo code generation, illustrating the cold-start problem for new languages.
 
-Vera's approach has three parts. First, the agent-facing documentation (SKILL.md) is designed to be dropped into a model's context window, so the model works from the language specification rather than training data recall. Second, Vera's syntax is deliberately simple and regular — fewer constructs, each with exactly one canonical form — which reduces the surface area a model needs to learn. Third, the conformance test suite (157 programs covering every language feature) gives models concrete examples to learn from and conform to. Simon Willison's December 2025 JustHTML write-up illustrates the same point in practice: an LLM-assisted implementation, guided by the html5lib conformance suite, conformed to the HTML parsing spec by running against its tests — a comprehensive test suite is a strong scaffold for a model implementing to a specification.
+Vera's approach has three parts. First, the agent-facing documentation (SKILL.md) is designed to be dropped into a model's context window, so the model works from the language specification rather than training data recall. Second, Vera's syntax is deliberately simple and regular — fewer constructs, each with exactly one canonical form — which reduces the surface area a model needs to learn. Third, the conformance test suite (160 programs covering every language feature) gives models concrete examples to learn from and conform to. Simon Willison's December 2025 JustHTML write-up illustrates the same point in practice: an LLM-assisted implementation, guided by the html5lib conformance suite, conformed to the HTML parsing spec by running against its tests — a comprehensive test suite is a strong scaffold for a model implementing to a specification.
 
 
 ## How does Vera compare to Dafny / Lean / Koka / F*?
@@ -3085,7 +3083,7 @@ The reference compiler is under active development. The current release includes
 
 - A seven-stage pipeline: parse, transform, resolve, typecheck, verify, compile, execute
 - A 14-chapter formal specification
-- 7,391 tests, including a 157-program conformance suite
+- 7,514 tests, including a 160-program conformance suite
 - 37 working example programs
 - 164 built-in functions covering strings, arrays, math, parsing, and data types
 - Four built-in abilities (Eq, Ord, Hash, Show) with constrained generics and ADT auto-derivation
@@ -3195,6 +3193,8 @@ Every diagnostic has a stable error code. Codes are grouped by compiler phase:
 - **E176**: Unknown expression type
 - **E180**: Unknown ability in constraint
 - **E181**: Constraint references undeclared type variable
+- **E182**: Slot reference to a zero-size type
+- **E183**: Let binding of a zero-size type
 - **E200**: Unresolved function
 - **E201**: Wrong argument count
 - **E202**: Argument type mismatch

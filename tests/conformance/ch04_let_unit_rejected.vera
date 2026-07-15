@@ -1,0 +1,21 @@
+-- Conformance: a let binding of the zero-size type Unit is a checker
+-- error (Chapter 4, Section 4.7; Chapter 2, Section 2.2).
+-- Tests: E183 — a Unit binding has no WASM representation and could
+-- never be read (E182), so its only conceivable use is sequencing,
+-- which the expression statement already provides (#1006).  Applies to
+-- any right-hand side: an effect op (let @Unit = put(5)) or a plain
+-- unit expression.  Previously this passed check and codegen skipped
+-- the whole enclosing function (E602).
+public fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>](@Int = 0) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) }
+  } in {
+    let @Unit = put(5);
+    get(())
+  }
+}

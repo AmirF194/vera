@@ -423,7 +423,7 @@ class TestObligationKinds:
             "\n"
             "private fn f(@Unit -> @Int)\n"
             "  requires(true) ensures(true) effects(pure)\n"
-            "{ let @NonEmptyArray = mk(@Unit.0); 0 }\n"
+            "{ let @NonEmptyArray = mk(()); 0 }\n"
         )
         result = self._verify_source(source)
         unguarded = [

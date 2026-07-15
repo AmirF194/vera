@@ -183,6 +183,7 @@ class FunctionCompilationMixin:
         # legal — raw `<`, `>`, `,`, ` ` are illegal in a WAT identifier.
         effect_ops: dict[str, tuple[str, bool]] = {}
         effect_op_result_wt: dict[str, str | None] = {}
+        effect_op_result_vera: dict[str, str | None] = {}
         if isinstance(decl.effect, ast.EffectSet):
             for eff in decl.effect.effects:
                 if (isinstance(eff, ast.EffectRef) and eff.name == "State"
@@ -202,6 +203,10 @@ class FunctionCompilationMixin:
                             effect_op_result_wt["get"] = (
                                 self._type_expr_to_wasm_type(eff.type_args[0])
                             )
+                            # #1006: the VERA-name mirror — `_infer_vera_type`
+                            # needs it to type a `get(())` array-literal
+                            # element (the WAT type above is layout-ambiguous).
+                            effect_op_result_vera["get"] = type_name
                         if "put" not in self._fn_sigs:
                             effect_ops["put"] = (
                                 f"$vera.state_put_{mangled}", True
@@ -227,6 +232,7 @@ class FunctionCompilationMixin:
             self.string_pool,
             effect_ops=effect_ops,
             effect_op_result_wt=effect_op_result_wt,
+            effect_op_result_vera=effect_op_result_vera,
             ctor_layouts=ctor_layouts,
             adt_type_names=adt_type_names,
             generic_fn_info=getattr(self, "_generic_fn_info", None),

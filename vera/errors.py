@@ -489,6 +489,8 @@ ERROR_CODES: dict[str, str] = {
     "E176": "Unknown expression type",
     "E180": "Unknown ability in constraint",
     "E181": "Constraint references undeclared type variable",
+    "E182": "Slot reference to a zero-size type",
+    "E183": "Let binding of a zero-size type",
     # E2xx — Type Checker: Calls
     "E200": "Unresolved function",
     "E201": "Wrong argument count",

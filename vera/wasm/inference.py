@@ -897,7 +897,9 @@ class InferenceMixin:
         #   NullaryConstructor → parent ADT name
         #   BinaryExpr        → "Bool" for cmp/logic, else left's type
         #   UnaryExpr         → "Bool" for `not`, else operand's type
-        #   FnCall            → from `_infer_fncall_vera_type`
+        #   FnCall            → effect-op result registry first (#1006 —
+        #                       `get(())` as an array-literal element),
+        #                       else from `_infer_fncall_vera_type`
         #   ArrayLit          → "Array"
         #   IndexExpr         → element type
         #   IfExpr            → from then-branch
@@ -967,6 +969,17 @@ class InferenceMixin:
                 return "Bool"
             return self._infer_vera_type(expr.operand)
         if isinstance(expr, ast.FnCall):
+            # #1006: an effect op in a Vera-type-needing position (the
+            # array-literal ELEMENT case) — the op is not in the fn tables,
+            # so consult the op registry first.  Guarded on `_effect_ops`
+            # membership: op names only bind where ops are injected, and a
+            # user fn shadowing an op name is kept OUT of `_effect_ops` (the
+            # `_fn_sigs` guard at both injection sites), so a shadowed name
+            # still resolves through the normal fn path below.  `get` maps
+            # to State<T>'s T; `put`/`throw` record no Vera result type and
+            # return None (unchanged skip for value-position uses).
+            if expr.name in self._effect_ops:
+                return self._effect_op_result_vera.get(expr.name)
             return self._infer_fncall_vera_type(expr)
         if isinstance(expr, ast.StringLit):
             return "String"
