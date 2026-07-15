@@ -142,12 +142,16 @@ class TestNestedGenericWhereHelper990:
 
     def test_clone_emitted_exactly_once(self) -> None:
         # The T=Int clone exists exactly once, and the uncompilable @T
-        # template is not emitted at all.
+        # template is not emitted at all.  #1014 parent-qualifies the nested
+        # generic's base, so the clone is ``parent$where$gid$Int`` — never a
+        # bare ``gid$Int`` (which would collide across same-named nested
+        # generics under different parents).
         result = _compile(_NESTED_GENERIC)
         names = _func_names(result.wat)
-        clones = [n for n in names if n.startswith("gid$")]
-        assert clones == ["gid$Int"], f"expected one gid$Int clone, got {clones}"
-        assert "gid" not in names, "the @T template must not be emitted"
+        clones = [n for n in names if "gid" in n]
+        assert clones == ["parent$where$gid$Int"], (
+            f"expected one parent-qualified gid clone (#1014), got {clones}"
+        )
 
     def test_generic_grandchild_under_plain_child_runs(self) -> None:
         # The issue's one-level-deeper variant: every ancestor is non-generic.
@@ -157,9 +161,10 @@ class TestNestedGenericWhereHelper990:
         _assert_compiles_and_runs(_TWO_INSTANTIATIONS, 15)
         result = _compile(_TWO_INSTANTIATIONS)
         names = _func_names(result.wat)
-        clones = sorted(n for n in names if n.startswith("gid$"))
-        assert clones == ["gid$Bool", "gid$Int"], (
-            f"expected both instantiation clones, got {clones}"
+        clones = sorted(n for n in names if "gid" in n)
+        assert clones == ["parent$where$gid$Bool", "parent$where$gid$Int"], (
+            f"expected both parent-qualified instantiation clones (#1014), "
+            f"got {clones}"
         )
 
     def test_contract_only_instantiation_runs(self) -> None:
@@ -205,7 +210,10 @@ public fn main(@Unit -> @Int)
         _assert_compiles_and_runs(source, 15)
         result = _compile(source)
         names = _func_names(result.wat)
-        assert "outer$Int" in names and "inner$Int" in names, (
+        # #1014 parent-qualifies both nested generic bases.
+        assert "parent$where$outer$Int" in names and (
+            "parent$where$inner$Int" in names
+        ), (
             f"transitive nested-to-nested clones missing: "
             f"{[n for n in names if '$' in n]}"
         )
@@ -232,9 +240,9 @@ public fn main(@Unit -> @Int)
 
     def test_nested_generic_with_own_where_child_runs(self) -> None:
         # The nested generic carries its OWN where-child: the child is emitted
-        # per-clone by the hoisting path (`gid$Int$where$dbl`), and the Pass-2
-        # where-fn sweep must NOT also emit it standalone (it stops at the
-        # generic template).
+        # per-clone by the hoisting path (`parent$where$gid$Int$where$dbl`),
+        # and the Pass-2 where-fn sweep must NOT also emit it standalone (it
+        # stops at the generic template).
         # Two children under the generic helper: a T-DEPENDENT one (only
         # compilable inside a clone) and a T-INDEPENDENT one (would compile
         # standalone, so a Pass-2 sweep that wrongly descends the generic's
@@ -263,22 +271,30 @@ public fn main(@Unit -> @Int)
         _assert_compiles_and_runs(source, 15)
         result = _compile(source)
         names = _func_names(result.wat)
-        hoisted = sorted(n for n in names if "$where$" in n)
+        hoisted = sorted(
+            n for n in names
+            if "$where$bump" in n or "$where$pass_through" in n
+        )
         assert hoisted == [
-            "gid$Int$where$bump", "gid$Int$where$pass_through",
-        ], f"expected exactly the per-clone hoisted children, got {hoisted}"
+            "parent$where$gid$Int$where$bump",
+            "parent$where$gid$Int$where$pass_through",
+        ], (
+            f"expected exactly the per-clone hoisted children under the #1014 "
+            f"parent-qualified generic, got {hoisted}"
+        )
         for bare in ("pass_through", "bump"):
             assert bare not in names, (
                 f"the generic's child '{bare}' must not ALSO be emitted "
                 f"standalone by the Pass-2 where-fn sweep (dead duplicate)"
             )
 
-    def test_generic_under_generic_ancestor_still_dangles_1002(self) -> None:
-        # HONEST PIN (#1002, pre-existing): a generic grandchild under a
-        # GENERIC child is hoisted as a still-generic template (hoisting
-        # substitutes only the ancestor's type vars) and never instantiated —
-        # the clone's call dangles at WAT assembly while check AND verify are
-        # green.  When #1002 closes this pin flips to a run assertion.
+    def test_generic_under_generic_ancestor_instantiated_1002(self) -> None:
+        # #1002 (closed): a generic grandchild (`ginner`) under a GENERIC child
+        # (`outer`) is now instantiated per-clone — each clone of the ancestor
+        # discovers its concrete calls to the still-generic hoisted helper,
+        # emits `parent$where$outer$Int$where$ginner$Int`, and rewrites the
+        # call.  Was a dangling `unknown func` at run (check + verify green)
+        # before the per-clone nested-instantiation fixpoint landed.
         source = """\
 private fn parent(@Int -> @Int)
   requires(true) ensures(@Int.result == @Int.0 + 5) effects(pure)
@@ -297,12 +313,12 @@ public fn main(@Unit -> @Int)
   requires(true) ensures(@Int.result == 15) effects(pure)
 { parent(10) }
 """
+        _assert_compiles_and_runs(source, 15)
         result = _compile(source)
-        errs = [d for d in result.diagnostics if d.severity == "error"]
-        assert any("unknown func" in d.description for d in errs), (
-            f"expected the #1002 dangling-template failure, got "
-            f"{[d.description for d in errs] or 'a clean compile'} — if this "
-            f"now compiles, #1002 has closed: flip this pin to a run assertion"
+        names = _func_names(result.wat)
+        assert "parent$where$outer$Int$where$ginner$Int" in names, (
+            f"the generic-under-generic clone must be emitted per-clone "
+            f"(#1002), got {[n for n in names if 'ginner' in n]}"
         )
 
     def test_helper_under_generic_parent_hoisting_unchanged(self) -> None:

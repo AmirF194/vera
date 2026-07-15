@@ -26,6 +26,8 @@ from vera.monomorphize import (
     Monomorphizer,
     collect_nested_generic_decls,
     declared_return_clone_key,
+    qualify_nested_generic_decls,
+    reroute_module_private_generic_calls,
 )
 
 if TYPE_CHECKING:
@@ -1138,23 +1140,46 @@ class ContractVerifier:
 
     def _imported_generic_decls(
         self, program: ast.Program,
-    ) -> dict[str, ast.FnDecl]:
-        """Imported PUBLIC generics whose bare name is NOT locally shadowed.
+    ) -> tuple[dict[str, ast.FnDecl], dict[str, ast.FnDecl]]:
+        """``(public unshadowed imported generics, private module generics)``.
 
-        The verifier-side mirror of codegen's ``_imported_generic_decls`` split
-        (#774): an unshadowed imported generic is monomorphized by the importer,
-        so the verifier must discover the SAME instantiations codegen emits (a
-        cross-module clone verified by neither side would be a false Tier-1).
+        The verifier-side mirror of codegen's ``_register_modules`` generic
+        harvest (#774 + #1000):
+
+        * PUBLIC unshadowed generics, keyed by bare name — an unshadowed
+          imported generic is monomorphized by the importer, so the verifier
+          must discover the SAME instantiations codegen emits (a cross-module
+          clone verified by neither side would be a false Tier-1).  A public
+          generic whose body transitively calls a same-module PRIVATE generic
+          has that call rerouted to the private generic's ``mod$<path>$name``
+          key (byte-identical to codegen's ``_module_qualified_wasm_name``), so
+          discovery reaches it under a distinct-per-module identity.
+
+        * PRIVATE module generics, keyed by ``mod$<path>$name`` — reachable only
+          transitively (through a public generic's rerouted body).  Two modules'
+          same-named private generics keep DISTINCT decls under distinct keys, so
+          a LYING private contract in one is verified (and E500s) independently
+          of a truthful namesake in another (#1000c) — a single bare-name entry
+          would collapse them and leave the liar unverified (a false Tier-1).
+
         Same public + import-filter gating and first-seen-wins ``setdefault`` as
-        codegen's ``_register_modules``; a shadowed generic (a local owns the
-        bare name) is excluded here — its qualified-only routing is a separate
-        codegen-side concern the verifier already resolves via the module's
-        contract, so no extra discovery is needed for the bare namespace.
+        codegen; a shadowed public generic (a local owns the bare name) is
+        excluded from the public set — its qualified-only routing is resolved via
+        the module's contract elsewhere.
         """
         local_fn_names = self._local_fn_names(program)
-        out: dict[str, ast.FnDecl] = {}
+        public: dict[str, ast.FnDecl] = {}
+        private: dict[str, ast.FnDecl] = {}
         for mod in self._resolved_modules:
             name_filter = self._import_names.get(mod.path)
+            # This module's PRIVATE top-level generics → their reroute targets.
+            priv_names = {
+                tld.decl.name
+                for tld in mod.program.declarations
+                if isinstance(tld.decl, ast.FnDecl)
+                and tld.decl.forall_vars
+                and (tld.visibility or "private") != "public"
+            }
             for tld in mod.program.declarations:
                 decl = tld.decl
                 if not isinstance(decl, ast.FnDecl) or not decl.forall_vars:
@@ -1164,8 +1189,64 @@ class ContractVerifier:
                 if is_public and in_filter and (
                     decl.name not in local_fn_names
                 ):
-                    out.setdefault(decl.name, decl)
-        return out
+                    # #1000/#1029: reroute this public generic's transitive calls
+                    # to same-module private generics onto their ``mod$<path>$n``
+                    # discovery key — the SAME shadow-aware walk codegen uses (a
+                    # where-helper of the same name owns the bare call, so it is
+                    # NOT captured), keyed by name-rename here (the verifier
+                    # discovers by `generic_decls` name) rather than the
+                    # ModuleCall codegen emits.
+                    public.setdefault(
+                        decl.name,
+                        self._reroute_to_module_privates(
+                            decl, mod.path, priv_names,
+                        ),
+                    )
+                elif not is_public:
+                    # #1029: reroute the PRIVATE generic's own body too, so a
+                    # private→private chain (this generic calls ANOTHER private
+                    # generic) is discovered under the sibling's ``mod$<path>$n``
+                    # key — else its clone runs with a contract neither module
+                    # proved (a false Tier-1).  Its own name is included in the
+                    # rename map (harmless: a self-recursive call keys the same
+                    # base it already lives under).
+                    private.setdefault(
+                        self._module_qualified_base(mod.path, decl.name),
+                        self._reroute_to_module_privates(
+                            decl, mod.path, priv_names,
+                        ),
+                    )
+        return public, private
+
+    def _reroute_to_module_privates(
+        self,
+        decl: ast.FnDecl,
+        path: tuple[str, ...],
+        priv_names: set[str],
+    ) -> ast.FnDecl:
+        """Name-rename an imported body's bare calls to *path*'s private generics
+        onto their ``mod$<path>$name`` discovery keys (#1029).
+
+        The verifier-side mirror of codegen's ModuleCall reroute
+        (``_reroute_private_generic_calls``): both drive the SHARED shadow-aware
+        walk (:func:`vera.monomorphize.reroute_module_private_generic_calls`), so
+        a where-helper sharing a private generic's name is NOT captured on either
+        side.  The verifier discovers instantiations by matching ``node.name``
+        against ``generic_decls`` (which keys private module generics under
+        ``mod$<path>$name``), so its terminal renames the ``FnCall`` to that key
+        rather than emitting a ``ModuleCall`` — keeping the #732 differential
+        exact while both sides route the identical set of calls."""
+        if not priv_names:
+            return decl
+        rename = {
+            n: self._module_qualified_base(path, n) for n in priv_names
+        }
+        return reroute_module_private_generic_calls(
+            decl, priv_names,
+            lambda call, args: replace(
+                call, name=rename[call.name], args=args,
+            ),
+        )
 
     def _collect_instantiations(
         self, program: ast.Program,
@@ -1192,6 +1273,16 @@ class ContractVerifier:
         self._imported_generic_verify_decls = {}
 
         disc = _replace(program)
+        # #1014: qualify nested generic helper names on the discovery copy —
+        # the SAME shared transform codegen applies at Pass 0 — so instance
+        # keys are parent-qualified (``a$where$g``) and two same-named helpers
+        # under different parents key distinct instance sets on both sides.
+        # The ORIGINAL program AST (used for contract verification and scoped
+        # lookup below) stays untouched; `_verify_fn` reconstructs the same
+        # key from its lexical `enclosing` chain.  Runs BEFORE prelude
+        # injection, mirroring codegen's ordering (qualify at Pass 0, prelude
+        # injected later), so prelude decls are unqualified on both sides.
+        disc = qualify_nested_generic_decls(disc)
         inject_prelude(disc)
 
         generic_decls: dict[str, ast.FnDecl] = {}
@@ -1222,10 +1313,78 @@ class ContractVerifier:
         # false Tier-1 (CR 3519156263 — the same gap as the shadowed case, the
         # unshadowed twin).
         self._imported_generic_verify_decls = {}
-        for gname, gdecl in self._imported_generic_decls(program).items():
+        imported_public, imported_private = self._imported_generic_decls(program)
+        for gname, gdecl in imported_public.items():
             generic_decls.setdefault(gname, gdecl)
             if gname not in local_generic_names:
                 self._imported_generic_verify_decls[gname] = gdecl
+        # #1000: a PRIVATE module generic reached transitively (its `mod$…` key
+        # rerouted into the public generics above).  Register it as a discovery
+        # base under that distinct-per-module key and verify its clones at the
+        # importer's instantiations — private module fns are NOT in
+        # ``env.functions``, so this shadowed-verify registry is the only place
+        # its contract is checked; a lying private contract is then a loud E500
+        # at the importer, not a silent false Tier-1.
+        for qkey, gdecl in imported_private.items():
+            generic_decls.setdefault(qkey, gdecl)
+            self._imported_generic_verify_decls.setdefault(qkey, gdecl)
+        # #999: harvest each resolved module's NESTED generics (a `forall`
+        # where-helper under an imported non-generic fn) as imported mono bases,
+        # keyed by the qualified name codegen produces (``compute$where$gid``).
+        # Qualify a COPY of each module program (the shared transform, same as
+        # codegen's Pass-0.5 module qualify) so the seed walk below sees the
+        # qualified call; the ORIGINAL module AST is untouched (contract
+        # verification and lexical scoping still use it).  The nested generic's
+        # body lives in the module, never reached by `program.declarations`, so
+        # it joins `_imported_generic_verify_decls` for the importer to verify
+        # its clones — else an imported nested generic with a LYING contract
+        # runs unverified (a false Tier-1).
+        # #1029: namespace the nested-generic qualification by module path
+        # (byte-identical to codegen's `_register_modules`), so two imported
+        # modules' same-named nested generics stay DISTINCT keys instead of
+        # collapsing first-seen-wins (a lying namesake left unverified: a false
+        # Tier-1).  Also reroute each module's private-generic calls onto their
+        # ``mod$<path>$name`` discovery keys — the SAME loop-top reroute codegen
+        # applies — so a NON-generic caller of a private generic (`use_it` →
+        # `inner`) seeds that instantiation for the importer to verify.
+        qualified_module_programs = []
+        for mod in self._resolved_modules:
+            qmod = qualify_nested_generic_decls(
+                mod.program,
+                name_prefix="mod$" + "$".join(mod.path) + "$",
+            )
+            mod_priv_names = {
+                tld.decl.name
+                for tld in mod.program.declarations
+                if isinstance(tld.decl, ast.FnDecl)
+                and tld.decl.forall_vars
+                and (tld.visibility or "private") != "public"
+            }
+            if mod_priv_names:
+                qmod = replace(qmod, declarations=tuple(
+                    replace(
+                        tld,
+                        decl=self._reroute_to_module_privates(
+                            tld.decl, mod.path, mod_priv_names,
+                        ),
+                    )
+                    if isinstance(tld.decl, ast.FnDecl) else tld
+                    for tld in qmod.declarations
+                ))
+            qualified_module_programs.append(qmod)
+        for qmod in qualified_module_programs:
+            for tld in qmod.declarations:
+                decl = tld.decl
+                if not isinstance(decl, ast.FnDecl) or decl.forall_vars:
+                    continue
+                nested: dict[str, ast.FnDecl] = {}
+                collect_nested_generic_decls(decl, nested)
+                for gname, gdecl in nested.items():
+                    generic_decls.setdefault(gname, gdecl)
+                    if gname not in local_generic_names:
+                        self._imported_generic_verify_decls.setdefault(
+                            gname, gdecl,
+                        )
         if not generic_decls:
             return {}
 
@@ -1248,14 +1407,45 @@ class ContractVerifier:
             # (PR #767 review).
             mono.collect_calls_in_node(fn, generic_decls, ctor_to_adt, into)
 
-        # Seed from non-generic bodies.
+        # Seed from non-generic bodies — the main program AND every resolved
+        # module (its qualified copy), so an imported ``compute``'s body call to
+        # its own nested generic ``compute$where$gid`` seeds that instantiation
+        # (#999).  Codegen's Pass 1.5 seeds from the identical set (main +
+        # resolved-module bodies), keeping the #732 differential in lockstep.
         seed: dict[str, set[tuple[str, ...]]] = {
             name: set() for name in generic_decls
         }
-        for tld in disc.declarations:
-            decl = tld.decl
-            if isinstance(decl, ast.FnDecl) and not decl.forall_vars:
-                collect_calls_in_fn(decl, seed)
+        for seed_program in (disc, *qualified_module_programs):
+            for tld in seed_program.declarations:
+                decl = tld.decl
+                if isinstance(decl, ast.FnDecl) and not decl.forall_vars:
+                    collect_calls_in_fn(decl, seed)
+
+        # #1002: nested generic-under-generic helpers keyed by their
+        # concrete-FREE lexical chain (``parent$where$outer$where$ginner``) — the
+        # SAME key `_verify_fn` reconstructs from its enclosing chain and codegen
+        # records in `_emitted_instances`.  Discovered by recursing into each
+        # ACTUAL clone's substituted subtree (not a single shared base decl), so
+        # a nested generic whose instantiation differs across ancestor
+        # instantiations contributes every flavour — the verified set is a sound
+        # superset of what codegen emits.
+        nested_result: dict[str, set[tuple[str, ...]]] = {}
+        nested_seen: set[tuple[str, tuple[str, ...]]] = set()
+
+        def record_nested(clone: ast.FnDecl, base_chain: str) -> None:
+            found = mono.collect_clone_nested_generic_instances(
+                clone, ctor_to_adt,
+            )
+            for h_name, (h_decl, h_cts) in found.items():
+                chain_key = f"{base_chain}$where${h_name}"
+                for h_ct in h_cts:
+                    if (chain_key, h_ct) in nested_seen:
+                        continue
+                    nested_seen.add((chain_key, h_ct))
+                    nested_result.setdefault(chain_key, set()).add(h_ct)
+                    record_nested(
+                        mono.monomorphize_fn(h_decl, h_ct), chain_key,
+                    )
 
         # Transitive closure: monomorphize each, rescan its body.  Mirrors the
         # codegen worklist exactly, minus the constraint filter.
@@ -1274,6 +1464,8 @@ class ContractVerifier:
             mono_fn = mono.monomorphize_fn(
                 generic_decls[fn_name], concrete_types,
             )
+            # #1002: seed nested generic-under-generic instances from this clone.
+            record_nested(mono_fn, fn_name)
             transitive: dict[str, set[tuple[str, ...]]] = {
                 name: set() for name in generic_decls
             }
@@ -1289,6 +1481,8 @@ class ContractVerifier:
         for name, concrete_types in discovered:
             if name in generic_decls:
                 result[name].add(concrete_types)
+        for name, cts in nested_result.items():
+            result.setdefault(name, set()).update(cts)
 
         # #814 asymmetric variant: an imported generic whose bare name a LOCAL
         # non-generic shadows is monomorphized by codegen under a ``mod$…`` name
@@ -1328,10 +1522,40 @@ class ContractVerifier:
         """
         local_fn_names = self._local_fn_names(program)
         ctor_to_adt = mono.ctx.ctor_to_adt
-        # Build the (path → {name → decl}) map of shadowed imported generics.
+        # Build the (path → {name → decl}) map of shadowed imported generics,
+        # mirroring codegen's ``_shadowed_imported_generic_decls`` — which holds
+        # BOTH a module's locally-shadowed PUBLIC generics AND ALL its PRIVATE
+        # top-level generics (#1029, R4).  Pre-fix only the public-shadowed
+        # generics were here, so a shadowed generic's body call to a PRIVATE
+        # sibling (`gen` → `sib`) had no `sib` base in the transitive scan: the
+        # `mod$g$sib` clone codegen emits ran with a contract the verifier never
+        # checked (a false Tier-1).  Each decl is rerouted the SAME shadow-aware
+        # way codegen reroutes it (bare private-generic call → a ``ModuleCall``
+        # the by-name transitive scan then matches), keeping the two sides'
+        # discovered set in lockstep.  A private sibling reached this way is
+        # verified via ``_imported_generic_verify_decls`` (it is keyed there too),
+        # so it must NOT ALSO be stashed in ``_shadowed_module_generic_verify``
+        # below — the guard there avoids the double-verify.
         shadowed: dict[tuple[str, ...], dict[str, ast.FnDecl]] = {}
         for mod in self._resolved_modules:
             name_filter = self._import_names.get(mod.path)
+            priv_names = {
+                tld.decl.name
+                for tld in mod.program.declarations
+                if isinstance(tld.decl, ast.FnDecl)
+                and tld.decl.forall_vars
+                and (tld.visibility or "private") != "public"
+            }
+
+            def _reroute(decl: ast.FnDecl, path: tuple[str, ...] = mod.path,
+                         privs: set[str] = priv_names) -> ast.FnDecl:
+                return reroute_module_private_generic_calls(
+                    decl, privs,
+                    lambda call, args: ast.ModuleCall(
+                        path=path, name=call.name, args=args, span=call.span,
+                    ),
+                )
+
             for tld in mod.program.declarations:
                 decl = tld.decl
                 if not isinstance(decl, ast.FnDecl) or not decl.forall_vars:
@@ -1340,7 +1564,11 @@ class ContractVerifier:
                 in_filter = name_filter is None or decl.name in name_filter
                 if is_public and in_filter and decl.name in local_fn_names:
                     shadowed.setdefault(mod.path, {}).setdefault(
-                        decl.name, decl,
+                        decl.name, _reroute(decl),
+                    )
+                elif not is_public:
+                    shadowed.setdefault(mod.path, {}).setdefault(
+                        decl.name, _reroute(decl),
                     )
         if not shadowed:
             return
@@ -1407,9 +1635,18 @@ class ContractVerifier:
             # the MODULE contract in `verify_program` via the stashed decl.
             base = self._module_qualified_base(spath, sname)
             result.setdefault(base, set()).add(sct)
-            self._shadowed_module_generic_verify.setdefault(
-                base, (gdecl, set()),
-            )[1].add(sct)
+            # #1029 (R4): a PRIVATE sibling reached through the shadowed scan is
+            # already registered in `_imported_generic_verify_decls` under this
+            # same `mod$…` base (it is a private module generic), and
+            # `_verify_shadowed_module_generics` verifies it there at
+            # `_instances[base]` — which `result` above just populated.  Stashing
+            # it here too would verify its contract TWICE (two E500s for one lie).
+            # Only a locally-shadowed PUBLIC generic (absent from that registry)
+            # needs this stash — the importer verifies it nowhere else.
+            if base not in self._imported_generic_verify_decls:
+                self._shadowed_module_generic_verify.setdefault(
+                    base, (gdecl, set()),
+                )[1].add(sct)
             clone = mono.monomorphize_fn(gdecl, sct)
 
             # Unshadowed transitive generics → chase full closure into `result`.
@@ -1503,13 +1740,24 @@ class ContractVerifier:
             self._shadowed_module_generic_verify.items(),
         ):
             if cts:
-                self._verify_generic_instances(gdecl, tuple(sorted(cts)))
+                # #1029 (R5): verify the clone under its `mod$…` base so a nested
+                # generic where-helper's enclosing-chain key rebuilds to match
+                # discovery (`mod$<path>$gen$where$ginner`).
+                self._verify_generic_instances(
+                    gdecl, tuple(sorted(cts)), clone_name=_base,
+                )
         for gname, gdecl in sorted(
             self._imported_generic_verify_decls.items(),
         ):
             cts = self._instances.get(gname, set())
             if cts:
-                self._verify_generic_instances(gdecl, tuple(sorted(cts)))
+                # #1029 (R5): `gname` is the CANONICAL discovery key — bare for an
+                # unshadowed public generic (a no-op rename), but the
+                # ``mod$<path>$name`` base for a PRIVATE module generic, so its
+                # nested helper's enclosing chain reconstructs the qualified key.
+                self._verify_generic_instances(
+                    gdecl, tuple(sorted(cts)), clone_name=gname,
+                )
 
     # -- #732: per-monomorphization verification + aggregation -------------
 
@@ -1518,16 +1766,30 @@ class ContractVerifier:
         decl: ast.FnDecl,
         instances: tuple[tuple[str, ...], ...],
         enclosing: tuple[ast.FnDecl, ...] = (),
+        clone_name: str | None = None,
     ) -> None:
         """Verify each concrete instantiation of a generic, then aggregate.
 
-        Each instantiation is monomorphized to a concrete clone — keeping the
-        generic's ORIGINAL name so recursion/decreases resolve by name and
-        diagnostics anchor at the generic's source — and run through the normal
-        non-generic path into a scratch buffer.  The per-instance obligations
-        are then aggregated one-per-source-site with meet semantics, so a
-        generic-body bug surfaces once (naming the failing instantiation)
+        Each instantiation is monomorphized to a concrete clone — named
+        *clone_name* (default: the generic's own ``decl.name``) — and run through
+        the normal non-generic path into a scratch buffer.  The per-instance
+        obligations are then aggregated one-per-source-site with meet semantics,
+        so a generic-body bug surfaces once (naming the failing instantiation)
         rather than once per instantiation.
+
+        *clone_name* is the CANONICAL discovery key this generic is instantiated
+        under (#1029, R5): the main path passes ``None`` (a local / bare-name
+        generic keeps its source name so recursion/decreases resolve by name and
+        diagnostics anchor at the source), but an IMPORTED-PRIVATE or SHADOWED
+        module generic passes its ``mod$<path>$name`` base — so when its own
+        nested generic where-helper is verified, the enclosing-chain
+        reconstruction below (``$where$``-join of ancestor NAMES) rebuilds the
+        SAME ``mod$<path>$name$where$ginner`` key discovery recorded and codegen
+        emits.  Without it the chain rebuilt a bare ``name$where$ginner`` key
+        discovery never produced, dropping the helper to the uninstantiated E520
+        path and leaving a LYING nested contract a false Tier-1.  The
+        user-facing aggregate diagnostic still names ``decl.name`` (the bare
+        source name), never the synthetic ``mod$…`` key.
 
         *enclosing* is the generic's ancestor chain (non-empty exactly when it
         is a nested where-helper), threaded into each clone's ``_verify_fn`` so
@@ -1543,7 +1805,7 @@ class ContractVerifier:
         assert decl.forall_vars is not None  # generic by construction  # noqa: S101
         for concrete in instances:
             clone = self._mono.monomorphize_fn(decl, concrete)
-            clone = replace(clone, name=decl.name)  # keep the source name
+            clone = replace(clone, name=clone_name or decl.name)
             # Verify each instance into scratch error/obligation buffers so its
             # per-instance obligations don't pollute the aggregate stream; the
             # meet-collapsed obligations are re-appended below.  The summary is
@@ -1772,7 +2034,18 @@ class ContractVerifier:
         than through the flat, last-wins registry.
         """
         if decl.forall_vars:
-            instances = tuple(sorted(self._instances.get(decl.name, set())))
+            # #1014: a nested generic helper's instances are keyed by its
+            # parent-qualified name (``a$where$g`` — the discovery copy is
+            # qualified by the shared transform), while THIS walk carries the
+            # original pretty AST.  Rebuild the key from the lexical
+            # `enclosing` chain; a top-level generic (empty chain) keeps its
+            # bare name.  A generic under a GENERIC ancestor reconstructs a
+            # key discovery never produced and falls to the E520 path below —
+            # per-clone instantiation of that shape is #1002.
+            inst_key = "$where$".join(
+                (*(e.name for e in enclosing), decl.name)
+            )
+            instances = tuple(sorted(self._instances.get(inst_key, set())))
             if instances:
                 # #732: this generic IS instantiated — verify each concrete
                 # clone through the normal path and aggregate per source

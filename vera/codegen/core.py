@@ -24,6 +24,7 @@ from vera import ast
 from vera.codegen.api import CompileResult
 from vera.codegen.memory import ConstructorLayout
 from vera.errors import Diagnostic, SourceLocation
+from vera.monomorphize import qualify_nested_generic_decls
 from vera.prelude import PRELUDE_FILE, mentioned_fn_names
 from vera.slots import type_expr_slot_name
 from vera.wasm import StringPool
@@ -385,6 +386,17 @@ class CodeGenerator(
         # (a local generic's clones are absent and keep the main-file tables).
         self._imported_generic_origins: dict[str, tuple[str, ...]] = {}
         self._mono_clone_origins: dict[str, tuple[str, ...]] = {}
+        # #1002: every emitted mono clone name → the concrete-FREE chain base
+        # key of the generic it clones (a top-level generic's own name, or a
+        # ``<parent-chain>$where$<helper>`` chain for a nested generic).  The
+        # per-clone where-tree hoister reads it to key a generic-under-generic
+        # helper's ``_emitted_instances`` entry the SAME way the verifier's
+        # `_verify_fn` reconstructs it from its lexical enclosing chain (both
+        # concrete-free), so the #732 differential stays in lockstep even though
+        # the EMITTED WASM clone carries a per-instantiation concrete-including
+        # name (``outer$Int$where$ginner$Int``) to avoid a cross-instantiation
+        # collision.
+        self._clone_base_chain: dict[str, str] = {}
         # Reset per-`_monomorphize` run; declared here so the type is stated
         # once (imported bases that actually entered `generic_decls`).
         self._imported_generic_base_origins: dict[str, tuple[str, ...]] = {}
@@ -658,6 +670,25 @@ class CodeGenerator(
         # wrong body under spec §5 helper locality).  Codegen-only: the checker
         # and verifier keep the original nested AST (both scope helper
         # resolution lexically, #991).
+        # #1014: parent-qualify nested GENERIC where-helper names (and their
+        # lexically-visible bare calls) so two same-named ``forall`` helpers
+        # under different parents are distinct mono bases (``a$where$g`` /
+        # ``b$where$g``) instead of colliding first-seen-wins in the flat
+        # base registry (silent wrong body).
+        #
+        # Runs BEFORE the #991 hoist: a non-generic helper (``flag``) that calls
+        # a generic SIBLING (``gid``) must have that bare call qualified while it
+        # is still lexically inside the shared ``where`` block — the hoist would
+        # otherwise lift ``flag`` to a top-level ``parent$where$flag`` first,
+        # putting it out of reach of the parent-scoped qualification and leaving
+        # its ``gid`` call bare (a dangling ``unknown func`` at run — the
+        # conformance ch09 regression).  Qualification descends into non-generic
+        # helpers exactly as the hoist does, so a generic under a hoisted chain
+        # (``a$where$leaf$where$g``) still lands on the identical name; the
+        # verifier scopes helpers lexically on its un-hoisted copy, so applying
+        # the SAME transform there keeps both sides keying instances identically.
+        program = qualify_nested_generic_decls(program)
+
         program = self._hoist_nongeneric_where_helpers(program)
 
         # Pass 0.5: register imported module declarations (C7e)
@@ -866,7 +897,14 @@ class CodeGenerator(
         # generics whose clones all fail.
         compiled_mono_bases: set[str] = set()
         for mdecl in mono_decls:
-            orig_name = mdecl.name.split("$")[0]
+            # #1014: strip ONE ``$<TypeArgs>`` suffix, keeping the full base —
+            # a parent-qualified helper clone (``a$where$g$Int``) must gate its
+            # visibility on ``a$where$g`` (absent from ``fn_visibility`` →
+            # private), not on ``a`` (``split("$")[0]``), which would wrongly
+            # export a private helper clone under its PUBLIC parent's
+            # visibility.  Mangled type args never contain ``$``, so one
+            # rsplit is exact.
+            orig_name = mdecl.name.rsplit("$", 1)[0]
             is_public = fn_visibility.get(orig_name) == "public"
             # #998: a clone of an IMPORTED generic is the module's own code —
             # compile it against that module's span tables (or, absent tables,

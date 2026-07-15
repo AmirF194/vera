@@ -28,8 +28,9 @@ instantiation sets in agreement.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field, fields, replace
-from typing import Any
+from typing import Any, cast
 
 from vera import ast
 from vera.slots import slot_ref_name, type_expr_slot_name
@@ -323,16 +324,255 @@ def collect_nested_generic_decls(
     substitutes the generic ANCESTOR's type variables — a descendant with its
     own ``forall`` is hoisted as a still-generic template and never
     instantiated, so that shape still dangles at compile (#1002); this
-    collector deliberately does not paper over it.  ``setdefault`` keeps
-    first-seen-wins on a bare-name collision, matching how plain where-helpers
-    flatten into the bare WASM namespace; per-scope duplicate-name semantics
-    are #991's subject.
+    collector deliberately does not paper over it.
+
+    Callers pass a program that has been through
+    :func:`qualify_nested_generic_decls` (#1014), so every collected helper
+    name is parent-qualified (``a$where$g``) and globally unique by
+    construction — two same-named helpers under different parents collect as
+    two distinct bases.  ``setdefault`` is retained as a no-op backstop.
     """
     for wfn in decl.where_fns or ():
         if wfn.forall_vars:
             out.setdefault(wfn.name, wfn)
         else:
             collect_nested_generic_decls(wfn, out)
+
+
+def rewrite_fn_call_names(node: object, rename: dict[str, str]) -> object:
+    """Return *node* with every ``FnCall`` whose name is in *rename* redirected
+    to the mapped name, rebuilding only changed spines (spans preserved).
+
+    The standalone twin of codegen's ``_rewrite_call_names`` — shared here so
+    the #1014 qualification transform below can run identically on the codegen
+    program and the verifier's discovery copy.
+    """
+    if isinstance(node, ast.Node):
+        changes: dict[str, Any] = {}
+        for f in fields(node):
+            if f.name == "span":
+                continue
+            val = getattr(node, f.name)
+            new_val = rewrite_fn_call_names(val, rename)
+            if new_val is not val:
+                changes[f.name] = new_val
+        if isinstance(node, ast.FnCall) and node.name in rename:
+            changes["name"] = rename[node.name]
+        if changes:
+            return replace(node, **changes)
+        return node
+    if isinstance(node, tuple):
+        new_items = tuple(rewrite_fn_call_names(v, rename) for v in node)
+        if any(n is not o for n, o in zip(new_items, node)):
+            return new_items
+        return node
+    return node
+
+
+def reroute_module_private_generic_calls(
+    decl: ast.FnDecl,
+    private_generics: set[str],
+    make_call: Callable[[ast.FnCall, tuple[ast.Expr, ...]], ast.Node],
+) -> ast.FnDecl:
+    """Shadow-aware rewrite of bare calls to a module's PRIVATE top-level
+    generics (#1000).
+
+    An imported body (a public generic, a non-generic fn, or another private
+    generic) may transitively call one of its module's private generics by bare
+    name.  Once the importer clones or discovers that body the bare name is
+    ambiguous — the private generic is unimportable, or a same-named local
+    captures it — so each such ``FnCall`` is replaced by ``make_call(node,
+    rerouted_args)``: codegen builds an ``ast.ModuleCall`` (resolved by the
+    desugar to the module's ``mod$<path>$name`` clone), while the verifier
+    builds a name-renamed ``FnCall`` keyed to that same ``mod$…`` discovery
+    base.  The SHARED shadow-aware walk is what keeps the two sides' routing (and
+    thus the #732 differential) in lockstep.
+
+    Shadow-aware (PR #1029 review): a ``where``-helper sharing a private
+    generic's name lexically owns the bare call for its whole scope (spec §5), so
+    rerouting it would run/verify the module generic instead of the
+    lexically-nearer helper (a wrong body / wrong contract).  Each ``FnDecl``
+    level adds its helpers' names to the shadow set for its body AND subtree.
+    Only the matched call NODE changes (recursively rerouted args); every other
+    node — including nested ``AnonFn`` / ``where`` bodies — is structurally
+    preserved with its span.
+    """
+    if not private_generics:
+        return decl
+
+    def walk(node: object, shadowed: frozenset[str]) -> object:
+        if isinstance(node, ast.FnDecl):
+            level = shadowed | {wfn.name for wfn in node.where_fns or ()}
+            changes: dict[str, Any] = {}
+            for f in fields(node):
+                if f.name == "span":
+                    continue
+                val = getattr(node, f.name)
+                new_val = walk(val, level)
+                if new_val is not val:
+                    changes[f.name] = new_val
+            if changes:
+                return replace(node, **changes)
+            return node
+        if (isinstance(node, ast.FnCall)
+                and node.name in private_generics
+                and node.name not in shadowed):
+            new_args = tuple(
+                cast("ast.Expr", walk(a, shadowed)) for a in node.args
+            )
+            return make_call(node, new_args)
+        if isinstance(node, ast.Node):
+            changes = {}
+            for f in fields(node):
+                if f.name == "span":
+                    continue
+                val = getattr(node, f.name)
+                new_val = walk(val, shadowed)
+                if new_val is not val:
+                    changes[f.name] = new_val
+            if changes:
+                return replace(node, **changes)
+            return node
+        if isinstance(node, tuple):
+            new_items = tuple(walk(v, shadowed) for v in node)
+            if any(n is not o for n, o in zip(new_items, node)):
+                return new_items
+            return node
+        return node
+
+    result = walk(decl, frozenset())
+    assert isinstance(result, ast.FnDecl)  # noqa: S101
+    return result
+
+
+def _qualify_generic_subtree_calls(
+    fn: ast.FnDecl, rename: dict[str, str],
+) -> ast.FnDecl:
+    """Redirect calls to OUTER qualified generic helpers inside a retained
+    generic subtree, honouring the subtree's own shadowing (#1014).
+
+    A generic helper's subtree is per-clone territory (#904): nothing inside
+    it is renamed here, and a name the subtree re-declares at any level drops
+    the outer entry for that level and below (the per-clone hoist owns it) —
+    the same rule as the non-generic hoist's
+    ``_rewrite_generic_subtree_shadowed``.
+    """
+    level_names = {wfn.name for wfn in fn.where_fns or ()}
+    visible = {k: v for k, v in rename.items() if k not in level_names}
+    body_only = replace(fn, where_fns=None)
+    rewritten = rewrite_fn_call_names(body_only, visible)
+    assert isinstance(rewritten, ast.FnDecl)  # noqa: S101
+    new_where = tuple(
+        _qualify_generic_subtree_calls(wfn, visible)
+        for wfn in fn.where_fns or ()
+    )
+    return replace(rewritten, where_fns=new_where or None)
+
+
+def _qualify_nested_under(
+    fn: ast.FnDecl, prefix: str, scope: dict[str, str],
+) -> ast.FnDecl:
+    """Qualify *fn*'s generic where-helpers under *prefix*, recursively.
+
+    *scope* maps every lexically-enclosing generic helper's bare name to its
+    qualified name; this level's declared names (generic or not) shadow outer
+    entries, and this level's generic helpers add their own qualified names —
+    so a bare call anywhere in the subtree resolves to the NEAREST same-named
+    helper, exactly the lexical rule of spec §5 and the non-generic hoist.
+    """
+    where_fns = fn.where_fns or ()
+    declared = {wfn.name for wfn in where_fns}
+    generic_renames = {
+        wfn.name: f"{prefix}$where${wfn.name}"
+        for wfn in where_fns
+        if wfn.forall_vars
+    }
+    combined = {k: v for k, v in scope.items() if k not in declared}
+    combined.update(generic_renames)
+    new_where: list[ast.FnDecl] = []
+    for wfn in where_fns:
+        if wfn.forall_vars:
+            # Rename the base decl; its subtree is rewritten shadow-aware but
+            # structurally untouched (per-clone hoisting owns it, #904).
+            rewritten = _qualify_generic_subtree_calls(wfn, combined)
+            new_where.append(
+                replace(rewritten, name=generic_renames[wfn.name])
+            )
+        else:
+            # Descend a non-generic helper, extending the qualification
+            # chain — a generic grandchild under it becomes
+            # ``a$where$leaf$where$g``, byte-identical to what the codegen
+            # side produces after the #991 hoist made ``a$where$leaf`` a
+            # top-level parent.
+            new_where.append(
+                _qualify_nested_under(
+                    wfn, f"{prefix}$where${wfn.name}", combined,
+                )
+            )
+    body_only = replace(fn, where_fns=None)
+    body_rewritten = rewrite_fn_call_names(body_only, combined)
+    assert isinstance(body_rewritten, ast.FnDecl)  # noqa: S101
+    return replace(body_rewritten, where_fns=tuple(new_where) or None)
+
+
+def qualify_nested_generic_decls(
+    program: ast.Program, name_prefix: str = "",
+) -> ast.Program:
+    """Give every ``forall`` where-helper under a NON-generic ancestor chain
+    a parent-qualified name (``a$where$g``) and redirect each
+    lexically-visible bare call to it (#1014).
+
+    Pre-#1014 the nested-generic base set was keyed by BARE name, flat and
+    first-seen-wins: two same-named ``forall`` helpers under different parents
+    both resolved to the first parent's declaration, so the second parent's
+    call silently ran the first parent's body (check-green, wrong value).
+    Qualification makes every base name unique by construction — discovery,
+    clone naming (``a$where$g$Int``), call rewriting, and the
+    codegen<->verifier differential all operate on the qualified names with
+    no special-casing.  ``$`` cannot appear in a source identifier and
+    ``where`` is reserved, so qualified names collide with nothing
+    user-writable; the scheme matches the #991 non-generic hoist and the #904
+    per-clone hoist conventions exactly.
+
+    *name_prefix* namespaces the chain root (``{name_prefix}{decl.name}``,
+    #1029): the main program passes ``""`` (bare ``compute$where$gid``), while
+    codegen's ``_register_modules`` and the verifier's ``_collect_instantiations``
+    pass ``"mod$" + "$".join(mod.path) + "$"`` for an IMPORTED module — byte-for-
+    byte the ``_module_qualified_wasm_name`` / ``_module_qualified_base`` prefix.
+    Without it, two imported modules' same-named nested generics
+    (``ma::compute$where$gid`` and ``mb::compute$where$gid``) collapse to one
+    key first-seen-wins, leaving a LYING namesake unverified (a false Tier-1).
+
+    Applied by BOTH sides in lockstep: codegen transforms its program at Pass 0
+    (BEFORE the #991 hoist — a non-generic helper that calls a generic sibling
+    must be qualified while still lexically inside the shared ``where`` block,
+    else the hoist lifts it out of parent scope and its bare call dangles; see
+    the ordering comment in ``codegen/core.py``), and the verifier transforms its
+    prelude-free discovery COPY (``_collect_instantiations``) while keeping the
+    original AST for contract verification — its instance lookup joins the lexical
+    ``enclosing`` chain to reconstruct the same key.  GENERIC top-level
+    declarations are skipped whole: their subtrees are per-clone territory
+    (#904/#1002).
+    """
+    import dataclasses
+
+    new_tlds: list[ast.TopLevelDecl] = []
+    for tld in program.declarations:
+        decl = tld.decl
+        if (isinstance(decl, ast.FnDecl)
+                and decl.where_fns
+                and not decl.forall_vars):
+            new_tlds.append(
+                dataclasses.replace(
+                    tld,
+                    decl=_qualify_nested_under(
+                        decl, f"{name_prefix}{decl.name}", {},
+                    ),
+                )
+            )
+        else:
+            new_tlds.append(tld)
+    return dataclasses.replace(program, declarations=tuple(new_tlds))
 
 
 def unmangle_type_name(mangled: str) -> str:
@@ -779,6 +1019,53 @@ class Monomorphizer:
             self.collect_calls_in_node(
                 wfn, generic_decls, ctor_to_adt, instances,
             )
+
+    def collect_clone_nested_generic_instances(
+        self,
+        clone: ast.FnDecl,
+        ctor_to_adt: dict[str, str],
+    ) -> dict[str, tuple[ast.FnDecl, set[tuple[str, ...]]]]:
+        """Discover instantiations of a monomorphized clone's still-generic
+        ``where``-helpers (generic-under-generic, #1002).
+
+        A ``forall`` helper under a GENERIC ancestor is carried — still generic
+        — into every clone of the ancestor by :meth:`monomorphize_fn`, but the
+        ancestor's own type variables are the only ones substituted, so the
+        helper stays a template that nothing instantiates (its clone-body call
+        dangles at ``unknown func``).  This is the SHARED leaf both sides drive
+        to close that gap: given ``clone`` (a concrete-at-its-own-level clone),
+        it returns ``{helper bare name: (helper FnDecl, {concrete type vectors})}``
+        for each of ``clone``'s DIRECT generic ``where``-helpers, discovering
+        each helper's instantiations by its bare name everywhere it is
+        lexically visible inside ``clone`` — the clone body, the clone's
+        contract predicates, and its sibling ``where``-helper bodies.
+
+        The returned ``FnDecl`` is the helper AS CARRIED IN THE CLONE (the
+        ancestor's type variables already substituted), so a nested generic
+        whose signature references the ancestor's type parameter is keyed with
+        that parameter already bound — which is what makes a per-clone concrete
+        clone name (``outer$Int$where$ginner$U``) collision-free across distinct
+        ancestor instantiations.  Only DIRECT generic helpers are returned;
+        deeper nesting is reached when each helper's own clone is processed
+        (monomorphizing it binds its type variable and re-exposes its subtree),
+        so callers recurse per level rather than descending here.
+        """
+        generic_helpers = {
+            wfn.name: wfn
+            for wfn in (clone.where_fns or ())
+            if wfn.forall_vars
+        }
+        if not generic_helpers:
+            return {}
+        found: dict[str, set[tuple[str, ...]]] = {
+            name: set() for name in generic_helpers
+        }
+        self.collect_calls_in_node(clone, generic_helpers, ctor_to_adt, found)
+        return {
+            name: (generic_helpers[name], cts)
+            for name, cts in found.items()
+            if cts
+        }
 
     def _collect_calls(
         self,

@@ -280,6 +280,54 @@ public fn use_contract_only(@Unit -> @Int)
   parent(10)
 }
 """,
+    # #1014: two same-named `forall` where-helpers under DIFFERENT non-generic
+    # parents.  Qualification keys them `a$where$g` / `b$where$g`, so codegen
+    # emits (and the verifier discovers) two distinct nested generic bases — a
+    # bare-name key would collapse both onto the first parent's clone.
+    "two_parents_same_named_generic_helper_1014": """
+public fn a(@Int -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ g(@Int.0) }
+where {
+  forall<T> fn g(@T -> @Int) requires(true) ensures(true) effects(pure)
+  { 1 }
+}
+
+public fn b(@Int -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ g(@Int.0) }
+where {
+  forall<T> fn g(@T -> @Int) requires(true) ensures(true) effects(pure)
+  { 2 }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ a(0) * 10 + b(0) }
+""",
+    # #1002: a `forall` helper under a GENERIC ancestor.  Codegen instantiates
+    # the nested helper per parent-clone (`parent$where$outer$where$ginner`), and
+    # the verifier discovers the SAME concrete-free chain key by recursing into
+    # each clone's substituted subtree — both sides keyed identically so the
+    # differential covers the nested clone (pre-fix it dangled `unknown func` at
+    # run and fell to E520 at verify).
+    "generic_helper_under_generic_ancestor_1002": """
+private fn parent(@Int -> @Int)
+  requires(true) ensures(@Int.result == @Int.0 + 5) effects(pure)
+{ outer(@Int.0) + (if outer(false) then { 50 } else { 5 }) }
+where {
+  forall<T> fn outer(@T -> @T) requires(true) ensures(@T.result == @T.0) effects(pure)
+  { ginner(@T.0) }
+  where {
+    forall<U> fn ginner(@U -> @U) requires(true) ensures(@U.result == @U.0) effects(pure)
+    { @U.0 }
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(@Int.result == 15) effects(pure)
+{ parent(10) }
+""",
 }
 
 
@@ -813,6 +861,54 @@ def test_imported_generic_symmetric_between_codegen_and_verifier(
     )
 
 
+def test_imported_fn_nested_generic_symmetric_between_codegen_and_verifier(
+) -> None:
+    """`#999`: an imported NON-generic fn (`compute`) whose body calls its own
+    nested `forall` where-helper (`gid`) must have that helper's instantiation
+    discovered by BOTH sides at the SAME qualified key.
+
+    Both sides give the module program the shared #1014 nested-generic
+    qualification (``gid`` → ``compute$where$gid``), harvest it as an imported
+    mono base, and seed its instantiation from the module BODY's
+    ``compute$where$gid(@Int.0)`` call — codegen emits the clone, the verifier
+    verifies it.  A desync (only one side walks the module body) drops the clone
+    from one set: codegen would emit a clone the verifier never proved (a false
+    Tier-1) or reference a symbol never emitted (`main` dropped at run).  Pins
+    the equality both ways.
+    """
+    mod = _resolved_module(("lib_nested",), (
+        "public fn compute(@Int -> @Int)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ gid(@Int.0) + 1 }\n"
+        "where {\n"
+        "  forall<T> fn gid(@T -> @T)\n"
+        "    requires(true) ensures(@T.result == @T.0) effects(pure)\n"
+        "  { @T.0 }\n"
+        "}\n"
+    ))
+    main_src = (
+        "import lib_nested(compute);\n"
+        "public fn main(@Unit -> @Int)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ compute(10) }\n"
+    )
+    codegen_set, verifier_set = _cross_module_sets(main_src, [mod])
+
+    # #1029: the imported nested generic's base is namespaced by the module path
+    # (``mod$lib_nested$compute$where$gid``), byte-identical to
+    # ``_module_qualified_wasm_name`` — so two imported modules' same-named nested
+    # generics stay distinct instead of collapsing first-seen-wins.
+    assert ("mod$lib_nested$compute$where$gid", ("Int",)) in codegen_set, (
+        f"codegen must emit the imported nested generic's clone under its "
+        f"module-qualified base, got {sorted(codegen_set)}"
+    )
+    assert verifier_set == codegen_set, (
+        f"verifier ({sorted(verifier_set)}) must discover exactly codegen's "
+        f"emitted set ({sorted(codegen_set)}) — imported nested-generic "
+        f"lockstep (#999); a miss is a false Tier-1"
+    )
+
+
 def test_shadowed_imported_generic_symmetric_between_codegen_and_verifier(
 ) -> None:
     """`#814` asymmetric variant: an imported generic (`gen`) shadowed by a
@@ -948,6 +1044,277 @@ def test_unshadowed_generic_calling_shadowed_sibling_symmetric() -> None:
         f"verifier ({sorted(verifier_set)}) must discover exactly codegen's "
         f"emitted set ({sorted(codegen_set)}) — an unshadowed generic reaching "
         f"a shadowed sibling; a miss is a new false Tier-1"
+    )
+
+
+def test_private_module_generic_symmetric_between_codegen_and_verifier() -> None:
+    """`#1000`: a PRIVATE module generic (`inner`) reached transitively by a
+    PUBLIC imported generic (`outer`) must be discovered by BOTH sides under the
+    SAME module-qualified key (`mod$lib_priv$inner`), NEVER a bare `inner`.
+
+    Codegen harvests the private generic into the shadowed-generic machinery and
+    reroutes `outer`'s clone body call onto the module-qualified base; the
+    verifier mirrors the harvest + reroute so it discovers the identical
+    `mod$lib_priv$inner<Int>` instantiation and verifies it (a lying private
+    contract must E500 at the importer).  A bare-name key would hijack a
+    same-named local fn and collapse two modules' private generics — the exact
+    #1000 trap this equality pins.
+    """
+    mod = _resolved_module(("lib_priv",), (
+        "private forall<T> fn inner(@T -> @T)\n"
+        "  requires(true) ensures(@T.result == @T.0) effects(pure)\n"
+        "{ @T.0 }\n"
+        "public forall<T> fn outer(@T -> @T)\n"
+        "  requires(true) ensures(@T.result == @T.0) effects(pure)\n"
+        "{ inner(@T.0) }\n"
+    ))
+    main_src = (
+        "import lib_priv(outer);\n"
+        "public fn main(@Unit -> @Int)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ outer(7) }\n"
+    )
+    codegen_set, verifier_set = _cross_module_sets(main_src, [mod])
+
+    assert ("outer", ("Int",)) in codegen_set and (
+        ("mod$lib_priv$inner", ("Int",)) in codegen_set
+    ), (
+        f"codegen must emit outer<Int> and its transitive private "
+        f"mod$lib_priv$inner<Int> under the module-qualified base, "
+        f"got {sorted(codegen_set)}"
+    )
+    assert ("inner", ("Int",)) not in codegen_set, (
+        f"the private generic must NOT be keyed bare (hijack risk), "
+        f"got {sorted(codegen_set)}"
+    )
+    assert verifier_set == codegen_set, (
+        f"verifier ({sorted(verifier_set)}) must discover exactly codegen's "
+        f"emitted set ({sorted(codegen_set)}) — private module generic reached "
+        f"transitively (#1000); a miss leaves a lying private contract unverified"
+    )
+
+
+def test_local_shadowing_private_module_generic_symmetric() -> None:
+    """`#1000` collision variant: a LOCAL non-generic `dup` and a same-named
+    PRIVATE module generic `dup` reached transitively by a public imported
+    `caller` must stay separate on both sides.
+
+    The local `dup` keeps its bare identity (main's `dup(5)` runs it); the
+    module's `dup` is keyed `mod$lib$dup` (caller's clone body reaches it).  A
+    bare-name harvest would collapse the two — the draft-PR #1026 hijack this
+    pins against.
+    """
+    mod = _resolved_module(("lib",), (
+        "private forall<T> fn dup(@T -> @Int)"
+        " requires(true) ensures(true) effects(pure) { 0 }\n"
+        "public forall<T> fn caller(@T -> @Int)"
+        " requires(true) ensures(true) effects(pure) { dup(@T.0) }\n"
+    ))
+    main_src = (
+        "import lib(caller);\n"
+        "private fn dup(@Int -> @Int)"
+        " requires(true) ensures(@Int.result == @Int.0 + 100) effects(pure)"
+        " { @Int.0 + 100 }\n"
+        "public fn main(@Unit -> @Int)"
+        " requires(true) ensures(true) effects(pure)"
+        " { dup(5) * 1000 + caller(3) }\n"
+    )
+    codegen_set, verifier_set = _cross_module_sets(main_src, [mod])
+
+    assert ("caller", ("Int",)) in codegen_set and (
+        ("mod$lib$dup", ("Int",)) in codegen_set
+    ), (
+        f"codegen must emit caller<Int> and the module's private "
+        f"mod$lib$dup<Int>, got {sorted(codegen_set)}"
+    )
+    assert verifier_set == codegen_set, (
+        f"verifier ({sorted(verifier_set)}) must discover exactly codegen's "
+        f"emitted set ({sorted(codegen_set)}) — local/private-generic collision "
+        f"(#1000); the module's dup stays under its mod$… key, distinct from the "
+        f"bare local dup"
+    )
+
+
+def test_nongeneric_caller_of_private_generic_symmetric_1029() -> None:
+    """`#1029` (R1): a NON-generic imported fn (`use_it`) that calls a PRIVATE
+    module generic (`inner`) must have `inner`'s instantiation discovered by BOTH
+    sides under the module-qualified base `mod$lib$inner`.
+
+    Pre-fix only the PUBLIC-generic branch rerouted private-generic calls, so
+    `use_it`'s bare `inner(@Int.0)` kept a bare name: codegen emitted `use_it`'s
+    body with a `call $inner` that dangled at run (`unknown func`), and neither
+    side seeded `mod$lib$inner<Int>`.  The loop-top reroute (codegen) + the
+    non-generic-body seed (`_monomorphize_shadowed_module_generics`) / the
+    module-body reroute (verifier discovery) make both discover the identical
+    instantiation — a lockstep that also proves the clone codegen now emits IS
+    verified.
+    """
+    mod = _resolved_module(("lib",), (
+        "private forall<T> fn inner(@T -> @T)\n"
+        "  requires(true) ensures(@T.result == @T.0) effects(pure)\n"
+        "{ @T.0 }\n"
+        "public fn use_it(@Int -> @Int)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ inner(@Int.0) + 1 }\n"
+    ))
+    main_src = (
+        "import lib(use_it);\n"
+        "public fn main(@Unit -> @Int)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ use_it(4) }\n"
+    )
+    codegen_set, verifier_set = _cross_module_sets(main_src, [mod])
+
+    assert ("mod$lib$inner", ("Int",)) in codegen_set, (
+        f"codegen must emit the private generic's clone reached from a "
+        f"non-generic caller under its mod$… base, got {sorted(codegen_set)}"
+    )
+    assert ("inner", ("Int",)) not in codegen_set, (
+        f"the private generic must NOT be keyed bare (hijack risk), "
+        f"got {sorted(codegen_set)}"
+    )
+    assert verifier_set == codegen_set, (
+        f"verifier ({sorted(verifier_set)}) must discover exactly codegen's "
+        f"emitted set ({sorted(codegen_set)}) — a non-generic caller of a "
+        f"private generic (#1029); a miss dangles the clone at run"
+    )
+
+
+def test_shadowed_generic_private_sibling_symmetric_1029() -> None:
+    """`#1029` (R4): a locally-shadowed PUBLIC generic (`g::gen`) whose body calls
+    a PRIVATE sibling generic (`sib`) must have BOTH clones discovered on both
+    sides — `mod$g$gen<Int>` and its transitive `mod$g$sib<Int>`.
+
+    Codegen harvests both into the shadowed-generic machinery and reaches `sib`
+    through `gen`'s rerouted clone body; pre-fix the verifier built its shadowed
+    map from PUBLIC-shadowed generics only, so `sib` had no base in the
+    transitive scan and `mod$g$sib<Int>` ran unverified (a false Tier-1).  The
+    equality pins that the verifier now discovers the private sibling too.
+    """
+    mod = _resolved_module(("g",), (
+        "private forall<T> fn sib(@T -> @Int)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ 11 }\n"
+        "public forall<T> fn gen(@T -> @Int)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ sib(@T.0) }\n"
+    ))
+    main_src = (
+        "import g;\n\n"
+        "private fn gen(@Int -> @Int)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ @Int.0 + 100 }\n\n"
+        "public fn main(@Unit -> @Int)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ g::gen(5) }\n"
+    )
+    codegen_set, verifier_set = _cross_module_sets(main_src, [mod])
+
+    assert ("mod$g$gen", ("Int",)) in codegen_set and (
+        ("mod$g$sib", ("Int",)) in codegen_set
+    ), (
+        f"codegen must emit the shadowed generic AND its private sibling under "
+        f"their mod$… bases, got {sorted(codegen_set)}"
+    )
+    assert verifier_set == codegen_set, (
+        f"verifier ({sorted(verifier_set)}) must discover exactly codegen's "
+        f"emitted set ({sorted(codegen_set)}) — shadowed generic's private "
+        f"sibling (#1029, R4); a miss leaves the sibling's clone a false Tier-1"
+    )
+
+
+def test_nested_generic_under_private_generic_symmetric_1029() -> None:
+    """`#1029` (R3/R5): a nested `forall` where-helper (`ginner`) under a PRIVATE
+    module generic (`priv_outer`) reached through a public entry must be keyed by
+    the SAME concrete-FREE, module-qualified lexical chain on both sides —
+    `mod$lib1$priv_outer$where$ginner`.
+
+    This is the canonical-key lockstep: codegen's emitted WASM clone carries a
+    per-instantiation concrete-INCLUDING name
+    (`mod$lib1$priv_outer$Int$where$ginner$Int`), but its `_emitted_instances`
+    key must be the concrete-FREE chain — which the R3 `_clone_base_chain`
+    population on the shadowed path produces, and which the verifier's discovery
+    (`record_nested`) and enclosing-chain reconstruction rebuild identically.  A
+    desync (codegen concrete-including vs verifier concrete-free) left the lying
+    nested contract on the uninstantiated E520 path: a false Tier-1.
+    """
+    mod = _resolved_module(("lib1",), (
+        "private forall<T> fn priv_outer(@T -> @Int)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ ginner(@T.0) }\n"
+        "where {\n"
+        "  forall<U> fn ginner(@U -> @Int)\n"
+        "    requires(true) ensures(true) effects(pure)\n"
+        "  { 1 }\n"
+        "}\n"
+        "public forall<T> fn pub_entry(@T -> @Int)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ priv_outer(@T.0) }\n"
+    ))
+    main_src = (
+        "import lib1(pub_entry);\n"
+        "public fn main(@Unit -> @Int)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ pub_entry(7) }\n"
+    )
+    codegen_set, verifier_set = _cross_module_sets(main_src, [mod])
+
+    assert ("mod$lib1$priv_outer$where$ginner", ("Int",)) in codegen_set, (
+        f"codegen must key the nested generic under the concrete-FREE, "
+        f"module-qualified chain, got {sorted(codegen_set)}"
+    )
+    assert not any(
+        "$Int$where$" in n for (n, _) in codegen_set
+    ), (
+        f"the _emitted_instances key must be concrete-FREE (no `$Int$where$`), "
+        f"got {sorted(codegen_set)}"
+    )
+    assert verifier_set == codegen_set, (
+        f"verifier ({sorted(verifier_set)}) must discover exactly codegen's "
+        f"emitted set ({sorted(codegen_set)}) — nested generic under a private "
+        f"module generic (#1029, R3/R5); a key desync is a false Tier-1"
+    )
+
+
+def test_private_to_private_generic_chain_symmetric_1029() -> None:
+    """`#1029` (R1): a public generic → private `aa` → private `bb` chain must
+    have EVERY link discovered on both sides under its mod$… base
+    (`mod$m$aa`, `mod$m$bb`).
+
+    Pre-fix a private generic's own body was harvested RAW, so `aa`'s bare
+    `bb(@T.0)` call was not rerouted onto `mod$m$bb`: the verifier discovered a
+    strict subset (`bb`'s clone ran unverified).  The loop-top reroute of the
+    private decls themselves closes the chain.
+    """
+    mod = _resolved_module(("m",), (
+        "private forall<T> fn bb(@T -> @Int)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ 11 }\n"
+        "private forall<T> fn aa(@T -> @Int)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ bb(@T.0) }\n"
+        "public forall<T> fn pub(@T -> @Int)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ aa(@T.0) }\n"
+    ))
+    main_src = (
+        "import m(pub);\n"
+        "public fn main(@Unit -> @Int)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ pub(7) }\n"
+    )
+    codegen_set, verifier_set = _cross_module_sets(main_src, [mod])
+
+    assert ("mod$m$aa", ("Int",)) in codegen_set and (
+        ("mod$m$bb", ("Int",)) in codegen_set
+    ), (
+        f"codegen must emit both private links of the chain under their mod$… "
+        f"bases, got {sorted(codegen_set)}"
+    )
+    assert verifier_set == codegen_set, (
+        f"verifier ({sorted(verifier_set)}) must discover exactly codegen's "
+        f"emitted set ({sorted(codegen_set)}) — private→private chain (#1029); "
+        f"a missing link runs unverified"
     )
 
 
