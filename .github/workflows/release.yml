@@ -1,0 +1,313 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Registry path to exercise
+        required: true
+        type: choice
+        options:
+          - testpypi
+          - production-recovery
+      confirm_version:
+        description: Exact X.Y.Z version currently in pyproject.toml
+        required: true
+        type: string
+
+# A version is immutable. Never cancel or overlap release attempts.
+concurrency:
+  group: vera-release
+  cancel-in-progress: false
+
+# Every job opts into only the permissions it needs. In particular, the job
+# that executes the build has no OIDC token, and OIDC jobs execute no project
+# code: they only download and publish the already-tested artifact.
+permissions: {}
+
+jobs:
+  prepare:
+    name: Plan and validate release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      publish: ${{ steps.push.outputs.publish || steps.testpypi.outputs.publish || steps.recovery.outputs.publish }}
+      target: ${{ steps.push.outputs.target || steps.testpypi.outputs.target || steps.recovery.outputs.target }}
+      version: ${{ steps.push.outputs.version || steps.testpypi.outputs.version || steps.recovery.outputs.version }}
+      artifact: ${{ steps.push.outputs.artifact || steps.testpypi.outputs.artifact || steps.recovery.outputs.artifact }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Detect a production version bump
+        id: push
+        if: github.event_name == 'push'
+        env:
+          BEFORE_REF: ${{ github.event.before }}
+        run: >-
+          python scripts/release.py prepare
+          --mode push
+          --before-ref "$BEFORE_REF"
+          --github-output "$GITHUB_OUTPUT"
+
+      - name: Validate an explicit TestPyPI staging run
+        id: testpypi
+        if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
+        env:
+          CONFIRM_VERSION: ${{ inputs.confirm_version }}
+        run: >-
+          python scripts/release.py prepare
+          --mode testpypi
+          --confirm-version "$CONFIRM_VERSION"
+          --github-output "$GITHUB_OUTPUT"
+
+      - name: Validate a guarded production recovery
+        id: recovery
+        if: github.event_name == 'workflow_dispatch' && inputs.target == 'production-recovery'
+        env:
+          CONFIRM_VERSION: ${{ inputs.confirm_version }}
+          REF_NAME: ${{ github.ref }}
+        run: >-
+          python scripts/release.py prepare
+          --mode production-recovery
+          --ref-name "$REF_NAME"
+          --confirm-version "$CONFIRM_VERSION"
+          --github-output "$GITHUB_OUTPUT"
+
+      - name: Refuse an existing TestPyPI version
+        if: steps.testpypi.outputs.publish == 'true'
+        run: >-
+          python scripts/release.py assert-absent
+          --index testpypi
+          --version "${{ steps.testpypi.outputs.version }}"
+
+      - name: Refuse an existing PyPI version
+        if: steps.push.outputs.publish == 'true' || steps.recovery.outputs.publish == 'true'
+        run: >-
+          python scripts/release.py assert-absent
+          --index pypi
+          --version "${{ steps.push.outputs.version || steps.recovery.outputs.version }}"
+
+      - name: Refuse an existing GitHub Release
+        if: steps.push.outputs.publish == 'true' || steps.recovery.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.push.outputs.version || steps.recovery.outputs.version }}
+        run: |
+          if gh release view "v${VERSION}" >/dev/null 2>&1; then
+            echo "::error::GitHub Release v${VERSION} already exists; releases are immutable"
+            exit 1
+          fi
+
+  build:
+    name: Build and test release archives
+    needs: prepare
+    if: needs.prepare.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install packaging tools
+        run: python -m pip install build twine
+
+      - name: Build and inspect distribution archives
+        run: |
+          python scripts/check_version_sync.py
+          python -m build
+          python -m twine check dist/*
+          python scripts/check_distribution.py dist
+
+      - name: Install and smoke-test the wheel outside the checkout
+        run: |
+          python -m venv "$RUNNER_TEMP/veralang-release-smoke"
+          "$RUNNER_TEMP/veralang-release-smoke/bin/python" -m pip install dist/*.whl
+          cp examples/hello_world.vera "$RUNNER_TEMP/hello_world.vera"
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/veralang-release-smoke/bin/vera" version
+          "$RUNNER_TEMP/veralang-release-smoke/bin/vera" check hello_world.vera
+          run_out="$("$RUNNER_TEMP/veralang-release-smoke/bin/vera" run hello_world.vera)"
+          printf '%s\n' "$run_out"
+          case "$run_out" in
+            *"Hello, World!"*) ;;
+            *) echo "::error::wheel smoke: unexpected 'vera run' output"; exit 1 ;;
+          esac
+
+      - name: Create release notes and checksum manifest
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          python scripts/release.py notes \
+            --version "$VERSION" \
+            --output release/RELEASE_NOTES.md
+          python scripts/release.py manifest \
+            --dist-dir dist \
+            --output release/SHA256SUMS
+
+      - name: Upload the tested release artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ needs.prepare.outputs.artifact }}
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+            release/RELEASE_NOTES.md
+            release/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 90
+
+  publish-testpypi:
+    name: Publish to TestPyPI
+    needs: [prepare, build]
+    if: needs.prepare.outputs.target == 'testpypi'
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/veralang
+    permissions:
+      id-token: write
+    steps:
+      - name: Download the tested release artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.prepare.outputs.artifact }}
+          path: artifact
+
+      - name: Publish package distributions to TestPyPI
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1, 2026-07-15
+        with:
+          packages-dir: artifact/dist/
+          repository-url: https://test.pypi.org/legacy/
+          print-hash: true
+
+  verify-testpypi:
+    name: Verify TestPyPI archives
+    needs: [prepare, publish-testpypi]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Download the tested release artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.prepare.outputs.artifact }}
+          path: artifact
+
+      - name: Verify registry filenames and SHA-256 hashes
+        run: >-
+          python scripts/release.py verify-registry
+          --index testpypi
+          --version "${{ needs.prepare.outputs.version }}"
+          --dist-dir artifact/dist
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: [prepare, build]
+    if: needs.prepare.outputs.target == 'pypi'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/veralang
+    permissions:
+      id-token: write
+    steps:
+      - name: Download the tested release artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.prepare.outputs.artifact }}
+          path: artifact
+
+      - name: Publish package distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1, 2026-07-15
+        with:
+          packages-dir: artifact/dist/
+          print-hash: true
+
+  verify-pypi:
+    name: Verify PyPI archives
+    needs: [prepare, publish-pypi]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Download the tested release artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.prepare.outputs.artifact }}
+          path: artifact
+
+      - name: Verify registry filenames and SHA-256 hashes
+        run: >-
+          python scripts/release.py verify-registry
+          --index pypi
+          --version "${{ needs.prepare.outputs.version }}"
+          --dist-dir artifact/dist
+
+  github-release:
+    name: Tag and create GitHub Release
+    needs: [prepare, verify-pypi]
+    if: needs.prepare.outputs.target == 'pypi'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download the verified release artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.prepare.outputs.artifact }}
+          path: artifact
+
+      - name: Create immutable tag and GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          tag_sha="$(gh api \
+            "repos/$GITHUB_REPOSITORY/git/ref/tags/v${VERSION}" \
+            --jq .object.sha 2>/dev/null || true)"
+          if [ -z "$tag_sha" ]; then
+            gh api --method POST \
+              "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f ref="refs/tags/v${VERSION}" \
+              -f sha="$GITHUB_SHA"
+          elif [ "$tag_sha" != "$GITHUB_SHA" ]; then
+            echo "::error::immutable tag v${VERSION} points at ${tag_sha}, not ${GITHUB_SHA}"
+            exit 1
+          fi
+
+          gh release create "v${VERSION}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "v${VERSION}" \
+            --notes-file artifact/release/RELEASE_NOTES.md \
+            --latest \
+            artifact/dist/*.whl \
+            artifact/dist/*.tar.gz \
+            artifact/release/SHA256SUMS
