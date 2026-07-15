@@ -1475,7 +1475,8 @@ private fn f(@Int -> @Box<Nat>)
             "import ma(compute);\n"
             "import mb(compute);\n"
             "public fn main(@Unit -> @Int)"
-            " requires(true) ensures(true) effects(pure) { compute(1) }\n",
+            " requires(true) ensures(true) effects(pure)"
+            " { ma::compute(1) + mb::compute(1) }\n",
             [ma, mb],
         )
         e500s = [d for d in result.diagnostics if d.error_code == "E500"]
@@ -1484,3 +1485,30 @@ private fn f(@Int -> @Box<Nat>)
             f"{[(d.error_code, d.description[:70]) for d in result.diagnostics]}"
         )
         assert "gid" in e500s[0].description, e500s[0].description
+
+    def test_shadowed_self_recursive_module_generic_stays_healthy(self) -> None:
+        """A SELF-RECURSIVE public module generic, locally shadowed by a
+        same-named non-generic, verifies and keeps its recursion on the
+        module's own clone (PR #1029 review probe): the local shadow never
+        captures the qualified clone's self-call, so verify is green and the
+        obligation stream carries the module generic's instances."""
+        g = self._resolved(("g",), (
+            "public forall<T> fn gen(@T, @Int -> @Int)"
+            " requires(@Int.0 >= 0) ensures(true) effects(pure)\n"
+            "{ if @Int.0 == 0 then { 0 } else"
+            " { gen(@T.0, @Int.0 - 1) + 1 } }\n"
+        ))
+        result = self._verify_mod(
+            "import g;\n"
+            "private fn gen(@Int -> @Int)"
+            " requires(true) ensures(true) effects(pure) { @Int.0 + 100 }\n"
+            "public fn main(@Unit -> @Int)"
+            " requires(true) ensures(true) effects(pure)"
+            " { g::gen(true, 3) }\n",
+            [g],
+        )
+        errors = [d for d in result.diagnostics if d.severity == "error"]
+        assert not errors, (
+            f"shadowed self-recursive module generic must verify clean, got "
+            f"{[(d.error_code, d.description[:60]) for d in errors]}"
+        )
