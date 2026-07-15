@@ -86,17 +86,21 @@ jobs:
 
       - name: Refuse an existing TestPyPI version
         if: steps.testpypi.outputs.publish == 'true'
+        env:
+          VERSION: ${{ steps.testpypi.outputs.version }}
         run: >-
           python scripts/release.py assert-absent
           --index testpypi
-          --version "${{ steps.testpypi.outputs.version }}"
+          --version "$VERSION"
 
       - name: Refuse an existing PyPI version
         if: steps.push.outputs.publish == 'true' || steps.recovery.outputs.publish == 'true'
+        env:
+          VERSION: ${{ steps.push.outputs.version || steps.recovery.outputs.version }}
         run: >-
           python scripts/release.py assert-absent
           --index pypi
-          --version "${{ steps.push.outputs.version || steps.recovery.outputs.version }}"
+          --version "$VERSION"
 
       - name: Refuse an existing GitHub Release
         if: steps.push.outputs.publish == 'true' || steps.recovery.outputs.publish == 'true'
@@ -217,10 +221,12 @@ jobs:
           path: artifact
 
       - name: Verify registry filenames and SHA-256 hashes
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: >-
           python scripts/release.py verify-registry
           --index testpypi
-          --version "${{ needs.prepare.outputs.version }}"
+          --version "$VERSION"
           --dist-dir artifact/dist
 
   publish-pypi:
@@ -264,10 +270,12 @@ jobs:
           path: artifact
 
       - name: Verify registry filenames and SHA-256 hashes
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: >-
           python scripts/release.py verify-registry
           --index pypi
-          --version "${{ needs.prepare.outputs.version }}"
+          --version "$VERSION"
           --dist-dir artifact/dist
 
   github-release:

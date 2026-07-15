@@ -310,6 +310,29 @@ class TestArchivesAndRegistry:
             is None
         )
 
+    @pytest.mark.parametrize(
+        ("payload", "message"),
+        [
+            ({"releases": []}, "no releases object"),
+            ({"releases": {"0.1.5": ["bad"]}}, "malformed file data"),
+            (
+                {"releases": {"0.1.5": [{"digests": {"sha256": "abc"}}]}},
+                "lacks filename/SHA-256 data",
+            ),
+            (
+                {"releases": {"0.1.5": [{"filename": "a.whl"}]}},
+                "lacks filename/SHA-256 data",
+            ),
+        ],
+    )
+    def test_registry_rejects_malformed_payloads(
+        self, payload: dict[str, Any], message: str
+    ) -> None:
+        with pytest.raises(release.ReleaseError, match=message):
+            release.registry_version_files(
+                "pypi", "0.1.5", fetch=lambda _index: payload
+            )
+
     def test_assert_absent_rejects_existing_version(self) -> None:
         payload = {
             "releases": {"0.1.5": [{"filename": "a", "digests": {"sha256": "b"}}]}
@@ -358,6 +381,33 @@ class TestArchivesAndRegistry:
         )
         assert sleeps == [0.25]
 
+    def test_verify_registry_retries_stale_hashes(self, tmp_path: Path) -> None:
+        dist = _dist(tmp_path)
+        hashes = release.distribution_hashes(dist)
+
+        def payload(digests: dict[str, str]) -> dict[str, Any]:
+            return {
+                "releases": {
+                    "0.1.5": [
+                        {"filename": name, "digests": {"sha256": digest}}
+                        for name, digest in digests.items()
+                    ]
+                }
+            }
+
+        responses = iter([payload(dict.fromkeys(hashes, "0" * 64)), payload(hashes)])
+        sleeps: list[float] = []
+        release.verify_registry(
+            "pypi",
+            "0.1.5",
+            dist,
+            attempts=2,
+            delay=0.25,
+            fetch=lambda _index: next(responses),
+            sleep=sleeps.append,
+        )
+        assert sleeps == [0.25]
+
     def test_verify_registry_rejects_hash_mismatch(self, tmp_path: Path) -> None:
         dist = _dist(tmp_path)
         hashes = release.distribution_hashes(dist)
@@ -387,3 +437,109 @@ class TestArchivesAndRegistry:
             release.verify_registry(
                 "pypi", "0.1.5", dist, attempts=1, fetch=lambda _index: payload
             )
+
+
+class TestCLI:
+    def test_write_github_outputs(self, tmp_path: Path) -> None:
+        output = tmp_path / "github-output"
+        release._write_github_outputs(
+            output, release.ReleasePlan(False, "none", "0.1.5")
+        )
+        assert output.read_text(encoding="utf-8").splitlines() == [
+            "publish=false",
+            "target=none",
+            "version=0.1.5",
+            "artifact=veralang-0.1.5",
+        ]
+
+    def test_main_prepare_writes_github_outputs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def plan(mode: str, **kwargs: Any) -> Any:
+            assert mode == "push"
+            assert kwargs["before_ref"] == "before"
+            return release.ReleasePlan(True, "pypi", "0.1.5")
+
+        monkeypatch.setattr(release, "plan_release", plan)
+        output = tmp_path / "github-output"
+        assert (
+            release.main(
+                [
+                    "prepare",
+                    "--mode",
+                    "push",
+                    "--before-ref",
+                    "before",
+                    "--github-output",
+                    str(output),
+                ]
+            )
+            == 0
+        )
+        assert output.read_text(encoding="utf-8").splitlines() == [
+            "publish=true",
+            "target=pypi",
+            "version=0.1.5",
+            "artifact=veralang-0.1.5",
+        ]
+
+    def test_main_notes(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            release, "notes_for_version", lambda version: f"- Notes for {version}."
+        )
+        output = tmp_path / "release" / "notes.md"
+        assert (
+            release.main(["notes", "--version", "0.1.5", "--output", str(output)]) == 0
+        )
+        assert output.read_text(encoding="utf-8") == "- Notes for 0.1.5.\n"
+
+    def test_main_manifest(self, tmp_path: Path) -> None:
+        dist = _dist(tmp_path)
+        output = tmp_path / "release" / "SHA256SUMS"
+        assert (
+            release.main(["manifest", "--dist-dir", str(dist), "--output", str(output)])
+            == 0
+        )
+        assert output.read_text(encoding="utf-8").splitlines() == [
+            f"{digest}  {name}"
+            for name, digest in sorted(release.distribution_hashes(dist).items())
+        ]
+
+    def test_main_assert_absent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            release,
+            "assert_version_absent",
+            lambda index, version: calls.append((index, version)),
+        )
+        assert (
+            release.main(["assert-absent", "--index", "testpypi", "--version", "0.1.5"])
+            == 0
+        )
+        assert calls == [("testpypi", "0.1.5")]
+
+    def test_main_verify_registry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[tuple[str, str, Path]] = []
+        monkeypatch.setattr(
+            release,
+            "verify_registry",
+            lambda index, version, dist: calls.append((index, version, dist)),
+        )
+        dist = tmp_path / "dist"
+        assert (
+            release.main(
+                [
+                    "verify-registry",
+                    "--index",
+                    "pypi",
+                    "--version",
+                    "0.1.5",
+                    "--dist-dir",
+                    str(dist),
+                ]
+            )
+            == 0
+        )
+        assert calls == [("pypi", "0.1.5", dist)]

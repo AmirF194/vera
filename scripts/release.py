@@ -326,7 +326,7 @@ def verify_registry(
     actual: dict[str, str] | None = None
     for attempt in range(1, attempts + 1):
         actual = registry_version_files(index, version, fetch=fetch)
-        if actual is not None and set(actual) == set(expected):
+        if actual == expected:
             break
         if attempt < attempts:
             sleep(delay)
@@ -348,7 +348,7 @@ def _write_github_outputs(path: Path, plan: ReleasePlan) -> None:
         output.write(f"publish={'true' if plan.publish else 'false'}\n")
         output.write(f"target={plan.target}\n")
         output.write(f"version={plan.version}\n")
-        output.write(f"artifact=veralang-{plan.version}\n")
+        output.write(f"artifact={PROJECT}-{plan.version}\n")
 
 
 def _parser() -> argparse.ArgumentParser:
