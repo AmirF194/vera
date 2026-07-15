@@ -619,6 +619,18 @@ class MonomorphizationMixin:
                 self._collect_shadowed_qualified_calls(
                     decl, path, decls_by_name, ctor_to_adt, instances,
                 )
+        # #1029: also seed from THIS module's imported NON-generic bodies (and
+        # their where-helpers), which after the loop-top reroute carry a
+        # ``path::inner(...)`` ModuleCall for each private-generic call.  Without
+        # this a NON-generic caller of a private generic (`use_it` → `inner`)
+        # never seeds `mod$<path>$inner$Int`, so Pass 2.5 emits `use_it`'s body
+        # with a `call $inner` that dangles (`unknown func`) at run.  These decls
+        # already live in `_imported_fn_decls` (rerouted); filter to this path.
+        for mp, fdecl in self._imported_fn_decls:
+            if mp == path and not fdecl.forall_vars:
+                self._collect_shadowed_qualified_calls(
+                    fdecl, path, decls_by_name, ctor_to_adt, instances,
+                )
         for mono_fn in mono_decls:
             self._collect_shadowed_qualified_calls(
                 mono_fn, path, decls_by_name, ctor_to_adt, instances,
@@ -682,6 +694,17 @@ class MonomorphizationMixin:
             }
             clone = self._rewrite_sibling_generic_calls(clone, sibling_bases)
             mono_decls.append(_replace(clone, name=mangled))
+            # #1029 (R3/R5): record this shadowed clone's concrete-FREE chain
+            # base (the ``mod$<path>$gen`` qualified base, NOT the concrete-
+            # including emission name).  The per-clone where-tree hoister
+            # (`_instantiate_hoisted_generic`) reads `_clone_base_chain` to key a
+            # nested generic-under-this-generic helper's `_emitted_instances`
+            # entry — so a lying `ginner` under a shadowed/private generic keys
+            # `mod$<path>$gen$where$ginner`, byte-identical to what the verifier
+            # discovers and reconstructs from its enclosing chain.  Without it the
+            # fallback keyed the concrete-including `mod$<path>$gen$Int$where$…`,
+            # desyncing the #732 differential and leaving the liar a false Tier-1.
+            self._clone_base_chain[mangled] = qual_base
             # #998: a shadowed module generic's clone body is the MODULE's
             # code — compile it against that module's own span tables.
             self._mono_clone_origins[mangled] = path
@@ -732,6 +755,12 @@ class MonomorphizationMixin:
                     t_fn = mono.monomorphize_fn(t_decl, t_ct)
                     mono_decls.append(t_fn)
                     self._record_clone_origin(t_name, t_fn.name)
+                    # #1029 (R3): a normal clone reached transitively from a
+                    # shadowed clone body keys its concrete-FREE chain base the
+                    # same way the main worklist does (line ~271), so its own
+                    # nested generic-under-generic helper hoists under a
+                    # concrete-free `_emitted_instances` key matching the verifier.
+                    self._clone_base_chain[t_fn.name] = t_name
                     self._emitted_instances.add((t_name, t_ct))
                     stack.append(t_fn)
 

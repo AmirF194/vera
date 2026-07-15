@@ -6,7 +6,7 @@ call detection) of the code generation pipeline.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING
 
 from vera import ast
 from vera.errors import Diagnostic, SourceLocation
@@ -61,11 +61,20 @@ class CrossModuleMixin:
         # Rebind a NEW list of replaced (frozen) ``ResolvedModule``s rather than
         # mutating the caller's list: the verifier scopes where-helpers lexically
         # on the ORIGINAL nested AST and must keep seeing it.
+        # #1029: namespace each imported module's nested-generic qualification
+        # by the module path (``mod$<path>$compute$where$gid``) — byte-identical
+        # to ``_module_qualified_wasm_name`` — so two imported modules' same-named
+        # nested generics stay DISTINCT bases instead of collapsing first-seen-wins
+        # (which left a lying namesake unemitted/unverified: a false Tier-1).  The
+        # main program keeps the bare prefix (core.py Pass 0).
         self._resolved_modules = [
             dataclasses.replace(
                 mod,
                 program=self._hoist_nongeneric_where_helpers(
-                    qualify_nested_generic_decls(mod.program),
+                    qualify_nested_generic_decls(
+                        mod.program,
+                        name_prefix="mod$" + "$".join(mod.path) + "$",
+                    ),
                 ),
             )
             for mod in self._resolved_modules
@@ -340,6 +349,21 @@ class CrossModuleMixin:
             for tld in mod.program.declarations:
                 if not isinstance(tld.decl, ast.FnDecl):
                     continue
+                # #1029: reroute EVERY imported decl's bare calls to this
+                # module's private generics ONCE at the loop top, and use the
+                # rerouted copy in ALL branches below.  Pre-fix only the PUBLIC
+                # generic branch rerouted (#1000), so a NON-generic caller
+                # (``use_it`` → private ``inner``), a private→private chain
+                # (private ``A`` → private ``B``), and a private generic's own
+                # body all kept the bare call — which dangled (``unknown func``)
+                # or was captured by a same-named local.  The reroute is
+                # shadow-aware (a where-helper of the same name owns the bare
+                # call), so it never captures a lexically-nearer helper.  Only
+                # the call nodes change; name/params/sig are untouched, so the
+                # ``temp._fn_sigs``-keyed registration lookups below stay valid.
+                routed = self._reroute_private_generic_calls(
+                    tld.decl, mod.path, module_private_generics,
+                )
                 # #774: an imported PUBLIC generic is monomorphized by the
                 # importer (Pass 1.5) at its own call sites — it can't be
                 # emitted verbatim under a bare/mangled name in Pass 2.5, but
@@ -356,21 +380,13 @@ class CrossModuleMixin:
                         name_filter is None or tld.decl.name in name_filter
                     )
                     if is_public and in_filter:
-                        # #1000: reroute this public generic's transitive calls
-                        # to same-module PRIVATE generics onto a synthetic
-                        # ``ModuleCall`` so its emitted clone reaches the module's
-                        # own ``mod$<path>$inner`` clone (never a bare/local
-                        # ``inner``).
-                        gdecl = self._reroute_private_generic_calls(
-                            tld.decl, mod.path, module_private_generics,
-                        )
                         if tld.decl.name in local_fn_names:
                             self._shadowed_imported_generic_decls.setdefault(
                                 mod.path, {},
-                            ).setdefault(tld.decl.name, gdecl)
+                            ).setdefault(tld.decl.name, routed)
                         else:
                             self._imported_generic_decls.setdefault(
-                                tld.decl.name, gdecl,
+                                tld.decl.name, routed,
                             )
                             # #998: same first-seen-wins order as the decl
                             # registry, so a clone of this generic compiles
@@ -386,15 +402,21 @@ class CrossModuleMixin:
                         # machinery) — NEVER the bare ``_imported_generic_decls``,
                         # where a bare-name entry would hijack a same-named local
                         # fn (E608's import-only provenance can't catch that).
+                        # #1029: use the rerouted copy so a private→private chain
+                        # (this private generic calls ANOTHER private generic)
+                        # reaches the sibling's ``mod$<path>$sibling`` clone.
                         self._shadowed_imported_generic_decls.setdefault(
                             mod.path, {},
-                        ).setdefault(tld.decl.name, tld.decl)
+                        ).setdefault(tld.decl.name, routed)
                     continue
                 is_public = (tld.visibility or "private") == "public"
                 in_filter = name_filter is None or tld.decl.name in name_filter
-                self._imported_fn_decls.append((mod.path, tld.decl))
+                # #1029: the rerouted non-generic body carries the private-generic
+                # ModuleCalls the Pass-2.5 emission + shadowed-generic discovery
+                # (`_monomorphize_shadowed_module_generics`) both consume.
+                self._imported_fn_decls.append((mod.path, routed))
                 self._register_shadowed_import(
-                    mod.path, tld.decl, temp, local_fn_names,
+                    mod.path, routed, temp, local_fn_names,
                     qualified_eligible=is_public and in_filter,
                 )
                 # #999: harvest this imported NON-generic fn's nested `forall`
@@ -406,7 +428,7 @@ class CrossModuleMixin:
                 # call), then emits + verifies the clones — pre-fix the call had
                 # no base and WAT assembly dangled at ``unknown func $gid``.
                 nested_gen: dict[str, ast.FnDecl] = {}
-                collect_nested_generic_decls(tld.decl, nested_gen)
+                collect_nested_generic_decls(routed, nested_gen)
                 for _gname, _gdecl in nested_gen.items():
                     self._imported_generic_decls.setdefault(_gname, _gdecl)
                     self._imported_generic_origins.setdefault(
@@ -425,7 +447,7 @@ class CrossModuleMixin:
                 # ``child``'s call to it dangled (``unknown func``).  Reuse the
                 # same ``_flatten_where_fns`` walk the local non-generic Pass-2
                 # emission loop uses (mirrors the #978 local-path fix).
-                for wfn in self._flatten_where_fns(tld.decl):
+                for wfn in self._flatten_where_fns(routed):
                     if wfn.forall_vars:
                         continue
                     self._imported_fn_decls.append((mod.path, wfn))
@@ -547,43 +569,22 @@ class CrossModuleMixin:
         Only the call NODE changes (``FnCall`` → ``ModuleCall`` with the same
         args, recursively rerouted); every other node — including nested
         ``AnonFn`` / ``where`` bodies — is structurally preserved with its span.
+
+        Delegates to the shared shadow-aware walk
+        (:func:`vera.monomorphize.reroute_module_private_generic_calls`) so this
+        codegen reroute and the verifier's #732 mirror can never drift (#1029) —
+        the two differ only in the terminal node each builds (codegen a
+        ``ModuleCall`` resolved by the desugar; the verifier a name-renamed
+        ``FnCall`` keyed to the same ``mod$…`` discovery base).
         """
-        if not private_generics:
-            return decl
-        from dataclasses import fields as _fields
-        from dataclasses import replace as _replace
+        from vera.monomorphize import reroute_module_private_generic_calls
 
-        def walk(node: object) -> object:
-            if isinstance(node, ast.FnCall) and node.name in private_generics:
-                new_args = tuple(
-                    cast("ast.Expr", walk(a)) for a in node.args
-                )
-                return ast.ModuleCall(
-                    path=module_path, name=node.name,
-                    args=new_args, span=node.span,
-                )
-            if isinstance(node, ast.Node):
-                changes: dict[str, Any] = {}
-                for f in _fields(node):
-                    if f.name == "span":
-                        continue
-                    val = getattr(node, f.name)
-                    new_val = walk(val)
-                    if new_val is not val:
-                        changes[f.name] = new_val
-                if changes:
-                    return _replace(node, **changes)
-                return node
-            if isinstance(node, tuple):
-                new_items = tuple(walk(v) for v in node)
-                if any(n is not o for n, o in zip(new_items, node)):
-                    return new_items
-                return node
-            return node
-
-        result = walk(decl)
-        assert isinstance(result, ast.FnDecl)  # noqa: S101
-        return result
+        return reroute_module_private_generic_calls(
+            decl, private_generics,
+            lambda call, args: ast.ModuleCall(
+                path=module_path, name=call.name, args=args, span=call.span,
+            ),
+        )
 
     @staticmethod
     def _module_qualified_wasm_name(

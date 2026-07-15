@@ -4875,7 +4875,7 @@ public fn main(@Unit -> @Int)
     _GENERIC_UNDER_GENERIC = """\
 private fn parent(@Int -> @Int)
   requires(true) ensures(@Int.result == @Int.0 + 5) effects(pure)
-{ outer(@Int.0) + 5 }
+{ outer(@Int.0) + (if outer(false) then { 50 } else { 5 }) }
 where {
   forall<T> fn outer(@T -> @T) requires(true) ensures(@T.result == @T.0) effects(pure)
   { ginner(@T.0) }

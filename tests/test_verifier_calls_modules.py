@@ -1362,3 +1362,125 @@ private fn f(@Int -> @Box<Nat>)
         assert errors == [], [
             (d.error_code, d.description[:60]) for d in errors
         ]
+
+    # -- #1029: shadowed / nested private generics reached transitively -----
+
+    def test_lying_private_sibling_of_shadowed_generic_is_E500(self) -> None:
+        """#1029 (R4): a LYING PRIVATE sibling generic (`sib`) reached through a
+        locally-shadowed public generic (`g::gen`) must be an E500 at the importer.
+
+        `g::gen` is shadowed by a local non-generic `gen`; it is reached via the
+        qualified `g::gen(5)` and its body calls the private `sib`, whose
+        ``ensures(@Int.result == 999)`` lies over body `11`.  Codegen emits the
+        `mod$g$sib<Int>` clone (it traps at run), but pre-fix the verifier built
+        its shadowed map from public-shadowed generics only, so `sib` was never
+        discovered and its lying contract ran unverified — a false Tier-1.
+        Discovering the private sibling and verifying it under `mod$g$sib` catches
+        the lie."""
+        g_mod = self._resolved(("g",), (
+            "private forall<T> fn sib(@T -> @Int)"
+            " requires(true) ensures(@Int.result == 999) effects(pure) { 11 }\n"
+            "public forall<T> fn gen(@T -> @Int)"
+            " requires(true) ensures(true) effects(pure) { sib(@T.0) }\n"
+        ))
+        result = self._verify_mod(
+            "import g;\n"
+            "private fn gen(@Int -> @Int)"
+            " requires(true) ensures(true) effects(pure) { @Int.0 + 100 }\n"
+            "public fn main(@Unit -> @Int)"
+            " requires(true) ensures(true) effects(pure) { g::gen(5) }\n",
+            [g_mod],
+        )
+        e500s = [d for d in result.diagnostics if d.error_code == "E500"]
+        assert len(e500s) == 1, (
+            f"exactly one E500 (the lying private sibling) expected, got "
+            f"{[(d.error_code, d.description[:70]) for d in result.diagnostics]}"
+        )
+        assert "sib" in e500s[0].description, e500s[0].description
+
+    def test_lying_nested_generic_under_private_generic_is_E500(self) -> None:
+        """#1029 (R3/R5): a LYING nested `forall` where-helper (`ginner`) under a
+        PRIVATE module generic (`priv_outer`) reached through a public entry must
+        be an E500 — NOT the uninstantiated-generic E520.
+
+        `pub_entry` (public) calls the private `priv_outer`, whose nested
+        `ginner` has ``ensures(@Int.result == 999)`` over body `1`.  Pre-fix the
+        three surfaces disagreed on the key: codegen emitted a concrete-INCLUDING
+        `mod$lib1$priv_outer$Int$where$ginner`, discovery recorded the
+        concrete-FREE `mod$lib1$priv_outer$where$ginner`, and the verify-walk
+        rebuilt a BARE `priv_outer$where$ginner` — so the helper fell to the
+        uninstantiated E520 path and its lie ran unverified (a false Tier-1).  One
+        canonical concrete-free `mod$…`-prefixed key on all three surfaces
+        instantiates it and catches the lie."""
+        lib_mod = self._resolved(("lib1",), (
+            "private forall<T> fn priv_outer(@T -> @Int)"
+            " requires(true) ensures(true) effects(pure) { ginner(@T.0) }\n"
+            "where {\n"
+            "  forall<U> fn ginner(@U -> @Int)"
+            "    requires(true) ensures(@Int.result == 999) effects(pure) { 1 }\n"
+            "}\n"
+            "public forall<T> fn pub_entry(@T -> @Int)"
+            " requires(true) ensures(true) effects(pure) { priv_outer(@T.0) }\n"
+        ))
+        result = self._verify_mod(
+            "import lib1(pub_entry);\n"
+            "public fn main(@Unit -> @Int)"
+            " requires(true) ensures(true) effects(pure) { pub_entry(7) }\n",
+            [lib_mod],
+        )
+        e500s = [d for d in result.diagnostics if d.error_code == "E500"]
+        assert len(e500s) == 1, (
+            f"exactly one E500 (the lying nested generic) expected, got "
+            f"{[(d.error_code, d.description[:70]) for d in result.diagnostics]}"
+        )
+        assert "ginner" in e500s[0].description, e500s[0].description
+        # The uninstantiated-generic Tier-3 fallback must NOT fire: `ginner` IS
+        # instantiated at Int, so its contract is checked, not deferred (E520 was
+        # the pre-fix false-Tier-1 signature).
+        assert not [d for d in result.diagnostics if d.error_code == "E520"], (
+            f"no E520 (uninstantiated generic) expected — ginner is "
+            f"instantiated, got {[d.error_code for d in result.diagnostics]}"
+        )
+
+    def test_lying_nested_generic_two_modules_is_E500(self) -> None:
+        """#1029 (R2): two imported modules whose SAME-named non-generic parent
+        (`compute`) carries a SAME-named nested `forall` helper (`gid`) must key
+        the two helpers DISTINCTLY, so a LYING one is verified independently.
+
+        `ma`'s `gid` tells the truth (``ensures(@T.result == @T.0)``); `mb`'s LIES
+        (``ensures(@T.result == 9)`` over body `@T.0`).  Pre-fix both qualified to
+        the bare `compute$where$gid` and collapsed first-seen-wins, so only `ma`'s
+        truthful helper was verified and `mb`'s lie was a false Tier-1.
+        Namespacing the qualification by module path
+        (`mod$ma$compute$where$gid` vs `mod$mb$compute$where$gid`) keeps them
+        distinct and catches the lie."""
+        ma = self._resolved(("ma",), (
+            "public fn compute(@Int -> @Int)"
+            " requires(true) ensures(true) effects(pure) { gid(@Int.0) }\n"
+            "where {\n"
+            "  forall<T> fn gid(@T -> @T)"
+            "    requires(true) ensures(@T.result == @T.0) effects(pure)"
+            " { @T.0 }\n"
+            "}\n"
+        ))
+        mb = self._resolved(("mb",), (
+            "public fn compute(@Int -> @Int)"
+            " requires(true) ensures(true) effects(pure) { gid(@Int.0) }\n"
+            "where {\n"
+            "  forall<T> fn gid(@T -> @T)"
+            "    requires(true) ensures(@T.result == 9) effects(pure) { @T.0 }\n"
+            "}\n"
+        ))
+        result = self._verify_mod(
+            "import ma(compute);\n"
+            "import mb(compute);\n"
+            "public fn main(@Unit -> @Int)"
+            " requires(true) ensures(true) effects(pure) { compute(1) }\n",
+            [ma, mb],
+        )
+        e500s = [d for d in result.diagnostics if d.error_code == "E500"]
+        assert len(e500s) == 1, (
+            f"exactly one E500 (mb's lying nested gid) expected, got "
+            f"{[(d.error_code, d.description[:70]) for d in result.diagnostics]}"
+        )
+        assert "gid" in e500s[0].description, e500s[0].description

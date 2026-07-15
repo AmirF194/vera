@@ -3032,3 +3032,80 @@ public fn main(@Unit -> @Int)
 { roundtrip(9) }
 """, [mod], fn="main")
         assert val == 9
+
+    SHADOW_HELPER_MODULE = """\
+private forall<T> fn pick(@T -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ 100 }
+public forall<T> fn outer(@T -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ pick(@T.0) }
+where {
+  fn pick(@T -> @Int)
+    requires(true) ensures(true) effects(pure)
+  { 7 }
+}
+"""
+
+    def test_private_generic_reroute_respects_helper_shadowing_1000(
+        self,
+    ) -> None:
+        """A where-helper sharing a private module generic's name owns the
+        bare call lexically (spec section 5) — the #1000 reroute must NOT
+        capture it onto the module generic (PR #1029 review: pre-fix this
+        returned 100, the private generic's body, instead of the helper's
+        7)."""
+        mod = self._resolved(("lib",), self.SHADOW_HELPER_MODULE)
+        val = self._run_mod("""\
+import lib(outer);
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ outer(3) }
+""", [mod], fn="main")
+        assert val == 7
+
+    def test_nongeneric_caller_of_private_generic_runs_1029(self) -> None:
+        """#1029 (R1): a NON-generic imported fn (`use_it`) that calls a private
+        module generic (`inner`) must reach the module's own `mod$lib$inner`
+        clone.  Pre-fix only the public-generic branch rerouted, so `use_it`'s
+        bare `inner(@Int.0)` compiled to a `call $inner` that dangled at run
+        (`unknown func`).  `inner` is identity, so `use_it(4) = 4 + 1 = 5`."""
+        mod = self._resolved(("lib",), """\
+private forall<T> fn inner(@T -> @T)
+  requires(true) ensures(@T.result == @T.0) effects(pure)
+{ @T.0 }
+public fn use_it(@Int -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ inner(@Int.0) + 1 }
+""")
+        val = self._run_mod("""\
+import lib(use_it);
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ use_it(4) }
+""", [mod], fn="main")
+        assert val == 5
+
+    def test_private_to_private_generic_chain_runs_1029(self) -> None:
+        """#1029 (R1): a public generic → private `aa` → private `bb` chain must
+        emit every link's clone.  Pre-fix the private generic's own body was
+        harvested RAW, so `aa`'s bare `bb(@T.0)` call dangled.  `bb` returns 42,
+        `aa` forwards it, `pub` forwards that — `pub(7) = 42`."""
+        mod = self._resolved(("m",), """\
+private forall<T> fn bb(@T -> @Int)
+  requires(true) ensures(@Int.result == 42) effects(pure)
+{ 42 }
+private forall<T> fn aa(@T -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ bb(@T.0) }
+public forall<T> fn pub(@T -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ aa(@T.0) }
+""")
+        val = self._run_mod("""\
+import m(pub);
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ pub(7) }
+""", [mod], fn="main")
+        assert val == 42

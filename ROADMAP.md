@@ -12,7 +12,7 @@ Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verificati
 
 ## Where we are
 
-7,475 tests, 157 conformance programs, 38 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
+7,485 tests, 157 conformance programs, 38 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
 
 ## Stage 19 — The verification completeness sprint
 
@@ -20,7 +20,7 @@ Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verificati
 
 ### Bug sprint — monomorphizer and verifier gaps first
 
-Three bugs remain in the sprint, spanning effect-op codegen lowering and the verifier's obligation walkers, grouped by shared fix machinery so each PR touches one code path:
+Three bugs remain in the sprint's bug-PR cluster — effect-op codegen lowering and the verifier's obligation walkers — grouped by shared fix machinery so each PR touches one code path (the verification-completeness rows below are the sprint's remaining scope):
 
 **PR B — effect-op positional lowering (2).** [#1005](https://github.com/aallan/vera/issues/1005) a `get` clause's `@Unit` op-parameter read is check-green but E699 at codegen; [#1006](https://github.com/aallan/vera/issues/1006) effect ops in array-literal-element / `let @Unit` positions `CodegenSkip` the enclosing fn. Same translator region; both must route through the post-#976 clause-aware effect-op dispatch, not the raw host cell.
 
