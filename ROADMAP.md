@@ -12,7 +12,7 @@ Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verificati
 
 ## Where we are
 
-7,411 tests, 157 conformance programs, 38 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
+7,458 tests, 157 conformance programs, 38 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
 
 ## Stage 19 — The verification completeness sprint
 
@@ -62,8 +62,7 @@ Exit criterion: each listed drift class has a generator or a gate, and a release
 | [#653](https://github.com/aallan/vera/issues/653) | Spec audit for §0.2 / §0.3 design-principle violations — the spec held to its own principles. |
 | [#528](https://github.com/aallan/vera/issues/528) | Gate the hand-edited numbers on the veralang.dev homepage against live counts (the Stage 18 landing-page audit found this class live). |
 | [#540](https://github.com/aallan/vera/issues/540) | lychee + markdownlint MD051 cross-doc anchor validation. |
-| [#481](https://github.com/aallan/vera/issues/481) | Auto-tag and auto-release on version bump — removes the forgettable manual release steps documented in [CONTRIBUTING.md](CONTRIBUTING.md). |
-| [#737](https://github.com/aallan/vera/issues/737) | Document the distribution policy (git-clone now; PyPI `veralang` publication gated on #481). |
+| [#737](https://github.com/aallan/vera/issues/737) | Complete the first live PyPI `veralang` release and verify both documented installation routes. |
 
 ## Stage 21 — The effect hardening sprint
 

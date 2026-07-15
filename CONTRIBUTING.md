@@ -240,13 +240,15 @@ If you are a maintainer setting up branch protection on a fork, configure these 
 
 ## Releases
 
-Contributors don't cut releases — the maintainer tags and publishes after merge ([#481](https://github.com/aallan/vera/issues/481) tracks automating that). What your PR needs to contain so a release can happen on top of it:
+Contributors don't cut releases. A release-prep PR carries the version and notes; after it merges, the approval-gated release workflow publishes the tested archives through PyPI Trusted Publishing and creates the matching tag and GitHub Release. The maintainer approves the production deployment. See [RELEASING.md](RELEASING.md) for the maintainer runbook. What your PR needs to contain:
 
 1. **Bump the version** in `pyproject.toml` and `vera/__init__.py`, and update the version badge in `docs/index.html` (the version appears twice on the badge line — URL and visible text). `scripts/check_version_sync.py` gates the consistency.
 2. **Add the `## [X.Y.Z]` section** to `CHANGELOG.md` with its compare-link reference at the bottom, and add the version's one-sentence row to the current stage table in `HISTORY.md`.
 3. **Regenerate `uv.lock` and the site assets** (`python scripts/build_site.py`) if dependencies or AI-readable docs changed.
 
-Not every PR is a release: small changes can ride along and ship with the next version bump. If you're unsure whether your change merits one, leave the bump out and say so in the PR description — the maintainer will fold it into the next release.
+Not every PR is a release: small changes can ride along and ship with the next version bump. If you're unsure whether your change merits one, leave the bump out and say so in the PR description — the maintainer will include it in the next release.
+
+Published versions are immutable. Never amend a released CHANGELOG section or move an existing release tag to fold in a follow-up; fixes after publication require a new patch version.
 
 ## Code of Conduct
 
