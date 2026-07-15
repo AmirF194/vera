@@ -6,7 +6,7 @@ call detection) of the code generation pipeline.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 from vera import ast
 from vera.errors import Diagnostic, SourceLocation
@@ -33,7 +33,43 @@ class CrossModuleMixin:
         if not self._resolved_modules:
             return
 
+        import dataclasses
+
         from vera.codegen.core import CodeGenerator
+        from vera.monomorphize import (
+            collect_nested_generic_decls,
+            qualify_nested_generic_decls,
+        )
+
+        # #1015: give every imported module AST the same #991 parent-qualified
+        # where-helper hoist the main program gets at Pass 0 (core.py) — BEFORE
+        # any registration or harvesting below reads ``mod.program``.  Without
+        # it, imported non-generic helpers keep bare names into the flat Pass
+        # 2.5/2.6 namespace, and two imported fns' same-named helpers collide
+        # first-seen-wins (silent wrong body).
+        #
+        # #999: chain the #1014 nested-generic qualification too — a `forall`
+        # where-helper under an imported non-generic fn (``compute`` →
+        # ``compute$where$gid``) becomes a uniquely-named mono base the importer
+        # can discover + clone, exactly as the main program's nested generics
+        # do.  Qualification runs BEFORE the hoist (same ordering as the main
+        # program, core.py) so a non-generic imported helper calling a generic
+        # sibling is qualified before the hoist lifts it out of the shared scope.
+        # Both transforms only rename ``FnCall.name`` fields and re-parent helper
+        # decls — every node keeps its original span, so the checker-built #987
+        # ``_module_artifacts`` span tables stay valid for the transformed AST.
+        # Rebind a NEW list of replaced (frozen) ``ResolvedModule``s rather than
+        # mutating the caller's list: the verifier scopes where-helpers lexically
+        # on the ORIGINAL nested AST and must keep seeing it.
+        self._resolved_modules = [
+            dataclasses.replace(
+                mod,
+                program=self._hoist_nongeneric_where_helpers(
+                    qualify_nested_generic_decls(mod.program),
+                ),
+            )
+            for mod in self._resolved_modules
+        ]
 
         # Pre-register builtin ADTs so we can identify them during collision
         # detection.  Every CodeGenerator registers Option, Result, Ordering,
@@ -86,6 +122,21 @@ class CrossModuleMixin:
                     vis_map[tld.decl.name] = tld.visibility or "private"
                 elif isinstance(tld.decl, ast.DataDecl):
                     vis_map[tld.decl.name] = tld.visibility or "private"
+
+            # #1000: names of this module's PRIVATE top-level generics.  They
+            # are unimportable, so a public generic reaching one transitively
+            # must route to the module's own version (``mod$<path>$inner``) — a
+            # bare ``inner`` in the importer's flat namespace either dangles or
+            # (a same-named local) is captured.  Rerouted below to a synthetic
+            # ``ModuleCall`` so the existing shadowed-generic discovery finds it
+            # and the ModuleCall desugar resolves it to the qualified clone.
+            module_private_generics: set[str] = {
+                tld.decl.name
+                for tld in mod.program.declarations
+                if isinstance(tld.decl, ast.FnDecl)
+                and tld.decl.forall_vars
+                and (tld.visibility or "private") != "public"
+            }
 
             # Harvest function sigs — include all (public + private) so
             # private helpers called by imported public fns are available.
@@ -210,7 +261,18 @@ class CrossModuleMixin:
                     else:
                         ctor_provenance[ctor_name] = (mod.path, adt_name)
 
-                if not ctor_collision and is_public and in_filter:
+                if not ctor_collision:
+                    # #1008: register EVERY non-colliding module ADT's layout
+                    # (public or private, in the import filter or not) — the
+                    # module's OWN bodies compile in Pass 2.5/2.6 against
+                    # ``self._adt_layouts``, so a module fn constructing its
+                    # own ADT dropped to ``unknown constructor`` →
+                    # ``CodegenSkip`` → a dangling ``$fn`` whenever the
+                    # importer didn't name the TYPE (or the ADT is private).
+                    # This softens no user-facing rail: the checker already
+                    # rejects the MAIN program's use of an unimported ctor in
+                    # both positions (E210 expression / E320 pattern), and
+                    # importer VISIBILITY below stays public + in-filter.
                     self._adt_layouts.setdefault(adt_name, layouts)
                     # #912: propagate the imported ADT's type-parameter
                     # metadata alongside its layout.  Without these, an imported
@@ -238,16 +300,20 @@ class CrossModuleMixin:
                                 temp._ctor_adt_tp_indices[_ctor_name])
                     self._needs_alloc = True
                     self._needs_memory = True
-                    # #890: importer-visible only for a direct import; a
-                    # transitive module's public ADT + ctors are compiled in
-                    # (an imported body may construct them) but stay invisible
-                    # to the top-level program.
-                    if mod.direct:
-                        importer_visible.add(adt_name)
-                        importer_visible.update(layouts.keys())
-                    else:
-                        transitive_contributed.add(adt_name)
-                        transitive_contributed.update(layouts.keys())
+                    # #890: importer-visible only for a PUBLIC, in-filter ADT
+                    # of a direct import; a transitive module's public ADT +
+                    # ctors are compiled in (an imported body may construct
+                    # them) but stay invisible to the top-level program.  A
+                    # private / out-of-filter ADT registers its layout above
+                    # (#1008) but joins NEITHER set — exactly its pre-#1008
+                    # bookkeeping.
+                    if is_public and in_filter:
+                        if mod.direct:
+                            importer_visible.add(adt_name)
+                            importer_visible.update(layouts.keys())
+                        else:
+                            transitive_contributed.add(adt_name)
+                            transitive_contributed.update(layouts.keys())
 
             # Harvest type aliases
             for alias_name, alias_expr in temp._type_aliases.items():
@@ -290,13 +356,21 @@ class CrossModuleMixin:
                         name_filter is None or tld.decl.name in name_filter
                     )
                     if is_public and in_filter:
+                        # #1000: reroute this public generic's transitive calls
+                        # to same-module PRIVATE generics onto a synthetic
+                        # ``ModuleCall`` so its emitted clone reaches the module's
+                        # own ``mod$<path>$inner`` clone (never a bare/local
+                        # ``inner``).
+                        gdecl = self._reroute_private_generic_calls(
+                            tld.decl, mod.path, module_private_generics,
+                        )
                         if tld.decl.name in local_fn_names:
                             self._shadowed_imported_generic_decls.setdefault(
                                 mod.path, {},
-                            ).setdefault(tld.decl.name, tld.decl)
+                            ).setdefault(tld.decl.name, gdecl)
                         else:
                             self._imported_generic_decls.setdefault(
-                                tld.decl.name, tld.decl,
+                                tld.decl.name, gdecl,
                             )
                             # #998: same first-seen-wins order as the decl
                             # registry, so a clone of this generic compiles
@@ -304,6 +378,17 @@ class CrossModuleMixin:
                             self._imported_generic_origins.setdefault(
                                 tld.decl.name, mod.path,
                             )
+                    elif not is_public:
+                        # #1000: a PRIVATE module generic is reachable only
+                        # transitively (through a public generic's body).
+                        # Harvest it under the module-qualified shadowed-generic
+                        # identity (``mod$<path>$name`` via the shared shadowed
+                        # machinery) — NEVER the bare ``_imported_generic_decls``,
+                        # where a bare-name entry would hijack a same-named local
+                        # fn (E608's import-only provenance can't catch that).
+                        self._shadowed_imported_generic_decls.setdefault(
+                            mod.path, {},
+                        ).setdefault(tld.decl.name, tld.decl)
                     continue
                 is_public = (tld.visibility or "private") == "public"
                 in_filter = name_filter is None or tld.decl.name in name_filter
@@ -312,6 +397,21 @@ class CrossModuleMixin:
                     mod.path, tld.decl, temp, local_fn_names,
                     qualified_eligible=is_public and in_filter,
                 )
+                # #999: harvest this imported NON-generic fn's nested `forall`
+                # where-helpers (qualified to ``compute$where$gid`` above) as
+                # imported mono bases, with origin threading (#998) so each
+                # clone compiles against this module's span tables.  The
+                # importer seeds their instantiations from the module BODY in
+                # `_monomorphize` (that body's ``compute$where$gid(@Int.0)``
+                # call), then emits + verifies the clones — pre-fix the call had
+                # no base and WAT assembly dangled at ``unknown func $gid``.
+                nested_gen: dict[str, ast.FnDecl] = {}
+                collect_nested_generic_decls(tld.decl, nested_gen)
+                for _gname, _gdecl in nested_gen.items():
+                    self._imported_generic_decls.setdefault(_gname, _gdecl)
+                    self._imported_generic_origins.setdefault(
+                        _gname, mod.path,
+                    )
                 # where-fns compile in Pass 2.5 too, so they need the SAME
                 # shadow wiring: an imported body's call to a locally-shadowed
                 # helper must reach the module's helper, not the local (#814
@@ -426,6 +526,64 @@ class CrossModuleMixin:
             self._fn_ret_type_exprs.setdefault(mangled, ret_te)
         if qualified_eligible:
             self._module_qualified_targets[(mod_path, fn_name)] = mangled
+
+    @staticmethod
+    def _reroute_private_generic_calls(
+        decl: ast.FnDecl,
+        module_path: tuple[str, ...],
+        private_generics: set[str],
+    ) -> ast.FnDecl:
+        """Rewrite bare calls to a module's PRIVATE generics into synthetic
+        ``ModuleCall``s (#1000).
+
+        A public imported generic's body may transitively call one of its
+        module's private generics by bare name.  Once the importer clones that
+        body, the bare name is ambiguous — it dangles (the private generic is
+        unimportable) or a same-named local captures it.  Rewriting each such
+        ``FnCall`` to ``ModuleCall(module_path, name)`` routes it through the
+        existing shadowed-generic discovery + desugar
+        (``_resolve_module_call_wasm_name`` → ``_module_qualified_generic_bases``
+        → the ``mod$<path>$name`` clone), so it reaches the module's own version.
+        Only the call NODE changes (``FnCall`` → ``ModuleCall`` with the same
+        args, recursively rerouted); every other node — including nested
+        ``AnonFn`` / ``where`` bodies — is structurally preserved with its span.
+        """
+        if not private_generics:
+            return decl
+        from dataclasses import fields as _fields
+        from dataclasses import replace as _replace
+
+        def walk(node: object) -> object:
+            if isinstance(node, ast.FnCall) and node.name in private_generics:
+                new_args = tuple(
+                    cast("ast.Expr", walk(a)) for a in node.args
+                )
+                return ast.ModuleCall(
+                    path=module_path, name=node.name,
+                    args=new_args, span=node.span,
+                )
+            if isinstance(node, ast.Node):
+                changes: dict[str, Any] = {}
+                for f in _fields(node):
+                    if f.name == "span":
+                        continue
+                    val = getattr(node, f.name)
+                    new_val = walk(val)
+                    if new_val is not val:
+                        changes[f.name] = new_val
+                if changes:
+                    return _replace(node, **changes)
+                return node
+            if isinstance(node, tuple):
+                new_items = tuple(walk(v) for v in node)
+                if any(n is not o for n, o in zip(new_items, node)):
+                    return new_items
+                return node
+            return node
+
+        result = walk(decl)
+        assert isinstance(result, ast.FnDecl)  # noqa: S101
+        return result
 
     @staticmethod
     def _module_qualified_wasm_name(

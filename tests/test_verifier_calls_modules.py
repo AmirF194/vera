@@ -1292,3 +1292,73 @@ private fn f(@Int -> @Box<Nat>)
         assert len(verified) == 1, [(o.kind, o.status)
                                     for o in result.obligations]
         assert [d for d in result.diagnostics if d.severity == "error"] == []
+
+    # -- #1000: private module generics reached transitively ---------------
+
+    # Two modules, each with a same-named PRIVATE generic `inner` behind a
+    # PUBLIC generic that calls it.  Module `ma`'s `inner` tells the truth
+    # (ensures result == 0, body 0); module `mb`'s LIES (ensures result == 9,
+    # body 0).  The importer reaches both transitively.
+    _MA_TRUTH = (
+        "private forall<T> fn inner(@T -> @Int)"
+        " requires(true) ensures(@Int.result == 0) effects(pure) { 0 }\n"
+        "public forall<T> fn oa(@T -> @Int)"
+        " requires(true) ensures(true) effects(pure) { inner(@T.0) }\n"
+    )
+    _MB_LIE = (
+        "private forall<T> fn inner(@T -> @Int)"
+        " requires(true) ensures(@Int.result == 9) effects(pure) { 0 }\n"
+        "public forall<T> fn ob(@T -> @Int)"
+        " requires(true) ensures(true) effects(pure) { inner(@T.0) }\n"
+    )
+    _MB_TRUTH = (
+        "private forall<T> fn inner(@T -> @Int)"
+        " requires(true) ensures(@Int.result == 0) effects(pure) { 0 }\n"
+        "public forall<T> fn ob(@T -> @Int)"
+        " requires(true) ensures(true) effects(pure) { inner(@T.0) }\n"
+    )
+    _TWO_PRIV_MAIN = (
+        "import ma(oa);\n"
+        "import mb(ob);\n"
+        "public fn main(@Unit -> @Int)"
+        " requires(true) ensures(true) effects(pure) { oa(0) + ob(0) }\n"
+    )
+
+    def test_lying_private_module_generic_is_E500(self) -> None:
+        """#1000c: a LYING PRIVATE module generic reached transitively must be
+        an E500 at the importer, not a silent false Tier-1.
+
+        `mb`'s private `inner` has ``ensures(@Int.result == 9)`` over body `0`.
+        It is unimportable and NOT in ``env.functions`` — pre-fix the importer
+        never harvested it, so its clone ran with a contract neither module
+        proved.  Harvesting it under the module-qualified ``mod$mb$inner`` key
+        and verifying its instantiations catches the lie.  `ma`'s TRUTHFUL
+        namesake must NOT also error — the two must be kept under DISTINCT keys
+        (a single bare-name entry would collapse them)."""
+        mods = [
+            self._resolved(("ma",), self._MA_TRUTH),
+            self._resolved(("mb",), self._MB_LIE),
+        ]
+        result = self._verify_mod(self._TWO_PRIV_MAIN, mods)
+        e500s = [d for d in result.diagnostics if d.error_code == "E500"]
+        assert len(e500s) == 1, (
+            f"exactly one E500 (mb's lying inner) expected, got "
+            f"{[(d.error_code, d.description[:60]) for d in result.diagnostics]}"
+        )
+        assert "inner" in e500s[0].description, e500s[0].description
+
+    def test_truthful_private_module_generics_verify_clean(self) -> None:
+        """#1000c control: two modules with TRUTHFUL same-named private generics
+        reached transitively must both verify clean under distinct keys — no
+        E500 for either.  Pins that the private-generic verification does not
+        false-positive (and that keeping distinct keys does not spuriously fail
+        a truthful namesake)."""
+        mods = [
+            self._resolved(("ma",), self._MA_TRUTH),
+            self._resolved(("mb",), self._MB_TRUTH),
+        ]
+        result = self._verify_mod(self._TWO_PRIV_MAIN, mods)
+        errors = [d for d in result.diagnostics if d.severity == "error"]
+        assert errors == [], [
+            (d.error_code, d.description[:60]) for d in errors
+        ]

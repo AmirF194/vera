@@ -16,8 +16,6 @@ plus the transitive worklist, with constraint-failing instances filtered out
 
 from __future__ import annotations
 
-from typing import Any
-
 from vera import ast
 from vera.monomorphize import (
     MonoContext,
@@ -212,15 +210,27 @@ class MonomorphizationMixin:
         # every constrained-generic call site's constructor arguments, across
         # both the seed decls and the transitively emitted mono bodies below.
         self._eq_full_type_names: dict[str, str] = {}
-        for tld in program.declarations:
-            decl = tld.decl
-            if isinstance(decl, ast.FnDecl) and not decl.forall_vars:
-                mono.collect_calls_in_node(
-                    decl, generic_decls, ctor_to_adt, instances,
-                )
-                self._collect_eq_full_type_names(
-                    decl, mono, generic_decls, ctor_to_adt,
-                )
+        seed_programs = [program, *(
+            mod.program for mod in getattr(self, "_resolved_modules", [])
+        )]
+        for seed_program in seed_programs:
+            # #999: seed from resolved-module bodies too (their #1015-hoisted +
+            # #1014-qualified copies).  An imported ``compute``'s body call to
+            # its own nested generic ``compute$where$gid`` (or a top-level
+            # imported generic) is only reachable through the module's decls, not
+            # the main program's — so without walking them the importer emits no
+            # clone and the module body's call dangles.  The verifier's
+            # `_collect_instantiations` walks the identical set, keeping the #732
+            # differential in lockstep.
+            for tld in seed_program.declarations:
+                decl = tld.decl
+                if isinstance(decl, ast.FnDecl) and not decl.forall_vars:
+                    mono.collect_calls_in_node(
+                        decl, generic_decls, ctor_to_adt, instances,
+                    )
+                    self._collect_eq_full_type_names(
+                        decl, mono, generic_decls, ctor_to_adt,
+                    )
 
         # Generate monomorphized FnDecls with transitive closure.
         # After generating the first round, scan the monomorphized bodies
@@ -255,6 +265,10 @@ class MonomorphizationMixin:
             mono_fn = mono.monomorphize_fn(decl, concrete_types)
             mono_decls.append(mono_fn)
             self._record_clone_origin(fn_name, mono_fn.name)
+            # #1002: remember this clone's concrete-FREE chain base so the
+            # per-clone where-tree hoister can key a generic-under-generic
+            # helper's `_emitted_instances` entry identically to the verifier.
+            self._clone_base_chain[mono_fn.name] = fn_name
             # #932: a transitively-reached nested-generic constrained call in
             # this clone body carries the same truncated constrained-var name —
             # record its full recovery so the next round's `_check_constraints`
@@ -322,11 +336,13 @@ class MonomorphizationMixin:
         # of every helper under a clone-aligned name and rewrite the intra-clone
         # calls to match, so the ordinary mono-decl emission path (register in
         # Pass 1.5, compile in Pass 2) emits them.
-        return self._hoist_clone_where_fns(mono_decls)
+        return self._hoist_clone_where_fns(mono_decls, mono, ctor_to_adt)
 
     def _hoist_clone_where_fns(
         self,
         mono_decls: list[ast.FnDecl],
+        mono: Monomorphizer,
+        ctor_to_adt: dict[str, str],
     ) -> list[ast.FnDecl]:
         """Hoist every clone's ``where``-helpers into standalone mono decls (#904).
 
@@ -350,9 +366,22 @@ class MonomorphizationMixin:
 
         Nested ``where`` blocks (a helper with its own helpers) are hoisted
         recursively under the same clone-qualified prefix.
+
+        #1002: a ``where``-helper that is ITSELF generic (a ``forall`` under a
+        generic ancestor) is NOT flattened here — its subtree depends on its
+        own type variable and must be hoisted only after that variable is bound.
+        ``_hoist_where_fns_under`` keeps such a helper's subtree intact (its
+        bare name and calls to visible outer helpers still redirected), and this
+        loop then monomorphizes it per its concrete call sites, re-queuing each
+        resulting clone so its own where-tree is hoisted in turn (fixpoint over
+        arbitrary generic-under-generic depth).
         """
         result: list[ast.FnDecl] = []
-        for decl in mono_decls:
+        # Worklist so a nested generic's freshly-emitted clone (which may carry
+        # its own where-tree, generic or not) re-enters hoisting.
+        pending: list[ast.FnDecl] = list(mono_decls)
+        while pending:
+            decl = pending.pop(0)
             if not decl.where_fns:
                 result.append(decl)
                 continue
@@ -361,49 +390,147 @@ class MonomorphizationMixin:
                 decl, decl.name, hoisted,
             )
             result.append(rewritten)
-            result.extend(hoisted)
             # #998: a hoisted helper's body is the same module's code as the
             # clone it was hoisted from — it needs the same span tables.
             origin = self._mono_clone_origins.get(decl.name)
             if origin is not None:
                 for h in hoisted:
                     self._mono_clone_origins[h.name] = origin
+            for h in hoisted:
+                if h.forall_vars:
+                    # #1002: still-generic (generic-under-generic).  Instantiate
+                    # it per its calls in the just-hoisted parent + siblings;
+                    # the concrete clones re-enter `pending`.
+                    self._instantiate_hoisted_generic(
+                        h, decl.name, [rewritten, *hoisted], pending,
+                        mono, ctor_to_adt,
+                    )
+                else:
+                    result.append(h)
         return result
+
+    def _instantiate_hoisted_generic(
+        self,
+        gen: ast.FnDecl,
+        parent_clone_name: str,
+        bodies: list[ast.FnDecl],
+        pending: list[ast.FnDecl],
+        mono: Monomorphizer,
+        ctor_to_adt: dict[str, str],
+    ) -> None:
+        """Instantiate a still-generic hoisted ``where``-helper (#1002).
+
+        *gen* is a ``forall`` helper hoisted under a generic ancestor's clone,
+        renamed to its concrete-including per-clone name
+        (``parent$where$outer$Int$where$ginner``).  Register it as a generic
+        base so Pass 2's call-site rewriter mangles the (already-redirected)
+        bare calls to it, discover its instantiations from *bodies* (the hoisted
+        parent clone + its sibling helpers), monomorphize each to a concrete
+        per-clone clone (``…$ginner$Int``), record the emission under the
+        concrete-FREE chain key so the #732 differential matches the verifier,
+        and re-queue each clone so its own where-tree is hoisted.
+        """
+        assert gen.forall_vars is not None  # noqa: S101
+        # Register for Pass 2 generic-call resolution under the emission name.
+        self._generic_fn_info[gen.name] = (gen.forall_vars, gen.params)
+        self._generic_constrained_vars[gen.name] = frozenset(
+            c.type_var for c in (gen.forall_constraints or ())
+        )
+        # The concrete-FREE chain key: the parent clone's chain base plus this
+        # helper's bare name (``gen.name`` is ``<parent_clone_name>$where$<h>``).
+        base_chain = self._clone_base_chain.get(
+            parent_clone_name, parent_clone_name,
+        )
+        helper_bare = gen.name[len(parent_clone_name) + len("$where$"):]
+        chain_key = f"{base_chain}$where${helper_bare}"
+        # Origin: a nested clone of an imported base is the module's own code.
+        origin = self._mono_clone_origins.get(parent_clone_name)
+        # Discover instantiations of `gen` (by its emission name) across the
+        # parent clone body + every sibling helper body.
+        gen_decls = {gen.name: gen}
+        instances: dict[str, set[tuple[str, ...]]] = {gen.name: set()}
+        for body in bodies:
+            mono.collect_calls_in_node(
+                body, gen_decls, ctor_to_adt, instances,
+            )
+        for concrete in sorted(instances[gen.name]):
+            if not self._check_constraints(gen, concrete):
+                continue
+            clone = mono.monomorphize_fn(gen, concrete)
+            if origin is not None:
+                self._mono_clone_origins[clone.name] = origin
+            # Chain the deeper base so a generic sub-helper of `gen` keys
+            # concrete-free too.
+            self._clone_base_chain[clone.name] = chain_key
+            self._emitted_instances.add((chain_key, concrete))
+            pending.append(clone)
 
     def _hoist_where_fns_under(
         self,
         fn: ast.FnDecl,
         prefix: str,
         hoisted: list[ast.FnDecl],
+        scope: dict[str, str] | None = None,
     ) -> ast.FnDecl:
         """Hoist ``fn``'s ``where``-helpers under ``prefix``, recursively.
 
         Returns ``fn`` with its ``where_fns`` stripped and every bare call to a
-        (now-renamed) helper redirected.  Each helper is appended to ``hoisted``
-        under ``<prefix>$where$<helper>``, with its OWN nested helpers hoisted
-        under that new prefix.  The sibling-rename map is shared across the
-        parent body and every helper body so a helper→sibling-helper call is
-        rewritten identically to a parent→helper call.
+        lexically-visible helper redirected.  Each helper is appended to
+        ``hoisted`` under ``<prefix>$where$<helper>``, with its OWN nested
+        helpers hoisted under that new prefix.
+
+        *scope* is the ``{helper name: renamed name}`` map of every helper
+        visible from ENCLOSING ``where`` scopes, threaded down the recursion so
+        full lexical resolution holds (#1012) — the exact mirror of the
+        non-generic hoister's ``scope`` parameter
+        (``_hoist_nongeneric_where_fns_under``): a helper body resolves a bare
+        call to the NEAREST same-named helper in the enclosing tree — its own
+        children first, then siblings, then any ancestor's (a grandchild
+        calling an "aunt", a sibling of its parent, is redirected too), and an
+        inner helper shadows an outer same-named one for its subtree.  A name
+        absent from the combined scope is a top-level / builtin call and stays
+        bare.  Pre-#1012 the recursion dropped the enclosing map, so a
+        grandchild's aunt call stayed bare and WAT assembly failed with an
+        unknown-func internal error on a check-green program.
         """
         from dataclasses import replace as _replace
+
+        from vera.monomorphize import _qualify_generic_subtree_calls
 
         where_fns = fn.where_fns or ()
         rename = {
             wfn.name: f"{prefix}$where${wfn.name}"
             for wfn in where_fns
         }
+        # This level's names shadow same-named ancestors for this subtree.
+        combined = {**(scope or {}), **rename}
         for wfn in where_fns:
-            # Recurse first (under the helper's own hoisted name) so a nested
-            # helper's calls are redirected before the sibling-rename pass.
+            if wfn.forall_vars:
+                # #1002: a generic helper's subtree is per-INSTANTIATION
+                # territory — it depends on the helper's own type variable, so
+                # it must be hoisted only AFTER the helper is monomorphized (the
+                # caller instantiates it and re-queues each clone).  Keep its
+                # subtree intact; only redirect its calls to lexically-visible
+                # OUTER helpers (shadow-aware, so a re-declared inner name still
+                # binds to the inner helper), then rename it to its per-clone
+                # emission name.
+                redirected = _qualify_generic_subtree_calls(wfn, combined)
+                hoisted.append(
+                    _replace(redirected, name=rename[wfn.name]),
+                )
+                continue
+            # The child body sees `combined` (ancestors + this level, so
+            # sibling and aunt calls redirect); its own nested helpers extend
+            # that scope inside the recursion, which also applies the final
+            # rewrite — no second pass here.
             child = self._hoist_where_fns_under(
-                wfn, rename[wfn.name], hoisted,
+                wfn, rename[wfn.name], hoisted, combined,
             )
-            renamed = self._rewrite_call_names(child, rename)
-            assert isinstance(renamed, ast.FnDecl)  # noqa: S101
-            hoisted.append(_replace(renamed, name=rename[wfn.name]))
-        # Strip the parent's where block and redirect its calls to the helpers.
+            hoisted.append(_replace(child, name=rename[wfn.name]))
+        # Strip the parent's where block and redirect its calls with the full
+        # lexical scope.
         stripped = _replace(fn, where_fns=None)
-        rewritten = self._rewrite_call_names(stripped, rename)
+        rewritten = self._rewrite_call_names(stripped, combined)
         assert isinstance(rewritten, ast.FnDecl)  # noqa: S101
         return rewritten
 
@@ -649,31 +776,11 @@ class MonomorphizationMixin:
     def _rewrite_call_names(
         self, node: object, rename: dict[str, str],
     ) -> object:
-        from dataclasses import fields as _fields
-        from dataclasses import replace as _replace
+        # Delegates to the shared standalone walker (vera/monomorphize.py) so
+        # the #1014 qualification transform and this mixin can never drift.
+        from vera.monomorphize import rewrite_fn_call_names
 
-        if isinstance(node, ast.Node):
-            changes: dict[str, Any] = {}
-            for f in _fields(node):
-                if f.name == "span":
-                    continue
-                val = getattr(node, f.name)
-                new_val = self._rewrite_call_names(val, rename)
-                if new_val is not val:
-                    changes[f.name] = new_val
-            if isinstance(node, ast.FnCall) and node.name in rename:
-                changes["name"] = rename[node.name]
-            if changes:
-                return _replace(node, **changes)
-            return node
-        if isinstance(node, tuple):
-            new_items = tuple(
-                self._rewrite_call_names(v, rename) for v in node
-            )
-            if any(n is not o for n, o in zip(new_items, node)):
-                return new_items
-            return node
-        return node
+        return rewrite_fn_call_names(node, rename)
 
     def _collect_shadowed_qualified_calls(
         self,

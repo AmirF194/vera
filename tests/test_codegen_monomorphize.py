@@ -4777,3 +4777,125 @@ public fn main(@Unit -> @Unit)
             f"expected '100'; got {out!r} — nested where-fn indices were "
             f"not reindexed"
         )
+
+
+# =====================================================================
+# #999-#1015 import-door cluster — single-file mono fixes
+# =====================================================================
+
+
+class TestMonoImportCluster:
+    """Single-file fixes from the mono/import-door cluster (#1012, #1014,
+    #1002): ancestor-scope call rewriting in the generic clone hoister,
+    parent-qualified keying for nested generic bases, and per-clone
+    instantiation of generic-under-generic helpers."""
+
+    _AUNT_UNDER_FORALL = """\
+private forall<T> fn g(@T -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  child(())
+}
+where {
+  fn child(@Unit -> @Int)
+    requires(true) ensures(true) effects(pure)
+  { grandchild(()) }
+  where {
+    fn grandchild(@Unit -> @Int)
+      requires(true) ensures(true) effects(pure)
+    { aunt(()) }
+  }
+  fn aunt(@Unit -> @Int)
+    requires(true) ensures(true) effects(pure)
+  { 8 }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  g(5)
+}
+"""
+
+    def test_grandchild_calls_aunt_in_generic_where_tree_1012(self) -> None:
+        """A grandchild helper calling an AUNT (its parent's sibling) inside a
+        generic clone's where-tree must resolve to the hoisted aunt (#1012).
+
+        Pre-fix `_hoist_where_fns_under` rewrote with this-level names only —
+        the recursion dropped the parent-level rename map, so the grandchild's
+        `aunt(())` stayed bare and WAT assembly failed with
+        `unknown func $aunt`.  8 cannot coincide with any other leaf value in
+        the tree, so a mis-resolved call cannot masquerade as a pass."""
+        assert _run(self._AUNT_UNDER_FORALL, fn="main") == 8
+
+    _SAME_NAME_TWO_PARENTS = """\
+public fn a(@Int -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  g(@Int.0)
+}
+where {
+  forall<T> fn g(@T -> @Int)
+    requires(true) ensures(true) effects(pure)
+  { 1 }
+}
+
+public fn b(@Int -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  g(@Int.0)
+}
+where {
+  forall<T> fn g(@T -> @Int)
+    requires(true) ensures(true) effects(pure)
+  { 2 }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  a(0) * 10 + b(0)
+}
+"""
+
+    def test_same_named_generic_helpers_under_different_parents_1014(
+        self,
+    ) -> None:
+        """Two same-named `forall` where-helpers under DIFFERENT parents must
+        each run their own body (#1014).
+
+        Pre-fix `collect_nested_generic_decls` keyed nested generic bases by
+        bare name, flat and first-seen-wins: both parents' `g` calls
+        monomorphized against parent `a`'s declaration and main returned 11
+        (b's call ran a's body).  The digits differ per parent (1 vs 2), so
+        the combined value 12 uniquely proves each parent reached its own
+        helper."""
+        assert _run(self._SAME_NAME_TWO_PARENTS, fn="main") == 12
+
+    _GENERIC_UNDER_GENERIC = """\
+private fn parent(@Int -> @Int)
+  requires(true) ensures(@Int.result == @Int.0 + 5) effects(pure)
+{ outer(@Int.0) + 5 }
+where {
+  forall<T> fn outer(@T -> @T) requires(true) ensures(@T.result == @T.0) effects(pure)
+  { ginner(@T.0) }
+  where {
+    forall<U> fn ginner(@U -> @U) requires(true) ensures(@U.result == @U.0) effects(pure)
+    { @U.0 }
+  }
+}
+public fn main(@Unit -> @Int) requires(true) ensures(@Int.result == 15) effects(pure) { parent(10) }
+"""
+
+    def test_generic_helper_under_generic_ancestor_instantiated_1002(
+        self,
+    ) -> None:
+        """A `forall` helper under a GENERIC ancestor must be instantiated
+        per-clone (#1002).
+
+        Pre-fix `_hoist_clone_where_fns` hoisted `ginner` as a still-generic
+        template (`outer$Int$where$ginner` with `U` unbound) that was never
+        monomorphized, so the clone body's call dangled — check-green,
+        VERIFY-GREEN (Tier-1 obligations over an uncompilable program), and
+        `unknown func` at run."""
+        assert _run(self._GENERIC_UNDER_GENERIC, fn="main") == 15

@@ -2811,3 +2811,224 @@ public fn main(@Unit -> @Int)
 """
         mod = self._resolved(("lib",), lib_src)
         assert self._run_mod(main_src, [mod], fn="main") == 116
+
+
+# =====================================================================
+# #999-#1015 import-door cluster — cross-module fixes
+# =====================================================================
+
+
+class TestImportDoorCluster:
+    """Cross-module fixes from the mono/import-door cluster: imported-body
+    where-helper hoisting (#1015), a module's own ADT layouts (#1008),
+    imported-body generic discovery (#999), and module-qualified private
+    generic harvesting (#1000, replacing draft PR #1026)."""
+
+    _resolved = staticmethod(TestCrossModuleCodegen._resolved)
+    _compile_mod = staticmethod(TestCrossModuleCodegen._compile_mod)
+    _run_mod = staticmethod(TestCrossModuleCodegen._run_mod)
+
+    LEAF_MODULE = """\
+public fn a(@Int -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  leaf(@Int.0)
+}
+where {
+  fn leaf(@Int -> @Int)
+    requires(true) ensures(true) effects(pure)
+  { @Int.0 + 1 }
+}
+
+public fn b(@Int -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  leaf(@Int.0)
+}
+where {
+  fn leaf(@Int -> @Int)
+    requires(true) ensures(true) effects(pure)
+  { @Int.0 + 2 }
+}
+"""
+
+    def test_imported_same_named_where_helpers_run_own_bodies_1015(
+        self,
+    ) -> None:
+        """Two imported fns each carrying a same-named non-generic
+        where-helper must run their OWN helper bodies (#1015).
+
+        Pre-fix imported module ASTs were never given the #991
+        parent-qualified hoist, so both `leaf`s collided first-seen-wins in
+        the flat namespace and main returned 101 (b's leaf resolved to a's
+        +1 body).  Correct: a(0)=1, b(0)=2 -> 102."""
+        mod = self._resolved(("lib",), self.LEAF_MODULE)
+        val = self._run_mod("""\
+import lib(a, b);
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  a(0) * 100 + b(0)
+}
+""", [mod], fn="main")
+        assert val == 102
+
+    ADT_MODULE = """\
+public data Inner { MkInner(Int) }
+public fn make(@Int -> @Inner)
+  requires(true) ensures(true) effects(pure)
+{ MkInner(@Int.0) }
+public fn unwrap(@Inner -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ match @Inner.0 { MkInner(@Int) -> @Int.0 } }
+"""
+
+    def test_module_constructs_own_adt_without_type_import_1008(self) -> None:
+        """An imported fn constructing its module's OWN ADT must compile even
+        when the importer never names the type (#1008).
+
+        Pre-fix constructor layouts were registered per the importer's
+        filter, so `make`'s body hit `unknown constructor MkInner` ->
+        CodegenSkip -> `unknown func $make` at run unless the importer added
+        `Inner` to the import list."""
+        mod = self._resolved(("lib",), self.ADT_MODULE)
+        val = self._run_mod("""\
+import lib(make, unwrap);
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ unwrap(make(7)) }
+""", [mod], fn="main")
+        assert val == 7
+
+    def test_unimported_ctor_stays_rejected_at_check_1008(self) -> None:
+        """PINNED INVARIANT (green pre- and post-fix): the CHECKER rejects an
+        importer pattern-matching a constructor whose type it never imported
+        (E320) — registering the module's own layouts unconditionally in
+        codegen must not soften this user-facing guard rail."""
+        from vera.checker import typecheck
+
+        main_src = """\
+import lib(make, unwrap);
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ match make(7) { MkInner(@Int) -> @Int.0 } }
+"""
+        mod = self._resolved(("lib",), self.ADT_MODULE)
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".vera", delete=False, encoding="utf-8"
+        ) as f:
+            f.write(main_src)
+            f.flush()
+            path = f.name
+        try:
+            prog = transform(parse_file(path))
+            diags = typecheck(prog, main_src, resolved_modules=[mod])
+            assert any(d.error_code == "E320" for d in diags), (
+                "pattern-matching an unimported module ctor must stay E320 "
+                f"at check (guard rail, #1008); got "
+                f"{[d.error_code for d in diags]}"
+            )
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+    NESTED_GEN_MODULE = """\
+public fn compute(@Int -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ gid(@Int.0) + 1 }
+where {
+  forall<T> fn gid(@T -> @T)
+    requires(true) ensures(@T.result == @T.0) effects(pure)
+  { @T.0 }
+}
+"""
+
+    def test_imported_fn_nested_generic_helper_discovered_999(self) -> None:
+        """An imported fn's call to its OWN nested `forall` where-helper must
+        be seeded into instance discovery (#999).
+
+        Pre-fix discovery scanned only the importer's declarations, so the
+        imported `compute`'s `gid(@Int.0)` had no clone base and WAT assembly
+        failed with `unknown func $gid`."""
+        mod = self._resolved(("lib_nested",), self.NESTED_GEN_MODULE)
+        val = self._run_mod("""\
+import lib_nested(compute);
+public fn main(@Unit -> @Int)
+  requires(true) ensures(@Int.result == 11) effects(pure)
+{ compute(10) }
+""", [mod], fn="main")
+        assert val == 11
+
+    PRIV_MODULE = """\
+private forall<T> fn inner(@T -> @T)
+  requires(true) ensures(@T.result == @T.0) effects(pure)
+{ @T.0 }
+public forall<T> fn outer(@T -> @T)
+  requires(true) ensures(@T.result == @T.0) effects(pure)
+{ inner(@T.0) }
+"""
+
+    def test_private_generic_reached_transitively_executes_1000(self) -> None:
+        """A private module generic called by the module's public generic must
+        be harvested as a (module-qualified) clone base (#1000).
+
+        Pre-fix `_register_modules` skipped private generics entirely, so the
+        public clone's body call dangled at `unknown func $inner`."""
+        mod = self._resolved(("lib_priv",), self.PRIV_MODULE)
+        val = self._run_mod("""\
+import lib_priv(outer);
+public fn main(@Unit -> @Int)
+  requires(true) ensures(@Int.result == 7) effects(pure)
+{ outer(7) }
+""", [mod], fn="main")
+        assert val == 7
+
+    COLLIDE_MODULE = """\
+private forall<T> fn dup(@T -> @Int) requires(true) ensures(true) effects(pure) { 0 }
+public forall<T> fn caller(@T -> @Int) requires(true) ensures(true) effects(pure) { dup(@T.0) }
+"""
+
+    def test_local_fn_survives_transitive_private_generic_collision_1000(
+        self,
+    ) -> None:
+        """A LOCAL fn and a transitively-reached private module generic
+        sharing a name must EACH keep their own body (#1000).
+
+        Both hijack directions are covered: pre-fix, main returned 105103 —
+        the local dup(5) kept its body (105) but the imported caller's
+        transitive `dup` call bound to the LOCAL dup (3+100=103) instead of
+        the module's private helper (0), a silent wrong body on today's main.
+        (The draft-PR #1026 bare-name harvest inverted the hijack: local
+        dup(5) returned the import clone's 0.)  Module-qualified keying gives
+        each caller its own callee: 105 * 1000 + 0 = 105000."""
+        mod = self._resolved(("lib",), self.COLLIDE_MODULE)
+        val = self._run_mod("""\
+import lib(caller);
+private fn dup(@Int -> @Int) requires(true) ensures(@Int.result == @Int.0 + 100) effects(pure) { @Int.0 + 100 }
+public fn main(@Unit -> @Int) requires(true) ensures(true) effects(pure) { dup(5) * 1000 + caller(3) }
+""", [mod], fn="main")
+        assert val == 105000
+
+    PRIVATE_ADT_MODULE = """\
+private data Hidden { MkHidden(Int) }
+public fn roundtrip(@Int -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ match MkHidden(@Int.0) { MkHidden(@Int) -> @Int.0 } }
+"""
+
+    def test_module_private_adt_constructed_by_own_fn_1008(self) -> None:
+        """A module fn constructing its module's PRIVATE ADT must compile —
+        the private-ADT variant of #1008, where no import list could ever
+        name the type.  Pre-fix: `unknown constructor` -> CodegenSkip ->
+        `unknown func $roundtrip` at run."""
+        mod = self._resolved(("lib",), self.PRIVATE_ADT_MODULE)
+        val = self._run_mod("""\
+import lib(roundtrip);
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ roundtrip(9) }
+""", [mod], fn="main")
+        assert val == 9

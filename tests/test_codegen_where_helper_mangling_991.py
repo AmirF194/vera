@@ -447,13 +447,22 @@ class TestWhereHelperNameCollision991:
 
     def test_collision_coexists_with_nested_generic(self) -> None:
         # Shape (c): the non-generic `leaf` collision is mangled while the
-        # nested generic `gid` still monomorphizes (mono's job, untouched).
+        # nested generic `gid` still monomorphizes.  #1014 parent-qualifies a
+        # nested `forall` helper's base (like the sibling `leaf`s above), so its
+        # clone is emitted under the qualified name — NOT a bare `gid$Int`,
+        # which would collapse two same-named nested generics under different
+        # parents.  The clone is still emitted (mono's job): the program runs.
         assert _run(_COLLISION_WITH_NESTED_GENERIC, "compute", [0]) == 300
         result = _compile(_COLLISION_WITH_NESTED_GENERIC)
         names = _func_names(result.wat)
-        assert "gid$Int" in names, (
-            f"the nested generic clone must still be emitted, got "
+        assert "compute$where$branchB$where$gid$Int" in names, (
+            f"the nested generic clone must still be emitted under its "
+            f"parent-qualified name (#1014), got "
             f"{[n for n in names if 'gid' in n]}"
+        )
+        assert "gid$Int" not in names, (
+            "the nested generic must NOT be emitted under a bare name — that "
+            "would collide across same-named nested generics (#1014)"
         )
 
 
