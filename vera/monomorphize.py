@@ -347,12 +347,9 @@ def rewrite_fn_call_names(node: object, rename: dict[str, str]) -> object:
     the #1014 qualification transform below can run identically on the codegen
     program and the verifier's discovery copy.
     """
-    from dataclasses import fields as _fields
-    from dataclasses import replace as _replace
-
     if isinstance(node, ast.Node):
         changes: dict[str, Any] = {}
-        for f in _fields(node):
+        for f in fields(node):
             if f.name == "span":
                 continue
             val = getattr(node, f.name)
@@ -362,7 +359,7 @@ def rewrite_fn_call_names(node: object, rename: dict[str, str]) -> object:
         if isinstance(node, ast.FnCall) and node.name in rename:
             changes["name"] = rename[node.name]
         if changes:
-            return _replace(node, **changes)
+            return replace(node, **changes)
         return node
     if isinstance(node, tuple):
         new_items = tuple(rewrite_fn_call_names(v, rename) for v in node)
@@ -460,18 +457,16 @@ def _qualify_generic_subtree_calls(
     the same rule as the non-generic hoist's
     ``_rewrite_generic_subtree_shadowed``.
     """
-    from dataclasses import replace as _replace
-
     level_names = {wfn.name for wfn in fn.where_fns or ()}
     visible = {k: v for k, v in rename.items() if k not in level_names}
-    body_only = _replace(fn, where_fns=None)
+    body_only = replace(fn, where_fns=None)
     rewritten = rewrite_fn_call_names(body_only, visible)
     assert isinstance(rewritten, ast.FnDecl)  # noqa: S101
     new_where = tuple(
         _qualify_generic_subtree_calls(wfn, visible)
         for wfn in fn.where_fns or ()
     )
-    return _replace(rewritten, where_fns=new_where or None)
+    return replace(rewritten, where_fns=new_where or None)
 
 
 def _qualify_nested_under(
@@ -485,8 +480,6 @@ def _qualify_nested_under(
     so a bare call anywhere in the subtree resolves to the NEAREST same-named
     helper, exactly the lexical rule of spec §5 and the non-generic hoist.
     """
-    from dataclasses import replace as _replace
-
     where_fns = fn.where_fns or ()
     declared = {wfn.name for wfn in where_fns}
     generic_renames = {
@@ -503,7 +496,7 @@ def _qualify_nested_under(
             # structurally untouched (per-clone hoisting owns it, #904).
             rewritten = _qualify_generic_subtree_calls(wfn, combined)
             new_where.append(
-                _replace(rewritten, name=generic_renames[wfn.name])
+                replace(rewritten, name=generic_renames[wfn.name])
             )
         else:
             # Descend a non-generic helper, extending the qualification
@@ -516,10 +509,10 @@ def _qualify_nested_under(
                     wfn, f"{prefix}$where${wfn.name}", combined,
                 )
             )
-    body_only = _replace(fn, where_fns=None)
+    body_only = replace(fn, where_fns=None)
     body_rewritten = rewrite_fn_call_names(body_only, combined)
     assert isinstance(body_rewritten, ast.FnDecl)  # noqa: S101
-    return _replace(body_rewritten, where_fns=tuple(new_where) or None)
+    return replace(body_rewritten, where_fns=tuple(new_where) or None)
 
 
 def qualify_nested_generic_decls(
