@@ -50,6 +50,28 @@ The practical implication for user code: do **not** insert `nat_to_int` defensiv
 
 These rules key on representation, not on the name `Unit`: a `Future` transparently wrapping a zero-size payload (`Future<Unit>`) is rejected the same way, while boxed shapes with a real runtime representation (`Option<Unit>` — tag plus pointer) are ordinary values.
 
+The legal side of the line — a `@Unit` parameter declared and satisfied with the unit literal:
+
+```vera
+private fn poll(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  7
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  poll(())
+}
+```
+
+`poll` declares a `@Unit` parameter (legal — it erases from the ABI) and the call site supplies the literal `()`; neither body ever reads a `@Unit` slot.
+
 ## 2.3 Compound Types
 
 ### 2.3.1 Tuple Types
