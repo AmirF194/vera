@@ -1,5 +1,5 @@
 -- Conformance: effect ops in array-literal element position (Chapter 7,
--- Section 7.3; Chapter 4, Section 4.xx arrays).
+-- Section 7.3; Chapter 4, Section 4.12 arrays).
 -- Tests: get(()) as an array-literal element compiles and dispatches
 -- through the clause-aware op lowering (#1006) — under a handler whose
 -- get clause is the identity, under a TRANSFORMING get clause (+100,
