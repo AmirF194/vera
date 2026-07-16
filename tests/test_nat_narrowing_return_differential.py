@@ -1143,3 +1143,103 @@ class TestClosureRefinedPair1032:
             f"an empty NonEmptyStr argument"
         )
         assert _run(_CLOSURE_REFINED_STR_FORMAL, "go", 1) == 3
+
+
+_REFINED_NONPLAIN_PRELUDE = """\
+type NEPosArr = { @Array<{ @Int | @Int.0 > 0 }> | array_length(@Array<{ @Int | @Int.0 > 0 }>.0) > 0 };
+"""
+
+_NONPLAIN_CLOSURE_RET = _REFINED_NONPLAIN_PRELUDE + """\
+type MK = fn(Array<{ @Int | @Int.0 > 0 }> -> NEPosArr) effects(pure);
+
+public fn go(@Unit -> @Nat)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @MK = fn(@Array<{ @Int | @Int.0 > 0 }> -> @NEPosArr) effects(pure) {
+    @Array<{ @Int | @Int.0 > 0 }>.0
+  };
+  let @Array<{ @Int | @Int.0 > 0 }> = apply_fn(@MK.0, []);
+  array_length(@Array<{ @Int | @Int.0 > 0 }>.0)
+}
+"""
+
+_NONPLAIN_CLOSURE_FORMAL = _REFINED_NONPLAIN_PRELUDE + """\
+type TK = fn(NEPosArr -> Nat) effects(pure);
+
+public fn go(@Unit -> @Nat)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @TK = fn(@NEPosArr -> @Nat) effects(pure) {
+    array_length(@NEPosArr.0)
+  };
+  apply_fn(@TK.0, [])
+}
+"""
+
+_NONPLAIN_NAMED_FORMAL = _REFINED_NONPLAIN_PRELUDE + """\
+private fn take(@NEPosArr -> @Nat)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  array_length(@NEPosArr.0)
+}
+
+public fn go(@Unit -> @Nat)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  take([])
+}
+"""
+
+_NONPLAIN_NAMED_RET = _REFINED_NONPLAIN_PRELUDE + """\
+public fn mk(@Array<{ @Int | @Int.0 > 0 }> -> @NEPosArr)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  @Array<{ @Int | @Int.0 > 0 }>.0
+}
+"""
+
+
+class TestRefinedNonPlainBaseDisclosure1036:
+    """A refinement base with a NON-PLAIN type argument (a nested refinement
+    or fn type, e.g. `Array<{ @Int | ... }>`) gets NO codegen guard at any
+    boundary — `_refinement_guard_parts` cannot spell the binder slot and
+    bails (#1036).  The verifier's `guarded=` must say so: these obligations
+    record `tier3_unguarded` (E506 disclosure, excluded from the runtime
+    totals), never a guarded `tier3` promise the runtime does not keep
+    (PR #1034 adversarial review: an empty array flowed through a
+    NonEmpty-refined closure boundary silently while verify claimed a
+    runtime check).
+    """
+
+    @pytest.mark.parametrize(
+        ("src", "site"),
+        [
+            (_NONPLAIN_CLOSURE_RET, "closure return"),
+            (_NONPLAIN_CLOSURE_FORMAL, "closure argument"),
+            (_NONPLAIN_NAMED_FORMAL, "call argument"),
+            (_NONPLAIN_NAMED_RET, "return type"),
+        ],
+        ids=["closure-ret", "closure-formal", "named-formal", "named-ret"],
+    )
+    def test_nonplain_base_records_unguarded(self, src: str, site: str) -> None:
+        statuses = _refine_bind_statuses(src)
+        assert statuses and all(s == "tier3_unguarded" for s in statuses), (
+            f"a non-plain-arg refined {site} has no codegen guard — expected "
+            f"only tier3_unguarded disclosures, got {statuses} (a 'tier3' here "
+            f"is an unfulfilled runtime-guard promise, #1036)"
+        )
+
+    def test_plain_base_still_promises_guard(self) -> None:
+        # The control: a PLAIN NamedType base keeps its honest guarded tier3
+        # (the closure guards fire for these — pinned by the classes above).
+        assert _refine_bind_statuses(_CLOSURE_REFINED_RET_LEAK) == ["tier3"]

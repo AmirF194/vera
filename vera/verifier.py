@@ -2491,7 +2491,7 @@ class ContractVerifier:
                 # pass (R7).
                 self._record_refined_bind_tier3(
                     decl, ret_node, "return type",
-                    guarded=not self._is_unit_refinement(ret_type))
+                    guarded=self._refined_boundary_codegen_guardable(ret_type))
             else:
                 ret_result = smt.check_valid(goal, list(assumptions))
                 if ret_result.status == "verified":
@@ -2509,7 +2509,9 @@ class ContractVerifier:
                     )
                 else:  # pragma: no cover — solver timeout
                     self._record_refined_bind_tier3(
-                        decl, ret_node, "return type", guarded=True)
+                        decl, ret_node, "return type",
+                        guarded=self._refined_boundary_codegen_guardable(
+                            ret_type))
 
         # 7c. #813: a bare @Nat body widening into an @Int return reinterprets
         #     its bit pattern above i64.MAX (u64.MAX -> -1), so a Tier-1 proof
@@ -3578,7 +3580,8 @@ class ContractVerifier:
             if self._is_refined_type(resolved_ret):
                 self._record_refined_bind_tier3(
                     decl, expr.body, "closure return",
-                    guarded=not self._is_unit_refinement(resolved_ret),
+                    guarded=self._refined_boundary_codegen_guardable(
+                        resolved_ret),
                 )
             elif (self._is_int_type(resolved_ret)
                     and self._result_is_nat(expr.body)):
@@ -5082,7 +5085,10 @@ class ContractVerifier:
         """
         # A `@Unit` refinement is codegen-UNguarded (erased binder), so its
         # Tier-3 fallback must not claim a runtime guard (CR db24433).
-        eff_guarded = guarded and not self._is_unit_refinement(refined_ty)
+        eff_guarded = (
+            guarded
+            and self._refined_boundary_codegen_guardable(refined_ty)
+        )
         val = smt.translate_expr(value_node, slot_env)
         if val is None:
             self._record_refined_bind_tier3(
@@ -5237,7 +5243,7 @@ class ContractVerifier:
         if goal is None:
             self._record_refined_bind_tier3(
                 decl, decl.body, "return type",
-                guarded=not self._is_unit_refinement(ret_type))
+                guarded=self._refined_boundary_codegen_guardable(ret_type))
             return
         result = smt.check_valid(goal, list(assumptions))
         if result.status == "verified":
@@ -5255,7 +5261,7 @@ class ContractVerifier:
         else:  # pragma: no cover — solver timeout
             self._record_refined_bind_tier3(
                 decl, decl.body, "return type",
-                guarded=not self._is_unit_refinement(ret_type))
+                guarded=self._refined_boundary_codegen_guardable(ret_type))
 
     def _check_refined_binding_obligation_term(
         self,
@@ -7071,6 +7077,33 @@ class ContractVerifier:
         runtime guard codegen never emits — unlike ``@Byte`` (an `i32`) or
         ``@Array`` (a pair), whose binders DO lower, so those stay guarded."""
         return isinstance(ty, RefinedType) and ty.base == UNIT
+
+    @staticmethod
+    def _refined_boundary_codegen_guardable(ty: Type) -> bool:
+        """Whether codegen's boundary refinement guard actually fires for
+        *ty* — the semantic mirror of ``_refinement_guard_parts``'s bail
+        conditions (``vera/codegen/contracts.py``); KEEP IN SYNC (#1036).
+
+        Codegen bails (emits NO guard) when (a) the base is the erased
+        ``@Unit`` (no local to check — the ``_is_unit_refinement`` case), or
+        (b) the base carries a NON-PLAIN type argument — a nested refinement
+        or fn type, e.g. ``Array<{ @Int | ... }>`` — whose binder slot name
+        cannot be spelt.  A ``guarded=True`` Tier-3 for either was an
+        unfulfilled runtime-guard promise: an empty array flowed through a
+        NonEmpty-refined closure boundary silently while the obligation
+        stream claimed a runtime check (PR #1034 adversarial review).  Plain
+        named args (``Array<Int>``, nested ``Array<Array<Int>>`` via the
+        truncated-name convention) stay guarded."""
+        if not isinstance(ty, RefinedType):
+            return False
+        if ty.base == UNIT:
+            return False
+        if isinstance(ty.base, AdtType):
+            return all(
+                isinstance(arg, (PrimitiveType, AdtType))
+                for arg in ty.base.type_args
+            )
+        return True
 
     @staticmethod
     def _is_bool_type(ty: Type) -> bool:
