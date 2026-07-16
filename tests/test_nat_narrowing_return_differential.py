@@ -520,12 +520,15 @@ class TestClosureNarrowingBoundary984:
         assert _run(_CLOSURE_BOUNDARY, "go", 2 ** 63 - 1) == 2 ** 63 - 1
 
     def test_refined_return_single_guard_no_double(self) -> None:
-        """A refinement-over-@Nat closure return stays on the refinement
-        boundary — the #984 narrowing gate must NOT add a second guard
-        (`_refinement_guard_parts is None` exclusion, previously untested:
-        removing it compiles a redundant second sign check).  Pin by guard
-        count in the lifted closure's WAT, plus behavior: 5 round-trips,
-        0 violates the refinement and traps."""
+        """A refinement-over-@Nat closure return is guarded EXACTLY ONCE — by
+        the #1032 refined-return guard in the lifted body — and the #984
+        narrowing gate must NOT add a second sign check on top
+        (`_refinement_guard_parts is None` exclusion: removing it compiles a
+        redundant `i64.lt_s`; the refinement guard's predicate already
+        conjoins the @Nat base's `>= 0`).  Pin by guard counts in the lifted
+        closure's WAT, plus behavior: 5 round-trips, 0 takes the clamping arm.
+        (Pre-#1032 this pinned ZERO guards of any kind, on the then-false
+        assumption that a boundary guard existed at the call/return site.)"""
         statuses, wat = _statuses_and_wat(_CLOSURE_REFINED)
         anon = wat[wat.index("(func $anon_"):]
         depth = 0
@@ -537,19 +540,26 @@ class TestClosureNarrowingBoundary984:
                 if depth == 0:
                     anon = anon[: i + 1]
                     break
-        # Exactly ZERO sign checks in the lifted body: the refinement's own
-        # boundary guard lives at the call/return boundary, not in the anon
-        # body — so ANY i64.lt_s here is the #984 narrowing gate wrongly
-        # firing on a refined return (measured: 0 at head, 1 with the
-        # `_refinement_guard_parts is None` exclusion removed).
+        # Exactly ZERO narrowing sign checks in the lifted body: ANY i64.lt_s
+        # here is the #984 leaf gate wrongly firing on a refined return
+        # (measured: 0 at head, 1 with the `_refinement_guard_parts is None`
+        # exclusion removed) — the refinement guard below uses ge_s/gt_s.
         assert anon.count("i64.lt_s") == 0, (
             f"refined closure return picked up a narrowing guard: "
             f"{anon.count('i64.lt_s')} sign checks in the lifted body"
         )
+        # ...and exactly ONE refinement guard: the #1032 return-value check.
+        # 0 would be the pre-#1032 silent leak; 2+ would be double-guarding
+        # (e.g. the #984 gate un-excluded, or the return guard emitted twice).
+        assert anon.count("call $vera.contract_fail") == 1, (
+            f"expected exactly one refinement return guard in the lifted "
+            f"body, found {anon.count('call $vera.contract_fail')}"
+        )
         assert _run(_CLOSURE_REFINED, "go", 5) == 5
         # 0 takes the else arm and returns the clamped 1 — the body never
-        # produces a refinement-violating value, so no trap is expected here;
-        # the guard-count pin above is what this test exists for.
+        # produces a refinement-violating value, so the (now-live) return
+        # guard does not trip; the guard-count pins above are what this test
+        # exists for.
         assert _run(_CLOSURE_REFINED, "go", 0) == 1
 
 
@@ -961,3 +971,76 @@ class TestApplyFnArgRefinedNarrowing1024:
         assert _run(source, fn, arg) == expect, (
             f"{label}: a non-narrowing refined argument was altered or trapped"
         )
+
+
+# ---------------------------------------------------------------------------
+# #1032 — the refinement-predicate narrowing at a LIFTED CLOSURE's RETURN, the
+# return-side dual of the #1024 formal narrowing above (found while fixing it).
+# Pre-fix `fn(@Int -> @Pos) { @Int.0 }` (Pos = `{ @Nat | @Nat.0 > 0 }`) applied
+# to -5 or 0 returned the violating value through the refined slot on a
+# verify-CLEAN program: the verifier's AnonFn walk had widen (#820) and
+# bare-@Nat narrow (#984) arms but no refined arm, and `_compile_lifted_closure`
+# guarded the @Nat/@Int returns but not the refinement's predicate — while the
+# #984 leaf-guard gate excluded refinements on the (then-false) assumption that
+# "the refinement's own boundary guard lives at the call/return boundary".  The
+# verifier now records the refined closure return `tier3` guarded (the closure
+# body is opaque to SMT — same shallow-syntactic, never-false-Tier-1 treatment
+# as the #820/#984 arms) and codegen guards the lifted body's return value,
+# mirroring the named path's refined-return guard (`_compile_postconditions`).
+# 0 is the discriminating input again: it clears any `>= 0` backstop but
+# violates the strict `> 0`.
+# ---------------------------------------------------------------------------
+
+_CLOSURE_REFINED_RET_LEAK = f"""
+{_POS}
+type F = fn(Int -> Pos) effects(pure);
+private fn mk(@Unit -> @F) requires(true) ensures(true) effects(pure)
+{{ fn(@Int -> @Pos) effects(pure) {{ @Int.0 }} }}
+public fn go(@Int -> @Nat) requires(true) ensures(true) effects(pure)
+{{ let @F = mk(()); apply_fn(@F.0, @Int.0) }}
+"""
+
+
+class TestClosureRefinedReturn1032:
+    def test_refined_return_obligated_tier3(self) -> None:
+        # The closure body is opaque to the SMT layer, so the refined return is
+        # obligated shallow-syntactically — exactly ONE tier3 refine_bind (a
+        # runtime-guard promise), NEVER a false Tier-1 and never the pre-fix
+        # empty list (no obligation at all: the #1032 hole).
+        statuses = _refine_bind_statuses(_CLOSURE_REFINED_RET_LEAK)
+        assert statuses == ["tier3"], (
+            f"expected one tier3 closure-return refine_bind, got {statuses} "
+            f"(pre-fix: [] — the #1032 silent clean verify)"
+        )
+
+    @pytest.mark.parametrize("bad", [-5, 0], ids=["neg", "zero"])
+    def test_violating_return_traps(self, bad: int) -> None:
+        # ...and codegen makes good on the promise: a body value violating the
+        # predicate traps at the closure's return guard with the refinement
+        # message (pre-fix it flowed out silently).  0 is the crux: it clears
+        # the @Nat base's `>= 0`, so only the FULL predicate catches it.
+        kind = _trap_kind(_CLOSURE_REFINED_RET_LEAK, "go", bad)
+        assert kind == "contract_violation", (
+            f"run({bad}) gave trap kind {kind!r} — expected the refinement "
+            f"return guard (None = no trap: the #1032 silent leak)"
+        )
+        msg = _trap_message(_CLOSURE_REFINED_RET_LEAK, "go", bad) or ""
+        assert "Refinement violation" in msg and "return value" in msg, (
+            f"trap message did not name the refined return: {msg!r}"
+        )
+
+    def test_satisfying_return_passes_guard(self) -> None:
+        # A body value satisfying the predicate passes the guard unharmed.
+        assert _run(_CLOSURE_REFINED_RET_LEAK, "go", 5) == 5
+
+    def test_healthy_refined_return_tier3_and_no_trap(self) -> None:
+        # The always-satisfying body (`if @Int.0 > 0 then { @Int.0 } else
+        # { 1 }`): still tier3 (the closure is opaque — over-guarded, never
+        # proven Tier-1, matching the #984 `_CLOSURE_SAFE` philosophy), verify
+        # stays non-erroring, and the live guard never trips.
+        assert _refine_bind_statuses(_CLOSURE_REFINED) == ["tier3"], (
+            "a healthy refined closure return must be an honest tier3, "
+            "never E505-violated"
+        )
+        assert _run(_CLOSURE_REFINED, "go", 5) == 5
+        assert _run(_CLOSURE_REFINED, "go", 0) == 1

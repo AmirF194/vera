@@ -3551,7 +3551,29 @@ class ContractVerifier:
             # closure-opacity rationale), matching what the #984 narrowing dual
             # below shares.
             resolved_ret = self._resolve_type(expr.return_type)
-            if (self._is_int_type(resolved_ret)
+            # #1032: a REFINED closure return — the return-side dual of the
+            # #1024 formal narrowing at the apply_fn branch above.  Pre-fix
+            # `fn(@Int -> @Pos) { @Int.0 }` returned -5 (or 0, which clears the
+            # @Nat base's `>= 0`) through the refined slot on a verify-clean
+            # program: no arm here claimed a RefinedType return, and codegen's
+            # #984 leaf gate excluded refinements assuming a boundary guard
+            # that did not exist.  Refined-FIRST, ahead of the widen arm below,
+            # for the same reason as everywhere else (`_is_int_type` unwraps a
+            # refinement-over-@Int, so the widen arm would otherwise claim it):
+            # the refinement's FULL predicate is the boundary invariant.  Same
+            # shallow-syntactic, opacity-forced treatment as its siblings
+            # (always tier3, never a false Tier-1 — the named refined-return
+            # path discharges via SMT, but this body is opaque): codegen guards
+            # the lifted body's return value (`_compile_lifted_closure`, the
+            # closure mirror of `_compile_postconditions`' refined-return
+            # guard), except over an erased `@Unit` base, which has no local to
+            # check — recorded honestly unguarded, as at every other site.
+            if self._is_refined_type(resolved_ret):
+                self._record_refined_bind_tier3(
+                    decl, expr.body, "closure return",
+                    guarded=not self._is_unit_refinement(resolved_ret),
+                )
+            elif (self._is_int_type(resolved_ret)
                     and self._result_is_nat(expr.body)):
                 self._record_int_widen_tier3(
                     decl, expr.body, "closure return", "tier3", guarded=True)
@@ -3564,10 +3586,10 @@ class ContractVerifier:
             # (never a FALSE Tier-1): record tier3 guarded, backed by codegen's
             # per-narrowing-leaf `>= 0` guard in `_compile_lifted_closure`.  A
             # refinement OVER @Nat is a RefinedType with its own boundary
-            # predicate (7b at the top level), so gate on the bare @Nat
-            # primitive — the two never co-fire on one site.
+            # predicate, claimed by the refined-first #1032 arm above — so this
+            # arm sees only the bare @Nat primitive and the two never co-fire
+            # on one site.
             elif (self._is_nat_type(resolved_ret)
-                    and not self._is_refined_type(resolved_ret)
                     and self._return_narrows_into_nat(expr.body)):
                 self._record_nat_bind_tier3(
                     decl, expr.body, "closure return", "tier3", guarded=True)
