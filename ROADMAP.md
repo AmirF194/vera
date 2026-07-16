@@ -12,7 +12,7 @@ Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verificati
 
 ## Where we are
 
-7,711 tests, 160 conformance programs, 38 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
+7,766 tests, 160 conformance programs, 38 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
 
 ## Stage 19 — The verification completeness sprint
 
@@ -20,9 +20,7 @@ Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verificati
 
 ### Bug sprint — monomorphizer and verifier gaps first
 
-Two PRs remain in the sprint's bug-PR cluster (the verification-completeness rows below are the sprint's remaining scope):
-
-**PR G — zero-size fields in registered layouts and wildcard walks (2).** [#1043](https://github.com/aallan/vera/issues/1043) the registered constructor layouts give a zero-size field a 4-byte slot (wildcard tag walks and structural `Eq` read wrong offsets), and [#1060](https://github.com/aallan/vera/issues/1060) the type-parameter spelling of the same wildcard walks. In review as [#1049](https://github.com/aallan/vera/pull/1049).
+One PR remains in the sprint's bug-PR cluster (the verification-completeness rows below are the sprint's remaining scope):
 
 **PR L — concrete scrutinee types for direct-call wildcard matches (1).** [#1065](https://github.com/aallan/vera/issues/1065) a direct-call match scrutinee whose type-param wildcard is followed by a read loud-skips — the #1060 walks need the callee's concrete instantiation threaded in. Fix in progress, stacked on [#1049](https://github.com/aallan/vera/pull/1049).
 

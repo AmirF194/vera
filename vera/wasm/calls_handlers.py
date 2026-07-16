@@ -1071,7 +1071,14 @@ class CallsHandlersMixin:
                 f"local.get {ptr_local}", f"i32.load offset={offset}",
                 f"local.get {ptr_local}", f"i32.load offset={offset + 4}",
             ]
-        # i32 (Bool/Byte/Unit/ADT pointer)
+        # #1043: a zero-size Unit field ("unit" wt) stores nothing, so there is
+        # nothing to load — `_show_value` / `_hash_value` render "unit" / fold a
+        # constant and ignore these (empty) instructions.  Emitting a spurious
+        # `i32.load` here would read the NEXT field's bytes (harmless only
+        # because the caller discards it); return nothing instead.
+        if wt == "unit":
+            return []
+        # i32 (Bool/Byte/ADT pointer)
         return [f"local.get {ptr_local}", f"i32.load offset={offset}"]
 
     def _load_array_element(

@@ -24,6 +24,7 @@ from vera.monomorphize import (
     declared_return_clone_key,
 )
 from vera.skip import DERIVED_HELPER_DEPTH_CAP
+from vera.slots import type_expr_slot_name
 
 # Types that satisfy the built-in abilities.  #773: `Eq` is structural, so a
 # field of ANY of these — String included (compared by content) — is
@@ -1307,4 +1308,43 @@ class MonomorphizationMixin:
             return True
         if base in self._adt_layouts:
             return self._adt_satisfies_eq(name, seen)
+        # #1070: an erases-to-Unit spelling (`type U = Unit;` argument,
+        # `Future<Unit>`, alias chains) IS the zero-size Unit — equal by
+        # definition, so derivable.  Must stay in lockstep with the `$eq`
+        # generator, whose field resolution canonicalises the same spellings
+        # to "Unit" (`_canonical_unit_field_type`): the gate accepting a type
+        # the generator cannot lower (or vice versa) breaks the #732
+        # differential.  Without this, `Box<U> == Box<U>` raised a wrong E613
+        # on a program whose checker (alias-resolving) accepted the Eq.
+        if self._field_type_erases_to_unit(name):
+            return True
         return False
+
+    def _field_type_erases_to_unit(self, name: str) -> bool:
+        """Generator-side mirror of ``InferenceMixin._slot_name_erases_to_unit``.
+
+        True iff ``name`` is zero-size: ``Unit``, a transparent ``Future<…>``
+        whose payload is itself zero-size, or an alias / alias chain to either
+        (#1070).  The derivability gate runs on the ``CodeGenerator`` (it is
+        threaded into contexts as the ``_adt_eq_derivable`` oracle), which
+        holds ``_type_aliases`` but not the InferenceMixin walk — so the
+        alias-hop + ``Future<…>``-peel loop is reimplemented here over the
+        same ``type_expr_slot_name`` canonical naming, cycle-cut by ``seen``.
+        """
+        seen: set[str] = set()
+        while True:
+            if name == "Unit":
+                return True
+            if name.startswith("Future<") and name.endswith(">"):
+                name = name[7:-1]
+                continue
+            if name in seen:
+                return False
+            te = self._type_aliases.get(name)
+            if te is None:
+                return False
+            seen.add(name)
+            target = type_expr_slot_name(te)
+            if target is None or target == name:
+                return False
+            name = target
