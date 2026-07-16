@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+from collections.abc import Iterator
 
 from vera import ast
 from vera.environment import (
@@ -209,15 +210,38 @@ class RegistrationMixin:
         # aliases fully explored with no cycle reachable; `reported`
         # suppresses a second diagnostic for aliases already named in an
         # emitted cycle (one E132 per cycle is enough to act on).
+        # Iterative with an explicit frame stack: a *legal* alias chain
+        # declared deepest-first would recurse once per hop and overflow
+        # Python's call stack around a thousand aliases — a checker
+        # crash on valid input, the acyclic sibling of the #1059
+        # RecursionError (PR #1066 review).
         safe: set[str] = set()
         reported: set[str] = set()
 
-        def visit(name: str, path: list[str], on_stack: set[str]) -> None:
+        def refs_of(name: str) -> list[str]:
             decl = alias_decls[name]
-            exclude = set(decl.type_params or ())
-            for ref in self._referenced_aliases(
-                decl.type_expr, alias_decls, exclude
-            ):
+            return self._referenced_aliases(
+                decl.type_expr, alias_decls, set(decl.type_params or ())
+            )
+
+        def visit(root: str) -> None:
+            path = [root]
+            on_stack = {root}
+            # Each frame pairs an alias with an iterator over its
+            # outgoing references; exhausting the iterator pops the
+            # frame (the alias is fully explored).
+            frames: list[tuple[str, Iterator[str]]] = [
+                (root, iter(refs_of(root)))
+            ]
+            while frames:
+                name, refs_iter = frames[-1]
+                ref = next(refs_iter, None)
+                if ref is None:
+                    frames.pop()
+                    safe.add(name)
+                    on_stack.discard(name)
+                    path.pop()
+                    continue
                 if ref in on_stack:
                     cycle = path[path.index(ref):] + [ref]
                     if not any(n in reported for n in cycle):
@@ -252,15 +276,12 @@ class RegistrationMixin:
                     continue
                 path.append(ref)
                 on_stack.add(ref)
-                visit(ref, path, on_stack)
-                on_stack.discard(ref)
-                path.pop()
-            safe.add(name)
+                frames.append((ref, iter(refs_of(ref))))
 
         for name in alias_decls:
             if name in safe or name in reported:
                 continue
-            visit(name, [name], {name})
+            visit(name)
 
     @staticmethod
     def _referenced_aliases(
@@ -271,25 +292,34 @@ class RegistrationMixin:
         """Alias names `te` structurally references, outer-to-inner and
         left-to-right so the reported cycle path is deterministic.
 
-        Recurses into `NamedType.type_args` (so a self-reference buried
+        Descends into `NamedType.type_args` (so a self-reference buried
         in `Future<F>` / `Array<L>` is seen — the #1059 extension) and
         `RefinementType.base_type` (so a cycle hidden behind a refinement
-        wrapper is seen — #648).  `exclude` holds the enclosing alias's
-        own type parameters, which are locally bound and never count as a
-        reference to a like-named alias.
+        wrapper is seen — #648).  `FnType` parameter/return positions are
+        deliberately NOT descended: a function value is a table-index
+        (pointer) indirection, so an alias reference there never
+        recursively expands the alias's representation — the same
+        exemption spec 2.6.3 grants `data` ADTs.  `type FA = fn(FA ->
+        Int)` therefore registers cleanly (and self-application is
+        separately bounded by finite alias unfolding at the use site).
+        `exclude` holds the enclosing alias's own type parameters, which
+        are locally bound and never count as a reference to a like-named
+        alias.
+
+        Iterative (explicit stack) so a deeply nested spelling cannot
+        overflow the Python call stack; pushes type_args reversed to
+        keep the traversal depth-first left-to-right.
         """
         out: list[str] = []
-
-        def walk(t: ast.TypeExpr) -> None:
+        stack: list[ast.TypeExpr] = [te]
+        while stack:
+            t = stack.pop()
             if isinstance(t, ast.NamedType):
                 if t.name in aliases and t.name not in exclude:
                     out.append(t.name)
-                for arg in t.type_args or ():
-                    walk(arg)
+                stack.extend(reversed(t.type_args or ()))
             elif isinstance(t, ast.RefinementType):
-                walk(t.base_type)
-
-        walk(te)
+                stack.append(t.base_type)
         return out
 
     def _register_decl(

@@ -473,6 +473,70 @@ private fn use_it(@L -> @Int)
             f"got: {[(e.error_code, e.description) for e in errs]}"
         )
 
+    def test_cyclic_alias_nested_compound_type_arg_e132(self) -> None:
+        """`type A = Future<Array<B>>; type B = A` — the cycle edge sits
+        two compound levels deep (a type argument OF a type argument),
+        so the reference walk must descend the full nesting, not one
+        level (#1059, PR #1066 review)."""
+        errs = _check_err("""
+type A = Future<Array<B>>;
+type B = A;
+
+private fn use_it(@A -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  0
+}
+""", "Cyclic type alias")
+        e132 = [e for e in errs if e.error_code == "E132"]
+        assert e132, (
+            f"Expected at least one diagnostic with error_code=E132; "
+            f"got: {[(e.error_code, e.description) for e in errs]}"
+        )
+        assert "A -> B -> A" in e132[0].description, (
+            f"Expected cycle path 'A -> B -> A' in description; "
+            f"got: {e132[0].description!r}"
+        )
+
+    def test_alias_chain_deep_worst_case_order_checks(self) -> None:
+        """A 1,500-alias LEGAL chain declared deepest-first must check
+        clean.  The cycle DFS visits an unexplored predecessor per hop
+        before anything is marked safe, so with recursive traversal this
+        input overflowed Python's call stack — a checker crash
+        (RecursionError) on valid input, the acyclic sibling of the
+        #1059 crash (PR #1066 review).  The explicit-stack DFS bounds it
+        by memory instead."""
+        n = 1500
+        decls = "\n".join(f"type A{i} = A{i - 1};" for i in range(n - 1, 0, -1))
+        _check_ok(decls + "\ntype A0 = Int;\n" + """
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ 0 }
+""")
+
+    def test_fn_type_alias_self_reference_accepted(self) -> None:
+        """`type FA = fn(FA -> Int)` is NOT an E132 cycle: a function
+        value is a table-index (pointer) indirection, so the alias's
+        representation never recursively expands — the same exemption
+        spec 2.6.3 grants `data` ADTs.  The reference walk deliberately
+        does not descend fn-type parameter/return positions (PR #1066
+        review; self-APPLICATION is separately bounded by finite alias
+        unfolding, E170 at the binding site, so nothing in this family
+        is silent)."""
+        _check_ok("""
+type FA = fn(FA -> Int) effects(pure);
+
+private fn use_it(@FA -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  0
+}
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ 0 }
+""")
+
     def test_cyclic_alias_through_discarded_type_arg_e132(self) -> None:
         """`type Wrap<T> = Int; type C = Wrap<C>` — a self-reference
         inside a type argument the generic alias never uses — is E132
