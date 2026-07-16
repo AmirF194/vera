@@ -86,16 +86,25 @@ class DataMixin:
                 return None
             arg_wt = self._infer_expr_wasm_type(arg)
             if arg_wt is None:
-                # Distinguish a genuine zero-size `Unit` field (handled) from a
-                # true inability to infer the WASM type (still a skip).  Use
-                # `_is_void_expr` — the canonical "produces no stack value"
-                # check — rather than `_infer_vera_type == "Unit"`, so a
+                # Distinguish a genuine zero-size field (handled) from a true
+                # inability to infer the WASM type (still a skip).  `_is_void_expr`
+                # — the canonical "produces no stack value" check — catches a
                 # *Unit-returning call* in field position (`IO.print("x")`, a
-                # user `@Unit` fn, a void effect op, a `ModuleCall` to a
-                # `@Unit` fn) is also laid out zero-size instead of falling
-                # through to a skip (#902 completeness: `_infer_vera_type`
-                # returns None for Qualified/Module calls).
-                if self._is_void_expr(arg):
+                # user `@Unit` fn, a void effect op, a `ModuleCall` to a `@Unit`
+                # fn), laid out zero-size instead of skipping (#902 completeness:
+                # `_infer_vera_type` returns None for Qualified/Module calls).
+                # #1031: a *transparent* `Future<Unit>` field (`async(())`)
+                # produces no stack value either — `_infer_expr_wasm_type` already
+                # returned None by recursing through the Future to its zero-size
+                # Unit payload — but it is not structurally void, so also lay it
+                # out zero-size when its inferred Vera type erases to Unit.  This
+                # gates reachability: without it the constructor skips and the
+                # destructure/match declaration guards below are never reached.
+                arg_vera = self._infer_vera_type(arg)
+                if self._is_void_expr(arg) or (
+                    arg_vera is not None
+                    and self._slot_name_erases_to_unit(arg_vera)
+                ):
                     arg_wt = "unit"
                 else:
                     raise CodegenSkip(
@@ -256,8 +265,12 @@ class DataMixin:
                 raise CodegenSkip(
                     stmt, "let-destruct binding type has no slot name"
                 )
-            # Unit bindings: no WASM representation, just bind with dummy
-            if type_name == "Unit":
+            # Zero-size bindings (Unit, transparent Future<Unit>, …): no WASM
+            # representation — bind nothing and advance no offset, exactly like
+            # a zero-size constructor field.  Keyed on erasure, not the bare
+            # string "Unit" (#1031), so Future<Unit> erases like Unit instead of
+            # skipping the whole function.
+            if self._slot_name_erases_to_unit(type_name):
                 continue
             # Pair types (String, Array<T>): two consecutive i32 locals
             if self._is_pair_type_name(type_name):
@@ -656,8 +669,10 @@ class DataMixin:
                         sub_pat,
                         "constructor field binding has no slot name",
                     )
-                # Unit bindings: no WASM representation, skip extraction
-                if type_name == "Unit":
+                # Zero-size bindings (Unit, transparent Future<Unit>, …): no
+                # WASM representation — skip extraction, advance no offset.
+                # Keyed on erasure, not the bare string "Unit" (#1031).
+                if self._slot_name_erases_to_unit(type_name):
                     continue
                 # Pair types (String, Array<T>): two consecutive i32 locals
                 if self._is_pair_type_name(type_name):
@@ -815,8 +830,11 @@ class DataMixin:
                     sub_pat,
                     "sub-pattern binding has no slot name",
                 )
-            # Unit bindings: no WASM representation — use generic layout type
-            if type_name == "Unit":
+            # Zero-size bindings (Unit, transparent Future<Unit>, …): no WASM
+            # representation — use the generic layout type for the offset walk,
+            # exactly as bare Unit does.  Keyed on erasure, not the bare string
+            # "Unit" (#1031), so Future<Unit> behaves identically to Unit.
+            if self._slot_name_erases_to_unit(type_name):
                 if field_index < len(layout.field_offsets):
                     _, generic_wt = layout.field_offsets[field_index]
                     return generic_wt

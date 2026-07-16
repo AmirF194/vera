@@ -20,11 +20,11 @@ Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verificati
 
 ### Bug sprint — monomorphizer and verifier gaps first
 
-Three bugs remain in the sprint's bug-PR cluster (the verification-completeness rows below are the sprint's remaining scope):
+Two PRs remain in the sprint's bug-PR cluster (the verification-completeness rows below are the sprint's remaining scope):
 
-**PR D — zero-size declaration guards (2).** [#1031](https://github.com/aallan/vera/issues/1031) a `Future<Unit>` destructure/match component is check-green but E602-skips the enclosing fn — four `wasm/data.py` declaration guards key on the bare `Unit` name instead of representation (`erases_to_unit`); [#1037](https://github.com/aallan/vera/issues/1037) the sibling name-only alias resolution in `_slot_name_to_wasm_type` skips `type FI = Future<Int>;` components the same way. In review as [#1035](https://github.com/aallan/vera/pull/1035).
+**PR E — await-scrutinee inference (1).** [#1038](https://github.com/aallan/vera/issues/1038) `match await(@Future<ADT>.0)` is check-green but E602-skips on scrutinee WASM-type inference — unwrap the awaited `Future<T>` the way the let-binding path already does. In review as [#1040](https://github.com/aallan/vera/pull/1040).
 
-**PR E — await-scrutinee inference (1).** [#1038](https://github.com/aallan/vera/issues/1038) `match await(@Future<ADT>.0)` is check-green but E602-skips on scrutinee WASM-type inference — unwrap the awaited `Future<T>` the way the let-binding path already does. Fix in progress.
+**PR F — pair-Future let bindings (1).** [#1039](https://github.com/aallan/vera/issues/1039) `let @Future<String>` (pair-represented Future payloads) is check-green but E602-skips — the let-binding pair handling keys on known pair type names rather than the canonical WASM type. Fix in progress.
 
 [#996](https://github.com/aallan/vera/issues/996) stays a watch-only row — an unreproducible conformance flake, not a fix target.
 

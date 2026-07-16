@@ -2001,3 +2001,30 @@ class InferenceMixin:
         if name == "Fn":
             return "i32"
         return None
+
+    def _slot_name_erases_to_unit(self, name: str) -> bool:
+        """True if a slot type name is *zero-size* — no WASM representation.
+
+        Zero-size means ``Unit``, or a transparent ``Future<…>`` whose payload
+        is itself zero-size (``Future<Unit>``, ``Future<Future<Unit>>``, …);
+        aliases are resolved first.  This is the slot-name mirror of
+        :func:`vera.types.erases_to_unit` and codegen's ``_type_expr_to_wasm_type``
+        (``Future<T>`` is representation-identical to ``T`` — #841), and it
+        follows the same ``Future<…>`` recursion as :meth:`_slot_name_to_wasm_type`.
+
+        Distinct from ``_slot_name_to_wasm_type(name) is None``: that predicate
+        ALSO fires for genuinely unrepresentable types (an unknown ADT, a bare
+        type variable), which are a real codegen gap that must still ``CodegenSkip``
+        rather than silently erase.  The declaration-position guards need to tell
+        "erase this zero-size field" apart from "skip — cannot represent", so
+        they key on THIS check, not on ``_slot_name_to_wasm_type`` being ``None``
+        (#1031: the guards previously compared the bare string ``"Unit"``, so a
+        ``Future<Unit>`` component missed the zero-size branch and skipped the
+        whole function on a check-green program).
+        """
+        name = self._resolve_base_type_name(name)
+        if name == "Unit":
+            return True
+        if name.startswith("Future<") and name.endswith(">"):
+            return self._slot_name_erases_to_unit(name[7:-1])
+        return False

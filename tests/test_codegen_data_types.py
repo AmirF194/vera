@@ -1024,6 +1024,62 @@ public fn main(-> @Unit)
         # observable), then the match body prints "end".
         assert _run_io(source, fn="main") == "sideend"
 
+    # ---- #1031: a transparent Future<Unit> component erases like bare Unit --
+    # A `Future<Unit>` field is zero-size exactly like `Unit` (types.py
+    # `erases_to_unit` recurses through the transparent `Future` wrapper).  The
+    # three data.py declaration guards and the constructor-argument WASM-type
+    # inference keyed on the bare string "Unit", so `Future<Unit>` (slot name
+    # "Future<Unit>") missed the zero-size branch and `CodegenSkip`ped the
+    # enclosing function (E602) on a check-green program.  These pin the four
+    # sites end-to-end: construction (`Tuple(async(()), n)` — the ctor-arg
+    # inference gate), the let-destructure guard, and the two match-pattern
+    # guards (`_sub_pattern_wasm_type` + `_extract_constructor_fields`).  The
+    # non-zero-size Int component must land at the correct offset after the
+    # zero-size Future<Unit> field and be recovered with the right value.
+
+    def test_tuple_future_unit_component_let_destructure_runs(self) -> None:
+        """let Tuple<@Future<Unit>, @Int> = ... destructures; the Int survives.
+
+        Exercises the ctor-arg inference gate (`async(())` field) and the
+        let-destruct declaration guard (data.py `_translate_let_destruct`).
+        """
+        source = """\
+private fn mkt(@Int -> @Tuple<Future<Unit>, Int>)
+  requires(true) ensures(true) effects(<Async>)
+{ Tuple(async(()), @Int.0) }
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let Tuple<@Future<Unit>, @Int> = mkt(4242);
+  @Int.0
+}
+"""
+        assert _run(source, fn="f") == 4242
+
+    def test_tuple_future_unit_component_match_extract_runs(self) -> None:
+        """match Tuple(@Future<Unit>, @Int) recovers the Int at the right offset.
+
+        Exercises the ctor-arg inference gate plus both match-pattern guards:
+        `_sub_pattern_wasm_type` (offset walk in `_collect_nested_tag_checks`)
+        and `_extract_constructor_fields` (field extraction).
+        """
+        source = """\
+private fn mkt(@Int -> @Tuple<Future<Unit>, Int>)
+  requires(true) ensures(true) effects(<Async>)
+{ Tuple(async(()), @Int.0) }
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @Tuple<Future<Unit>, Int> = mkt(4242);
+  match @Tuple<Future<Unit>, Int>.0 {
+    Tuple(@Future<Unit>, @Int) -> @Int.0
+  }
+}
+"""
+        assert _run(source, fn="f") == 4242
+
 
 class TestAdtStringFields:
     """ADT constructors with String/Array fields (bug #266)."""
