@@ -175,6 +175,59 @@ class ResolutionMixin:
                         spec_ref='Chapter 2, Section 2.2 "Primitive Types"',
                         error_code="E135",
                     )
+                # #1075: the Map/Set siblings of the Array gate above.  Map
+                # keys/values and Set elements are raw host-serialized values
+                # at a tag-determined width — exactly the Array-element
+                # representation case, not the boxed-ADT-field case
+                # (`Box<Unit>` / `Option<Unit>` fields live inside a heap
+                # layout with a real representation and stay legal).  Without
+                # this gate, `Map<String, Unit>` / `Set<Unit>` checked clean
+                # and compiled exit-0 to INVALID WASM ("expected i32 but
+                # nothing on stack" — the zero-size value pushes nothing where
+                # the host import expects an i32 operand).
+                if name == "Map" and len(args) == 2:
+                    for role, arg in (("key", args[0]), ("value", args[1])):
+                        if erases_to_unit(arg):
+                            fix = (
+                                "Use `Set<K>` if only key membership "
+                                "matters, or give the value type a runtime "
+                                "value (e.g. `Map<String, Int>`, or a boxed "
+                                "`Map<String, Option<Unit>>`)."
+                            ) if role == "value" else (
+                                "Give the key type a runtime value "
+                                "(e.g. `Map<String, ...>`)."
+                            )
+                            self._error(
+                                te,
+                                f"'Map' with a zero-size {role} type "
+                                f"'{pretty_type(arg)}' is not supported.",
+                                rationale="A zero-size type (`Unit`, or a "
+                                "`Future` wrapping one) occupies 0 bytes and "
+                                f"has no runtime value, so a Map {role} of "
+                                "that type has no WASM representation to "
+                                "store or load — the map operations would "
+                                "compile to invalid WASM.",
+                                fix=fix,
+                                spec_ref='Chapter 2, Section 2.2 '
+                                '"Primitive Types"',
+                                error_code="E135",
+                            )
+                if (name == "Set" and len(args) == 1
+                        and erases_to_unit(args[0])):
+                    self._error(
+                        te,
+                        f"'Set' of a zero-size element type "
+                        f"'{pretty_type(args[0])}' is not supported.",
+                        rationale="A zero-size type (`Unit`, or a `Future` "
+                        "wrapping one) occupies 0 bytes and has no runtime "
+                        "value, so a Set element of that type has no WASM "
+                        "representation to store or load — the set "
+                        "operations would compile to invalid WASM.",
+                        fix="Use `Bool` for a present/absent flag, or give "
+                        "the element type a runtime value (e.g. `Set<Int>`).",
+                        spec_ref='Chapter 2, Section 2.2 "Primitive Types"',
+                        error_code="E135",
+                    )
                 return AdtType(name, args)
             return AdtType(name, ())
 

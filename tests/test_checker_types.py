@@ -2476,6 +2476,138 @@ class TestArrayZeroSizeElementRejected945:
         )
 
 
+class TestContainerZeroSizeRejected1075:
+    """#1075: the Map/Set siblings of the #945 ``Array<Unit>`` gate.  A
+    ``Map`` key or value, or a ``Set`` element, whose type erases to zero
+    size checked clean and compiled exit-0 to INVALID WASM ("expected i32
+    but nothing on stack" — the zero-size value pushes no operand where the
+    container's host import expects one).  Rejected at check with the same
+    E135 the Array gate uses: container entries are raw, unboxed
+    host-serialized values — representationally the Array-element case, not
+    the boxed-ADT-field case (``Box<Unit>`` / ``Option<Unit>`` fields live
+    inside a heap layout and stay legal, spec §2.2) — and ``Map<K, Unit>``
+    is informationally a ``Set<K>``, so rejection also keeps one canonical
+    form (DESIGN.md principle 3).  The annotation-free spelling never
+    reaches type resolution and is backstopped by a loud codegen skip — see
+    TestContainerZeroSizeBackstop1075 in test_codegen_arrays.py.
+    """
+
+    def test_map_unit_value_rejected(self) -> None:
+        # The issue's direct-spelling repro: `let @Map<String, Unit>`.
+        errs = _errors(
+            "public fn g(-> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{\n"
+            "  let @Map<String, Unit> = map_insert(map_new(), \"k\", ());\n"
+            "  array_length(map_values(@Map<String, Unit>.0))\n"
+            "}\n"
+        )
+        e135 = [e for e in errs if e.error_code == "E135"]
+        assert e135, (
+            "Map<String, Unit> must be rejected with E135, got "
+            f"{[e.error_code for e in errs]}"
+        )
+        assert "zero-size value type" in e135[0].description
+
+    def test_map_unit_value_alias_rejected(self) -> None:
+        # The alias spelling (the adversarial review's AC probe): the alias
+        # TARGET resolves through the same `_resolve_type` gate, so `type M
+        # = Map<String, Unit>;` rejects identically to the direct spelling.
+        errs = _errors(
+            "type M = Map<String, Unit>;\n"
+            "\n"
+            "private fn mk(-> @M)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{\n"
+            "  map_insert(map_new(), \"k\", ())\n"
+            "}\n"
+            "\n"
+            "public fn g(-> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{\n"
+            "  array_length(map_values(mk()))\n"
+            "}\n"
+        )
+        assert any(e.error_code == "E135" for e in errs), (
+            "the alias spelling must reject with E135 like the direct one, "
+            f"got {[e.error_code for e in errs]}"
+        )
+
+    def test_map_unit_key_rejected(self) -> None:
+        errs = _errors(
+            "public fn g(-> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{\n"
+            "  let @Map<Unit, Int> = map_insert(map_new(), (), 7);\n"
+            "  array_length(map_keys(@Map<Unit, Int>.0))\n"
+            "}\n"
+        )
+        e135 = [e for e in errs if e.error_code == "E135"]
+        assert e135, (
+            "Map<Unit, Int> (zero-size KEY) must be rejected with E135, "
+            f"got {[e.error_code for e in errs]}"
+        )
+        assert "zero-size key type" in e135[0].description
+
+    def test_set_unit_elem_rejected(self) -> None:
+        errs = _errors(
+            "public fn g(-> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{\n"
+            "  let @Set<Unit> = set_add(set_new(), ());\n"
+            "  array_length(set_to_array(@Set<Unit>.0))\n"
+            "}\n"
+        )
+        e135 = [e for e in errs if e.error_code == "E135"]
+        assert e135, (
+            "Set<Unit> must be rejected with E135, got "
+            f"{[e.error_code for e in errs]}"
+        )
+        assert "zero-size element type" in e135[0].description
+
+    def test_map_unit_both_positions_two_errors(self) -> None:
+        # Per-position reporting: a `Map<Unit, Unit>` names BOTH degenerate
+        # positions (distinct messages, so the exact-duplicate dedup keeps
+        # them apart).
+        errs = _errors(
+            "public fn f(@Map<Unit, Unit> -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ 0 }\n"
+        )
+        e135 = [e for e in errs if e.error_code == "E135"]
+        assert len(e135) == 2, (
+            "Map<Unit, Unit> must report the key AND the value position, "
+            f"got {[e.error_code for e in errs]}"
+        )
+
+    def test_future_unit_value_rejected_by_erasure(self) -> None:
+        # The gate keys on representation (`erases_to_unit`), not the name:
+        # a transparent `Future<Unit>` value type rejects the same way.
+        errs = _errors(
+            "public fn f(@Map<String, Future<Unit>> -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ 0 }\n"
+        )
+        assert any(e.error_code == "E135" for e in errs), (
+            "Map<String, Future<Unit>> must reject via erasure, got "
+            f"{[e.error_code for e in errs]}"
+        )
+
+    def test_boxed_unit_value_stays_legal(self) -> None:
+        # The legal side of the line (spec §2.2): a BOXED zero-size payload
+        # (`Option<Unit>` — tag plus pointer) is an ordinary value with a
+        # real representation, exactly like ADT fields (`Box<Unit>`).
+        _check_ok(
+            "public fn g(-> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{\n"
+            "  let @Map<String, Option<Unit>> = "
+            "map_insert(map_new(), \"k\", Some(()));\n"
+            "  array_length(map_keys(@Map<String, Option<Unit>>.0))\n"
+            "}\n"
+        )
+
+
 class TestForallNullaryCtorCallArg993:
     """#993: a bare ``None`` in the remaining fresh-ctor-var positions must
     adopt the expected type instead of minting an unresolvable ``T$n``.
