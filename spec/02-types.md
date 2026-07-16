@@ -275,7 +275,7 @@ Type aliases are transparent for refinement subtyping: `PosInt` and `{ @Int | @I
 
 However, type aliases create distinct namespaces for slot references (see Chapter 3): `@PosInt.0` counts only `PosInt` bindings, not `Int` bindings.
 
-A type alias MUST eventually resolve to a concrete type — the chain of alias definitions MUST be acyclic. A cyclic alias (e.g. `type A = B; type B = A`, or a self-reference `type A = A`) has no underlying representation and is rejected with error `E132`. (Recursion *is* permitted through an `ADT` declared via `data`, where the indirection is a heap pointer rather than a direct alias expansion.)
+A type alias MUST eventually resolve to a concrete type — the chain of alias definitions MUST be acyclic. The requirement is structural and covers every alias reference in the definition, including references nested inside type arguments (`type F = Future<F>`, `type L = Array<L>`) and references in a type argument the generic alias does not use. A cyclic alias is rejected with error `E132`. (Recursion *is* permitted through an `ADT` declared via `data`, where the indirection is a heap pointer rather than a direct alias expansion.)
 
 ### 2.6.4 Predicate Verification
 

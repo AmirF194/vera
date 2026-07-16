@@ -170,26 +170,29 @@ class RegistrationMixin:
     def _check_alias_cycles(self, program: ast.Program) -> None:
         """Detect cyclic type aliases and emit `[E132]`.
 
-        A type alias abbreviates a *finite* type, so its expansion must
-        terminate.  This walks the directed graph whose nodes are the
-        program's aliases and whose edges run from an alias to every
-        other alias its target *structurally* references — the target's
-        own `NamedType` head, every `type_arg` at any nesting depth, and
-        the base of any `RefinementType` wrapper.  A cycle in that graph
-        is an alias whose expansion never terminates: `type F =
-        Future<F>`, `type A = Future<B>; type B = Future<A>`, `type L =
-        Array<L>`.  Such a type is uninhabitable and has no underlying
-        representation, and where the cycle threads a `type_arg` position
-        that `_type_expr_to_wasm_type` recurses through (`Future<T>`) it
-        crashes codegen with a `RecursionError` (#1059).
+        Spec §2.6.3 requires the alias reference graph to be acyclic.
+        This walks the directed graph whose nodes are the program's
+        aliases and whose edges run from an alias to every other alias
+        its target *structurally* references — the target's own
+        `NamedType` head, every `type_arg` at any nesting depth, and
+        the base of any `RefinementType` wrapper.
+
+        The rule is structural: not every cyclic spelling would fail
+        later on its own.  `type F = Future<F>` crashes codegen with a
+        `RecursionError` (#1059 — `_type_expr_to_wasm_type` recurses
+        through `Future`'s type argument); `type L = Array<L>` compiles
+        to a degenerate type whose only inhabitant is `[]`; a
+        self-reference inside a type argument the generic alias
+        discards (`type W<T> = Int; type C = W<C>`) even resolves to
+        the generic's concrete body.  All are rejected by the one
+        acyclicity rule rather than by enumerating which spellings
+        happen to crash — no usage analysis of generic parameters.
 
         Descending into `type_args` is the #1059 extension.  The original
         #648 pass mirrored codegen's alias walker exactly — bare
         `type A = B` references and `RefinementType` bases only — and so
         followed no `type_arg` edge, silently admitting every
-        through-`type_arg` cycle (`Array<L>` compiles to a stuck i32_pair
-        rather than crashing, but it is no more inhabitable than the
-        `Future` spellings, so all three are rejected uniformly).
+        through-`type_arg` cycle.
 
         A generic alias's own type *parameters* are excluded from the
         reference set: in `type Box<T> = Array<T>` the `T` is bound
@@ -223,11 +226,15 @@ class RegistrationMixin:
                             f"Cyclic type alias `{cycle[0]}`: "
                             f"{' -> '.join(cycle)}.",
                             rationale=(
-                                "Type aliases must eventually resolve to a "
-                                "concrete type.  A cycle leaves the alias "
-                                "with no underlying representation and "
-                                "would crash codegen with unbounded "
-                                "recursion."
+                                "Type aliases must form an acyclic "
+                                "reference graph: expanding an alias must "
+                                "reach a concrete type in finitely many "
+                                "steps.  Cycles threaded through `Future` "
+                                "type arguments crash codegen with "
+                                "unbounded recursion; every other cyclic "
+                                "spelling is rejected by the same "
+                                "structural rule rather than special-cased "
+                                "by whether it happens to compile."
                             ),
                             fix=(
                                 "Replace one alias in the cycle with a "

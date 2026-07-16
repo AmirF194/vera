@@ -401,8 +401,9 @@ public fn id(@A -> @A)
     # generic's type_arg (`Future<F>`, `Array<L>`) slipped past `check`
     # and either crashed codegen with a RecursionError (the Future
     # spellings, which `_type_expr_to_wasm_type` recurses through) or
-    # produced an uninhabitable stuck type (`Array<L>`).  All are now
-    # rejected uniformly at check time.
+    # compiled to a degenerate type inhabited only by `[]` (`Array<L>`).
+    # The acyclicity rule (spec 2.6.3) is structural, so all cyclic
+    # spellings are rejected uniformly at check time.
     # -----------------------------------------------------------------
 
     def test_cyclic_alias_self_through_future_arg_e132(self) -> None:
@@ -454,8 +455,9 @@ private fn use_it(@A -> @Int)
     def test_cyclic_alias_self_through_array_arg_e132(self) -> None:
         """`type L = Array<L>` — self-reference through an `Array` type
         argument — is E132 (#1059).  `Array<L>` does not crash codegen
-        (it stops at an i32_pair) but is no more inhabitable than the
-        `Future` spellings, so it is rejected on the same rule."""
+        (it stops at an i32_pair) and is inhabited by `[]`, but the
+        acyclicity rule is structural, so it is rejected uniformly
+        with the `Future` spellings."""
         errs = _check_err("""
 type L = Array<L>;
 
@@ -469,6 +471,34 @@ private fn use_it(@L -> @Int)
         assert e132, (
             f"Expected at least one diagnostic with error_code=E132; "
             f"got: {[(e.error_code, e.description) for e in errs]}"
+        )
+
+    def test_cyclic_alias_through_discarded_type_arg_e132(self) -> None:
+        """`type Wrap<T> = Int; type C = Wrap<C>` — a self-reference
+        inside a type argument the generic alias never uses — is E132
+        (#1059).  This pins the decision that the acyclicity rule is
+        structural: the checker rejects the cycle without analyzing
+        whether `Wrap` consumes `T`, even though this spelling would
+        resolve to `Int` and run.  A future change that adds
+        usage-analysis to admit it must revisit spec 2.6.3 first."""
+        errs = _check_err("""
+type Wrap<T> = Int;
+type C = Wrap<C>;
+
+private fn use_it(@C -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  0
+}
+""", "Cyclic type alias")
+        e132 = [e for e in errs if e.error_code == "E132"]
+        assert e132, (
+            f"Expected at least one diagnostic with error_code=E132; "
+            f"got: {[(e.error_code, e.description) for e in errs]}"
+        )
+        assert "C -> C" in e132[0].description, (
+            f"Expected cycle path 'C -> C' in description; "
+            f"got: {e132[0].description!r}"
         )
 
     def test_acyclic_alias_through_future_arg_ok(self) -> None:

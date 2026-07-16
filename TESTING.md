@@ -6,7 +6,7 @@ This is the single source of truth for Vera's testing infrastructure, coverage d
 
 | Metric | Value |
 |--------|-------|
-| **Tests** | 7,576 across 122 files (~104,000 lines of test code; 7,475 passed + 26 stress, 75 skipped) |
+| **Tests** | 7,577 across 122 files (~104,000 lines of test code; 7,476 passed + 26 stress, 75 skipped) |
 | **Compiler code coverage** | 95% Python, 61% JavaScript — 91% combined (CI minimum: 80%) |
 | **Conformance programs** | 160 programs across 9 spec chapters, validating every language feature |
 | **Example programs** | 38, all validated through `vera check` + `vera verify` |
@@ -62,7 +62,7 @@ python scripts/check_wheel_availability.py           # pre-flight: every runtime
 | `test_checker_functions.py` | 78 | 984 | Function signatures, slot references, result refs, calls, control flow, higher-order, where-blocks (incl. #969 closed-scope isolation over bodies + contract clauses, nested-where hint targeting, handler-vs-where hint ordering), expression diagnostics, IO operations, string interpolation (#420 split) |
 | `test_checker_effects.py` | 67 | 1,066 | Effect declarations, abilities, effect subtyping, async effect, handler typing (#420 split) |
 | `test_checker_modules.py` | 45 | 975 | Module-call diagnostics, cross-module typing, visibility enforcement, builtin redefinition, parsed module calls (#420 split) |
-| `test_checker_errors.py` | 52 | 771 | Error codes, resolution-coverage diagnostics, contracts, error accumulation (#420 split); cyclic type aliases incl. #1059 self-reference through a type argument (`Future<F>`, mutual `Future<B>`/`Future<A>`, `Array<L>`) rejected E132 |
+| `test_checker_errors.py` | 53 | 801 | Error codes, resolution-coverage diagnostics, contracts, error accumulation (#420 split); cyclic type aliases incl. #1059 self-reference through a type argument (`Future<F>`, mutual `Future<B>`/`Future<A>`, `Array<L>`) rejected E132 |
 | `test_checker_builtins_collections.py` | 97 | 848 | Map / Set / Decimal / Json / Html / Http / Inference built-in type-checking (#420 split) |
 | `test_checker_builtins_strings.py` | 122 | 945 | String / numeric / type-conversion / float-predicate / string-search / markdown / regex built-in type-checking, removed-legacy-name regression (#420 split) |
 | `test_obligations.py` | 409 | 1,521 | Reified proof obligations + warm `VerificationSession` (#222 Phase A): full-corpus differential oracle (warm session == cold `verify()` on diagnostics, summary, and obligation stream, plus warm-twice determinism, across all 38 examples and every verify/run-level conformance program), summary↔obligation tier-bookkeeping consistency (including the #967 `total == tier1_verified + tier3_runtime` leg, plus a focused self-consistency pin on the three call-demotion examples), per-kind unit tests (requires / ensures / decreases / nat_sub / call_pre statuses, counterexamples, error codes), content-key stability + same-text-two-sites span disambiguation, session solver reuse, type-error short-circuit, ADT-registry resync between programs; plus the Phase B incremental suite — identical-source full replay, callee-body-edit replays callers while callee-contract-edit invalidates them, span-shift and ADT-edit conservative invalidation, cross-program isolation, timeout-status never cached (monkeypatched solver), FIFO eviction bound; plus the #727 dedup pin — a violating call in a let RHS records exactly one E501 diagnostic and one call_pre obligation |
