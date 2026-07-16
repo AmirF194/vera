@@ -1080,6 +1080,93 @@ public fn f(-> @Int)
 """
         assert _run(source, fn="f") == 4242
 
+    # ---- #1042: the nested-tag walk gives erased components zero width ----
+    # Construction stores NOTHING for a zero-size component, but the nested
+    # pattern tag walk (`_collect_nested_tag_checks` via
+    # `_sub_pattern_wasm_type`) gave it 4 bytes — the registered layout's
+    # generic type or an "i32" default — so every nested constructor tag
+    # AFTER the erased component was checked at the wrong offset, failed
+    # against garbage, and match fall-through silently selected a LATER arm
+    # (the extraction walks compute offsets correctly, so the wrong arm
+    # returned the real value: -4242 where 4242 was constructed).  The three
+    # tests below pin the discriminating shape — a two-constructor nested
+    # pattern whose tag decides between a positive and a negated arm — for
+    # the transparent `Future<Unit>` spelling, the bare `Unit` spelling
+    # (pre-existing on main since #902's zero-size components), and a user
+    # ADT parent (registered layout, not the recomputed Tuple one).
+
+    def test_tuple_future_unit_then_nested_ctor_picks_right_arm(self) -> None:
+        """Tuple(@Future<Unit>, MkBox(@Int)) selects the MkBox arm.
+
+        RED on base: -4242 (the MkNot arm ran for an MkBox value)."""
+        source = """\
+private data BB { MkBox(Int), MkNot(Int) }
+
+private fn mkt(@Int -> @Tuple<Future<Unit>, BB>)
+  requires(true) ensures(true) effects(<Async>)
+{ Tuple(async(()), MkBox(@Int.0)) }
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @Tuple<Future<Unit>, BB> = mkt(4242);
+  match @Tuple<Future<Unit>, BB>.0 {
+    Tuple(@Future<Unit>, MkBox(@Int)) -> @Int.0,
+    Tuple(@Future<Unit>, MkNot(@Int)) -> 0 - @Int.0
+  }
+}
+"""
+        assert _run(source, fn="f") == 4242
+
+    def test_tuple_bare_unit_then_nested_ctor_picks_right_arm(self) -> None:
+        """The bare-Unit spelling of the same shape (pre-existing on main).
+
+        RED on base: -4242."""
+        source = """\
+private data BB { MkBox(Int), MkNot(Int) }
+
+private fn mkt(@Int -> @Tuple<Unit, BB>)
+  requires(true) ensures(true) effects(pure)
+{ Tuple((), MkBox(@Int.0)) }
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  let @Tuple<Unit, BB> = mkt(4242);
+  match @Tuple<Unit, BB>.0 {
+    Tuple(@Unit, MkBox(@Int)) -> @Int.0,
+    Tuple(@Unit, MkNot(@Int)) -> 0 - @Int.0
+  }
+}
+"""
+        assert _run(source, fn="f") == 4242
+
+    def test_user_adt_future_unit_then_nested_ctor_picks_right_arm(self) -> None:
+        """A user-ADT parent: the walk must not consult the registered
+        layout for the erased component (it gives zero-size fields 4 bytes,
+        #1043) — the binding pattern's own erasure decides the zero width.
+
+        RED on base: -4242."""
+        source = """\
+private data BB { MkBox(Int), MkNot(Int) }
+private data P { MkP(Future<Unit>, BB) }
+
+private fn mkp(@Int -> @P)
+  requires(true) ensures(true) effects(<Async>)
+{ MkP(async(()), MkBox(@Int.0)) }
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @P = mkp(4242);
+  match @P.0 {
+    MkP(@Future<Unit>, MkBox(@Int)) -> @Int.0,
+    MkP(@Future<Unit>, MkNot(@Int)) -> 0 - @Int.0
+  }
+}
+"""
+        assert _run(source, fn="f") == 4242
+
     # ---- PR #1035 review: an ALIAS to a compound Future<Unit> erases too ----
     # `_slot_name_erases_to_unit` originally resolved aliases through
     # `_resolve_base_type_name`, which recurses on the alias target's NAME

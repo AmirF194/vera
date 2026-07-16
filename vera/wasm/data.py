@@ -831,14 +831,17 @@ class DataMixin:
                     "sub-pattern binding has no slot name",
                 )
             # Zero-size bindings (Unit, transparent Future<Unit>, …): no WASM
-            # representation — use the generic layout type for the offset walk,
-            # exactly as bare Unit does.  Keyed on erasure, not the bare string
-            # "Unit" (#1031), so Future<Unit> behaves identically to Unit.
+            # representation — construction stores NOTHING for them, so the
+            # offset walk must give them zero width (#1042).  Consulting the
+            # registered layout here is wrong twice over: the builtin Tuple's
+            # layout is empty (its per-call layout is recomputed erasure-aware),
+            # and the registered user-ADT layout gives zero-size fields 4 bytes
+            # (#1043) — either way the walk would advance past bytes that were
+            # never stored and every later nested tag check would read garbage.
+            # Keyed on erasure, not the bare string "Unit" (#1031), so
+            # Future<Unit> behaves identically to Unit.
             if self._slot_name_erases_to_unit(type_name):
-                if field_index < len(layout.field_offsets):
-                    _, generic_wt = layout.field_offsets[field_index]
-                    return generic_wt
-                return "i32"  # safe default
+                return "unit"
             # Pair types (String, Array<T>) use i32_pair representation
             if self._is_pair_type_name(type_name):
                 return "i32_pair"
@@ -870,8 +873,12 @@ class DataMixin:
         Returns a list of instruction-lists, each producing an ``i32``
         boolean on the stack.  Returns ``None`` on layout lookup failure.
         """
-        _sizes = {"i32": 4, "i64": 8, "f64": 8, "i32_pair": 8}
-        _aligns = {"i32": 4, "i64": 8, "f64": 8, "i32_pair": 4}
+        # "unit" is a zero-size binding (Unit, transparent Future<Unit>):
+        # construction stores nothing for it, so the walk gives it zero width
+        # and no alignment — the extraction walks reach the same result by
+        # `continue`-ing on erased components before their map lookups (#1042).
+        _sizes = {"i32": 4, "i64": 8, "f64": 8, "i32_pair": 8, "unit": 0}
+        _aligns = {"i32": 4, "i64": 8, "f64": 8, "i32_pair": 4, "unit": 1}
         offset = 4  # after tag
 
         checks: list[list[str]] = []
