@@ -1433,12 +1433,60 @@ class InferenceMixin:
             # preserved) so we can feed `_alias_array_element` —
             # that helper inspects `.type_args` on the NamedType.
             canonical = self._canonical_named_type(ret_te)
+            if canonical is None:
+                # #1048: a BUILTIN call has no `_fn_ret_type_exprs` entry
+                # (that registry holds user functions only), so `canonical`
+                # is None above and — pre-fix — the collection fell through
+                # to `return None`, `_translate_index_expr` returned None,
+                # and the enclosing function was dropped via [E602].  Only
+                # the let-bound form (`let @Array<Int> = array_concat(...);
+                # @Array<Int>.0[i]`) worked — it resolves through the SlotRef
+                # arm above, not this FnCall arm.  Recover the builtin's
+                # return NamedType via the same `_get_arg_type_info_wasm`
+                # consultor the sibling Vera-type inference
+                # (`_infer_fncall_vera_type`) and instantiation discovery use,
+                # so all three agree on the shape.  Type-var-element builtins
+                # (`array_map`/`array_mapi`/`array_flatten`) are absent from
+                # that consultor's tables, so this stays None for them and the
+                # function is still (correctly) dropped rather than mis-typed.
+                canonical = self._builtin_call_ret_named_type(coll)
             if canonical is not None:
                 ta_te = self._alias_array_element(
                     canonical.name, canonical.type_args)
                 if ta_te is not None:
                     return ta_te
         return None
+
+    def _builtin_call_ret_named_type(
+        self, call: ast.FnCall,
+    ) -> ast.NamedType | None:
+        """Full return ``NamedType`` of a builtin ``call`` whose result is a
+        parameterized type (e.g. ``array_concat(...)`` → ``Array<Int>``), or
+        ``None`` if the shape cannot be resolved.
+
+        Reuses :py:meth:`_get_arg_type_info_wasm` — the
+        ``(type_name, type_arg_names)`` consultor the Vera-type inference path
+        already uses for builtin returns: arg-forwarding for
+        ``array_concat`` / ``array_append`` / ``array_slice`` /
+        ``array_filter``, plus the ``_BUILTIN_PARAMETERIZED_RETURNS`` table
+        for the concrete-Array builtins (``array_range``, ``string_split``,
+        ``json_keys``, …).  Its string result is rebuilt into a ``NamedType``
+        via ``Monomorphizer._parse_type_name`` (which parses nested inners
+        like ``Array<Json>``).  Sharing one consultor keeps the index element
+        type in lockstep with clone-name discovery (#1048).
+        """
+        info = self._get_arg_type_info_wasm(call)
+        if info is None:
+            return None
+        type_name, type_arg_names = info
+        if any(a is None for a in type_arg_names):
+            return None
+        type_args = tuple(
+            Monomorphizer._parse_type_name(a)
+            for a in type_arg_names
+            if a is not None
+        )
+        return ast.NamedType(name=type_name, type_args=type_args or None)
 
     def _alias_array_element(
         self,

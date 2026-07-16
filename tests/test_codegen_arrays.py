@@ -475,6 +475,89 @@ public fn f(-> @Int) requires(true) ensures(true) effects(pure) {
 
 
 # =====================================================================
+# Indexing directly on a builtin call result (#1048)
+# =====================================================================
+
+
+class TestIndexBuiltinCallResult:
+    """Indexing directly on a builtin call result — `array_concat(...)[i]`
+    — must infer the element type and compile, not drop the enclosing
+    function via [E602] (#1048).
+
+    Pre-fix, `_infer_index_element_type_expr`'s FnCall arm resolved only
+    user-function returns (via `_fn_ret_type_exprs`); a builtin call had
+    no entry there, element-type inference returned None, and the whole
+    function was skipped.  The let-bound form (the control below) always
+    worked — it resolves through the SlotRef arm, not the FnCall arm.
+    """
+
+    def test_index_array_concat_result_int(self) -> None:
+        """Direct index on array_concat result — Int element (arg-forward
+        resolution).  Pre-fix this dropped `g` via [E602] (#1048)."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  array_concat([10, 20], [30, 40])[2]
+}
+"""
+        assert _run(src, fn="g") == 30
+
+    def test_index_array_range_result_int(self) -> None:
+        """Direct index on array_range result — resolves via the
+        `_BUILTIN_PARAMETERIZED_RETURNS` table (Array<Int>), a different
+        sub-path from array_concat's arg-forwarding (#1048)."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  array_range(10, 20)[3]
+}
+"""
+        assert _run(src, fn="g") == 13
+
+    def test_index_array_slice_result_int(self) -> None:
+        """Direct index on array_slice result — 3-arg arg-forward builtin
+        (#1048)."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  array_slice([10, 20, 30, 40, 50], 1, 4)[1]
+}
+"""
+        assert _run(src, fn="g") == 30
+
+    def test_index_array_concat_result_string(self) -> None:
+        """Direct index on array_concat of Array<String>, then
+        `string_length` — proves PAIR (pointer+length) elements resolve
+        through the new arm, not only scalar Int (#1048)."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  string_length(array_concat(["ab", "cd"], ["efg"])[2])
+}
+"""
+        assert _run(src, fn="g") == 3
+
+    def test_index_builtin_call_no_e602_drop(self) -> None:
+        """Structural: the direct-index-on-builtin-call function must be
+        emitted, i.e. NO [E602] "function skipped" diagnostic (#1048)."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  array_concat([10, 20], [30, 40])[2]
+}
+"""
+        result = _compile_ok(src)
+        assert not any(d.error_code == "E602" for d in result.diagnostics), \
+            "array_concat(...)[i] should not drop the function via E602"
+
+    def test_index_builtin_call_let_bound_control(self) -> None:
+        """Control: the let-bound form resolves through the SlotRef arm and
+        stays green independently of the FnCall-arm fix (#1048)."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Array<Int> = array_concat([10, 20], [30, 40]);
+  @Array<Int>.0[2]
+}
+"""
+        assert _run(src, fn="g") == 30
+
+
+# =====================================================================
 # C8e: Arrays of compound types (#132)
 # =====================================================================
 
