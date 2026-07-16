@@ -1308,43 +1308,45 @@ class MonomorphizationMixin:
             return True
         if base in self._adt_layouts:
             return self._adt_satisfies_eq(name, seen)
-        # #1070: an erases-to-Unit spelling (`type U = Unit;` argument,
-        # `Future<Unit>`, alias chains) IS the zero-size Unit — equal by
-        # definition, so derivable.  Must stay in lockstep with the `$eq`
-        # generator, whose field resolution canonicalises the same spellings
-        # to "Unit" (`_canonical_unit_field_type`): the gate accepting a type
-        # the generator cannot lower (or vice versa) breaks the #732
-        # differential.  Without this, `Box<U> == Box<U>` raised a wrong E613
-        # on a program whose checker (alias-resolving) accepted the Eq.
-        if self._field_type_erases_to_unit(name):
-            return True
+        # #1070/#1076: an ALIAS or transparent-`Future` spelling (`U` via
+        # `type U = Unit;`, `MyInt`, `FI` / `Future<Int>`, chains) names a
+        # concrete type — GROUND it and re-judge.  Must stay in lockstep with
+        # the `$eq` generator, whose field resolution grounds the same
+        # spellings (`_canonical_field_type`): the gate accepting a type the
+        # generator cannot lower (or vice versa) breaks the #732 differential.
+        # Without this, `Box<U> == Box<U>` / `Box<MyInt> == Box<MyInt>` raised
+        # a wrong E613 on a program whose checker (alias-resolving) accepted
+        # the Eq.  A genuine free `T` grounds to itself: no recursion.
+        ground = self._ground_field_type_name(name)
+        if ground != name:
+            return self._type_eq_derivable(ground, seen)
         return False
 
-    def _field_type_erases_to_unit(self, name: str) -> bool:
-        """Generator-side mirror of ``InferenceMixin._slot_name_erases_to_unit``.
+    def _ground_field_type_name(self, name: str) -> str:
+        """Generator-side mirror of ``OperatorsMixin._canonical_field_type``.
 
-        True iff ``name`` is zero-size: ``Unit``, a transparent ``Future<…>``
-        whose payload is itself zero-size, or an alias / alias chain to either
-        (#1070).  The derivability gate runs on the ``CodeGenerator`` (it is
-        threaded into contexts as the ``_adt_eq_derivable`` oracle), which
-        holds ``_type_aliases`` but not the InferenceMixin walk — so the
-        alias-hop + ``Future<…>``-peel loop is reimplemented here over the
-        same ``type_expr_slot_name`` canonical naming, cycle-cut by ``seen``.
+        Ground spelling of a field / type-argument name: alias chains
+        resolved hop by hop, transparent ``Future<…>`` wrappers peeled to
+        their payload (#1070/#1076) — ``U`` → ``"Unit"``, ``MyInt`` →
+        ``"Int"``, ``FI`` / ``Future<Int>`` → ``"Int"``.  The derivability
+        gate runs on the ``CodeGenerator`` (it is threaded into contexts as
+        the ``_adt_eq_derivable`` oracle), which holds ``_type_aliases`` but
+        not the InferenceMixin walk — so the loop is reimplemented here over
+        the same ``type_expr_slot_name`` canonical naming, cycle-cut by
+        ``seen``.  A non-alias, non-Future name returns unchanged.
         """
         seen: set[str] = set()
         while True:
-            if name == "Unit":
-                return True
             if name.startswith("Future<") and name.endswith(">"):
                 name = name[7:-1]
                 continue
             if name in seen:
-                return False
+                return name
             te = self._type_aliases.get(name)
             if te is None:
-                return False
+                return name
             seen.add(name)
             target = type_expr_slot_name(te)
             if target is None or target == name:
-                return False
+                return name
             name = target
