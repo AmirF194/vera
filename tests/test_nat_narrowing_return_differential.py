@@ -743,3 +743,221 @@ class TestApplyFnArgNarrowingDifferential1017:
             f"{label}: the verifier promised a tier3 runtime guard, but codegen "
             f"emitted none in {fn}:\n{body}"
         )
+
+
+# ---------------------------------------------------------------------------
+# #1024 — the refinement-PREDICATE narrowing at an apply_fn ARGUMENT position
+# (into the closure's REFINED formal), the refinement dual of the #1017 @Nat
+# argument narrowing.  Pre-fix `apply_fn(clo, 0)` where the closure formal is
+# `{ @Nat | @Nat.0 > 0 }` verified CLEAN and ran silently (returned the body
+# value): the #1017 apply_fn arm obligated the formal as a bare @Nat — proving
+# only the base's `>= 0` (which 0 satisfies) — so the STRICT `> 0` predicate was
+# unchecked (a false Tier-1), and `_compile_lifted_closure` emitted no
+# param-entry guard.  The verifier now obligates the argument against the FULL
+# predicate at its apply_fn branch (refined-FIRST, ahead of the #1017 @Nat arm,
+# mirroring the generic call-argument path) and codegen guards each refined
+# closure formal at the lifted body's prologue (`_compile_lifted_closure`,
+# mirroring `_compile_fn`'s refined-param guard).  The named-call equivalent
+# (`take(0)` into a `@Pos` param) already behaved this way — E505 at verify, a
+# `contract_violation` trap at run — so these pin the apply_fn path to the same
+# contract.  The discriminating input is 0: it clears the #1017 `>= 0` backstop
+# but violates `> 0`, so any test that traps/obligates 0 is exercising the
+# refined predicate specifically, not the @Nat base.
+# ---------------------------------------------------------------------------
+
+_REFINE_KIND = "refine_bind"
+_POS = "type Pos = { @Nat | @Nat.0 > 0 };"
+
+
+def _refine_bind_statuses(source: str) -> list[str]:
+    """The status of every ``refine_bind`` obligation the verifier emits — the
+    refinement-predicate analogue of :func:`_return_nat_bind_statuses` (#1024).
+
+    Threads ``file=`` + ``resolved_modules=`` through BOTH typecheck and verify
+    (the 48cbc1f fidelity principle).  The corpus shapes below apply a closure
+    whose formal is a refinement, so the only ``refine_bind`` site is the
+    apply_fn argument under test (the closure body returns a constant, and a
+    closure-param declaration raises no narrowing obligation of its own)."""
+    with _resolved_pipeline(source) as (program, arts, resolved, path):
+        result = verify(
+            program, source, file=path, resolved_modules=resolved,
+            expr_types=arts.expr_semantic_types,
+            expr_target_types=arts.expr_target_types,
+        )
+        return [o.status for o in result.obligations if o.kind == _REFINE_KIND]
+
+
+def _trap_message(source: str, fn: str, arg: int) -> str | None:
+    """The trap MESSAGE for running *fn(arg)*, or ``None`` if it does not trap —
+    so a refinement-guard trap can be pinned by its ``Refinement violation``
+    message text, not merely "some trap" (#1024, the refined dual of
+    :func:`_trap_kind`)."""
+    with _resolved_pipeline(source) as (program, arts, resolved, path):
+        result = codegen_compile(
+            program, source=source, file=path, resolved_modules=resolved,
+            expr_semantic_types=arts.expr_semantic_types,
+        )
+        try:
+            execute(result, fn_name=fn, args=[arg])
+        except WasmTrapError as exc:
+            return str(exc)
+        return None
+
+
+# (label, source) — a provably-refinement-violating CONSTANT arg into a refined
+# closure formal: the verifier witnesses the constant and reports the argument
+# refine_bind `violated` (a loud E505), never the pre-fix empty list (the #1024
+# false Tier-1, where the #1017 @Nat arm silently proved only `>= 0`).
+_APPLYFN_REFINED_ARG_VIOLATED = [
+    # The #1024 issue repro: a @PosToInt closure PARAMETER (refined formal
+    # recovered from its declared fn-type alias) applied to a constant 0, which
+    # satisfies the @Nat base's `>= 0` but violates the strict `> 0`.
+    ("issue_param_closure", f"""
+{_POS}
+type PosToInt = fn(Pos -> Int) effects(pure);
+private fn f(@PosToInt -> @Int) requires(true) ensures(true) effects(pure)
+{{ apply_fn(@PosToInt.0, 0) }}
+"""),
+    # A locally-constructed closure literal applied to a constant 0 — the refined
+    # formal is recovered from the inline AnonFn's declared parameter type.
+    ("literal_closure_zero", f"""
+{_POS}
+type PosToNat = fn(Pos -> Nat) effects(pure);
+private fn mk(@Unit -> @PosToNat) requires(true) ensures(true) effects(pure)
+{{ fn(@Pos -> @Nat) effects(pure) {{ 5 }} }}
+public fn go(@Unit -> @Nat) requires(true) ensures(true) effects(pure)
+{{ let @PosToNat = mk(()); apply_fn(@PosToNat.0, 0) }}
+"""),
+]
+
+# (label, source, fn) — a RUNTIME arg (unknown sign) narrowing into a refined
+# formal.  The verifier obligates it (never "verified"), and codegen guards the
+# closure's refined formal at its prologue, so run(0) — which clears `>= 0` but
+# fails `> 0` — TRAPS with a `contract_violation` Refinement-violation message
+# (pre-fix it silently returned the body constant) while run(7) passes.
+_APPLYFN_REFINED_ARG_TRAP = [
+    ("runtime_arg", f"""
+{_POS}
+type PosToNat = fn(Pos -> Nat) effects(pure);
+private fn mk(@Unit -> @PosToNat) requires(true) ensures(true) effects(pure)
+{{ fn(@Pos -> @Nat) effects(pure) {{ 5 }} }}
+public fn go(@Int -> @Nat) requires(true) ensures(true) effects(pure)
+{{ let @PosToNat = mk(()); apply_fn(@PosToNat.0, @Int.0) }}
+""", "go"),
+]
+
+# (label, source, fn, arg, expect) — a PROVEN refined arg narrowing: a constant
+# satisfying the predicate, or a `requires`-bounded arg, discharges the refine
+# _bind at Tier 1, codegen's guard is dead, and run returns the body value with
+# no trap.  `const_satisfying` is the #1024 c2 healthy pin (arg 5 > 0, body 42).
+_APPLYFN_REFINED_ARG_PROVEN = [
+    ("const_satisfying", f"""
+{_POS}
+type PosToInt = fn(Pos -> Int) effects(pure);
+private fn mk(@Unit -> @PosToInt) requires(true) ensures(true) effects(pure)
+{{ fn(@Pos -> @Int) effects(pure) {{ 42 }} }}
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{{ let @PosToInt = mk(()); apply_fn(@PosToInt.0, 5) }}
+""", "go", 0, 42),
+    ("requires_bound", f"""
+{_POS}
+type PosToNat = fn(Pos -> Nat) effects(pure);
+private fn mk(@Unit -> @PosToNat) requires(true) ensures(true) effects(pure)
+{{ fn(@Pos -> @Nat) effects(pure) {{ 5 }} }}
+public fn go(@Int -> @Nat) requires(@Int.0 > 0) ensures(true) effects(pure)
+{{ let @PosToNat = mk(()); apply_fn(@PosToNat.0, @Int.0) }}
+""", "go", 7, 5),
+]
+
+# (label, source, fn, arg, expect) — a @Pos arg into a @Pos formal: the source
+# already carries the EXACT refinement (base AND predicate), so
+# `_narrows_into_refined` does not fire — no refine_bind, no guard, the value
+# flows through.  Guards against the refined-first arm over-firing on a value
+# whose refinement was already discharged where it was produced.
+_APPLYFN_REFINED_ARG_UNOBLIGATED = [
+    ("pos_arg_pos_formal", f"""
+{_POS}
+type PosToNat = fn(Pos -> Nat) effects(pure);
+private fn mk(@Unit -> @PosToNat) requires(true) ensures(true) effects(pure)
+{{ fn(@Pos -> @Nat) effects(pure) {{ 5 }} }}
+public fn go(@Pos -> @Nat) requires(true) ensures(true) effects(pure)
+{{ let @PosToNat = mk(()); apply_fn(@PosToNat.0, @Pos.0) }}
+""", "go", 7, 5),
+]
+
+
+class TestApplyFnArgRefinedNarrowing1024:
+    @pytest.mark.parametrize("label,source", _APPLYFN_REFINED_ARG_VIOLATED,
+                             ids=[c[0] for c in _APPLYFN_REFINED_ARG_VIOLATED])
+    def test_provably_violating_arg_obligated_violated(
+        self, label: str, source: str,
+    ) -> None:
+        # The verifier now emits the argument refine_bind and Z3 witnesses the
+        # violating constant, so it is `violated` (E505) — never the pre-fix
+        # empty list (the #1024 false Tier-1).  0 clears the @Nat base's `>= 0`,
+        # so ONLY the refined-first arm (the FULL predicate) catches it — the
+        # #1017 @Nat arm's `>= 0` alone would have proved it "verified".
+        statuses = _refine_bind_statuses(source)
+        assert statuses == ["violated"], (
+            f"{label}: expected one violated arg refine_bind, got {statuses} "
+            f"(pre-fix: [] — the #1024 false Tier-1)"
+        )
+
+    @pytest.mark.parametrize("label,source,fn", _APPLYFN_REFINED_ARG_TRAP,
+                             ids=[c[0] for c in _APPLYFN_REFINED_ARG_TRAP])
+    def test_runtime_arg_obligated_and_run_traps(
+        self, label: str, source: str, fn: str,
+    ) -> None:
+        statuses = _refine_bind_statuses(source)
+        assert statuses and all(s != "verified" for s in statuses), (
+            f"{label}: an unprovable refined arg narrowing must be obligated, "
+            f"not verified: {statuses}"
+        )
+        # The crux of #1024: 0 clears the @Nat base's `>= 0` but fails the strict
+        # `> 0`, so the closure's refined-formal prologue guard must trap it — the
+        # #1017 `>= 0` backstop alone would let it through silently.
+        assert _trap_kind(source, fn, 0) == "contract_violation", (
+            f"{label}: run(0) did not trap at the closure's refined-formal guard "
+            f"— the strict predicate `> 0` is unguarded (the #1024 hole)"
+        )
+        assert "Refinement violation" in (_trap_message(source, fn, 0) or ""), (
+            f"{label}: the trap did not carry a refinement-violation message"
+        )
+        # ...while a value satisfying the predicate passes the guard unharmed.
+        assert _run(source, fn, 7) is not None, (
+            f"{label}: a valid (> 0) argument must pass the guard"
+        )
+
+    @pytest.mark.parametrize("label,source,fn,arg,expect",
+                             _APPLYFN_REFINED_ARG_PROVEN,
+                             ids=[c[0] for c in _APPLYFN_REFINED_ARG_PROVEN])
+    def test_proven_arg_verified_and_run_no_trap(
+        self, label: str, source: str, fn: str, arg: int, expect: int,
+    ) -> None:
+        # A constant satisfying the predicate, or a `requires`-bounded arg, proves
+        # the narrowing at Tier 1 (exactly one refine_bind, discharged)...
+        assert _refine_bind_statuses(source) == ["verified"], (
+            f"{label}: a provable refined arg narrowing must prove Tier-1"
+        )
+        # ...and codegen's guard is dead — run returns the value, never traps.
+        assert _run(source, fn, arg) == expect, (
+            f"{label}: verifier proved Tier-1 but run({arg}) trapped or gave the "
+            f"wrong value — a spurious trap or codegen<->verifier desync"
+        )
+
+    @pytest.mark.parametrize("label,source,fn,arg,expect",
+                             _APPLYFN_REFINED_ARG_UNOBLIGATED,
+                             ids=[c[0] for c in _APPLYFN_REFINED_ARG_UNOBLIGATED])
+    def test_matching_refined_arg_unobligated_and_not_trapped(
+        self, label: str, source: str, fn: str, arg: int, expect: int,
+    ) -> None:
+        # A @Pos arg into a @Pos formal already carries the exact refinement, so
+        # `_narrows_into_refined` does not fire — no obligation, no guard: the
+        # value flows through unchanged (a spurious guard would re-check a value
+        # the source already established, and could false-trap).
+        assert _refine_bind_statuses(source) == [], (
+            f"{label}: a @Pos->@Pos argument does not narrow — no obligation"
+        )
+        assert _run(source, fn, arg) == expect, (
+            f"{label}: a non-narrowing refined argument was altered or trapped"
+        )

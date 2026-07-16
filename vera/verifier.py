@@ -3490,6 +3490,28 @@ class ContractVerifier:
             if formals is not None:
                 for arg, formal in zip(expr.args[1:], formals):
                     resolved_formal = self._resolve_type(formal)
+                    # #1024: refined-FIRST, mirroring the generic call-argument
+                    # path (Site 2 below).  A refinement-over-@Nat closure formal
+                    # (e.g. `{ @Nat | @Nat.0 > 0 }`) IS a @Nat type
+                    # (`_is_nat_type` unwraps the base), so pre-fix the #1017 arm
+                    # below claimed it and discharged only the base's `>= 0` —
+                    # leaving the STRICT predicate unobligated, a false Tier-1
+                    # (`apply_fn(clo, 0)` verified clean and ran silently).
+                    # Discharge the FULL predicate here so the refinement is not
+                    # reduced to `>= 0`.  `_refined_binding_target` takes the
+                    # RESOLVED formal (a concrete refined formal, or a generic one
+                    # instantiated to a RefinedType at this site).  Codegen guards
+                    # the closure's refined formal at the lifted body's prologue
+                    # (`_compile_lifted_closure`, fix site 2), so `guarded=True`.
+                    refined_target = self._refined_binding_target(
+                        arg, resolved_formal)
+                    if (refined_target is not None
+                            and self._narrows_into_refined(arg, refined_target)):
+                        self._check_refined_binding_obligation(
+                            decl, arg, refined_target, smt, slot_env,
+                            assumptions, site="closure argument",
+                            guarded=True,
+                        )
                     # #1017: the @Int -> @Nat NARROWING dual of the widening arm
                     # below.  A provably-negative @Int argument narrowing into a
                     # @Nat closure formal was a false Tier-1 (no obligation) with
@@ -3497,7 +3519,7 @@ class ContractVerifier:
                     # narrowing (Site 2 below): obligate the argument against its
                     # recovered @Nat formal.  Codegen guards the call_indirect
                     # argument (`_translate_apply_fn`), so `guarded=True`.
-                    if (self._nat_binding_target(arg, resolved_formal)
+                    elif (self._nat_binding_target(arg, resolved_formal)
                             and self._narrows_into_nat(arg)):
                         self._check_nat_binding_obligation(
                             decl, arg, smt, slot_env, assumptions,

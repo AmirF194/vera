@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -47,6 +48,26 @@ def _dist(tmp_path: Path) -> Path:
     (dist / "veralang-0.1.5-py3-none-any.whl").write_bytes(b"wheel")
     (dist / "veralang-0.1.5.tar.gz").write_bytes(b"sdist")
     return dist
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_git_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Scrub inherited ``GIT_*`` variables so every git subprocess in this
+    module — the ``_git`` fixture helper AND the ``scripts/release.py`` helpers
+    under test — is hermetic to the tmp repo its ``cwd`` names.
+
+    When this suite runs inside a pre-commit hook, git exports ``GIT_DIR`` (and
+    ``GIT_INDEX_FILE``) to the hook's environment.  Without the scrub, the
+    exported gitdir overrode each call's ``cwd``: ``git init`` re-initialized
+    the DEVELOPER'S repository instead of the tmp one — from a linked worktree
+    the exported gitdir path doesn't end in ``.git``, so the re-init marked the
+    shared repo ``core.bare=true`` — and ``git config user.*`` hijacked its
+    committer identity, breaking every subsequent git operation in the outer
+    repo while this test failed on ``git add`` (exit 128, "this operation must
+    be run in a work tree").  ``release.py``'s own git calls read the wrong
+    repo the same way, so the scrub lives here rather than in ``_git``."""
+    for name in [k for k in os.environ if k.startswith("GIT_")]:
+        monkeypatch.delenv(name, raising=False)
 
 
 def _git(root: Path, *args: str) -> str:
