@@ -42,6 +42,7 @@ from vera.obligations.core import (
 from vera.slots import slot_table, type_expr_slot_name
 from vera.smt import SlotEnv, SmtContext
 from vera.types import (
+    erases_to_unit,
     BOOL,
     FLOAT64,
     INT,
@@ -7119,7 +7120,10 @@ class ContractVerifier:
         truncated-name convention) stay guarded."""
         if not isinstance(ty, RefinedType):
             return False
-        if ty.base == UNIT:
+        if erases_to_unit(ty):
+            # Representation-keyed, not name-keyed: a `Future<Unit>` base
+            # erases exactly like bare `@Unit` (#841), so neither has a
+            # local for the guard to check (PR #1034 full review).
             return False
         if isinstance(ty.base, AdtType):
             return all(

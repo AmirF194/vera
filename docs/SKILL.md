@@ -2369,7 +2369,7 @@ These are known limitations in the current reference implementation. Most are tr
 
 ## Known Bugs and Workarounds
 
-Current reference-implementation bugs that an agent writing Vera code is likely to hit. Every entry has a confirmed reproducer and a known workaround. The full curated list is in [KNOWN_ISSUES.md](https://github.com/aallan/vera/blob/main/KNOWN_ISSUES.md); the issue tracker is the source of truth.
+Current reference-implementation bugs that an agent writing Vera code is likely to hit. Most entries have a confirmed reproducer and a known workaround; an observed one-off CI flake is tracked with reporting guidance instead. The full curated list is in [KNOWN_ISSUES.md](https://github.com/aallan/vera/blob/main/KNOWN_ISSUES.md); the issue tracker is the source of truth.
 
 | Shape | Bug summary | Workaround | Issue |
 |---|---|---|---|

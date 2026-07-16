@@ -1336,3 +1336,27 @@ class TestRefinedOverIntWidenIntersection:
         assert _run(_CAP_RET_INTERSECTION, "go", 5) == 5
         kind = _trap_kind(_CAP_RET_INTERSECTION, "go", 150)
         assert kind == "contract_violation", kind
+
+
+class TestRefinedBoundaryGuardableHelper:
+    """Direct pins on `_refined_boundary_codegen_guardable` — the semantic
+    mirror of codegen's `_refinement_guard_parts` bail set (#1036).  The
+    erased-base arm must key on REPRESENTATION (`erases_to_unit`), not the
+    bare `Unit` name: a `Future<Unit>` base erases identically (#841), so
+    claiming it guardable would be the same unfulfilled-promise class
+    (PR #1034 full review)."""
+
+    def test_erased_and_nonplain_bases_unguardable(self) -> None:
+        from vera.types import (
+            INT, UNIT, AdtType, PrimitiveType, RefinedType,
+        )
+        from vera.verifier import ContractVerifier
+
+        pred = object()  # predicate payload is irrelevant to the keying
+        g = ContractVerifier._refined_boundary_codegen_guardable
+        assert not g(RefinedType(UNIT, pred))
+        assert not g(RefinedType(AdtType("Future", (UNIT,)), pred))
+        assert not g(
+            RefinedType(AdtType("Array", (RefinedType(INT, pred),)), pred))
+        assert g(RefinedType(INT, pred))
+        assert g(RefinedType(AdtType("Array", (PrimitiveType("Int"),)), pred))

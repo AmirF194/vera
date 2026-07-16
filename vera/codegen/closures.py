@@ -380,10 +380,12 @@ class ClosureLiftingMixin:
         # @Unit param is `continue`d above and never enters `param_info`, which
         # matches the codegen-unguardable @Unit refinement (the verifier records
         # that narrowing `tier3_unguarded`, claiming no runtime guard).
-        refined_param_checks: list[tuple[int, ast.TypeExpr]] = [
-            (value_local, param_te)
+        refined_param_checks: list[
+            tuple[int, tuple[ast.Expr, str]]
+        ] = [
+            (value_local, parts)
             for _i, param_te, value_local in param_info
-            if self._refinement_guard_parts(param_te) is not None
+            if (parts := self._refinement_guard_parts(param_te)) is not None
         ]
 
         # Compute capture layout (must match _translate_anon_fn).
@@ -620,10 +622,7 @@ class ClosureLiftingMixin:
                 ast.format_type_expr(p) for p in anon_fn.params)
             ret_sig = ast.format_type_expr(anon_fn.return_type)
             closure_sig = f"fn({param_sig} -> {ret_sig})"
-            for value_local, param_te in refined_param_checks:
-                parts = self._refinement_guard_parts(param_te)
-                if parts is None:  # pragma: no cover — collected only when set
-                    continue
+            for value_local, parts in refined_param_checks:
                 predicate, base_name = parts
                 msg = (
                     f"Refinement violation in {closure_sig}\n"
