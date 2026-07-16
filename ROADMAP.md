@@ -12,7 +12,7 @@ Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verificati
 
 ## Where we are
 
-7,584 tests, 160 conformance programs, 38 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
+7,639 tests, 160 conformance programs, 38 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
 
 ## Stage 19 — The verification completeness sprint
 
@@ -20,15 +20,13 @@ Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verificati
 
 ### Bug sprint — monomorphizer and verifier gaps first
 
-Four PRs remain in the sprint's bug-PR cluster (the verification-completeness rows below are the sprint's remaining scope):
+Three PRs remain in the sprint's bug-PR cluster (the verification-completeness rows below are the sprint's remaining scope):
 
-**PR F — Future representation-transparency in the let/capture/element paths (7).** [#1039](https://github.com/aallan/vera/issues/1039) `let @Future<String>` E602-skips on name-keyed pair detection, plus the sibling deciders its adversarial reviews confirmed: closure capture ([#1044](https://github.com/aallan/vera/issues/1044)), `Array<Future<T>>` elements ([#1045](https://github.com/aallan/vera/issues/1045)), an alias of a pair-payload Future ([#1046](https://github.com/aallan/vera/issues/1046)), return display ([#1047](https://github.com/aallan/vera/issues/1047)), the combinator element inference the #1045 fix exposed ([#1057](https://github.com/aallan/vera/issues/1057), silent wrong values), and aliased array elements ([#1058](https://github.com/aallan/vera/issues/1058)). In review as [#1041](https://github.com/aallan/vera/pull/1041).
+**PR G — zero-size fields in registered layouts and wildcard walks (2).** [#1043](https://github.com/aallan/vera/issues/1043) the registered constructor layouts give a zero-size field a 4-byte slot (wildcard tag walks and structural `Eq` read wrong offsets), and [#1060](https://github.com/aallan/vera/issues/1060) the type-parameter spelling of the same wildcard walks. In review as [#1049](https://github.com/aallan/vera/pull/1049).
 
-**PR G — zero-size fields in registered layouts and wildcard walks (2).** [#1043](https://github.com/aallan/vera/issues/1043) the registered constructor layouts give a zero-size field a 4-byte slot (wildcard tag walks and structural `Eq` read wrong offsets), and [#1060](https://github.com/aallan/vera/issues/1060) the type-parameter spelling of the same wildcard walks (a `Box<Unit>` wildcard reads following fields at wrong offsets). In review as [#1049](https://github.com/aallan/vera/pull/1049).
+**PR — argument-derived element types (5).** [#1051](https://github.com/aallan/vera/issues/1051) direct indexing on the eight type-variable-element Array builtins, [#1055](https://github.com/aallan/vera/issues/1055) alias-spelled arguments to those derivations, [#1052](https://github.com/aallan/vera/issues/1052) inline nested array literals as call arguments, [#1053](https://github.com/aallan/vera/issues/1053) type-variable builtins nested as call arguments, and [#1063](https://github.com/aallan/vera/issues/1063) the container host-tag mis-tag under aliased/user-fn arguments (silent truncation). In review as [#1061](https://github.com/aallan/vera/pull/1061).
 
-**PR I — type-variable builtin index derivations (2).** [#1051](https://github.com/aallan/vera/issues/1051) direct indexing on the eight type-variable-element Array builtins, and [#1055](https://github.com/aallan/vera/issues/1055) alias-spelled arguments to those derivations. Built and gated on the [#1050](https://github.com/aallan/vera/pull/1050) stack; opens when #1050 merges.
-
-**PR J — call-argument element-type recovery (2).** [#1052](https://github.com/aallan/vera/issues/1052) inline nested array literals as call arguments, and [#1053](https://github.com/aallan/vera/issues/1053) type-variable builtins nested as call arguments (plus its aliased and user-fn argument extensions). Stacked on PR I.
+**PR L — concrete scrutinee types for direct-call wildcard matches (1).** [#1065](https://github.com/aallan/vera/issues/1065) a direct-call match scrutinee whose type-param wildcard is followed by a read loud-skips — the #1060 walks need the callee's concrete instantiation threaded in. Fix in progress, stacked on [#1049](https://github.com/aallan/vera/pull/1049).
 
 [#996](https://github.com/aallan/vera/issues/996) stays a watch-only row — an unreproducible conformance flake, not a fix target.
 

@@ -1246,6 +1246,199 @@ public fn f(-> @Int)
         assert _run(source, fn="f") == 6
 
 
+class TestFuturePairLetBinding1039:
+    """#1039: a `let` of a pair-represented `Future<T>` payload
+    (`Future<String>`, `Future<Array<T>>`) binds two locals like a bare
+    String/Array let.
+
+    `Future<T>` is representation-transparent (#841), so `Future<String>`
+    is an `i32_pair`.  Pre-fix the let-binding translator's pair detection
+    (`_is_pair_type_name`) keyed on the literal `String`/`Array` names and
+    was NOT Future-transparent, so `Future<String>`/`Future<Array<T>>`
+    missed the pair branch, fell to the scalar branch where
+    `_slot_name_to_wasm_type` recursed through the transparent wrapper to a
+    pair inner and returned None, and the whole enclosing function was
+    dropped with the [E602] loud skip ("has no WASM representation") on a
+    check/verify-green program — same family as #1006/#1031/#1037/#1038.
+
+    The fix makes `_is_pair_type_name` Future-transparent (string-form
+    strip-and-recurse, mirroring `_slot_name_to_wasm_type`'s Future arm),
+    which covers BOTH the composite-string sites in the let path: the
+    binding (`context.translate_block`) and the read emit
+    (`_translate_slot_ref`).  The scalar and pointer pins plus the
+    `Future<Unit>` loud-skip pin prove the transparency is to the
+    *payload's* representation, not "every Future is a pair".
+    """
+
+    def test_string_payload_let_compiles(self) -> None:
+        """The bare bug: `let @Future<String>` must compile (bind two pair
+        locals) so the enclosing function is exported, not E602-skipped.
+        Returns a constant so it pins compilation independent of any read
+        path.  RED on base (function dropped → not exported)."""
+        source = """\
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @Future<String> = async("hello");
+  42
+}
+"""
+        assert _run(source, fn="f") == 42
+
+    def test_string_payload_value_survives_end_to_end(self) -> None:
+        """The issue's repro: bind, await via the slot ref, read the String.
+        `string_length("hello") == 5` proves the (ptr, len) pair survived —
+        a mis-bound pair (one local) would corrupt the value or trap, not
+        return exactly 5.  RED on base (E602 skip)."""
+        source = """\
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @Future<String> = async("hello");
+  let @String = await(@Future<String>.0);
+  string_length(@String.0)
+}
+"""
+        assert _run(source, fn="f") == 5
+
+    def test_array_payload_value_survives_end_to_end(self) -> None:
+        """`Future<Array<Int>>` — the other pair payload — binds, awaits, and
+        reads back: `array_length([7, 8, 9]) == 3`.  A distinctive length
+        (not 0/1) rules out a coincident default.  RED on base (E602 skip)."""
+        source = """\
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @Future<Array<Int>> = async([7, 8, 9]);
+  let @Array<Int> = await(@Future<Array<Int>>.0);
+  array_length(@Array<Int>.0)
+}
+"""
+        assert _run(source, fn="f") == 3
+
+    def test_scalar_payload_let_stays_scalar(self) -> None:
+        """Precision pin: `Future<Int>` is a scalar (i64), NOT a pair — it
+        must keep the single-local scalar path.  Green before and after the
+        fix; fails only if the Future recursion over-broadens a scalar
+        payload to a pair."""
+        source = """\
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @Future<Int> = async(41);
+  await(@Future<Int>.0)
+}
+"""
+        assert _run(source, fn="f") == 41
+
+    def test_pointer_payload_let_stays_pointer(self) -> None:
+        """Precision pin: `Future<Box>` (ADT payload) is an i32 heap pointer,
+        NOT a pair — single-local pointer path.  Green before and after;
+        guards the Future recursion against pair-treating a pointer
+        payload."""
+        source = """\
+private data Box { Wrap(Int) }
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @Future<Box> = async(Wrap(42));
+  let @Box = await(@Future<Box>.0);
+  match @Box.0 {
+    Wrap(@Int) -> @Int.0
+  }
+}
+"""
+        assert _run(source, fn="f") == 42
+
+    def test_unit_payload_let_still_skips_loudly(self) -> None:
+        """The loud skip is preserved: `Future<Unit>` wraps a zero-size
+        payload with no WASM representation (Unit is neither a pair nor a
+        scalar), so the let must STILL reach the [E602] skip — never be
+        silently pair-bound.  Exercises the Future recursion directly: it
+        must return False for the Unit payload, so `f` is dropped, not
+        exported.  Green before and after the fix (`_compile` runs codegen
+        without the checker's E183 zero-size gate, so this reaches the
+        codegen skip)."""
+        source = """\
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @Future<Unit> = async(());
+  42
+}
+"""
+        result = _compile(source)
+        warnings = [d for d in result.diagnostics if d.severity == "warning"]
+        assert any("unsupported" in w.description.lower() for w in warnings)
+        assert "f" not in result.exports
+
+
+class TestAliasPairFuture1046:
+    """#1046: an ALIAS to a pair-payload Future binds like its target.
+
+    `type FS = Future<String>;` then `let @FS = async("hello");` was
+    check+verify-green but E602-skipped the enclosing function: the pair
+    predicate (`_is_pair_type_name`) resolved the alias through the
+    name-only `_resolve_base_type_name`, which drops type arguments — `FS`
+    resolved to bare `"Future"`, missed the #1039 Future arm, and fell to
+    the scalar mapper, whose canonical spelling (`String`) has no scalar
+    representation.  The predicate now canonicalizes an alias to its
+    target's full compound spelling first (`_canonicalize_alias_slot_name`,
+    the #1037 walk), so an alias behaves exactly like its target written
+    directly.  The scalar-alias sibling (`type FI = Future<Int>`) was
+    already closed by #1037's `_slot_name_to_wasm_type` wiring and is
+    pinned here as the must-not-change control.
+    """
+
+    def test_alias_to_pair_future_let_runs(self) -> None:
+        """The #1046 repro: alias to Future<String> binds, awaits, reads.
+
+        RED on base (E602 skip; string_length must return exactly 5)."""
+        source = """\
+type FS = Future<String>;
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @FS = async("hello");
+  string_length(await(@FS.0))
+}
+"""
+        assert _run(source, fn="f") == 5
+
+    def test_alias_chain_to_pair_future_let_runs(self) -> None:
+        """An alias-of-alias chain ending at Future<String> canonicalizes
+        hop by hop.  RED on base (E602 skip)."""
+        source = """\
+type FS = Future<String>;
+type FS2 = FS;
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @FS2 = async("hello");
+  string_length(await(@FS2.0))
+}
+"""
+        assert _run(source, fn="f") == 5
+
+    def test_alias_to_scalar_future_stays_scalar(self) -> None:
+        """Control: `type FI = Future<Int>` binds one i64 local (#1037's
+        fix) — the pair predicate must NOT claim it."""
+        source = """\
+type FI = Future<Int>;
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @FI = async(41);
+  await(@FI.0)
+}
+"""
+        assert _run(source, fn="f") == 41
+
+
 class TestRandomEffect:
     """Tests for the Random effect (#465).
 

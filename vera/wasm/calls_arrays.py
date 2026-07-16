@@ -17,6 +17,7 @@ from vera.wasm.helpers import (
     _element_wasm_type,
     _is_host_handle_type,
     _is_pair_element_type,
+    _strip_future,
     gc_shadow_push,
 )
 
@@ -112,6 +113,17 @@ class CallsArraysMixin:
             raise CodegenSkip(
                 elem_arg, "could not infer array_append element type"
             )
+        # Canonicalize an alias-spelled element (#1062): for `@FI.0`
+        # (`type FI = Future<Int>`) the inference returns the bare alias
+        # name unresolved, which the module-level element helpers below
+        # (no alias table) size as the 4-byte i32 default and store with
+        # `i32.store` — an "expected i32, found i64" validation trap on a
+        # check+verify-green `array_append`.  Canonicalize-then-resolve
+        # BEFORE the module-level helpers, mirroring the #1058
+        # literal-store fix; a full compound spelling (`Future<Int>`)
+        # or non-alias name passes through unchanged.
+        elem_type, _ = self._canonicalize_alias_slot_name(elem_type)
+        elem_type = self._resolve_base_type_name(elem_type)
         elem_size = _element_mem_size(elem_type)
         if elem_size is None:  # pragma: no cover — defensive: _element_mem_size never returns None (falls back to 4)
             raise CodegenSkip(
@@ -136,9 +148,17 @@ class CallsArraysMixin:
             elem_ptr = self.alloc_local("i32")
             elem_len = self.alloc_local("i32")
         else:
+            # `Future<T>` is representation-transparent (#841): the local
+            # holding the pushed element must be its payload T's WASM type,
+            # not the i32 default.  `elem_size` / `store_op` already strip
+            # the wrapper (via `_strip_future`), so without stripping here
+            # too a `Future<Int>` payload (i64) is `local.set` into an i32
+            # local — a "expected i32, found i64" validation trap on a
+            # check+verify-green `array_append` (#1057).
+            bare_elem = _strip_future(elem_type)
             elem_val = self.alloc_local(
-                "i64" if elem_type in ("Int", "Nat") else
-                "f64" if elem_type == "Float64" else "i32"
+                "i64" if bare_elem in ("Int", "Nat") else
+                "f64" if bare_elem == "Float64" else "i32"
             )
         # Locals for copy loop and destination
         dst = self.alloc_local("i32")
@@ -1987,7 +2007,36 @@ class CallsArraysMixin:
                 and arr_arg.type_args[0].name == "Array"
                 and arr_arg.type_args[0].type_args
                 and isinstance(arr_arg.type_args[0].type_args[0], ast.NamedType)):
-                t_type = arr_arg.type_args[0].type_args[0].name
+                inner_te = arr_arg.type_args[0].type_args[0]
+                # Preserve the FULL `Future<…>` spelling for a
+                # representation-transparent element (#841): the bare head
+                # `"Future"` collapses to the 4-byte i32 default in the
+                # element-size / pair deciders below, so the inner copy
+                # loop runs a 4-byte stride over an 8-byte (or two-word
+                # pair) payload and flattens garbage — silent-wrong on a
+                # check+verify-green `array_flatten` (#1057).
+                #
+                # An ALIAS-spelled inner element (`Array<Array<FI>>`,
+                # `type FI = Future<Int>`) is canonicalized to its
+                # target's full compound spelling first (#1062) — the raw
+                # alias name hit the same i32 default.  Mirrors the
+                # canonicalize-then-resolve order of the #1058
+                # literal-store fix; a parameterized inner element keeps
+                # the bare-head behavior (the name-only canonicalizer
+                # cannot substitute its arguments).
+                if inner_te.name == "Future" and inner_te.type_args:
+                    # #1074: canonicalize an alias inside the payload
+                    # (`Future<FlagA>` -> `Future<Bool>`) so the inner copy
+                    # loop sizes the resolved payload, not a bare alias
+                    # that falls to the 4-byte i32 default.
+                    t_type, _ = self._canonicalize_alias_slot_name(
+                        self._format_named_type(inner_te))
+                elif not inner_te.type_args:
+                    canon, _ = self._canonicalize_alias_slot_name(
+                        inner_te.name)
+                    t_type = self._resolve_base_type_name(canon)
+                else:
+                    t_type = inner_te.name
         if t_type is None:
             raise CodegenSkip(
                 arr_arg,

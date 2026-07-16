@@ -954,6 +954,17 @@ class DataMixin:
         # below match on bare "Array" / "Array<...>".  Without this,
         # an alias-typed element falls through to the 4-byte i32 path
         # and the literal emits a malformed WAT (#583).
+        #
+        # Canonicalize to the target's FULL compound spelling first
+        # (#1058): the name-only `_resolve_base_type_name` hop drops type
+        # arguments, so `type FI = Future<Int>` resolved to bare "Future".
+        # A `Future<T>` element is representation-transparent (#841) —
+        # its width is its payload T's — but the bare head collapses to
+        # the i32 default, storing an i64 payload with `i32.store` (a
+        # "expected i32, found i64" validation trap) on a check-green
+        # program.  Mirrors the `_is_pair_type_name` canonicalize-then-
+        # resolve order (#1046).
+        elem_type, _ = self._canonicalize_alias_slot_name(elem_type)
         elem_type = self._resolve_base_type_name(elem_type)
         elem_size = _element_mem_size(elem_type)
         if elem_size is None:

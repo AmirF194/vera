@@ -167,6 +167,49 @@ class TestExecuteValueField734:
         assert r.value == "hello"
         assert isinstance(r.value, str)
 
+    def test_future_string_return_is_decoded(self) -> None:
+        """A bare `Future<String>` return is decoded to a Python str (#1047).
+
+        `Future<String>` is representation-transparent (#841) — the same
+        (ptr, len) pair as a plain `String` — so `execute()` must decode
+        it for display exactly like the `String` cell above.  RED before
+        the fix: `_return_type_is_string` (codegen/core.py) lacked the
+        Future strip, so `mk` was absent from `fn_string_returns` and the
+        display path surfaced the bare pointer (an int) instead of
+        "hello".  The emitted WASM is sound — a caller that awaits the
+        future gets the right value; only the top-level display was
+        wrong.
+        """
+        result = _compile(
+            'public fn mk(-> @Future<String>) requires(true) ensures(true) '
+            'effects(<Async>) { async("hello") }'
+        )
+        r = execute(result, fn_name="mk")
+        assert r.value == "hello"
+        assert isinstance(r.value, str)
+
+    def test_generic_alias_future_string_return_is_decoded(self) -> None:
+        """A `Deferred<String>` return (`type Deferred<T> = Future<T>;`)
+        is decoded to a Python str (PR #1041 review).
+
+        The alias arm of `_return_type_is_string` recursed on the RAW alias
+        body without substituting the concrete `type_args` into the alias's
+        own params — the #635 substitution its sibling
+        `_type_expr_to_wasm_type` already performs — so the body's bare `T`
+        never resolved to String and the display surfaced the raw pointer.
+        RED before the fix: prints an int, not "hello".  The simple-alias
+        spelling (`type FS = Future<String>;`) carried the args in the body
+        and already decoded — this pins the parameterised spelling.
+        """
+        result = _compile(
+            'type Deferred<T> = Future<T>;\n'
+            'public fn mk(-> @Deferred<String>) requires(true) ensures(true) '
+            'effects(<Async>) { async("hello") }'
+        )
+        r = execute(result, fn_name="mk")
+        assert r.value == "hello"
+        assert isinstance(r.value, str)
+
     def test_array_return_is_bare_heap_pointer(self) -> None:
         """An Array<T> return stays a raw heap-pointer int, never decoded."""
         # overlaps test_codegen_strings.py::test_array_return_unchanged.  The
