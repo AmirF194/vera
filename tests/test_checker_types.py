@@ -2774,3 +2774,158 @@ public fn main(@Unit -> @Int)
         assert _compatible_modulo_typevars(TypeVar("T"), INT, frozenset())
         assert not _compatible_modulo_typevars(
             TypeVar("T"), INT, frozenset({"T"}))
+
+
+# =====================================================================
+# Zero-size slot reads and let bindings (#1005, #1006)
+# =====================================================================
+
+class TestUnitSlotReadRejection1005:
+    """`#1005`: reading a Unit-typed slot is rejected at check (E182).
+
+    A Unit value occupies no bytes and compiles to no WASM local, so a
+    ``@Unit.n`` read lowers to a ``local.get`` on a local that does not
+    exist — the dangling-slot codegen invariant behind E699.  Pre-fix
+    these programs were check-green and died at codegen with the E699
+    internal error, identically for a normal fn's ``@Unit`` param and a
+    handler clause's ``@Unit`` op param (the #1005 report shape).
+
+    Declaring the param stays legal — it erases cleanly from the ABI
+    (the same declare-vs-read line the E206 generic-at-Unit guard draws
+    via ``forall_vars_read``).  Only the read is rejected, keyed on
+    ``erases_to_unit`` so a ``Future<Unit>`` slot (representation-
+    identical, #841) is rejected the same way.
+    """
+
+    def test_normal_fn_unit_param_read_rejected(self) -> None:
+        errs = _check_err("""\
+private fn takes_unit(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  7
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  takes_unit(@Unit.0)
+}
+""", "zero-size")
+        assert any(e.error_code == "E182" for e in errs)
+
+    def test_clause_unit_op_param_read_rejected(self) -> None:
+        errs = _check_err("""\
+private fn takes_unit(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  7
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>](@Int = 3) {
+    get(@Unit) -> { resume(@Int.0 + takes_unit(@Unit.0)) },
+    put(@Int) -> { resume(()) }
+  } in {
+    get(())
+  }
+}
+""", "zero-size")
+        assert any(e.error_code == "E182" for e in errs)
+
+    def test_future_unit_param_read_rejected(self) -> None:
+        # Future<Unit> is representation-identical to Unit (#841): the
+        # read dangles the same way, so `erases_to_unit` keys the same
+        # rejection.  (Declaring the param is legal, as for bare Unit.)
+        errs = _check_err("""\
+private fn takes_fut(@Future<Unit> -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  7
+}
+
+public fn main(@Future<Unit> -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  takes_fut(@Future<Unit>.0)
+}
+""", "zero-size")
+        assert any(e.error_code == "E182" for e in errs)
+
+    def test_unit_literal_arg_still_ok(self) -> None:
+        # The canonical form — passing the unit LITERAL — stays green:
+        # only slot READS are rejected, not Unit params or `()` values.
+        _check_ok("""\
+private fn takes_unit(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  7
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  takes_unit(())
+}
+""")
+
+
+class TestUnitLetRejection1006:
+    """`#1006`: a ``let`` binding of a zero-size type is rejected at
+    check (E183).
+
+    ``let @Unit = put(5)`` (the #1006 report shape) was check-green but
+    the binding has no WASM representation, so codegen skipped the whole
+    enclosing function (E602).  A zero-size binding could never be read
+    (E182), so its only conceivable use is sequencing — which the
+    expression statement already provides.  The rejection covers any
+    RHS, effect op or plain call, and steers to the statement form.
+    """
+
+    def test_let_unit_of_effect_op_rejected(self) -> None:
+        errs = _check_err("""\
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>](@Int = 0) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) }
+  } in {
+    let @Unit = put(5);
+    get(())
+  }
+}
+""", "zero-size")
+        assert any(e.error_code == "E183" for e in errs)
+
+    def test_let_unit_of_literal_rejected(self) -> None:
+        errs = _check_err("""\
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Unit = ();
+  0
+}
+""", "zero-size")
+        assert any(e.error_code == "E183" for e in errs)

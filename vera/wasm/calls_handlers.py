@@ -1390,10 +1390,15 @@ class CallsHandlersMixin:
         #    the checker, so `_type_name_to_wasm` yields the op's result WT).
         saved_ops = dict(self._effect_ops)
         saved_result_wt = dict(self._effect_op_result_wt)
+        saved_result_vera = dict(self._effect_op_result_vera)
         saved_clause_ops = dict(self._state_clause_ops)
         self._effect_ops["get"] = (get_import, False)
         self._effect_ops["put"] = (put_import, True)
         self._effect_op_result_wt["get"] = self._type_name_to_wasm(type_name)
+        # #1006: the VERA-name mirror of the WT record above —
+        # `_infer_vera_type` needs the Vera name (not the layout-ambiguous
+        # WAT type) to type a `get(())` array-literal element.
+        self._effect_op_result_vera["get"] = type_name
         # #976 option C: register the clauses so each get/put CALL SITE in
         # the body inlines its clause body (intrinsic-hybrid semantics)
         # instead of the bare host-cell call.  Start from an EMPTY registry:
@@ -1414,6 +1419,7 @@ class CallsHandlersMixin:
         # 5. Restore effect_ops (and the clause registry — nested handlers)
         self._effect_ops = saved_ops
         self._effect_op_result_wt = saved_result_wt
+        self._effect_op_result_vera = saved_result_vera
         self._state_clause_ops = saved_clause_ops
 
         if body_instrs is None:

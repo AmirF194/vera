@@ -394,6 +394,21 @@
     ]
   },
   {
+    "id": "ch04_let_unit_rejected",
+    "file": "ch04_let_unit_rejected.vera",
+    "chapter": 4,
+    "title": "A let binding of the zero-size type Unit is a checker error (#1006)",
+    "level": "check",
+    "spec_ref": "Section 4.7",
+    "expected_error": "E183",
+    "features": [
+      "let_binding",
+      "unit_type",
+      "zero_size",
+      "check_error"
+    ]
+  },
+  {
     "id": "ch04_nat_subtraction",
     "file": "ch04_nat_subtraction.vera",
     "chapter": 4,
@@ -1190,6 +1205,37 @@
       "old",
       "new",
       "composite_type_arg"
+    ]
+  },
+  {
+    "id": "ch07_state_op_array_element",
+    "file": "ch07_state_op_array_element.vera",
+    "chapter": 7,
+    "title": "Effect ops as array-literal elements dispatch through clause-aware lowering",
+    "level": "run",
+    "spec_ref": "Section 7.3",
+    "features": [
+      "state_effect",
+      "handler",
+      "state_clauses",
+      "array_literal",
+      "effect_op_position"
+    ]
+  },
+  {
+    "id": "ch07_state_unit_op_param_read_rejected",
+    "file": "ch07_state_unit_op_param_read_rejected.vera",
+    "chapter": 7,
+    "title": "Reading a get clause's @Unit op parameter is a checker error (#1005)",
+    "level": "check",
+    "spec_ref": "Section 7.5",
+    "expected_error": "E182",
+    "features": [
+      "state_effect",
+      "handler",
+      "unit_type",
+      "zero_size",
+      "check_error"
     ]
   },
   {

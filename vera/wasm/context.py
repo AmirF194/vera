@@ -84,6 +84,7 @@ class WasmContext(
         string_pool: StringPool,
         effect_ops: dict[str, tuple[str, bool]] | None = None,
         effect_op_result_wt: dict[str, str | None] | None = None,
+        effect_op_result_vera: dict[str, str | None] | None = None,
         ctor_layouts: dict[str, ConstructorLayout] | None = None,
         adt_type_names: set[str] | None = None,
         generic_fn_info: (
@@ -114,6 +115,18 @@ class WasmContext(
         # body path in wasm/calls_handlers.py) so the two never drift.
         self._effect_op_result_wt: dict[str, str | None] = (
             effect_op_result_wt or {}
+        )
+        # #1006: op_name -> the op's RESULT VERA type name (e.g. "get" ->
+        # "Int" for State<Int>).  The WAT-type mirror above cannot serve
+        # `_infer_vera_type` (i32 is Bool/pointer/…-ambiguous), which needs
+        # the Vera name when a bare `get(())` sits in an array-literal
+        # ELEMENT position — the element layout is chosen from the Vera
+        # type.  Populated in lock-step with `_effect_op_result_wt` at both
+        # injection sites (codegen/functions.py declared-effect path and
+        # wasm/calls_handlers.py handler-body path) and saved/restored the
+        # same way, so the three op registries never drift.
+        self._effect_op_result_vera: dict[str, str | None] = (
+            effect_op_result_vera or {}
         )
         # #976 option C: op_name -> (HandlerClause, state type name,
         # get import, put import) for the innermost enclosing

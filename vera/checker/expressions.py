@@ -386,6 +386,33 @@ class ExpressionsMixin:
                 error_code="E130",
             )
             return UnknownType()
+        # #1005: a zero-size slot READ resolves (the binding exists) but the
+        # type compiles to no WASM local, so the read would lower to a
+        # `local.get` on a local that does not exist — the dangling-slot
+        # invariant behind E699.  DECLARING the binding stays legal (it
+        # erases cleanly from the ABI — the same declare-vs-read line the
+        # E206 generic-at-Unit guard draws via `forall_vars_read`); only
+        # the read is rejected, uniformly for fn params, handler-clause op
+        # params, and any other binding form.
+        if erases_to_unit(resolved):
+            self._error(
+                ref,
+                f"Cannot read @{tname}.{ref.index}: type "
+                f"'{pretty_type(resolved)}' is zero-size and carries no "
+                f"runtime value.",
+                rationale="A zero-size type (`Unit`, or a `Future` wrapping "
+                          "one) compiles to no WASM local, so a slot "
+                          "reference to it resolves to no runtime location.",
+                fix="Write the unit literal `()` where a Unit value is "
+                    "needed; a zero-size binding exists only as a "
+                    "declaration and cannot be read.",
+                spec_ref='Chapter 2, Section 2.2 "Primitive Types"',
+                error_code="E182",
+            )
+            # Error recovery: unlike the unresolved-slot arm above, this slot
+            # HAS a type — return it so downstream diagnostics stay
+            # meaningful (an `UnknownType` here masked the E206 call-site
+            # check for `idf(@Future<Unit>.0)` and cascaded E170/E121).
         return resolved
 
     def _check_result_ref(self, ref: ast.ResultRef) -> Type | None:
@@ -964,6 +991,30 @@ class ExpressionsMixin:
                         spec_ref='Chapter 4, Section 4.7 "Let Bindings"',
                         error_code="E170",
                     )
+
+        # #1006: a let of a zero-size type has no WASM representation — the
+        # binding could never be read (E182), so its only conceivable use is
+        # sequencing, which the expression statement already provides.
+        # Pre-fix `let @Unit = put(5);` was check-green and codegen skipped
+        # the whole enclosing function (E602).  Uniform over any RHS
+        # (effect op or plain call); the value expression above is still
+        # checked, so its own diagnostics and effect tracking are kept.
+        if erases_to_unit(declared_type):
+            self._error(
+                stmt.value,
+                f"Cannot bind a let of type "
+                f"'{pretty_type(declared_type)}': it is zero-size and "
+                f"carries no runtime value.",
+                rationale="A zero-size type (`Unit`, or a `Future` wrapping "
+                          "one) compiles to no WASM local, so the binding "
+                          "would have no runtime location and could never "
+                          "be read.",
+                fix="Evaluate the expression as a statement instead — "
+                    "`put(5);` rather than `let @Unit = put(5);` — and "
+                    "delete the binding.",
+                spec_ref='Chapter 4, Section 4.7 "Let Bindings"',
+                error_code="E183",
+            )
 
         tname = self._type_expr_to_slot_name(stmt.type_expr)
         self.env.bind(tname, declared_type, "let")

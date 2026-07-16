@@ -40,6 +40,38 @@ The practical implication for user code: do **not** insert `nat_to_int` defensiv
 
 `Never` is the type of expressions that never produce a value (e.g., functions that always diverge or branches that are statically unreachable). `Never` is a subtype of every type.
 
+### 2.2.2 Zero-size types are declaration-only
+
+`Unit` is zero-size: a `Unit` value occupies no bytes and compiles to no runtime local. A `Unit`-typed binding may be **declared** — a `@Unit` function parameter or a handler clause's `@Unit` operation parameter erases cleanly from the ABI — but it cannot be **materialized**:
+
+- Reading a zero-size slot (`@Unit.0`) is a checker error (**E182**) in every binding form — function parameters, handler-clause operation parameters, and closure parameters alike. The unit value has exactly one spelling: the literal `()`.
+- A `let` binding of a zero-size type (`let @Unit = put(5);`) is a checker error (**E183**): the binding could never be read, and sequencing is the expression statement's job (`put(5);`).
+- An array of a zero-size element type is a checker error (**E135**), and instantiating a type parameter that is *read* at `Unit` is a checker error (**E206**, §2.7).
+
+These rules key on representation, not on the name `Unit`: a `Future` transparently wrapping a zero-size payload (`Future<Unit>`) is rejected the same way, while boxed shapes with a real runtime representation (`Option<Unit>` — tag plus pointer) are ordinary values.
+
+The legal side of the line — a `@Unit` parameter declared and satisfied with the unit literal:
+
+```vera
+private fn poll(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  7
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  poll(())
+}
+```
+
+`poll` declares a `@Unit` parameter (legal — it erases from the ABI) and the call site supplies the literal `()`; neither body ever reads a `@Unit` slot.
+
 ## 2.3 Compound Types
 
 ### 2.3.1 Tuple Types
