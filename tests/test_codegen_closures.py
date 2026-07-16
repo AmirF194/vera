@@ -436,6 +436,87 @@ public fn test(@Unit -> @Int)
 
 
 # =====================================================================
+# #1044: Future<T> is representation-transparent (#841), so a closure
+# that CAPTURES a `Future<T>` free variable must serialise it with the
+# same width as its payload T.  Pre-fix the capture-width decision in
+# `_walk_free_vars` matched only the literal names "String" / "Array"
+# and routed everything else through `_type_name_to_wasm` (which maps
+# unknowns to "i32").  A captured `Future<String>` (i32_pair) was thus
+# stored as ONE i32 (ptr only) — the len read back as adjacent zero, so
+# the body silently saw an empty string; a captured `Future<Int>` (i64)
+# pushed an i64 into an `i32.store`, trapping at WASM validation
+# ("expected i32, found i64").  The fix routes the decision through the
+# Future-transparent `_is_pair_type_name` + `_slot_name_to_wasm_type`.
+# =====================================================================
+
+class TestFutureCapture1044:
+    """Closure capture of a `Future<T>` free variable (#1044)."""
+
+    def test_closure_captures_future_string_value_roundtrip(self) -> None:
+        """A captured `Future<String>` round-trips its (ptr, len) pair.
+
+        RED before the fix: the capture stored only the ptr as one i32,
+        so `string_length` read len from adjacent (zero) memory and the
+        closure returned 0 instead of 5.
+        """
+        src = """\
+type StrThunk = fn(Unit -> Int) effects(<Async>);
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @Future<String> = async("hello");
+  let @StrThunk = fn(@Unit -> @Int) effects(<Async>) {
+    string_length(await(@Future<String>.0))
+  };
+  apply_fn(@StrThunk.0, ())
+}
+"""
+        assert _run(src, "f") == 5
+
+    def test_closure_captures_future_int_scalar(self) -> None:
+        """A captured `Future<Int>` (i64) is serialised at i64 width.
+
+        RED before the fix: the capture used the i32 default, so the i64
+        value pushed into an `i32.store` trapped at WASM validation
+        ("expected i32, found i64").
+        """
+        src = """\
+type IntThunk = fn(Unit -> Int) effects(<Async>);
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @Future<Int> = async(41);
+  let @IntThunk = fn(@Unit -> @Int) effects(<Async>) {
+    await(@Future<Int>.0)
+  };
+  apply_fn(@IntThunk.0, ())
+}
+"""
+        assert _run(src, "f") == 41
+
+    def test_closure_captures_plain_string_control(self) -> None:
+        """Control: a plain `String` capture already worked and must stay
+        green — pins that the #1044 fix does not regress the non-Future
+        pair-capture path (#535)."""
+        src = """\
+type StrThunk = fn(Unit -> Int) effects(<Async>);
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @String = "hello";
+  let @StrThunk = fn(@Unit -> @Int) effects(<Async>) {
+    string_length(@String.0)
+  };
+  apply_fn(@StrThunk.0, ())
+}
+"""
+        assert _run(src, "f") == 5
+
+
+# =====================================================================
 # Coverage: closures.py — additional closure compilation paths
 # =====================================================================
 

@@ -1258,8 +1258,30 @@ class CodeGenerator(
         if isinstance(te, ast.NamedType):
             if te.name == "String":
                 return True
+            # Future<T> is representation-transparent (#841 / #1047): a bare
+            # `Future<String>` return has the same (ptr, len) pair shape as a
+            # plain String, so `execute()` must decode it for display too.
+            # Without this strip `mk() -> Future<String>` was absent from
+            # `fn_string_returns` and `vera run --fn mk` printed the raw
+            # pointer instead of the string (the emitted WASM is sound — a
+            # caller that awaits gets the value; only top-level display broke).
+            if (te.name == "Future" and te.type_args
+                    and len(te.type_args) == 1):
+                return self._return_type_is_string(te.type_args[0])
+            # Type aliases — substitute a parameterised alias's own type
+            # params with the concrete `te.type_args` BEFORE recursing
+            # (mirrors `_type_expr_to_wasm_type`'s #635 block below), so
+            # `type Deferred<T> = Future<T>` used as `Deferred<String>`
+            # resolves to String instead of recursing on the bare `T` and
+            # displaying the raw pointer (PR #1041 review).
             if te.name in self._type_aliases:
-                return self._return_type_is_string(self._type_aliases[te.name])
+                alias = self._type_aliases[te.name]
+                alias_params = self._type_alias_params.get(te.name)
+                if (alias_params and te.type_args
+                        and len(alias_params) == len(te.type_args)):
+                    local_subst = dict(zip(alias_params, te.type_args))
+                    alias = substitute_type_vars(alias, local_subst)
+                return self._return_type_is_string(alias)
         if isinstance(te, ast.RefinementType):
             return self._return_type_is_string(te.base_type)
         return False

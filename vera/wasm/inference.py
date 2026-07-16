@@ -1347,19 +1347,47 @@ class InferenceMixin:
         """Check if a slot type name is an Array<T> type."""
         return type_name.startswith("Array<")
 
-    def _is_pair_type_name(self, type_name: str) -> bool:
+    def _is_pair_type_name(
+        self, type_name: str, _seen: frozenset[str] = frozenset(),
+    ) -> bool:
         """Check if a slot type name is a pair type (ptr, len).
 
         String and Array<T> are represented as two consecutive i32 locals.
         Bare "Array" also matches — monomorphization may produce slot
         references with type_name="Array" (no type args in the name).
 
+        An alias is canonicalized to its target's FULL compound spelling
+        first (the shared :meth:`_canonicalize_alias_slot_name` walk, #1046):
+        the name-only ``_resolve_base_type_name`` hop drops type arguments,
+        so ``type FS = Future<String>`` resolved to bare ``"Future"``, missed
+        the Future arm below, and the let binding E602-skipped its enclosing
+        function on a check+verify-green program — the pair-payload sibling
+        of the #1037 scalar-alias fix, which wired the canonicalizer into
+        ``_slot_name_to_wasm_type`` but not into this predicate.
+
         Resolves type aliases first so `type Row = Array<Bool>` compiles
         identically to writing `Array<Bool>` directly: a SlotRef with
         type_name "Row" must emit `(local.get ptr; local.get len)` like
         any other Array slot, not just the ptr (#583).
+
+        `Future<T>` is representation-transparent (#841): a `Future<String>`
+        / `Future<Array<T>>` has the SAME `i32_pair` layout as its payload,
+        so it binds and reads as two locals exactly like a bare String /
+        Array.  The transparency is to the PAYLOAD's representation — a
+        scalar payload (`Future<Int>` → i64) or a pointer payload
+        (`Future<Box>` → i32) is NOT a pair.  Mirrors the string-form
+        strip-and-recurse in `_slot_name_to_wasm_type`'s Future arm, and
+        covers both composite-string sites in the let path — the binding
+        (`translate_block`) and the read emit (`_translate_slot_ref`).
+        Without it a `let @Future<String>` fell to the scalar branch, where
+        `_slot_name_to_wasm_type` recursed through the wrapper to a pair
+        inner and returned None, and the whole function was dropped with the
+        [E602] loud skip on a check/verify-green program (#1039).
         """
+        type_name, _seen = self._canonicalize_alias_slot_name(type_name, _seen)
         resolved = self._resolve_base_type_name(type_name)
+        if resolved.startswith("Future<") and resolved.endswith(">"):
+            return self._is_pair_type_name(resolved[7:-1], _seen)
         return (resolved == "String"
                 or resolved == "Array"
                 or resolved.startswith("Array<"))
@@ -1377,9 +1405,36 @@ class InferenceMixin:
         type_name is "Array" with type_args (NamedType("Int"),).
         Also handles chained indexing (e.g. @Array<Array<Int>>.0[0][1])
         by recursively resolving the inner collection's element type.
+
+        Normally returns the bare element name (`te.name`) — dropping the
+        element's own type args is safe because every ADT element is an i32
+        heap pointer and String/Array match on the bare head, so the
+        representation deciders (`_element_mem_size` / `_element_load_op` /
+        `_element_store_op` / `_element_wasm_type` / `_is_pair_element_type`)
+        need no args.  The ONE exception is `Future<T>` (#1045): it is
+        representation-transparent (#841), so its width IS its payload's —
+        a bare "Future" (args dropped) collapses to the i32 default and
+        mis-sizes an i64 payload (`i32.load` on i64 data) or a pair payload
+        (single i32 load of a two-word String).  Render the full
+        `Future<…>` name so `_strip_future` can recover the payload, keeping
+        this in agreement with the array-literal store side, which gets the
+        full name from `_infer_array_element_type` -> `_infer_vera_type`.
+        An alias INSIDE the payload (`Future<FlagA>`, `type FlagA = Bool`) is
+        canonicalized to `Future<Bool>` first (#1074) so the bare alias does
+        not itself fall to the 4-byte default under `_strip_future`.
         """
         te = self._infer_index_element_type_expr(expr)
-        return te.name if te is not None else None
+        if te is None:
+            return None
+        if te.name == "Future" and te.type_args:
+            # #1074: canonicalize an alias sitting inside the payload
+            # (`Future<FlagA>` -> `Future<Bool>`) so `_strip_future` in the
+            # element helpers hands a resolved payload to the size / load
+            # deciders, not a bare alias that falls to the 4-byte default.
+            canon, _ = self._canonicalize_alias_slot_name(
+                self._format_named_type(te))
+            return canon
+        return te.name
 
     def _infer_index_element_type_expr(
         self, expr: ast.IndexExpr,
@@ -2056,6 +2111,16 @@ class InferenceMixin:
         mapper canonicalize identically: an alias behaves exactly like
         writing its target's spelling directly.
 
+        After the top-level hops, an alias sitting INSIDE a transparent
+        ``Future<…>`` payload is canonicalized too (``Future<FlagA>`` ->
+        ``Future<Bool>``, #1074) — the hop-by-hop walk resolves only the
+        outer NAME, so the four array-element-type deciders that route the
+        result to the module-level element-size / store-op helpers
+        (``_infer_concat_elem_type``, ``_translate_array_lit``, the
+        ``array_flatten`` inner walk, ``_infer_index_element_type``) get a
+        payload the size dict can key on, not a bare alias that falls to the
+        4-byte i32 default.
+
         Returns the canonical name plus the accumulated seen-set; callers
         whose own recursion re-enters this walk (the transparent
         ``Future<...>`` payload peel) thread it through so a self-referential
@@ -2071,6 +2136,25 @@ class InferenceMixin:
                 break
             _seen = _seen | {name}
             name = target
+        # #1074: recurse into a representation-transparent ``Future<…>``
+        # payload so an alias sitting INSIDE the wrapper is canonicalized
+        # too (``Future<FlagA>`` -> ``Future<Bool>``, ``type BigF =
+        # Future<Big>`` -> ``Future<Int>``).  The hop-by-hop walk above
+        # resolves only a top-level alias NAME (or an alias chain landing
+        # on a ``Future<…>`` compound); the payload spelling it terminates
+        # on is left verbatim.  An aliased payload therefore reached the
+        # module-level element-size / store-op deciders unresolved (they
+        # ``_strip_future`` the wrapper and hand the bare alias to a
+        # name-keyed size dict with no alias table) and fell to the 4-byte
+        # i32 default — a 4-byte stride over 1-byte-packed Bool/Byte
+        # (silent-wrong values) or an ``i32.store`` of an i64/pair payload
+        # (a WASM-validation trap behind an exit-0 compile).  Thread
+        # ``_seen`` through so a self-referential payload (``type F =
+        # Future<F>``) still terminates.
+        if name.startswith("Future<") and name.endswith(">"):
+            inner = name[len("Future<"):-1]
+            inner, _seen = self._canonicalize_alias_slot_name(inner, _seen)
+            name = f"Future<{inner}>"
         return name, _seen
 
     def _slot_name_to_wasm_type(

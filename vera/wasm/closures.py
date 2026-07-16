@@ -361,24 +361,39 @@ class ClosuresMixin:
                 key = (type_name, outer_idx)
                 if key not in seen:
                     seen.add(key)
-                    # Infer wasm type from type name.  `_type_name_to_wasm`
-                    # collapses every composite type to a single ``"i32"``
-                    # for handler-callsite compatibility, so we re-detect
-                    # the pair shape here (#535): String / Array<T> values
-                    # live as two consecutive i32 slots (ptr, len) and a
-                    # closure capture must serialise both.  Pre-fix the
-                    # capture path used the bare ``"i32"`` and stored only
-                    # the ptr — the body then read len from adjacent
-                    # struct memory (typically zero), making the captured
-                    # value silently appear empty.
-                    if (
-                        type_name == "String"
-                        or type_name == "Array"
-                        or type_name.startswith("Array<")
-                    ):
+                    # Infer the capture's serialisation width from its slot
+                    # type name.  String / Array<T> values live as two
+                    # consecutive i32 slots (ptr, len) and a closure capture
+                    # must serialise both (#535): pre-#535 the capture path
+                    # used a bare ``"i32"`` and stored only the ptr, so the
+                    # body read len from adjacent struct memory (typically
+                    # zero) and the captured value silently appeared empty.
+                    #
+                    # Route the decision through the SAME Future-transparent
+                    # deciders the let-binding and slot-read paths use
+                    # (`_is_pair_type_name` / `_slot_name_to_wasm_type`), NOT
+                    # the literal String/Array check + `_type_name_to_wasm`
+                    # (which maps every unknown name — including a resolved
+                    # alias or a `Future<T>` wrapper — to ``"i32"``).  Since
+                    # `Future<T>` is representation-transparent (#841), a
+                    # captured `Future<String>` is a pair (i32_pair) and a
+                    # captured `Future<Int>` is an i64; pre-#1044 both fell to
+                    # the "i32" default — the pair silently stored ptr-only
+                    # (empty value), the i64 pushed an i64 into an `i32.store`
+                    # and trapped at WASM validation.  Both `_translate_anon_fn`
+                    # (layout + store) and `_compile_lifted_closure` (layout +
+                    # load) read this `wt` back from the capture tuple, so the
+                    # two sides stay in agreement by construction.  The
+                    # ``or "i32"`` guards the None `_slot_name_to_wasm_type`
+                    # returns for a pair (unreachable — `_is_pair_type_name`
+                    # took that branch) or a genuinely unrepresentable name
+                    # (which could not have been bound in the outer scope,
+                    # since binding uses the same mapper), matching the prior
+                    # `_type_name_to_wasm` default.
+                    if self._is_pair_type_name(type_name):
                         wt = "i32_pair"
                     else:
-                        wt = self._type_name_to_wasm(type_name)
+                        wt = self._slot_name_to_wasm_type(type_name) or "i32"
                     free.append((type_name, outer_idx, wt))
             return
 

@@ -248,6 +248,27 @@ def is_compilable_type(t: Type) -> bool:
 # Array element helpers
 # =====================================================================
 
+def _strip_future(name: str) -> str:
+    """Strip representation-transparent ``Future<…>`` wrappers (#1045).
+
+    ``Future<T>`` has the SAME array-element representation as its payload
+    ``T`` (#841), so the element sizing / load / store / wasm-type
+    decisions below must see through the wrapper and key on ``T``.
+    Loops so nested futures (``Future<Future<Int>>``) collapse fully.
+
+    String-form only — aliases are pre-resolved by the caller
+    (``vera/wasm/data.py`` canonicalizes via ``_canonicalize_alias_slot_name``
+    then ``_resolve_base_type_name`` before these helpers), so an *aliased*
+    future (``type Fut = Future<Int>``) arrives as the FULL compound
+    spelling ``"Future<Int>"`` and is stripped normally here (#1058); the
+    canonicaliser is what recovers the payload the name-only resolve
+    dropped.
+    """
+    while name.startswith("Future<") and name.endswith(">"):
+        name = name[7:-1]
+    return name
+
+
 def _is_pair_element_type(elem_type: str) -> bool:
     """Check if an array element type is a pair type (ptr, len).
 
@@ -255,7 +276,11 @@ def _is_pair_element_type(elem_type: str) -> bool:
     i32 values (pointer + length), requiring 8 bytes of storage.
     Bare "Array" (without type args) also matches, since the element
     type name from _infer_vera_type may not include type parameters.
+
+    ``Future<…>`` is stripped first (#1045): a ``Future<String>`` /
+    ``Future<Array<T>>`` element is a pair exactly like its payload.
     """
+    elem_type = _strip_future(elem_type)
     return elem_type == "String" or elem_type == "Array" or elem_type.startswith("Array<")
 
 
@@ -334,7 +359,11 @@ def _element_mem_size(elem_type: str) -> int | None:
     Primitive types have fixed sizes.  Pair types (String, Array<T>)
     use 8 bytes (ptr + len).  All other compound types (ADTs) use
     4 bytes (i32 heap pointer).
+
+    ``Future<…>`` is stripped first (#1045) so the payload's size is
+    used — e.g. ``Future<Int>`` is an 8-byte i64, not a 4-byte i32.
     """
+    elem_type = _strip_future(elem_type)
     sizes = {
         "Int": 8,
         "Nat": 8,
@@ -357,7 +386,11 @@ def _element_load_op(elem_type: str) -> str | None:
 
     Returns None for pair types (String, Array<T>) which require
     special two-load handling in the caller.
+
+    ``Future<…>`` is stripped first (#1045) so the payload's load op is
+    used — e.g. ``Future<Int>`` loads with ``i64.load``, not ``i32.load``.
     """
+    elem_type = _strip_future(elem_type)
     ops = {
         "Int": "i64.load",
         "Nat": "i64.load",
@@ -380,7 +413,12 @@ def _element_store_op(elem_type: str) -> str | None:
 
     Returns None for pair types (String, Array<T>) which require
     special two-store handling in the caller.
+
+    ``Future<…>`` is stripped first (#1045) so the payload's store op is
+    used — e.g. ``Future<Int>`` stores with ``i64.store``, not
+    ``i32.store``, and ``Future<String>`` returns None (pair, two stores).
     """
+    elem_type = _strip_future(elem_type)
     ops = {
         "Int": "i64.store",
         "Nat": "i64.store",
@@ -403,7 +441,11 @@ def _element_wasm_type(elem_type: str) -> str | None:
 
     Returns "i32_pair" for pair types (String, Array<T>),
     "i32" for ADT/compound types, or the native type for primitives.
+
+    ``Future<…>`` is stripped first (#1045) so the payload's value type
+    is used — e.g. ``Future<Int>`` is ``i64``, not ``i32``.
     """
+    elem_type = _strip_future(elem_type)
     types = {
         "Int": "i64",
         "Nat": "i64",

@@ -911,15 +911,98 @@ class CallsMixin:
         return tuple(result)
 
     def _infer_concat_elem_type(self, expr: ast.Expr) -> str | None:
-        """Infer the element type name from an array-typed expression."""
+        """Infer the element type name from an array-typed expression.
+
+        For a `Future<T>` element the FULL `Future<…>` spelling is
+        preserved (not the bare head `"Future"`), mirroring the sibling
+        `_infer_index_element_type` fix (#1045): `Future<T>` is
+        representation-transparent (#841), so its array-element width is
+        its payload T's.  A bare `"Future"` (args dropped) collapses to
+        the i32 default in the element-size / store deciders, so a
+        combinator's copy loop runs a 4-byte stride over 8-byte (or
+        two-word pair) elements and returns garbage — silent-wrong on a
+        check+verify-green program (#1057).  `_strip_future` in the
+        element helpers recovers the payload only from the full name.  An
+        alias INSIDE that payload (`Future<FlagA>`, `type FlagA = Bool`)
+        is canonicalized to `Future<Bool>` before returning (#1074) — the
+        full spelling is preserved but the bare alias `FlagA` would
+        otherwise itself fall to the 4-byte default under `_strip_future`.
+
+        An ALIAS-spelled element (a bare name like `type FI =
+        Future<Int>` in `Array<FI>`) is canonicalized to its target's
+        full compound spelling first (#1062): the raw alias name means
+        nothing to the module-level element helpers (no alias table
+        there), so it fell to the same i32 default — the alias-spelled
+        sibling of the #1057 garbage (unmasked for Future aliases once
+        #1058 made `Array<FI>` literals buildable; a scalar alias like
+        `type Flag = Bool` was reachable-and-wrong before).  The
+        canonicalize-then-resolve order mirrors the #1058 literal-store
+        fix; a parameterized element (args present) keeps the bare-head
+        behavior — the name-only canonicalizer cannot substitute its
+        arguments.
+
+        An alias-named COLLECTION (`type Flags = Array<Bool>` — the slot
+        name itself, not the element) and a literal whose elements are
+        alias-typed slots are canonicalized the same way (#1064; see the
+        inline comments on the two arms below).
+        """
         if isinstance(expr, ast.SlotRef):
             if expr.type_name == "Array" and expr.type_args:
                 ta = expr.type_args[0]
                 if isinstance(ta, ast.NamedType):
+                    if ta.name == "Future" and ta.type_args:
+                        # #1074: canonicalize an alias inside the payload
+                        # (`Future<FlagA>` -> `Future<Bool>`) so the copy
+                        # loop's element helpers size the resolved payload,
+                        # not a bare alias that falls to the 4-byte default.
+                        canon, _ = self._canonicalize_alias_slot_name(
+                            self._format_named_type(ta))
+                        return canon
+                    if not ta.type_args:
+                        canon, _ = self._canonicalize_alias_slot_name(
+                            ta.name)
+                        return self._resolve_base_type_name(canon)
                     return ta.name
+            # #1064: alias-named COLLECTION (`type Flags = Array<Bool>;`
+            # concat of `@Flags` slots) — the slot name misses the
+            # "Array" match above, so the probe returned None and each
+            # consumer fell back: concat to an 8-byte default stride
+            # (coincidentally right for Int / String / pair elements,
+            # silently wrong for 1-byte Bool / Byte), slice and the
+            # map-family to a loud skip.  Canonicalize the collection
+            # name to its target's full spelling, take the element
+            # spelling, and canonicalize a bare element name in turn
+            # (`type Grid = Array<Row>` — the target spelling keeps
+            # `Row` opaque, and the raw alias would fall to the 4-byte
+            # default the #1062 element fix closed).  A parameterized
+            # collection (args present) keeps the old fallback — the
+            # name-only canonicalizer cannot substitute arguments.
+            if expr.type_name != "Array" and not expr.type_args:
+                canon, _ = self._canonicalize_alias_slot_name(
+                    expr.type_name)
+                canon = self._resolve_base_type_name(canon)
+                if canon.startswith("Array<") and canon.endswith(">"):
+                    elem = canon[len("Array<"):-1]
+                    if "<" not in elem:
+                        e_canon, _ = self._canonicalize_alias_slot_name(
+                            elem)
+                        return self._resolve_base_type_name(e_canon)
+                    return elem
         if isinstance(expr, ast.ArrayLit):
             if expr.elements:
-                return self._infer_vera_type(expr.elements[0])
+                t = self._infer_vera_type(expr.elements[0])
+                # #1064 (literal branch): an element that is itself an
+                # alias-typed slot (`array_concat([@Flags.0], …)`)
+                # infers to the bare alias name, which the element
+                # helpers size at the 4-byte default — the copy mangled
+                # the two-word pairs and indexing the result trapped
+                # `unreachable`.  Canonicalize a bare name; compound
+                # spellings (`Future<Int>`, `Array<Bool>`) and non-alias
+                # names pass through unchanged.
+                if t is not None and "<" not in t:
+                    t, _ = self._canonicalize_alias_slot_name(t)
+                    t = self._resolve_base_type_name(t)
+                return t
             return None
         if isinstance(expr, ast.FnCall):
             if expr.name == "array_range":
