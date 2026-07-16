@@ -1169,6 +1169,83 @@ public fn f(-> @Int)
         assert _run(source, fn="f") == 48
 
 
+class TestAliasFutureRefMapper1054:
+    """#1054: an ALIAS to a Future works at the #1038 mapper's call sites.
+
+    `type FA = Future<Option<Int>>;` at the match-await scrutinee and the
+    constructor-argument sites E602-skipped while the direct spelling
+    compiled: `_ref_type_name_wasm_type` resolved the slot name through the
+    name-only `_resolve_base_type_name` (dropping the alias's type
+    arguments — `FA` -> bare `Future`) and its Future arm guards on AST
+    `type_args` an alias-spelled ref does not carry.  The mapper now
+    canonicalizes an alias to its target's full compound spelling first
+    (`_canonicalize_alias_slot_name`, the #1037 walk) and adds the
+    string-form Future arm its sibling `_slot_name_to_wasm_type` carries,
+    recursing on the payload spelling.  The alias analog of #1046, in the
+    last mapper of the family without the canonicalizer.
+    """
+
+    def test_alias_future_match_scrutinee_runs(self) -> None:
+        """The #1054 repro: alias-spelled match-await scrutinee.
+
+        RED on base (E602 scrutinee-inference skip; expect 5 + 1 = 6)."""
+        source = """\
+type FA = Future<Option<Int>>;
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @FA = async(Some(5));
+  match await(@FA.0) {
+    Some(@Int) -> @Int.0 + 1,
+    None -> 0 - 7
+  }
+}
+"""
+        assert _run(source, fn="f") == 6
+
+    def test_alias_future_ctor_arg_runs(self) -> None:
+        """Alias-spelled Future SlotRef as a constructor argument.
+
+        RED on base (E602 unsupported-SlotRef skip; 41 + 7 = 48)."""
+        source = """\
+type FA = Future<Int>;
+
+private data WrapI { WI(FA, Int) }
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @FA = async(41);
+  let @WrapI = WI(@FA.0, 7);
+  match @WrapI.0 {
+    WI(@FA, @Int) -> await(@FA.0) + @Int.0
+  }
+}
+"""
+        assert _run(source, fn="f") == 48
+
+    def test_alias_chain_future_scrutinee_runs(self) -> None:
+        """An alias-of-alias chain canonicalizes hop by hop.
+
+        RED on base (same E602 skip)."""
+        source = """\
+type FA = Future<Option<Int>>;
+type FA2 = FA;
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @FA2 = async(Some(5));
+  match await(@FA2.0) {
+    Some(@Int) -> @Int.0 + 1,
+    None -> 0 - 7
+  }
+}
+"""
+        assert _run(source, fn="f") == 6
+
+
 class TestRandomEffect:
     """Tests for the Random effect (#465).
 
