@@ -211,14 +211,6 @@ Serving HTTP on http://0.0.0.0:8080/
 Python 3.11+. Everything else installs into a virtual environment.
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install veralang
-```
-
-Or install the current GitHub source for development:
-
-```bash
 git clone https://github.com/aallan/vera.git
 cd vera
 python -m venv .venv

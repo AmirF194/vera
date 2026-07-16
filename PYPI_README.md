@@ -8,7 +8,7 @@ Full documentation, examples, and the language specification are available at
 [veralang.dev](https://veralang.dev) and in the
 [GitHub repository](https://github.com/aallan/vera).
 
-## Install a released version
+## Install
 
 Vera requires Python 3.11 or later. Create a virtual environment and install
 the `veralang` distribution:

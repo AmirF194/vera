@@ -9,14 +9,16 @@ Vera is a programming language designed for LLMs to write. It uses typed slot re
 
 ## Installation
 
-Vera requires Python 3.11 or later. Node.js 22+ is optional (only needed for `vera compile --target browser` and browser parity tests). Install the released `veralang` distribution from PyPI:
+Vera requires Python 3.11 or later. Node.js 22+ is optional (only needed for `vera compile --target browser` and browser parity tests). Install from the GitHub source:
 
 ```bash
+git clone https://github.com/aallan/vera.git
+cd vera
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
-python -m pip install veralang
+python -m pip install -e ".[dev]"
 ```
 
-This installs the `vera` command and all runtime dependencies (Lark parser, Z3 solver, wasmtime). For editor/agent integration via the Language Server Protocol, install `python -m pip install "veralang[lsp]"` — see [LSP_SERVER.md](https://github.com/aallan/vera/blob/main/LSP_SERVER.md).
+This installs the `vera` command and all runtime dependencies (Lark parser, Z3 solver, wasmtime). For editor/agent integration via the Language Server Protocol, use the `[lsp]` extra — `python -m pip install -e ".[lsp]"` — see [LSP_SERVER.md](https://github.com/aallan/vera/blob/main/LSP_SERVER.md).
 
 The GitHub source route remains supported for unreleased changes and compiler development:
 
