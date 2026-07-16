@@ -399,10 +399,14 @@ class DataMixin:
         # #1060: the scrutinee's CONCRETE Vera type (e.g. "Box<Unit>") drives the
         # instantiation-aware width of a WILDCARD over a bare type-parameter
         # field — that field registers generically as i32 but is laid out per
-        # the concrete type arg at construction (Unit → 0 bytes).  None when the
-        # scrutinee type is unrecoverable; a type-parameter wildcard then
-        # LOUD-skips rather than reading a shifted offset.
-        scrutinee_type = self._infer_vera_type(expr.scrutinee)
+        # the concrete type arg at construction (Unit → 0 bytes).  #1065: a
+        # DIRECT-CALL scrutinee recovers its full instantiation from the callee's
+        # declared return type (`_infer_vera_type` alone drops the type args and
+        # a type-parameter wildcard then LOUD-skipped a check-green program);
+        # None only when the type is genuinely unrecoverable, and a
+        # type-parameter wildcard still LOUD-skips rather than reading a shifted
+        # offset.
+        scrutinee_type = self._match_scrutinee_vera_type(expr.scrutinee)
 
         # Compile arms as chained if-else
         arm_instrs = self._compile_match_arms(
@@ -415,6 +419,130 @@ class DataMixin:
 
         instructions.extend(arm_instrs)
         return instructions
+
+    def _match_scrutinee_vera_type(self, scrutinee: ast.Expr) -> str | None:
+        """Concrete Vera type of a match scrutinee for the #1060 wildcard walks.
+
+        A ``SlotRef`` scrutinee (``@Box<Unit>.0``) already carries its concrete
+        type args, which ``_infer_vera_type`` renders in full.  A DIRECT-CALL
+        scrutinee (``mk()``) does NOT: ``_infer_fncall_vera_type`` returns the
+        bare base head (``"Box"``) for a parameterized i32-pointer return (#911),
+        dropping the ``<Unit>`` a type-parameter WILDCARD needs to recompute its
+        erased width — so the #1060 walk LOUD-skipped (E602) a check-green
+        program on a shape the slot form compiled correctly (#1065).
+
+        For a NON-generic direct-call scrutinee the callee's DECLARED return type
+        IS the concrete instantiation — a non-generic signature mentions no type
+        variables, so ``mk() -> @Box<Unit>`` declares exactly ``Box<Unit>``.
+        Recover it from ``_fn_ret_type_exprs`` (the same #614/#878 declared-return
+        registry other consultors read, populated by ``_register_fn`` in both the
+        CLI and the ``transform -> compile`` test-harness path) and render it in
+        full, matching the SlotRef form so the wildcard walks receive an
+        identical concrete type.  A non-parameterized return (``ret_te.type_args``
+        empty) needs no recovery and falls through unchanged.
+
+        A GENERIC callee's declared return carries type variables
+        (``forall<T> fn wrap(@T -> @P2<T, Unit>)``) — #1072 resolves them from
+        the call site via the same ``_unify_param_arg_wasm`` unification the
+        generic call-rewrite performs, then renders the substituted return in
+        full (``P2<Int, Unit>``).  On main this family read shifted offsets
+        SILENTLY (the pre-#1060 walk); the #1049 stack made it a sound
+        LOUD-skip; now it compiles like the slot form.  An unresolved variable
+        falls through to ``_infer_vera_type`` — whose bare base head keeps the
+        wildcard walk's LOUD-skip (sound) — though no check-green shape reaches
+        it (var-at-Unit is E206-rejected, a phantom-var callee is E121-rejected).
+
+        A MODULE-qualified callee (``boxlib::mk()``, #1073) resolves through
+        the single shared target resolver (``_resolve_module_call_wasm_name``,
+        the #774-reviewed source of truth that CONSUMES ``path`` — no wrong
+        same-name-local lookup, mirroring ``_infer_vera_type``'s ModuleCall
+        arm) and recurses with the resolved-name ``FnCall``: the bare or
+        ``mod$…`` name of a non-generic import is in ``_fn_ret_type_exprs``,
+        a shadowed generic resolves to its per-instantiation clone whose
+        registered declared return is already substituted, and anything
+        unregistered falls through to the sound LOUD-skip.
+        """
+        if isinstance(scrutinee, ast.ModuleCall):
+            target = self._resolve_module_call_wasm_name(scrutinee)
+            return self._match_scrutinee_vera_type(ast.FnCall(
+                name=target, args=scrutinee.args, span=scrutinee.span))
+        if isinstance(scrutinee, ast.FnCall):
+            if scrutinee.name in self._generic_fn_info:
+                rendered = self._generic_call_ret_vera_type(scrutinee)
+                if rendered is not None:
+                    return rendered
+            elif scrutinee.name in self._fn_ret_type_exprs:
+                ret_te = self._fn_ret_type_exprs[scrutinee.name]
+                if isinstance(ret_te, ast.RefinementType):
+                    ret_te = ret_te.base_type
+                if isinstance(ret_te, ast.NamedType) and ret_te.type_args:
+                    return self._format_named_type(ret_te)
+        return self._infer_vera_type(scrutinee)
+
+    def _generic_call_ret_vera_type(self, call: ast.FnCall) -> str | None:
+        """Render a GENERIC call's declared return with its type variables
+        resolved from the call site (#1072) — ``wrap(5)`` against
+        ``forall<T> fn wrap(@T -> @P2<T, Unit>)`` yields ``"P2<Int, Unit>"``.
+
+        Unifies each parameter TypeExpr against its argument exactly as the
+        generic call-rewrite does (``_unify_param_arg_wasm``), substitutes the
+        bound variables into the declared return, and renders the full name.
+        Returns ``None`` — caller falls back to ``_infer_vera_type`` — when the
+        return is not a parameterized ``NamedType`` (nothing to recover) or any
+        variable in it stays unbound (the render must never guess: a wrong
+        concrete type would put the wildcard walk back on a shifted offset,
+        whereas the bare-head fallback keeps the sound LOUD-skip).
+        """
+        ret_te: ast.TypeExpr | None = self._fn_ret_type_exprs.get(call.name)
+        if isinstance(ret_te, ast.RefinementType):
+            ret_te = ret_te.base_type
+        if not (isinstance(ret_te, ast.NamedType) and ret_te.type_args):
+            return None
+        forall_vars, param_types = self._generic_fn_info[call.name]
+        constrained_vars = self._generic_constrained_vars.get(
+            call.name, frozenset())
+        mapping: dict[str, str] = {}
+        for pt, arg in zip(param_types, call.args):
+            self._unify_param_arg_wasm(
+                pt, arg, forall_vars, mapping, constrained_vars)
+        return self._render_type_substituted(ret_te, forall_vars, mapping)
+
+    def _render_type_substituted(
+        self,
+        te: ast.TypeExpr,
+        forall_vars: tuple[str, ...],
+        mapping: dict[str, str],
+    ) -> str | None:
+        """Render *te* as a full Vera type name with every forall variable
+        replaced by its call-site binding (#1072) — the substituting sibling of
+        ``_format_named_type``, which renders names verbatim.
+
+        A leaf that is a forall variable renders its ``mapping`` binding —
+        ``None`` (propagated to the caller) when unbound, so an unresolved
+        instantiation is never guessed.  Concrete leaves render verbatim;
+        parameterized nodes recurse into their type args.  A non-``NamedType``
+        node (after refinement unwrap) is unrenderable → ``None``.
+        """
+        if isinstance(te, ast.RefinementType):
+            te = te.base_type
+        if not isinstance(te, ast.NamedType):
+            return None
+        if not te.type_args:
+            if te.name in forall_vars:
+                return mapping.get(te.name)
+            return te.name
+        if te.name in forall_vars:
+            # A parameterized node whose HEAD is a type variable — Vera type
+            # vars are not higher-kinded, so this cannot arise from a checked
+            # program; refuse to render rather than emit a var-headed name.
+            return None
+        parts = []
+        for ta in te.type_args:
+            rendered = self._render_type_substituted(ta, forall_vars, mapping)
+            if rendered is None:
+                return None
+            parts.append(rendered)
+        return f"{te.name}<{', '.join(parts)}>"
 
     def _infer_match_result_type(
         self, expr: ast.MatchExpr
