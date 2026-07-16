@@ -368,7 +368,7 @@ def test_trailing_unit_binding_after_unrecoverable_wildcard() -> None:
     assert _run(_TRAILING_UNIT_BINDING, fn="f") == 5
 
 
-_UNRECOVERABLE_READ_AFTER_UNIT_BINDING = """\
+_DIRECT_CALL_READ_AFTER_UNIT_BINDING = """\
 data B4<T> { MkB4(Int, T, Unit, Int) }
 
 private fn mk(-> @B4<Bool>)
@@ -385,8 +385,14 @@ public fn f(-> @Int)
 """
 
 
-def test_read_beyond_unit_binding_still_loud_skips() -> None:
-    """A REAL read (`@Int` field 3) after the erased binding still depends on
-    the unrecoverable wildcard width — the erased-binding exemption must not
-    swallow it: LOUD skip (E602), never a wrong read."""
-    assert "E602" in _warnings(_UNRECOVERABLE_READ_AFTER_UNIT_BINDING)
+def test_read_beyond_unit_binding_now_resolves() -> None:
+    """A REAL read (`@Int` field 3) after the erased binding: on the
+    #1060/#1070 interim this direct-call scrutinee was unrecoverable
+    (the inferred type dropped its arguments) and the shape correctly
+    LOUD-skipped rather than reading a wrong offset.  The #1065
+    declared-return recovery resolves `B4<Bool>` from the callee's
+    signature, so the shape now compiles and reads the constructed
+    trailing `Int` — the loud-skip boundary itself is still pinned by
+    the unresolved-variable shapes in
+    test_codegen_typeparam_unit_wildcard_1060.py."""
+    assert _run(_DIRECT_CALL_READ_AFTER_UNIT_BINDING, fn="f") == 7

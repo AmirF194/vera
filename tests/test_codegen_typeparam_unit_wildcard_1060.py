@@ -28,10 +28,31 @@ The fix makes the two wildcard walks (``_extract_constructor_fields`` and
 ``_sub_pattern_wasm_type``) instantiation-aware: a bare type-parameter field's
 width is recomputed from the scrutinee's concrete type args, mirroring the
 eq/show recomputation.  A concrete field keeps its (#1043-erasure-aware)
-registered width.  When the instantiation is unrecoverable (a direct-call
-scrutinee whose inferred type dropped its args) AND a later field is read, the
-function LOUD-skips (E602) rather than reading a wrong offset; a trailing
-unrecoverable wildcard stays compilable (its unknown width is never consumed).
+registered width.
+
+#1065 then closes the DIRECT-CALL gap for a non-generic callee: a
+``match mk() { … }`` scrutinee's concrete type is recovered from the callee's
+declared return type (``mk() -> @Box<Unit>``), so those shapes now compile and
+read the real value exactly like a slot scrutinee.  Before #1065 the FnCall
+Vera-type inference dropped the ``<Unit>`` arg, so a wildcard followed by a read
+LOUD-skipped (E602) — the sound interim behavior — while a trailing wildcard
+(whose unknown width is never consumed) stayed compilable.
+
+#1072 closes the GENERIC-call sibling: a ``match wrap(5) { … }`` scrutinee where
+``forall<T> fn wrap(@T -> @P2<T, Unit>)`` resolves the declared return's type
+variables from the call site (the same unification the generic call-rewrite
+performs) and renders the full instantiation (``P2<Int, Unit>``).  On main this
+family was a SILENT wrong value (the #1060 walk was not instantiation-aware at
+all); the #1049 stack made it a sound LOUD-skip; now it compiles and reads the
+real value.  An unresolved type variable still falls back to the LOUD-skip
+(sound) — though no check-green shape reaches it: instantiating the var itself
+at Unit is E206-rejected and a phantom-var callee is E121-rejected.
+
+#1073 closes the MODULE-call door: ``match boxlib::mk() { … }`` resolves the
+qualified target through the single shared resolver and recurses into the same
+declared-return recovery, covering the imported non-generic AND imported
+generic (#1072 x #1073 compound) scrutinees — also a SILENT wrong value on
+main, a sound LOUD-skip on the #1049 stack, compiled correctly now.
 """
 from __future__ import annotations
 
@@ -377,13 +398,15 @@ def test_trailing_typeparam_wildcard_slot() -> None:
 
 
 # =====================================================================
-# Recoverability boundary — a DIRECT-CALL scrutinee's inferred Vera type drops
-# its type args, so a type-parameter wildcard's concrete width is unrecoverable.
-# * followed by a read  → LOUD skip (E602), never a wrong read;
-# * trailing (nothing read after) → still compiles (width never consumed).
+# Direct-call scrutinee (#1065) — the concrete instantiation is recovered from
+# the callee's DECLARED return type, so a type-parameter wildcard's width is
+# instantiation-aware exactly as for a slot scrutinee.  Before #1065 the FnCall
+# Vera-type inference dropped the type args (returning the bare base head) and a
+# wildcard followed by a read LOUD-skipped (E602) — the sound #1060 interim
+# behavior; now the width is recovered and the function reads the real value.
 # =====================================================================
 
-_DIRECT_CALL_HARMFUL = """\
+_DIRECT_CALL_READ = """\
 data Box<T> { MkB(Int, T, Int) }
 
 private fn mk(-> @Box<Unit>)
@@ -400,12 +423,67 @@ public fn f(-> @Int)
 """
 
 
-def test_direct_call_unrecoverable_read_after_loud_skips() -> None:
-    """`match mk() { MkB(@Int, _, @Int) }` — mk's return type inference drops the
-    `<Unit>` arg, so the erased field's width is unknown AND a later Int is read.
-    LOUD-skip (E602), never a silent wrong read."""
-    assert "E602" in _warnings(_DIRECT_CALL_HARMFUL)
-    assert _errors(_DIRECT_CALL_HARMFUL) == []
+def test_direct_call_wildcard_reads_trailing_int() -> None:
+    """`match mk() { MkB(@Int, _, @Int) }` on a direct-call `mk() -> @Box<Unit>`
+    scrutinee: #1065 recovers `Box<Unit>` from mk's declared return type, so the
+    erased field advances by 0 bytes and the trailing Int reads the real 22 — no
+    LOUD-skip, and not the 0 a shifted read would return."""
+    assert "E602" not in _warnings(_DIRECT_CALL_READ)
+    assert _errors(_DIRECT_CALL_READ) == []
+    assert _run(_DIRECT_CALL_READ, fn="f") == 22
+
+
+_DIRECT_CALL_NESTED = """\
+data BB { MkBox(Int), MkNot(Int) }
+data Entry<T> { En(T, BB) }
+
+private fn mk(-> @Entry<Unit>)
+  requires(true) ensures(true) effects(pure)
+{ En((), MkBox(314)) }
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  match mk() {
+    En(_, MkBox(@Int)) -> @Int.0,
+    En(_, MkNot(@Int)) -> 0 - @Int.0
+  }
+}
+"""
+
+
+def test_direct_call_wildcard_before_nested_ctor() -> None:
+    """Direct-call `mk() -> @Entry<Unit>` scrutinee, wildcard over the erased T
+    before a nested constructor: #1065 recovers `Entry<Unit>` so BOTH the
+    condition tag-walk and the extraction walk give the erased field zero width —
+    the nested tag is read @4, hits the MkBox arm, and extracts the real 314."""
+    assert "E602" not in _warnings(_DIRECT_CALL_NESTED)
+    assert _run(_DIRECT_CALL_NESTED, fn="f") == 314
+
+
+_DIRECT_CALL_NAMED_STRING = """\
+data Named<T> { N(T, String) }
+
+private fn mk(-> @Named<Unit>)
+  requires(true) ensures(true) effects(pure)
+{ N((), "payload") }
+
+public fn f(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  match mk() {
+    N(_, @String) -> eq(@String.0, "payload")
+  }
+}
+"""
+
+
+def test_direct_call_wildcard_reads_string_at_right_offset() -> None:
+    """Direct-call `mk() -> @Named<Unit>` scrutinee: #1065 recovers `Named<Unit>`
+    so the wildcard over the erased T gives zero width and the String header is
+    read @4 (not @8 garbage) — `eq(@String.0, "payload")` is true."""
+    assert "E602" not in _warnings(_DIRECT_CALL_NAMED_STRING)
+    assert _run(_DIRECT_CALL_NAMED_STRING, fn="f") == 1
 
 
 _DIRECT_CALL_TRAILING = """\
@@ -425,12 +503,306 @@ public fn f(-> @Int)
 """
 
 
-def test_direct_call_unrecoverable_trailing_wildcard_compiles() -> None:
-    """Same unrecoverable direct-call scrutinee, but the type-parameter wildcard
-    is TRAILING — its unknown width is never consumed, so the function still
-    compiles and reads field 0 (5)."""
+def test_direct_call_trailing_wildcard_compiles() -> None:
+    """Direct-call scrutinee with a TRAILING type-parameter wildcard — its width
+    is never consumed, so this compiled even while the instantiation was
+    unrecoverable (pre-#1065), and keeps compiling now that it is recovered.
+    Reads field 0 (5)."""
     assert "E602" not in _warnings(_DIRECT_CALL_TRAILING)
     assert _run(_DIRECT_CALL_TRAILING, fn="f") == 5
+
+
+# =====================================================================
+# Generic-call scrutinee (#1072) — the callee's declared return carries type
+# VARIABLES (`forall<T> fn wrap(@T -> @P2<T, Unit>)`), resolved from the call
+# site by the same unification the generic call-rewrite performs, then rendered
+# in full (`P2<Int, Unit>`).  On main this family read shifted offsets SILENTLY
+# (the #1060 class); the #1049 stack turned it into a sound E602 LOUD-skip;
+# now it compiles and reads the real value.  Instantiating the var itself at
+# Unit is E206-rejected, so the generic Unit-erasure arrives via a concrete
+# Unit type argument in the declared return.
+# =====================================================================
+
+_GENERIC_CALL_READ = """\
+data P2<A, B> { MkP2(Int, B, Int) }
+
+forall<T> fn wrap(@T -> @P2<T, Unit>)
+  requires(true) ensures(true) effects(pure)
+{ MkP2(11, (), 22) }
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  match wrap(5) {
+    MkP2(@Int, _, @Int) -> @Int.0
+  }
+}
+"""
+
+
+def test_generic_call_wildcard_reads_trailing_int() -> None:
+    """`match wrap(5)` where `forall<T> fn wrap(@T -> @P2<T, Unit>)`: #1072
+    unifies T=Int from the call site and renders `P2<Int, Unit>`, so the erased
+    B=Unit field advances 0 bytes and the trailing Int reads the real 22 — on
+    main this returned 0 silently; on the #1049 stack it LOUD-skipped."""
+    assert "E602" not in _warnings(_GENERIC_CALL_READ)
+    assert _errors(_GENERIC_CALL_READ) == []
+    assert _run(_GENERIC_CALL_READ, fn="f") == 22
+
+
+_GENERIC_CALL_STRING_WIDTH = """\
+data Box<T> { MkB(Int, T, Int) }
+
+forall<T> fn wrap(@T -> @Box<T>)
+  requires(true) ensures(true) effects(pure)
+{ MkB(11, @T.0, 22) }
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  match wrap("x") {
+    MkB(@Int, _, @Int) -> @Int.0
+  }
+}
+"""
+
+
+def test_generic_call_string_typeparam_width() -> None:
+    """The wildcarded field IS the forall var, instantiated at String via
+    `wrap("x")`: the recovered `Box<String>` gives the erased-field slot the
+    i32_pair width (8 bytes, not the generic 4), so the trailing Int is 22."""
+    assert "E602" not in _warnings(_GENERIC_CALL_STRING_WIDTH)
+    assert _run(_GENERIC_CALL_STRING_WIDTH, fn="f") == 22
+
+
+_GENERIC_CALL_CONCRETE_RET = """\
+data Box<T> { MkB(Int, T, Int) }
+
+forall<T> fn wrap(@T -> @Box<Unit>)
+  requires(true) ensures(true) effects(pure)
+{ MkB(11, (), 22) }
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  match wrap(5) {
+    MkB(@Int, _, @Int) -> @Int.0
+  }
+}
+"""
+
+
+def test_generic_call_concrete_parameterized_return() -> None:
+    """A generic fn whose declared return is fully CONCRETE (`-> @Box<Unit>`,
+    no variables to resolve): the render needs zero substitutions but the
+    pre-#1072 non-generic gate still skipped it — now it reads 22."""
+    assert "E602" not in _warnings(_GENERIC_CALL_CONCRETE_RET)
+    assert _run(_GENERIC_CALL_CONCRETE_RET, fn="f") == 22
+
+
+_GENERIC_CALL_NESTED = """\
+data BB { MkBox(Int), MkNot(Int) }
+data EntryAB<A, B> { En(B, BB) }
+
+forall<T> fn wrap(@T -> @EntryAB<T, Unit>)
+  requires(true) ensures(true) effects(pure)
+{ En((), MkBox(314)) }
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  match wrap(7) {
+    En(_, MkBox(@Int)) -> @Int.0,
+    En(_, MkNot(@Int)) -> 0 - @Int.0
+  }
+}
+"""
+
+
+def test_generic_call_wildcard_before_nested_ctor() -> None:
+    """Generic-call scrutinee, wildcard over the erased B=Unit before a nested
+    constructor: BOTH the condition tag-walk and the extraction walk receive the
+    rendered `EntryAB<Int, Unit>` — the nested tag is read @4, hits the MkBox
+    arm, and extracts the real 314."""
+    assert "E602" not in _warnings(_GENERIC_CALL_NESTED)
+    assert _run(_GENERIC_CALL_NESTED, fn="f") == 314
+
+
+_GENERIC_CALL_NAMED_STRING = """\
+data NamedAB<A, B> { N(B, String) }
+
+forall<T> fn wrap(@T -> @NamedAB<T, Unit>)
+  requires(true) ensures(true) effects(pure)
+{ N((), "payload") }
+
+public fn f(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  match wrap(3) {
+    N(_, @String) -> eq(@String.0, "payload")
+  }
+}
+"""
+
+
+def test_generic_call_wildcard_reads_string_at_right_offset() -> None:
+    """Generic-call scrutinee: the rendered `NamedAB<Int, Unit>` gives the
+    erased B=Unit wildcard zero width, so the String header is read @4 (not @8
+    garbage) — `eq(@String.0, "payload")` is true."""
+    assert "E602" not in _warnings(_GENERIC_CALL_NAMED_STRING)
+    assert _run(_GENERIC_CALL_NAMED_STRING, fn="f") == 1
+
+
+_GENERIC_CALL_TRAILING = """\
+data WAB<A, B> { MkW(Int, B) }
+
+forall<T> fn wrap(@T -> @WAB<T, Unit>)
+  requires(true) ensures(true) effects(pure)
+{ MkW(5, ()) }
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  match wrap(9) {
+    MkW(@Int, _) -> @Int.0
+  }
+}
+"""
+
+
+def test_generic_call_trailing_wildcard_compiles() -> None:
+    """Generic-call scrutinee with a TRAILING type-parameter wildcard — a
+    control: its width is never consumed, so this compiled (and read the right
+    field 0) even before #1072 recovered the instantiation, and keeps doing so
+    after."""
+    assert "E602" not in _warnings(_GENERIC_CALL_TRAILING)
+    assert _run(_GENERIC_CALL_TRAILING, fn="f") == 5
+
+
+# =====================================================================
+# Module-call scrutinee (#1073) — `match boxlib::mk() { … }` resolves the
+# qualified target through the shared resolver and recurses into the same
+# declared-return recovery, so the imported callee's `Box<Unit>` reaches the
+# wildcard walks.  On main this door read shifted offsets SILENTLY; the #1049
+# stack turned it into a sound E602 LOUD-skip; now it compiles.
+# =====================================================================
+
+def _compile_with_module(
+    main_source: str, module_path: tuple[str, ...], module_source: str,
+):
+    """Compile *main_source* with one resolved module (Windows-safe temps)."""
+    import tempfile
+    from pathlib import Path as _P
+
+    from vera.codegen import compile as _mod_compile
+    from vera.parser import parse_file as _parse_file
+    from vera.resolver import ResolvedModule
+    from vera.transform import transform as _transform
+
+    mod_f = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".vera", delete=False, encoding="utf-8")
+    main_f = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".vera", delete=False, encoding="utf-8")
+    try:
+        with mod_f:
+            mod_f.write(module_source)
+        with main_f:
+            main_f.write(main_source)
+        mod_prog = _transform(_parse_file(mod_f.name))
+        resolved = ResolvedModule(
+            path=module_path,
+            file_path=_P(mod_f.name),
+            program=mod_prog,
+            source=module_source,
+        )
+        main_prog = _transform(_parse_file(main_f.name))
+        return _mod_compile(
+            main_prog, source=main_source, file=main_f.name,
+            resolved_modules=[resolved],
+        )
+    finally:
+        _P(mod_f.name).unlink(missing_ok=True)
+        _P(main_f.name).unlink(missing_ok=True)
+
+
+_BOXLIB_MODULE = """\
+module boxlib;
+
+public data Box<T> { MkB(Int, T, Int) }
+
+public fn mk(-> @Box<Unit>)
+  requires(true) ensures(true) effects(pure)
+{ MkB(11, (), 22) }
+"""
+
+_MODULE_CALL_READ = """\
+import boxlib;
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  match boxlib::mk() {
+    MkB(@Int, _, @Int) -> @Int.0
+  }
+}
+"""
+
+
+def test_module_call_wildcard_reads_trailing_int() -> None:
+    """`match boxlib::mk()` where the imported `mk() -> @Box<Unit>`: #1073
+    resolves the qualified target and recovers `Box<Unit>` from its declared
+    return, so the erased field advances 0 bytes and the trailing Int reads the
+    real 22 — on main this returned 0 silently; on the #1049 stack it
+    LOUD-skipped."""
+    from vera.codegen import execute as _execute
+
+    result = _compile_with_module(_MODULE_CALL_READ, ("boxlib",), _BOXLIB_MODULE)
+    warns = [d.error_code for d in result.diagnostics if d.severity == "warning"]
+    errs = [d.error_code for d in result.diagnostics if d.severity == "error"]
+    assert "E602" not in warns
+    assert errs == []
+    exec_result = _execute(result, fn_name="f")
+    assert exec_result.value == 22
+
+
+_GENLIB_MODULE = """\
+module genlib;
+
+public data P2<A, B> { MkP2(Int, B, Int) }
+
+public forall<T> fn wrap(@T -> @P2<T, Unit>)
+  requires(true) ensures(true) effects(pure)
+{ MkP2(11, (), 22) }
+"""
+
+_MODULE_GENERIC_CALL_READ = """\
+import genlib;
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  match genlib::wrap(5) {
+    MkP2(@Int, _, @Int) -> @Int.0
+  }
+}
+"""
+
+
+def test_module_call_generic_wildcard_reads_trailing_int() -> None:
+    """The #1072 x #1073 compound: an IMPORTED generic (`genlib::wrap(5)`,
+    declared `-> @P2<T, Unit>`) as the scrutinee — the resolver hands the
+    recursion a name whose declared return resolves (clone or template), so the
+    erased field advances 0 bytes and the trailing Int reads the real 22."""
+    from vera.codegen import execute as _execute
+
+    result = _compile_with_module(
+        _MODULE_GENERIC_CALL_READ, ("genlib",), _GENLIB_MODULE)
+    warns = [d.error_code for d in result.diagnostics if d.severity == "warning"]
+    errs = [d.error_code for d in result.diagnostics if d.severity == "error"]
+    assert "E602" not in warns
+    assert errs == []
+    exec_result = _execute(result, fn_name="f")
+    assert exec_result.value == 22
 
 
 # =====================================================================
@@ -504,3 +876,84 @@ public fn f(-> @Bool)
 
 def test_show_named_unit_control() -> None:
     assert _run(_SHOW_NAMED, fn="f") == 1
+
+
+class TestRecoveredAliasTypeArgWidths:
+    """The #1080 review's regression shapes: a recovered scrutinee
+    instantiation whose type ARGUMENT is an alias or ``Future<Unit>``
+    spelling.  On the pre-#1070/#1076 base these read silently wrong
+    offsets (5-for-22, 0-for-22) because the wildcard-width function
+    could not size the raw recovered spelling; the erasure keying
+    (#1070) and alias grounding (#1076) now compose with the #1065/
+    #1072 recovery so every spelling reads the constructed offset.
+    These pins guard that composition."""
+
+    def test_generic_call_int_alias_type_arg(self) -> None:
+        """``wrap(mkAge())`` with ``type Age = Int``: the recovered
+        instantiation ``W<Age>`` must size the field via the grounded
+        ``Int`` (i64-slot), not the 4-byte raw-alias default — the
+        review's R1 read 5 (the field) instead of 22 (the trailing
+        Int) on the unfixed base."""
+        src = """
+type Age = Int;
+
+private data W<X> { MkW(X, Int) }
+
+private fn mkAge(-> @Age)
+  requires(true) ensures(true) effects(pure)
+{ 5 }
+
+private forall<T> fn wrap(@T -> @W<T>)
+  requires(true) ensures(true) effects(pure)
+{ MkW(@T.0, 22) }
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  match wrap(mkAge()) { MkW(_, @Int) -> @Int.0 }
+}
+"""
+        assert _run(src, fn="f") == 22
+
+    def test_direct_call_unit_alias_type_arg(self) -> None:
+        """``mk() -> @Box<U>`` with ``type U = Unit``: the recovered
+        ``Box<U>`` must erase the wildcarded field (0 bytes) so the
+        trailing ``Int`` reads 22 — the review's R2 read 0 on the
+        unfixed base."""
+        src = """
+type U = Unit;
+
+private data Box<T> { MkB(Int, T, Int) }
+
+private fn mk(-> @Box<U>)
+  requires(true) ensures(true) effects(pure)
+{ MkB(11, (), 22) }
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  match mk() {
+    MkB(@Int, _, @Int) -> @Int.0
+  }
+}
+"""
+        assert _run(src, fn="f") == 22
+
+    def test_direct_call_future_unit_type_arg(self) -> None:
+        """``mk() -> @Box<Future<Unit>>``: the transparent erasure
+        spelling recovered from a direct call must also erase — the
+        review's R3 read 0 on the unfixed base."""
+        src = """
+private data Box<T> { MkB(Int, T, Int) }
+
+private fn mk(-> @Box<Future<Unit>>)
+  requires(true) ensures(true) effects(<Async>)
+{ MkB(11, async(()), 22) }
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  match mk() { MkB(@Int, _, @Int) -> @Int.0 }
+}
+"""
+        assert _run(src, fn="f") == 22
