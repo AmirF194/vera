@@ -12,7 +12,7 @@ Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verificati
 
 ## Where we are
 
-7,548 tests, 160 conformance programs, 38 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
+7,559 tests, 160 conformance programs, 38 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
 
 ## Stage 19 — The verification completeness sprint
 
@@ -20,9 +20,7 @@ Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verificati
 
 ### Bug sprint — monomorphizer and verifier gaps first
 
-Three PRs remain in the sprint's bug-PR cluster (the verification-completeness rows below are the sprint's remaining scope):
-
-**PR E — await-scrutinee inference (1).** [#1038](https://github.com/aallan/vera/issues/1038) `match await(@Future<ADT>.0)` is check-green but E602-skips on scrutinee WASM-type inference — unwrap the awaited `Future<T>` the way the let-binding path already does. In review as [#1040](https://github.com/aallan/vera/pull/1040).
+Two PRs remain in the sprint's bug-PR cluster (the verification-completeness rows below are the sprint's remaining scope):
 
 **PR F — Future representation-transparency in the let/capture/element paths (5).** [#1039](https://github.com/aallan/vera/issues/1039) `let @Future<String>` (pair-represented Future payloads) E602-skips on name-keyed pair detection, plus the sibling name-keyed deciders its adversarial review confirmed: closure capture of a `Future<T>` free variable ([#1044](https://github.com/aallan/vera/issues/1044), silent wrong value / trap), `Array<Future<T>>` element representation ([#1045](https://github.com/aallan/vera/issues/1045), traps), an alias of a pair-payload Future ([#1046](https://github.com/aallan/vera/issues/1046), still skips), and bare-`Future<String>` return display ([#1047](https://github.com/aallan/vera/issues/1047), minor). In review as [#1041](https://github.com/aallan/vera/pull/1041).
 

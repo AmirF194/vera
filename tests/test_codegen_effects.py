@@ -1007,6 +1007,245 @@ public fn f(-> @Float64)
         assert abs(_run_float(source, fn="f") - 3.14) < 0.001
 
 
+# Shared source programs for the #1038 await-in-scrutinee family.  Each
+# `scrut_*` helper awaits a Future directly in match-scrutinee position; the
+# public `call_*` wrappers construct concrete payloads so both arms run.  The
+# return values are distinguishing (payload-carrying, arm-specific) so a wrong
+# scrutinee width or a mis-extracted payload fails the assertion — not merely
+# the E602-skip that drops the function pre-fix.
+_ASYNC_SCRUT_OPTION = """\
+private fn scrut_opt(@Option<Int> -> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @Future<Option<Int>> = async(@Option<Int>.0);
+  match await(@Future<Option<Int>>.0) {
+    Some(@Int) -> @Int.0 + 1,
+    None -> -7
+  }
+}
+
+public fn call_some(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{ scrut_opt(Some(5)) }
+
+public fn call_none(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{ scrut_opt(None) }
+"""
+
+_ASYNC_SCRUT_ADT = """\
+private data Shape {
+  Circle(Int),
+  Square(Int)
+}
+
+private fn scrut_shape(@Shape -> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @Future<Shape> = async(@Shape.0);
+  match await(@Future<Shape>.0) {
+    Circle(@Int) -> @Int.0 + 10,
+    Square(@Int) -> @Int.0 + 20
+  }
+}
+
+public fn call_circle(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{ scrut_shape(Circle(3)) }
+
+public fn call_square(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{ scrut_shape(Square(4)) }
+"""
+
+_ASYNC_SCRUT_INT = """\
+private fn scrut_int(@Int -> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @Future<Int> = async(@Int.0);
+  match await(@Future<Int>.0) {
+    0 -> 100,
+    _ -> 200
+  }
+}
+
+public fn call_int_zero(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{ scrut_int(0) }
+
+public fn call_int_nonzero(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{ scrut_int(9) }
+"""
+
+
+class TestAwaitMatchScrutinee1038:
+    """#1038: `match await(@Future<T>.0) { ... }` — awaiting a Future directly
+    in scrutinee position.
+
+    The match-scrutinee WASM-type inference (`_ref_type_name_wasm_type`, reached
+    via the `await` FnCall arm of `_infer_expr_wasm_type`) must unwrap Future<T>
+    to T — the same transparency the let-binding path (`_slot_name_to_wasm_type`)
+    already applies.  Without it the scrutinee inferred None and the enclosing
+    function E602-skipped ("could not infer match scrutinee WASM type") on a
+    check/verify-green program.  Each test exercises BOTH arms with
+    distinguishing values, so a wrong scrutinee width or mis-extracted payload
+    is caught, not merely that the function survived codegen.  The scalar-Int and
+    user-ADT members are here alongside the reported Option member because all
+    three share the one broken inference site.  The final test pins the
+    await-into-let-then-match form (the semantic oracle) against regression."""
+
+    def test_await_future_option_scrutinee_some_arm(self) -> None:
+        """await(Future<Option<Int>>) scrutinee: Some(5) payload flows to 5+1."""
+        assert _run(_ASYNC_SCRUT_OPTION, fn="call_some") == 6
+
+    def test_await_future_option_scrutinee_none_arm(self) -> None:
+        """await(Future<Option<Int>>) scrutinee: None selects the None arm."""
+        assert _run(_ASYNC_SCRUT_OPTION, fn="call_none") == -7
+
+    def test_await_future_adt_scrutinee_first_ctor(self) -> None:
+        """await(Future<UserADT>) scrutinee: Circle(3) payload flows to 3+10."""
+        assert _run(_ASYNC_SCRUT_ADT, fn="call_circle") == 13
+
+    def test_await_future_adt_scrutinee_second_ctor(self) -> None:
+        """await(Future<UserADT>) scrutinee: Square(4) payload flows to 4+20."""
+        assert _run(_ASYNC_SCRUT_ADT, fn="call_square") == 24
+
+    def test_await_future_int_scrutinee_literal_arm(self) -> None:
+        """await(Future<Int>) scalar scrutinee: 0 matches the literal arm."""
+        assert _run(_ASYNC_SCRUT_INT, fn="call_int_zero") == 100
+
+    def test_await_future_int_scrutinee_wildcard_arm(self) -> None:
+        """await(Future<Int>) scalar scrutinee: 9 falls to the wildcard arm."""
+        assert _run(_ASYNC_SCRUT_INT, fn="call_int_nonzero") == 200
+
+    def test_await_into_let_then_match_still_works(self) -> None:
+        """Regression pin: the await-into-let-then-match form (the semantic
+        oracle) keeps compiling and running — the fix must not disturb the
+        working path it mirrors.  Green before and after; it guards the
+        let-binding scrutinee inference against collateral breakage."""
+        source = """\
+private fn oracle_opt(@Option<Int> -> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @Future<Option<Int>> = async(@Option<Int>.0);
+  let @Option<Int> = await(@Future<Option<Int>>.0);
+  match @Option<Int>.0 {
+    Some(@Int) -> @Int.0 + 1,
+    None -> -7
+  }
+}
+
+public fn call_oracle(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{ oracle_opt(Some(41)) }
+"""
+        assert _run(source, fn="call_oracle") == 42
+
+    def test_slotref_ctor_arg_future_field_runs(self) -> None:
+        """A `Future<Int>` SLOT REFERENCE as a constructor argument compiles.
+
+        Pins the constructor-argument call site of the same fixed mapper
+        (`_ref_type_name_wasm_type`): `WI(@Future<Int>.0, 7)` passes the
+        Future through a SlotRef, whose WASM type the constructor-argument
+        inference asks the mapper for — without the Future-transparency arm
+        the whole function E602-skipped, exactly like the scrutinee site
+        (the #1041 adversarial review flagged this site as a live, unpinned
+        manifestation).  RED on base (E602 skip; 41 + 7 = 48 end-to-end,
+        values chosen so no zeroed default can coincide)."""
+        source = """\
+private data WrapI { WI(Future<Int>, Int) }
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @Future<Int> = async(41);
+  let @WrapI = WI(@Future<Int>.0, 7);
+  match @WrapI.0 {
+    WI(@Future<Int>, @Int) -> await(@Future<Int>.0) + @Int.0
+  }
+}
+"""
+        assert _run(source, fn="f") == 48
+
+
+class TestAliasFutureRefMapper1054:
+    """#1054: an ALIAS to a Future works at the #1038 mapper's call sites.
+
+    `type FA = Future<Option<Int>>;` at the match-await scrutinee and the
+    constructor-argument sites E602-skipped while the direct spelling
+    compiled: `_ref_type_name_wasm_type` resolved the slot name through the
+    name-only `_resolve_base_type_name` (dropping the alias's type
+    arguments — `FA` -> bare `Future`) and its Future arm guards on AST
+    `type_args` an alias-spelled ref does not carry.  The mapper now
+    canonicalizes an alias to its target's full compound spelling first
+    (`_canonicalize_alias_slot_name`, the #1037 walk) and adds the
+    string-form Future arm its sibling `_slot_name_to_wasm_type` carries,
+    recursing on the payload spelling.  The alias analog of #1046, in the
+    last mapper of the family without the canonicalizer.
+    """
+
+    def test_alias_future_match_scrutinee_runs(self) -> None:
+        """The #1054 repro: alias-spelled match-await scrutinee.
+
+        RED on base (E602 scrutinee-inference skip; expect 5 + 1 = 6)."""
+        source = """\
+type FA = Future<Option<Int>>;
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @FA = async(Some(5));
+  match await(@FA.0) {
+    Some(@Int) -> @Int.0 + 1,
+    None -> 0 - 7
+  }
+}
+"""
+        assert _run(source, fn="f") == 6
+
+    def test_alias_future_ctor_arg_runs(self) -> None:
+        """Alias-spelled Future SlotRef as a constructor argument.
+
+        RED on base (E602 unsupported-SlotRef skip; 41 + 7 = 48)."""
+        source = """\
+type FA = Future<Int>;
+
+private data WrapI { WI(FA, Int) }
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @FA = async(41);
+  let @WrapI = WI(@FA.0, 7);
+  match @WrapI.0 {
+    WI(@FA, @Int) -> await(@FA.0) + @Int.0
+  }
+}
+"""
+        assert _run(source, fn="f") == 48
+
+    def test_alias_chain_future_scrutinee_runs(self) -> None:
+        """An alias-of-alias chain canonicalizes hop by hop.
+
+        RED on base (same E602 skip)."""
+        source = """\
+type FA = Future<Option<Int>>;
+type FA2 = FA;
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @FA2 = async(Some(5));
+  match await(@FA2.0) {
+    Some(@Int) -> @Int.0 + 1,
+    None -> 0 - 7
+  }
+}
+"""
+        assert _run(source, fn="f") == 6
+
+
 class TestRandomEffect:
     """Tests for the Random effect (#465).
 

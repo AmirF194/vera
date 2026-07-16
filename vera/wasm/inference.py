@@ -1913,6 +1913,7 @@ class InferenceMixin:
         self,
         type_name: str,
         type_args: tuple[ast.TypeExpr, ...] | None = None,
+        _seen: frozenset[str] = frozenset(),
     ) -> str | None:
         """Map a slot/result ref's ``type_name`` to its WAT stack type.
 
@@ -1929,7 +1930,20 @@ class InferenceMixin:
         #891 the ResultRef arm inferred only the scalar primitives, so an
         ADT-bound return defaulted to ``None`` and the postcondition equality
         compared two i32 heap pointers with ``i64.eq`` (a WASM validation
-        trap)."""
+        trap).
+
+        An alias is canonicalized to its target's FULL compound spelling
+        first (the shared :meth:`_canonicalize_alias_slot_name` walk,
+        #1054): the name-only ``_resolve_base_type_name`` hop drops type
+        arguments, so ``type FA = Future<Option<Int>>`` resolved to bare
+        ``"Future"`` and — since an alias-spelled slot ref carries no AST
+        ``type_args`` — missed the Future arm below, E602-skipping the
+        scrutinee and constructor-argument sites the direct spelling
+        compiles.  The string-form Future arm below handles the
+        canonicalized compound spelling, mirroring
+        ``_slot_name_to_wasm_type``; the alias analog of #1046, in the last
+        mapper of the family without the canonicalizer."""
+        type_name, _seen = self._canonicalize_alias_slot_name(type_name, _seen)
         resolved = self._resolve_base_type_name(type_name)
         if resolved in ("Int", "Nat"):
             return "i64"
@@ -1939,6 +1953,28 @@ class InferenceMixin:
             return "i32"
         if self._is_pair_type_name(resolved):
             return "i32_pair"
+        # Future<T> is WASM-transparent — same representation as its single type
+        # argument.  Mirrors `_slot_name_to_wasm_type`'s string-form Future arm
+        # and `_named_type_to_wasm`'s canonical-walk Future arm; this SlotRef /
+        # ResultRef mapper was the odd one out that lacked it, so a
+        # `match await(@Future<T>.0) { ... }` scrutinee — whose `await` FnCall
+        # arm of `_infer_expr_wasm_type` delegates to this mapper on the
+        # `@Future<T>` slot ref — inferred None and E602-skipped the enclosing
+        # function on a check/verify-green program (#1038).  Delegating to
+        # `_canonical_wasm_type` lowers the inner type through the same walk the
+        # let-binding path uses, so a scalar inner (Future<Int> -> i64), an ADT
+        # inner (Future<Option<Int>>, Future<UserADT> -> i32), and a pair inner
+        # (Future<String> -> i32_pair) all map correctly here.  (A Future<String>
+        # *scrutinee* stays blocked upstream by the separate `let @Future<String>`
+        # pair-binding gap, so this mapper fix alone doesn't reach it end-to-end.)
+        if resolved == "Future" and type_args and len(type_args) == 1:
+            return self._canonical_wasm_type(type_args[0])
+        # String-form dual of the arm above (#1054): an alias-canonicalized
+        # spelling arrives as the full compound STRING ("Future<Option<Int>>")
+        # with no AST type_args — strip the wrapper and recurse on the payload
+        # spelling, exactly like _slot_name_to_wasm_type's Future arm.
+        if resolved.startswith("Future<") and resolved.endswith(">"):
+            return self._ref_type_name_wasm_type(resolved[7:-1], None, _seen)
         base = resolved.split("<")[0] if "<" in resolved else resolved
         # Opaque handle types — i32 handles managed by host runtime
         if base in ("Decimal", "Map", "Set"):
