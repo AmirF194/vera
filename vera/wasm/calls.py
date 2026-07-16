@@ -913,6 +913,30 @@ class CallsMixin:
     def _infer_concat_elem_type(self, expr: ast.Expr) -> str | None:
         """Infer the element type name from an array-typed expression.
 
+        The raw inference can surface an ALIAS name for the element —
+        the direct arm's type-arg name (`@Array<Row>.0` gives "Row"), the
+        alias-spelled-collection arm's inner name, or an ArrayLit element's
+        Vera type.  Canonicalize the result to its target's compound
+        spelling at this single exit (#1067): the size/pair classification
+        downstream (`_element_mem_size` / `_is_pair_element_type`) would
+        otherwise fall to the 4-byte opaque-pointer default for what is
+        really an 8-byte (ptr, len) pair, silently mis-copying every array
+        combinator's elements (`array_reverse(@Grid.0)` via
+        `type Row = Array<Int>; type Grid = Array<Row>` returned garbage;
+        `array_concat` and depth-2 `array_flatten` read past their
+        allocations).  The exit canonicalization is idempotent over the
+        per-arm canonical returns documented on `_raw` (#1057/#1062/
+        #1064/#1074) — a compound or already-canonical spelling passes
+        through unchanged.
+        """
+        t = self._infer_concat_elem_type_raw(expr)
+        if t is None:
+            return None
+        return self._canonicalize_alias_slot_name(t)[0]
+
+    def _infer_concat_elem_type_raw(self, expr: ast.Expr) -> str | None:
+        """Uncanonicalized element-name inference — see the public wrapper.
+
         For a `Future<T>` element the FULL `Future<…>` spelling is
         preserved (not the bare head `"Future"`), mirroring the sibling
         `_infer_index_element_type` fix (#1045): `Future<T>` is
@@ -944,7 +968,9 @@ class CallsMixin:
         An alias-named COLLECTION (`type Flags = Array<Bool>` — the slot
         name itself, not the element) and a literal whose elements are
         alias-typed slots are canonicalized the same way (#1064; see the
-        inline comments on the two arms below).
+        inline comments on the two arms below), with the #1053 rebuilder
+        arm as the broader fall-through for alias-spelled array arguments
+        the name-keyed arm cannot resolve.
         """
         if isinstance(expr, ast.SlotRef):
             if expr.type_name == "Array" and expr.type_args:
@@ -988,6 +1014,19 @@ class CallsMixin:
                             elem)
                         return self._resolve_base_type_name(e_canon)
                     return elem
+            # #1053 alias extension: an alias-spelled array argument
+            # (`type Row = Array<Int>;` then `@Row.0`) carries its bare
+            # alias name with no type args, so the direct arm above never
+            # fires and every combinator's element-type triad dropped the
+            # function.  Resolve through the shared rebuilder, which
+            # canonicalizes a bare alias to its target's compound spelling
+            # (#1055) — the call-emission dual of the index-side fix.
+            # Runs after the #1064 name-keyed arm: that arm returns on
+            # success, so this is the broader fall-through.
+            nt = self._named_type_from_arg_info(expr)
+            if (nt is not None and nt.name == "Array" and nt.type_args
+                    and isinstance(nt.type_args[0], ast.NamedType)):
+                return nt.type_args[0].name
         if isinstance(expr, ast.ArrayLit):
             if expr.elements:
                 t = self._infer_vera_type(expr.elements[0])
@@ -1033,4 +1072,21 @@ class CallsMixin:
                 "string_lines", "string_words",
             ):
                 return "String"
+            # #1053: any Array-returning builtin whose element type the arms
+            # above could not resolve — notably array_flatten of a SlotRef
+            # `@Array<Array<T>>`, whose inner `<T>` layer the bare-name helpers
+            # drop (they return "Array", not "Array<T>"), so the unwrap above
+            # fails.  Derive the full return NamedType via the shared #1051
+            # `_builtin_call_ret_named_type` chain and read back its element
+            # name.  This lets a type-variable-element builtin (array_flatten,
+            # array_reverse, …) nest as another combinator's argument
+            # (`array_reverse(array_flatten(x))`) resolve its element type on
+            # this call-emission inference path — the sibling of the #1051
+            # index-path fix.  A genuinely unresolvable call still yields None,
+            # keeping the loud [E602] skip.
+            ret_nt = self._builtin_call_ret_named_type(expr)
+            if (ret_nt is not None and ret_nt.name == "Array"
+                    and ret_nt.type_args
+                    and isinstance(ret_nt.type_args[0], ast.NamedType)):
+                return ret_nt.type_args[0].name
         return None

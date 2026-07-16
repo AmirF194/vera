@@ -464,10 +464,16 @@ class CallsContainersMixin:
         # tests (`test_set_empty_to_array`, `test_map_keys_in_if_expr`,
         # `test_set_to_array_in_if_expr`) depend on this path: the
         # element type is genuinely unknown but the host import works
-        # because no element value flows through it.  Mis-tagging is
-        # only possible when a real (non-None) type fails inference,
-        # and that's caught by the Array branch above and the
-        # primitive branches.
+        # because no element value flows through it.  Mis-tagging happens
+        # whenever a REAL (non-None) element type fails inference and a
+        # value flows through the import.  The #1053 container extension
+        # closed the known such failures — alias-spelled slots, registered
+        # user-fn returns (parameterized, bare-alias, generic-alias), and
+        # Block-wrapped arguments now resolve via
+        # `_container_arg_elem_name` — but argument shapes none of the
+        # resolvers type (see that helper's docstring for the list) still
+        # reach this fall-through with real elements and would mis-tag;
+        # they are exactly the shapes with no inference arm today.
         return "b"
 
     @staticmethod
@@ -662,10 +668,55 @@ class CallsContainersMixin:
         ins.append(f"call {wasm_name}")
         return ins
 
+    def _container_arg_elem_name(
+        self, expr: "ast.Expr", container: str, idx: int,
+    ) -> str | None:
+        """Type-arg ``idx`` of a ``container``-typed argument expression,
+        resolved through the shared rebuilder (#1053 container extension).
+
+        ``_named_type_from_arg_info`` resolves the argument shapes the
+        local arms in ``_infer_map_key/value_from_map_arg`` and
+        ``_infer_set_elem_from_set_arg`` below don't: an alias-spelled slot
+        (``@M.0`` via `type M = Map<String, Int>;` — #1055), a registered
+        non-generic user fn's declared return — parameterized (#1053),
+        bare-alias (`fn mkm(-> @M)` — #1071), or generic-alias
+        (`-> @MyMap<Int>` via `type MyMap<V> = Map<String, V>`,
+        substituted through the target — #1068) — and a Block-wrapped
+        argument via its tail expression (#1071).  Pre-fix those shapes
+        returned None here and ``_map_wasm_tag(None)`` fell through to the
+        ``"b"`` (i32) tag, so the mis-tagged host import silently truncated
+        i64 values and garbled String keys (a wrong VALUE, not even an
+        [E602] drop).
+
+        Shapes that still return ``None`` and ride the permissive ``"b"``
+        fall-through: genuinely element-type-free arguments (an empty
+        ``map_new()`` / ``set_new()``, where no element value flows through
+        the import), builtin container chains the local arms resolve
+        instead, and argument expressions none of the resolvers type (an
+        effect-op call, a match/if expression, a chained generic alias
+        whose free type params survive substitution).
+        """
+        nt = self._named_type_from_arg_info(expr)
+        if (nt is not None and nt.name == container and nt.type_args
+                and len(nt.type_args) > idx):
+            ta = nt.type_args[idx]
+            if isinstance(ta, ast.NamedType):
+                return self._format_named_type(ta)
+        return None
+
     def _infer_map_value_from_map_arg(
         self, expr: "ast.Expr",
     ) -> str | None:
-        """Infer the value type V from a Map<K, V> expression."""
+        """Infer the value type V from a Map<K, V> expression.
+
+        The shared-rebuilder consult handles alias-spelled and user-fn
+        arguments first (#1053 container extension); it resolves the direct
+        ``@Map<K, V>`` slot to the same answer as the arms below, so
+        ordering is behavior-preserving for the previously-working shapes.
+        """
+        t = self._container_arg_elem_name(expr, "Map", 1)
+        if t is not None:
+            return t
         # If the map arg is a slot ref like @Map<String, Int>.0,
         # extract V from the type_args (not the type_name string).
         if isinstance(expr, ast.SlotRef):
@@ -867,7 +918,17 @@ class CallsContainersMixin:
     def _infer_map_key_from_map_arg(
         self, expr: "ast.Expr",
     ) -> str | None:
-        """Infer the key type K from a Map<K, V> expression."""
+        """Infer the key type K from a Map<K, V> expression.
+
+        Shared-rebuilder consult first (#1053 container extension) — see
+        :py:meth:`_container_arg_elem_name`.  For a user-fn argument this
+        also pre-empts the blind ``args[0]`` recursion below, so the
+        DECLARED return type wins over a coincidental map-shaped first
+        argument.
+        """
+        t = self._container_arg_elem_name(expr, "Map", 0)
+        if t is not None:
+            return t
         if isinstance(expr, ast.SlotRef):
             if expr.type_name == "Map" and expr.type_args:
                 if len(expr.type_args) >= 1:
@@ -926,7 +987,14 @@ class CallsContainersMixin:
     def _infer_set_elem_from_set_arg(
         self, expr: "ast.Expr",
     ) -> str | None:
-        """Infer the element type T from a Set<T> expression."""
+        """Infer the element type T from a Set<T> expression.
+
+        Shared-rebuilder consult first (#1053 container extension) — see
+        :py:meth:`_container_arg_elem_name`.
+        """
+        t = self._container_arg_elem_name(expr, "Set", 0)
+        if t is not None:
+            return t
         if isinstance(expr, ast.SlotRef):
             if expr.type_name == "Set" and expr.type_args:
                 if len(expr.type_args) >= 1:

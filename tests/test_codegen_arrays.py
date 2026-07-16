@@ -557,6 +557,1198 @@ public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
         assert _run(src, fn="g") == 30
 
 
+class TestIndexTypevarBuiltinCallResult:
+    """Indexing directly on a *type-variable-element* Array-returning builtin
+    — `array_reverse([...])[0]`, `map_keys(m)[0]`, `array_map(xs, f)[0]` — must
+    infer the element type from the call's ARGUMENTS and compile, not drop the
+    enclosing function via [E602] (#1051).
+
+    The #1048 fix resolved builtins whose return NamedType comes from the shared
+    consultor tables (arg-forwarding for array_concat/.../array_filter, plus the
+    `_BUILTIN_PARAMETERIZED_RETURNS` concrete-Array builtins).  These eight are
+    absent from those tables because their element type depends on the CALL's
+    arguments, not a fixed signature:
+
+      * argument-forwarding   — array_reverse / array_sort_by (arg0's type
+        verbatim), array_flatten (arg0's type with one Array<> unwrapped);
+      * container-arg-derived — map_keys (K) / map_values (V) from Map<K, V>;
+        set_to_array (T) from Set<T>;
+      * closure-return-derived — array_map / array_mapi element = the closure
+        argument's declared return type.
+
+    The let-bound form (the controls below) always worked — it resolves through
+    the SlotRef arm off the `let @Array<...>` annotation, not the FnCall arm.
+    """
+
+    # ---- Class 1: argument-forwarding -------------------------------------
+
+    def test_index_array_reverse_int(self) -> None:
+        """array_reverse([10, 20, 30])[0] -> 30 (arg0's type verbatim)."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  array_reverse([10, 20, 30])[0]
+}
+"""
+        assert _run(src, fn="g") == 30
+
+    def test_index_array_reverse_string(self) -> None:
+        """Array<String> variant — pair (ptr, len) elements resolve through the
+        derived Array<String> type, read back via string_length.  reverse of
+        ["a", "bb", "ccc"] -> ["ccc", "bb", "a"]; [0] = "ccc" (length 3)."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  string_length(array_reverse(["a", "bb", "ccc"])[0])
+}
+"""
+        assert _run(src, fn="g") == 3
+
+    def test_index_array_sort_by_int(self) -> None:
+        """array_sort_by([30, 10, 20], asc)[0] -> 10 (arg0's type verbatim)."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  array_sort_by([30, 10, 20], fn(@Int, @Int -> @Ordering) effects(pure) {
+    if @Int.1 < @Int.0 then { Less } else {
+      if @Int.1 > @Int.0 then { Greater } else { Equal }
+    }
+  })[0]
+}
+"""
+        assert _run(src, fn="g") == 10
+
+    def test_index_array_flatten_int(self) -> None:
+        """array_flatten(Array<Array<Int>>)[2] -> 30 (arg0's Array<Array<Int>>
+        with one Array<> layer unwrapped to Array<Int>).  The nested array is
+        let-bound so the flatten ARGUMENT resolves through the SlotRef arm; the
+        flatten RESULT is what is indexed directly (the #1051 case).  (The inline
+        `[[..], [..]]` literal as a direct call argument is #1052 — see
+        TestFlattenInlineNestedLiteral.)"""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Array<Array<Int>> = [[10, 20], [30, 40]];
+  array_flatten(@Array<Array<Int>>.0)[2]
+}
+"""
+        assert _run(src, fn="g") == 30
+
+    def test_index_array_reverse_of_concat(self) -> None:
+        """Class 1 with a builtin-call argument: array_reverse's arg0 is itself
+        a (consultor-resolvable) array_concat, so the derived return type comes
+        from resolving that nested call.  concat -> [10, 20, 30, 40]; reverse ->
+        [40, 30, 20, 10]; [0] = 40."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  array_reverse(array_concat([10, 20], [30, 40]))[0]
+}
+"""
+        assert _run(src, fn="g") == 40
+
+    def test_index_array_reverse_nested_chained(self) -> None:
+        """Chained indexing on array_reverse of a nested array (class 1).
+        reverse returns Array<Array<Int>> (arg0's type verbatim), so the outer
+        [0] has element type Array<Int> (a pair) and the chained [1] unwraps to
+        Int.  reverse of [[10,11,12],[20,21,22],[30,31,32]] ->
+        [[30,31,32],[20,21,22],[10,11,12]]; [0][1] = 31."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Array<Array<Int>> = [[10, 11, 12], [20, 21, 22], [30, 31, 32]];
+  array_reverse(@Array<Array<Int>>.0)[0][1]
+}
+"""
+        assert _run(src, fn="g") == 31
+
+    # ---- Class 2: container-arg-derived -----------------------------------
+
+    def test_index_map_keys_string(self) -> None:
+        """map_keys(Map<String, Int>)[0] -> the String key (element type K).
+        Single-entry map so keys[0] is deterministic; read back via
+        string_length ("abcde" -> 5) to prove the pair element type."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Map<String, Int> = map_insert(map_new(), "abcde", 99);
+  string_length(map_keys(@Map<String, Int>.0)[0])
+}
+"""
+        assert _run(src, fn="g") == 5
+
+    def test_index_map_values_int(self) -> None:
+        """map_values(Map<String, Int>)[0] -> the Int value (element type V)."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Map<String, Int> = map_insert(map_new(), "k", 77);
+  map_values(@Map<String, Int>.0)[0]
+}
+"""
+        assert _run(src, fn="g") == 77
+
+    def test_index_set_to_array_int(self) -> None:
+        """set_to_array(Set<Int>)[0] -> the Int element (element type T)."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Set<Int> = set_add(set_new(), 88);
+  set_to_array(@Set<Int>.0)[0]
+}
+"""
+        assert _run(src, fn="g") == 88
+
+    def test_index_map_keys_inline_map_arg_stays_loud_skip(self) -> None:
+        """Honest boundary (#1051): when the Map argument is built INLINE by a
+        non-consultor builtin (`map_insert`) instead of let-bound, the shared
+        consultor cannot recover its `Map<K, V>` type, so the class-2 derivation
+        yields None and the enclosing function keeps the LOUD [E602] skip rather
+        than guessing an element type or silently mis-compiling.  (The common
+        let-bound `@Map<K, V>` argument resolves — see
+        test_index_map_keys_string.)"""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  string_length(map_keys(map_insert(map_new(), "abcde", 99))[0])
+}
+"""
+        result = _compile_ok(src)
+        assert "g" not in result.exports, \
+            "inline-built Map arg is unresolvable — must drop, not compile wrong"
+        assert any(d.error_code == "E602" for d in result.diagnostics), \
+            "the unresolvable argument shape must keep the loud E602 skip"
+
+    # ---- #1055: alias-spelled arguments canonicalize -----------------------
+    # An alias argument (`type M = Map<String, Int>; @M.0`) reached the
+    # derivations as its bare alias name with NO type args, so the class
+    # arms never saw the container shape and the index E602-dropped where
+    # the direct spelling compiled.  `_named_type_from_arg_info` now
+    # canonicalizes a bare alias name to its target's full compound spelling
+    # (the #1037 walk) before parsing.  (The array builtins with aliased
+    # arguments — `array_flatten(@Grid.0)` / `array_reverse(@Row.0)` —
+    # additionally needed the builtin's CALL emission to canonicalize; that
+    # alias extension is part of the #1053 work, pinned in
+    # TestAliasSpelledArgCallEmission, with the Map/Set emission tag side in
+    # TestContainerArgEmissionTag.)
+
+    def test_index_map_values_aliased_map_arg(self) -> None:
+        """map_values(@M.0)[0] via `type M = Map<String, Int>`.
+
+        RED on base (E602 drop)."""
+        src = """\
+type M = Map<String, Int>;
+
+public fn g(-> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  let @M = map_insert(map_new(), "k", 77);
+  map_values(@M.0)[0]
+}
+"""
+        assert _run(src, fn="g") == 77
+
+    def test_index_set_to_array_aliased_set_arg(self) -> None:
+        """set_to_array(@S.0)[0] via `type S = Set<Int>`.
+
+        RED on base (E602 drop)."""
+        src = """\
+type S = Set<Int>;
+
+public fn g(-> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  let @S = set_add(set_new(), 88);
+  set_to_array(@S.0)[0]
+}
+"""
+        assert _run(src, fn="g") == 88
+
+    # ---- Class 3: closure-return-derived ----------------------------------
+
+    def test_index_array_map_int(self) -> None:
+        """array_map([1, 2, 3], |x| x + 100)[1] -> 102.  The closure returns a
+        value DIFFERENT from its input element; the _string variant proves the
+        element TYPE (not just value) comes from the closure return."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  array_map([1, 2, 3], fn(@Int -> @Int) effects(pure) { @Int.0 + 100 })[1]
+}
+"""
+        assert _run(src, fn="g") == 102
+
+    def test_index_array_map_string(self) -> None:
+        """Int array mapped to String elements — proves the element type comes
+        from the closure's RETURN (String), not the input element (Int).  If
+        inference took the input's Int, the pair-typed String load would be
+        mistranslated.  map -> ["1000", "2000", "3000"]; [2] = "3000" (len 4)."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  string_length(
+    array_map([1, 2, 3], fn(@Int -> @String) effects(pure) {
+      int_to_string(@Int.0 * 1000)
+    })[2]
+  )
+}
+"""
+        assert _run(src, fn="g") == 4
+
+    def test_index_array_mapi_int(self) -> None:
+        """array_mapi([10, 20, 30], |x, i| x + i)[2] -> 32 (30 + 2)."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  array_mapi([10, 20, 30], fn(@Int, @Nat -> @Int) effects(pure) {
+    @Int.0 + nat_to_int(@Nat.0)
+  })[2]
+}
+"""
+        assert _run(src, fn="g") == 32
+
+    def test_index_array_mapi_string(self) -> None:
+        """array_mapi mapped to String elements — element type from the closure
+        return (String), not the input (Int).  mapi -> ["100", "201", "302"];
+        [2] = "302" (len 3)."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  string_length(
+    array_mapi([1, 2, 3], fn(@Int, @Nat -> @String) effects(pure) {
+      int_to_string(@Int.0 * 100 + nat_to_int(@Nat.0))
+    })[2]
+  )
+}
+"""
+        assert _run(src, fn="g") == 3
+
+    # ---- Structural: no [E602] drop, one per mechanism class --------------
+
+    def test_index_class1_no_e602_drop(self) -> None:
+        """array_reverse(...)[i] must not drop the function via [E602] (#1051)."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  array_reverse([10, 20, 30])[0]
+}
+"""
+        result = _compile_ok(src)
+        assert not any(d.error_code == "E602" for d in result.diagnostics), \
+            "array_reverse(...)[i] should not drop the function via E602"
+
+    def test_index_class2_no_e602_drop(self) -> None:
+        """map_values(m)[i] must not drop the function via [E602] (#1051)."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Map<String, Int> = map_insert(map_new(), "k", 77);
+  map_values(@Map<String, Int>.0)[0]
+}
+"""
+        result = _compile_ok(src)
+        assert not any(d.error_code == "E602" for d in result.diagnostics), \
+            "map_values(m)[i] should not drop the function via E602"
+
+    def test_index_class3_no_e602_drop(self) -> None:
+        """array_map(xs, f)[i] must not drop the function via [E602] (#1051)."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  array_map([1, 2, 3], fn(@Int -> @Int) effects(pure) { @Int.0 + 100 })[1]
+}
+"""
+        result = _compile_ok(src)
+        assert not any(d.error_code == "E602" for d in result.diagnostics), \
+            "array_map(xs, f)[i] should not drop the function via E602"
+
+    # ---- Controls: let-bound form works independently of the FnCall fix ---
+
+    def test_index_array_reverse_let_bound_control(self) -> None:
+        """Class 1 control: let-bound reverse result resolves via the SlotRef
+        arm and stays green independently of the FnCall-arm fix."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Array<Int> = array_reverse([10, 20, 30]);
+  @Array<Int>.0[0]
+}
+"""
+        assert _run(src, fn="g") == 30
+
+    def test_index_map_values_let_bound_control(self) -> None:
+        """Class 2 control: let-bound map_values result resolves via the SlotRef
+        arm."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Map<String, Int> = map_insert(map_new(), "k", 77);
+  let @Array<Int> = map_values(@Map<String, Int>.0);
+  @Array<Int>.0[0]
+}
+"""
+        assert _run(src, fn="g") == 77
+
+    def test_index_array_map_let_bound_control(self) -> None:
+        """Class 3 control: let-bound array_map result resolves via the SlotRef
+        arm."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Array<Int> = array_map([1, 2, 3], fn(@Int -> @Int) effects(pure) { @Int.0 + 100 });
+  @Array<Int>.0[1]
+}
+"""
+        assert _run(src, fn="g") == 102
+
+
+class TestFlattenInlineNestedLiteral:
+    """array_flatten of an INLINE nested array literal as a direct call argument
+    — `array_flatten([[10, 20], [30, 40]])` — must recover the inner element
+    type T from the literal and compile, not drop the enclosing function via
+    [E602] (#1052).
+
+    Pre-fix, `_translate_array_flatten` recovered T only from a `SlotRef`
+    `@Array<Array<T>>` argument; an inline `[[..], [..]]` literal fell through to
+    the loud skip.  T is now taken from the inner literal's element type — the
+    same `_infer_array_element_type` recovery a nested literal in a `let`
+    position already uses.  The let-bound-argument control (flatten of a SlotRef)
+    always worked and is pinned below.
+    """
+
+    def test_flatten_inline_nested_int_literal(self) -> None:
+        """array_flatten([[10, 20], [30, 40]])[0] -> 10.  Value 10 (not 0) so a
+        mis-inferred element type cannot coincide with a zero default."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Array<Int> = array_flatten([[10, 20], [30, 40]]);
+  @Array<Int>.0[0]
+}
+"""
+        assert _run(src, fn="g") == 10
+
+    def test_flatten_inline_nested_int_literal_cross_inner(self) -> None:
+        """... [2] -> 30 — the first element of the SECOND inner array, proving
+        both inners flattened contiguously in order (not just inner 0 read)."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Array<Int> = array_flatten([[10, 20], [30, 40]]);
+  @Array<Int>.0[2]
+}
+"""
+        assert _run(src, fn="g") == 30
+
+    def test_flatten_inline_nested_string_literal(self) -> None:
+        """Array<String> inner variant — pair (ptr, len) elements resolve through
+        the recovered element type.  flatten([["ab","cd"],["ef","gh"]]) ->
+        ["ab","cd","ef","gh"]; [2] = "ef" (string_length 2)."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Array<String> = array_flatten([["ab", "cd"], ["ef", "gh"]]);
+  string_length(@Array<String>.0[2])
+}
+"""
+        assert _run(src, fn="g") == 2
+
+    def test_flatten_empty_inline_literal_stays_loud_skip(self) -> None:
+        """Honest boundary (#1052): an EMPTY inline literal (`array_flatten([])`)
+        carries no element-type information — T is genuinely unrecoverable from
+        the argument — so the enclosing function keeps the LOUD [E602] skip
+        rather than guessing T or silently mis-compiling.  (A non-empty inline
+        literal resolves — see the tests above.)"""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Array<Int> = array_flatten([]);
+  array_length(@Array<Int>.0)
+}
+"""
+        result = _compile_ok(src)
+        assert "g" not in result.exports, \
+            "empty inline literal is unresolvable — must drop, not compile wrong"
+        assert any(d.error_code == "E602" for d in result.diagnostics), \
+            "the unresolvable empty-literal shape must keep the loud E602 skip"
+
+    def test_flatten_inline_literal_no_e602_drop(self) -> None:
+        """Structural: the inline-literal flatten must not drop the fn via
+        [E602] (#1052)."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Array<Int> = array_flatten([[10, 20], [30, 40]]);
+  @Array<Int>.0[0]
+}
+"""
+        result = _compile_ok(src)
+        assert not any(d.error_code == "E602" for d in result.diagnostics), \
+            "array_flatten of an inline nested literal should not drop via E602"
+
+    def test_flatten_letbound_arg_control(self) -> None:
+        """Control: flatten of a let-bound `@Array<Array<Int>>` SlotRef argument
+        resolves via the SlotRef arm and stays green independently of the
+        ArrayLit-arm fix."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Array<Array<Int>> = [[10, 20], [30, 40]];
+  let @Array<Int> = array_flatten(@Array<Array<Int>>.0);
+  @Array<Int>.0[0]
+}
+"""
+        assert _run(src, fn="g") == 10
+
+
+class TestNestedTypevarBuiltinArg:
+    """A type-variable-element Array builtin nested as ANOTHER builtin's call
+    argument — `array_reverse(array_flatten(x))` — must derive the inner call's
+    element type on the call-emission inference path and compile, not drop via
+    [E602] (#1053).
+
+    This is the call-emission sibling of #1051 (which fixed the *index* path).
+    The outer combinator's element-type probe (`_array_elem_triad_or_skip` ->
+    `_infer_concat_elem_type`) previously dropped the inner `<Int>` layer of a
+    `SlotRef` `@Array<Array<Int>>` (returned bare "Array"), so an inner
+    `array_flatten` could not be unwrapped and the outer call kept the loud skip.
+    Inference now falls back to the shared #1051 `_builtin_call_ret_named_type`
+    derivation.  The converse nesting — a builtin call as `array_flatten`'s own
+    argument (`array_flatten(array_map(...))`) — resolves T the same way in
+    `_translate_array_flatten`.
+
+    Consultor-resolvable inner calls (`array_reverse(array_concat(a, b))`) and
+    typevar-in-typevar (`array_reverse(array_reverse(x))`) already worked and are
+    pinned as passing controls, alongside the let-bound single-call controls.
+    """
+
+    # ---- The fixed shapes -------------------------------------------------
+
+    def test_reverse_of_flatten(self) -> None:
+        """array_reverse(array_flatten([[10,20],[30,40]]))[0] -> 40.
+        flatten -> [10,20,30,40]; reverse -> [40,30,20,10]; [0] = 40."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Array<Array<Int>> = [[10, 20], [30, 40]];
+  let @Array<Int> = array_reverse(array_flatten(@Array<Array<Int>>.0));
+  @Array<Int>.0[0]
+}
+"""
+        assert _run(src, fn="g") == 40
+
+    def test_reverse_of_flatten_mid(self) -> None:
+        """... [1] -> 30 — proves the reversed order across the flatten boundary
+        (not just the head)."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Array<Array<Int>> = [[10, 20], [30, 40]];
+  let @Array<Int> = array_reverse(array_flatten(@Array<Array<Int>>.0));
+  @Array<Int>.0[1]
+}
+"""
+        assert _run(src, fn="g") == 30
+
+    def test_sort_by_of_flatten(self) -> None:
+        """One more nesting pair: array_sort_by(array_flatten(x), asc)[0] -> 10.
+        flatten([[30,10],[40,20]]) -> [30,10,40,20]; sorted asc -> [10,20,30,40];
+        [0] = 10."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Array<Array<Int>> = [[30, 10], [40, 20]];
+  let @Array<Int> = array_sort_by(
+    array_flatten(@Array<Array<Int>>.0),
+    fn(@Int, @Int -> @Ordering) effects(pure) {
+      if @Int.1 < @Int.0 then { Less } else {
+        if @Int.1 > @Int.0 then { Greater } else { Equal }
+      }
+    }
+  );
+  @Array<Int>.0[0]
+}
+"""
+        assert _run(src, fn="g") == 10
+
+    def test_flatten_of_map_converse(self) -> None:
+        """Converse nesting — a typevar builtin (array_map) as array_flatten's own
+        argument: array_flatten(array_map([1,2,3], |x| [x, x+100])).
+        map -> [[1,101],[2,102],[3,103]]; flatten -> [1,101,2,102,3,103];
+        [3] = 102."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Array<Int> = array_flatten(
+    array_map([1, 2, 3], fn(@Int -> @Array<Int>) effects(pure) {
+      [@Int.0, @Int.0 + 100]
+    })
+  );
+  @Array<Int>.0[3]
+}
+"""
+        assert _run(src, fn="g") == 102
+
+    def test_nested_typevar_arg_no_e602_drop(self) -> None:
+        """Structural: reverse(flatten(...)) must not drop the fn via [E602]."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Array<Array<Int>> = [[10, 20], [30, 40]];
+  let @Array<Int> = array_reverse(array_flatten(@Array<Array<Int>>.0));
+  @Array<Int>.0[0]
+}
+"""
+        result = _compile_ok(src)
+        assert not any(d.error_code == "E602" for d in result.diagnostics), \
+            "reverse(flatten(...)) should not drop the function via E602"
+
+    # ---- Pins: shapes that already resolved (must stay green) -------------
+
+    def test_reverse_of_concat_consultor_pin(self) -> None:
+        """Consultor-inside-typevar pin: array_reverse's inner arg is a
+        consultor-resolvable array_concat, so it resolved before #1053 too.
+        concat -> [10,20,30,40]; reverse -> [40,30,20,10]; [0] = 40."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Array<Int> = array_reverse(array_concat([10, 20], [30, 40]));
+  @Array<Int>.0[0]
+}
+"""
+        assert _run(src, fn="g") == 40
+
+    def test_reverse_of_reverse_typevar_pin(self) -> None:
+        """Typevar-in-typevar pin: array_reverse(array_reverse([10,20,30])) — the
+        inner array_reverse forwards its ArrayLit-arg element type, so this
+        resolved before #1053 too.  reverse twice = identity; [0] = 10."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Array<Int> = array_reverse(array_reverse([10, 20, 30]));
+  @Array<Int>.0[0]
+}
+"""
+        assert _run(src, fn="g") == 10
+
+    def test_reverse_single_letbound_control(self) -> None:
+        """Control: a single let-bound array_reverse resolves via the SlotRef arm
+        and stays green independently of the nested-arg fix.  [0] = 30."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Array<Int> = array_reverse([10, 20, 30]);
+  @Array<Int>.0[0]
+}
+"""
+        assert _run(src, fn="g") == 30
+
+    def test_flatten_single_letbound_control(self) -> None:
+        """Control: a single let-bound array_flatten of a SlotRef resolves via the
+        SlotRef arm.  [0] = 10."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Array<Array<Int>> = [[10, 20], [30, 40]];
+  let @Array<Int> = array_flatten(@Array<Array<Int>>.0);
+  @Array<Int>.0[0]
+}
+"""
+        assert _run(src, fn="g") == 10
+
+
+class TestAliasSpelledArgCallEmission:
+    """An alias-spelled array argument at a builtin's CALL emission —
+    `type Grid = Array<Array<Int>>; array_flatten(@Grid.0)` /
+    `type Row = Array<Int>; array_reverse(@Row.0)` — must canonicalize the
+    alias to its target's compound spelling and compile, not drop via [E602]
+    (#1053 alias extension; the call-emission dual of #1055's index-side fix).
+
+    #1055 taught the shared `_named_type_from_arg_info` rebuilder to
+    canonicalize a bare alias slot name (the #1037 walk), which fixed the
+    INDEX-side derivations; the array builtins' own emission probes
+    (`_infer_concat_elem_type`'s SlotRef arm, `_translate_array_flatten`'s
+    T-recovery) still saw the bare alias name and dropped — flatten at its
+    input-shape gate, reverse/sort_by at the element-type triad.  Both now
+    fall back to the same canonicalizing rebuilder.  Direct spellings are
+    pinned by the sibling classes' controls.
+    """
+
+    def test_flatten_aliased_grid_arg(self) -> None:
+        """array_flatten(@Grid.0) via `type Grid = Array<Array<Int>>`,
+        let-bound result.  [0] = 10."""
+        src = """
+type Grid = Array<Array<Int>>;
+
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Grid = [[10, 20], [30, 40]];
+  let @Array<Int> = array_flatten(@Grid.0);
+  @Array<Int>.0[0]
+}
+"""
+        assert _run(src, fn="g") == 10
+
+    def test_flatten_aliased_grid_arg_indexed(self) -> None:
+        """array_flatten(@Grid.0)[2] -> 30 — the first element of the SECOND
+        inner array, proving contiguous flattening through the alias (and the
+        index side resolving the same call, post-#1055)."""
+        src = """
+type Grid = Array<Array<Int>>;
+
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Grid = [[10, 20], [30, 40]];
+  array_flatten(@Grid.0)[2]
+}
+"""
+        assert _run(src, fn="g") == 30
+
+    def test_reverse_aliased_row_arg(self) -> None:
+        """array_reverse(@Row.0)[0] via `type Row = Array<Int>` -> 30."""
+        src = """
+type Row = Array<Int>;
+
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Row = [10, 20, 30];
+  array_reverse(@Row.0)[0]
+}
+"""
+        assert _run(src, fn="g") == 30
+
+    def test_reverse_aliased_string_row_arg(self) -> None:
+        """Array<String> alias variant — pair (ptr, len) elements resolve
+        through the canonicalized element type.  reverse of ["a","bb","ccc"]
+        -> ["ccc","bb","a"]; [0] = "ccc" (length 3)."""
+        src = """
+type Names = Array<String>;
+
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Names = ["a", "bb", "ccc"];
+  string_length(array_reverse(@Names.0)[0])
+}
+"""
+        assert _run(src, fn="g") == 3
+
+    def test_sort_by_aliased_row_arg(self) -> None:
+        """array_sort_by(@Row.0, asc)[0] via the alias -> 10 (the triad is
+        shared by every array combinator, so sort_by rides the same fix)."""
+        src = """
+type Row = Array<Int>;
+
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Row = [30, 10, 20];
+  array_sort_by(@Row.0, fn(@Int, @Int -> @Ordering) effects(pure) {
+    if @Int.1 < @Int.0 then { Less } else {
+      if @Int.1 > @Int.0 then { Greater } else { Equal }
+    }
+  })[0]
+}
+"""
+        assert _run(src, fn="g") == 10
+
+
+class TestContainerArgEmissionTag:
+    """Aliased or user-fn Map/Set arguments at the container builtins' CALL
+    emission must resolve K/V/T for the host-import tag — not silently fall
+    to the `"b"` (i32) tag and return WRONG VALUES (#1053 container
+    extension).
+
+    The emission-side inference helpers (`_infer_map_key_from_map_arg`,
+    `_infer_map_value_from_map_arg`, `_infer_set_elem_from_set_arg`) only
+    understood direct `@Map<K, V>` / `@Set<T>` slots and map-builtin chains;
+    an alias-spelled slot or a user-fn call argument returned None, and
+    `_map_wasm_tag(None)` deliberately falls through to `"b"` (the
+    empty-collection escape hatch).  The mis-tagged import then decoded a
+    stored i64 value as i32 (silent truncation) or a String key's ptr field
+    as a scalar (garbage), and the host wrote a 4-byte-stride array the
+    guest reads at 8-byte stride — check-green, verify-green, WRONG value
+    (not even an [E602] drop).  All three helpers now consult the shared
+    canonicalizing rebuilder first.  Values are chosen > 2^32 so a
+    truncating mis-tag CANNOT pass by fresh-heap luck.
+    """
+
+    # ---- Aliased container arguments ---------------------------------------
+
+    def test_map_values_aliased_arg_emission_big_value(self) -> None:
+        """map_values(@M.0) emission via `type M = Map<String, Int>` with a
+        value above 2^32 (8589934597 = 2^33 + 5).  The mis-tagged `$vb`
+        import truncated it to 5."""
+        src = """
+type M = Map<String, Int>;
+
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @M = map_insert(map_new(), "k", 8589934597);
+  let @Array<Int> = map_values(@M.0);
+  @Array<Int>.0[0]
+}
+"""
+        assert _run(src, fn="g") == 8589934597
+
+    def test_map_keys_aliased_arg_emission_string(self) -> None:
+        """map_keys(@M.0) emission via the alias — String keys under the
+        mis-tagged `$kb` import came back as garbage (length 0)."""
+        src = """
+type M = Map<String, Int>;
+
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @M = map_insert(map_new(), "abcde", 99);
+  let @Array<String> = map_keys(@M.0);
+  string_length(@Array<String>.0[0])
+}
+"""
+        assert _run(src, fn="g") == 5
+
+    def test_map_get_aliased_arg_emission_big_value(self) -> None:
+        """map_get(@M.0, k) shares `_infer_map_value_from_map_arg` for the
+        Option<V> host construction — the aliased arg mis-tagged it the same
+        way."""
+        src = """
+type M = Map<String, Int>;
+
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @M = map_insert(map_new(), "k", 8589934597);
+  option_unwrap_or(map_get(@M.0, "k"), 0)
+}
+"""
+        assert _run(src, fn="g") == 8589934597
+
+    def test_set_to_array_aliased_arg_emission_big_value(self) -> None:
+        """set_to_array(@S.0) emission via `type S = Set<Int>` with an element
+        above 2^32 (8589934600 = 2^33 + 8) — the mis-tagged `$eb` import
+        truncated it to 8."""
+        src = """
+type S = Set<Int>;
+
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @S = set_add(set_new(), 8589934600);
+  let @Array<Int> = set_to_array(@S.0);
+  @Array<Int>.0[0]
+}
+"""
+        assert _run(src, fn="g") == 8589934600
+
+    # ---- User-fn container arguments ---------------------------------------
+
+    def test_map_keys_user_fn_arg_emission(self) -> None:
+        """map_keys(mkm()) — a user fn returning Map<String, Int> as the
+        argument.  The emission had no user-fn arm; String keys came back as
+        garbage (length 0) under the `$kb` mis-tag."""
+        src = """
+fn mkm(-> @Map<String, Int>) requires(true) ensures(true) effects(pure) {
+  map_insert(map_new(), "abcde", 99)
+}
+
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Array<String> = map_keys(mkm());
+  string_length(@Array<String>.0[0])
+}
+"""
+        assert _run(src, fn="g") == 5
+
+    def test_map_keys_user_fn_with_arg_emission(self) -> None:
+        """Same shape with a PARAMETERIZED user fn (`mkm2(1)`) — the key
+        helper's blind args[0] recursion used to swallow this shape before
+        any declared-return consultation."""
+        src = """
+fn mkm2(@Int -> @Map<String, Int>) requires(true) ensures(true) effects(pure) {
+  map_insert(map_new(), "abcde", @Int.0)
+}
+
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Array<String> = map_keys(mkm2(1));
+  string_length(@Array<String>.0[0])
+}
+"""
+        assert _run(src, fn="g") == 5
+
+    def test_map_values_user_fn_arg_emission_big_value(self) -> None:
+        """map_values(mkm()) with a value above 2^32 — truncated to 7 under
+        the mis-tag."""
+        src = """
+fn mkm(-> @Map<String, Int>) requires(true) ensures(true) effects(pure) {
+  map_insert(map_new(), "k", 8589934599)
+}
+
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Array<Int> = map_values(mkm());
+  @Array<Int>.0[0]
+}
+"""
+        assert _run(src, fn="g") == 8589934599
+
+    def test_set_to_array_user_fn_arg_emission_big_value(self) -> None:
+        """set_to_array(mks()) — user fn returning Set<Int>, element above
+        2^32."""
+        src = """
+fn mks(-> @Set<Int>) requires(true) ensures(true) effects(pure) {
+  set_add(set_new(), 8589934600)
+}
+
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Array<Int> = set_to_array(mks());
+  @Array<Int>.0[0]
+}
+"""
+        assert _run(src, fn="g") == 8589934600
+
+    # ---- Bare-alias user-fn returns (#1071) ---------------------------------
+
+    def test_map_values_bare_alias_return_big_value(self) -> None:
+        """map_values(mkm()) where mkm's declared return is the BARE alias
+        `@M` (`type M = Map<String, Int>`) — the consultor's user-fn arm
+        only reported parameterized returns, so the bare alias exited
+        unresolved and the value truncated to 7 under the `$vb` mis-tag
+        (#1071; pre-existing on main)."""
+        src = """
+type M = Map<String, Int>;
+
+fn mkm(-> @M) requires(true) ensures(true) effects(pure) {
+  map_insert(map_new(), "abcde", 8589934599)
+}
+
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Array<Int> = map_values(mkm());
+  @Array<Int>.0[0]
+}
+"""
+        assert _run(src, fn="g") == 8589934599
+
+    def test_map_keys_bare_alias_return_string(self) -> None:
+        """map_keys(mkm()) with the bare-alias return — String keys came
+        back garbled (length 0) under the `$kb` mis-tag (#1071)."""
+        src = """
+type M = Map<String, Int>;
+
+fn mkm(-> @M) requires(true) ensures(true) effects(pure) {
+  map_insert(map_new(), "abcde", 99)
+}
+
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Array<String> = map_keys(mkm());
+  string_length(@Array<String>.0[0])
+}
+"""
+        assert _run(src, fn="g") == 5
+
+    def test_map_get_bare_alias_return_big_value(self) -> None:
+        """map_get(mkm(), k) with the bare-alias return — the Option<V>
+        construction mis-tagged the same way (#1071)."""
+        src = """
+type M = Map<String, Int>;
+
+fn mkm(-> @M) requires(true) ensures(true) effects(pure) {
+  map_insert(map_new(), "abcde", 8589934599)
+}
+
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  option_unwrap_or(map_get(mkm(), "abcde"), 0)
+}
+"""
+        assert _run(src, fn="g") == 8589934599
+
+    def test_set_to_array_bare_alias_return_big_value(self) -> None:
+        """set_to_array(mks()) where mks returns the bare alias `@S`
+        (`type S = Set<Int>`) — truncated to 8 pre-fix (#1071)."""
+        src = """
+type S = Set<Int>;
+
+fn mks(-> @S) requires(true) ensures(true) effects(pure) {
+  set_add(set_new(), 8589934600)
+}
+
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Array<Int> = set_to_array(mks());
+  @Array<Int>.0[0]
+}
+"""
+        assert _run(src, fn="g") == 8589934600
+
+    def test_map_values_block_wrapped_arg_big_value(self) -> None:
+        """A Block-wrapped container argument (`map_values({ @M.0 })`)
+        unwraps to its tail expression for the tag inference — truncated to
+        5 pre-fix (#1071)."""
+        src = """
+type M = Map<String, Int>;
+
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @M = map_insert(map_new(), "k", 8589934597);
+  let @Array<Int> = map_values({ @M.0 });
+  @Array<Int>.0[0]
+}
+"""
+        assert _run(src, fn="g") == 8589934597
+
+    # ---- Controls -----------------------------------------------------------
+
+    def test_map_values_direct_arg_big_value_control(self) -> None:
+        """Direct `@Map<String, Int>.0` spelling with the same big value —
+        correctly tagged `$vi` before and after the fix."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Map<String, Int> = map_insert(map_new(), "k", 8589934597);
+  let @Array<Int> = map_values(@Map<String, Int>.0);
+  @Array<Int>.0[0]
+}
+"""
+        assert _run(src, fn="g") == 8589934597
+
+    def test_map_keys_empty_map_still_compiles(self) -> None:
+        """The genuinely-unknown empty-collection shape keeps its permissive
+        `"b"` fall-through: map_keys(map_new()) compiles and returns an empty
+        array (no element value ever flows through the import)."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  array_length(map_keys(map_new()))
+}
+"""
+        assert _run(src, fn="g") == 0
+
+
+class TestUserFnArrayArg:
+    """A user fn returning Array<T> as a type-variable builtin's argument
+    (#1053 user-fn extension).
+
+    `array_reverse(mk())` / `array_sort_by(mk(), cmp)` resolve through the
+    #1053 emission fallback's `_builtin_call_ret_named_type` chain — the
+    shared rebuilder reads a registered non-generic user fn's declared
+    return type — so the flat-return shapes are pinned GREEN here (they
+    rode the #1053 fix; no further change).  A NESTED return
+    (`mkn() -> Array<Array<Int>>`) reached the rebuilder as
+    `("Array", (None,))` — the consultor's user-fn arm deliberately blanks
+    nested type-arg positions to stay in clone-name-discovery lockstep — so
+    `array_flatten(mkn())` dropped at its input-shape gate; the rebuilder
+    now recovers the declared return TypeExpr directly (full nesting, off
+    the consultor) and flatten unwraps it.
+    """
+
+    def test_reverse_user_fn_arg(self) -> None:
+        """array_reverse(mk())[0] -> 30 (pin: resolved by the #1053 fallback)."""
+        src = """
+fn mk(-> @Array<Int>) requires(true) ensures(true) effects(pure) {
+  [10, 20, 30]
+}
+
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  array_reverse(mk())[0]
+}
+"""
+        assert _run(src, fn="g") == 30
+
+    def test_reverse_user_fn_arg_letbound(self) -> None:
+        """Let-bound variant of the same pin."""
+        src = """
+fn mk(-> @Array<Int>) requires(true) ensures(true) effects(pure) {
+  [10, 20, 30]
+}
+
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Array<Int> = array_reverse(mk());
+  @Array<Int>.0[0]
+}
+"""
+        assert _run(src, fn="g") == 30
+
+    def test_sort_by_user_fn_arg(self) -> None:
+        """array_sort_by(mk(), asc)[0] -> 10 (pin)."""
+        src = """
+fn mk(-> @Array<Int>) requires(true) ensures(true) effects(pure) {
+  [30, 10, 20]
+}
+
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  array_sort_by(mk(), fn(@Int, @Int -> @Ordering) effects(pure) {
+    if @Int.1 < @Int.0 then { Less } else {
+      if @Int.1 > @Int.0 then { Greater } else { Equal }
+    }
+  })[0]
+}
+"""
+        assert _run(src, fn="g") == 10
+
+    def test_flatten_user_fn_nested_return(self) -> None:
+        """array_flatten(mkn()) — user fn returning Array<Array<Int>>.
+        Dropped at the input-shape gate before the nested-return recovery."""
+        src = """
+fn mkn(-> @Array<Array<Int>>) requires(true) ensures(true) effects(pure) {
+  [[10, 20], [30, 40]]
+}
+
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Array<Int> = array_flatten(mkn());
+  @Array<Int>.0[0]
+}
+"""
+        assert _run(src, fn="g") == 10
+
+    def test_flatten_user_fn_nested_return_indexed(self) -> None:
+        """array_flatten(mkn())[2] -> 30 — the indexed form exercises the
+        index-side derivation through the same nested-return recovery."""
+        src = """
+fn mkn(-> @Array<Array<Int>>) requires(true) ensures(true) effects(pure) {
+  [[10, 20], [30, 40]]
+}
+
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  array_flatten(mkn())[2]
+}
+"""
+        assert _run(src, fn="g") == 30
+
+
+class TestNestedAliasElemClassification:
+    """An ALIAS-SPELLED inner element name (`type Row = Array<Int>` as the
+    element of an outer array) must be canonicalized before the element
+    size/pair classification at the array builtins' emission — not classified
+    as a 4-byte scalar where the real element is an 8-byte (ptr, len) pair
+    (#1067).
+
+    `_infer_concat_elem_type` (and flatten's own T-recovery) returned the
+    bare alias name ("Row"); `_element_mem_size("Row")` fell to the 4-byte
+    ADT default, so `array_reverse(@Grid.0)` (via `type Grid = Array<Row>`)
+    copied half of each pair — check-green, verify-green, garbage values
+    (`[0][0]` returned 4626322722586886145, `array_length([0])` returned
+    81948) — and `array_concat` / depth-2 `array_flatten` read past their
+    allocations (unreachable traps).  Element names now canonicalize to the
+    target's compound spelling at the single inference exit (plus flatten's
+    gate and T-recovery), classifying as pairs.  The direct spellings
+    `@Array<Row>` / `@Array<Array<Row>>` mis-classified identically through
+    the pre-#1053 direct arm — latent on `main`, where these shapes still
+    E602-dropped for unrelated reasons; this branch's derivations made them
+    reachable, so both spellings are pinned here.
+    """
+
+    def test_reverse_aliased_grid_nested_read(self) -> None:
+        """array_reverse(@Grid.0)[0][0] -> 30 (was garbage)."""
+        src = """
+type Row = Array<Int>;
+type Grid = Array<Row>;
+
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Grid = [[10, 20], [30, 40]];
+  array_reverse(@Grid.0)[0][0]
+}
+"""
+        assert _run(src, fn="g") == 30
+
+    def test_reverse_aliased_grid_inner_length(self) -> None:
+        """array_length(array_reverse(@Grid.0)[0]) -> 2 (was garbage)."""
+        src = """
+type Row = Array<Int>;
+type Grid = Array<Row>;
+
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Grid = [[10, 20], [30, 40]];
+  array_length(array_reverse(@Grid.0)[0])
+}
+"""
+        assert _run(src, fn="g") == 2
+
+    def test_reverse_direct_array_of_row_twin(self) -> None:
+        """Direct-spelling twin: array_reverse(@Array<Row>.0)[0][0] -> 30 —
+        the pre-existing direct SlotRef arm returned the same bare "Row"."""
+        src = """
+type Row = Array<Int>;
+
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Array<Row> = [[10, 20], [30, 40]];
+  array_reverse(@Array<Row>.0)[0][0]
+}
+"""
+        assert _run(src, fn="g") == 30
+
+    def test_concat_aliased_grid_args(self) -> None:
+        """array_concat(@Grid.0, @Grid.0)[2][0] -> 10 (read past its
+        allocation pre-fix: the 4-byte stride halved the copied bytes)."""
+        src = """
+type Row = Array<Int>;
+type Grid = Array<Row>;
+
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Grid = [[10, 20], [30, 40]];
+  array_concat(@Grid.0, @Grid.0)[2][0]
+}
+"""
+        assert _run(src, fn="g") == 10
+
+    def test_flatten_direct_depth2_array_of_row(self) -> None:
+        """Depth-2 direct spelling: array_flatten(@Array<Array<Row>>.0)
+        yields Array<Row> — pair elements, [1][0] -> 30 (unreachable trap
+        pre-fix: T recovered as bare "Row", 4-byte stride read past the
+        allocation)."""
+        src = """
+type Row = Array<Int>;
+
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Array<Array<Row>> = [[[10, 20]], [[30, 40]]];
+  array_flatten(@Array<Array<Row>>.0)[1][0]
+}
+"""
+        assert _run(src, fn="g") == 30
+
+    def test_flatten_aliased_grid_outer(self) -> None:
+        """array_flatten(@Grid.0)[2] via `Grid = Array<Row>` -> 30 — the
+        input-shape gate and T-recovery both see through the alias chain
+        (E602-dropped pre-fix)."""
+        src = """
+type Row = Array<Int>;
+type Grid = Array<Row>;
+
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Grid = [[10, 20], [30, 40]];
+  array_flatten(@Grid.0)[2]
+}
+"""
+        assert _run(src, fn="g") == 30
+
+    def test_flatten_aliased_row_middle(self) -> None:
+        """array_flatten(@Array<Row>.0)[2] — the alias in the MIDDLE layer
+        only — -> 30 (E602-dropped pre-fix)."""
+        src = """
+type Row = Array<Int>;
+
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Array<Row> = [[10, 20], [30, 40]];
+  array_flatten(@Array<Row>.0)[2]
+}
+"""
+        assert _run(src, fn="g") == 30
+
+    def test_sort_by_aliased_grid_row_comparator(self) -> None:
+        """array_sort_by(@Grid.0, cmp) with a `@Row`-typed comparator sorts
+        by inner length — [0][0] -> 30 for the singleton-first ordering.
+        Trapped with a wasm backtrace pre-fix (element stride garbage fed the
+        comparator)."""
+        src = """
+type Row = Array<Int>;
+type Grid = Array<Row>;
+
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Grid = [[30], [10, 20]];
+  array_sort_by(@Grid.0, fn(@Row, @Row -> @Ordering) effects(pure) {
+    if array_length(@Row.1) < array_length(@Row.0) then { Less } else {
+      if array_length(@Row.1) > array_length(@Row.0) then { Greater } else { Equal }
+    }
+  })[0][0]
+}
+"""
+        assert _run(src, fn="g") == 30
+
+
+class TestGenericAliasContainerArg:
+    """A GENERIC alias of a container as a user fn's declared return
+    (`type MyMap<V> = Map<String, V>; fn mk(-> @MyMap<Int>)`) must
+    substitute the alias's type args through its target before any
+    derivation consumes them (#1068).
+
+    The class-2 container derivation consumed `("MyMap", ("Int",))`'s type
+    args with no container-name check, deriving element `Int` where the
+    truth is `String` — `map_keys(mk())[0]` handed a VALIDATION-FAILING
+    module to the runner while `vera compile` exited 0.  The shared
+    rebuilder now substitutes a generic alias's args through its target
+    (`substitute_type_vars`) and canonicalizes; the class-2 arm additionally
+    verifies the resolved container IS `Map`/`Set` before reading K/V/T off
+    it, so an unresolvable shape stays a loud skip rather than an invalid
+    module.
+    """
+
+    def test_map_keys_generic_alias_return(self) -> None:
+        """string_length(map_keys(mk())[0]) -> 5 via `MyMap<Int>` (invalid
+        WASM pre-fix: K derived as Int, module failed validation at run)."""
+        src = """
+type MyMap<V> = Map<String, V>;
+
+fn mk(-> @MyMap<Int>) requires(true) ensures(true) effects(pure) {
+  map_insert(map_new(), "abcde", 99)
+}
+
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  string_length(map_keys(mk())[0])
+}
+"""
+        assert _run(src, fn="g") == 5
+
+    def test_map_values_generic_alias_return_big_value(self) -> None:
+        """map_values(mk())[0] -> the 2^33+5 value via `MyMap<Int>`
+        (E602-dropped pre-fix; the tag and element type both resolve through
+        the substituted Map<String, Int>)."""
+        src = """
+type MyMap<V> = Map<String, V>;
+
+fn mk(-> @MyMap<Int>) requires(true) ensures(true) effects(pure) {
+  map_insert(map_new(), "k", 8589934597)
+}
+
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  map_values(mk())[0]
+}
+"""
+        assert _run(src, fn="g") == 8589934597
+
+
 # =====================================================================
 # C8e: Arrays of compound types (#132)
 # =====================================================================

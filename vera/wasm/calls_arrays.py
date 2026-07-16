@@ -8,6 +8,7 @@ array_any, array_all, array_flatten, array_sort_by.
 from __future__ import annotations
 
 from vera import ast
+from vera.monomorphize import Monomorphizer
 from vera.skip import CodegenSkip
 from vera.wasm.helpers import (
     WasmSlotEnv,
@@ -24,6 +25,35 @@ from vera.wasm.helpers import (
 
 class CallsArraysMixin:
     """Methods for translating array built-in functions."""
+
+    def _array_of_array_inner(self, nt: "ast.NamedType | None") -> str | None:
+        """T from a ``NamedType`` spelling ``Array<Array<T>>``, else ``None``.
+
+        Shared by ``_translate_array_flatten``'s FnCall arm (#1053) and its
+        alias-spelled SlotRef recovery (#1053 alias extension) — both derive
+        a full return/argument ``NamedType`` and need the same two-layer
+        unwrap.  An alias-spelled MIDDLE layer (``Array<Row>`` with
+        ``type Row = Array<Int>``) is canonicalized before the unwrap
+        (#1067), so the alias chain behaves exactly like the direct
+        spelling; the returned T may itself be an alias name — the caller's
+        size/pair classification canonicalizes it.
+        """
+        if (nt is None or nt.name != "Array" or not nt.type_args
+                or not isinstance(nt.type_args[0], ast.NamedType)):
+            return None
+        mid = nt.type_args[0]
+        if mid.name != "Array" and not mid.type_args:
+            # #1067: alias-spelled middle layer — canonicalize the bare
+            # name to its target's compound spelling and re-parse.
+            canon = self._canonicalize_alias_slot_name(mid.name)[0]
+            if canon != mid.name:
+                parsed = Monomorphizer._parse_type_name(canon)
+                if isinstance(parsed, ast.NamedType):
+                    mid = parsed
+        if (mid.name == "Array" and mid.type_args
+                and isinstance(mid.type_args[0], ast.NamedType)):
+            return self._format_named_type(mid.type_args[0])
+        return None
 
     def _array_elem_triad_or_skip(
         self, arr_arg: "ast.Expr", *, role: str,
@@ -1984,16 +2014,27 @@ class CallsArraysMixin:
         # input is not array-of-array shaped and we bail.
         #
         # Second pass: AST walk to recover T.
-        #   - SlotRef typed ``@Array<Array<T>>``: walk type_args twice.
-        #   - Other expressions (FnCall returning Array<Array<T>>,
-        #     array literals, etc.): deferred — recovering T for
-        #     those requires teaching the inference helpers about
-        #     nested generics, which is broader infrastructure work
-        #     tracked separately.  Until then those inputs emit
-        #     "unsupported expressions" at codegen, which is the
-        #     same behaviour as for any other codegen gap.
+        #   - SlotRef typed ``@Array<Array<T>>``: walk type_args twice; an
+        #     alias-spelled slot (``@Grid.0``) canonicalizes through the
+        #     shared rebuilder instead (#1053 alias extension).
+        #   - ArrayLit (#1052): an inline nested literal argument
+        #     (``array_flatten([[10, 20], [30, 40]])``) — T is the inner
+        #     literal's element type, the same ``_infer_array_element_type``
+        #     recovery a nested literal in a ``let`` position uses.
+        #   - FnCall (#1053, converse): a call returning ``Array<Array<T>>``
+        #     — a builtin (``array_flatten(array_map(xs, |x| [...]))``) or a
+        #     registered user fn (``array_flatten(mkn())``) — derive its full
+        #     return NamedType via the shared #1051
+        #     ``_builtin_call_ret_named_type`` derivation and unwrap both
+        #     ``Array<>`` layers.
+        # A genuinely unresolvable argument shape keeps the loud skip.
         outer_elem = self._infer_concat_elem_type(arr_arg)
-        if outer_elem != "Array":
+        # The element probe canonicalizes alias names (#1067), so an
+        # array-shaped outer element may arrive as the bare "Array" (direct
+        # nested spelling) or a full "Array<...>" (canonicalized alias, e.g.
+        # `type Grid = Array<Row>` gives "Array<Int>").
+        if outer_elem is None or (
+                outer_elem != "Array" and not outer_elem.startswith("Array<")):
             raise CodegenSkip(
                 arr_arg,
                 "array_flatten input must be Array<Array<T>>",
@@ -2037,12 +2078,39 @@ class CallsArraysMixin:
                     t_type = self._resolve_base_type_name(canon)
                 else:
                     t_type = inner_te.name
+            if t_type is None:
+                # #1053 alias extension: an alias-spelled slot
+                # (`type Grid = Array<Array<Int>>;` then `@Grid.0`) has no
+                # type_args to walk — resolve through the shared rebuilder,
+                # which canonicalizes the alias to its target's compound
+                # spelling (#1055), and unwrap both Array<> layers.
+                t_type = self._array_of_array_inner(
+                    self._named_type_from_arg_info(arr_arg))
+        elif isinstance(arr_arg, ast.ArrayLit) and arr_arg.elements:
+            # #1052: inline nested array literal — the outer literal's first
+            # element is itself an array literal, so T is that inner literal's
+            # element type.
+            inner = arr_arg.elements[0]
+            if isinstance(inner, ast.ArrayLit):
+                t_type = self._infer_array_element_type(inner)
+        elif isinstance(arr_arg, ast.FnCall):
+            # #1053: a builtin call returning Array<Array<T>> as the argument —
+            # unwrap both Array<> layers of its derived return NamedType.
+            t_type = self._array_of_array_inner(
+                self._builtin_call_ret_named_type(arr_arg))
         if t_type is None:
             raise CodegenSkip(
                 arr_arg,
                 "could not recover inner element type for array_flatten "
-                "(only SlotRef Array<Array<T>> is currently supported)",
+                "(need Array<Array<T>> from a slot or alias, an inline "
+                "nested literal, or a resolvable call)",
             )
+        # #1067: T itself may be an alias spelling (`Array<Array<Row>>`
+        # recovers "Row") — canonicalize before the size/pair
+        # classification, else a pair element is copied at the 4-byte
+        # opaque-pointer stride and the second pass reads past the
+        # destination allocation.
+        t_type = self._canonicalize_alias_slot_name(t_type)[0]
         t_size = _element_mem_size(t_type)
         if t_size is None:  # pragma: no cover — defensive: _element_mem_size never returns None (falls back to 4)
             raise CodegenSkip(
