@@ -12,7 +12,7 @@ Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verificati
 
 ## Where we are
 
-7,565 tests, 160 conformance programs, 38 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
+7,584 tests, 160 conformance programs, 38 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
 
 ## Stage 19 — The verification completeness sprint
 
@@ -20,7 +20,7 @@ Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verificati
 
 ### Bug sprint — monomorphizer and verifier gaps first
 
-Four PRs remain in the sprint's bug-PR cluster, with a queued pair behind them (the verification-completeness rows below are the sprint's remaining scope):
+Four PRs remain in the sprint's bug-PR cluster (the verification-completeness rows below are the sprint's remaining scope):
 
 **PR F — Future representation-transparency in the let/capture/element paths (7).** [#1039](https://github.com/aallan/vera/issues/1039) `let @Future<String>` E602-skips on name-keyed pair detection, plus the sibling deciders its adversarial reviews confirmed: closure capture ([#1044](https://github.com/aallan/vera/issues/1044)), `Array<Future<T>>` elements ([#1045](https://github.com/aallan/vera/issues/1045)), an alias of a pair-payload Future ([#1046](https://github.com/aallan/vera/issues/1046)), return display ([#1047](https://github.com/aallan/vera/issues/1047)), the combinator element inference the #1045 fix exposed ([#1057](https://github.com/aallan/vera/issues/1057), silent wrong values), and aliased array elements ([#1058](https://github.com/aallan/vera/issues/1058)). In review as [#1041](https://github.com/aallan/vera/pull/1041).
 
@@ -29,8 +29,6 @@ Four PRs remain in the sprint's bug-PR cluster, with a queued pair behind them (
 **PR I — type-variable builtin index derivations (2).** [#1051](https://github.com/aallan/vera/issues/1051) direct indexing on the eight type-variable-element Array builtins, and [#1055](https://github.com/aallan/vera/issues/1055) alias-spelled arguments to those derivations. Built and gated on the [#1050](https://github.com/aallan/vera/pull/1050) stack; opens when #1050 merges.
 
 **PR J — call-argument element-type recovery (2).** [#1052](https://github.com/aallan/vera/issues/1052) inline nested array literals as call arguments, and [#1053](https://github.com/aallan/vera/issues/1053) type-variable builtins nested as call arguments (plus its aliased and user-fn argument extensions). Stacked on PR I.
-
-**Queued.** [#1056](https://github.com/aallan/vera/issues/1056) fn-typed slot closures into `array_map`; [#1059](https://github.com/aallan/vera/issues/1059) the checker admits `type F = Future<F>;` and codegen crashes. The next fix cluster once the PRs above land.
 
 [#996](https://github.com/aallan/vera/issues/996) stays a watch-only row — an unreproducible conformance flake, not a fix target.
 

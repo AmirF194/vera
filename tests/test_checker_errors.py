@@ -375,8 +375,8 @@ public fn id(@A -> @A)
     def test_cyclic_alias_refinement_e132(self) -> None:
         """Cycles through a `RefinementType` wrapper (`type A = { @B
         | true }; type B = A`) also flagged.  Pins the
-        `_alias_chain_target` helper's `RefinementType.base_type`
-        peeling — codegen's `_type_expr_to_wasm_type` recurses
+        `_referenced_aliases` helper's `RefinementType.base_type`
+        recursion — codegen's `_type_expr_to_wasm_type` recurses
         through refinements unconditionally, so a cycle hidden
         behind one is still a codegen-crash cycle (#648)."""
         errs = _check_err("""
@@ -394,6 +394,209 @@ public fn id(@A -> @A)
             f"Expected at least one diagnostic with error_code=E132; "
             f"got: {[(e.error_code, e.description) for e in errs]}"
         )
+
+    # -----------------------------------------------------------------
+    # #1059 — cycles buried in a type ARGUMENT.  The #648 walk followed
+    # only bare `type A = B` references, so a self-reference through a
+    # generic's type_arg (`Future<F>`, `Array<L>`) slipped past `check`
+    # and either crashed codegen with a RecursionError (the Future
+    # spellings, which `_type_expr_to_wasm_type` recurses through) or
+    # compiled to a degenerate type inhabited only by `[]` (`Array<L>`).
+    # The acyclicity rule (spec 2.6.3) is structural, so all cyclic
+    # spellings are rejected uniformly at check time.
+    # -----------------------------------------------------------------
+
+    def test_cyclic_alias_self_through_future_arg_e132(self) -> None:
+        """`type F = Future<F>` — self-reference through a `Future`
+        type argument — is E132, not an admitted alias that later
+        crashes `_type_expr_to_wasm_type` with RecursionError (#1059)."""
+        errs = _check_err("""
+type F = Future<F>;
+
+private fn use_it(@F -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  0
+}
+""", "Cyclic type alias")
+        e132 = [e for e in errs if e.error_code == "E132"]
+        assert e132, (
+            f"Expected at least one diagnostic with error_code=E132; "
+            f"got: {[(e.error_code, e.description) for e in errs]}"
+        )
+        assert "F -> F" in e132[0].description, (
+            f"Expected cycle path 'F -> F' in description; "
+            f"got: {e132[0].description!r}"
+        )
+
+    def test_cyclic_alias_mutual_through_future_arg_e132(self) -> None:
+        """`type A = Future<B>; type B = Future<A>` — mutual cycle
+        threaded through `Future` type arguments — is E132 (#1059)."""
+        errs = _check_err("""
+type A = Future<B>;
+type B = Future<A>;
+
+private fn use_it(@A -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  0
+}
+""", "Cyclic type alias")
+        e132 = [e for e in errs if e.error_code == "E132"]
+        assert e132, (
+            f"Expected at least one diagnostic with error_code=E132; "
+            f"got: {[(e.error_code, e.description) for e in errs]}"
+        )
+        assert "A -> B -> A" in e132[0].description, (
+            f"Expected cycle path 'A -> B -> A' in description; "
+            f"got: {e132[0].description!r}"
+        )
+
+    def test_cyclic_alias_self_through_array_arg_e132(self) -> None:
+        """`type L = Array<L>` — self-reference through an `Array` type
+        argument — is E132 (#1059).  `Array<L>` does not crash codegen
+        (it stops at an i32_pair) and is inhabited by `[]`, but the
+        acyclicity rule is structural, so it is rejected uniformly
+        with the `Future` spellings."""
+        errs = _check_err("""
+type L = Array<L>;
+
+private fn use_it(@L -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  0
+}
+""", "Cyclic type alias")
+        e132 = [e for e in errs if e.error_code == "E132"]
+        assert e132, (
+            f"Expected at least one diagnostic with error_code=E132; "
+            f"got: {[(e.error_code, e.description) for e in errs]}"
+        )
+
+    def test_cyclic_alias_nested_compound_type_arg_e132(self) -> None:
+        """`type A = Future<Array<B>>; type B = A` — the cycle edge sits
+        two compound levels deep (a type argument OF a type argument),
+        so the reference walk must descend the full nesting, not one
+        level (#1059, PR #1066 review)."""
+        errs = _check_err("""
+type A = Future<Array<B>>;
+type B = A;
+
+private fn use_it(@A -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  0
+}
+""", "Cyclic type alias")
+        e132 = [e for e in errs if e.error_code == "E132"]
+        assert e132, (
+            f"Expected at least one diagnostic with error_code=E132; "
+            f"got: {[(e.error_code, e.description) for e in errs]}"
+        )
+        assert "A -> B -> A" in e132[0].description, (
+            f"Expected cycle path 'A -> B -> A' in description; "
+            f"got: {e132[0].description!r}"
+        )
+
+    def test_alias_chain_deep_worst_case_order_checks(self) -> None:
+        """A 1,500-alias LEGAL chain declared deepest-first must check
+        clean.  The cycle DFS visits an unexplored predecessor per hop
+        before anything is marked safe, so with recursive traversal this
+        input overflowed Python's call stack — a checker crash
+        (RecursionError) on valid input, the acyclic sibling of the
+        #1059 crash (PR #1066 review).  The explicit-stack DFS bounds it
+        by memory instead."""
+        n = 1500
+        decls = "\n".join(f"type A{i} = A{i - 1};" for i in range(n - 1, 0, -1))
+        _check_ok(decls + "\ntype A0 = Int;\n" + """
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ 0 }
+""")
+
+    def test_fn_type_alias_self_reference_accepted(self) -> None:
+        """`type FA = fn(FA -> Int) effects(pure);` is NOT an E132
+        cycle: a function
+        value is a table-index (pointer) indirection, so the alias's
+        representation never recursively expands — the same exemption
+        spec 2.6.3 grants `data` ADTs.  The reference walk deliberately
+        does not descend fn-type parameter/return positions (PR #1066
+        review; self-APPLICATION is separately bounded by finite alias
+        unfolding, E170 at the binding site, so nothing in this family
+        is silent)."""
+        _check_ok("""
+type FA = fn(FA -> Int) effects(pure);
+
+private fn use_it(@FA -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  0
+}
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ 0 }
+""")
+
+    def test_cyclic_alias_through_discarded_type_arg_e132(self) -> None:
+        """`type Wrap<T> = Int; type C = Wrap<C>` — a self-reference
+        inside a type argument the generic alias never uses — is E132
+        (#1059).  This pins the decision that the acyclicity rule is
+        structural: the checker rejects the cycle without analyzing
+        whether `Wrap` consumes `T`, even though this spelling would
+        resolve to `Int` and run.  A future change that adds
+        usage-analysis to admit it must revisit spec 2.6.3 first."""
+        errs = _check_err("""
+type Wrap<T> = Int;
+type C = Wrap<C>;
+
+private fn use_it(@C -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  0
+}
+""", "Cyclic type alias")
+        e132 = [e for e in errs if e.error_code == "E132"]
+        assert e132, (
+            f"Expected at least one diagnostic with error_code=E132; "
+            f"got: {[(e.error_code, e.description) for e in errs]}"
+        )
+        assert "C -> C" in e132[0].description, (
+            f"Expected cycle path 'C -> C' in description; "
+            f"got: {e132[0].description!r}"
+        )
+
+    def test_acyclic_alias_through_future_arg_ok(self) -> None:
+        """`type A = Future<Int>; type B = Future<A>` is a legal
+        *acyclic* nesting through `Future` type arguments — the #1059
+        walk must recurse into type_args without false-positiving a
+        finite chain that merely mentions another alias (#1059)."""
+        _check_ok("""
+type A = Future<Int>;
+type B = Future<A>;
+
+private fn use_it(@B -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  0
+}
+""")
+
+    def test_generic_alias_param_not_cycle_ok(self) -> None:
+        """A generic alias's own type parameter is bound locally and is
+        never a reference to a like-named alias: `type T = Int; type
+        Box<T> = Array<T>` must not read `Box`'s `<T>` as pointing at
+        the alias `T` and manufacture a spurious cycle (#1059)."""
+        _check_ok("""
+type T = Int;
+type Box<T> = Array<T>;
+
+private fn use_it(@Box<Int> -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  0
+}
+""")
 
     def test_acyclic_alias_chain_ok(self) -> None:
         """`type IntAlias = Int; type Pair = IntAlias` is an

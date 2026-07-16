@@ -637,21 +637,30 @@ class CallsArraysMixin:
     ) -> str | None:
         """Return the Vera element type name for a closure's return value.
 
-        Needed so array_map knows the size / load / store ops for the
-        output element type.  Handles the common case of an anonymous
-        function literal (``fn(...) -> T { ... }``).  Returns ``None``
-        when the return type can't be inferred from the AST alone.
+        Needed so array_map / array_mapi / array_fold know the size /
+        load / store ops for the output element type.  Handles both
+        closure-arg shapes the combinators accept: an inline anonymous
+        function literal (``fn(...) -> T { ... }``) and a fn-typed slot
+        reference (``@Mapper.0`` where ``type Mapper = fn(A -> T)``).
+        Returns ``None`` when no return type can be recovered from the
+        AST alone.
 
-        Post-#630: delegates to `_canonical_named_type` so that
-        closures with `RefinementType` returns (single-level or nested)
-        and aliased return types resolve to the canonical name.  The
-        pre-#630 shape only handled bare `NamedType` — a closure with
-        a refinement return passed to `array_map` would have silently
-        returned `None`, exactly the trigger pattern of the #602 /
-        #614 bug class.
+        Shape dispatch is delegated to :py:meth:`_closure_arg_return_type`
+        — the same resolver ``apply_fn`` uses (#867) — which yields an
+        ``AnonFn``'s declared ``return_type`` directly and resolves a
+        ``SlotRef`` through the transitive ``FnType`` alias chain.  Both
+        results feed `_canonical_named_type`, so `RefinementType` returns
+        (single-level or nested) and aliased return types resolve to the
+        canonical name.  Before #1056 only the ``AnonFn`` arm existed, so
+        a fn-typed slot handed to ``array_map`` E602-dropped with "could
+        not infer array_map closure return type" even though
+        ``apply_fn`` over the identical slot resolved fine; the pre-#630
+        bare-`NamedType`-only shape had the parallel gap for refinement
+        returns (#602 / #614).
         """
-        if isinstance(closure_arg, ast.AnonFn):
-            canonical = self._canonical_named_type(closure_arg.return_type)
+        ret_te = self._closure_arg_return_type(closure_arg)
+        if ret_te is not None:
+            canonical = self._canonical_named_type(ret_te)
             if canonical is not None:
                 return canonical.name
         return None
