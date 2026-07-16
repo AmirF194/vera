@@ -1152,6 +1152,96 @@ public fn f(-> @Int)
 """
         assert _run(source, fn="f") == 4747
 
+    # ---- #1037: an alias to a NON-zero-size compound maps to its WAT type --
+    # `_slot_name_to_wasm_type` resolved aliases through the same name-only
+    # `_resolve_base_type_name` hop PR #1035's review fixed in
+    # `_slot_name_erases_to_unit`: `type FI = Future<Int>` resolved to bare
+    # "Future" (type args dropped), matched no branch, returned None, and the
+    # component/binding E602-skipped its function on a check+verify-green
+    # program — while the direct `Future<Int>` spelling compiled fine.  The
+    # mapper now canonicalizes an alias to its target's full compound
+    # spelling through the same shared walk as the zero-size keying, so an
+    # alias maps exactly like its target written directly: the `FI`
+    # component binds a real i64, `await` recovers the payload, and the
+    # non-alias sibling lands at the correct offset.  Zero-size erasure is
+    # untouched (`FI` is NOT erased — see the #1031 tests above for the
+    # erasing duals).
+
+    def test_tuple_alias_to_future_int_let_destructure_runs(self) -> None:
+        """type FI = Future<Int>; a @FI component binds a real i64 local."""
+        source = """\
+type FI = Future<Int>;
+
+private fn mkt(@Int -> @Tuple<FI, Int>)
+  requires(true) ensures(true) effects(<Async>)
+{ Tuple(async(41), @Int.0) }
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let Tuple<@FI, @Int> = mkt(43);
+  await(@FI.0) * 100 + @Int.0
+}
+"""
+        assert _run(source, fn="f") == 4143
+
+    def test_tuple_alias_to_future_int_match_extract_runs(self) -> None:
+        """type FI = Future<Int>; a @FI match binding extracts the i64 field."""
+        source = """\
+type FI = Future<Int>;
+
+private fn mkt(@Int -> @Tuple<FI, Int>)
+  requires(true) ensures(true) effects(<Async>)
+{ Tuple(async(41), @Int.0) }
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @Tuple<FI, Int> = mkt(43);
+  match @Tuple<FI, Int>.0 {
+    Tuple(@FI, @Int) -> await(@FI.0) * 100 + @Int.0
+  }
+}
+"""
+        assert _run(source, fn="f") == 4143
+
+    def test_tuple_alias_chain_to_future_int_runs(self) -> None:
+        """An alias-of-alias chain to a representable compound (`FIB -> FIA
+        -> Future<IA>`, `IA -> Int`) maps through every hop to i64."""
+        source = """\
+type IA = Int;
+type FIA = Future<IA>;
+type FIB = FIA;
+
+private fn mkt(@Int -> @Tuple<FIB, Int>)
+  requires(true) ensures(true) effects(<Async>)
+{ Tuple(async(41), @Int.0) }
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let Tuple<@FIB, @Int> = mkt(43);
+  await(@FIB.0) * 100 + @Int.0
+}
+"""
+        assert _run(source, fn="f") == 4143
+
+    def test_standalone_let_alias_to_future_int_runs(self) -> None:
+        """A standalone `let @FI = async(41);` binds through the same mapper
+        (the plain-LetStmt caller in context.py) — `let @Future<Int>` already
+        compiled; the alias spelling must too."""
+        source = """\
+type FI = Future<Int>;
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @FI = async(41);
+  await(@FI.0)
+}
+"""
+        assert _run(source, fn="f") == 41
+
 
 class TestAdtStringFields:
     """ADT constructors with String/Array fields (bug #266)."""
