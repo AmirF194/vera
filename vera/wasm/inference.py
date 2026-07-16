@@ -2002,15 +2002,31 @@ class InferenceMixin:
             return "i32"
         return None
 
-    def _slot_name_erases_to_unit(self, name: str) -> bool:
+    def _slot_name_erases_to_unit(
+        self, name: str, _seen: frozenset[str] = frozenset(),
+    ) -> bool:
         """True if a slot type name is *zero-size* — no WASM representation.
 
         Zero-size means ``Unit``, or a transparent ``Future<…>`` whose payload
-        is itself zero-size (``Future<Unit>``, ``Future<Future<Unit>>``, …);
-        aliases are resolved first.  This is the slot-name mirror of
-        :func:`vera.types.erases_to_unit` and codegen's ``_type_expr_to_wasm_type``
-        (``Future<T>`` is representation-identical to ``T`` — #841), and it
-        follows the same ``Future<…>`` recursion as :meth:`_slot_name_to_wasm_type`.
+        is itself zero-size (``Future<Unit>``, ``Future<Future<Unit>>``, …).
+        This is the slot-name mirror of :func:`vera.types.erases_to_unit` and
+        codegen's ``_type_expr_to_wasm_type`` (``Future<T>`` is
+        representation-identical to ``T`` — #841), and it follows the same
+        ``Future<…>`` recursion as :meth:`_slot_name_to_wasm_type`.
+
+        An alias is canonicalized to its target's **full compound spelling**
+        (via the alias table's ``TypeExpr`` through
+        :func:`~vera.slots.type_expr_slot_name`) before the zero-size tests —
+        NOT through ``_resolve_base_type_name``, which recurses on the target's
+        name only and drops type arguments (``type FU = Future<Unit>`` resolved
+        to ``"Future"``, missed the ``Future<…>`` branch, and E602-skipped the
+        function on a check+verify-green program; PR #1035 review).  Chains of
+        aliases ending at a compound resolve hop by hop; ``_seen`` cuts alias
+        cycles (a user-facing E132 upstream — defence-in-depth here, matching
+        ``_resolve_base_type_name``), and it threads through the ``Future<…>``
+        recursion so a self-referential type argument also terminates.  The
+        ``_resolve_base_type_name`` fallthrough still handles what the
+        canonicalizer cannot name (and is a no-op for non-aliases).
 
         Distinct from ``_slot_name_to_wasm_type(name) is None``: that predicate
         ALSO fires for genuinely unrepresentable types (an unknown ADT, a bare
@@ -2022,9 +2038,13 @@ class InferenceMixin:
         ``Future<Unit>`` component missed the zero-size branch and skipped the
         whole function on a check-green program).
         """
+        if name in self._type_aliases and name not in _seen:
+            target = type_expr_slot_name(self._type_aliases[name])
+            if target is not None and target != name:
+                return self._slot_name_erases_to_unit(target, _seen | {name})
         name = self._resolve_base_type_name(name)
         if name == "Unit":
             return True
         if name.startswith("Future<") and name.endswith(">"):
-            return self._slot_name_erases_to_unit(name[7:-1])
+            return self._slot_name_erases_to_unit(name[7:-1], _seen)
         return False

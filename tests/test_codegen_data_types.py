@@ -1080,6 +1080,78 @@ public fn f(-> @Int)
 """
         assert _run(source, fn="f") == 4242
 
+    # ---- PR #1035 review: an ALIAS to a compound Future<Unit> erases too ----
+    # `_slot_name_erases_to_unit` originally resolved aliases through
+    # `_resolve_base_type_name`, which recurses on the alias target's NAME
+    # only and drops type arguments — "FU" resolved to "Future" (not
+    # "Future<Unit>"), failed the `Future<...>` branch, and the component
+    # fell through to the E602 CodegenSkip on a check+verify-green program.
+    # An alias INSIDE `Future<...>` already worked (the inner name is
+    # resolved after the wrapper is peeled); an alias TO `Future<...>` did
+    # not.  The helper now canonicalizes an alias to its FULL compound
+    # target spelling (via the alias table's TypeExpr) before the zero-size
+    # tests, including chains of aliases ending at a compound.
+
+    def test_tuple_alias_to_future_unit_let_destructure_runs(self) -> None:
+        """type FU = Future<Unit>; a @FU component let-destructures away."""
+        source = """\
+type FU = Future<Unit>;
+
+private fn mkt(@Int -> @Tuple<FU, Int>)
+  requires(true) ensures(true) effects(<Async>)
+{ Tuple(async(()), @Int.0) }
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let Tuple<@FU, @Int> = mkt(4343);
+  @Int.0
+}
+"""
+        assert _run(source, fn="f") == 4343
+
+    def test_tuple_alias_to_future_unit_match_extract_runs(self) -> None:
+        """type FU = Future<Unit>; a @FU match component erases; Int lands."""
+        source = """\
+type FU = Future<Unit>;
+
+private fn mkt(@Int -> @Tuple<FU, Int>)
+  requires(true) ensures(true) effects(<Async>)
+{ Tuple(async(()), @Int.0) }
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @Tuple<FU, Int> = mkt(4343);
+  match @Tuple<FU, Int>.0 {
+    Tuple(@FU, @Int) -> @Int.0
+  }
+}
+"""
+        assert _run(source, fn="f") == 4343
+
+    def test_tuple_alias_chain_to_compound_future_runs(self) -> None:
+        """An alias-of-alias chain ending at a compound (`FUB -> FUA ->
+        Future<UA>`, `UA -> Unit`) erases through every hop: the chain to
+        the compound target and the aliased payload inside it."""
+        source = """\
+type UA = Unit;
+type FUA = Future<UA>;
+type FUB = FUA;
+
+private fn mkt(@Int -> @Tuple<FUB, Int>)
+  requires(true) ensures(true) effects(<Async>)
+{ Tuple(async(()), @Int.0) }
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let Tuple<@FUB, @Int> = mkt(4747);
+  @Int.0
+}
+"""
+        assert _run(source, fn="f") == 4747
+
 
 class TestAdtStringFields:
     """ADT constructors with String/Array fields (bug #266)."""
