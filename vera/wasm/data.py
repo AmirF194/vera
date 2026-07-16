@@ -86,16 +86,25 @@ class DataMixin:
                 return None
             arg_wt = self._infer_expr_wasm_type(arg)
             if arg_wt is None:
-                # Distinguish a genuine zero-size `Unit` field (handled) from a
-                # true inability to infer the WASM type (still a skip).  Use
-                # `_is_void_expr` — the canonical "produces no stack value"
-                # check — rather than `_infer_vera_type == "Unit"`, so a
+                # Distinguish a genuine zero-size field (handled) from a true
+                # inability to infer the WASM type (still a skip).  `_is_void_expr`
+                # — the canonical "produces no stack value" check — catches a
                 # *Unit-returning call* in field position (`IO.print("x")`, a
-                # user `@Unit` fn, a void effect op, a `ModuleCall` to a
-                # `@Unit` fn) is also laid out zero-size instead of falling
-                # through to a skip (#902 completeness: `_infer_vera_type`
-                # returns None for Qualified/Module calls).
-                if self._is_void_expr(arg):
+                # user `@Unit` fn, a void effect op, a `ModuleCall` to a `@Unit`
+                # fn), laid out zero-size instead of skipping (#902 completeness:
+                # `_infer_vera_type` returns None for Qualified/Module calls).
+                # #1031: a *transparent* `Future<Unit>` field (`async(())`)
+                # produces no stack value either — `_infer_expr_wasm_type` already
+                # returned None by recursing through the Future to its zero-size
+                # Unit payload — but it is not structurally void, so also lay it
+                # out zero-size when its inferred Vera type erases to Unit.  This
+                # gates reachability: without it the constructor skips and the
+                # destructure/match declaration guards below are never reached.
+                arg_vera = self._infer_vera_type(arg)
+                if self._is_void_expr(arg) or (
+                    arg_vera is not None
+                    and self._slot_name_erases_to_unit(arg_vera)
+                ):
                     arg_wt = "unit"
                 else:
                     raise CodegenSkip(
@@ -256,8 +265,12 @@ class DataMixin:
                 raise CodegenSkip(
                     stmt, "let-destruct binding type has no slot name"
                 )
-            # Unit bindings: no WASM representation, just bind with dummy
-            if type_name == "Unit":
+            # Zero-size bindings (Unit, transparent Future<Unit>, …): no WASM
+            # representation — bind nothing and advance no offset, exactly like
+            # a zero-size constructor field.  Keyed on erasure, not the bare
+            # string "Unit" (#1031), so Future<Unit> erases like Unit instead of
+            # skipping the whole function.
+            if self._slot_name_erases_to_unit(type_name):
                 continue
             # Pair types (String, Array<T>): two consecutive i32 locals
             if self._is_pair_type_name(type_name):
@@ -656,8 +669,10 @@ class DataMixin:
                         sub_pat,
                         "constructor field binding has no slot name",
                     )
-                # Unit bindings: no WASM representation, skip extraction
-                if type_name == "Unit":
+                # Zero-size bindings (Unit, transparent Future<Unit>, …): no
+                # WASM representation — skip extraction, advance no offset.
+                # Keyed on erasure, not the bare string "Unit" (#1031).
+                if self._slot_name_erases_to_unit(type_name):
                     continue
                 # Pair types (String, Array<T>): two consecutive i32 locals
                 if self._is_pair_type_name(type_name):
@@ -815,12 +830,18 @@ class DataMixin:
                     sub_pat,
                     "sub-pattern binding has no slot name",
                 )
-            # Unit bindings: no WASM representation — use generic layout type
-            if type_name == "Unit":
-                if field_index < len(layout.field_offsets):
-                    _, generic_wt = layout.field_offsets[field_index]
-                    return generic_wt
-                return "i32"  # safe default
+            # Zero-size bindings (Unit, transparent Future<Unit>, …): no WASM
+            # representation — construction stores NOTHING for them, so the
+            # offset walk must give them zero width (#1042).  Consulting the
+            # registered layout here is wrong twice over: the builtin Tuple's
+            # layout is empty (its per-call layout is recomputed erasure-aware),
+            # and the registered user-ADT layout gives zero-size fields 4 bytes
+            # (#1043) — either way the walk would advance past bytes that were
+            # never stored and every later nested tag check would read garbage.
+            # Keyed on erasure, not the bare string "Unit" (#1031), so
+            # Future<Unit> behaves identically to Unit.
+            if self._slot_name_erases_to_unit(type_name):
+                return "unit"
             # Pair types (String, Array<T>) use i32_pair representation
             if self._is_pair_type_name(type_name):
                 return "i32_pair"
@@ -852,8 +873,12 @@ class DataMixin:
         Returns a list of instruction-lists, each producing an ``i32``
         boolean on the stack.  Returns ``None`` on layout lookup failure.
         """
-        _sizes = {"i32": 4, "i64": 8, "f64": 8, "i32_pair": 8}
-        _aligns = {"i32": 4, "i64": 8, "f64": 8, "i32_pair": 4}
+        # "unit" is a zero-size binding (Unit, transparent Future<Unit>):
+        # construction stores nothing for it, so the walk gives it zero width
+        # and no alignment — the extraction walks reach the same result by
+        # `continue`-ing on erased components before their map lookups (#1042).
+        _sizes = {"i32": 4, "i64": 8, "f64": 8, "i32_pair": 8, "unit": 0}
+        _aligns = {"i32": 4, "i64": 8, "f64": 8, "i32_pair": 4, "unit": 1}
         offset = 4  # after tag
 
         checks: list[list[str]] = []

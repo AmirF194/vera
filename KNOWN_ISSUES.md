@@ -9,7 +9,6 @@ Defects in shipped compiler, runtime, or tooling behaviour — this table matche
 | Bug | Issue |
 |-----|-------|
 | `ch05_closure_nat_return` (a run-level conformance program in the pre-commit + CI gate) trapped **once** in a full `check_conformance.py` run (`unreachable` in `main` — the sentinel `assert` or a GC shadow-stack guard) and has not reproduced in ~960 attempts across isolated, parallel, eager-GC, and hash-seed-swept executions; the emitted WAT is deterministic and correct. Suspected rare runtime/GC/wasmtime interaction, tracked so a future intermittent CI red resolves here instead of starting fresh. | [#996](https://github.com/aallan/vera/issues/996) |
-| A `Future<Unit>` component in a destructuring `let` or match binding is check-green but **E602-skips** the whole function — the zero-size declaration guards in `wasm/data.py` compare the bare string `"Unit"` instead of keying on `erases_to_unit` (the closure path already recurses correctly). Loud and exotically reachable (the constructor-argument inference independently skips the tuple construction); fix is to key the three guards (and the constructor-arg inference) on zero-size-ness, codegen and checker moving together. | [#1031](https://github.com/aallan/vera/issues/1031) |
 
 ## Limitations
 

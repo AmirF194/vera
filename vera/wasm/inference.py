@@ -1957,8 +1957,56 @@ class InferenceMixin:
             return "i32"
         return None
 
-    def _slot_name_to_wasm_type(self, name: str) -> str | None:
-        """Map a slot type name to a WAT type string."""
+    def _canonicalize_alias_slot_name(
+        self, name: str, _seen: frozenset[str] = frozenset(),
+    ) -> tuple[str, frozenset[str]]:
+        """Resolve an alias slot name to its target's FULL compound spelling.
+
+        Hop by hop through alias-of-alias chains (``FUB -> FUA ->
+        Future<UA>``), keeping type arguments intact — unlike
+        ``_resolve_base_type_name``, which recurses on the target's NAME only
+        and drops them (``type FU = Future<Unit>`` resolved to ``"Future"`` —
+        PR #1035 review; ``type FI = Future<Int>`` likewise — #1037).  The
+        shared walk under ``_slot_name_erases_to_unit`` and
+        ``_slot_name_to_wasm_type``, so the zero-size test and the WAT-type
+        mapper canonicalize identically: an alias behaves exactly like
+        writing its target's spelling directly.
+
+        Returns the canonical name plus the accumulated seen-set; callers
+        whose own recursion re-enters this walk (the transparent
+        ``Future<...>`` payload peel) thread it through so a self-referential
+        type argument (``type F = Future<F>``) terminates.  Alias cycles are
+        a user-facing E132 upstream — the cut here is defence-in-depth,
+        matching ``_resolve_base_type_name``.  A non-alias name, or an alias
+        whose target has no nameable slot form, is returned unchanged for
+        the caller's own fallthrough handling.
+        """
+        while name in self._type_aliases and name not in _seen:
+            target = type_expr_slot_name(self._type_aliases[name])
+            if target is None or target == name:
+                break
+            _seen = _seen | {name}
+            name = target
+        return name, _seen
+
+    def _slot_name_to_wasm_type(
+        self, name: str, _seen: frozenset[str] = frozenset(),
+    ) -> str | None:
+        """Map a slot type name to a WAT type string.
+
+        An alias is canonicalized to its target's full compound spelling
+        first (the shared :meth:`_canonicalize_alias_slot_name` walk): the
+        prior name-only ``_resolve_base_type_name`` hop dropped type
+        arguments, so an alias TO a compound transparent wrapper (``type FI
+        = Future<Int>``) resolved to bare ``"Future"``, matched no branch,
+        and returned ``None`` — E602-skipping the enclosing function of a
+        destructure / match / let binding on a check+verify-green program
+        (#1037; the zero-size dual of the same disease was PR #1035's
+        review finding), while the direct ``Future<Int>`` spelling
+        compiled.  Canonicalizing makes an alias map exactly like its
+        target written directly.
+        """
+        name, _seen = self._canonicalize_alias_slot_name(name, _seen)
         name = self._resolve_base_type_name(name)
         if name in ("Int", "Nat"):
             return "i64"
@@ -1969,7 +2017,7 @@ class InferenceMixin:
         # Future<T> is WASM-transparent — same representation as T
         if name.startswith("Future<") and name.endswith(">"):
             inner = name[7:-1]
-            return self._slot_name_to_wasm_type(inner)
+            return self._slot_name_to_wasm_type(inner, _seen)
         # Map/Set/Decimal are opaque host-import handles (i32)
         if name.startswith("Map<") or name.startswith("Set<") or name == "Decimal":
             return "i32"
@@ -2001,3 +2049,45 @@ class InferenceMixin:
         if name == "Fn":
             return "i32"
         return None
+
+    def _slot_name_erases_to_unit(
+        self, name: str, _seen: frozenset[str] = frozenset(),
+    ) -> bool:
+        """True if a slot type name is *zero-size* — no WASM representation.
+
+        Zero-size means ``Unit``, or a transparent ``Future<…>`` whose payload
+        is itself zero-size (``Future<Unit>``, ``Future<Future<Unit>>``, …).
+        This is the slot-name mirror of :func:`vera.types.erases_to_unit` and
+        codegen's ``_type_expr_to_wasm_type`` (``Future<T>`` is
+        representation-identical to ``T`` — #841), and it follows the same
+        ``Future<…>`` recursion as :meth:`_slot_name_to_wasm_type`.
+
+        An alias is canonicalized to its target's **full compound spelling**
+        first (the shared :meth:`_canonicalize_alias_slot_name` walk, hop by
+        hop for chains, cycle-cut by ``_seen``) — NOT through
+        ``_resolve_base_type_name``, which recurses on the target's name only
+        and drops type arguments (``type FU = Future<Unit>`` resolved to
+        ``"Future"``, missed the ``Future<…>`` branch, and E602-skipped the
+        function on a check+verify-green program; PR #1035 review).  The
+        seen-set threads through the ``Future<…>`` recursion so a
+        self-referential type argument also terminates, and the
+        ``_resolve_base_type_name`` fallthrough still handles what the
+        canonicalizer cannot name (a no-op for non-aliases).
+
+        Distinct from ``_slot_name_to_wasm_type(name) is None``: that predicate
+        ALSO fires for genuinely unrepresentable types (an unknown ADT, a bare
+        type variable), which are a real codegen gap that must still ``CodegenSkip``
+        rather than silently erase.  The declaration-position guards need to tell
+        "erase this zero-size field" apart from "skip — cannot represent", so
+        they key on THIS check, not on ``_slot_name_to_wasm_type`` being ``None``
+        (#1031: the guards previously compared the bare string ``"Unit"``, so a
+        ``Future<Unit>`` component missed the zero-size branch and skipped the
+        whole function on a check-green program).
+        """
+        name, _seen = self._canonicalize_alias_slot_name(name, _seen)
+        name = self._resolve_base_type_name(name)
+        if name == "Unit":
+            return True
+        if name.startswith("Future<") and name.endswith(">"):
+            return self._slot_name_erases_to_unit(name[7:-1], _seen)
+        return False

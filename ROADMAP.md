@@ -12,7 +12,7 @@ Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verificati
 
 ## Where we are
 
-7,536 tests, 160 conformance programs, 38 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
+7,548 tests, 160 conformance programs, 38 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
 
 ## Stage 19 — The verification completeness sprint
 
@@ -20,11 +20,13 @@ Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verificati
 
 ### Bug sprint — monomorphizer and verifier gaps first
 
-Three bugs remain in the sprint's bug-PR cluster (the verification-completeness rows below are the sprint's remaining scope):
+Three PRs remain in the sprint's bug-PR cluster (the verification-completeness rows below are the sprint's remaining scope):
 
-**PR D — zero-size declaration guards (2).** [#1031](https://github.com/aallan/vera/issues/1031) a `Future<Unit>` destructure/match component is check-green but E602-skips the enclosing fn — four `wasm/data.py` declaration guards key on the bare `Unit` name instead of representation (`erases_to_unit`); [#1037](https://github.com/aallan/vera/issues/1037) the sibling name-only alias resolution in `_slot_name_to_wasm_type` skips `type FI = Future<Int>;` components the same way. In review as [#1035](https://github.com/aallan/vera/pull/1035).
+**PR E — await-scrutinee inference (1).** [#1038](https://github.com/aallan/vera/issues/1038) `match await(@Future<ADT>.0)` is check-green but E602-skips on scrutinee WASM-type inference — unwrap the awaited `Future<T>` the way the let-binding path already does. In review as [#1040](https://github.com/aallan/vera/pull/1040).
 
-**PR E — await-scrutinee inference (1).** [#1038](https://github.com/aallan/vera/issues/1038) `match await(@Future<ADT>.0)` is check-green but E602-skips on scrutinee WASM-type inference — unwrap the awaited `Future<T>` the way the let-binding path already does. Fix in progress.
+**PR F — Future representation-transparency in the let/capture/element paths (5).** [#1039](https://github.com/aallan/vera/issues/1039) `let @Future<String>` (pair-represented Future payloads) E602-skips on name-keyed pair detection, plus the sibling name-keyed deciders its adversarial review confirmed: closure capture of a `Future<T>` free variable ([#1044](https://github.com/aallan/vera/issues/1044), silent wrong value / trap), `Array<Future<T>>` element representation ([#1045](https://github.com/aallan/vera/issues/1045), traps), an alias of a pair-payload Future ([#1046](https://github.com/aallan/vera/issues/1046), still skips), and bare-`Future<String>` return display ([#1047](https://github.com/aallan/vera/issues/1047), minor). In review as [#1041](https://github.com/aallan/vera/pull/1041).
+
+**PR G — registered-layout zero-size fields (1).** [#1043](https://github.com/aallan/vera/issues/1043) the registered constructor layouts give a zero-size field (`Unit`, transparent `Future<Unit>`) a 4-byte slot while construction stores it at zero width — wildcard tag walks and structural `Eq` read the wrong offsets (silent wrong arm / false inequality). Fix in progress.
 
 [#996](https://github.com/aallan/vera/issues/996) stays a watch-only row — an unreproducible conformance flake, not a fix target.
 
