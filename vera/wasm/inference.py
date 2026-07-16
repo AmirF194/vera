@@ -1500,10 +1500,14 @@ class InferenceMixin:
                 # return NamedType via the same `_get_arg_type_info_wasm`
                 # consultor the sibling Vera-type inference
                 # (`_infer_fncall_vera_type`) and instantiation discovery use,
-                # so all three agree on the shape.  Type-var-element builtins
-                # (`array_map`/`array_mapi`/`array_flatten`) are absent from
-                # that consultor's tables, so this stays None for them and the
-                # function is still (correctly) dropped rather than mis-typed.
+                # so all three agree on the shape.  Type-variable-element
+                # builtins (`array_map`/`array_reverse`/`map_keys`/…) are
+                # absent from that consultor's tables — their element type
+                # depends on the arguments — so `_builtin_call_ret_named_type`
+                # derives their return NamedType from the call's arguments per
+                # mechanism class (#1051).  A genuinely unresolvable argument
+                # shape still yields None, so the function keeps the loud
+                # [E602] skip rather than being mis-typed.
                 canonical = self._builtin_call_ret_named_type(coll)
             if canonical is not None:
                 ta_te = self._alias_array_element(
@@ -1519,22 +1523,117 @@ class InferenceMixin:
         parameterized type (e.g. ``array_concat(...)`` → ``Array<Int>``), or
         ``None`` if the shape cannot be resolved.
 
-        Reuses :py:meth:`_get_arg_type_info_wasm` — the
-        ``(type_name, type_arg_names)`` consultor the Vera-type inference path
-        already uses for builtin returns: arg-forwarding for
-        ``array_concat`` / ``array_append`` / ``array_slice`` /
-        ``array_filter``, plus the ``_BUILTIN_PARAMETERIZED_RETURNS`` table
-        for the concrete-Array builtins (``array_range``, ``string_split``,
-        ``json_keys``, …).  Its string result is rebuilt into a ``NamedType``
-        via ``Monomorphizer._parse_type_name`` (which parses nested inners
-        like ``Array<Json>``).  Sharing one consultor keeps the index element
-        type in lockstep with clone-name discovery (#1048).
+        Two resolution paths:
+
+        1. Builtins whose return NamedType is recoverable from the shared
+           ``(type_name, type_arg_names)`` consultor
+           (:py:meth:`_get_arg_type_info_wasm`, via
+           :py:meth:`_named_type_from_arg_info`): arg-forwarding for
+           ``array_concat`` / ``array_append`` / ``array_slice`` /
+           ``array_filter``, plus the ``_BUILTIN_PARAMETERIZED_RETURNS`` table
+           for the concrete-Array builtins (``array_range``, ``string_split``,
+           ``json_keys``, …).  Sharing that consultor keeps the index element
+           type in lockstep with clone-name discovery (#1048).
+
+        2. #1051: the eight *type-variable-element* Array-returning builtins
+           (``array_reverse`` / ``array_sort_by`` / ``array_flatten`` /
+           ``map_keys`` / ``map_values`` / ``set_to_array`` / ``array_map`` /
+           ``array_mapi``) are deliberately ABSENT from that consultor's tables
+           — their element type depends on the CALL's arguments, not a fixed
+           signature, and ``_BUILTIN_PARAMETERIZED_RETURNS`` is registry-locked
+           to type-var-free returns (``test_parameterized_table_matches_registry``
+           rejects any TypeVar-carrying entry, else discovery would bind a
+           phantom var).  Their return NamedType is derived from the arguments
+           in :py:meth:`_typevar_elem_builtin_ret_named_type`, kept OFF the
+           shared consultor (this helper is only reached from
+           :py:meth:`_infer_index_element_type_expr`), so clone-name discovery
+           is untouched.
         """
-        info = self._get_arg_type_info_wasm(call)
+        nt = self._named_type_from_arg_info(call)
+        if nt is not None:
+            return nt
+        return self._typevar_elem_builtin_ret_named_type(call)
+
+    def _named_type_from_arg_info(
+        self, expr: ast.Expr,
+    ) -> ast.NamedType | None:
+        """Rebuild an expression's parameterized Vera type as a ``NamedType``
+        from the shared :py:meth:`_get_arg_type_info_wasm` consultor:
+        ``(type_name, type_arg_names)`` → ``NamedType``, nested inners parsed
+        via ``Monomorphizer._parse_type_name`` (which handles shapes like
+        ``Array<Json>``).  ``None`` when neither the consultor nor the
+        off-consultor fallbacks below can resolve the shape.
+
+        Alias spellings resolve here so every consumer sees the target
+        type: a bare alias slot canonicalizes (#1055), a GENERIC alias's
+        args substitute through its target (#1068 — `MyMap<Int>` with
+        `type MyMap<V> = Map<String, V>` resolves to `Map<String, Int>`,
+        never a blind read of the alias's own args), and a registered
+        user fn's declared return recovers shapes the consultor reports
+        incompletely or not at all — nested type args (#1053) and bare
+        alias returns (#1071) — OFF the consultor, so clone-name
+        discovery is untouched.  A Block argument resolves via its tail
+        expression (#1071).
+        """
+        # #1071: a Block-wrapped argument (`map_values({ @M.0 })`) types as
+        # its tail expression.
+        while isinstance(expr, ast.Block):
+            expr = expr.expr
+        info = self._get_arg_type_info_wasm(expr)
         if info is None:
-            return None
+            # #1071: a user fn whose declared return is a BARE alias of a
+            # container (`fn mkm(-> @M)` with `type M = Map<String, Int>`)
+            # has no type args for the consultor's user-fn arm to report,
+            # so it exits None before any alias handling — recover the
+            # declared return directly.
+            return self._user_fn_declared_ret_named_type(expr)
         type_name, type_arg_names = info
+        # #1055: an alias-spelled argument (`type Grid = Array<Array<Int>>;`
+        # then `@Grid.0`) arrives as its bare alias name with NO type args,
+        # so the class derivations never see the container shape and the
+        # index E602-dropped where the direct spelling compiled.
+        # Canonicalize to the target's full compound spelling (the #1037
+        # walk) and parse that instead.  A GENERIC alias name is excluded —
+        # its target carries the alias's own free type params, which must
+        # not leak; without args it is unresolvable (falls through to the
+        # arity-checked substitution path below, which yields None).
+        if not type_arg_names and type_name not in self._type_alias_params:
+            canonical, _ = self._canonicalize_alias_slot_name(type_name)
+            if canonical != type_name:
+                parsed = Monomorphizer._parse_type_name(canonical)
+                if isinstance(parsed, ast.NamedType):
+                    return parsed
+                return None
         if any(a is None for a in type_arg_names):
+            # #1053 user-fn extension: a registered non-generic user fn's
+            # PARAMETERIZED return reaches the consultor with nested type-arg
+            # positions blanked to None (its user-fn arm deliberately reports
+            # only depth-one names, staying in clone-name-discovery lockstep),
+            # so `array_flatten(mkn())` with `mkn(-> @Array<Array<Int>>)`
+            # rebuilt as `("Array", (None,))` and stayed unresolvable.  The
+            # declared return TypeExpr carries the full nesting — canonicalize
+            # it directly, OFF the consultor, so discovery is untouched.
+            return self._user_fn_declared_ret_named_type(expr)
+        # #1068: a GENERIC alias spelling (`type MyMap<V> = Map<String, V>;`
+        # then a `@MyMap<Int>`-returning argument) must never have its type
+        # args consumed as the TARGET's — `("MyMap", ("Int",))`'s single arg
+        # is the alias's V, not the Map's K.  Substitute the args through
+        # the alias target and canonicalize; an arity mismatch (or a target
+        # that resolves to no NamedType) is unresolvable — return None so
+        # the caller keeps the loud skip.
+        alias_params = self._type_alias_params.get(type_name)
+        if alias_params is not None:
+            target = self._type_aliases.get(type_name)
+            if (target is not None
+                    and type_arg_names
+                    and len(type_arg_names) == len(alias_params)):
+                subst: dict[str, ast.TypeExpr] = {
+                    p: Monomorphizer._parse_type_name(a)
+                    for p, a in zip(alias_params, type_arg_names)
+                    if a is not None
+                }
+                resolved = substitute_type_vars(target, subst)
+                return self._canonical_named_type(resolved)
             return None
         type_args = tuple(
             Monomorphizer._parse_type_name(a)
@@ -1542,6 +1641,98 @@ class InferenceMixin:
             if a is not None
         )
         return ast.NamedType(name=type_name, type_args=type_args or None)
+
+    def _user_fn_declared_ret_named_type(
+        self, expr: ast.Expr,
+    ) -> ast.NamedType | None:
+        """Canonical ``NamedType`` of a registered NON-generic user fn call's
+        declared return — the off-consultor recovery behind
+        :py:meth:`_named_type_from_arg_info` for return shapes the shared
+        consultor cannot report: nested type args (#1053, blanked for
+        discovery lockstep) and bare alias returns (#1071, no type args to
+        report at all).  ``None`` for anything else — non-calls, generic
+        fns (their declared return is over their OWN type vars), builtins,
+        and unresolvable return TypeExprs — so callers keep the loud skip.
+        """
+        if (not isinstance(expr, ast.FnCall)
+                or expr.name in self._generic_fn_info):
+            return None
+        ret_te = self._fn_ret_type_exprs.get(expr.name)
+        if ret_te is None:
+            return None
+        return self._canonical_named_type(ret_te)
+
+    def _typevar_elem_builtin_ret_named_type(
+        self, call: ast.FnCall,
+    ) -> ast.NamedType | None:
+        """#1051: derive the return ``NamedType`` of a type-variable-element
+        Array-returning builtin from its arguments, per mechanism class.  Any
+        argument shape that cannot be resolved yields ``None`` — the caller
+        then keeps the loud [E602] skip rather than guessing an element type.
+
+        Argument types come from :py:meth:`_named_type_from_arg_info` (the
+        shared consultor), so a ``SlotRef`` array/container argument resolves,
+        as does an argument that is itself a *consultor-resolvable* builtin call
+        (``array_concat`` / ``array_range`` / …, via the consultor's own FnCall
+        arm).  An argument that is itself a type-variable-element builtin
+        (``array_flatten(...)`` etc.) stays unresolved here — but such nested
+        calls already fail to emit as a call argument upstream, so the enclosing
+        index drops regardless.
+        """
+        name = call.name
+        args = call.args
+        # ---- Class 1: argument-forwarding --------------------------------
+        # array_reverse(Array<T>) and array_sort_by(Array<T>, cmp) return
+        # arg0's type verbatim; array_flatten(Array<Array<T>>) returns arg0's
+        # type with one Array<> layer unwrapped.
+        if name in ("array_reverse", "array_sort_by") and args:
+            return self._named_type_from_arg_info(args[0])
+        if name == "array_flatten" and args:
+            outer = self._named_type_from_arg_info(args[0])
+            if (outer is not None and outer.name == "Array"
+                    and outer.type_args
+                    and isinstance(outer.type_args[0], ast.NamedType)):
+                return outer.type_args[0]
+            return None
+        # ---- Class 2: container-arg-derived ------------------------------
+        # map_keys(Map<K, V>) -> Array<K>; map_values(Map<K, V>) -> Array<V>;
+        # set_to_array(Set<T>) -> Array<T>.
+        if name in ("map_keys", "map_values", "set_to_array") and args:
+            container = self._named_type_from_arg_info(args[0])
+            # #1068: verify the resolved argument type IS the expected
+            # container before reading K/V/T off its type args.  The
+            # rebuilder resolves alias spellings (including a generic
+            # alias's substitution through its target), so a well-formed
+            # aliased argument arrives here named `Map`/`Set`; anything
+            # else must not have its args consumed positionally — a
+            # `("MyMap", ("Int",))` read K = Int where the target says
+            # String, deriving an element type the emission contradicts
+            # (a validation-failing module behind a clean `vera compile`).
+            expected = "Set" if name == "set_to_array" else "Map"
+            if (container is None or container.name != expected
+                    or not container.type_args):
+                return None
+            if name == "map_values":
+                if len(container.type_args) < 2:
+                    return None
+                elem = container.type_args[1]
+            else:
+                elem = container.type_args[0]
+            if isinstance(elem, ast.NamedType):
+                return ast.NamedType(name="Array", type_args=(elem,))
+            return None
+        # ---- Class 3: closure-return-derived -----------------------------
+        # array_map(Array<A>, fn(A -> B)) and
+        # array_mapi(Array<A>, fn(A, Nat -> B)) return Array<B>; B is the
+        # closure argument's declared return type.
+        if name in ("array_map", "array_mapi") and len(args) >= 2:
+            ret_te = self._closure_arg_return_type(args[1])
+            if ret_te is not None:
+                elem_nt = self._canonical_named_type(ret_te)
+                if elem_nt is not None:
+                    return ast.NamedType(name="Array", type_args=(elem_nt,))
+            return None
+        return None
 
     def _alias_array_element(
         self,
