@@ -396,10 +396,19 @@ class DataMixin:
         # gate drives the FIX-1 tail-call collector, so the two stay in lockstep.
         guard_widen_arms = self._is_hetero_int_widen_join(expr)
 
+        # #1060: the scrutinee's CONCRETE Vera type (e.g. "Box<Unit>") drives the
+        # instantiation-aware width of a WILDCARD over a bare type-parameter
+        # field — that field registers generically as i32 but is laid out per
+        # the concrete type arg at construction (Unit → 0 bytes).  None when the
+        # scrutinee type is unrecoverable; a type-parameter wildcard then
+        # LOUD-skips rather than reading a shifted offset.
+        scrutinee_type = self._infer_vera_type(expr.scrutinee)
+
         # Compile arms as chained if-else
         arm_instrs = self._compile_match_arms(
             expr.arms, scr_local, scr_wasm_type, result_type, env,
             expr.scrutinee, guard_widen_arms=guard_widen_arms,
+            scrutinee_type=scrutinee_type,
         )
         if arm_instrs is None:
             return None
@@ -427,12 +436,18 @@ class DataMixin:
         scrutinee: ast.Expr | None = None,
         *,
         guard_widen_arms: bool = False,
+        scrutinee_type: str | None = None,
     ) -> list[str] | None:
         """Compile match arms as a chained if-else cascade.
 
         *scrutinee* is the match scrutinee expression (#813): threaded so a
         top-level binding pattern can tell whether the bound value is @Nat
         (`_result_is_nat`) and thus needs the @Nat -> @Int widening guard.
+
+        *scrutinee_type* (#1060) is that scrutinee's concrete Vera type name
+        (e.g. "Box<Unit>"), threaded so a WILDCARD over a bare type-parameter
+        field advances by the concrete (instantiation-aware) width, not the
+        generic i32 placeholder.
 
         *guard_widen_arms* (#820) is True for a heterogeneous @Int-join match:
         each arm body that is intrinsically @Nat (`_result_is_nat`) widens into
@@ -446,13 +461,14 @@ class DataMixin:
 
         # Check if this arm needs a condition
         cond = self._translate_match_condition(
-            arm.pattern, scr_local, scr_wasm_type
+            arm.pattern, scr_local, scr_wasm_type, scrutinee_type,
         )
 
         if cond is None or not remaining:
             # Unconditional arm (catch-all) or last arm — emit directly
             setup = self._setup_match_arm_env(
-                arm.pattern, scr_local, scr_wasm_type, env, scrutinee
+                arm.pattern, scr_local, scr_wasm_type, env, scrutinee,
+                scrutinee_type,
             )
             if setup is None:
                 return None
@@ -470,7 +486,8 @@ class DataMixin:
 
         # Conditional arm with more arms following
         setup = self._setup_match_arm_env(
-            arm.pattern, scr_local, scr_wasm_type, env, scrutinee
+            arm.pattern, scr_local, scr_wasm_type, env, scrutinee,
+            scrutinee_type,
         )
         if setup is None:
             return None
@@ -487,7 +504,7 @@ class DataMixin:
         # Compile remaining arms (else branch)
         else_instrs = self._compile_match_arms(
             remaining, scr_local, scr_wasm_type, result_type, env, scrutinee,
-            guard_widen_arms=guard_widen_arms,
+            guard_widen_arms=guard_widen_arms, scrutinee_type=scrutinee_type,
         )
         if else_instrs is None:
             return None
@@ -516,10 +533,17 @@ class DataMixin:
         pattern: ast.Pattern,
         scr_local: int,
         scr_wasm_type: str,
+        scrutinee_type: str | None = None,
     ) -> list[str] | None:
         """Emit i32 condition for a pattern check.
 
         Returns None for unconditional patterns (wildcard/binding).
+
+        *scrutinee_type* (#1060) is the scrutinee's concrete Vera type name,
+        threaded into the nested tag-check walk so a WILDCARD over a bare
+        type-parameter field before a nested constructor sub-pattern advances
+        the offset by the concrete width (Unit → 0 bytes), keeping the nested
+        tag load on the right address.
         """
         if isinstance(pattern, (ast.NullaryPattern, ast.ConstructorPattern)):
             name = pattern.name
@@ -538,7 +562,7 @@ class DataMixin:
             # AND-chain nested tag checks for constructor sub-patterns
             if isinstance(pattern, ast.ConstructorPattern):
                 nested = self._collect_nested_tag_checks(
-                    pattern, scr_local, layout,
+                    pattern, scr_local, layout, scrutinee_type,
                 )
                 if nested is None:
                     return None
@@ -570,10 +594,16 @@ class DataMixin:
         scr_wasm_type: str,
         env: WasmSlotEnv,
         scrutinee: ast.Expr | None = None,
+        scrutinee_type: str | None = None,
     ) -> tuple[list[str], WasmSlotEnv] | None:
         """Extract fields and set up environment bindings for a match arm.
 
         Returns (instructions, new_env) or None on failure.
+
+        *scrutinee_type* (#1060) is the scrutinee's concrete Vera type name,
+        forwarded to the field-extraction walk so a WILDCARD over a bare
+        type-parameter field advances the offset by the instantiation-aware
+        width instead of the generic i32 placeholder.
         """
         if isinstance(pattern, (ast.WildcardPattern, ast.NullaryPattern,
                                 ast.BoolPattern, ast.IntPattern)):
@@ -634,7 +664,7 @@ class DataMixin:
                     f"unknown constructor {pattern.name!r} in match arm pattern",
                 )
             return self._extract_constructor_fields(
-                pattern, scr_local, layout, env
+                pattern, scr_local, layout, env, scrutinee_type,
             )
 
         raise CodegenSkip(
@@ -648,14 +678,26 @@ class DataMixin:
         scr_local: int,
         layout: ConstructorLayout,
         env: WasmSlotEnv,
+        scrutinee_type: str | None = None,
     ) -> tuple[list[str], WasmSlotEnv] | None:
         """Extract fields from a constructor match into locals.
 
         Computes field offsets from concrete binding types (same
         monomorphization approach as _translate_constructor_call).
+
+        *scrutinee_type* (#1060) is the concrete Vera type name of the value at
+        *scr_local* (e.g. "Box<Unit>").  A WILDCARD over a bare type-parameter
+        field consults it to recover the field's instantiation-aware width; a
+        nested constructor sub-pattern recurses with the field's own resolved
+        concrete type so deeper type-parameter wildcards stay correct too.
         """
-        _sizes = {"i32": 4, "i64": 8, "f64": 8, "i32_pair": 8}
-        _aligns = {"i32": 4, "i64": 8, "f64": 8, "i32_pair": 4}
+        # #1043: `"unit"` (a zero-size erases-to-Unit field) is size 0 / align 1
+        # — a WILDCARD over such a field reads `"unit"` from the (now
+        # erasure-aware) registered `field_offsets` and must advance the offset
+        # by nothing, matching construction.  A `"unit"` BINDING is handled by
+        # the `type_name == "Unit"` skip above and never reaches these maps.
+        _sizes = {"i32": 4, "i64": 8, "f64": 8, "i32_pair": 8, "unit": 0}
+        _aligns = {"i32": 4, "i64": 8, "f64": 8, "i32_pair": 4, "unit": 1}
         offset = 4  # after tag (i32, 4 bytes)
         instrs: list[str] = []
         new_env = env
@@ -761,12 +803,23 @@ class DataMixin:
                 offset += _sizes.get(wt, 8)
 
             elif isinstance(sub_pat, ast.WildcardPattern):
-                # Skip this field but advance offset using layout's type
+                # Skip this field but advance the offset by its width.  #1060:
+                # a bare type-PARAMETER field registers generically as i32, but
+                # construction laid it out per the concrete instantiation
+                # (Unit → 0 bytes) — recompute the width from the scrutinee's
+                # type args, mirroring the eq/show recomputation, so every later
+                # field reads the address construction actually wrote.  A
+                # concrete field keeps its registered (#1043-erasure-aware)
+                # width; an unrecoverable type-parameter instantiation LOUD-skips.
                 if i < len(layout.field_offsets):
                     _, generic_wt = layout.field_offsets[i]
-                    align = _aligns.get(generic_wt, 8)
+                    wt = self._wildcard_field_wasm_type(
+                        pattern.name, i, generic_wt, scrutinee_type, sub_pat,
+                        self._later_sub_pattern_reads(pattern.sub_patterns, i),
+                    )
+                    align = _aligns.get(wt, 8)
                     offset = (offset + align - 1) & ~(align - 1)
-                    offset += _sizes.get(generic_wt, 8)
+                    offset += _sizes.get(wt, 8)
 
             elif isinstance(sub_pat, ast.ConstructorPattern):
                 # Nested constructor: load the field pointer (i32),
@@ -783,9 +836,15 @@ class DataMixin:
                 instrs.append(f"local.get {scr_local}")
                 instrs.append(f"i32.load offset={offset}")
                 instrs.append(f"local.set {sub_local}")
-                # Recurse into the nested constructor's sub-patterns
+                # Recurse into the nested constructor's sub-patterns, resolving
+                # this field's concrete type against the outer instantiation
+                # (#1060) so a type-parameter wildcard deeper in the nest
+                # recomputes its width too.
                 nested = self._extract_constructor_fields(
                     sub_pat, sub_local, sub_layout, new_env,
+                    self._resolve_nested_scrutinee_type(
+                        pattern.name, i, scrutinee_type,
+                    ),
                 )
                 if nested is None:
                     return None
@@ -813,15 +872,49 @@ class DataMixin:
     # Nested pattern helpers
     # -----------------------------------------------------------------
 
+    def _later_sub_pattern_reads(
+        self, sub_patterns: tuple[ast.Pattern, ...], index: int,
+    ) -> bool:
+        """True if any sub-pattern after *index* reads a field.  #1060: a
+        wildcard's mis-computed width only corrupts the offsets of LATER
+        reads; a trailing wildcard — or one followed only by other wildcards —
+        is harmless, so an unrecoverable type-parameter wildcard there need
+        not LOUD-skip a compilable function.
+
+        A zero-size BINDING (``@Unit``, ``@Future<Unit>``, aliases) is also
+        not a read (#1070 rider): both walks bind nothing and load nothing
+        for it (the extraction walk ``continue``s on erased bindings), so a
+        trailing erased binding after an unrecoverable wildcard stays
+        compilable too.  An un-nameable binding stays conservative (a read).
+        """
+        for sp in sub_patterns[index + 1:]:
+            if isinstance(sp, ast.WildcardPattern):
+                continue
+            if isinstance(sp, ast.BindingPattern):
+                type_name = self._type_expr_to_slot_name(sp.type_expr)
+                if (type_name is not None
+                        and self._slot_name_erases_to_unit(type_name)):
+                    continue
+            return True
+        return False
+
     def _sub_pattern_wasm_type(
         self,
         sub_pat: ast.Pattern,
         field_index: int,
         layout: ConstructorLayout,
+        ctor_name: str = "",
+        scrutinee_type: str | None = None,
+        later_read: bool = False,
     ) -> str | None:
         """Return the WASM type for a sub-pattern's field.
 
-        Used for offset computation when walking nested patterns.
+        Used for offset computation when walking nested patterns.  *ctor_name*,
+        *scrutinee_type*, and *later_read* (#1060) let a WILDCARD over a bare
+        type-parameter field resolve its instantiation-aware width instead of
+        the generic i32 placeholder the registered layout records for a type
+        parameter (LOUD-skipping only when the width is unrecoverable AND a
+        later field is read).
         """
         if isinstance(sub_pat, ast.BindingPattern):
             type_name = self._type_expr_to_slot_name(sub_pat.type_expr)
@@ -849,17 +942,109 @@ class DataMixin:
         if isinstance(sub_pat, ast.WildcardPattern):
             if field_index < len(layout.field_offsets):
                 _, generic_wt = layout.field_offsets[field_index]
-                return generic_wt
+                # #1060: instantiation-aware for a bare type-parameter field —
+                # its registered width is the generic i32 placeholder, wrong for
+                # any instantiation whose concrete width differs (Unit → 0).
+                return self._wildcard_field_wasm_type(
+                    ctor_name, field_index, generic_wt, scrutinee_type,
+                    sub_pat, later_read,
+                )
             return None
         if isinstance(sub_pat, (ast.ConstructorPattern, ast.NullaryPattern)):
             return "i32"  # ADT = heap pointer
         return None
+
+    def _wildcard_field_wasm_type(
+        self,
+        ctor_name: str,
+        field_index: int,
+        generic_wt: str,
+        scrutinee_type: str | None,
+        sub_pat: ast.Pattern,
+        later_read: bool,
+    ) -> str:
+        """WASM width of a WILDCARD sub-pattern's field, instantiation-aware.
+
+        #1060: a bare type-PARAMETER field (``Box<T>`` field ``T``) registers
+        generically as a 4-byte i32, but construction lays it out per the
+        concrete instantiation — ``Box<Unit>`` erases it to 0 bytes,
+        ``Box<String>`` to an i32_pair, ``Box<Int>`` to an i64.  A wildcard over
+        such a field must advance the offset by the CONCRETE width, recovered
+        from the scrutinee's type args exactly as the eq/show recomputation does
+        (``_resolve_field_type_for_eq`` + ``_eq_field_wasm_type``); otherwise
+        every later field reads a shifted, wrong address on a check-green
+        program.  A concrete (non-type-parameter) field keeps its registered
+        width, which #1043 already made erasure-aware.
+
+        When the field IS a type parameter but the concrete instantiation cannot
+        be recovered from *scrutinee_type* (e.g. a direct-call scrutinee whose
+        inferred type dropped its type args), the width is unknown.  It only
+        MATTERS if a later field is read at an offset that depends on it, so:
+
+        * *later_read* True (a subsequent sub-pattern reads a field) → raise
+          ``CodegenSkip``, a LOUD skip (E602 disclosure), never a wrong read;
+        * *later_read* False (this wildcard is trailing, or only wildcards
+          follow) → the unknown width is never consumed, so fall back to the
+          generic placeholder rather than skip a compilable function
+          (``match parse_bool(s) { Ok(_) -> …, Err(_) -> … }``).
+        """
+        tp_idx = self._ctor_adt_tp_indices.get(ctor_name)
+        pos = (
+            tp_idx[field_index]
+            if tp_idx is not None and field_index < len(tp_idx)
+            else None
+        )
+        if pos is None:
+            # Not a bare type parameter — the registered width is correct.
+            return generic_wt
+        _base, type_args = self._split_param_type(scrutinee_type or "")
+        if pos < len(type_args):
+            return self._eq_field_wasm_type(type_args[pos])
+        # Unrecoverable instantiation for a type-parameter field.
+        if later_read:
+            raise CodegenSkip(
+                sub_pat,
+                f"wildcard over type-parameter field {field_index} of "
+                f"{ctor_name!r}: concrete instantiation unrecoverable from "
+                f"scrutinee type {scrutinee_type!r}, and a later field is read "
+                f"at an offset that depends on this field's erased width",
+            )
+        return generic_wt
+
+    def _resolve_nested_scrutinee_type(
+        self,
+        ctor_name: str,
+        field_index: int,
+        scrutinee_type: str | None,
+    ) -> str | None:
+        """Concrete Vera type of a field — the scrutinee type for a nested
+        constructor pattern on it.
+
+        #1060: substitutes the outer instantiation's type args into the field's
+        declared type (``Outer<Unit>`` field ``Inner<T>`` → ``Inner<Unit>``), so
+        a wildcard over a type-parameter field deeper in the nest recomputes its
+        width correctly.  Returns ``None`` when the field type is unknown or the
+        outer instantiation is missing; the nested walk then LOUD-skips any
+        type-parameter wildcard rather than reading a wrong offset.
+        """
+        layout = self._ctor_layouts.get(ctor_name)
+        if layout is None or field_index >= len(layout.field_types):
+            return None
+        raw = layout.field_types[field_index]
+        base, type_args = self._split_param_type(scrutinee_type or "")
+        tp_names = self._adt_tp_param_names.get(base, ())
+        tp_mapping = dict(zip(tp_names, type_args))
+        tp_idx = self._ctor_adt_tp_indices.get(ctor_name)
+        return self._resolve_field_type_for_eq(
+            raw, field_index, tp_idx, type_args, tp_mapping,
+        )
 
     def _collect_nested_tag_checks(
         self,
         pattern: ast.ConstructorPattern,
         scr_local: int,
         layout: ConstructorLayout,
+        scrutinee_type: str | None = None,
     ) -> list[list[str]] | None:
         """Collect tag checks for nested constructor/nullary sub-patterns.
 
@@ -870,6 +1055,11 @@ class DataMixin:
         tag.  For ``ConstructorPattern`` it recurses to collect deeper
         checks.
 
+        *scrutinee_type* (#1060) is the concrete Vera type name of the value at
+        *scr_local*; it lets a WILDCARD over a bare type-parameter field before
+        a nested constructor advance by the instantiation-aware width so the
+        nested tag load lands on the address construction actually wrote.
+
         Returns a list of instruction-lists, each producing an ``i32``
         boolean on the stack.  Returns ``None`` on layout lookup failure.
         """
@@ -877,6 +1067,11 @@ class DataMixin:
         # construction stores nothing for it, so the walk gives it zero width
         # and no alignment — the extraction walks reach the same result by
         # `continue`-ing on erased components before their map lookups (#1042).
+        # A WILDCARD over such a field also resolves to `"unit"`: for a DECLARED
+        # Unit field via the erasure-aware registered `field_offsets` (#1043),
+        # and for a type-PARAMETER field instantiated to Unit via the
+        # scrutinee-threaded recomputation (#1060) — so the zero-width rule
+        # covers both sub-pattern arms.
         _sizes = {"i32": 4, "i64": 8, "f64": 8, "i32_pair": 8, "unit": 0}
         _aligns = {"i32": 4, "i64": 8, "f64": 8, "i32_pair": 4, "unit": 1}
         offset = 4  # after tag
@@ -884,7 +1079,10 @@ class DataMixin:
         checks: list[list[str]] = []
 
         for i, sub_pat in enumerate(pattern.sub_patterns):
-            wt = self._sub_pattern_wasm_type(sub_pat, i, layout)
+            wt = self._sub_pattern_wasm_type(
+                sub_pat, i, layout, pattern.name, scrutinee_type,
+                self._later_sub_pattern_reads(pattern.sub_patterns, i),
+            )
             if wt is None:
                 raise CodegenSkip(
                     sub_pat,
@@ -914,10 +1112,16 @@ class DataMixin:
                 ]
                 checks.append(check)
 
-                # Recurse for deeper nesting
+                # Recurse for deeper nesting, resolving this field's concrete
+                # type against the outer instantiation (#1060) so a
+                # type-parameter wildcard deeper in the nest recomputes its
+                # width too.
                 if isinstance(sub_pat, ast.ConstructorPattern):
                     deeper = self._collect_nested_tag_checks(
                         sub_pat, tmp, sub_layout,
+                        self._resolve_nested_scrutinee_type(
+                            pattern.name, i, scrutinee_type,
+                        ),
                     )
                     if deeper is None:
                         return None

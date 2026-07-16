@@ -479,12 +479,18 @@ class OperatorsMixin:
         registered ADT (`_adt_type_names`) — i.e. a bare `T` left un-substituted
         in a generic function's `@Box<T>` operand that the monomorphizer did not
         specialize to a concrete clone.
+
+        #1070: an erases-to-Unit spelling (`U` via `type U = Unit;`,
+        `Future<Unit>`, `FU`, alias chains) is NOT a free variable — it names
+        the concrete zero-size type.  Without this, `Box<U>` was classified as
+        a dead base-generic clone and its `==` fell back to the scalar POINTER
+        compare: structurally equal values compared unequal, silently, on a
+        check-green program.
         """
         base = arg.split("<", 1)[0].strip()
-        return (
-            base not in self._CONCRETE_NON_ADT_BASES
-            and base not in self._adt_type_names
-        )
+        if base in self._CONCRETE_NON_ADT_BASES or base in self._adt_type_names:
+            return False
+        return not self._slot_name_erases_to_unit(arg.strip())
 
     def _has_free_type_var_arg(self, lv: str) -> bool:
         """Whether `lv` carries a type argument that is an unresolved type var.
@@ -628,6 +634,15 @@ class OperatorsMixin:
             if len(args) != self._adt_tp_counts.get(base, 0):
                 return False  # under-parameterized: an argument was erased
             return all(self._eq_type_name_fully_concrete(a) for a in args)
+        # #1070: an erases-to-Unit spelling (`Unit` via `type U = Unit;`,
+        # `Future<Unit>`, `FU`, alias chains) is NOT a free type variable —
+        # it names the concrete zero-size type.  Without this, `Box<U>`
+        # failed the concreteness gate and the `==` dispatch fell back to
+        # the scalar i32 POINTER compare: two structurally equal values
+        # compared unequal, silently, on a check-green program (the checker
+        # resolves the alias and accepts the Eq).
+        if self._slot_name_erases_to_unit(name):
+            return True
         # A single-segment name that is neither a registered ADT nor a known
         # concrete base is an unresolved type VARIABLE (``T``).
         return False
@@ -828,17 +843,32 @@ class OperatorsMixin:
                 ]
                 # Concrete offsets from concrete WASM types.
                 concrete = self._concrete_field_layout(field_type_names)
-                first = True
-                for (offset, _wt), ftype in zip(concrete, field_type_names):
-                    cmp_instrs = self._emit_field_eq(offset, ftype)
-                    if cmp_instrs is None:
-                        raise CodegenInvariantError(  # pragma: no cover
-                            f"ADT field type {ftype!r} of {cname!r} has no Eq "
-                            f"comparison; the E613 gate should have rejected it")
-                    body.extend(fpad + ln for ln in cmp_instrs)
-                    if not first:
-                        body.append(f"{fpad}i32.and")
-                    first = False
+                # #1043: a zero-size Unit field ("unit" wt) is equal by
+                # definition — emit NO comparison for it (and don't advance the
+                # `i32.and` chain, which would underflow the stack).  If a
+                # constructor's fields are ALL zero-size, its two values are
+                # equal once the tags match: the then-branch of this
+                # `if (result i32)` must still leave an i32, so emit a constant
+                # `1` (mirrors the no-field-constructors `i32.const 1` above).
+                comparable = [
+                    (offset, ftype)
+                    for (offset, wt), ftype in zip(concrete, field_type_names)
+                    if wt != "unit"
+                ]
+                if not comparable:
+                    body.append(f"{fpad}i32.const 1")
+                else:
+                    first = True
+                    for offset, ftype in comparable:
+                        cmp_instrs = self._emit_field_eq(offset, ftype)
+                        if cmp_instrs is None:
+                            raise CodegenInvariantError(  # pragma: no cover
+                                f"ADT field type {ftype!r} of {cname!r} has no Eq "
+                                f"comparison; the E613 gate should have rejected it")
+                        body.extend(fpad + ln for ln in cmp_instrs)
+                        if not first:
+                            body.append(f"{fpad}i32.and")
+                        first = False
                 body.append(f"{pad}else")
             inner_pad = "  " * (len(ctors_with_fields) + 3)
             body.append(f"{inner_pad}i32.const 1")
@@ -874,14 +904,37 @@ class OperatorsMixin:
         declared type are deep-substituted (``List<T>`` ↦ ``List<Int>`` under
         a ``List<Int>`` comparison); a fully concrete type passes through
         unchanged.
+
+        #1070: an erases-to-Unit resolution canonicalises to ``"Unit"`` —
+        registration already does this for a DECLARED erased field (#1043),
+        but a type argument keeps its use-site spelling (``"U"``, ``"FU"``,
+        ``"Future<Unit>"``), and the show/hash/`$eq` field dispatches key on
+        this NAME: uncanonicalised they treated the alias as an unknown type
+        and loud-skipped (show/hash) or mis-sized it (`$eq`).
         """
         if tp_idx is not None and field_index < len(tp_idx):
             pos = tp_idx[field_index]
             if pos is not None and pos < len(type_args):
-                return type_args[pos]
+                return self._canonical_unit_field_type(type_args[pos])
         from vera.monomorphize import substitute_type_param_names
 
-        return substitute_type_param_names(raw, tp_mapping)
+        return self._canonical_unit_field_type(
+            substitute_type_param_names(raw, tp_mapping)
+        )
+
+    def _canonical_unit_field_type(self, name: str) -> str:
+        """Canonicalise an erases-to-Unit field-type name to ``"Unit"`` (#1070).
+
+        The resolved-field-type consumers (`_eq_field_wasm_type`,
+        `_show_value`, `_hash_value`, `_emit_field_eq`) dispatch on the Vera
+        type NAME; ``"Unit"`` is the one spelling they all understand as the
+        zero-size value.  Mirrors ``RegistrationMixin._field_vera_type_name``,
+        which canonicalises DECLARED erased fields the same way (#1043).
+        Non-erased names pass through unchanged.
+        """
+        if name != "Unit" and self._slot_name_erases_to_unit(name):
+            return "Unit"
+        return name
 
     def _concrete_field_layout(
         self, field_type_names: list[str],
@@ -891,8 +944,11 @@ class OperatorsMixin:
         Mirrors the construction site (``_translate_constructor_call``): tag at
         offset 0 (4 bytes), then each field aligned to its natural alignment.
         """
-        sizes = {"i32": 4, "i64": 8, "f64": 8, "i32_pair": 8}
-        aligns = {"i32": 4, "i64": 8, "f64": 8, "i32_pair": 4}
+        # #1043: `"unit"` (a zero-size Unit field) is size 0 / align 1, so it
+        # neither aligns nor advances the offset — the same convention
+        # construction (`_translate_constructor_call`) uses.
+        sizes = {"i32": 4, "i64": 8, "f64": 8, "i32_pair": 8, "unit": 0}
+        aligns = {"i32": 4, "i64": 8, "f64": 8, "i32_pair": 4, "unit": 1}
         offset = 4
         out: list[tuple[int, str]] = []
         for ftype in field_type_names:
@@ -903,15 +959,26 @@ class OperatorsMixin:
             offset += sizes.get(wt, 8)
         return out
 
-    @staticmethod
-    def _eq_field_wasm_type(ftype: str) -> str:
+    def _eq_field_wasm_type(self, ftype: str) -> str:
         """WASM rep of a concrete field type for structural-eq layout."""
+        # #1043: a zero-size field is the `"unit"` sentinel, which makes
+        # `_concrete_field_layout` advance the offset by nothing (matching
+        # construction) and lets the `$eq` emitter skip the (equal-by-
+        # definition) comparison.  #1070: keyed on ERASURE, not the literal
+        # name "Unit" — registration canonicalises a DECLARED erases-to-Unit
+        # field to "Unit", but a type ARGUMENT arrives here as spelled at the
+        # use site (`Box<U>` with `type U = Unit;`, `Box<Future<Unit>>`,
+        # `Box<FU>`, alias chains), and the literal test gave those 4 bytes:
+        # the wildcard width recomputation (#1060) then shifted every later
+        # field's read on a check-green program.
+        if self._slot_name_erases_to_unit(ftype):
+            return "unit"
         base = ftype.split("<", 1)[0]
         if base in ("Int", "Nat"):
             return "i64"
         if base == "Float64":
             return "f64"
-        if base in ("Bool", "Byte", "Unit"):
+        if base in ("Bool", "Byte"):
             return "i32"
         if base in ("String", "Array"):
             return "i32_pair"
