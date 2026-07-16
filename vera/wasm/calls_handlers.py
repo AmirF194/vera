@@ -68,8 +68,11 @@ class CallsHandlersMixin:
         if vera_type == "String":
             return self.translate_expr(arg, env)
 
-        # Unit → literal "unit" string
-        if vera_type == "Unit":
+        # Unit → literal "unit" string.  #1077: keyed on ERASURE, not the
+        # literal name — a bare value of an erases-to-Unit alias type
+        # (`type U = Unit;` fn returning `@U`) otherwise missed this arm and
+        # loud-skipped the function, while literal `Unit` rendered fine.
+        if self._slot_name_erases_to_unit(vera_type):
             offset, length = self.string_pool.intern("unit")
             return [f"i32.const {offset}", f"i32.const {length}"]
 
@@ -139,8 +142,8 @@ class CallsHandlersMixin:
         if vera_type == "Float64":
             return arg_instrs + ["i64.reinterpret_f64"]
 
-        # Unit → constant 0
-        if vera_type == "Unit":
+        # Unit → constant 0.  #1077: keyed on erasure, mirroring show above.
+        if self._slot_name_erases_to_unit(vera_type):
             return ["i64.const 0"]
 
         # String → FNV-1a hash
@@ -519,13 +522,22 @@ class CallsHandlersMixin:
         # fields come from the instantiation's type args, laid out exactly as
         # the construction site does (`_concrete_field_layout`).  A missing /
         # unparameterized Tuple type (no args recovered) is not showable here.
+        # #1077: the args are GROUNDED first (`_canonical_field_type`, exactly
+        # as the registered-ADT branch below grounds its resolutions via
+        # `_resolve_field_type_for_eq`) — a `Tuple<U, Int>` component spelled
+        # through an alias otherwise reached the per-field dispatch as the
+        # unknown name "U" and loud-skipped the whole function, while the
+        # literal `Tuple<Unit, Int>` rendered fine.
         if base == "Tuple":
             if not type_args:
                 return None
-            concrete = self._concrete_field_layout(type_args)
+            field_type_names = [
+                self._canonical_field_type(a) for a in type_args
+            ]
+            concrete = self._concrete_field_layout(field_type_names)
             fields = [
                 (offset, wt, ftype)
-                for (offset, wt), ftype in zip(concrete, type_args)
+                for (offset, wt), ftype in zip(concrete, field_type_names)
             ]
             return [("Tuple", 0, fields)]
 

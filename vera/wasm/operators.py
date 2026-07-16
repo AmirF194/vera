@@ -480,17 +480,21 @@ class OperatorsMixin:
         in a generic function's `@Box<T>` operand that the monomorphizer did not
         specialize to a concrete clone.
 
-        #1070: an erases-to-Unit spelling (`U` via `type U = Unit;`,
-        `Future<Unit>`, `FU`, alias chains) is NOT a free variable — it names
-        the concrete zero-size type.  Without this, `Box<U>` was classified as
-        a dead base-generic clone and its `==` fell back to the scalar POINTER
-        compare: structurally equal values compared unequal, silently, on a
-        check-green program.
+        #1070/#1076: an ALIAS or transparent-`Future` spelling (`U` via
+        `type U = Unit;`, `MyInt` via `type MyInt = Int;`, `Future<Int>`,
+        `FU`, chains) is NOT a free variable — it names a concrete type.
+        Classify on the GROUND spelling: without this, `Box<U>` / `Box<MyInt>`
+        were classified as dead base-generic clones and their `==` fell back
+        to the scalar POINTER compare — structurally equal values compared
+        unequal, silently, on a check-green program.  A genuinely unregistered
+        name (`T`) grounds to itself and still classifies free.
         """
-        base = arg.split("<", 1)[0].strip()
-        if base in self._CONCRETE_NON_ADT_BASES or base in self._adt_type_names:
-            return False
-        return not self._slot_name_erases_to_unit(arg.strip())
+        arg = self._canonical_field_type(arg.strip())
+        base = arg.split("<", 1)[0]
+        return (
+            base not in self._CONCRETE_NON_ADT_BASES
+            and base not in self._adt_type_names
+        )
 
     def _has_free_type_var_arg(self, lv: str) -> bool:
         """Whether `lv` carries a type argument that is an unresolved type var.
@@ -634,15 +638,17 @@ class OperatorsMixin:
             if len(args) != self._adt_tp_counts.get(base, 0):
                 return False  # under-parameterized: an argument was erased
             return all(self._eq_type_name_fully_concrete(a) for a in args)
-        # #1070: an erases-to-Unit spelling (`Unit` via `type U = Unit;`,
-        # `Future<Unit>`, `FU`, alias chains) is NOT a free type variable —
-        # it names the concrete zero-size type.  Without this, `Box<U>`
-        # failed the concreteness gate and the `==` dispatch fell back to
-        # the scalar i32 POINTER compare: two structurally equal values
-        # compared unequal, silently, on a check-green program (the checker
-        # resolves the alias and accepts the Eq).
-        if self._slot_name_erases_to_unit(name):
-            return True
+        # #1070/#1076: an ALIAS or transparent-`Future` spelling (`U`,
+        # `MyInt`, `FU`, `Future<Int>`, chains) is NOT a free type variable —
+        # ground it and re-judge (`U` → `Unit`, `MyInt` → `Int`, `Future<Int>`
+        # → `Int`).  Without this, `Box<U>` / `Box<MyInt>` failed the
+        # concreteness gate and the `==` dispatch fell back to the scalar i32
+        # POINTER compare: two structurally equal values compared unequal,
+        # silently, on a check-green program (the checker resolves the alias
+        # and accepts the Eq).  A genuine `T` grounds to itself: no recursion.
+        canonical = self._canonical_field_type(name)
+        if canonical != name:
+            return self._eq_type_name_fully_concrete(canonical)
         # A single-segment name that is neither a registered ADT nor a known
         # concrete base is an unresolved type VARIABLE (``T``).
         return False
@@ -664,8 +670,22 @@ class OperatorsMixin:
           name to its fully-nested form (#932).
 
         ``bare`` is *operand*'s already-computed ``_infer_vera_type`` name.
+
+        #1078: an ``IndexExpr`` operand (an array ELEMENT) arrives as the
+        element type's bare head — ``_infer_index_element_type`` computes the
+        full element ``NamedType`` and then returns only ``.name`` (``Box<Int>``
+        → ``"Box"``) — so a parameterized element was classified as a
+        lost-type-argument clone and ``==`` silently fell back to the scalar
+        POINTER compare.  The indexed collection carries its complete type
+        arguments, so re-derive the full element spelling from it.
         """
         name = self._parameterize_ctor_operand(operand, bare)
+        if (isinstance(operand, ast.IndexExpr)
+                and name is not None
+                and "<" not in name):
+            te = self._infer_index_element_type_expr(operand)
+            if te is not None and te.type_args and te.name == name:
+                name = self._format_named_type(te)
         name = self._recover_lost_type_arg(name, other)
         if name is not None:
             name = self._eq_full_type_names.get(name, name)
@@ -905,36 +925,52 @@ class OperatorsMixin:
         a ``List<Int>`` comparison); a fully concrete type passes through
         unchanged.
 
-        #1070: an erases-to-Unit resolution canonicalises to ``"Unit"`` —
-        registration already does this for a DECLARED erased field (#1043),
-        but a type argument keeps its use-site spelling (``"U"``, ``"FU"``,
-        ``"Future<Unit>"``), and the show/hash/`$eq` field dispatches key on
-        this NAME: uncanonicalised they treated the alias as an unknown type
-        and loud-skipped (show/hash) or mis-sized it (`$eq`).
+        #1070/#1076: the resolution is GROUNDED — alias chains resolved,
+        transparent ``Future<...>`` peeled (``"U"`` → ``"Unit"``, ``"MyStr"``
+        → ``"String"``, ``"FI"`` → ``"Int"``).  Registration already grounds
+        a DECLARED field type (#773/#1043), but a type argument keeps its
+        use-site spelling, and the show/hash/`$eq` field dispatches key on
+        this NAME: ungrounded they treated the alias as an unknown type and
+        loud-skipped (show/hash) or mis-sized and mis-compared it (`$eq`).
         """
         if tp_idx is not None and field_index < len(tp_idx):
             pos = tp_idx[field_index]
             if pos is not None and pos < len(type_args):
-                return self._canonical_unit_field_type(type_args[pos])
+                return self._canonical_field_type(type_args[pos])
         from vera.monomorphize import substitute_type_param_names
 
-        return self._canonical_unit_field_type(
+        return self._canonical_field_type(
             substitute_type_param_names(raw, tp_mapping)
         )
 
-    def _canonical_unit_field_type(self, name: str) -> str:
-        """Canonicalise an erases-to-Unit field-type name to ``"Unit"`` (#1070).
+    def _canonical_field_type(self, name: str) -> str:
+        """Ground spelling of a field / type-argument name (#1070, #1076).
+
+        Resolves alias chains to their target's compound spelling (the shared
+        `_canonicalize_alias_slot_name` walk) and peels transparent
+        ``Future<...>`` wrappers to their payload (representation-identical,
+        #841), repeating until stable: ``U`` → ``"Unit"``, ``FU`` /
+        ``Future<Unit>`` → ``"Unit"``, ``MyInt`` → ``"Int"``, ``FI`` /
+        ``Future<Int>`` → ``"Int"``.  A non-alias, non-Future name — a
+        concrete type or a genuine free type variable ``T`` — returns
+        unchanged; alias arguments NESTED inside a compound (``Box<U>``) are
+        not touched here (each consumer canonicalises per nesting level).
 
         The resolved-field-type consumers (`_eq_field_wasm_type`,
         `_show_value`, `_hash_value`, `_emit_field_eq`) dispatch on the Vera
-        type NAME; ``"Unit"`` is the one spelling they all understand as the
-        zero-size value.  Mirrors ``RegistrationMixin._field_vera_type_name``,
-        which canonicalises DECLARED erased fields the same way (#1043).
-        Non-erased names pass through unchanged.
+        type NAME, and the `==` dispatch gates classify it — the ground
+        spelling is the one they all understand.  Mirrors
+        ``RegistrationMixin._field_vera_type_name``, which grounds DECLARED
+        field types the same way at registration (#773/#1043); a type
+        ARGUMENT arrives spelled as at the use site and is grounded here.
         """
-        if name != "Unit" and self._slot_name_erases_to_unit(name):
-            return "Unit"
-        return name
+        seen: frozenset[str] = frozenset()
+        while True:
+            name, seen = self._canonicalize_alias_slot_name(name, seen)
+            if name.startswith("Future<") and name.endswith(">"):
+                name = name[7:-1]
+                continue
+            return name
 
     def _concrete_field_layout(
         self, field_type_names: list[str],
@@ -961,17 +997,21 @@ class OperatorsMixin:
 
     def _eq_field_wasm_type(self, ftype: str) -> str:
         """WASM rep of a concrete field type for structural-eq layout."""
+        # #1070/#1076: ground the spelling first — a type ARGUMENT arrives as
+        # spelled at the use site (`Box<U>`, `Box<MyInt>`, `Box<Future<Int>>`,
+        # alias chains), and the raw-name dispatch mis-sized every such
+        # spelling (an alias fell to the 4-byte ADT-pointer default; a
+        # transparent Future missed its payload's width): the wildcard width
+        # recomputation (#1060) then shifted every later field's read on a
+        # check-green program.  Grounding makes each spelling behave exactly
+        # like its target written literally.
+        ftype = self._canonical_field_type(ftype)
         # #1043: a zero-size field is the `"unit"` sentinel, which makes
         # `_concrete_field_layout` advance the offset by nothing (matching
         # construction) and lets the `$eq` emitter skip the (equal-by-
-        # definition) comparison.  #1070: keyed on ERASURE, not the literal
-        # name "Unit" — registration canonicalises a DECLARED erases-to-Unit
-        # field to "Unit", but a type ARGUMENT arrives here as spelled at the
-        # use site (`Box<U>` with `type U = Unit;`, `Box<Future<Unit>>`,
-        # `Box<FU>`, alias chains), and the literal test gave those 4 bytes:
-        # the wildcard width recomputation (#1060) then shifted every later
-        # field's read on a check-green program.
-        if self._slot_name_erases_to_unit(ftype):
+        # definition) comparison.  Post-grounding, every erases-to-Unit
+        # spelling IS the literal name.
+        if ftype == "Unit":
             return "unit"
         base = ftype.split("<", 1)[0]
         if base in ("Int", "Nat"):
