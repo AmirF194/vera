@@ -515,7 +515,8 @@ public fn main(@Unit -> @Int)
 """)
 
     def test_fn_type_alias_self_reference_accepted(self) -> None:
-        """`type FA = fn(FA -> Int)` is NOT an E132 cycle: a function
+        """`type FA = fn(FA -> Int) effects(pure);` is NOT an E132
+        cycle: a function
         value is a table-index (pointer) indirection, so the alias's
         representation never recursively expands — the same exemption
         spec 2.6.3 grants `data` ADTs.  The reference walk deliberately

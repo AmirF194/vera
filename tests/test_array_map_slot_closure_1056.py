@@ -102,6 +102,52 @@ public fn main(@Unit -> @Int)
 """
         assert _run(src) == 28
 
+    def test_array_mapi_type_changing_slot_closure(self) -> None:
+        """A type-changing ``(Int, Int) -> String`` mapper slot for
+        ``array_mapi``: the output element representation must come from
+        the slot's ``FnType`` return (String pair), not the Int input
+        elements (PR #1066 review).  Element ``[2]`` of ``[10,20,30]``
+        maps element-then-index to ``"302"``, whose length is 3.  The
+        sibling subtraction test pins the argument order; this one pins
+        the output representation."""
+        src = """
+type SIdxMapper = fn(Int, Int -> String) effects(pure);
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  let @SIdxMapper = fn(@Int, @Int -> @String) effects(pure) { string_concat(int_to_string(@Int.1), int_to_string(@Int.0)) };
+  let @Array<String> = array_mapi([10, 20, 30], @SIdxMapper.0);
+  string_length(@Array<String>.0[2])
+}
+"""
+        assert _run(src) == 3
+
+    def test_array_map_chained_fn_slot_closures(self) -> None:
+        """Two fn-slot mappers chained — the first map's OUTPUT array
+        (element type from slot 1's ``FnType`` return, String) is the
+        second map's INPUT (whose Int output comes from slot 2's return)
+        — so the inference resolves through both type changes, not just
+        one layer (PR #1066 review).  ``[10,200,3000]`` maps to
+        ``["10","200","3000"]`` and then to their lengths ``[2,3,4]``;
+        element ``[2]`` is 4 (the lengths differ per element, so a
+        wrong element read cannot coincide)."""
+        src = """
+type ToStr = fn(Int -> String) effects(pure);
+type ToLen = fn(String -> Int) effects(pure);
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  let @ToStr = fn(@Int -> @String) effects(pure) { int_to_string(@Int.0) };
+  let @ToLen = fn(@String -> @Int) effects(pure) { string_length(@String.0) };
+  let @Array<String> = array_map([10, 200, 3000], @ToStr.0);
+  let @Array<Int> = array_map(@Array<String>.0, @ToLen.0);
+  @Array<Int>.0[2]
+}
+"""
+        assert _run(src) == 4
+
     def test_array_fold_fn_slot_closure_order(self) -> None:
         """``array_fold`` routes its accumulator typing through the same
         slot resolver — pinned with a non-commutative, order-sensitive

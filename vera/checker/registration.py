@@ -300,8 +300,9 @@ class RegistrationMixin:
         (pointer) indirection, so an alias reference there never
         recursively expands the alias's representation — the same
         exemption spec 2.6.3 grants `data` ADTs.  `type FA = fn(FA ->
-        Int)` therefore registers cleanly (and self-application is
-        separately bounded by finite alias unfolding at the use site).
+        Int) effects(pure);` therefore registers cleanly (and
+        self-application is separately bounded by finite alias
+        unfolding at the use site).
         `exclude` holds the enclosing alias's own type parameters, which
         are locally bound and never count as a reference to a like-named
         alias.

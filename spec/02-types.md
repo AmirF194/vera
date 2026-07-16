@@ -275,7 +275,7 @@ Type aliases are transparent for refinement subtyping: `PosInt` and `{ @Int | @I
 
 However, type aliases create distinct namespaces for slot references (see Chapter 3): `@PosInt.0` counts only `PosInt` bindings, not `Int` bindings.
 
-A type alias MUST eventually resolve to a concrete type — the chain of alias definitions MUST be acyclic. The requirement is structural over every representation-expanding position of the definition: the target's own name, references nested inside type arguments at any depth (`type F = Future<F>`, `type L = Array<L>`, `type A = Future<Array<B>>`) — including arguments the generic alias does not use — and refinement bases. A cyclic alias is rejected with error `E132`. (Recursion *is* permitted where an indirection bounds the expansion: through an `ADT` declared via `data` — a heap pointer — and through function-type parameter or return positions — a function value is a table index, so `type FA = fn(FA -> Int)` is accepted.)
+A type alias MUST eventually resolve to a concrete type — the chain of alias definitions MUST be acyclic. The requirement is structural over every representation-expanding position of the definition: the target's own name, references nested inside type arguments at any depth (`type F = Future<F>`, `type L = Array<L>`, `type A = Future<Array<B>>`) — including arguments the generic alias does not use — and refinement bases. A cyclic alias is rejected with error `E132`. (Recursion *is* permitted where an indirection bounds the expansion: through an `ADT` declared via `data` — a heap pointer — and through function-type parameter or return positions — a function value is a table index, so `type FA = fn(FA -> Int) effects(pure);` is accepted.)
 
 ### 2.6.4 Predicate Verification
 
