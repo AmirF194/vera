@@ -136,7 +136,7 @@ class ClosureLiftingMixin:
             param_wasm: list[str] = ["i32"]  # env param
             for p in anon_fn.params:
                 pwt = self._type_expr_to_wasm_type(p)
-                if pwt == "i32_pair":  # pragma: no cover — String/Array closure params
+                if pwt == "i32_pair":
                     param_wasm.extend(["i32", "i32"])
                 elif pwt and pwt != "unsupported":
                     param_wasm.append(pwt)

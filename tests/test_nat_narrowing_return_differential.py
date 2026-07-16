@@ -1044,3 +1044,102 @@ class TestClosureRefinedReturn1032:
         )
         assert _run(_CLOSURE_REFINED, "go", 5) == 5
         assert _run(_CLOSURE_REFINED, "go", 0) == 1
+
+
+_CLOSURE_REFINED_STR_RET = """\
+type NonEmptyStr = { @String | string_length(@String.0) > 0 };
+type IntToStr = fn(Int -> NonEmptyStr) effects(pure);
+
+private fn call_it(@IntToStr, @Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @NonEmptyStr = apply_fn(@IntToStr.0, @Int.0);
+  string_length(@NonEmptyStr.0)
+}
+
+public fn go(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  call_it(fn(@Int -> @NonEmptyStr) effects(pure) {
+    if @Int.0 > 0 then { "vera" } else { "" }
+  }, @Int.0)
+}
+"""
+
+_CLOSURE_REFINED_STR_FORMAL = """\
+type NonEmptyStr = { @String | string_length(@String.0) > 0 };
+type StrToInt = fn(NonEmptyStr -> Int) effects(pure);
+
+private fn call_it(@StrToInt, @String -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  apply_fn(@StrToInt.0, @String.0)
+}
+
+public fn go(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  if @Int.0 > 0 then {
+    call_it(fn(@NonEmptyStr -> @Int) effects(pure) {
+      string_length(@NonEmptyStr.0)
+    }, "abc")
+  } else {
+    call_it(fn(@NonEmptyStr -> @Int) effects(pure) {
+      string_length(@NonEmptyStr.0)
+    }, "")
+  }
+}
+"""
+
+
+class TestClosureRefinedPair1032:
+    """The i32_pair (String/Array) halves of the #1032/#1024 closure guards.
+
+    A pair value is (ptr, len) on the WASM stack; the guards must save BOTH
+    halves, run the predicate over the ptr (`string_length` reads the length
+    from memory, as the named-function pair guard does), and re-push in the
+    right order — an ordering bug would corrupt the value or read garbage.
+    The scalar tests above cannot see any of that, so the pair paths carry
+    their own end-to-end pins.
+    """
+
+    def test_pair_return_obligated_and_guarded(self) -> None:
+        # Verifier half: the refined String RETURN records the same honest
+        # guarded tier3 as the scalar shape.
+        statuses = _refine_bind_statuses(_CLOSURE_REFINED_STR_RET)
+        assert statuses == ["tier3"], (
+            f"expected one tier3 pair-return refine_bind, got {statuses}"
+        )
+        # Codegen half: the empty string violates `string_length > 0` at the
+        # closure's return guard...
+        kind = _trap_kind(_CLOSURE_REFINED_STR_RET, "go", 0)
+        assert kind == "contract_violation", (
+            f"go(0) gave trap kind {kind!r} — the pair return guard must trap "
+            f"an empty NonEmptyStr (None = the value leaked through)"
+        )
+        # ...and a satisfying value survives the save-guard-reload INTACT:
+        # length 4 proves the (ptr, len) pair was re-pushed unharmed.
+        assert _run(_CLOSURE_REFINED_STR_RET, "go", 5) == 4
+
+    def test_pair_formal_obligated_and_guarded(self) -> None:
+        # The argument-side (#1024) pair dual: a refined String FORMAL through
+        # apply_fn — entry guard traps the empty string, passes "abc" with the
+        # value intact (length 3 read through the guarded param).
+        statuses = _refine_bind_statuses(_CLOSURE_REFINED_STR_FORMAL)
+        assert statuses == ["tier3"], (
+            f"expected one tier3 pair-formal refine_bind, got {statuses}"
+        )
+        kind = _trap_kind(_CLOSURE_REFINED_STR_FORMAL, "go", 0)
+        assert kind == "contract_violation", (
+            f"go(0) gave trap kind {kind!r} — the pair entry guard must trap "
+            f"an empty NonEmptyStr argument"
+        )
+        assert _run(_CLOSURE_REFINED_STR_FORMAL, "go", 1) == 3

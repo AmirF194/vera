@@ -3568,6 +3568,13 @@ class ContractVerifier:
             # closure mirror of `_compile_postconditions`' refined-return
             # guard), except over an erased `@Unit` base, which has no local to
             # check — recorded honestly unguarded, as at every other site.
+            # Deliberately UNGATED (unlike the argument side's
+            # `_narrows_into_refined`): the closure body is opaque, so even a
+            # body already typed at the refined type could carry a raw leaf
+            # through a join — obligating every refined return keeps the
+            # obligation stream exactly matched to codegen's unconditional
+            # guard (the lockstep invariant), at worst one redundant tier3 on
+            # an identity-shaped closure.
             if self._is_refined_type(resolved_ret):
                 self._record_refined_bind_tier3(
                     decl, expr.body, "closure return",
