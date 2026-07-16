@@ -136,7 +136,7 @@ class ClosureLiftingMixin:
             param_wasm: list[str] = ["i32"]  # env param
             for p in anon_fn.params:
                 pwt = self._type_expr_to_wasm_type(p)
-                if pwt == "i32_pair":  # pragma: no cover — String/Array closure params
+                if pwt == "i32_pair":
                     param_wasm.extend(["i32", "i32"])
                 elif pwt and pwt != "unsupported":
                     param_wasm.append(pwt)
@@ -366,6 +366,28 @@ class ClosureLiftingMixin:
                 ):
                     gc_pointer_params.append(local_idx)
 
+        # #1024: a REFINED closure formal carries a runtime predicate guard at
+        # the lifted body's prologue — the closure-side dual of `_compile_fn`'s
+        # `refined_param_checks` (functions.py).  The verifier obligates the
+        # apply_fn ARGUMENT against this formal's full predicate (verifier.py
+        # apply_fn branch, fix site 1) and records it `guarded=True` on the
+        # strength of THIS guard: without it, `apply_fn(clo, 0)` into a
+        # `{ @Nat | @Nat.0 > 0 }` formal narrowed a violating value in
+        # unchecked (the #1017 apply_fn arm's `>= 0` proved nothing about the
+        # strict predicate).  Derived from `param_info`, whose stored index is
+        # already the value local the guard checks (the ptr half for an
+        # i32_pair String/Array param, exactly as `_compile_fn` collects) — the
+        # @Unit param is `continue`d above and never enters `param_info`, which
+        # matches the codegen-unguardable @Unit refinement (the verifier records
+        # that narrowing `tier3_unguarded`, claiming no runtime guard).
+        refined_param_checks: list[
+            tuple[int, tuple[ast.Expr, str]]
+        ] = [
+            (value_local, parts)
+            for _i, param_te, value_local in param_info
+            if (parts := self._refinement_guard_parts(param_te)) is not None
+        ]
+
         # Compute capture layout (must match _translate_anon_fn).
         # Pair-type captures (#535) take 8 bytes: ptr (i32) + len (i32),
         # two consecutive 4-byte fields.  The matching emit in
@@ -481,12 +503,19 @@ class ClosureLiftingMixin:
         # arm leaf): a whole-body wrap would false-trap a legitimate @Nat leaf
         # of a heterogeneous body (a captured @Nat above i64.MAX reads as a
         # negative i64), and closures emit no `return_call` so no TCO revert is
-        # needed.  Alias-aware + refinement-excluded gate (a refinement over
-        # @Nat stays on the refinement-boundary path), mirroring the top-level
-        # narrow-return gate.  MUST run before `translate_block` so the leaf
-        # ids are in place when the body is lowered.
+        # needed.  Alias-aware + refinement-excluded gate: a refinement over
+        # @Nat is guarded by the #1032 refined-RETURN guard emitted after the
+        # body below — its predicate conjoins the @Nat base's `>= 0`
+        # (`_refinement_guard_parts`), so adding the leaf guard here would be a
+        # redundant second sign check.  Mirrors the top-level narrow-return
+        # gate.  MUST run before `translate_block` so the leaf ids are in
+        # place when the body is lowered.  `ret_refined_parts` is computed
+        # ONCE and reused by the #1032 guard: `_refinement_guard_parts`
+        # emits a loud E618 for a nested-refinement base, and calling it
+        # twice would double that diagnostic.
+        ret_refined_parts = self._refinement_guard_parts(anon_fn.return_type)
         if (ctx._type_expr_base_is_nat(anon_fn.return_type)
-                and self._refinement_guard_parts(anon_fn.return_type) is None):
+                and ret_refined_parts is None):
             ctx._nat_return_leaf_ids = ctx._collect_narrowing_return_leaves(
                 anon_fn.body)
         else:
@@ -571,6 +600,86 @@ class ClosureLiftingMixin:
             # `_translate_interpolated_string`.
             self._harvest_interp_inference_failures(ctx)
             return None
+
+        # #1024: emit the refined-formal prologue guards now — AFTER the body
+        # compiles (so the `_nat_return_leaf_ids` setup that MUST precede
+        # `translate_block` is untouched) and BEFORE the host-import propagation
+        # block below, so any ctx state a predicate translation registers (an
+        # overflow guard, a Map/Set op) rides the SAME merge the body's does (the
+        # #808 fan-in rule).  `_emit_refinement_check` allocs no locals for the
+        # predicate, but `ctx.translate_expr` may, so this must also precede the
+        # `ctx.extra_locals_wat()` read in the assembly below.  A CodegenSkip
+        # while lowering a predicate is caught inside `_emit_refinement_check`
+        # (E617, no guard); an AdtEq/CodegenInvariant escape propagates to
+        # `_lift_pending_closures` -> a single [E699], exactly as the closure
+        # body's own uncaught invariants do (no extra try/except is layered here,
+        # matching the closure's existing return-side guards).  The AnonFn has no
+        # `decl`, so the trap message is built from its own signature — the shape
+        # `_format_refinement_message` produces for a named fn.
+        refine_guard_instrs: list[str] = []
+        if refined_param_checks or ret_refined_parts is not None:
+            param_sig = ", ".join(
+                ast.format_type_expr(p) for p in anon_fn.params)
+            ret_sig = ast.format_type_expr(anon_fn.return_type)
+            closure_sig = f"fn({param_sig} -> {ret_sig})"
+            for value_local, parts in refined_param_checks:
+                predicate, base_name = parts
+                msg = (
+                    f"Refinement violation in {closure_sig}\n"
+                    f"  parameter: {ast.format_expr(predicate)} failed"
+                )
+                guard = self._emit_refinement_check(
+                    ctx, predicate, base_name, value_local, msg, env)
+                if guard is not None:
+                    refine_guard_instrs.extend(guard)
+            # #1032: a REFINED closure RETURN carries a runtime predicate guard
+            # over the body's result — the return-side dual of the formal
+            # guards above and the closure mirror of the named path's
+            # refined-return guard (`_compile_postconditions`, contracts.py):
+            # save the result to locals, check the predicate over it, push it
+            # back.  The verifier records the refined closure return `tier3`
+            # guarded on the strength of THIS guard (the AnonFn refined arm in
+            # `_walk_for_nat_binding_obligations`); without it,
+            # `fn(@Int -> @Pos) { @Int.0 }` returned -5 — or 0, which clears
+            # the @Nat base's `>= 0` — out through the refined slot silently.
+            # An i32_pair result (String/Array base) saves both halves and
+            # checks over the ptr, exactly as the named i32_pair return guard
+            # does; a `@Unit`-based refinement never reaches here
+            # (`_refinement_guard_parts` returns None for an erased base, and
+            # the verifier records it tier3_unguarded).  Appended to
+            # `body_instrs` so the check runs before the GC epilogue re-roots
+            # the (now-checked) value.
+            if ret_refined_parts is not None:
+                predicate, base_name = ret_refined_parts
+                msg = (
+                    f"Refinement violation in {closure_sig}\n"
+                    f"  return value: {ast.format_expr(predicate)} failed"
+                )
+                if ret_wt == "i32_pair":
+                    ptr_l = ctx.alloc_local("i32")
+                    len_l = ctx.alloc_local("i32")
+                    guard = self._emit_refinement_check(
+                        ctx, predicate, base_name, ptr_l, msg, env)
+                    if guard is not None:
+                        body_instrs = [
+                            *body_instrs,
+                            f"local.set {len_l}",
+                            f"local.set {ptr_l}",
+                            *guard,
+                            f"local.get {ptr_l}",
+                            f"local.get {len_l}",
+                        ]
+                elif ret_wt:
+                    ret_local = ctx.alloc_local(ret_wt)
+                    guard = self._emit_refinement_check(
+                        ctx, predicate, base_name, ret_local, msg, env)
+                    if guard is not None:
+                        body_instrs = [
+                            *body_instrs,
+                            f"local.set {ret_local}",
+                            *guard,
+                            f"local.get {ret_local}",
+                        ]
 
         # #820: a @Nat closure body widening into an @Int closure RETURN
         # reinterprets above i64.MAX (u64.MAX -> -1) — the definition-side dual
@@ -742,6 +851,12 @@ class ClosureLiftingMixin:
         # snapshots their value — see the gc_prologue/gc_capture_pushes
         # split above for the rationale.
         for instr in gc_capture_pushes:
+            lines.append(f"    {instr}")
+        # #1024: refined-formal prologue guards run after all prologue setup (GC
+        # roots + capture loads) and BEFORE the body, so a refinement-violating
+        # argument traps at closure entry — the closure-side analogue of
+        # `_compile_fn` prepending its refined-param guards to the body.
+        for instr in refine_guard_instrs:
             lines.append(f"    {instr}")
         for instr in body_instrs:
             lines.append(f"    {instr}")

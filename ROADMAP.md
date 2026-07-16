@@ -12,7 +12,7 @@ Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verificati
 
 ## Where we are
 
-7,514 tests, 160 conformance programs, 38 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
+7,536 tests, 160 conformance programs, 38 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
 
 ## Stage 19 — The verification completeness sprint
 
@@ -20,11 +20,11 @@ Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verificati
 
 ### Bug sprint — monomorphizer and verifier gaps first
 
-Three bugs remain in the sprint's bug-PR cluster — effect-op codegen lowering and the verifier's obligation walkers — grouped by shared fix machinery so each PR touches one code path (the verification-completeness rows below are the sprint's remaining scope):
+Three bugs remain in the sprint's bug-PR cluster (the verification-completeness rows below are the sprint's remaining scope):
 
-**PR B — effect-op positional lowering (2).** [#1005](https://github.com/aallan/vera/issues/1005) a `get` clause's `@Unit` op-parameter read is check-green but E699 at codegen; [#1006](https://github.com/aallan/vera/issues/1006) effect ops in array-literal-element / `let @Unit` positions `CodegenSkip` the enclosing fn. Same translator region; both must route through the post-#976 clause-aware effect-op dispatch, not the raw host cell.
+**PR D — zero-size declaration guards (2).** [#1031](https://github.com/aallan/vera/issues/1031) a `Future<Unit>` destructure/match component is check-green but E602-skips the enclosing fn — four `wasm/data.py` declaration guards key on the bare `Unit` name instead of representation (`erases_to_unit`); [#1037](https://github.com/aallan/vera/issues/1037) the sibling name-only alias resolution in `_slot_name_to_wasm_type` skips `type FI = Future<Int>;` components the same way. In review as [#1035](https://github.com/aallan/vera/pull/1035).
 
-**PR C — verifier narrowing dual (1).** [#1024](https://github.com/aallan/vera/issues/1024) the refinement-predicate narrowing into an `apply_fn` closure formal is not obligated (false Tier-1) — the `@Nat` base (`>= 0`) was obligated + guarded by #1017; this adds the generic call path's refined arm (`_refined_binding_target` + the runtime refinement guard) at the same site. Groups with the verification-completeness rows below.
+**PR E — await-scrutinee inference (1).** [#1038](https://github.com/aallan/vera/issues/1038) `match await(@Future<ADT>.0)` is check-green but E602-skips on scrutinee WASM-type inference — unwrap the awaited `Future<T>` the way the let-binding path already does. Fix in progress.
 
 [#996](https://github.com/aallan/vera/issues/996) stays a watch-only row — an unreproducible conformance flake, not a fix target.
 

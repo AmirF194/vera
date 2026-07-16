@@ -42,6 +42,7 @@ from vera.obligations.core import (
 from vera.slots import slot_table, type_expr_slot_name
 from vera.smt import SlotEnv, SmtContext
 from vera.types import (
+    erases_to_unit,
     BOOL,
     FLOAT64,
     INT,
@@ -2491,7 +2492,7 @@ class ContractVerifier:
                 # pass (R7).
                 self._record_refined_bind_tier3(
                     decl, ret_node, "return type",
-                    guarded=not self._is_unit_refinement(ret_type))
+                    guarded=self._refined_boundary_codegen_guardable(ret_type))
             else:
                 ret_result = smt.check_valid(goal, list(assumptions))
                 if ret_result.status == "verified":
@@ -2509,7 +2510,9 @@ class ContractVerifier:
                     )
                 else:  # pragma: no cover — solver timeout
                     self._record_refined_bind_tier3(
-                        decl, ret_node, "return type", guarded=True)
+                        decl, ret_node, "return type",
+                        guarded=self._refined_boundary_codegen_guardable(
+                            ret_type))
 
         # 7c. #813: a bare @Nat body widening into an @Int return reinterprets
         #     its bit pattern above i64.MAX (u64.MAX -> -1), so a Tier-1 proof
@@ -3490,6 +3493,39 @@ class ContractVerifier:
             if formals is not None:
                 for arg, formal in zip(expr.args[1:], formals):
                     resolved_formal = self._resolve_type(formal)
+                    # #1024: refined-FIRST, mirroring the generic call-argument
+                    # path (Site 2 below).  A refinement-over-@Nat closure formal
+                    # (e.g. `{ @Nat | @Nat.0 > 0 }`) IS a @Nat type
+                    # (`_is_nat_type` unwraps the base), so pre-fix the #1017 arm
+                    # below claimed it and discharged only the base's `>= 0` —
+                    # leaving the STRICT predicate unobligated, a false Tier-1
+                    # (`apply_fn(clo, 0)` verified clean and ran silently).
+                    # Discharge the FULL predicate here so the refinement is not
+                    # reduced to `>= 0`.  `_refined_binding_target` takes the
+                    # RESOLVED formal (a concrete refined formal, or a generic one
+                    # instantiated to a RefinedType at this site).  Codegen guards
+                    # the closure's refined formal at the lifted body's prologue
+                    # (`_compile_lifted_closure`, fix site 2), so `guarded=True`.
+                    refined_target = self._refined_binding_target(
+                        arg, resolved_formal)
+                    if (refined_target is not None
+                            and self._narrows_into_refined(arg, refined_target)):
+                        self._check_refined_binding_obligation(
+                            decl, arg, refined_target, smt, slot_env,
+                            assumptions, site="closure argument",
+                            guarded=True,
+                        )
+                        # #820 INTERSECTION (formal side): the call-site widen
+                        # guard fires alongside the entry refinement guard for
+                        # a refinement-over-@Int formal fed an intrinsically-
+                        # @Nat argument — record its obligation too (PR #1034
+                        # review round; see the closure-return twin below).
+                        if (self._is_int_type(resolved_formal)
+                                and self._result_is_nat(arg)):
+                            self._check_int_widening_obligation(
+                                decl, arg, smt, slot_env, list(assumptions),
+                                site="closure argument",
+                            )
                     # #1017: the @Int -> @Nat NARROWING dual of the widening arm
                     # below.  A provably-negative @Int argument narrowing into a
                     # @Nat closure formal was a false Tier-1 (no obligation) with
@@ -3497,7 +3533,7 @@ class ContractVerifier:
                     # narrowing (Site 2 below): obligate the argument against its
                     # recovered @Nat formal.  Codegen guards the call_indirect
                     # argument (`_translate_apply_fn`), so `guarded=True`.
-                    if (self._nat_binding_target(arg, resolved_formal)
+                    elif (self._nat_binding_target(arg, resolved_formal)
                             and self._narrows_into_nat(arg)):
                         self._check_nat_binding_obligation(
                             decl, arg, smt, slot_env, assumptions,
@@ -3529,7 +3565,49 @@ class ContractVerifier:
             # closure-opacity rationale), matching what the #984 narrowing dual
             # below shares.
             resolved_ret = self._resolve_type(expr.return_type)
-            if (self._is_int_type(resolved_ret)
+            # #1032: a REFINED closure return — the return-side dual of the
+            # #1024 formal narrowing at the apply_fn branch above.  Pre-fix
+            # `fn(@Int -> @Pos) { @Int.0 }` returned -5 (or 0, which clears the
+            # @Nat base's `>= 0`) through the refined slot on a verify-clean
+            # program: no arm here claimed a RefinedType return, and codegen's
+            # #984 leaf gate excluded refinements assuming a boundary guard
+            # that did not exist.  Refined-FIRST, ahead of the widen arm below,
+            # for the same reason as everywhere else (`_is_int_type` unwraps a
+            # refinement-over-@Int, so the widen arm would otherwise claim it):
+            # the refinement's FULL predicate is the boundary invariant.  Same
+            # shallow-syntactic, opacity-forced treatment as its siblings
+            # (always tier3, never a false Tier-1 — the named refined-return
+            # path discharges via SMT, but this body is opaque): codegen guards
+            # the lifted body's return value (`_compile_lifted_closure`, the
+            # closure mirror of `_compile_postconditions`' refined-return
+            # guard), except over an erased `@Unit` base, which has no local to
+            # check — recorded honestly unguarded, as at every other site.
+            # Deliberately UNGATED (unlike the argument side's
+            # `_narrows_into_refined`): the closure body is opaque, so even a
+            # body already typed at the refined type could carry a raw leaf
+            # through a join — obligating every refined return keeps the
+            # obligation stream exactly matched to codegen's unconditional
+            # guard (the lockstep invariant), at worst one redundant tier3 on
+            # an identity-shaped closure.
+            if self._is_refined_type(resolved_ret):
+                self._record_refined_bind_tier3(
+                    decl, expr.body, "closure return",
+                    guarded=self._refined_boundary_codegen_guardable(
+                        resolved_ret),
+                )
+                # #820 INTERSECTION: a refinement OVER @Int whose body is
+                # intrinsically @Nat gets codegen's widen guard ALONGSIDE the
+                # refinement guard — the predicate may not imply fit-in-i64
+                # (`< 100` is SATISFIED by a reinterpreted negative), so the
+                # widen guard is not subsumable and its obligation is
+                # recorded too, keeping the stream matched to both guards
+                # (PR #1034 review round).
+                if (self._is_int_type(resolved_ret)
+                        and self._result_is_nat(expr.body)):
+                    self._record_int_widen_tier3(
+                        decl, expr.body, "closure return", "tier3",
+                        guarded=True)
+            elif (self._is_int_type(resolved_ret)
                     and self._result_is_nat(expr.body)):
                 self._record_int_widen_tier3(
                     decl, expr.body, "closure return", "tier3", guarded=True)
@@ -3542,10 +3620,10 @@ class ContractVerifier:
             # (never a FALSE Tier-1): record tier3 guarded, backed by codegen's
             # per-narrowing-leaf `>= 0` guard in `_compile_lifted_closure`.  A
             # refinement OVER @Nat is a RefinedType with its own boundary
-            # predicate (7b at the top level), so gate on the bare @Nat
-            # primitive — the two never co-fire on one site.
+            # predicate, claimed by the refined-first #1032 arm above — so this
+            # arm sees only the bare @Nat primitive and the two never co-fire
+            # on one site.
             elif (self._is_nat_type(resolved_ret)
-                    and not self._is_refined_type(resolved_ret)
                     and self._return_narrows_into_nat(expr.body)):
                 self._record_nat_bind_tier3(
                     decl, expr.body, "closure return", "tier3", guarded=True)
@@ -5031,7 +5109,10 @@ class ContractVerifier:
         """
         # A `@Unit` refinement is codegen-UNguarded (erased binder), so its
         # Tier-3 fallback must not claim a runtime guard (CR db24433).
-        eff_guarded = guarded and not self._is_unit_refinement(refined_ty)
+        eff_guarded = (
+            guarded
+            and self._refined_boundary_codegen_guardable(refined_ty)
+        )
         val = smt.translate_expr(value_node, slot_env)
         if val is None:
             self._record_refined_bind_tier3(
@@ -5186,7 +5267,7 @@ class ContractVerifier:
         if goal is None:
             self._record_refined_bind_tier3(
                 decl, decl.body, "return type",
-                guarded=not self._is_unit_refinement(ret_type))
+                guarded=self._refined_boundary_codegen_guardable(ret_type))
             return
         result = smt.check_valid(goal, list(assumptions))
         if result.status == "verified":
@@ -5204,7 +5285,7 @@ class ContractVerifier:
         else:  # pragma: no cover — solver timeout
             self._record_refined_bind_tier3(
                 decl, decl.body, "return type",
-                guarded=not self._is_unit_refinement(ret_type))
+                guarded=self._refined_boundary_codegen_guardable(ret_type))
 
     def _check_refined_binding_obligation_term(
         self,
@@ -7020,6 +7101,36 @@ class ContractVerifier:
         runtime guard codegen never emits — unlike ``@Byte`` (an `i32`) or
         ``@Array`` (a pair), whose binders DO lower, so those stay guarded."""
         return isinstance(ty, RefinedType) and ty.base == UNIT
+
+    @staticmethod
+    def _refined_boundary_codegen_guardable(ty: Type) -> bool:
+        """Whether codegen's boundary refinement guard actually fires for
+        *ty* — the semantic mirror of ``_refinement_guard_parts``'s bail
+        conditions (``vera/codegen/contracts.py``); KEEP IN SYNC (#1036).
+
+        Codegen bails (emits NO guard) when (a) the base is the erased
+        ``@Unit`` (no local to check — the ``_is_unit_refinement`` case), or
+        (b) the base carries a NON-PLAIN type argument — a nested refinement
+        or fn type, e.g. ``Array<{ @Int | ... }>`` — whose binder slot name
+        cannot be spelt.  A ``guarded=True`` Tier-3 for either was an
+        unfulfilled runtime-guard promise: an empty array flowed through a
+        NonEmpty-refined closure boundary silently while the obligation
+        stream claimed a runtime check (PR #1034 adversarial review).  Plain
+        named args (``Array<Int>``, nested ``Array<Array<Int>>`` via the
+        truncated-name convention) stay guarded."""
+        if not isinstance(ty, RefinedType):
+            return False
+        if erases_to_unit(ty):
+            # Representation-keyed, not name-keyed: a `Future<Unit>` base
+            # erases exactly like bare `@Unit` (#841), so neither has a
+            # local for the guard to check (PR #1034 full review).
+            return False
+        if isinstance(ty.base, AdtType):
+            return all(
+                isinstance(arg, (PrimitiveType, AdtType))
+                for arg in ty.base.type_args
+            )
+        return True
 
     @staticmethod
     def _is_bool_type(ty: Type) -> bool:

@@ -9,14 +9,16 @@ Vera is a programming language designed for LLMs to write. It uses typed slot re
 
 ## Installation
 
-Vera requires Python 3.11 or later. Node.js 22+ is optional (only needed for `vera compile --target browser` and browser parity tests). Install the released `veralang` distribution from PyPI:
+Vera requires Python 3.11 or later. Node.js 22+ is optional (only needed for `vera compile --target browser` and browser parity tests). Install from the GitHub source:
 
 ```bash
+git clone https://github.com/aallan/vera.git
+cd vera
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
-python -m pip install veralang
+python -m pip install -e ".[dev]"
 ```
 
-This installs the `vera` command and all runtime dependencies (Lark parser, Z3 solver, wasmtime). For editor/agent integration via the Language Server Protocol, install `python -m pip install "veralang[lsp]"` — see [LSP_SERVER.md](LSP_SERVER.md).
+This installs the `vera` command and all runtime dependencies (Lark parser, Z3 solver, wasmtime). For editor/agent integration via the Language Server Protocol, use the `[lsp]` extra — `python -m pip install -e ".[lsp]"` — see [LSP_SERVER.md](LSP_SERVER.md).
 
 The GitHub source route remains supported for unreleased changes and compiler development:
 
@@ -2427,12 +2429,11 @@ These are known limitations in the current reference implementation. Most are tr
 
 ## Known Bugs and Workarounds
 
-Current reference-implementation bugs that an agent writing Vera code is likely to hit. Every entry has a confirmed reproducer and a known workaround. The full curated list is in [KNOWN_ISSUES.md](https://github.com/aallan/vera/blob/main/KNOWN_ISSUES.md); the issue tracker is the source of truth.
+Current reference-implementation bugs that an agent writing Vera code is likely to hit. Most entries have a confirmed reproducer and a known workaround; an observed one-off CI flake is tracked with reporting guidance instead. The full curated list is in [KNOWN_ISSUES.md](https://github.com/aallan/vera/blob/main/KNOWN_ISSUES.md); the issue tracker is the source of truth.
 
 | Shape | Bug summary | Workaround | Issue |
 |---|---|---|---|
 | Rare conformance-gate flake | `ch05_closure_nat_return` trapped once in a full conformance run and never again (~960 clean attempts) — suspected runtime/GC timing interaction, not a compiler defect. | If CI reds on this program with `Reached unreachable` in `main`, re-run and report on the issue with wasmtime version + load conditions — do not chase the compiler. | [#996](https://github.com/aallan/vera/issues/996) |
-| Refinement predicate into an `apply_fn` refined formal | `apply_fn(f, <v>)` where `f` takes `{ @Nat \| P }` obligates only the `@Nat` base (`>= 0`, since #1017), not the full predicate `P` — a value satisfying `>= 0` but violating `P` verifies clean. | Call the function by name instead of `apply_fn` (the named-call path checks the full refinement), or bind into the refined slot first (`let @T = <v>;`). | [#1024](https://github.com/aallan/vera/issues/1024) |
 
 When a Vera program type-checks cleanly, compiles without errors, and then produces a runtime trap you can't explain, runtime trap diagnostics are now Vera-native end-to-end: each trap carries a `kind` label (`divide_by_zero` / `out_of_bounds` / `stack_exhausted` / `unreachable` / `overflow` / `contract_violation` / `unknown`), a per-kind `Fix:` paragraph naming the canonical remediation, and a source backtrace pointing at the offending Vera function and line — not just `wasm trap: <reason>`.  Tail-recursive iteration runs in constant WASM stack space for both non-allocating ([#517](https://github.com/aallan/vera/issues/517), v0.0.126) and allocating ([#549](https://github.com/aallan/vera/issues/549), v0.0.154) tail calls — the latter prepends a `$gc_sp` restore before each `return_call` to keep the shadow stack bounded across iterations.
 
