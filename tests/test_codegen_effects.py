@@ -1142,6 +1142,32 @@ public fn call_oracle(-> @Int)
 """
         assert _run(source, fn="call_oracle") == 42
 
+    def test_slotref_ctor_arg_future_field_runs(self) -> None:
+        """A `Future<Int>` SLOT REFERENCE as a constructor argument compiles.
+
+        Pins the constructor-argument call site of the same fixed mapper
+        (`_ref_type_name_wasm_type`): `WI(@Future<Int>.0, 7)` passes the
+        Future through a SlotRef, whose WASM type the constructor-argument
+        inference asks the mapper for — without the Future-transparency arm
+        the whole function E602-skipped, exactly like the scrutinee site
+        (the #1041 adversarial review flagged this site as a live, unpinned
+        manifestation).  RED on base (E602 skip; 41 + 7 = 48 end-to-end,
+        values chosen so no zeroed default can coincide)."""
+        source = """\
+private data WrapI { WI(Future<Int>, Int) }
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @Future<Int> = async(41);
+  let @WrapI = WI(@Future<Int>.0, 7);
+  match @WrapI.0 {
+    WI(@Future<Int>, @Int) -> await(@Future<Int>.0) + @Int.0
+  }
+}
+"""
+        assert _run(source, fn="f") == 48
+
 
 class TestRandomEffect:
     """Tests for the Random effect (#465).
