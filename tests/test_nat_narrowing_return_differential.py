@@ -1243,3 +1243,96 @@ class TestRefinedNonPlainBaseDisclosure1036:
         # The control: a PLAIN NamedType base keeps its honest guarded tier3
         # (the closure guards fire for these — pinned by the classes above).
         assert _refine_bind_statuses(_CLOSURE_REFINED_RET_LEAK) == ["tier3"]
+
+
+def _obligation_kinds_statuses(source: str) -> set[tuple[str, str]]:
+    """Every (kind, status) pair in the verifier's obligation stream — for
+    intersection shapes where ONE value carries obligations of two kinds
+    (a refinement over `@Int` receiving an intrinsically-`@Nat` value gets
+    both the predicate obligation and the widen obligation)."""
+    with _resolved_pipeline(source) as (program, arts, resolved, path):
+        result = verify(
+            program, source, file=path, resolved_modules=resolved,
+            expr_types=arts.expr_semantic_types,
+            expr_target_types=arts.expr_target_types,
+        )
+        return {
+            (o.kind, o.status) for o in result.obligations
+            if o.kind in (_REFINE_KIND, "nat_to_int_coerce", "int_widen")
+        }
+
+
+_CAP_RET_INTERSECTION = """\
+type Cap = { @Int | @Int.0 < 100 };
+type F = fn(Nat -> Cap) effects(pure);
+
+public fn go(@Nat -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @F = fn(@Nat -> @Cap) effects(pure) { @Nat.0 };
+  apply_fn(@F.0, @Nat.0)
+}
+"""
+
+_CAP_FORMAL_INTERSECTION = """\
+type Cap = { @Int | @Int.0 < 100 };
+type F = fn(Cap -> Int) effects(pure);
+
+public fn go(@Nat -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @F = fn(@Cap -> @Int) effects(pure) { @Cap.0 };
+  apply_fn(@F.0, @Nat.0)
+}
+"""
+
+
+class TestRefinedOverIntWidenIntersection:
+    """A refinement OVER `@Int` receiving an intrinsically-`@Nat` value is an
+    INTERSECTION: codegen emits BOTH the refinement guard (the predicate) and
+    the #820 widen guard (`value < 0` = a u64 above i64.MAX reinterpreted) —
+    the predicate may not imply fit-in-i64 (`< 100` is SATISFIED by a
+    reinterpreted negative), so the widen guard is not subsumable.  The
+    obligation stream must describe both guards (PR #1034 review): the
+    refined-first arm records the predicate obligation AND the widen
+    obligation, never an either/or.
+    """
+
+    def test_refined_int_return_with_nat_body_records_both(self) -> None:
+        kinds = _obligation_kinds_statuses(_CAP_RET_INTERSECTION)
+        assert (_REFINE_KIND, "tier3") in kinds, kinds
+        assert any(k != _REFINE_KIND and s == "tier3" for k, s in kinds), (
+            f"the #820 widen guard codegen emits for this return has no "
+            f"obligation describing it — got only {kinds}"
+        )
+
+    def test_refined_int_formal_with_nat_arg_records_both(self) -> None:
+        # The formal side discharges via full SMT (unlike the opacity-shallow
+        # return), so the refine_bind here is a correct E505 `violated` — an
+        # unconstrained @Nat can exceed the `< 100` predicate.  The pin is
+        # the WIDEN kind's presence: the call-site widen guard codegen emits
+        # must have an obligation describing it, whatever the predicate
+        # obligation resolved to.
+        kinds = _obligation_kinds_statuses(_CAP_FORMAL_INTERSECTION)
+        assert any(k == _REFINE_KIND for k, _ in kinds), kinds
+        assert any(
+            k != _REFINE_KIND and s in ("tier3", "verified")
+            for k, s in kinds
+        ), (
+            f"the #820 call-site widen guard for this formal has no "
+            f"obligation describing it — got only {kinds}"
+        )
+
+    def test_intersection_runtime_behavior_pinned(self) -> None:
+        # The guards themselves: a satisfying value passes intact; a value
+        # violating the predicate traps at the refinement guard.  (The widen
+        # guard's own firing needs a u64 above i64.MAX and is pinned by the
+        # #820 suites; here we pin that adding the obligation changed no
+        # runtime behavior.)
+        assert _run(_CAP_RET_INTERSECTION, "go", 5) == 5
+        kind = _trap_kind(_CAP_RET_INTERSECTION, "go", 150)
+        assert kind == "contract_violation", kind

@@ -3514,6 +3514,17 @@ class ContractVerifier:
                             assumptions, site="closure argument",
                             guarded=True,
                         )
+                        # #820 INTERSECTION (formal side): the call-site widen
+                        # guard fires alongside the entry refinement guard for
+                        # a refinement-over-@Int formal fed an intrinsically-
+                        # @Nat argument — record its obligation too (PR #1034
+                        # review round; see the closure-return twin below).
+                        if (self._is_int_type(resolved_formal)
+                                and self._result_is_nat(arg)):
+                            self._check_int_widening_obligation(
+                                decl, arg, smt, slot_env, list(assumptions),
+                                site="closure argument",
+                            )
                     # #1017: the @Int -> @Nat NARROWING dual of the widening arm
                     # below.  A provably-negative @Int argument narrowing into a
                     # @Nat closure formal was a false Tier-1 (no obligation) with
@@ -3583,6 +3594,18 @@ class ContractVerifier:
                     guarded=self._refined_boundary_codegen_guardable(
                         resolved_ret),
                 )
+                # #820 INTERSECTION: a refinement OVER @Int whose body is
+                # intrinsically @Nat gets codegen's widen guard ALONGSIDE the
+                # refinement guard — the predicate may not imply fit-in-i64
+                # (`< 100` is SATISFIED by a reinterpreted negative), so the
+                # widen guard is not subsumable and its obligation is
+                # recorded too, keeping the stream matched to both guards
+                # (PR #1034 review round).
+                if (self._is_int_type(resolved_ret)
+                        and self._result_is_nat(expr.body)):
+                    self._record_int_widen_tier3(
+                        decl, expr.body, "closure return", "tier3",
+                        guarded=True)
             elif (self._is_int_type(resolved_ret)
                     and self._result_is_nat(expr.body)):
                 self._record_int_widen_tier3(
