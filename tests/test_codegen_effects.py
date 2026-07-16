@@ -1007,6 +1007,142 @@ public fn f(-> @Float64)
         assert abs(_run_float(source, fn="f") - 3.14) < 0.001
 
 
+# Shared source programs for the #1038 await-in-scrutinee family.  Each
+# `scrut_*` helper awaits a Future directly in match-scrutinee position; the
+# public `call_*` wrappers construct concrete payloads so both arms run.  The
+# return values are distinguishing (payload-carrying, arm-specific) so a wrong
+# scrutinee width or a mis-extracted payload fails the assertion — not merely
+# the E602-skip that drops the function pre-fix.
+_ASYNC_SCRUT_OPTION = """\
+private fn scrut_opt(@Option<Int> -> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @Future<Option<Int>> = async(@Option<Int>.0);
+  match await(@Future<Option<Int>>.0) {
+    Some(@Int) -> @Int.0 + 1,
+    None -> -7
+  }
+}
+
+public fn call_some(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{ scrut_opt(Some(5)) }
+
+public fn call_none(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{ scrut_opt(None) }
+"""
+
+_ASYNC_SCRUT_ADT = """\
+private data Shape {
+  Circle(Int),
+  Square(Int)
+}
+
+private fn scrut_shape(@Shape -> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @Future<Shape> = async(@Shape.0);
+  match await(@Future<Shape>.0) {
+    Circle(@Int) -> @Int.0 + 10,
+    Square(@Int) -> @Int.0 + 20
+  }
+}
+
+public fn call_circle(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{ scrut_shape(Circle(3)) }
+
+public fn call_square(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{ scrut_shape(Square(4)) }
+"""
+
+_ASYNC_SCRUT_INT = """\
+private fn scrut_int(@Int -> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @Future<Int> = async(@Int.0);
+  match await(@Future<Int>.0) {
+    0 -> 100,
+    _ -> 200
+  }
+}
+
+public fn call_int_zero(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{ scrut_int(0) }
+
+public fn call_int_nonzero(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{ scrut_int(9) }
+"""
+
+
+class TestAwaitMatchScrutinee1038:
+    """#1038: `match await(@Future<T>.0) { ... }` — awaiting a Future directly
+    in scrutinee position.
+
+    The match-scrutinee WASM-type inference (`_ref_type_name_wasm_type`, reached
+    via the `await` FnCall arm of `_infer_expr_wasm_type`) must unwrap Future<T>
+    to T — the same transparency the let-binding path (`_slot_name_to_wasm_type`)
+    already applies.  Without it the scrutinee inferred None and the enclosing
+    function E602-skipped ("could not infer match scrutinee WASM type") on a
+    check/verify-green program.  Each test exercises BOTH arms with
+    distinguishing values, so a wrong scrutinee width or mis-extracted payload
+    is caught, not merely that the function survived codegen.  The scalar-Int and
+    user-ADT members are here alongside the reported Option member because all
+    three share the one broken inference site.  The final test pins the
+    await-into-let-then-match form (the semantic oracle) against regression."""
+
+    def test_await_future_option_scrutinee_some_arm(self) -> None:
+        """await(Future<Option<Int>>) scrutinee: Some(5) payload flows to 5+1."""
+        assert _run(_ASYNC_SCRUT_OPTION, fn="call_some") == 6
+
+    def test_await_future_option_scrutinee_none_arm(self) -> None:
+        """await(Future<Option<Int>>) scrutinee: None selects the None arm."""
+        assert _run(_ASYNC_SCRUT_OPTION, fn="call_none") == -7
+
+    def test_await_future_adt_scrutinee_first_ctor(self) -> None:
+        """await(Future<UserADT>) scrutinee: Circle(3) payload flows to 3+10."""
+        assert _run(_ASYNC_SCRUT_ADT, fn="call_circle") == 13
+
+    def test_await_future_adt_scrutinee_second_ctor(self) -> None:
+        """await(Future<UserADT>) scrutinee: Square(4) payload flows to 4+20."""
+        assert _run(_ASYNC_SCRUT_ADT, fn="call_square") == 24
+
+    def test_await_future_int_scrutinee_literal_arm(self) -> None:
+        """await(Future<Int>) scalar scrutinee: 0 matches the literal arm."""
+        assert _run(_ASYNC_SCRUT_INT, fn="call_int_zero") == 100
+
+    def test_await_future_int_scrutinee_wildcard_arm(self) -> None:
+        """await(Future<Int>) scalar scrutinee: 9 falls to the wildcard arm."""
+        assert _run(_ASYNC_SCRUT_INT, fn="call_int_nonzero") == 200
+
+    def test_await_into_let_then_match_still_works(self) -> None:
+        """Regression pin: the await-into-let-then-match form (the semantic
+        oracle) keeps compiling and running — the fix must not disturb the
+        working path it mirrors.  Green before and after; it guards the
+        let-binding scrutinee inference against collateral breakage."""
+        source = """\
+private fn oracle_opt(@Option<Int> -> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @Future<Option<Int>> = async(@Option<Int>.0);
+  let @Option<Int> = await(@Future<Option<Int>>.0);
+  match @Option<Int>.0 {
+    Some(@Int) -> @Int.0 + 1,
+    None -> -7
+  }
+}
+
+public fn call_oracle(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{ oracle_opt(Some(41)) }
+"""
+        assert _run(source, fn="call_oracle") == 42
+
+
 class TestRandomEffect:
     """Tests for the Random effect (#465).
 

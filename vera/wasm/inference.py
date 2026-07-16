@@ -1939,6 +1939,22 @@ class InferenceMixin:
             return "i32"
         if self._is_pair_type_name(resolved):
             return "i32_pair"
+        # Future<T> is WASM-transparent — same representation as its single type
+        # argument.  Mirrors `_slot_name_to_wasm_type`'s string-form Future arm
+        # and `_named_type_to_wasm`'s canonical-walk Future arm; this SlotRef /
+        # ResultRef mapper was the odd one out that lacked it, so a
+        # `match await(@Future<T>.0) { ... }` scrutinee — whose `await` FnCall
+        # arm of `_infer_expr_wasm_type` delegates to this mapper on the
+        # `@Future<T>` slot ref — inferred None and E602-skipped the enclosing
+        # function on a check/verify-green program (#1038).  Delegating to
+        # `_canonical_wasm_type` lowers the inner type through the same walk the
+        # let-binding path uses, so a scalar inner (Future<Int> -> i64), an ADT
+        # inner (Future<Option<Int>>, Future<UserADT> -> i32), and a pair inner
+        # (Future<String> -> i32_pair) all map correctly here.  (A Future<String>
+        # *scrutinee* stays blocked upstream by the separate `let @Future<String>`
+        # pair-binding gap, so this mapper fix alone doesn't reach it end-to-end.)
+        if resolved == "Future" and type_args and len(type_args) == 1:
+            return self._canonical_wasm_type(type_args[0])
         base = resolved.split("<")[0] if "<" in resolved else resolved
         # Opaque handle types — i32 handles managed by host runtime
         if base in ("Decimal", "Map", "Set"):
