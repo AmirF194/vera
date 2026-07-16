@@ -707,12 +707,31 @@ class CallsArraysMixin:
         ``apply_fn`` over the identical slot resolved fine; the pre-#630
         bare-`NamedType`-only shape had the parallel gap for refinement
         returns (#602 / #614).
+
+        The canonical `NamedType` is rendered as its FULL compound
+        spelling (#1079): returning `.name` dropped the type arguments,
+        so a closure forwarding a `Future<T>` value (a PURE
+        identity/reshuffle closure — `array_map` rejects async ones)
+        inferred bare `"Future"`, which `_element_mem_size` /
+        `_element_wasm_type` cannot `_strip_future` and size at the
+        4-byte i32 default while the payload occupies 8 bytes — an
+        `indirect call type mismatch` trap for Int/Nat/Float64/String
+        payloads and SILENTLY wrong values for 1-byte-packed Bool/Byte,
+        all behind a check+verify-green exit-0 compile.  The bare-head
+        family (#1057's mechanism) at the closure-return site, which
+        the #1045/#1057 element fixes and the #1074 payload
+        canonicalizer never reach.  An alias INSIDE the rendered
+        payload (`Future<Big>`, `type Big = Int`) is canonicalized too
+        (`_canonicalize_alias_slot_name`, the #1074 walk) — the name
+        the deciders key on must be fully resolved.
         """
         ret_te = self._closure_arg_return_type(closure_arg)
         if ret_te is not None:
             canonical = self._canonical_named_type(ret_te)
             if canonical is not None:
-                return canonical.name
+                name, _ = self._canonicalize_alias_slot_name(
+                    self._format_named_type(canonical))
+                return name
         return None
 
     def _translate_array_map(
@@ -1143,7 +1162,21 @@ class CallsArraysMixin:
             return ret
         # Fallback: inspect the init expression.
         if isinstance(init_arg, ast.SlotRef):
-            return init_arg.type_name
+            # #1079 (fallback arm): `SlotRef.type_name` is the bare head
+            # (`@Future<Int>.0` carries `"Future"` with the payload in
+            # `type_args`), the same truncation
+            # `_infer_closure_return_vera_type` had — reachable when the
+            # closure-return dispatch yields None (e.g. an if-expression
+            # between two closures) and mis-typing the accumulator local
+            # (an `expected i32, found i64` validation error).  Render
+            # the full compound spelling and canonicalize any alias in
+            # it (`@FI.0` / `@Future<Big>.0`), exactly like the primary
+            # arm.
+            name = self._ref_vera_type_name(
+                init_arg.type_name, init_arg.type_args,
+            ) or init_arg.type_name
+            name, _ = self._canonicalize_alias_slot_name(name)
+            return name
         if isinstance(init_arg, ast.StringLit):
             return "String"
         if isinstance(init_arg, ast.IntLit):

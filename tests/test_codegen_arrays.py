@@ -7,6 +7,7 @@ from __future__ import annotations
 from tests.codegen_helpers import (
     _compile_ok,
     _run,
+    _run_float,
     _run_io,
     _run_trap,
 )
@@ -2888,6 +2889,512 @@ public fn f(-> @Int) requires(true) ensures(true) effects(<Async>) {
 }
 """
         assert _run(src, "f") == 4999999979
+
+
+class TestFutureCollectionAliasElements1082:
+    """#1082: a COLLECTION alias hiding an `Array<Future<Alias>>`
+    (`type FlagA = Bool; type Rows = Array<Future<FlagA>>`) mis-sizes
+    the elements through the array combinators — the #1074 residual arm.
+
+    `_infer_concat_elem_type`'s collection-alias arm (#1064) resolves
+    the collection name to its target's full spelling and extracts the
+    element — but a COMPOUND element (`Future<FlagA>`) was returned
+    VERBATIM, skipping the payload canonicalization the sibling
+    bare-element branch performs (`type Rows = Array<FF>` with
+    `type FF = Future<FlagA>` worked — the element is the bare name
+    `FF` there).  `_strip_future("Future<FlagA>")` hands the size dict
+    the unresolved alias `FlagA`, which falls to the 4-byte default:
+    silent wrong values for 1-byte Bool payloads (concat 2122 / reverse
+    2222 instead of 2121 / 1212) and for i64 payloads (concat of two
+    distinct >2^32 futures returned 0 — both reads landed on the same
+    element; reverse returned reinterpreted garbage).  All
+    check+verify-green.  Slice/filter/index shapes over the same alias
+    read correctly only by heap-layout coincidence (the packed data
+    happens to sit inside the first wrong-stride window), so the fix is
+    what makes them deterministic.
+
+    The fix canonicalizes the compound element before returning —
+    `Future<FlagA>` -> `Future<Bool>` via the #1074-extended
+    `_canonicalize_alias_slot_name` payload walk — exactly like the
+    `Array`-headed SlotRef arm's `Future` branch.
+    """
+
+    def test_rows_alias_bool_concat(self) -> None:
+        """`array_concat` over `@Rows`, `type Rows = Array<Future<FlagA>>`.
+
+        [false, true] ++ itself reads 2000+100+20+1 = 2121.  RED before
+        the fix: 2122 (the second copy's 4-byte stride left element 3
+        misread as false)."""
+        src = """
+type FlagA = Bool;
+type Rows = Array<Future<FlagA>>;
+
+public fn f(-> @Int) requires(true) ensures(true) effects(<Async>) {
+  let @Future<Bool> = async(false);
+  let @Future<Bool> = async(true);
+  let @Array<Future<Bool>> = [@Future<Bool>.1, @Future<Bool>.0];
+  let @Rows = @Array<Future<Bool>>.0;
+  let @Rows = array_concat(@Rows.0, @Rows.0);
+  let @Int = if await(@Rows.0[0]) then { 1000 } else { 2000 };
+  let @Int = if await(@Rows.0[1]) then { 100 } else { 200 };
+  let @Int = if await(@Rows.0[2]) then { 10 } else { 20 };
+  let @Int = if await(@Rows.0[3]) then { 1 } else { 2 };
+  @Int.3 + @Int.2 + @Int.1 + @Int.0
+}
+"""
+        assert _run(src, "f") == 2121
+
+    def test_rows_alias_bool_reverse(self) -> None:
+        """`array_reverse` over the same `Rows` alias.
+
+        [false, true, false, true] reversed reads [true, false, true,
+        false]: 1000+200+10+2 = 1212.  RED before the fix: 2222 (every
+        element misread as false — the 4-byte-stride swap scattered the
+        1-byte-packed payloads)."""
+        src = """
+type FlagA = Bool;
+type Rows = Array<Future<FlagA>>;
+
+public fn f(-> @Int) requires(true) ensures(true) effects(<Async>) {
+  let @Future<Bool> = async(false);
+  let @Future<Bool> = async(true);
+  let @Array<Future<Bool>> = [@Future<Bool>.1, @Future<Bool>.0, @Future<Bool>.1, @Future<Bool>.0];
+  let @Rows = @Array<Future<Bool>>.0;
+  let @Rows = array_reverse(@Rows.0);
+  let @Int = if await(@Rows.0[0]) then { 1000 } else { 2000 };
+  let @Int = if await(@Rows.0[1]) then { 100 } else { 200 };
+  let @Int = if await(@Rows.0[2]) then { 10 } else { 20 };
+  let @Int = if await(@Rows.0[3]) then { 1 } else { 2 };
+  @Int.3 + @Int.2 + @Int.1 + @Int.0
+}
+"""
+        assert _run(src, "f") == 1212
+
+    def test_rows_alias_int_concat(self) -> None:
+        """i64 twin: `type Rows = Array<Future<Big>>`, `type Big = Int`.
+
+        RED before the fix: 0 — the 4-byte copy stride made reads [0]
+        and [1] land on the same first i64, so their difference
+        vanished.  5000000001 - 22 = 4999999979."""
+        src = """
+type Big = Int;
+type Rows = Array<Future<Big>>;
+
+public fn f(-> @Int) requires(true) ensures(true) effects(<Async>) {
+  let @Future<Int> = async(5000000001);
+  let @Future<Int> = async(22);
+  let @Array<Future<Int>> = [@Future<Int>.1, @Future<Int>.0];
+  let @Rows = @Array<Future<Int>>.0;
+  let @Rows = array_concat(@Rows.0, @Rows.0);
+  await(@Rows.0[0]) - await(@Rows.0[1])
+}
+"""
+        assert _run(src, "f") == 4999999979
+
+    def test_rows_alias_int_reverse(self) -> None:
+        """i64 reverse twin.  [5000000001, 22] reversed reads
+        [22, 5000000001]: 22 - 5000000001 = -4999999979.  RED before
+        the fix: 3028092410585415681 (byte-scrambled i64s)."""
+        src = """
+type Big = Int;
+type Rows = Array<Future<Big>>;
+
+public fn f(-> @Int) requires(true) ensures(true) effects(<Async>) {
+  let @Future<Int> = async(5000000001);
+  let @Future<Int> = async(22);
+  let @Array<Future<Int>> = [@Future<Int>.1, @Future<Int>.0];
+  let @Rows = @Array<Future<Int>>.0;
+  let @Rows = array_reverse(@Rows.0);
+  await(@Rows.0[0]) - await(@Rows.0[1])
+}
+"""
+        assert _run(src, "f") == -4999999979
+
+    def test_rows_alias_bool_slice_deterministic(self) -> None:
+        """`array_slice` over the same `Rows` alias.
+
+        [false, true, false, true] sliced (1, 3) reads [true, false]:
+        100 + 20 = 120.  Coincidence-green before the fix (the wrong
+        4-byte stride happened to read plausible bytes on this heap
+        layout) — pinned so the now-deterministic 1-byte stride stays."""
+        src = """
+type FlagA = Bool;
+type Rows = Array<Future<FlagA>>;
+
+public fn f(-> @Int) requires(true) ensures(true) effects(<Async>) {
+  let @Future<Bool> = async(false);
+  let @Future<Bool> = async(true);
+  let @Array<Future<Bool>> = [@Future<Bool>.1, @Future<Bool>.0, @Future<Bool>.1, @Future<Bool>.0];
+  let @Rows = @Array<Future<Bool>>.0;
+  let @Rows = array_slice(@Rows.0, 1, 3);
+  let @Int = if await(@Rows.0[0]) then { 100 } else { 200 };
+  let @Int = if await(@Rows.0[1]) then { 10 } else { 20 };
+  @Int.1 + @Int.0
+}
+"""
+        assert _run(src, "f") == 120
+
+    def test_rows_hidden_ff_concat_control(self) -> None:
+        """Control: the BARE-element spelling of the same nest —
+        `type FF = Future<FlagA>; type Rows = Array<FF>` — already
+        worked (the bare-element branch canonicalizes `FF` ->
+        `Future<Bool>`) and must stay green.  2000+100+20+1 = 2121."""
+        src = """
+type FlagA = Bool;
+type FF = Future<FlagA>;
+type Rows = Array<FF>;
+
+public fn f(-> @Int) requires(true) ensures(true) effects(<Async>) {
+  let @Future<Bool> = async(false);
+  let @Future<Bool> = async(true);
+  let @Array<Future<Bool>> = [@Future<Bool>.1, @Future<Bool>.0];
+  let @Rows = @Array<Future<Bool>>.0;
+  let @Rows = array_concat(@Rows.0, @Rows.0);
+  let @Int = if await(@Rows.0[0]) then { 1000 } else { 2000 };
+  let @Int = if await(@Rows.0[1]) then { 100 } else { 200 };
+  let @Int = if await(@Rows.0[2]) then { 10 } else { 20 };
+  let @Int = if await(@Rows.0[3]) then { 1 } else { 2 };
+  @Int.3 + @Int.2 + @Int.1 + @Int.0
+}
+"""
+        assert _run(src, "f") == 2121
+
+
+class TestFutureBoolMapStrideDesync1081:
+    """#1081: `array_map` over `Array<Future<Bool>>` (DIRECT spelling)
+    silently misread EVERY element — a read/write stride desync that
+    regressed on main with #1041.
+
+    #1041's element-READ stripping sizes `Future<Bool>` index reads at
+    the payload's 1-byte stride, but `array_map`'s element WRITE path
+    still inferred the bare head `"Future"` (#1079's mechanism) and
+    stored at the 4-byte default — the previously-consistent 4/4
+    round-trip became 1/4.  Pre-#1041 this program returned 2121
+    (correct); on the #1041 merge it returned 2222 — every element
+    misread as false ([1] onward read the zero high bytes of the first
+    i32 store; [0] happened to be false here too).  Closed by the same
+    #1079 write-side fix (`_infer_closure_return_vera_type` rendering
+    the full `Future<Bool>` spelling, 1-byte store stride); this test
+    pins the base-correct 2121 pattern from the adversarial review of
+    the merge.
+    """
+
+    def test_map_future_bool_identity_2121(self) -> None:
+        """Identity map over [false, true, false, true]: 2000 + 100 +
+        20 + 1 = 2121.  RED on the #1041 merge: 2222."""
+        src = """
+public fn f(-> @Int) requires(true) ensures(true) effects(<Async>) {
+  let @Future<Bool> = async(false);
+  let @Future<Bool> = async(true);
+  let @Array<Future<Bool>> = [@Future<Bool>.1, @Future<Bool>.0, @Future<Bool>.1, @Future<Bool>.0];
+  let @Array<Future<Bool>> = array_map(@Array<Future<Bool>>.0, fn(@Future<Bool> -> @Future<Bool>) effects(pure) { @Future<Bool>.0 });
+  let @Int = if await(@Array<Future<Bool>>.0[0]) then { 1000 } else { 2000 };
+  let @Int = if await(@Array<Future<Bool>>.0[1]) then { 100 } else { 200 };
+  let @Int = if await(@Array<Future<Bool>>.0[2]) then { 10 } else { 20 };
+  let @Int = if await(@Array<Future<Bool>>.0[3]) then { 1 } else { 2 };
+  @Int.3 + @Int.2 + @Int.1 + @Int.0
+}
+"""
+        assert _run(src, "f") == 2121
+
+    def test_nomap_future_bool_control(self) -> None:
+        """Control: the same reads WITHOUT the map were correct on both
+        sides of #1041 and must stay green.  2121."""
+        src = """
+public fn f(-> @Int) requires(true) ensures(true) effects(<Async>) {
+  let @Future<Bool> = async(false);
+  let @Future<Bool> = async(true);
+  let @Array<Future<Bool>> = [@Future<Bool>.1, @Future<Bool>.0, @Future<Bool>.1, @Future<Bool>.0];
+  let @Int = if await(@Array<Future<Bool>>.0[0]) then { 1000 } else { 2000 };
+  let @Int = if await(@Array<Future<Bool>>.0[1]) then { 100 } else { 200 };
+  let @Int = if await(@Array<Future<Bool>>.0[2]) then { 10 } else { 20 };
+  let @Int = if await(@Array<Future<Bool>>.0[3]) then { 1 } else { 2 };
+  @Int.3 + @Int.2 + @Int.1 + @Int.0
+}
+"""
+        assert _run(src, "f") == 2121
+
+
+class TestFutureClosureReturnCombinators1079:
+    """#1079: array_map/mapi/fold over `Array<Future<T>>` mis-sized the
+    output element (or fold accumulator).
+
+    The bare-head family (#1057's mechanism) at the closure-return /
+    fold-accumulator inference site: `_infer_closure_return_vera_type`
+    (and `_infer_fold_init_vera_type`'s SlotRef-init fallback) returned
+    `canonical.name` — bare `"Future"`, the type argument dropped — so
+    the element-size / wasm-type deciders fell to the 4-byte i32
+    default while an i64 / f64 / pair payload occupies 8 bytes.  The
+    #1045/#1057 element fixes and the #1074 payload canonicalizer never
+    reach this path (it returned `.name` before the deciders run), and
+    the DIRECT `Future<Int>` spelling mis-sizes too, not only aliases.
+    `array_map` rejects an async closure, so the trigger is a PURE
+    closure forwarding an existing Future value — identity/reshuffle.
+
+    Failure modes, all check+verify-green with compile exit 0:
+
+      * Int/Nat/Float64 payloads (map/mapi) → `indirect call type
+        mismatch` trap at run: the registered call_indirect signature
+        says the closure returns i32 while the closure was compiled
+        returning i64/f64.
+      * String payloads → the same trap (i32 vs two-value i32_pair).
+      * Bool payloads → SILENT wrong values: the signatures happen to
+        agree (Bool is i32), so the loop stores at a 4-byte stride and
+        the downstream index read walks the 1-byte-packed layout.
+      * `array_fold` with a Future accumulator → WASM-validation error
+        (`expected i32, found i64`) at instantiation: the accumulator
+        local is typed i32 while the init instructions push i64.
+
+    The fix renders the FULL compound spelling — `_format_named_type`
+    plus the #1074-extended `_canonicalize_alias_slot_name` payload
+    walk — at both inference sites.  Int payloads exceed 2^32 so a
+    truncated read cannot coincide with the correct answer.
+    """
+
+    def test_map_future_int_identity(self) -> None:
+        """Identity map over `Array<Future<Int>>`, first payload > 2^32.
+
+        RED before the fix: `indirect call type mismatch` trap (sig
+        result i32 vs compiled i64).  5000000001 - 22 = 4999999979."""
+        src = """
+public fn f(-> @Int) requires(true) ensures(true) effects(<Async>) {
+  let @Future<Int> = async(5000000001);
+  let @Future<Int> = async(22);
+  let @Array<Future<Int>> = [@Future<Int>.1, @Future<Int>.0];
+  let @Array<Future<Int>> = array_map(@Array<Future<Int>>.0, fn(@Future<Int> -> @Future<Int>) effects(pure) { @Future<Int>.0 });
+  await(@Array<Future<Int>>.0[0]) - await(@Array<Future<Int>>.0[1])
+}
+"""
+        assert _run(src, "f") == 4999999979
+
+    def test_map_future_bool_silent(self) -> None:
+        """Identity map over `Array<Future<Bool>>` — the SILENT shape.
+
+        Bool payloads keep the call_indirect signatures consistent
+        (both i32), so nothing traps: the loop stores i32 at a 4-byte
+        stride into a `3 * 4`-byte buffer and the index read walks
+        1-byte-packed — [true, false, true] misreads as
+        [true, false, false].  RED before the fix: 100, not 101."""
+        src = """
+public fn f(-> @Int) requires(true) ensures(true) effects(<Async>) {
+  let @Future<Bool> = async(true);
+  let @Future<Bool> = async(false);
+  let @Future<Bool> = async(true);
+  let @Array<Future<Bool>> = [@Future<Bool>.2, @Future<Bool>.1, @Future<Bool>.0];
+  let @Array<Future<Bool>> = array_map(@Array<Future<Bool>>.0, fn(@Future<Bool> -> @Future<Bool>) effects(pure) { @Future<Bool>.0 });
+  let @Int = if await(@Array<Future<Bool>>.0[0]) then { 100 } else { 0 };
+  let @Int = if await(@Array<Future<Bool>>.0[1]) then { 10 } else { 0 };
+  let @Int = if await(@Array<Future<Bool>>.0[2]) then { 1 } else { 0 };
+  @Int.2 + @Int.1 + @Int.0
+}
+"""
+        assert _run(src, "f") == 101
+
+    def test_map_future_string_pair(self) -> None:
+        """Identity map over `Array<Future<String>>` (pair payload).
+
+        RED before the fix: `indirect call type mismatch` trap (sig
+        result i32 vs the closure's two-value i32_pair).  Lengths
+        8 * 100 + 3 = 803."""
+        src = """
+public fn f(-> @Int) requires(true) ensures(true) effects(<Async>) {
+  let @Future<String> = async("alphabet");
+  let @Future<String> = async("dog");
+  let @Array<Future<String>> = [@Future<String>.1, @Future<String>.0];
+  let @Array<Future<String>> = array_map(@Array<Future<String>>.0, fn(@Future<String> -> @Future<String>) effects(pure) { @Future<String>.0 });
+  string_length(await(@Array<Future<String>>.0[0])) * 100 + string_length(await(@Array<Future<String>>.0[1]))
+}
+"""
+        assert _run(src, "f") == 803
+
+    def test_map_future_float64(self) -> None:
+        """Identity map over `Array<Future<Float64>>`.
+
+        RED before the fix: `indirect call type mismatch` trap (sig
+        result i32 vs compiled f64).  1.5 + 2.25 = 3.75 — exactly
+        representable, and impossible for any i32/f64 reinterpretation
+        of the mis-sized layout to produce."""
+        src = """
+public fn f(-> @Float64) requires(true) ensures(true) effects(<Async>) {
+  let @Future<Float64> = async(1.5);
+  let @Future<Float64> = async(2.25);
+  let @Array<Future<Float64>> = [@Future<Float64>.1, @Future<Float64>.0];
+  let @Array<Future<Float64>> = array_map(@Array<Future<Float64>>.0, fn(@Future<Float64> -> @Future<Float64>) effects(pure) { @Future<Float64>.0 });
+  await(@Array<Future<Float64>>.0[0]) + await(@Array<Future<Float64>>.0[1])
+}
+"""
+        assert _run_float(src, "f") == 3.75
+
+    def test_mapi_future_int(self) -> None:
+        """`array_mapi` twin of the identity map — its own translator
+        computes `b_type` independently.  RED before the fix: the same
+        `indirect call type mismatch` trap.  5000000001 - 22 =
+        4999999979."""
+        src = """
+public fn f(-> @Int) requires(true) ensures(true) effects(<Async>) {
+  let @Future<Int> = async(5000000001);
+  let @Future<Int> = async(22);
+  let @Array<Future<Int>> = [@Future<Int>.1, @Future<Int>.0];
+  let @Array<Future<Int>> = array_mapi(@Array<Future<Int>>.0, fn(@Future<Int>, @Nat -> @Future<Int>) effects(pure) { @Future<Int>.0 });
+  await(@Array<Future<Int>>.0[0]) - await(@Array<Future<Int>>.0[1])
+}
+"""
+        assert _run(src, "f") == 4999999979
+
+    def test_fold_future_int_accumulator(self) -> None:
+        """`array_fold` with a `Future<Int>` accumulator (select-last).
+
+        RED before the fix: WASM-validation error `expected i32, found
+        i64` at instantiation — the accumulator local was typed i32
+        (bare `"Future"` → 4-byte default) while the init instructions
+        push an i64 payload.  The closure keeps the ELEMENT
+        (`@Future<Int>.0` = most recent param), so the fold returns the
+        last element: 6000000007 (> 2^32)."""
+        src = """
+public fn f(-> @Int) requires(true) ensures(true) effects(<Async>) {
+  let @Future<Int> = async(33);
+  let @Future<Int> = async(6000000007);
+  let @Array<Future<Int>> = [@Future<Int>.1, @Future<Int>.0];
+  let @Future<Int> = async(11);
+  let @Future<Int> = array_fold(@Array<Future<Int>>.0, @Future<Int>.0, fn(@Future<Int>, @Future<Int> -> @Future<Int>) effects(pure) { @Future<Int>.0 });
+  await(@Future<Int>.0)
+}
+"""
+        assert _run(src, "f") == 6000000007
+
+    def test_fold_future_acc_block_closure_slot_init(self) -> None:
+        """Fold accumulator inferred from the INIT SlotRef, not the
+        closure — `_infer_fold_init_vera_type`'s fallback arm.
+
+        A block-wrapped closure literal defeats the closure-return
+        dispatch (`_closure_arg_return_type` handles AnonFn and SlotRef
+        only — a `Block` yields None), so the accumulator type comes
+        from the init `@Future<Int>` slot — whose `SlotRef.type_name`
+        is the bare head `"Future"` with the payload in `type_args`.
+        RED before the fix: the same `expected i32, found i64`
+        validation error.  (An if-expression between two closures also
+        reaches this fallback, but that shape trips a distinct
+        pre-existing translation bug — "values remaining on stack" even
+        for a plain-Int fold — so the block form is the shape that
+        isolates THIS fallback.)  The closure keeps the element, so the
+        fold returns the last one: 6000000007 (> 2^32)."""
+        src = """
+public fn f(-> @Int) requires(true) ensures(true) effects(<Async>) {
+  let @Future<Int> = async(33);
+  let @Future<Int> = async(6000000007);
+  let @Array<Future<Int>> = [@Future<Int>.1, @Future<Int>.0];
+  let @Future<Int> = async(11);
+  let @Future<Int> = array_fold(
+    @Array<Future<Int>>.0,
+    @Future<Int>.0,
+    { fn(@Future<Int>, @Future<Int> -> @Future<Int>) effects(pure) { @Future<Int>.0 } });
+  await(@Future<Int>.0)
+}
+"""
+        assert _run(src, "f") == 6000000007
+
+    def test_fold_future_acc_block_closure_alias_init(self) -> None:
+        """Alias twin of the SlotRef-init fallback: the init slot is
+        `@FI.0`, `type FI = Future<Int>` — `SlotRef.type_name` is the
+        raw alias name, which the fallback must canonicalize
+        (`_canonicalize_alias_slot_name`) before the size dict can key
+        on it.  RED before the fix (and RED again if the fallback's
+        canonicalize hop is dropped): `expected i32, found i64` at
+        validation.  Select-element fold returns 6000000007."""
+        src = """
+type FI = Future<Int>;
+
+public fn f(-> @Int) requires(true) ensures(true) effects(<Async>) {
+  let @FI = async(33);
+  let @FI = async(6000000007);
+  let @Array<FI> = [@FI.1, @FI.0];
+  let @FI = async(11);
+  let @FI = array_fold(
+    @Array<FI>.0,
+    @FI.0,
+    { fn(@FI, @FI -> @FI) effects(pure) { @FI.0 } });
+  await(@FI.0)
+}
+"""
+        assert _run(src, "f") == 6000000007
+
+    def test_map_future_int_alias_element(self) -> None:
+        """Aliased twin: `type FI = Future<Int>` as the element AND the
+        closure's declared param/return spelling.
+
+        `_canonical_named_type` resolves the alias to
+        `NamedType("Future", [Int])` — whose `.name` is the same bare
+        `"Future"`.  RED before the fix: the identity-map trap.
+        5000000001 - 22 = 4999999979."""
+        src = """
+type FI = Future<Int>;
+
+public fn f(-> @Int) requires(true) ensures(true) effects(<Async>) {
+  let @FI = async(5000000001);
+  let @FI = async(22);
+  let @Array<FI> = [@FI.1, @FI.0];
+  let @Array<FI> = array_map(@Array<FI>.0, fn(@FI -> @FI) effects(pure) { @FI.0 });
+  await(@Array<FI>.0[0]) - await(@Array<FI>.0[1])
+}
+"""
+        assert _run(src, "f") == 4999999979
+
+    def test_map_future_payload_alias(self) -> None:
+        """Payload-alias twin (#1074's shape at THIS site): the closure
+        returns `Future<Big>`, `type Big = Int`.
+
+        `_format_named_type` alone renders `"Future<Big>"`, whose
+        payload the size dict cannot key on (4-byte default again) —
+        the `_canonicalize_alias_slot_name` payload walk is what
+        resolves it to `"Future<Int>"`.  RED before the fix (and RED
+        again if the canonicalize wrapper is dropped): the identity-map
+        trap.  5000000001 - 22 = 4999999979."""
+        src = """
+type Big = Int;
+
+public fn f(-> @Int) requires(true) ensures(true) effects(<Async>) {
+  let @Future<Big> = async(5000000001);
+  let @Future<Big> = async(22);
+  let @Array<Future<Big>> = [@Future<Big>.1, @Future<Big>.0];
+  let @Array<Future<Big>> = array_map(@Array<Future<Big>>.0, fn(@Future<Big> -> @Future<Big>) effects(pure) { @Future<Big>.0 });
+  await(@Array<Future<Big>>.0[0]) - await(@Array<Future<Big>>.0[1])
+}
+"""
+        assert _run(src, "f") == 4999999979
+
+    def test_map_future_int_concat_chained(self) -> None:
+        """`array_concat` whose first arg IS an inline `array_map` call —
+        `_infer_concat_elem_type`'s map arm delegates to the same
+        closure-return inference (vera/wasm/calls.py), so the chained
+        spelling inherits the fix.  RED before the fix: the map's own
+        trap fires first.  5000000001 - 22 = 4999999979."""
+        src = """
+public fn f(-> @Int) requires(true) ensures(true) effects(<Async>) {
+  let @Future<Int> = async(5000000001);
+  let @Future<Int> = async(22);
+  let @Array<Future<Int>> = [@Future<Int>.1];
+  let @Array<Future<Int>> = [@Future<Int>.0];
+  let @Array<Future<Int>> = array_concat(
+    array_map(@Array<Future<Int>>.1, fn(@Future<Int> -> @Future<Int>) effects(pure) { @Future<Int>.0 }),
+    @Array<Future<Int>>.0);
+  await(@Array<Future<Int>>.0[0]) - await(@Array<Future<Int>>.0[1])
+}
+"""
+        assert _run(src, "f") == 4999999979
+
+    def test_map_fold_int_direct_control(self) -> None:
+        """Control: plain Int map + fold (no Future anywhere) already
+        worked and must stay green — pins that the full-spelling render
+        leaves the primitive path unchanged.  (11+22+33)*2 = 132."""
+        src = """
+public fn f(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Array<Int> = [11, 22, 33];
+  let @Array<Int> = array_map(@Array<Int>.0, fn(@Int -> @Int) effects(pure) { @Int.0 * 2 });
+  let @Int = array_fold(@Array<Int>.0, 0, fn(@Int, @Int -> @Int) effects(pure) { @Int.1 + @Int.0 });
+  @Int.0
+}
+"""
+        assert _run(src, "f") == 132
 
 
 class TestArrayUtilities:
