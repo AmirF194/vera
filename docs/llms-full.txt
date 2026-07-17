@@ -167,6 +167,8 @@ Every diagnostic has a stable error code grouped by compiler phase:
 - **E600–E614** — Codegen (unsupported features, typed holes block compilation)
 - **E700–E702** — Testing (contract violations, input generation, execution errors)
 
+In diagnostic messages, a `?` inside a printed type (`Array<?>`, `Map<String, ?>`) marks a component the checker could not infer. That is a rendering marker for an unknown type, not the typed-hole expression `?` (W001) you write in source.
+
 Common codes you'll encounter:
 - **W001** — Typed hole: fill `?` with an expression of the stated type
 - **E130** — Unresolved slot reference (`@T.n` has no matching binding)
