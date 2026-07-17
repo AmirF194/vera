@@ -199,6 +199,12 @@ When implementing a new language feature, write the conformance program *first* 
 - `pytest tests/ -v` must pass
 - Version must stay in sync across `pyproject.toml`, `vera/__init__.py`, `docs/index.html`, `README.md`, and `uv.lock` (gated by `scripts/check_version_sync.py`); CHANGELOG.md must also carry a matching `## [X.Y.Z]` section
 
+### Releases and install docs
+
+**Releases are automated after merge.** A version bump on `main` (synced across the `scripts/check_version_sync.py` surface, with a matching non-empty `CHANGELOG.md` section) triggers `.github/workflows/release.yml`: it builds, waits for the maintainer to approve the protected `pypi` environment, publishes to PyPI via Trusted Publishing, then creates the tag and GitHub Release at the merge SHA. Do NOT create tags, run `twine`, or `gh release create` — the maintainer and the workflow own that. See `CONTRIBUTING.md` §Releases and `RELEASING.md`.
+
+**Install docs are circumstance-dependent — match `README.md`, `SKILL.md`, and `PYPI_README.md`; don't invent "the install route".** The GitHub source checkout (`pip install -e .`, plus `[lsp]` or `[dev]`) is the full environment — the toolchain alongside `examples/`, `tests/conformance/`, and `spec/` — and is the recommended route for agents; `pip install veralang` installs the toolchain only; the `[lsp]` extra adds the language server; never write `pip install vera` (an unrelated PyPI project). Only document a channel as an available install route once the artifact is actually live there: the VS Code extension is **not yet on the Marketplace** (blocked — see #1106), so `code --install-extension veralang.vera-language` must not be presented as available — source/clone is its route until it is accepted.
+
 ### Contributing
 
 See `CONTRIBUTING.md` for guidelines. Pre-commit hooks run mypy, pytest, trailing whitespace checks, and validate all examples on every commit.
