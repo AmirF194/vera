@@ -30,6 +30,7 @@ from vera.types import (
     is_subtype,
     pretty_effect,
     pretty_type,
+    pretty_inferred_type,
     strip_builtin_typevar_marker,
     substitute,
 )
@@ -378,7 +379,7 @@ class CallsMixin:
                 self._error(
                     args[i],
                     f"Argument {i} of '{fn_info.name}' has type "
-                    f"{pretty_type(arg_ty)}, expected "
+                    f"{pretty_inferred_type(arg_ty)}, expected "
                     f"{pretty_type(param_ty)}.",
                     rationale="Each argument's type must be a subtype of the "
                               "corresponding declared parameter type.",
@@ -477,7 +478,7 @@ class CallsMixin:
             self._error(
                 fn_arg,
                 f"Argument 0 of 'apply_fn' has type "
-                f"{pretty_type(fn_ty_raw or fn_ty)}, expected a function "
+                f"{pretty_inferred_type(fn_ty_raw or fn_ty)}, expected a function "
                 f"value (a fn(...) type).",
                 rationale="apply_fn invokes a stored function value via "
                           "call_indirect; a non-function first argument "
@@ -550,7 +551,7 @@ class CallsMixin:
                 self._error(
                     rest[i],
                     f"Argument {i + 1} of 'apply_fn' has type "
-                    f"{pretty_type(arg_ty)}, expected "
+                    f"{pretty_inferred_type(arg_ty)}, expected "
                     f"{pretty_type(param_ty)}.",
                     rationale="Each argument after the function value must "
                               "be a subtype of the corresponding parameter "
@@ -710,7 +711,7 @@ class CallsMixin:
                 self._error(
                     args[i],
                     f"Argument {i} of '{op_info.name}' has type "
-                    f"{pretty_type(arg_ty)}, expected "
+                    f"{pretty_inferred_type(arg_ty)}, expected "
                     f"{pretty_type(param_ty)}.",
                     rationale="Each argument to an effect operation must be a "
                               "subtype of the parameter type declared in its "
@@ -802,7 +803,7 @@ class CallsMixin:
                 self._error(
                     args[i],
                     f"Argument {i} of '{op_info.name}' has type "
-                    f"{pretty_type(arg_ty)}, expected "
+                    f"{pretty_inferred_type(arg_ty)}, expected "
                     f"{pretty_type(param_ty)}.",
                     rationale="Each argument to an ability operation must be a "
                               "subtype of the parameter type declared in its "
@@ -811,7 +812,7 @@ class CallsMixin:
                     fix=f"Pass a value of type {pretty_type(param_ty)} for "
                         f"argument {i} of '{op_info.name}', or ensure the "
                         f"ability's type variable resolves to a type that "
-                        f"accepts {pretty_type(arg_ty)}.",
+                        f"accepts {pretty_inferred_type(arg_ty)}.",
                     spec_ref='Chapter 9, Section 9.8 "Abilities"',
                     error_code="E241",
                 )
@@ -854,7 +855,7 @@ class CallsMixin:
                     self._error(
                         args[i],
                         f"'{op_info.name}' requires an orderable operand, "
-                        f"found {pretty_type(arg_ty)}.",
+                        f"found {pretty_inferred_type(arg_ty)}.",
                         rationale=(
                             "The Ord ability's 'compare' operation is the "
                             "three-way spelling of the ordering operators "
@@ -1061,7 +1062,7 @@ class CallsMixin:
                 self._error(
                     expr.args[i],
                     f"Constructor '{expr.name}' field {i} has type "
-                    f"{pretty_type(arg_ty)}, expected "
+                    f"{pretty_inferred_type(arg_ty)}, expected "
                     f"{pretty_type(field_ty)}.",
                     rationale="Each constructor argument's type must be a "
                               "subtype of the corresponding field type in the "

@@ -203,6 +203,80 @@ def pretty_type(ty: Type) -> str:
     return str(ty)
 
 
+def _is_leaked_placeholder_var(ty: Type) -> bool:
+    """A type variable that is an INTERNAL placeholder leaked into a diagnostic.
+
+    Two flavours, neither user-meaningful when it surfaces as an *inferred*
+    (actual) type: a fresh inference hole (``A$1`` — the ``$`` convention of
+    ``_is_fresh_typevar``) that inference never filled, and a namespaced
+    built-in generic var (``V#b`` — the #970/#982 ``BUILTIN_TYPEVAR_MARKER``)
+    that escaped unresolved because a built-in's result type could not be
+    substituted (e.g. the element type of ``map_values(@M.0)[0]`` read through
+    a refinement alias, #1069).  A genuine *user* ``forall`` var (plain ``T``,
+    no marker) is NOT a leak — it is the spelling the programmer wrote — so it
+    is left untouched.
+    """
+    return isinstance(ty, TypeVar) and (
+        "$" in ty.name or BUILTIN_TYPEVAR_MARKER in ty.name
+    )
+
+
+def _leaked_placeholders_to_unknown(ty: Type) -> Type:
+    """Replace every leaked placeholder var (``_is_leaked_placeholder_var``),
+    at any nesting depth, with ``UnknownType`` so it renders as ``?``."""
+    if _is_leaked_placeholder_var(ty):
+        return UnknownType()
+    if isinstance(ty, AdtType):
+        return AdtType(
+            ty.name,
+            tuple(_leaked_placeholders_to_unknown(a) for a in ty.type_args),
+        )
+    if isinstance(ty, FunctionType):
+        # The effect row scrubs too: ``pretty_effect`` renders each
+        # ``EffectInstance.type_args``, so a leak inside e.g.
+        # ``effects(<State<V#b>>)`` would surface exactly like a
+        # parameter-position leak (PR #1088 review).
+        effect = ty.effect
+        if isinstance(effect, ConcreteEffectRow):
+            effect = ConcreteEffectRow(
+                frozenset(
+                    EffectInstance(
+                        e.name,
+                        tuple(_leaked_placeholders_to_unknown(a)
+                              for a in e.type_args),
+                    )
+                    for e in effect.effects
+                ),
+                effect.row_var,
+            )
+        return FunctionType(
+            tuple(_leaked_placeholders_to_unknown(p) for p in ty.params),
+            _leaked_placeholders_to_unknown(ty.return_type),
+            effect,
+        )
+    if isinstance(ty, RefinedType):
+        return RefinedType(
+            _leaked_placeholders_to_unknown(ty.base), ty.predicate)
+    return ty
+
+
+def pretty_inferred_type(ty: Type) -> str:
+    """``pretty_type`` for an INFERRED/actual type in a mismatch diagnostic.
+
+    A leaked internal placeholder var (``_is_leaked_placeholder_var``) renders
+    as the unknown marker ``?`` rather than a bare stripped letter that
+    masquerades as a real, user-meaningful type (#1069: ``body has type V``,
+    where ``V`` is ``map_values``'s unsubstituted element var).
+
+    Use ONLY at the *actual*-type slot of a mismatch message ("body / value /
+    field / argument … has type X"); the *expected*-type slot keeps
+    ``pretty_type`` because a built-in's unsubstituted signature there
+    (``Array<T>``, ``Map<K, V>``) IS meaningful and is deliberately pinned
+    (``test_e202_expected_type_strips_marker``).
+    """
+    return pretty_type(_leaked_placeholders_to_unknown(ty))
+
+
 def pretty_effect(eff: EffectRowType) -> str:
     """Human-readable effect row string."""
     if isinstance(eff, PureEffectRow):

@@ -7,7 +7,8 @@ from vera.types import (
     INT, NAT, BOOL, STRING, NEVER, AdtType, FunctionType, RefinedType, TypeVar, UnknownType,
     PureEffectRow, ConcreteEffectRow, EffectInstance,
     is_subtype, is_effect_subtype, types_equal, substitute, substitute_effect,
-    pretty_type, pretty_effect, canonical_type_name, base_type,
+    pretty_type, pretty_inferred_type, pretty_effect, canonical_type_name,
+    base_type,
 )
 from vera import ast
 
@@ -340,6 +341,60 @@ class TestPrettyType:
 
     def test_unknown(self) -> None:
         assert pretty_type(UnknownType()) == "?"
+
+    def test_typevar_builtin_marker_stripped_but_still_leaks(self) -> None:
+        """``pretty_type`` strips the #970 ``#b`` marker (so it never leaks),
+        but the result is a BARE letter that reads as a real type — the #1069
+        defect that ``pretty_inferred_type`` fixes at actual-type slots."""
+        assert pretty_type(TypeVar("V#b")) == "V"
+
+
+class TestPrettyInferredType:
+    """``pretty_inferred_type`` renders a leaked INTERNAL placeholder var —
+    a namespaced built-in var (``V#b``) or a fresh inference hole (``A$1``) —
+    as ``?``, at any nesting depth, while leaving concretes and genuine user
+    ``forall`` vars untouched (#1069)."""
+
+    def test_bare_builtin_var_becomes_unknown(self) -> None:
+        assert pretty_inferred_type(TypeVar("V#b")) == "?"
+
+    def test_fresh_inference_hole_becomes_unknown(self) -> None:
+        assert pretty_inferred_type(TypeVar("A$1")) == "?"
+
+    def test_nested_builtin_var_in_adt_arg(self) -> None:
+        assert pretty_inferred_type(AdtType("Array", (TypeVar("V#b"),))) \
+            == "Array<?>"
+
+    def test_builtin_var_in_function_effect_row(self) -> None:
+        """A leaked var inside a function type's EFFECT ROW scrubs too —
+        ``pretty_effect`` renders ``EffectInstance.type_args``, so an
+        unscrubbed row would surface the bare letter (PR #1088 review)."""
+        fn_ty = FunctionType(
+            (INT,), BOOL,
+            ConcreteEffectRow(frozenset({
+                EffectInstance("State", (TypeVar("V#b"),))})),
+        )
+        out = pretty_inferred_type(fn_ty)
+        assert "State<?>" in out, out
+        assert "V" not in out, out
+
+    def test_multiple_nested_builtin_vars(self) -> None:
+        assert pretty_inferred_type(
+            AdtType("Map", (TypeVar("K#b"), TypeVar("V#b")))
+        ) == "Map<?, ?>"
+
+    def test_builtin_var_in_function_type(self) -> None:
+        ft = FunctionType((TypeVar("A$1"),), TypeVar("V#b"), PureEffectRow())
+        assert pretty_inferred_type(ft) == "fn(? -> ?) effects(pure)"
+
+    def test_genuine_user_forall_var_untouched(self) -> None:
+        """A plain user ``forall`` var (no marker) is the programmer's own
+        spelling — it must survive verbatim, not become ``?``."""
+        assert pretty_inferred_type(TypeVar("T")) == "T"
+
+    def test_concrete_types_unchanged(self) -> None:
+        assert pretty_inferred_type(INT) == "Int"
+        assert pretty_inferred_type(AdtType("Option", (INT,))) == "Option<Int>"
 
 
 class TestPrettyEffect:
