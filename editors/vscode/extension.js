@@ -2,10 +2,9 @@
 //
 // The grammar and language configuration are declarative (see
 // package.json `contributes`) and work with no code at all; this
-// module only wires up the language server. It degrades gracefully:
-// if the `vscode-languageclient` dependency is absent (a from-source
-// symlink install without `npm install`) or `vera.lsp.enabled` is
-// off, the extension stays a syntax-highlighting extension and
+// module only wires up the language server. Packaged releases bundle
+// `vscode-languageclient`; if loading it fails, or `vera.lsp.enabled`
+// is off, the extension stays a syntax-highlighting extension and
 // nothing errors.
 
 "use strict";
@@ -31,7 +30,8 @@ function loadLanguageClient() {
         log(
             "vscode-languageclient is missing; running in " +
             "syntax-highlighting-only mode. Reinstall the extension, " +
-            "or run `npm install` when using a source checkout. " +
+            "or run `npm install && npm run build` when using a " +
+            "source checkout. " +
             err.message,
         );
         return null;

@@ -94,21 +94,21 @@ code --install-extension vera-language-0.2.0.vsix
 
 ```bash
 git clone https://github.com/aallan/vera.git
-cd vera/editors/vscode && npm install && cd -
+cd vera/editors/vscode && npm install && npm run build && cd -
 ln -s "$(pwd)/vera/editors/vscode" ~/.vscode/extensions/vera-language
 ```
 
 **Existing clone** (run from the repo root):
 
 ```bash
-(cd editors/vscode && npm install)
+(cd editors/vscode && npm install && npm run build)
 ln -s "$(pwd)/editors/vscode" ~/.vscode/extensions/vera-language
 ```
 
 Then reload VS Code. Any `.vera` file will be recognised automatically.
-The `npm install` fetches the LSP client library
-(`vscode-languageclient`); skipping it is fine — you just get syntax
-highlighting without the language server.
+The build bundles the LSP client library into `dist/extension.js`.
+Skipping it leaves the declarative syntax highlighting available, but
+the language server integration cannot start.
 
 ## Scope reference
 
