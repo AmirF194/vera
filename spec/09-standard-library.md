@@ -250,7 +250,7 @@ For the compilation model of arrays, see Chapter 11, Section 11.12.
 
 ### 9.4.2 Set\<T\>
 
-`Set<T>` is an unordered collection of unique elements. It requires the `Eq` and `Hash` abilities on `T` (see Section 9.8). Element types must be hashable primitives: `Int`, `Nat`, `Bool`, `Float64`, `String`, `Byte`, or `Unit`.
+`Set<T>` is an unordered collection of unique elements. It requires the `Eq` and `Hash` abilities on `T` (see Section 9.8). Element types must be hashable primitives: `Int`, `Nat`, `Bool`, `Float64`, `String`, or `Byte`.
 
 Set is an opaque built-in type implemented via host imports. The runtime maintains the underlying set; WASM code interacts with sets through `i32` handles. All operations are pure — `set_add` and `set_remove` return new sets (functional semantics).
 
@@ -279,7 +279,7 @@ private fn set_demo(-> @Int)
 
 ### 9.4.3 Map\<K, V\>
 
-`Map<K, V>` is a key-value mapping. It requires the `Eq` and `Hash` abilities on `K` (see Section 9.8). Keys must be hashable primitive types: `Int`, `Nat`, `Bool`, `Float64`, `String`, `Byte`, or `Unit`. Values must be primitives (`Int`, `Nat`, `Bool`, `Byte`, `Float64`, `String`), ADT heap-pointer types (`Option<T>`, `Result<T, E>`), or other `Map` handles. `Array<T>` values are not yet supported as Map values (tracked as a future enhancement).
+`Map<K, V>` is a key-value mapping. It requires the `Eq` and `Hash` abilities on `K` (see Section 9.8). Keys must be hashable primitive types: `Int`, `Nat`, `Bool`, `Float64`, `String`, or `Byte`. Values must be primitives (`Int`, `Nat`, `Bool`, `Byte`, `Float64`, `String`), ADT heap-pointer types (`Option<T>`, `Result<T, E>`), or other `Map` handles. `Array<T>` values are not yet supported as Map values (tracked as a future enhancement).
 
 Map is an opaque built-in type implemented via host imports. The runtime maintains the underlying hash table; WASM code interacts with maps through `i32` handles. All operations are pure — `map_insert` and `map_remove` return new maps (functional semantics).
 

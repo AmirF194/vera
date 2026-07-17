@@ -197,7 +197,7 @@ When implementing a new language feature, write the conformance program *first* 
 - All 38 examples in `examples/` must pass `vera check` and `vera verify`
 - `mypy vera/` must be clean
 - `pytest tests/ -v` must pass
-- Version must be in sync across `vera/__init__.py`, `pyproject.toml`, and `CHANGELOG.md`
+- Version must stay in sync across `pyproject.toml`, `vera/__init__.py`, `docs/index.html`, `README.md`, and `uv.lock` (gated by `scripts/check_version_sync.py`); CHANGELOG.md must also carry a matching `## [X.Y.Z]` section
 
 ### Contributing
 

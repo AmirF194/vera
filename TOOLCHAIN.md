@@ -43,8 +43,8 @@ Two commitments from [DESIGN.md](DESIGN.md) shape every command:
 
 The thread running through all of it: *the compiler is the authority.* It tells
 you what's wrong (`check`/`verify`), what it can prove (`verify --json` tiers),
-what inputs break a contract (`test`), and — new in this release — what its own
-built-ins, effects, and error codes are (`builtins`/`effects`/`errors --json`).
+what inputs break a contract (`test`), and what its own built-ins, effects, and
+error codes are (`builtins`/`effects`/`errors --json`).
 You should rarely have to guess or hand-maintain a fact the compiler already
 knows.
 
@@ -215,9 +215,9 @@ surprisingly and `--explain-slots` wasn't enough.
 
 ## Recipe: ask the compiler about itself
 
-New in this release: three subcommands that make the compiler the source of
-truth for its own surface, so a count like "164 built-in functions" is a CLI
-call rather than a hand-maintained number that drifts.
+Three subcommands make the compiler the source of truth for its own surface, so
+a count like "164 built-in functions" is a CLI call rather than a hand-maintained
+number that drifts.
 
 ```bash
 vera builtins --json     # every built-in function   {schema, items[...]}

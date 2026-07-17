@@ -18,15 +18,7 @@ Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verificati
 
 *`vera verify` tells the whole truth.*
 
-### Bug sprint — monomorphizer and verifier gaps first
-
-The sprint's bug-PR cluster is fully merged; the verification-completeness rows below are the sprint's remaining scope, and [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the one watch-only row.
-
-[#996](https://github.com/aallan/vera/issues/996) stays a watch-only row — an unreproducible conformance flake, not a fix target.
-
-KNOWN_ISSUES carries a family of verification-completeness gaps — an obligation not emitted, a guard not planted — individually small and sharing machinery. This stage retires each. The per-component target-type table threaded into codegen (the enabler [#820](https://github.com/aallan/vera/issues/820) built) is the shared metadata the staged narrowing rows below reuse.
-
-Exit criterion: every verification-completeness and guard-deferral row in KNOWN_ISSUES is retired.
+Verification-completeness gaps — an obligation not emitted, a guard not planted — individually small and sharing the per-component target-type metadata the [#820](https://github.com/aallan/vera/issues/820) enabler provides:
 
 | Issue | What |
 |---|---|

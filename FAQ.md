@@ -221,14 +221,14 @@ The reference compiler is under active development. The current release includes
 
 - A seven-stage pipeline: parse, transform, resolve, typecheck, verify, compile, execute
 - A 14-chapter formal specification
-- 7,514 tests, including a 161-program conformance suite
-- 37 working example programs
+- 7,945 tests, including a 161-program conformance suite
+- 38 working example programs
 - 164 built-in functions covering strings, arrays, math, parsing, and data types
 - Four built-in abilities (Eq, Ord, Hash, Show) with constrained generics and ADT auto-derivation
 - Full IO operations (print, read_line, read_char, read_file, write_file, args, exit, get_env, sleep, time, stderr)
 - Algebraic data types, pattern matching, closures, generics with monomorphisation
 - Algebraic effect handlers with resume and state
-- Built-in `<Http>`, `<HttpServer>`, `<Inference>`, `<State>`, `<IO>`, `<Async>`, `<Random>`, and `Exn<T>` (typed exception) effects
+- Built-in `<Http>`, `<HttpServer>`, `<Inference>`, `<State>`, `<IO>`, `<Async>`, `<Random>`, `<Diverge>`, and `Exn<T>` (typed exception) effects
 - `<Inference>` dispatches to Anthropic, OpenAI, Kimi (Moonshot), or Mistral via env vars
 - Collection types: `Map<K,V>`, `Set<T>`, `Array<T>`, `Decimal`, `Json`, `HtmlNode`, `Markdown`
 - String interpolation with auto-conversion for primitive types
@@ -244,9 +244,17 @@ The language is under active development. See the [Roadmap](ROADMAP.md) and [Cha
 ## How do I try it?
 
 ```bash
+python -m venv .venv && source .venv/bin/activate
+python -m pip install veralang
+vera run examples/hello_world.vera
+```
+
+For compiler development or the latest unreleased changes, install from source instead:
+
+```bash
 git clone https://github.com/aallan/vera.git && cd vera
 python -m venv .venv && source .venv/bin/activate
-pip install -e .
+python -m pip install -e .
 vera run examples/hello_world.vera
 ```
 

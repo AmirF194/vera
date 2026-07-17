@@ -127,7 +127,7 @@ Before changing code — **adding or removing** — write the test that proves y
 - Pre-commit hooks run mypy + pytest + conformance suite + example validation on every commit
 - All 161 conformance programs in `tests/conformance/` must hold at their declared level — positive entries pass, and the negative fixtures (`ch02_generic_over_unit_rejected`, `ch02_map_unit_value_rejected`, `ch04_let_unit_rejected`, `ch05_apply_fn_arity`, `ch05_where_helper_outer_slot_rejected`, `ch07_handler_state_body_scope_rejected`, `ch07_state_unit_op_param_read_rejected`, `ch08_circular_import`, `ch08_visibility_private`, `ch09_builtin_redefinition`, `ch09_ord_adt_rejected`, `ch09_eq_non_derivable_rejected`) must *fail* `check` with their `expected_error` E-code
 - All 38 examples in `examples/` must pass `vera check` and `vera verify`
-- Version must stay in sync across `vera/__init__.py`, `pyproject.toml`, and `CHANGELOG.md`
+- Version must stay in sync across `pyproject.toml`, `vera/__init__.py`, `docs/index.html`, `README.md`, and `uv.lock` (gated by `scripts/check_version_sync.py`); CHANGELOG.md must also carry a matching `## [X.Y.Z]` section
 - All tests must pass: `pytest tests/ -v`
 - Type checking must be clean: `mypy vera/`
 - Every runtime dep must have wheels for all supported platforms: `python scripts/check_wheel_availability.py` (CI gate; see README §Supported platforms for the policy this enforces)

@@ -476,7 +476,7 @@ def main() -> int:
 
     skill_md = (root / "SKILL.md").read_text(encoding="utf-8")
 
-    m = re.search(r"contains (\d+) small, self-contained programs", skill_md)
+    m = re.search(r"contains (\d+) small programs", skill_md)
     if m:
         doc_conf = int(m.group(1))
         if doc_conf != live_conformance:
