@@ -9,16 +9,9 @@ Vera is a programming language designed for LLMs to write. It uses typed slot re
 
 ## Installation
 
-Vera requires Python 3.11 or later. Node.js 22+ is optional (only needed for `vera compile --target browser` and browser parity tests). Install the released `veralang` distribution from PyPI:
+Vera requires Python 3.11 or later. Node.js 22+ is optional (only needed for `vera compile --target browser` and browser parity tests).
 
-```bash
-python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
-python -m pip install veralang
-```
-
-This installs the `vera` command and all runtime dependencies (Lark parser, Z3 solver, wasmtime). For editor/agent integration via the Language Server Protocol, install `python -m pip install "veralang[lsp]"` — see [LSP_SERVER.md](LSP_SERVER.md).
-
-The GitHub source route remains supported for unreleased changes and compiler development:
+**Recommended — install from the GitHub source checkout.** The checkout is the full environment this file teaches from: alongside the compiler and the `vera` CLI it carries the bundled `examples/`, the conformance suite in `tests/conformance/` (minimal working programs for every language feature), and the specification in `spec/`:
 
 ```bash
 git clone https://github.com/aallan/vera.git && cd vera
@@ -26,18 +19,22 @@ python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\act
 python -m pip install -e .
 ```
 
-For an editable source install with the language server, use `python -m pip install -e ".[lsp]"`. Verify the installed CLI — works for either route, with no checkout required:
-
-```bash
-vera version
-```
-
-From a source checkout you can also run the bundled example end to end:
+For an editable source install with the language server, use `python -m pip install -e ".[lsp]"` — see [LSP_SERVER.md](LSP_SERVER.md). Verify the install end to end with the bundled example:
 
 ```bash
 vera check examples/hello_world.vera    # should print "OK: examples/hello_world.vera"
 vera run examples/hello_world.vera      # should print "Hello, World!"
 ```
+
+**Toolchain only — install the released `veralang` distribution from PyPI.** This installs the `vera` command and all runtime dependencies (Lark parser, Z3 solver, wasmtime), but **not** the examples, conformance programs, or specification — those exist only in the checkout:
+
+```bash
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+python -m pip install veralang
+vera version
+```
+
+For the language server on this route, install `python -m pip install "veralang[lsp]"`.
 
 If you are working on the compiler itself, install development dependencies too:
 

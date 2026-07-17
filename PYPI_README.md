@@ -29,12 +29,16 @@ python -m pip install "veralang[lsp]"
 
 The distribution is named `veralang`, but the installed command remains
 `vera`, and Python code still imports it as `import vera`. **Do not run `pip install vera`**: that name belongs to an unrelated
-ERAV citizen-science project on PyPI.
+ERAV citizen-science project on PyPI. The wheel ships the compiler and the
+`vera` command only — the bundled examples, the conformance suite, and the
+specification live in the GitHub repository.
 
 ## Install from GitHub source
 
-The source route remains supported for compiler development, unreleased
-changes, and testing the current `main` branch:
+The source route provides the full environment — the examples, conformance
+programs, and specification alongside the toolchain (the recommended setup for
+agents learning the language) — and remains the route for compiler
+development, unreleased changes, and testing the current `main` branch:
 
 ```bash
 git clone https://github.com/aallan/vera.git
@@ -62,7 +66,7 @@ public fn safe_divide(@Int, @Int -> @Int)
 ```bash
 vera check program.vera
 vera verify program.vera
-vera run program.vera
+vera run program.vera --fn safe_divide -- 10 2
 ```
 
 See the [CLI cookbook](https://github.com/aallan/vera/blob/main/TOOLCHAIN.md),

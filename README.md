@@ -126,10 +126,15 @@ python -m pip install veralang
 The distribution is named `veralang`, but the installed command remains
 `vera`, and Python code still imports it as `import vera`. For editor and agent integration through the language server, install
 `python -m pip install "veralang[lsp]"`. Do not run `pip install vera`: that
-name belongs to an unrelated project on PyPI.
+name belongs to an unrelated project on PyPI. The wheel ships the compiler and
+the `vera` command only — the bundled `examples/`, the conformance suite, and
+the specification live in the repository, not in the wheel.
 
-The GitHub source route remains supported for compiler development, unreleased
-changes, and testing the current `main` branch:
+The GitHub source route is the recommended environment for agents and for
+anyone learning the language — it provides the examples, conformance programs,
+and spec that [SKILL.md](SKILL.md) teaches from, alongside the toolchain — and
+it remains the route for compiler development, unreleased changes, and testing
+the current `main` branch:
 
 ```bash
 git clone https://github.com/aallan/vera.git

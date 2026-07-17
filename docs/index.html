@@ -555,19 +555,17 @@ Serving HTTP on http://0.0.0.0:8080/</pre>
       <p style="color:var(--ink-500);max-width:56ch">Python 3.11+. Everything installs into a virtual environment.</p>
 
       <div class="code-block">
-<pre><span class="cm"># Install from PyPI</span>
+<pre><span class="cm"># Install the toolchain from PyPI</span>
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install veralang
+vera version
 
-<span class="cm"># Check, verify, run, compile</span>
-vera check examples/absolute_value.vera
-vera verify examples/safe_divide.vera
-vera run examples/hello_world.vera
-vera compile --target browser examples/hello_world.vera</pre>
+<span class="cm"># Optional: the language server for editors and agents</span>
+python -m pip install "veralang[lsp]"</pre>
       </div>
 
-      <p style="color:var(--ink-500);max-width:56ch;margin-top:1.25rem">For compiler development, or access to the latest unreleased changes, you can also install Vera directly from GitHub.</p>
+      <p style="color:var(--ink-500);max-width:56ch;margin-top:1.25rem">The wheel ships the compiler and the <code>vera</code> command. For the full environment &mdash; the bundled examples, conformance suite, and specification the agent docs teach from &mdash; or for compiler development and unreleased changes, install from source.</p>
 
       <div class="code-block">
 <pre><span class="cm"># Clone and install from source</span>
@@ -575,7 +573,13 @@ git clone https://github.com/aallan/vera.git
 cd vera
 python -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"</pre>
+pip install -e ".[dev]"
+
+<span class="cm"># Check, verify, run, compile the bundled examples</span>
+vera check examples/absolute_value.vera
+vera verify examples/safe_divide.vera
+vera run examples/hello_world.vera
+vera compile --target browser examples/hello_world.vera</pre>
       </div>
 
       <div class="editor-rows">
@@ -589,7 +593,7 @@ pip install -e ".[dev]"</pre>
       </div>
       </div>
 
-      <p style="color:var(--ink-500);margin-top:1.25rem">Live proof-aware diagnostics, hover, slot go-to-definition, and typed-hole completion come from the <a href="https://github.com/aallan/vera/blob/main/LSP_SERVER.md">language server</a> &mdash; install the LSP extra with <code>python -m pip install "veralang[lsp]"</code> (source checkout: <code>pip install -e ".[lsp]"</code>). Any editor with a generic LSP client can point at <code>vera lsp</code> directly.</p>
+      <p style="color:var(--ink-500);margin-top:1.25rem">Live proof-aware diagnostics, hover, slot go-to-definition, and typed-hole completion come from the <a href="https://github.com/aallan/vera/blob/main/LSP_SERVER.md">language server</a>, installed with the <code>[lsp]</code> extra shown above (source checkout: <code>pip install -e ".[lsp]"</code>). Any editor with a generic LSP client can point at <code>vera lsp</code> directly.</p>
     </div>
   </section>
 

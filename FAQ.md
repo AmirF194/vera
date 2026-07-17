@@ -243,19 +243,21 @@ The language is under active development. See the [Roadmap](ROADMAP.md) and [Cha
 
 ## How do I try it?
 
-```bash
-python -m venv .venv && source .venv/bin/activate
-python -m pip install veralang
-vera run examples/hello_world.vera
-```
-
-For compiler development or the latest unreleased changes, install from source instead:
+Clone the repository — the checkout carries the bundled examples this command runs, plus the conformance suite and specification (a PyPI install ships the toolchain only):
 
 ```bash
 git clone https://github.com/aallan/vera.git && cd vera
 python -m venv .venv && source .venv/bin/activate
 python -m pip install -e .
 vera run examples/hello_world.vera
+```
+
+If you only need the `vera` command — no examples, spec, or conformance programs — install the released distribution from PyPI:
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+python -m pip install veralang
+vera version
 ```
 
 For agents, point your model at [SKILL.md](https://raw.githubusercontent.com/aallan/vera/main/SKILL.md). It's the complete language reference, designed to be dropped into a context window. For driving the command-line toolchain itself — checking, verifying, testing, running, and debugging Vera, plus the `builtins`/`effects`/`errors` introspection commands — see the CLI cookbook, [TOOLCHAIN.md](TOOLCHAIN.md).
