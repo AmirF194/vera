@@ -5,7 +5,7 @@ Language server integration and syntax highlighting for the [Vera programming la
 ## Features
 
 **Language server integration** — the extension starts Vera's own
-language server ([`vera lsp`](../../LSP_SERVER.md)) for `.vera` files,
+language server ([`vera lsp`](https://github.com/aallan/vera/blob/main/LSP_SERVER.md)) for `.vera` files,
 which runs the full pipeline — parse, type-check, **verify** — on every
 edit and provides:
 
@@ -20,7 +20,7 @@ edit and provides:
 
 Requires the `vera` binary with the `[lsp]` extra from PyPI (see
 [Requirements](#requirements)); without it the extension stays in
-syntax-highlighting-only mode. See [LSP_SERVER.md](../../LSP_SERVER.md)
+syntax-highlighting-only mode. See [LSP_SERVER.md](https://github.com/aallan/vera/blob/main/LSP_SERVER.md)
 for everything the server can do, including the custom methods for
 coding agents.
 
@@ -80,8 +80,6 @@ Install **Vera Language** from the Extensions view, or run:
 code --install-extension veralang.vera-language
 ```
 
-[Open Vera Language in the VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=veralang.vera-language).
-
 ### From VSIX
 
 ```bash
@@ -136,7 +134,6 @@ The grammar uses standard TextMate scope conventions, so it works with any colou
 
 - [Vera language](https://veralang.dev/)
 - [Vera on GitHub](https://github.com/aallan/vera)
-- [Vera Language on the VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=veralang.vera-language)
 - [TextMate bundle](https://github.com/aallan/vera/tree/main/editors/textmate) (same grammar, TextMate 2 packaging)
 
 ## Licence
