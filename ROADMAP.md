@@ -20,7 +20,7 @@ Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verificati
 
 ### Bug sprint — monomorphizer and verifier gaps first
 
-The sprint's bug-PR cluster is merged into the release branch; the remaining open bugs ride [KNOWN_ISSUES.md](KNOWN_ISSUES.md) with fix PRs in review (the verification-completeness rows below are the sprint's remaining scope).
+The sprint's bug-PR cluster is fully merged; the verification-completeness rows below are the sprint's remaining scope, and [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the one watch-only row.
 
 [#996](https://github.com/aallan/vera/issues/996) stays a watch-only row — an unreproducible conformance flake, not a fix target.
 

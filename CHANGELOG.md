@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-07-17
+
 ### Added
 
 - **`check_doc_counts.py` gates the README project-status test count** (PR #1088 review). The README's "N tests" figure in the Project status section matched none of the oracle's README patterns, so it had silently drifted hundreds of tests stale; a new anchored pattern locks it to the live collection count, mutation-validated (a stale figure fails the gate).
@@ -3000,7 +3002,8 @@ Small docs sweep — closes six aging documentation issues in one PR.  No code c
 - Grammar: handler body simplified to avoid LALR reduce/reduce conflict
 - `pyproject.toml`: corrected build backend, package discovery, PEP 639 compliance
 
-[Unreleased]: https://github.com/aallan/vera/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/aallan/vera/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/aallan/vera/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/aallan/vera/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/aallan/vera/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/aallan/vera/compare/v0.1.1...v0.1.2
