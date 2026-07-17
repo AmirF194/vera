@@ -9,18 +9,9 @@ Vera is a programming language designed for LLMs to write. It uses typed slot re
 
 ## Installation
 
-Vera requires Python 3.11 or later. Node.js 22+ is optional (only needed for `vera compile --target browser` and browser parity tests). Install from the GitHub source:
+Vera requires Python 3.11 or later. Node.js 22+ is optional (only needed for `vera compile --target browser` and browser parity tests).
 
-```bash
-git clone https://github.com/aallan/vera.git
-cd vera
-python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
-python -m pip install -e ".[dev]"
-```
-
-This installs the `vera` command and all runtime dependencies (Lark parser, Z3 solver, wasmtime). For editor/agent integration via the Language Server Protocol, use the `[lsp]` extra — `python -m pip install -e ".[lsp]"` — see [LSP_SERVER.md](https://github.com/aallan/vera/blob/main/LSP_SERVER.md).
-
-The GitHub source route remains supported for unreleased changes and compiler development:
+**Recommended — install from the GitHub source checkout.** The checkout is the full environment this file teaches from: alongside the compiler and the `vera` CLI it carries the bundled `examples/`, the conformance suite in `tests/conformance/` (minimal working programs for every language feature), and the specification in `spec/`:
 
 ```bash
 git clone https://github.com/aallan/vera.git && cd vera
@@ -28,18 +19,22 @@ python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\act
 python -m pip install -e .
 ```
 
-For an editable source install with the language server, use `python -m pip install -e ".[lsp]"`. Verify the installed CLI — works for either route, with no checkout required:
-
-```bash
-vera version
-```
-
-From a source checkout you can also run the bundled example end to end:
+For an editable source install with the language server, use `python -m pip install -e ".[lsp]"` — see [LSP_SERVER.md](https://github.com/aallan/vera/blob/main/LSP_SERVER.md). Verify the install end to end with the bundled example:
 
 ```bash
 vera check examples/hello_world.vera    # should print "OK: examples/hello_world.vera"
 vera run examples/hello_world.vera      # should print "Hello, World!"
 ```
+
+**Toolchain only — install the released `veralang` distribution from PyPI.** This installs the `vera` command and all runtime dependencies (Lark parser, Z3 solver, wasmtime), but **not** the examples, conformance programs, or specification — those exist only in the checkout:
+
+```bash
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+python -m pip install veralang
+vera version
+```
+
+For the language server on this route, install `python -m pip install "veralang[lsp]"`.
 
 If you are working on the compiler itself, install development dependencies too:
 
@@ -162,6 +157,8 @@ Every diagnostic has a stable error code grouped by compiler phase:
 - **E500–E528** — Verification (contract violations, undecidable fallbacks, primitive-operation safety incl. arithmetic overflow)
 - **E600–E614** — Codegen (unsupported features, typed holes block compilation)
 - **E700–E702** — Testing (contract violations, input generation, execution errors)
+
+In diagnostic messages, a `?` inside a printed type (`Array<?>`, `Map<String, ?>`) marks a component the checker could not infer. That is a rendering marker for an unknown type, not the typed-hole expression `?` (W001) you write in source.
 
 Common codes you'll encounter:
 - **W001** — Typed hole: fill `?` with an expression of the stated type
@@ -846,7 +843,7 @@ array_sort_by(@Array<Int>.0, fn(@Int, @Int -> @Ordering) effects(pure) { ... }) 
 
 ### Map operations
 
-`Map<K, V>` is a key-value collection. Keys must satisfy `Eq` and `Hash` abilities (primitive types: `Int`, `Nat`, `Bool`, `Float64`, `String`, `Byte`, `Unit`). Values can be any type. All operations are pure — insert and remove return new maps.
+`Map<K, V>` is a key-value collection. Keys must satisfy `Eq` and `Hash` abilities (primitive types: `Int`, `Nat`, `Bool`, `Float64`, `String`, `Byte`). Values may be any type with a runtime representation — a zero-size key or value type (`Unit`, or a `Future` wrapping one) is rejected at check time with E135. All operations are pure — insert and remove return new maps.
 
 ```vera
 map_insert(map_new(), "hello", 42)                  -- returns Map<String, Nat>
@@ -863,7 +860,7 @@ map_values(@Map<String, Nat>.0)                     -- returns Array<Nat>
 
 ### Set operations
 
-`Set<T>` is an unordered collection of unique elements. Elements must satisfy `Eq` and `Hash` abilities (primitive types: `Int`, `Nat`, `Bool`, `Float64`, `String`, `Byte`, `Unit`). All operations are pure — add and remove return new sets.
+`Set<T>` is an unordered collection of unique elements. Elements must satisfy `Eq` and `Hash` abilities (primitive types: `Int`, `Nat`, `Bool`, `Float64`, `String`, `Byte`); a zero-size element type (`Unit`, or a `Future` wrapping one) is rejected at check time with E135. All operations are pure — add and remove return new sets.
 
 ```vera
 set_add(set_add(set_new(), "hello"), "world")       -- returns Set<String>
@@ -2337,7 +2334,7 @@ public fn main(@Unit -> @Unit)
 
 ## Conformance Suite
 
-The `tests/conformance/` directory contains 143 small programs (each self-contained except `ch07_cross_module_contracts.vera` and `ch08_cross_module_generic.vera`, which import their `_lib.vera` companions) that validate every language feature against the spec — often one program per feature, though some features (slot references, match, contracts) span several. These are the best minimal working examples of Vera syntax and semantics.
+The `tests/conformance/` directory contains 163 small programs — most self-contained, with the Chapter 8 module-system programs and a few cross-module Chapter 7 and 9 programs importing companion `_lib.vera` / `_mid.vera` modules — that validate every language feature against the spec — often one program per feature, though some features (slot references, match, contracts) span several. These are the best minimal working examples of Vera syntax and semantics.
 
 Each program is organized by spec chapter (`ch01_int_literals.vera`, `ch04_match_basic.vera`, `ch07_state_handler.vera`, etc.) and the `manifest.json` file maps features to programs. When you need to see how a specific construct works, check the conformance program before reading the spec.
 

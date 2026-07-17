@@ -481,3 +481,331 @@ def test_a12_result_bare_tier_split_matches_control() -> None:
     assert (collide.tier1_verified, collide.tier3_runtime) == (
         control.tier1_verified, control.tier3_runtime
     ), f"tier split diverged: collide={collide} control={control}"
+
+
+# =====================================================================
+# #1069 — the STRIPPED marker still leaks a bare type var into a mismatch
+# message.  #982 stopped the raw ``#b`` marker from surfacing; but a built-in
+# generic var that inference never substituted (``map_values``'s element var
+# ``V#b``, escaping through a refinement alias) is stripped to a bare ``V``
+# and printed as if it were a real, user-meaningful type ("body has type V").
+# The fix renders such a leaked internal placeholder as ``?`` at the
+# *actual*-type slot of every mismatch message, while leaving a genuine user
+# ``forall`` var (plain ``T``) and a built-in's unsubstituted *expected*
+# signature (``Array<T>`` — TestMarkerNeverLeaks982) untouched.
+# =====================================================================
+
+# A refinement alias over a generic container whose value type is a concrete
+# ``Int``.  ``map_values(@M.0)`` is ``Array<V#b>`` (the element derivation does
+# not thread the alias base, an out-of-scope inference gap), so indexing it
+# yields the bare, unsubstituted ``V#b`` — the leak vehicle.
+_M_ALIAS = (
+    "type M = { @Map<String, Int> | map_size(@Map<String, Int>.0) >= 0 };\n"
+)
+
+
+def _diag(source: str, code: str) -> str:
+    """Return the description of the first diagnostic with ``error_code``."""
+    errs = _errors(source)
+    hits = [e for e in errs if e.error_code == code]
+    assert hits, (
+        f"expected a {code}, got "
+        f"{[(e.error_code, e.description) for e in errs]}"
+    )
+    return hits[0].description
+
+
+class TestLeakedTypevarMessage1069:
+    """Every reachable mismatch site renders a leaked built-in placeholder var
+    as ``?`` rather than a bare stripped letter.
+
+    RED on the pre-fix compiler: each ``has type ?`` assertion fails because
+    the message reads ``has type V`` (``pretty_type`` stripped ``V#b`` to
+    ``V``).  ``Int``/``Bool`` (expected) and ``?`` (corrected actual) and
+    ``V`` (leaked) are mutually distinct in every shape, so the assertions
+    cannot pass by coincidence.
+    """
+
+    def test_e121_function_body(self) -> None:
+        """E121 — the reported repro.  Body ``map_values(@M.0)[0]`` is a bare
+        leaked ``V``; the declared return is ``Int``."""
+        desc = _diag(
+            _M_ALIAS
+            + "public fn get_val(@M -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ map_values(@M.0)[0] }\n",
+            "E121",
+        )
+        assert "body has type ?, expected Int" in desc, desc
+        assert "type V" not in desc, desc
+
+    def test_e170_let_value_nested(self) -> None:
+        """E170 — a NESTED leak (``Array<V>``) proves the substitution recurses
+        into type arguments: the corrected render is ``Array<?>``."""
+        desc = _diag(
+            _M_ALIAS
+            + "public fn f(@M -> @Bool)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ let @Bool = map_values(@M.0); @Bool.0 }\n",
+            "E170",
+        )
+        assert "value has type Array<?>" in desc, desc
+        assert "Array<V>" not in desc, desc
+
+    def test_e171_anonymous_function_body(self) -> None:
+        """E171 — a leaked ``V`` at a closure's body position."""
+        desc = _diag(
+            _M_ALIAS
+            + "public fn f(@M -> @Bool)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ apply_fn(fn(@M -> @Bool) effects(pure) "
+            "{ map_values(@M.0)[0] }, @M.0) }\n",
+            "E171",
+        )
+        assert "body has type ?, expected Bool" in desc, desc
+        assert "type V" not in desc, desc
+
+    def test_e213_constructor_field(self) -> None:
+        """E213 — a leaked ``V`` at a constructor-argument position."""
+        desc = _diag(
+            "private data Box { MkBox(Bool) }\n"
+            + _M_ALIAS
+            + "public fn f(@M -> @Box)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ MkBox(map_values(@M.0)[0]) }\n",
+            "E213",
+        )
+        assert "field 0 has type ?, expected Bool" in desc, desc
+        assert "type V" not in desc, desc
+
+    def test_e204_effect_operation_argument(self) -> None:
+        """E204 — a leaked ``V`` at an effect-operation argument position."""
+        desc = _diag(
+            "effect Sig { op emit(Bool -> Unit); }\n"
+            + _M_ALIAS
+            + "private fn f(@M -> @Unit)\n"
+            "  requires(true) ensures(true) effects(<Sig>)\n"
+            "{ emit(map_values(@M.0)[0]) }\n",
+            "E204",
+        )
+        assert "has type ?, expected Bool" in desc, desc
+        assert "type V" not in desc, desc
+
+    def test_e241_ability_operation_argument(self) -> None:
+        """E241 — a leaked ``V`` at an ability-operation argument position
+        (the structural twin of the effect-operation arm)."""
+        desc = _diag(
+            "ability Emitter<T> { op emit(Bool -> Unit); }\n"
+            + _M_ALIAS
+            + "private forall<T where Emitter<T>> fn f(@T, @M -> @Unit)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ emit(map_values(@M.0)[0]) }\n",
+            "E241",
+        )
+        assert "has type ?, expected Bool" in desc, desc
+        assert "type V" not in desc, desc
+
+    def test_e202_apply_fn_argument(self) -> None:
+        """E202 — a leaked ``V`` at an ``apply_fn`` trailing-argument position
+        (the direct-call arm resolves the var by unifying it with the expected
+        parameter, so the leak only surfaces through ``apply_fn``)."""
+        desc = _diag(
+            "type BoolToInt = fn(Bool -> Int) effects(pure);\n"
+            + _M_ALIAS
+            + "public fn f(@BoolToInt, @M -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ apply_fn(@BoolToInt.0, map_values(@M.0)[0]) }\n",
+            "E202",
+        )
+        assert "has type ?, expected Bool" in desc, desc
+        assert "type V" not in desc, desc
+
+    def test_e331_handler_state_init(self) -> None:
+        """E331 — a leaked ``V`` at a handler's initial-state position."""
+        desc = _diag(
+            _M_ALIAS
+            + "public fn probe(@M -> @Bool)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{\n"
+            "  handle[State<Bool>](@Bool = map_values(@M.0)[0]) {\n"
+            "    get(@Unit) -> { resume(@Bool.0) },\n"
+            "    put(@Bool) -> { resume(()) }\n"
+            "  } in { get(()) }\n"
+            "}\n",
+            "E331",
+        )
+        assert "initial value has type ?, expected Bool" in desc, desc
+        assert "type V" not in desc, desc
+
+    def test_e335_handler_state_update(self) -> None:
+        """E335 — a leaked ``V`` at a ``with`` state-update position."""
+        desc = _diag(
+            _M_ALIAS
+            + "public fn probe(@M -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{\n"
+            "  handle[State<Int>](@Int = 0) {\n"
+            "    get(@Unit) -> { resume(@Int.0) },\n"
+            "    put(@Int) -> { resume(()) } with @Int = map_values(@M.0)[0]\n"
+            "  } in { get(()) }\n"
+            "}\n",
+            "E335",
+        )
+        assert "has type ?, expected Int" in desc, desc
+        assert "type V" not in desc, desc
+
+    def test_genuine_user_forall_var_is_preserved(self) -> None:
+        """Guard against over-broadening: a genuine *user* ``forall<T>`` var is
+        the spelling the programmer wrote, so it stays ``T`` — only namespaced
+        built-in (``#b``) and fresh (``$``) placeholders become ``?``.
+
+        Green both before and after the fix (a regression guard, not a
+        RED→GREEN): the fix must not touch this message."""
+        desc = _diag(
+            "private forall<T> fn f(@T -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ @T.0 }\n",
+            "E121",
+        )
+        assert "body has type T, expected Int" in desc, desc
+        assert "?" not in desc, desc
+
+
+_V = "map_values(@M.0)[0]"
+
+_PURE_FN = (
+    "public fn f(@M -> @{ret})\n"
+    "  requires(true) ensures(true) effects(pure)\n"
+    "{{ {body} }}\n"
+)
+
+
+def _fn(ret: str, body: str) -> str:
+    return _M_ALIAS + _PURE_FN.format(ret=ret, body=body)
+
+
+# One row per converted render slot: (error code, source, corrected
+# fragment that must appear, leaked fragment that must not).  The two-slot
+# operator messages (E140/E142/E143/E301) get one row per slot — leak on
+# the left and leak on the right pin each operand's render independently.
+_SIBLING_SITES = [
+    pytest.param(
+        "E140", _fn("Int", f"{_V} + 1"),
+        "found ? and Nat", "found V and", id="E140-arith-left"),
+    pytest.param(
+        "E140", _fn("Int", f"1 + {_V}"),
+        "found Nat and ?", "and V.", id="E140-arith-right"),
+    pytest.param(
+        "E142", _fn("Bool", f"{_V} == 1"),
+        "Cannot compare ? with Nat", "compare V with", id="E142-eq-left"),
+    pytest.param(
+        "E142", _fn("Bool", f"1 == {_V}"),
+        "Cannot compare Nat with ?", "with V.", id="E142-eq-right"),
+    pytest.param(
+        "E143", _fn("Bool", f"{_V} < 1"),
+        "found ? and Nat", "found V and", id="E143-ord-left"),
+    pytest.param(
+        "E143", _fn("Bool", f"1 < {_V}"),
+        "found Nat and ?", "and V.", id="E143-ord-right"),
+    pytest.param(
+        "E144", _fn("Bool", f"{_V} && true"),
+        "must be Bool, found ?", "found V.", id="E144-logical-left"),
+    pytest.param(
+        "E145", _fn("Bool", f"true && {_V}"),
+        "must be Bool, found ?", "found V.", id="E145-logical-right"),
+    pytest.param(
+        "E146", _fn("Bool", f"!{_V}"),
+        "requires Bool operand, found ?", "found V.", id="E146-not"),
+    pytest.param(
+        "E147", _fn("Int", f"-{_V}"),
+        "requires numeric operand, found ?", "found V.", id="E147-neg"),
+    pytest.param(
+        "E148", _fn("String", f'"x \\({_V})"'),
+        "Type '?' cannot be automatically converted",
+        "Type 'V'", id="E148-interpolation"),
+    pytest.param(
+        "E160",
+        _M_ALIAS
+        + "public fn f(@Array<Int>, @M -> @Int)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        f"{{ @Array<Int>.0[{_V}] }}\n",
+        "must be Int or Nat, found ?", "found V.", id="E160-index-type"),
+    pytest.param(
+        "E161", _fn("Int", f"{_V}[0]"),
+        "Cannot index ?:", "Cannot index V:", id="E161-cannot-index"),
+    pytest.param(
+        "E172", _fn("Bool", f"assert({_V}); true"),
+        "assert() requires Bool, found ?", "found V.", id="E172-assert"),
+    pytest.param(
+        "E173", _fn("Bool", f"assume({_V}); true"),
+        "assume() requires Bool, found ?", "found V.", id="E173-assume"),
+    pytest.param(
+        "E300", _fn("Int", f"if {_V} then {{ 1 }} else {{ 2 }}"),
+        "If condition must be Bool, found ?", "found V.", id="E300-if-cond"),
+    pytest.param(
+        "E301", _fn("Int", f"if true then {{ {_V} }} else {{ 2 }}"),
+        "then-branch is ?, else-branch is Nat",
+        "then-branch is V", id="E301-then-branch"),
+    pytest.param(
+        "E301", _fn("Int", f"if true then {{ 2 }} else {{ {_V} }}"),
+        "then-branch is Nat, else-branch is ?",
+        "else-branch is V", id="E301-else-branch"),
+    pytest.param(
+        "E123",
+        _M_ALIAS
+        + "public fn f(@M -> @Int)\n"
+        f"  requires({_V}) ensures(true) effects(pure)\n"
+        "{ 1 }\n",
+        "requires() predicate must be Bool, found ?",
+        "found V.", id="E123-requires"),
+    pytest.param(
+        "E124",
+        _M_ALIAS
+        + "public fn f(@M -> @Int)\n"
+        f"  requires(true) ensures({_V}) effects(pure)\n"
+        "{ 1 }\n",
+        "ensures() predicate must be Bool, found ?",
+        "found V.", id="E124-ensures"),
+    pytest.param(
+        "E126",
+        _M_ALIAS
+        + f"type Z = {{ @M | {_V} }};\n"
+        "public fn f(@Z -> @Int)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ 1 }\n",
+        "Refinement predicate must be Bool, found ?",
+        "found V.", id="E126-refinement-pred"),
+]
+
+
+class TestLeakedTypevarSiblingSites1069:
+    """PR #1088's adversarial review: the same leaked-placeholder masquerade
+    survived at the operator / unary / index / interpolation / assert /
+    if-and-branch / contract-and-refinement-predicate actual-type slots.
+    Every reachable slot renders ``?``, exactly like the mismatch sites.
+
+    RED on the pre-round compiler: each corrected fragment fails because the
+    message spells the leak as a bare ``V``.  Sites a leaked var provably
+    cannot reach keep plain ``pretty_type`` and are NOT pinned here: E141 /
+    the E142 ordering-compatibility arm (operands proven numeric/orderable
+    first), E302 (``is_subtype`` accepts a TypeVar arm), the ``==`` Eq-ability
+    message (``contains_typevar`` early-return), apply_fn's arity message
+    (fn value proven a FunctionType), and the data-invariant message
+    (``invariant`` in ``data`` is grammar-rejected, #686).
+    """
+
+    @pytest.mark.parametrize(("code", "src", "good", "bad"), _SIBLING_SITES)
+    def test_leaked_var_renders_unknown(
+            self, code: str, src: str, good: str, bad: str) -> None:
+        desc = _diag(src, code)
+        assert good in desc, desc
+        assert bad not in desc, desc
+
+    def test_e301_fix_text_renders_unknown(self) -> None:
+        """E301's fix field interpolates the else-branch's inferred type; a
+        leaked var there masquerades the same way the description did."""
+        errs = _errors(_fn("Int", f"if true then {{ 2 }} else {{ {_V} }}"))
+        fixes = [e.fix for e in errs if e.error_code == "E301"]
+        assert fixes and fixes[0] is not None, errs
+        assert "convert one branch to ?" in fixes[0], fixes[0]
+        assert "branch to V" not in fixes[0], fixes[0]

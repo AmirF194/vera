@@ -249,6 +249,21 @@
     ]
   },
   {
+    "id": "ch02_map_unit_value_rejected",
+    "file": "ch02_map_unit_value_rejected.vera",
+    "chapter": 2,
+    "title": "A Map with a zero-size value type is a checker error (#1075)",
+    "level": "check",
+    "spec_ref": "Section 2.2",
+    "expected_error": "E135",
+    "features": [
+      "map",
+      "unit_type",
+      "zero_size",
+      "check_error"
+    ]
+  },
+  {
     "id": "ch02_tuple_basic",
     "file": "ch02_tuple_basic.vera",
     "chapter": 2,
@@ -1088,7 +1103,7 @@
     "id": "ch07_state_clause_transform",
     "file": "ch07_state_clause_transform.vera",
     "chapter": 7,
-    "title": "State clause bodies execute \u2014 intrinsic-hybrid semantics (#976)",
+    "title": "State clause bodies execute — intrinsic-hybrid semantics (#976)",
     "level": "run",
     "spec_ref": "Section 7.5.2",
     "features": [
@@ -1115,9 +1130,9 @@
     "id": "ch07_exn_string",
     "file": "ch07_exn_string.vera",
     "chapter": 7,
-    "title": "Exn<String> effect handler \u2014 String payload",
+    "title": "Exn<String> effect handler — String payload",
     "level": "run",
-    "spec_ref": "Section 7.4 Exn<E> handler \u2014 String payload",
+    "spec_ref": "Section 7.4 Exn<E> handler — String payload",
     "features": [
       "exn_handler",
       "string_exception"
@@ -1419,7 +1434,7 @@
     "id": "ch08_transitive_module_import_base",
     "file": "ch08_transitive_module_import_base.vera",
     "chapter": 8,
-    "title": "Transitive import chain \u2014 base module",
+    "title": "Transitive import chain — base module",
     "level": "check",
     "spec_ref": "Section 8.6.4",
     "features": [
@@ -1431,7 +1446,7 @@
     "id": "ch08_transitive_module_import_mid",
     "file": "ch08_transitive_module_import_mid.vera",
     "chapter": 8,
-    "title": "Transitive import chain \u2014 middle module",
+    "title": "Transitive import chain — middle module",
     "level": "verify",
     "spec_ref": "Section 8.6.4",
     "features": [
@@ -1660,6 +1675,20 @@
       "array_all",
       "array_flatten",
       "array_sort_by"
+    ]
+  },
+  {
+    "id": "ch09_nested_builtin_index",
+    "file": "ch09_nested_builtin_index.vera",
+    "chapter": 9,
+    "title": "Direct index of a nested type-variable-element builtin (#1094)",
+    "level": "run",
+    "spec_ref": "Section 9.6.21",
+    "features": [
+      "array_reverse",
+      "array_sort_by",
+      "array_flatten",
+      "map_values"
     ]
   },
   {
@@ -1895,6 +1924,22 @@
       "await",
       "future",
       "async_effect"
+    ]
+  },
+  {
+    "id": "ch09_map_future_values",
+    "file": "ch09_map_future_values.vera",
+    "chapter": 9,
+    "title": "Map/Set with representation-transparent Future<T> entries",
+    "level": "run",
+    "spec_ref": "Section 9.5.4",
+    "features": [
+      "map",
+      "set",
+      "future",
+      "async_effect",
+      "map_values",
+      "array_concat"
     ]
   },
   {

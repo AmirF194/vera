@@ -54,6 +54,7 @@ Things Vera cannot do yet, as distinct from defects in what it claims to do.
 | `runtime.mjs` doesn't export its string-marshalling helpers, so JavaScript cannot pass `String` arguments into Vera functions in the browser. This forces browser programs into the compute-upfront/drain-stdout pattern; exporting the helpers is roadmap Tier 3. | [#603](https://github.com/aallan/vera/issues/603) |
 | `IO.sleep` busy-waits the browser's main thread, freezing the tab for the sleep duration — animations and paced simulations don't run meaningfully under `--target browser`. The JSPI-based suspend/resume fix is roadmap Tier 3, demoted below correctness work. | [#609](https://github.com/aallan/vera/issues/609) |
 | ANSI escape sequences render as literal control characters in the browser DOM, so terminal-style programs display garbage under `--target browser`. A minimal ANSI-subset interpreter in `runtime.mjs` is roadmap Tier 3. | [#610](https://github.com/aallan/vera/issues/610) |
+| The concurrent `await` lowering does not resolve type aliases in its handle-check classification — a future bound through an alias-typed `let` is skipped (`[E602]`) before any await could mis-lower (spec §9.5.4). Confirming this still reproduces requires a genuinely concurrent repro: an eager-path probe never reaches the handle-check, so a clean compile of a pure body proves nothing. | [#1095](https://github.com/aallan/vera/issues/1095) |
 
 ## Refactoring needed
 

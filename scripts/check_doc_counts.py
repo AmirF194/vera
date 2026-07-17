@@ -450,6 +450,11 @@ def main() -> int:
         "total tests",
     )
     check_readme(
+        r"([\d,]+) tests, \d+% code coverage",
+        live_total_tests,
+        "project-status tests",
+    )
+    check_readme(
         r"tests across (\d+) files",
         live_test_files,
         "test file count",
@@ -471,7 +476,7 @@ def main() -> int:
 
     skill_md = (root / "SKILL.md").read_text(encoding="utf-8")
 
-    m = re.search(r"contains (\d+) small, self-contained programs", skill_md)
+    m = re.search(r"contains (\d+) small programs", skill_md)
     if m:
         doc_conf = int(m.group(1))
         if doc_conf != live_conformance:

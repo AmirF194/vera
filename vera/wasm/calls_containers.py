@@ -420,12 +420,29 @@ class CallsContainersMixin:
 
     # ── Map<K, V> host-import builtins ──────────────────────────────
 
-    @staticmethod
-    def _map_wasm_tag(vera_type: str | None) -> str | None:
+    def _map_wasm_tag(self, vera_type: str | None) -> str | None:
         """Map a Vera type name to a single-char WASM type tag.
 
         Used to build monomorphized host import names like
         ``map_insert$ki_vi`` (key=i64, value=i64).
+
+        A representation-transparent ``Future<…>`` wrapper is stripped to
+        its payload first (#1097, #841): a ``Future<Int>`` IS an i64, a
+        ``Future<String>`` IS an i32_pair, so the tag must classify the
+        payload, not the opaque head.  An alias name is canonicalized to
+        its target's full compound spelling before stripping (``type FI =
+        Future<Int>``), re-canonicalized per wrapper hop so alias-of-Future
+        chains resolve.  Pre-strip, a ``Future<Int>`` value fell through to
+        the ``"b"`` (single-i32) tag while the value expression pushed an
+        i64 — the registered host import disagreed with the stack and a
+        check+verify-green program compiled exit-0 to an INVALID module
+        ("type mismatch: expected i32, found i64", or "values remaining on
+        stack" for the i32_pair payload).  Stripping happens BEFORE the
+        chain, so the zero-size erasure arm still fires on the payload
+        (``Future<Unit>`` -> ``Unit`` -> the ``None`` rejection) and an
+        ``Array<T>`` payload (``Future<Array<Int>>`` -> ``Array<Int>``)
+        reaches the existing Array-reject ``None`` path — a loud skip, not
+        an invalid module.
 
         Returns ``None`` for ``Array<T>`` values: arrays lower to
         ``i32_pair`` (ptr + len), but pre-#475 the fallback routed
@@ -433,13 +450,29 @@ class CallsContainersMixin:
         i32), which produced a host-import signature with one i32
         slot where two were needed — silently mis-tagging
         ``Map<K, Array<T>>`` insertions and breaking ``map_values``
-        round-trips.  Callers must check for ``None`` and return
+        round-trips.  Also returns ``None`` for any name that ERASES
+        to zero size (#1075 — an instance method for this reason: the
+        recursive `_slot_name_erases_to_unit` oracle needs the alias
+        tables): it pushes no operand at all, so a ``"b"`` tag emits
+        invalid WASM.  Callers must check for ``None`` and return
         ``None`` themselves, propagating the "skip this function"
         signal through the translator (the standard compile-failure
         convention).  When direct ``Map<K, Array<T>>`` support is
         added later it would belong here as a new tag (e.g. ``"a"``)
         with matching ``_map_wasm_types`` entry.
         """
+        # #1097: canonicalize an alias name, then peel transparent
+        # ``Future<…>`` wrappers to the payload BEFORE the tag chain below
+        # classifies it.  ONE canonicalize suffices: it resolves alias
+        # payloads at every depth (``type FI = Future<Int>`` and nested
+        # ``Future<FI2>`` chains both come back fully spelled), so the
+        # strip is a plain textual peel — matching ``_strip_future`` — and
+        # a cyclic alias (already E132 at check) cannot spin it: the
+        # canonicalizer's ``_seen`` guard runs once, never per hop.
+        if vera_type is not None:
+            vera_type, _ = self._canonicalize_alias_slot_name(vera_type)
+            while vera_type.startswith("Future<") and vera_type.endswith(">"):
+                vera_type = vera_type[len("Future<"):-1]
         if vera_type in ("Int", "Nat"):
             return "i"   # i64
         if vera_type == "Float64":
@@ -457,6 +490,25 @@ class CallsContainersMixin:
         # so empty-collection round-trips still compile.
         if vera_type is not None and vera_type.startswith("Array"):
             return None
+        # #1075: a ZERO-SIZE key/value/element pushes nothing onto the
+        # stack, so tagging it "b" emits a host import expecting an i32
+        # operand that was never produced — invalid WASM behind an exit-0
+        # compile.  The annotated spellings (`@Map<String, Unit>`, aliases)
+        # are rejected at check (E135, the Map/Set siblings of the Array
+        # gate); this backstop covers the annotation-free spellings, whose
+        # types exist only through inference and never pass type
+        # resolution — the caller's None-branch turns them into a loud
+        # skip.  The test is the same RECURSIVE erasure oracle the checker
+        # gate and the zero-size declaration guards key on
+        # (`_slot_name_erases_to_unit`: alias chains canonicalized,
+        # `Future<...>` payloads recursed) — a literal name comparison
+        # here was defeated by any indirection (`async(async(()))` infers
+        # `Future<Future<Unit>>`; a user fn returning `@FU` with
+        # `type FU = Future<Unit>` infers the alias name; both previously
+        # fell through to "b" and emitted invalid modules — PR #1083
+        # adversarial review).
+        if vera_type is not None and self._slot_name_erases_to_unit(vera_type):
+            return None
         # Bool, Byte, ADTs, Map handles, and uninferred (None) element
         # types from empty collections → i32.  This is the historical
         # fall-through; CodeRabbit on PR #567 flagged it as a possible
@@ -464,10 +516,16 @@ class CallsContainersMixin:
         # tests (`test_set_empty_to_array`, `test_map_keys_in_if_expr`,
         # `test_set_to_array_in_if_expr`) depend on this path: the
         # element type is genuinely unknown but the host import works
-        # because no element value flows through it.  Mis-tagging is
-        # only possible when a real (non-None) type fails inference,
-        # and that's caught by the Array branch above and the
-        # primitive branches.
+        # because no element value flows through it.  Mis-tagging happens
+        # whenever a REAL (non-None) element type fails inference and a
+        # value flows through the import.  The #1053 container extension
+        # closed the known such failures — alias-spelled slots, registered
+        # user-fn returns (parameterized, bare-alias, generic-alias), and
+        # Block-wrapped arguments now resolve via
+        # `_container_arg_elem_name` — but argument shapes none of the
+        # resolvers type (see that helper's docstring for the list) still
+        # reach this fall-through with real elements and would mis-tag;
+        # they are exactly the shapes with no inference arm today.
         return "b"
 
     @staticmethod
@@ -525,14 +583,14 @@ class CallsContainersMixin:
         if call.name == "map_new":
             return None
         if len(call.args) >= 2:
-            return self._infer_vera_type(call.args[1])
+            return self._container_entry_type_name(call.args[1])
         return None
 
     def _infer_map_val_type(self, call: "ast.FnCall") -> str | None:
         """Infer the Vera type of a Map's value from the call arguments."""
         # For map_insert(m, k, v): value is arg[2]
         if call.name == "map_insert" and len(call.args) >= 3:
-            return self._infer_vera_type(call.args[2])
+            return self._container_entry_type_name(call.args[2])
         return None
 
     def _translate_map_new(
@@ -568,17 +626,20 @@ class CallsContainersMixin:
         decodes its bucket, inserts, and returns a fresh wrapper_ptr
         that the call-site shadow-roots via ``_emit_root_result``.
         """
-        key_type = self._infer_vera_type(call.args[1])
-        val_type = self._infer_vera_type(call.args[2])
+        key_type = self._container_entry_type_name(call.args[1])
+        val_type = self._container_entry_type_name(call.args[2])
         kt = self._map_wasm_tag(key_type)
         vt = self._map_wasm_tag(val_type)
 
         if kt is None or vt is None:
             # #475 finding 5 — Map<K, V> / Set<T> with Array-typed
-            # K, V, or element doesn't have a host-import shape yet.
+            # K, V, or element doesn't have a host-import shape yet;
+            # #1075 — a zero-size (Unit-erasing) K, V, or element has
+            # no value to pass through one (annotated spellings are
+            # E135 at check; this is the inference-only backstop).
             raise CodegenSkip(
                 call,
-                "Map/Set with Array-typed key, value, or element is not supported",
+                "Map/Set with an Array-typed or zero-size key, value, or element is not supported",
             )
 
         params = ["i32"]  # wrapper_ptr
@@ -617,15 +678,18 @@ class CallsContainersMixin:
         constructs an Option ADT (Some/None) in WASM memory, and
         returns the pointer.
         """
-        key_type = self._infer_vera_type(call.args[1])
+        key_type = self._container_entry_type_name(call.args[1])
         kt = self._map_wasm_tag(key_type)
 
         if kt is None:
             # #475 finding 5 — Map<K, V> / Set<T> with Array-typed
-            # K, V, or element doesn't have a host-import shape yet.
+            # K, V, or element doesn't have a host-import shape yet;
+            # #1075 — a zero-size (Unit-erasing) K, V, or element has
+            # no value to pass through one (annotated spellings are
+            # E135 at check; this is the inference-only backstop).
             raise CodegenSkip(
                 call,
-                "Map/Set with Array-typed key, value, or element is not supported",
+                "Map/Set with an Array-typed or zero-size key, value, or element is not supported",
             )
         # We need the value tag too, so the host knows how to build Option<V>.
         # Infer from the map's type — look at the slot ref for arg[0].
@@ -634,10 +698,13 @@ class CallsContainersMixin:
 
         if vt is None:
             # #475 finding 5 — Map<K, V> / Set<T> with Array-typed
-            # K, V, or element doesn't have a host-import shape yet.
+            # K, V, or element doesn't have a host-import shape yet;
+            # #1075 — a zero-size (Unit-erasing) K, V, or element has
+            # no value to pass through one (annotated spellings are
+            # E135 at check; this is the inference-only backstop).
             raise CodegenSkip(
                 call,
-                "Map/Set with Array-typed key, value, or element is not supported",
+                "Map/Set with an Array-typed or zero-size key, value, or element is not supported",
             )
 
         params = ["i32"]  # wrapper_ptr
@@ -662,10 +729,79 @@ class CallsContainersMixin:
         ins.append(f"call {wasm_name}")
         return ins
 
+    def _container_arg_elem_name(
+        self, expr: "ast.Expr", container: str, idx: int,
+    ) -> str | None:
+        """Type-arg ``idx`` of a ``container``-typed argument expression,
+        resolved through the shared rebuilder (#1053 container extension).
+
+        ``_named_type_from_arg_info`` resolves the argument shapes the
+        local arms in ``_infer_map_key/value_from_map_arg`` and
+        ``_infer_set_elem_from_set_arg`` below don't: an alias-spelled slot
+        (``@M.0`` via `type M = Map<String, Int>;` — #1055), a registered
+        non-generic user fn's declared return — parameterized (#1053),
+        bare-alias (`fn mkm(-> @M)` — #1071), or generic-alias
+        (`-> @MyMap<Int>` via `type MyMap<V> = Map<String, V>`,
+        substituted through the target — #1068) — and a Block-wrapped
+        argument via its tail expression (#1071).  Pre-fix those shapes
+        returned None here and ``_map_wasm_tag(None)`` fell through to the
+        ``"b"`` (i32) tag, so the mis-tagged host import silently truncated
+        i64 values and garbled String keys (a wrong VALUE, not even an
+        [E602] drop).
+
+        Shapes that still return ``None`` and ride the permissive ``"b"``
+        fall-through: genuinely element-type-free arguments (an empty
+        ``map_new()`` / ``set_new()``, where no element value flows through
+        the import), builtin container chains the local arms resolve
+        instead, and argument expressions none of the resolvers type (an
+        effect-op call, a match/if expression, a chained generic alias
+        whose free type params survive substitution).
+        """
+        nt = self._named_type_from_arg_info(expr)
+        if (nt is not None and nt.name == container and nt.type_args
+                and len(nt.type_args) > idx):
+            ta = nt.type_args[idx]
+            if isinstance(ta, ast.NamedType):
+                return self._format_named_type(ta)
+        return None
+
+    def _container_entry_type_name(self, expr: "ast.Expr") -> str | None:
+        """Full Vera type name of a Map/Set ENTRY expression (a key, value,
+        or element argument) for host-tag classification.
+
+        Rebuilder-first (#1075, PR #1083 adversarial review):
+        ``_named_type_from_arg_info`` recovers a registered user fn's
+        declared return with FULL nesting (``Future<Unit>``, ``Array<String>``
+        — including bare-alias and generic-alias returns, #1071/#1068),
+        where ``_infer_vera_type``'s non-generic arm deliberately collapses
+        a parameterized return to its bare head (``"Future"``, the #911
+        convention) — a name the zero-size erasure oracle and the
+        Array-reject branch in :py:meth:`_map_wasm_tag` cannot decide, so a
+        ``fn(-> @Future<Unit>)`` map value fell through to the ``"b"`` tag
+        and emitted invalid WASM.  Falls back to ``_infer_vera_type`` for
+        every shape the rebuilder does not type (literals, effect ops,
+        builtin calls like ``async(...)`` whose inference arm already
+        renders the full spelling), so tags for previously-working entries
+        are unchanged.
+        """
+        nt = self._named_type_from_arg_info(expr)
+        if nt is not None:
+            return self._format_named_type(nt)
+        return self._infer_vera_type(expr)
+
     def _infer_map_value_from_map_arg(
         self, expr: "ast.Expr",
     ) -> str | None:
-        """Infer the value type V from a Map<K, V> expression."""
+        """Infer the value type V from a Map<K, V> expression.
+
+        The shared-rebuilder consult handles alias-spelled and user-fn
+        arguments first (#1053 container extension); it resolves the direct
+        ``@Map<K, V>`` slot to the same answer as the arms below, so
+        ordering is behavior-preserving for the previously-working shapes.
+        """
+        t = self._container_arg_elem_name(expr, "Map", 1)
+        if t is not None:
+            return t
         # If the map arg is a slot ref like @Map<String, Int>.0,
         # extract V from the type_args (not the type_name string).
         if isinstance(expr, ast.SlotRef):
@@ -686,7 +822,7 @@ class CallsContainersMixin:
         if isinstance(expr, ast.FnCall):
             if expr.name in ("map_new", "map_insert", "map_remove"):
                 if expr.name == "map_insert" and len(expr.args) >= 3:
-                    return self._infer_vera_type(expr.args[2])
+                    return self._container_entry_type_name(expr.args[2])
                 # Recurse into the map argument
                 if expr.args:
                     return self._infer_map_value_from_map_arg(expr.args[0])
@@ -696,15 +832,18 @@ class CallsContainersMixin:
         self, call: "ast.FnCall", env: WasmSlotEnv,
     ) -> list[str] | None:
         """map_contains(m, k) → i32 (Bool) via host import."""
-        key_type = self._infer_vera_type(call.args[1])
+        key_type = self._container_entry_type_name(call.args[1])
         kt = self._map_wasm_tag(key_type)
 
         if kt is None:
             # #475 finding 5 — Map<K, V> / Set<T> with Array-typed
-            # K, V, or element doesn't have a host-import shape yet.
+            # K, V, or element doesn't have a host-import shape yet;
+            # #1075 — a zero-size (Unit-erasing) K, V, or element has
+            # no value to pass through one (annotated spellings are
+            # E135 at check; this is the inference-only backstop).
             raise CodegenSkip(
                 call,
-                "Map/Set with Array-typed key, value, or element is not supported",
+                "Map/Set with an Array-typed or zero-size key, value, or element is not supported",
             )
 
         params = ["i32"]  # wrapper_ptr
@@ -732,15 +871,18 @@ class CallsContainersMixin:
         self, call: "ast.FnCall", env: WasmSlotEnv,
     ) -> list[str] | None:
         """map_remove(m, k) → i32 (fresh Map wrapper_ptr) via host import."""
-        key_type = self._infer_vera_type(call.args[1])
+        key_type = self._container_entry_type_name(call.args[1])
         kt = self._map_wasm_tag(key_type)
 
         if kt is None:
             # #475 finding 5 — Map<K, V> / Set<T> with Array-typed
-            # K, V, or element doesn't have a host-import shape yet.
+            # K, V, or element doesn't have a host-import shape yet;
+            # #1075 — a zero-size (Unit-erasing) K, V, or element has
+            # no value to pass through one (annotated spellings are
+            # E135 at check; this is the inference-only backstop).
             raise CodegenSkip(
                 call,
-                "Map/Set with Array-typed key, value, or element is not supported",
+                "Map/Set with an Array-typed or zero-size key, value, or element is not supported",
             )
 
         params = ["i32"]  # wrapper_ptr
@@ -796,10 +938,13 @@ class CallsContainersMixin:
 
         if kt is None:
             # #475 finding 5 — Map<K, V> / Set<T> with Array-typed
-            # K, V, or element doesn't have a host-import shape yet.
+            # K, V, or element doesn't have a host-import shape yet;
+            # #1075 — a zero-size (Unit-erasing) K, V, or element has
+            # no value to pass through one (annotated spellings are
+            # E135 at check; this is the inference-only backstop).
             raise CodegenSkip(
                 call,
-                "Map/Set with Array-typed key, value, or element is not supported",
+                "Map/Set with an Array-typed or zero-size key, value, or element is not supported",
             )
 
         wasm_name = self._register_map_import(
@@ -824,10 +969,13 @@ class CallsContainersMixin:
 
         if vt is None:
             # #475 finding 5 — Map<K, V> / Set<T> with Array-typed
-            # K, V, or element doesn't have a host-import shape yet.
+            # K, V, or element doesn't have a host-import shape yet;
+            # #1075 — a zero-size (Unit-erasing) K, V, or element has
+            # no value to pass through one (annotated spellings are
+            # E135 at check; this is the inference-only backstop).
             raise CodegenSkip(
                 call,
-                "Map/Set with Array-typed key, value, or element is not supported",
+                "Map/Set with an Array-typed or zero-size key, value, or element is not supported",
             )
 
         wasm_name = self._register_map_import(
@@ -867,7 +1015,17 @@ class CallsContainersMixin:
     def _infer_map_key_from_map_arg(
         self, expr: "ast.Expr",
     ) -> str | None:
-        """Infer the key type K from a Map<K, V> expression."""
+        """Infer the key type K from a Map<K, V> expression.
+
+        Shared-rebuilder consult first (#1053 container extension) — see
+        :py:meth:`_container_arg_elem_name`.  For a user-fn argument this
+        also pre-empts the blind ``args[0]`` recursion below, so the
+        DECLARED return type wins over a coincidental map-shaped first
+        argument.
+        """
+        t = self._container_arg_elem_name(expr, "Map", 0)
+        if t is not None:
+            return t
         if isinstance(expr, ast.SlotRef):
             if expr.type_name == "Map" and expr.type_args:
                 if len(expr.type_args) >= 1:
@@ -881,7 +1039,7 @@ class CallsContainersMixin:
                     return v[0]
         if isinstance(expr, ast.FnCall):
             if expr.name == "map_insert" and len(expr.args) >= 2:
-                return self._infer_vera_type(expr.args[1])
+                return self._container_entry_type_name(expr.args[1])
             if expr.args:
                 return self._infer_map_key_from_map_arg(expr.args[0])
         return None
@@ -920,13 +1078,20 @@ class CallsContainersMixin:
         if call.name == "set_new":
             return None
         if len(call.args) >= 2:
-            return self._infer_vera_type(call.args[1])
+            return self._container_entry_type_name(call.args[1])
         return None
 
     def _infer_set_elem_from_set_arg(
         self, expr: "ast.Expr",
     ) -> str | None:
-        """Infer the element type T from a Set<T> expression."""
+        """Infer the element type T from a Set<T> expression.
+
+        Shared-rebuilder consult first (#1053 container extension) — see
+        :py:meth:`_container_arg_elem_name`.
+        """
+        t = self._container_arg_elem_name(expr, "Set", 0)
+        if t is not None:
+            return t
         if isinstance(expr, ast.SlotRef):
             if expr.type_name == "Set" and expr.type_args:
                 if len(expr.type_args) >= 1:
@@ -938,7 +1103,7 @@ class CallsContainersMixin:
                 return name[4:-1]
         if isinstance(expr, ast.FnCall):
             if expr.name == "set_add" and len(expr.args) >= 2:
-                return self._infer_vera_type(expr.args[1])
+                return self._container_entry_type_name(expr.args[1])
             # Only recurse into set-returning functions
             if expr.name in ("set_new", "set_add", "set_remove"):
                 if expr.args:
@@ -973,15 +1138,18 @@ class CallsContainersMixin:
         bucket, adds the element, and returns a fresh wrapper_ptr
         that the call-site shadow-roots.
         """
-        elem_type = self._infer_vera_type(call.args[1])
+        elem_type = self._container_entry_type_name(call.args[1])
         et = self._map_wasm_tag(elem_type)
 
         if et is None:
             # #475 finding 5 — Map<K, V> / Set<T> with Array-typed
-            # K, V, or element doesn't have a host-import shape yet.
+            # K, V, or element doesn't have a host-import shape yet;
+            # #1075 — a zero-size (Unit-erasing) K, V, or element has
+            # no value to pass through one (annotated spellings are
+            # E135 at check; this is the inference-only backstop).
             raise CodegenSkip(
                 call,
-                "Map/Set with Array-typed key, value, or element is not supported",
+                "Map/Set with an Array-typed or zero-size key, value, or element is not supported",
             )
 
         params = ["i32"]  # wrapper_ptr
@@ -1012,15 +1180,18 @@ class CallsContainersMixin:
         self, call: "ast.FnCall", env: WasmSlotEnv,
     ) -> list[str] | None:
         """set_contains(s, elem) → Bool (#706: pass wrapper_ptr directly)."""
-        elem_type = self._infer_vera_type(call.args[1])
+        elem_type = self._container_entry_type_name(call.args[1])
         et = self._map_wasm_tag(elem_type)
 
         if et is None:
             # #475 finding 5 — Map<K, V> / Set<T> with Array-typed
-            # K, V, or element doesn't have a host-import shape yet.
+            # K, V, or element doesn't have a host-import shape yet;
+            # #1075 — a zero-size (Unit-erasing) K, V, or element has
+            # no value to pass through one (annotated spellings are
+            # E135 at check; this is the inference-only backstop).
             raise CodegenSkip(
                 call,
-                "Map/Set with Array-typed key, value, or element is not supported",
+                "Map/Set with an Array-typed or zero-size key, value, or element is not supported",
             )
 
         params = ["i32"]  # wrapper_ptr
@@ -1047,15 +1218,18 @@ class CallsContainersMixin:
         self, call: "ast.FnCall", env: WasmSlotEnv,
     ) -> list[str] | None:
         """set_remove(s, elem) → fresh Set wrapper_ptr (#706)."""
-        elem_type = self._infer_vera_type(call.args[1])
+        elem_type = self._container_entry_type_name(call.args[1])
         et = self._map_wasm_tag(elem_type)
 
         if et is None:
             # #475 finding 5 — Map<K, V> / Set<T> with Array-typed
-            # K, V, or element doesn't have a host-import shape yet.
+            # K, V, or element doesn't have a host-import shape yet;
+            # #1075 — a zero-size (Unit-erasing) K, V, or element has
+            # no value to pass through one (annotated spellings are
+            # E135 at check; this is the inference-only backstop).
             raise CodegenSkip(
                 call,
-                "Map/Set with Array-typed key, value, or element is not supported",
+                "Map/Set with an Array-typed or zero-size key, value, or element is not supported",
             )
 
         params = ["i32"]  # wrapper_ptr
@@ -1107,10 +1281,13 @@ class CallsContainersMixin:
 
         if et is None:
             # #475 finding 5 — Map<K, V> / Set<T> with Array-typed
-            # K, V, or element doesn't have a host-import shape yet.
+            # K, V, or element doesn't have a host-import shape yet;
+            # #1075 — a zero-size (Unit-erasing) K, V, or element has
+            # no value to pass through one (annotated spellings are
+            # E135 at check; this is the inference-only backstop).
             raise CodegenSkip(
                 call,
-                "Map/Set with Array-typed key, value, or element is not supported",
+                "Map/Set with an Array-typed or zero-size key, value, or element is not supported",
             )
 
         wasm_name = self._register_set_import(

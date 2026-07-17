@@ -12,27 +12,13 @@ Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verificati
 
 ## Where we are
 
-7,639 tests, 160 conformance programs, 38 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
+7,992 tests, 163 conformance programs, 39 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
 
 ## Stage 19 — The verification completeness sprint
 
 *`vera verify` tells the whole truth.*
 
-### Bug sprint — monomorphizer and verifier gaps first
-
-Three PRs remain in the sprint's bug-PR cluster (the verification-completeness rows below are the sprint's remaining scope):
-
-**PR G — zero-size fields in registered layouts and wildcard walks (2).** [#1043](https://github.com/aallan/vera/issues/1043) the registered constructor layouts give a zero-size field a 4-byte slot (wildcard tag walks and structural `Eq` read wrong offsets), and [#1060](https://github.com/aallan/vera/issues/1060) the type-parameter spelling of the same wildcard walks. In review as [#1049](https://github.com/aallan/vera/pull/1049).
-
-**PR — argument-derived element types (5).** [#1051](https://github.com/aallan/vera/issues/1051) direct indexing on the eight type-variable-element Array builtins, [#1055](https://github.com/aallan/vera/issues/1055) alias-spelled arguments to those derivations, [#1052](https://github.com/aallan/vera/issues/1052) inline nested array literals as call arguments, [#1053](https://github.com/aallan/vera/issues/1053) type-variable builtins nested as call arguments, and [#1063](https://github.com/aallan/vera/issues/1063) the container host-tag mis-tag under aliased/user-fn arguments (silent truncation). In review as [#1061](https://github.com/aallan/vera/pull/1061).
-
-**PR L — concrete scrutinee types for direct-call wildcard matches (1).** [#1065](https://github.com/aallan/vera/issues/1065) a direct-call match scrutinee whose type-param wildcard is followed by a read loud-skips — the #1060 walks need the callee's concrete instantiation threaded in. Fix in progress, stacked on [#1049](https://github.com/aallan/vera/pull/1049).
-
-[#996](https://github.com/aallan/vera/issues/996) stays a watch-only row — an unreproducible conformance flake, not a fix target.
-
-KNOWN_ISSUES carries a family of verification-completeness gaps — an obligation not emitted, a guard not planted — individually small and sharing machinery. This stage retires each. The per-component target-type table threaded into codegen (the enabler [#820](https://github.com/aallan/vera/issues/820) built) is the shared metadata the staged narrowing rows below reuse.
-
-Exit criterion: every verification-completeness and guard-deferral row in KNOWN_ISSUES is retired.
+Verification-completeness gaps — an obligation not emitted, a guard not planted — individually small; the `@Nat`-narrowing rows ([#754](https://github.com/aallan/vera/issues/754), [#757](https://github.com/aallan/vera/issues/757), [#765](https://github.com/aallan/vera/issues/765)) reuse the per-component target-type metadata the [#820](https://github.com/aallan/vera/issues/820) enabler provides, while the reporting-completeness and hardening rows each carry their own root cause:
 
 | Issue | What |
 |---|---|
@@ -63,6 +49,7 @@ Exit criterion: each listed drift class has a generator or a gate, and a release
 | [#528](https://github.com/aallan/vera/issues/528) | Gate the hand-edited numbers on the veralang.dev homepage against live counts (the Stage 18 landing-page audit found this class live). |
 | [#540](https://github.com/aallan/vera/issues/540) | lychee + markdownlint MD051 cross-doc anchor validation. |
 | [#737](https://github.com/aallan/vera/issues/737) | Complete the first live PyPI `veralang` release and verify both documented installation routes. |
+| [#1095](https://github.com/aallan/vera/issues/1095) | Verify the concurrent-await alias-Future limitation with a genuinely concurrent repro — spec §9.5.4's prose and the KNOWN_ISSUES row update (or fall away) with the verdict. |
 
 ## Stage 21 — The effect hardening sprint
 

@@ -4,7 +4,7 @@
 
 From the Latin *veritas* — truth. In Vera, verification is a first-class citizen.
 
-**Current version:** [0.1.4](https://github.com/aallan/vera/releases/tag/v0.1.4)  ·  [GitHub](https://github.com/aallan/vera)  ·  [SKILL.md](https://veralang.dev/SKILL.md) (agent language reference)
+**Current version:** [0.1.5](https://github.com/aallan/vera/releases/tag/v0.1.5)  ·  [GitHub](https://github.com/aallan/vera)  ·  [SKILL.md](https://veralang.dev/SKILL.md) (agent language reference)
 
 ## Why?
 
@@ -211,6 +211,14 @@ Serving HTTP on http://0.0.0.0:8080/
 Python 3.11+. Everything else installs into a virtual environment.
 
 ```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install veralang
+```
+
+Or install the current GitHub source for development:
+
+```bash
 git clone https://github.com/aallan/vera.git
 cd vera
 python -m venv .venv
@@ -247,7 +255,7 @@ For other models: point them at [`SKILL.md`](https://veralang.dev/SKILL.md) via 
 
 ## Status
 
-Vera is under [active development](https://raw.githubusercontent.com/aallan/vera/main/ROADMAP.md). A complete compiler with 164 built-in functions, nine algebraic effects (IO, Http, HttpServer, State, Exceptions, Async, Inference, Random, Diverge), contract-driven testing via [Z3](https://www.microsoft.com/en-us/research/project/z3-3/), and a 14-chapter specification. A 160-program conformance suite and 38 worked examples are validated against the spec on every pull request. All of it is developed openly on [GitHub](https://github.com/aallan/vera) and released under the MIT licence.
+Vera is under [active development](https://raw.githubusercontent.com/aallan/vera/main/ROADMAP.md). A complete compiler with 164 built-in functions, nine algebraic effects (IO, Http, HttpServer, State, Exceptions, Async, Inference, Random, Diverge), contract-driven testing via [Z3](https://www.microsoft.com/en-us/research/project/z3-3/), and a 14-chapter specification. A 163-program conformance suite and 39 worked examples are validated against the spec on every pull request. All of it is developed openly on [GitHub](https://github.com/aallan/vera) and released under the MIT licence.
 
 ## Links
 

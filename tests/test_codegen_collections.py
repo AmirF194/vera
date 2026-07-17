@@ -5,8 +5,13 @@ Split from tests/test_codegen.py (#419). Shared helpers live in tests/codegen_he
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from vera import ast as _ast
+    from vera.wasm.context import WasmContext
 
 from tests.codegen_helpers import (
     _IO_PRELUDE,
@@ -886,3 +891,242 @@ public fn main(@Unit -> @Unit)
             _validate_wrap_handle(True, kind=1, body_ptr=0x1000)
         with pytest.raises(RuntimeError, match="#578"):
             _validate_wrap_handle(False, kind=1, body_ptr=0x1000)
+
+
+class TestMapFutureValues1097:
+    """#1097: `Future<T>` Map/Set entry types are representation-transparent.
+
+    `Future<T>` is representation-transparent (#841): a `Future<Int>` IS an
+    i64, a `Future<String>` IS an i32_pair.  `_map_wasm_tag` (the shared
+    key / value / set-element host-tag classifier) did not strip the
+    transparent `Future<…>` wrapper, so `Future<Int>` fell through to the
+    `"b"` (single-i32) tag while the value expression pushed an i64: the
+    registered host-import signature disagreed with the stack and a
+    check+verify-green program compiled exit-0 to an INVALID module
+    ("type mismatch: expected i32, found i64" for the i64 payload,
+    "values remaining on stack at end of block" for the i32_pair payload).
+    The fix canonicalizes an alias name and strips `Future<…>` wrappers to
+    the payload before the tag chain decides.
+
+    Every value below is chosen so a wrong tag cannot instantiate at all
+    (a WASM-validation trap), so `_run` raising is itself the RED signal.
+    """
+
+    def test_map_future_int_size(self) -> None:
+        """The #1097 repro: `map_size` of a one-entry `Map<String,
+        Future<Int>>`.
+
+        RED before the fix: the i64 `async(7)` payload against the `"b"`
+        (i32) value tag trapped at WASM validation ("expected i32, found
+        i64") before the size could be read.
+        """
+        source = """
+public fn main(-> @Int) requires(true) ensures(true) effects(<Async>) {
+  let @Map<String, Future<Int>> = map_insert(map_new(), "a", async(7));
+  map_size(@Map<String, Future<Int>>.0)
+}
+"""
+        assert _run(source) == 1
+
+    def test_map_future_int_roundtrip(self) -> None:
+        """Insert an `async(Int)`, `map_get` it, `await` the payload.
+
+        The distinguishing value 12345 cannot coincide with a truncated
+        or garbage readback.  RED before the fix: the i32/i64 tag mismatch
+        traps at validation.
+        """
+        source = """
+public fn main(-> @Int) requires(true) ensures(true) effects(<Async>) {
+  let @Map<String, Future<Int>> = map_insert(map_new(), "a", async(12345));
+  match map_get(@Map<String, Future<Int>>.0, "a") {
+    None -> 0,
+    Some(@Future<Int>) -> await(@Future<Int>.0)
+  }
+}
+"""
+        assert _run(source) == 12345
+
+    def test_map_future_string_roundtrip(self) -> None:
+        """Insert an `async(String)` (pair payload), `map_get`, `await`,
+        measure — the value comes back intact.
+
+        `Future<String>` IS an i32_pair, so the `"b"` (single-i32) tag left
+        the len half on the stack.  RED before the fix: "values remaining
+        on stack at end of block".  Length 9 ("worldwide") is distinct from
+        the empty/0/1 wrong-value defaults.
+        """
+        source = """
+public fn main(-> @Int) requires(true) ensures(true) effects(<Async>) {
+  let @Map<String, Future<String>> = map_insert(map_new(), "a", async("worldwide"));
+  match map_get(@Map<String, Future<String>>.0, "a") {
+    None -> 0,
+    Some(@Future<String>) -> string_length(await(@Future<String>.0))
+  }
+}
+"""
+        assert _run(source) == 9
+
+    def test_map_alias_future_int_value(self) -> None:
+        """A `type FI = Future<Int>` alias as the Map's declared value type.
+
+        The `map_get` value-tag inference reads the map slot's type
+        argument `FI`, which `_map_wasm_tag` must canonicalize
+        (`FI` -> `Future<Int>` -> strip -> `Int` -> `"i"`).  RED before the
+        fix: the raw alias fell through to the `"b"` tag and trapped.
+        """
+        source = """
+type FI = Future<Int>;
+
+public fn main(-> @Int) requires(true) ensures(true) effects(<Async>) {
+  let @Map<String, FI> = map_insert(map_new(), "a", async(777));
+  match map_get(@Map<String, FI>.0, "a") {
+    None -> 0,
+    Some(@FI) -> await(@FI.0)
+  }
+}
+"""
+        assert _run(source) == 777
+
+    def test_map_values_future_int_length(self) -> None:
+        """`map_values` over a `Map<String, Future<Int>>` — length only.
+
+        `map_values` routes its value tag through the same `_map_wasm_tag`.
+        RED before the fix: the i64 payload against the i32 tag trapped
+        before the length could be read.
+        """
+        source = """
+public fn main(-> @Int) requires(true) ensures(true) effects(<Async>) {
+  let @Map<String, Future<Int>> = map_insert(map_insert(map_new(), "a", async(11)), "b", async(22));
+  array_length(map_values(@Map<String, Future<Int>>.0))
+}
+"""
+        assert _run(source) == 2
+
+    def test_map_values_future_int_element(self) -> None:
+        """`map_values` then index+await one element — the payload survives.
+
+        Order-independent anchor: the two payloads sum to 33 over both
+        elements, so map iteration order does not matter.  RED before the
+        fix: the value-tag mismatch traps.
+        """
+        source = """
+public fn main(-> @Int) requires(true) ensures(true) effects(<Async>) {
+  let @Map<String, Future<Int>> = map_insert(map_insert(map_new(), "a", async(11)), "b", async(22));
+  let @Array<Future<Int>> = map_values(@Map<String, Future<Int>>.0);
+  await(@Array<Future<Int>>.0[0]) + await(@Array<Future<Int>>.0[1])
+}
+"""
+        assert _run(source) == 33
+
+    def test_concat_map_values_future_differential(self) -> None:
+        """Site-2 differential: `array_concat(map_values(m), map_values(m))`
+        DIRECT vs the let-bound spelling must compute the SAME correct value.
+
+        The let-bound form's concat argument is an `@Array<Future<Int>>`
+        SlotRef, which `_infer_concat_elem_type` resolves through the direct
+        arm (the full `Future<Int>` spelling, already correct since #1057).
+        The direct form's argument is the `map_values(...)` FnCall, which
+        reaches the `_builtin_call_ret_named_type` arm — pre-#1097 that arm
+        returned the bare head `"Future"`, dropping the payload, so the copy
+        loop ran a 4-byte stride over the 8-byte i64 elements (garbage) or
+        trapped.  Both must agree AND equal the order-independent anchor
+        (each `map_values` yields both payloads, concat doubles them, so the
+        four-element sum is 2*(11+22) = 66 regardless of iteration order).
+        RED (after site 1 is fixed) before the site-2 fix: the direct form
+        diverges from the correct let-bound reference.
+        """
+        direct = """
+public fn main(-> @Int) requires(true) ensures(true) effects(<Async>) {
+  let @Map<String, Future<Int>> = map_insert(map_insert(map_new(), "a", async(11)), "b", async(22));
+  let @Array<Future<Int>> = array_concat(map_values(@Map<String, Future<Int>>.0), map_values(@Map<String, Future<Int>>.0));
+  await(@Array<Future<Int>>.0[0]) + await(@Array<Future<Int>>.0[1]) + await(@Array<Future<Int>>.0[2]) + await(@Array<Future<Int>>.0[3])
+}
+"""
+        letbound = """
+public fn main(-> @Int) requires(true) ensures(true) effects(<Async>) {
+  let @Map<String, Future<Int>> = map_insert(map_insert(map_new(), "a", async(11)), "b", async(22));
+  let @Array<Future<Int>> = map_values(@Map<String, Future<Int>>.0);
+  let @Array<Future<Int>> = array_concat(@Array<Future<Int>>.0, @Array<Future<Int>>.0);
+  await(@Array<Future<Int>>.0[0]) + await(@Array<Future<Int>>.0[1]) + await(@Array<Future<Int>>.0[2]) + await(@Array<Future<Int>>.0[3])
+}
+"""
+        letbound_result = _run(letbound)
+        assert letbound_result == 66, "let-bound reference must be correct"
+        assert _run(direct) == letbound_result, "direct concat must match the let-bound reference"
+
+    def test_map_future_array_value_loud_skip(self) -> None:
+        """Negative pin: a `Map<String, Future<Array<Int>>>` value must LOUD
+        skip (E602), NOT emit an invalid module.
+
+        `Future<Array<Int>>` strips to `Array<Int>`, which takes the
+        existing Array-reject `None` path — the loud [E602] skip, not the
+        `"b"` tag that (pre-fix) produced an "values remaining on stack"
+        invalid module from the two-word array payload.
+        """
+        source = """
+public fn main(-> @Int) requires(true) ensures(true) effects(<Async>) {
+  let @Array<Int> = [1, 2, 3];
+  let @Map<String, Future<Array<Int>>> = map_insert(map_new(), "a", async(@Array<Int>.0));
+  map_size(@Map<String, Future<Array<Int>>>.0)
+}
+"""
+        result = _compile_ok(source)
+        assert "main" not in result.exports, \
+            "Future<Array<Int>> map value must drop loudly, not emit invalid WASM"
+        assert any(d.error_code == "E602" for d in result.diagnostics)
+
+
+class TestMapTagFutureStripTermination1097:
+    """The ``_map_wasm_tag`` Future-strip terminates on a cyclic Future alias
+    and resolves nested alias payloads through the single up-front
+    canonicalize (PR #1098 review).  A cyclic alias is E132 at check; this
+    pins the codegen-side defence-in-depth so the failure mode can never be
+    a hang."""
+
+    def _ctx(self, aliases: dict[str, _ast.NamedType]) -> WasmContext:
+        import vera.wasm.context as wasm_context
+
+        ctx = object.__new__(wasm_context.WasmContext)
+        ctx._type_aliases = aliases
+        return ctx
+
+    def test_future_cycle_alias_terminates(self) -> None:
+        import threading
+
+        from vera import ast
+
+        ctx = self._ctx({
+            "F": ast.NamedType(
+                name="Future",
+                type_args=(ast.NamedType(name="F", type_args=None),),
+            ),
+        })
+        result: dict[str, str | None] = {}
+        errors: list[BaseException] = []
+
+        def worker() -> None:
+            try:
+                result["tag"] = ctx._map_wasm_tag("F")
+            except BaseException as exc:  # noqa: BLE001 — re-asserted below
+                errors.append(exc)
+
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+        t.join(10)
+        assert not t.is_alive(), \
+            "Future-strip loop failed to terminate on a cyclic alias"
+        assert not errors, f"tag decider raised instead of returning: {errors}"
+        assert result["tag"] == "b", \
+            "cyclic alias must fall through to the permissive i32 tag"
+
+    def test_nested_future_alias_payload_resolves(self) -> None:
+        from vera import ast
+
+        ctx = self._ctx({
+            "FI2": ast.NamedType(
+                name="Future",
+                type_args=(ast.NamedType(name="Int", type_args=None),),
+            ),
+        })
+        assert ctx._map_wasm_tag("Future<FI2>") == "i"
+        assert ctx._map_wasm_tag("FI2") == "i"

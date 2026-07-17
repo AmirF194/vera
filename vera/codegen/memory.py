@@ -79,6 +79,10 @@ def _wasm_type_size(wt: str) -> int:
         return 8
     if wt == "i32_pair":
         return 8
+    # #1043: an erases-to-Unit field is zero-size — it occupies no bytes and
+    # does not advance the layout offset, exactly as construction lays it out.
+    if wt == "unit":
+        return 0
     raise ValueError(f"Unknown WASM type: {wt}")
 
 
@@ -90,6 +94,9 @@ def _wasm_type_align(wt: str) -> int:
         return 8
     if wt == "i32_pair":
         return 4
+    # #1043: a zero-size Unit field imposes no alignment constraint.
+    if wt == "unit":
+        return 1
     raise ValueError(f"Unknown WASM type: {wt}")
 
 

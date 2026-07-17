@@ -80,7 +80,7 @@ class DataMixin:
         # compile, not silently skip the function and dangle its call.
         arg_instrs_list: list[list[str]] = []
         arg_wasm_types: list[str] = []
-        for arg in expr.args:
+        for i, arg in enumerate(expr.args):
             arg_instrs = self.translate_expr(arg, env)
             if arg_instrs is None:
                 return None
@@ -111,6 +111,28 @@ class DataMixin:
                         arg,
                         "could not infer constructor argument WASM type",
                     )
+            # #1092: an in-range int literal the checker coerced into a
+            # GENERIC field instantiated at @Byte (`let @Box<Byte> = MkB(0);`
+            # — the only literal-at-Byte-field spelling check admits: a
+            # DECLARED `Byte` field is E213, out-of-range / negative /
+            # non-literal @Int arguments are E170) translated at the
+            # literal's own i64 width and was stored at the i64 slot, while
+            # every READER — field extraction, the structural-`$eq` helper,
+            # show/hash — sizes the field from the instantiated type (Byte
+            # -> i32 at the i32 offset): extraction read 0 for a stored 255
+            # and `MkB(0) == MkB(255)` compared EQUAL, silently, on a
+            # check-green program.  Store the coerced literal at the field's
+            # i32 Byte width, exactly as the (always-correct) `@Byte`-slot
+            # passthrough argument does.  The target instantiation comes
+            # from the checker-recorded target type (the #820 table); an
+            # unthreaded transform->compile keeps the documented #798/#820
+            # degraded-path caveat.
+            if (isinstance(arg, ast.IntLit)
+                    and 0 <= arg.value <= 255
+                    and arg_wt == "i64"
+                    and self._ctor_field_targets_byte(expr, i)):
+                arg_instrs = [f"i32.const {arg.value}"]
+                arg_wt = "i32"
             arg_instrs_list.append(arg_instrs)
             arg_wasm_types.append(arg_wt)
 
@@ -213,6 +235,41 @@ class DataMixin:
         # Leave pointer as result
         instructions.append(f"local.get {tmp}")
         return instructions
+
+    def _ctor_field_targets_byte(
+        self, expr: ast.ConstructorCall, field_i: int,
+    ) -> bool:
+        """Whether constructor field ``field_i`` is a type-parameter field
+        instantiated at ``@Byte`` by the construction's TARGET type (#1092).
+
+        Decides the literal-width coercion in
+        :py:meth:`_translate_constructor_call`: the literal alone cannot —
+        ``MkB(0)`` is equally legal as ``Box<Int>`` (i64 field) and as
+        ``Box<Byte>`` (i32 field); only the checker-recorded target type
+        (``_target_codegen_type_full``, the #820 side-table) knows which.
+        The target's argument name is grounded through the shared
+        canonicalizer so an alias spelling (``Box<MB>``, ``type MB =
+        Byte;``) instantiates like the literal ``Byte``.  Conservative
+        ``False`` when the field is not a bare type parameter, the table is
+        unthreaded, or the target carries no matching argument — the
+        literal then keeps its i64 translation (the pre-#1092 behaviour).
+        """
+        tp_idx = self._ctor_adt_tp_indices.get(expr.name)
+        if not tp_idx or field_i >= len(tp_idx):
+            return False
+        pos = tp_idx[field_i]
+        if pos is None:
+            return False  # concrete declared field (a literal there is E213)
+        target = self._target_codegen_type_full(expr)
+        args = getattr(target, "type_args", None)
+        if not args or pos >= len(args):
+            return False
+        arg_ty = args[pos]
+        base = getattr(arg_ty, "base", arg_ty)  # unwrap a refinement
+        name = getattr(base, "name", None)
+        if name is None:
+            return False
+        return self._canonical_field_type(name) == "Byte"
 
     # -----------------------------------------------------------------
     # Let destructuring
@@ -396,16 +453,153 @@ class DataMixin:
         # gate drives the FIX-1 tail-call collector, so the two stay in lockstep.
         guard_widen_arms = self._is_hetero_int_widen_join(expr)
 
+        # #1060: the scrutinee's CONCRETE Vera type (e.g. "Box<Unit>") drives the
+        # instantiation-aware width of a WILDCARD over a bare type-parameter
+        # field — that field registers generically as i32 but is laid out per
+        # the concrete type arg at construction (Unit → 0 bytes).  #1065: a
+        # DIRECT-CALL scrutinee recovers its full instantiation from the callee's
+        # declared return type (`_infer_vera_type` alone drops the type args and
+        # a type-parameter wildcard then LOUD-skipped a check-green program);
+        # None only when the type is genuinely unrecoverable, and a
+        # type-parameter wildcard still LOUD-skips rather than reading a shifted
+        # offset.
+        scrutinee_type = self._match_scrutinee_vera_type(expr.scrutinee)
+
         # Compile arms as chained if-else
         arm_instrs = self._compile_match_arms(
             expr.arms, scr_local, scr_wasm_type, result_type, env,
             expr.scrutinee, guard_widen_arms=guard_widen_arms,
+            scrutinee_type=scrutinee_type,
         )
         if arm_instrs is None:
             return None
 
         instructions.extend(arm_instrs)
         return instructions
+
+    def _match_scrutinee_vera_type(self, scrutinee: ast.Expr) -> str | None:
+        """Concrete Vera type of a match scrutinee for the #1060 wildcard walks.
+
+        A ``SlotRef`` scrutinee (``@Box<Unit>.0``) already carries its concrete
+        type args, which ``_infer_vera_type`` renders in full.  A DIRECT-CALL
+        scrutinee (``mk()``) does NOT: ``_infer_fncall_vera_type`` returns the
+        bare base head (``"Box"``) for a parameterized i32-pointer return (#911),
+        dropping the ``<Unit>`` a type-parameter WILDCARD needs to recompute its
+        erased width — so the #1060 walk LOUD-skipped (E602) a check-green
+        program on a shape the slot form compiled correctly (#1065).
+
+        For a NON-generic direct-call scrutinee the callee's DECLARED return type
+        IS the concrete instantiation — a non-generic signature mentions no type
+        variables, so ``mk() -> @Box<Unit>`` declares exactly ``Box<Unit>``.
+        Recover it from ``_fn_ret_type_exprs`` (the same #614/#878 declared-return
+        registry other consultors read, populated by ``_register_fn`` in both the
+        CLI and the ``transform -> compile`` test-harness path) and render it in
+        full, matching the SlotRef form so the wildcard walks receive an
+        identical concrete type.  A non-parameterized return (``ret_te.type_args``
+        empty) needs no recovery and falls through unchanged.
+
+        A GENERIC callee's declared return carries type variables
+        (``forall<T> fn wrap(@T -> @P2<T, Unit>)``) — #1072 resolves them from
+        the call site via the same ``_unify_param_arg_wasm`` unification the
+        generic call-rewrite performs, then renders the substituted return in
+        full (``P2<Int, Unit>``).  On main this family read shifted offsets
+        SILENTLY (the pre-#1060 walk); the #1049 stack made it a sound
+        LOUD-skip; now it compiles like the slot form.  An unresolved variable
+        falls through to ``_infer_vera_type`` — whose bare base head keeps the
+        wildcard walk's LOUD-skip (sound) — though no check-green shape reaches
+        it (var-at-Unit is E206-rejected, a phantom-var callee is E121-rejected).
+
+        A MODULE-qualified callee (``boxlib::mk()``, #1073) resolves through
+        the single shared target resolver (``_resolve_module_call_wasm_name``,
+        the #774-reviewed source of truth that CONSUMES ``path`` — no wrong
+        same-name-local lookup, mirroring ``_infer_vera_type``'s ModuleCall
+        arm) and recurses with the resolved-name ``FnCall``: the bare or
+        ``mod$…`` name of a non-generic import is in ``_fn_ret_type_exprs``,
+        a shadowed generic resolves to its per-instantiation clone whose
+        registered declared return is already substituted, and anything
+        unregistered falls through to the sound LOUD-skip.
+        """
+        if isinstance(scrutinee, ast.ModuleCall):
+            target = self._resolve_module_call_wasm_name(scrutinee)
+            return self._match_scrutinee_vera_type(ast.FnCall(
+                name=target, args=scrutinee.args, span=scrutinee.span))
+        if isinstance(scrutinee, ast.FnCall):
+            if scrutinee.name in self._generic_fn_info:
+                rendered = self._generic_call_ret_vera_type(scrutinee)
+                if rendered is not None:
+                    return rendered
+            elif scrutinee.name in self._fn_ret_type_exprs:
+                ret_te = self._fn_ret_type_exprs[scrutinee.name]
+                if isinstance(ret_te, ast.RefinementType):
+                    ret_te = ret_te.base_type
+                if isinstance(ret_te, ast.NamedType) and ret_te.type_args:
+                    return self._format_named_type(ret_te)
+        return self._infer_vera_type(scrutinee)
+
+    def _generic_call_ret_vera_type(self, call: ast.FnCall) -> str | None:
+        """Render a GENERIC call's declared return with its type variables
+        resolved from the call site (#1072) — ``wrap(5)`` against
+        ``forall<T> fn wrap(@T -> @P2<T, Unit>)`` yields ``"P2<Int, Unit>"``.
+
+        Unifies each parameter TypeExpr against its argument exactly as the
+        generic call-rewrite does (``_unify_param_arg_wasm``), substitutes the
+        bound variables into the declared return, and renders the full name.
+        Returns ``None`` — caller falls back to ``_infer_vera_type`` — when the
+        return is not a parameterized ``NamedType`` (nothing to recover) or any
+        variable in it stays unbound (the render must never guess: a wrong
+        concrete type would put the wildcard walk back on a shifted offset,
+        whereas the bare-head fallback keeps the sound LOUD-skip).
+        """
+        ret_te: ast.TypeExpr | None = self._fn_ret_type_exprs.get(call.name)
+        if isinstance(ret_te, ast.RefinementType):
+            ret_te = ret_te.base_type
+        if not (isinstance(ret_te, ast.NamedType) and ret_te.type_args):
+            return None
+        forall_vars, param_types = self._generic_fn_info[call.name]
+        constrained_vars = self._generic_constrained_vars.get(
+            call.name, frozenset())
+        mapping: dict[str, str] = {}
+        for pt, arg in zip(param_types, call.args):
+            self._unify_param_arg_wasm(
+                pt, arg, forall_vars, mapping, constrained_vars)
+        return self._render_type_substituted(ret_te, forall_vars, mapping)
+
+    def _render_type_substituted(
+        self,
+        te: ast.TypeExpr,
+        forall_vars: tuple[str, ...],
+        mapping: dict[str, str],
+    ) -> str | None:
+        """Render *te* as a full Vera type name with every forall variable
+        replaced by its call-site binding (#1072) — the substituting sibling of
+        ``_format_named_type``, which renders names verbatim.
+
+        A leaf that is a forall variable renders its ``mapping`` binding —
+        ``None`` (propagated to the caller) when unbound, so an unresolved
+        instantiation is never guessed.  Concrete leaves render verbatim;
+        parameterized nodes recurse into their type args.  A non-``NamedType``
+        node (after refinement unwrap) is unrenderable → ``None``.
+        """
+        if isinstance(te, ast.RefinementType):
+            te = te.base_type
+        if not isinstance(te, ast.NamedType):
+            return None
+        if not te.type_args:
+            if te.name in forall_vars:
+                return mapping.get(te.name)
+            return te.name
+        if te.name in forall_vars:
+            # A parameterized node whose HEAD is a type variable — Vera type
+            # vars are not higher-kinded, so this cannot arise from a checked
+            # program; refuse to render rather than emit a var-headed name.
+            return None
+        parts = []
+        for ta in te.type_args:
+            rendered = self._render_type_substituted(ta, forall_vars, mapping)
+            if rendered is None:
+                return None
+            parts.append(rendered)
+        return f"{te.name}<{', '.join(parts)}>"
 
     def _infer_match_result_type(
         self, expr: ast.MatchExpr
@@ -427,12 +621,18 @@ class DataMixin:
         scrutinee: ast.Expr | None = None,
         *,
         guard_widen_arms: bool = False,
+        scrutinee_type: str | None = None,
     ) -> list[str] | None:
         """Compile match arms as a chained if-else cascade.
 
         *scrutinee* is the match scrutinee expression (#813): threaded so a
         top-level binding pattern can tell whether the bound value is @Nat
         (`_result_is_nat`) and thus needs the @Nat -> @Int widening guard.
+
+        *scrutinee_type* (#1060) is that scrutinee's concrete Vera type name
+        (e.g. "Box<Unit>"), threaded so a WILDCARD over a bare type-parameter
+        field advances by the concrete (instantiation-aware) width, not the
+        generic i32 placeholder.
 
         *guard_widen_arms* (#820) is True for a heterogeneous @Int-join match:
         each arm body that is intrinsically @Nat (`_result_is_nat`) widens into
@@ -446,13 +646,14 @@ class DataMixin:
 
         # Check if this arm needs a condition
         cond = self._translate_match_condition(
-            arm.pattern, scr_local, scr_wasm_type
+            arm.pattern, scr_local, scr_wasm_type, scrutinee_type,
         )
 
         if cond is None or not remaining:
             # Unconditional arm (catch-all) or last arm — emit directly
             setup = self._setup_match_arm_env(
-                arm.pattern, scr_local, scr_wasm_type, env, scrutinee
+                arm.pattern, scr_local, scr_wasm_type, env, scrutinee,
+                scrutinee_type,
             )
             if setup is None:
                 return None
@@ -470,7 +671,8 @@ class DataMixin:
 
         # Conditional arm with more arms following
         setup = self._setup_match_arm_env(
-            arm.pattern, scr_local, scr_wasm_type, env, scrutinee
+            arm.pattern, scr_local, scr_wasm_type, env, scrutinee,
+            scrutinee_type,
         )
         if setup is None:
             return None
@@ -487,7 +689,7 @@ class DataMixin:
         # Compile remaining arms (else branch)
         else_instrs = self._compile_match_arms(
             remaining, scr_local, scr_wasm_type, result_type, env, scrutinee,
-            guard_widen_arms=guard_widen_arms,
+            guard_widen_arms=guard_widen_arms, scrutinee_type=scrutinee_type,
         )
         if else_instrs is None:
             return None
@@ -516,10 +718,17 @@ class DataMixin:
         pattern: ast.Pattern,
         scr_local: int,
         scr_wasm_type: str,
+        scrutinee_type: str | None = None,
     ) -> list[str] | None:
         """Emit i32 condition for a pattern check.
 
         Returns None for unconditional patterns (wildcard/binding).
+
+        *scrutinee_type* (#1060) is the scrutinee's concrete Vera type name,
+        threaded into the nested tag-check walk so a WILDCARD over a bare
+        type-parameter field before a nested constructor sub-pattern advances
+        the offset by the concrete width (Unit → 0 bytes), keeping the nested
+        tag load on the right address.
         """
         if isinstance(pattern, (ast.NullaryPattern, ast.ConstructorPattern)):
             name = pattern.name
@@ -538,7 +747,7 @@ class DataMixin:
             # AND-chain nested tag checks for constructor sub-patterns
             if isinstance(pattern, ast.ConstructorPattern):
                 nested = self._collect_nested_tag_checks(
-                    pattern, scr_local, layout,
+                    pattern, scr_local, layout, scrutinee_type,
                 )
                 if nested is None:
                     return None
@@ -570,10 +779,16 @@ class DataMixin:
         scr_wasm_type: str,
         env: WasmSlotEnv,
         scrutinee: ast.Expr | None = None,
+        scrutinee_type: str | None = None,
     ) -> tuple[list[str], WasmSlotEnv] | None:
         """Extract fields and set up environment bindings for a match arm.
 
         Returns (instructions, new_env) or None on failure.
+
+        *scrutinee_type* (#1060) is the scrutinee's concrete Vera type name,
+        forwarded to the field-extraction walk so a WILDCARD over a bare
+        type-parameter field advances the offset by the instantiation-aware
+        width instead of the generic i32 placeholder.
         """
         if isinstance(pattern, (ast.WildcardPattern, ast.NullaryPattern,
                                 ast.BoolPattern, ast.IntPattern)):
@@ -634,7 +849,7 @@ class DataMixin:
                     f"unknown constructor {pattern.name!r} in match arm pattern",
                 )
             return self._extract_constructor_fields(
-                pattern, scr_local, layout, env
+                pattern, scr_local, layout, env, scrutinee_type,
             )
 
         raise CodegenSkip(
@@ -648,14 +863,26 @@ class DataMixin:
         scr_local: int,
         layout: ConstructorLayout,
         env: WasmSlotEnv,
+        scrutinee_type: str | None = None,
     ) -> tuple[list[str], WasmSlotEnv] | None:
         """Extract fields from a constructor match into locals.
 
         Computes field offsets from concrete binding types (same
         monomorphization approach as _translate_constructor_call).
+
+        *scrutinee_type* (#1060) is the concrete Vera type name of the value at
+        *scr_local* (e.g. "Box<Unit>").  A WILDCARD over a bare type-parameter
+        field consults it to recover the field's instantiation-aware width; a
+        nested constructor sub-pattern recurses with the field's own resolved
+        concrete type so deeper type-parameter wildcards stay correct too.
         """
-        _sizes = {"i32": 4, "i64": 8, "f64": 8, "i32_pair": 8}
-        _aligns = {"i32": 4, "i64": 8, "f64": 8, "i32_pair": 4}
+        # #1043: `"unit"` (a zero-size erases-to-Unit field) is size 0 / align 1
+        # — a WILDCARD over such a field reads `"unit"` from the (now
+        # erasure-aware) registered `field_offsets` and must advance the offset
+        # by nothing, matching construction.  A `"unit"` BINDING is handled by
+        # the `type_name == "Unit"` skip above and never reaches these maps.
+        _sizes = {"i32": 4, "i64": 8, "f64": 8, "i32_pair": 8, "unit": 0}
+        _aligns = {"i32": 4, "i64": 8, "f64": 8, "i32_pair": 4, "unit": 1}
         offset = 4  # after tag (i32, 4 bytes)
         instrs: list[str] = []
         new_env = env
@@ -761,12 +988,23 @@ class DataMixin:
                 offset += _sizes.get(wt, 8)
 
             elif isinstance(sub_pat, ast.WildcardPattern):
-                # Skip this field but advance offset using layout's type
+                # Skip this field but advance the offset by its width.  #1060:
+                # a bare type-PARAMETER field registers generically as i32, but
+                # construction laid it out per the concrete instantiation
+                # (Unit → 0 bytes) — recompute the width from the scrutinee's
+                # type args, mirroring the eq/show recomputation, so every later
+                # field reads the address construction actually wrote.  A
+                # concrete field keeps its registered (#1043-erasure-aware)
+                # width; an unrecoverable type-parameter instantiation LOUD-skips.
                 if i < len(layout.field_offsets):
                     _, generic_wt = layout.field_offsets[i]
-                    align = _aligns.get(generic_wt, 8)
+                    wt = self._wildcard_field_wasm_type(
+                        pattern.name, i, generic_wt, scrutinee_type, sub_pat,
+                        self._later_sub_pattern_reads(pattern.sub_patterns, i),
+                    )
+                    align = _aligns.get(wt, 8)
                     offset = (offset + align - 1) & ~(align - 1)
-                    offset += _sizes.get(generic_wt, 8)
+                    offset += _sizes.get(wt, 8)
 
             elif isinstance(sub_pat, ast.ConstructorPattern):
                 # Nested constructor: load the field pointer (i32),
@@ -783,9 +1021,15 @@ class DataMixin:
                 instrs.append(f"local.get {scr_local}")
                 instrs.append(f"i32.load offset={offset}")
                 instrs.append(f"local.set {sub_local}")
-                # Recurse into the nested constructor's sub-patterns
+                # Recurse into the nested constructor's sub-patterns, resolving
+                # this field's concrete type against the outer instantiation
+                # (#1060) so a type-parameter wildcard deeper in the nest
+                # recomputes its width too.
                 nested = self._extract_constructor_fields(
                     sub_pat, sub_local, sub_layout, new_env,
+                    self._resolve_nested_scrutinee_type(
+                        pattern.name, i, scrutinee_type,
+                    ),
                 )
                 if nested is None:
                     return None
@@ -813,15 +1057,49 @@ class DataMixin:
     # Nested pattern helpers
     # -----------------------------------------------------------------
 
+    def _later_sub_pattern_reads(
+        self, sub_patterns: tuple[ast.Pattern, ...], index: int,
+    ) -> bool:
+        """True if any sub-pattern after *index* reads a field.  #1060: a
+        wildcard's mis-computed width only corrupts the offsets of LATER
+        reads; a trailing wildcard — or one followed only by other wildcards —
+        is harmless, so an unrecoverable type-parameter wildcard there need
+        not LOUD-skip a compilable function.
+
+        A zero-size BINDING (``@Unit``, ``@Future<Unit>``, aliases) is also
+        not a read (#1070 rider): both walks bind nothing and load nothing
+        for it (the extraction walk ``continue``s on erased bindings), so a
+        trailing erased binding after an unrecoverable wildcard stays
+        compilable too.  An un-nameable binding stays conservative (a read).
+        """
+        for sp in sub_patterns[index + 1:]:
+            if isinstance(sp, ast.WildcardPattern):
+                continue
+            if isinstance(sp, ast.BindingPattern):
+                type_name = self._type_expr_to_slot_name(sp.type_expr)
+                if (type_name is not None
+                        and self._slot_name_erases_to_unit(type_name)):
+                    continue
+            return True
+        return False
+
     def _sub_pattern_wasm_type(
         self,
         sub_pat: ast.Pattern,
         field_index: int,
         layout: ConstructorLayout,
+        ctor_name: str = "",
+        scrutinee_type: str | None = None,
+        later_read: bool = False,
     ) -> str | None:
         """Return the WASM type for a sub-pattern's field.
 
-        Used for offset computation when walking nested patterns.
+        Used for offset computation when walking nested patterns.  *ctor_name*,
+        *scrutinee_type*, and *later_read* (#1060) let a WILDCARD over a bare
+        type-parameter field resolve its instantiation-aware width instead of
+        the generic i32 placeholder the registered layout records for a type
+        parameter (LOUD-skipping only when the width is unrecoverable AND a
+        later field is read).
         """
         if isinstance(sub_pat, ast.BindingPattern):
             type_name = self._type_expr_to_slot_name(sub_pat.type_expr)
@@ -849,17 +1127,109 @@ class DataMixin:
         if isinstance(sub_pat, ast.WildcardPattern):
             if field_index < len(layout.field_offsets):
                 _, generic_wt = layout.field_offsets[field_index]
-                return generic_wt
+                # #1060: instantiation-aware for a bare type-parameter field —
+                # its registered width is the generic i32 placeholder, wrong for
+                # any instantiation whose concrete width differs (Unit → 0).
+                return self._wildcard_field_wasm_type(
+                    ctor_name, field_index, generic_wt, scrutinee_type,
+                    sub_pat, later_read,
+                )
             return None
         if isinstance(sub_pat, (ast.ConstructorPattern, ast.NullaryPattern)):
             return "i32"  # ADT = heap pointer
         return None
+
+    def _wildcard_field_wasm_type(
+        self,
+        ctor_name: str,
+        field_index: int,
+        generic_wt: str,
+        scrutinee_type: str | None,
+        sub_pat: ast.Pattern,
+        later_read: bool,
+    ) -> str:
+        """WASM width of a WILDCARD sub-pattern's field, instantiation-aware.
+
+        #1060: a bare type-PARAMETER field (``Box<T>`` field ``T``) registers
+        generically as a 4-byte i32, but construction lays it out per the
+        concrete instantiation — ``Box<Unit>`` erases it to 0 bytes,
+        ``Box<String>`` to an i32_pair, ``Box<Int>`` to an i64.  A wildcard over
+        such a field must advance the offset by the CONCRETE width, recovered
+        from the scrutinee's type args exactly as the eq/show recomputation does
+        (``_resolve_field_type_for_eq`` + ``_eq_field_wasm_type``); otherwise
+        every later field reads a shifted, wrong address on a check-green
+        program.  A concrete (non-type-parameter) field keeps its registered
+        width, which #1043 already made erasure-aware.
+
+        When the field IS a type parameter but the concrete instantiation cannot
+        be recovered from *scrutinee_type* (e.g. a direct-call scrutinee whose
+        inferred type dropped its type args), the width is unknown.  It only
+        MATTERS if a later field is read at an offset that depends on it, so:
+
+        * *later_read* True (a subsequent sub-pattern reads a field) → raise
+          ``CodegenSkip``, a LOUD skip (E602 disclosure), never a wrong read;
+        * *later_read* False (this wildcard is trailing, or only wildcards
+          follow) → the unknown width is never consumed, so fall back to the
+          generic placeholder rather than skip a compilable function
+          (``match parse_bool(s) { Ok(_) -> …, Err(_) -> … }``).
+        """
+        tp_idx = self._ctor_adt_tp_indices.get(ctor_name)
+        pos = (
+            tp_idx[field_index]
+            if tp_idx is not None and field_index < len(tp_idx)
+            else None
+        )
+        if pos is None:
+            # Not a bare type parameter — the registered width is correct.
+            return generic_wt
+        _base, type_args = self._split_param_type(scrutinee_type or "")
+        if pos < len(type_args):
+            return self._eq_field_wasm_type(type_args[pos])
+        # Unrecoverable instantiation for a type-parameter field.
+        if later_read:
+            raise CodegenSkip(
+                sub_pat,
+                f"wildcard over type-parameter field {field_index} of "
+                f"{ctor_name!r}: concrete instantiation unrecoverable from "
+                f"scrutinee type {scrutinee_type!r}, and a later field is read "
+                f"at an offset that depends on this field's erased width",
+            )
+        return generic_wt
+
+    def _resolve_nested_scrutinee_type(
+        self,
+        ctor_name: str,
+        field_index: int,
+        scrutinee_type: str | None,
+    ) -> str | None:
+        """Concrete Vera type of a field — the scrutinee type for a nested
+        constructor pattern on it.
+
+        #1060: substitutes the outer instantiation's type args into the field's
+        declared type (``Outer<Unit>`` field ``Inner<T>`` → ``Inner<Unit>``), so
+        a wildcard over a type-parameter field deeper in the nest recomputes its
+        width correctly.  Returns ``None`` when the field type is unknown or the
+        outer instantiation is missing; the nested walk then LOUD-skips any
+        type-parameter wildcard rather than reading a wrong offset.
+        """
+        layout = self._ctor_layouts.get(ctor_name)
+        if layout is None or field_index >= len(layout.field_types):
+            return None
+        raw = layout.field_types[field_index]
+        base, type_args = self._split_param_type(scrutinee_type or "")
+        tp_names = self._adt_tp_param_names.get(base, ())
+        tp_mapping = dict(zip(tp_names, type_args))
+        tp_idx = self._ctor_adt_tp_indices.get(ctor_name)
+        return self._resolve_field_type_for_eq(
+            raw, field_index, tp_idx, type_args, tp_mapping,
+        )
 
     def _collect_nested_tag_checks(
         self,
         pattern: ast.ConstructorPattern,
         scr_local: int,
         layout: ConstructorLayout,
+        scrutinee_type: str | None = None,
     ) -> list[list[str]] | None:
         """Collect tag checks for nested constructor/nullary sub-patterns.
 
@@ -870,6 +1240,11 @@ class DataMixin:
         tag.  For ``ConstructorPattern`` it recurses to collect deeper
         checks.
 
+        *scrutinee_type* (#1060) is the concrete Vera type name of the value at
+        *scr_local*; it lets a WILDCARD over a bare type-parameter field before
+        a nested constructor advance by the instantiation-aware width so the
+        nested tag load lands on the address construction actually wrote.
+
         Returns a list of instruction-lists, each producing an ``i32``
         boolean on the stack.  Returns ``None`` on layout lookup failure.
         """
@@ -877,6 +1252,11 @@ class DataMixin:
         # construction stores nothing for it, so the walk gives it zero width
         # and no alignment — the extraction walks reach the same result by
         # `continue`-ing on erased components before their map lookups (#1042).
+        # A WILDCARD over such a field also resolves to `"unit"`: for a DECLARED
+        # Unit field via the erasure-aware registered `field_offsets` (#1043),
+        # and for a type-PARAMETER field instantiated to Unit via the
+        # scrutinee-threaded recomputation (#1060) — so the zero-width rule
+        # covers both sub-pattern arms.
         _sizes = {"i32": 4, "i64": 8, "f64": 8, "i32_pair": 8, "unit": 0}
         _aligns = {"i32": 4, "i64": 8, "f64": 8, "i32_pair": 4, "unit": 1}
         offset = 4  # after tag
@@ -884,7 +1264,10 @@ class DataMixin:
         checks: list[list[str]] = []
 
         for i, sub_pat in enumerate(pattern.sub_patterns):
-            wt = self._sub_pattern_wasm_type(sub_pat, i, layout)
+            wt = self._sub_pattern_wasm_type(
+                sub_pat, i, layout, pattern.name, scrutinee_type,
+                self._later_sub_pattern_reads(pattern.sub_patterns, i),
+            )
             if wt is None:
                 raise CodegenSkip(
                     sub_pat,
@@ -914,10 +1297,16 @@ class DataMixin:
                 ]
                 checks.append(check)
 
-                # Recurse for deeper nesting
+                # Recurse for deeper nesting, resolving this field's concrete
+                # type against the outer instantiation (#1060) so a
+                # type-parameter wildcard deeper in the nest recomputes its
+                # width too.
                 if isinstance(sub_pat, ast.ConstructorPattern):
                     deeper = self._collect_nested_tag_checks(
                         sub_pat, tmp, sub_layout,
+                        self._resolve_nested_scrutinee_type(
+                            pattern.name, i, scrutinee_type,
+                        ),
                     )
                     if deeper is None:
                         return None

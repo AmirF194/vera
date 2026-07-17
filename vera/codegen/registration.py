@@ -357,6 +357,19 @@ class RegistrationMixin:
             # concrete type argument at the comparison site.
             if decl.type_params and te.name in decl.type_params:
                 return te.name
+            # #1043: a field that erases to Unit (bare `Unit`, transparent
+            # `Future<Unit>`, or an alias / alias-chain to either — every
+            # spelling for which `_type_expr_to_wasm_type` returns None)
+            # canonicalises to the zero-size `"Unit"` name.  Structural
+            # Eq/show/hash then treat it as the equal-by-definition value it
+            # represents — comparing nothing, rendering "unit", folding a
+            # constant — instead of dispatching on a `Future<…>` head that has
+            # no scalar rep.  The parent type-parameter case is already handled
+            # above (a bare param stays its own name); `_type_expr_to_wasm_type`
+            # returns "unsupported" (not None) for one, so this never rewrites a
+            # param.
+            if self._type_expr_to_wasm_type(te) is None:
+                return "Unit"
             alias = self._type_aliases.get(te.name)
             if alias is not None and te.name not in _seen:
                 params = self._type_alias_params.get(te.name)
@@ -448,7 +461,16 @@ class RegistrationMixin:
                 return "i32"
             wt = self._type_expr_to_wasm_type(te)
             if wt is None:
-                return "i32"  # Unit → pointer (shouldn't appear, safe fallback)
+                # #1043: an erases-to-Unit field (bare `Unit`, transparent
+                # `Future<Unit>`, or an alias / alias-chain to either — every
+                # spelling for which `_type_expr_to_wasm_type` returns None) is
+                # ZERO-SIZE.  Return the `"unit"` sentinel so the registered
+                # layout matches CONSTRUCTION (`_translate_constructor_call`),
+                # which lays such a field out with size 0 / align 1 and stores
+                # nothing.  The old `"i32"` fallback gave it a spurious 4-byte
+                # slot, shifting every subsequent field's registered offset off
+                # the bytes construction actually wrote.
+                return "unit"
             if wt == "unsupported":
                 return "i32"  # ADT/String/other → heap pointer
             return wt
