@@ -511,3 +511,630 @@ public fn f(-> @Bool)
 
 def test_control_show_plain_int() -> None:
     assert _run(_SHOW_INT_CONTROL, fn="f") == 1
+
+
+# =====================================================================
+# Round 2 (PR #1090 review) — #1091 + the composite-Future recovery hole
+# (CodeRabbit finding 1) + the #1092 Byte-field construction width.
+#
+# The #1087 fix grounded the show/hash dispatch's INFERRED type, but the
+# composite path then recovers the PARAMETERIZED type from the DECLARED
+# spelling (`_parameterized_arg_type` — `_declared_type_expr_for_show`
+# returns `FOI` / `Future<Option<Int>>` / `MyBox` verbatim), UNDOING the
+# grounding before `_show_value` / `_hash_value`.  Two consequences:
+#
+# * a COMPOSITE Future payload (`Future<Option<Int>>`, bare or aliased)
+#   still loud-skipped (E602) — the scalar payloads #1087 fixed dispatch
+#   BEFORE the recovery, composites AFTER it;
+# * show/hash of an alias of a WHOLE ADT (`type MyBox = Box;`, #1091)
+#   loud-skipped — `_show_value("MyBox")` resolves no constructor plans.
+#
+# The fix grounds the recovery result at both dispatch sites and the
+# Array-element type at the composite render's Array arms (a `@Array<FI>`
+# slot's ELEMENT reaches `_show_array` / `_hash_array` as the raw alias).
+# The Tuple / registered-ADT plan branches already ground their component
+# resolutions (#1076/#1077) — pinned as controls below.
+# =====================================================================
+
+_SHOW_BARE_COMPOSITE_FUTURE = """\
+private fn mkf(-> @Future<Option<Int>>)
+  requires(true) ensures(true) effects(pure)
+{ async(Some(5)) }
+
+public fn f(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  let @Future<Option<Int>> = mkf();
+  eq(show(@Future<Option<Int>>.0), "Some(5)")
+}
+"""
+
+
+def test_show_bare_composite_future() -> None:
+    """show of a bare `Future<Option<Int>>` renders the composite payload —
+    the transparent wrapper peels at the recovery, not only at the scalar
+    dispatch (#1087's arm covered scalar payloads; this is the composite
+    sibling the recovery un-grounded)."""
+    assert _run(_SHOW_BARE_COMPOSITE_FUTURE, fn="f") == 1
+    assert "E602" not in _warnings(_SHOW_BARE_COMPOSITE_FUTURE)
+
+
+_SHOW_ALIASED_COMPOSITE_FUTURE = """\
+type FOI = Future<Option<Int>>;
+
+private fn mkf(-> @FOI)
+  requires(true) ensures(true) effects(pure)
+{ async(Some(5)) }
+
+public fn f(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  let @FOI = mkf();
+  eq(show(@FOI.0), "Some(5)")
+}
+"""
+
+
+def test_show_aliased_composite_future() -> None:
+    assert _run(_SHOW_ALIASED_COMPOSITE_FUTURE, fn="f") == 1
+    assert "E602" not in _warnings(_SHOW_ALIASED_COMPOSITE_FUTURE)
+
+
+_HASH_COMPOSITE_FUTURE_DISTINCT = """\
+type FOI = Future<Option<Int>>;
+
+private fn mkf(@Int -> @FOI)
+  requires(true) ensures(true) effects(pure)
+{ async(Some(@Int.0)) }
+
+public fn f(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  let @FOI = mkf(5);
+  let @FOI = mkf(9);
+  hash(@FOI.0) == hash(@FOI.1)
+}
+"""
+
+
+def test_hash_aliased_composite_future_payload_sensitive() -> None:
+    """hash of an aliased composite Future folds the REAL payload — distinct
+    Option payloads hash distinctly (was an E602 function drop)."""
+    assert _run(_HASH_COMPOSITE_FUTURE_DISTINCT, fn="f") == 0
+
+
+_HASH_COMPOSITE_FUTURE_EQUAL = """\
+private fn mkf(@Int -> @Future<Option<Int>>)
+  requires(true) ensures(true) effects(pure)
+{ async(Some(@Int.0)) }
+
+public fn f(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  let @Future<Option<Int>> = mkf(5);
+  let @Future<Option<Int>> = mkf(5);
+  hash(@Future<Option<Int>>.0) == hash(@Future<Option<Int>>.1)
+}
+"""
+
+
+def test_hash_bare_composite_future_equal_payload() -> None:
+    assert _run(_HASH_COMPOSITE_FUTURE_EQUAL, fn="f") == 1
+    assert "E602" not in _warnings(_HASH_COMPOSITE_FUTURE_EQUAL)
+
+
+# -- #1091: show/hash of an alias of a WHOLE ADT.
+
+_SHOW_ALIAS_WHOLE_ADT_NONGEN = """\
+data Box { MkB(Int, Int) }
+type MyBox = Box;
+
+private fn a(-> @MyBox)
+  requires(true) ensures(true) effects(pure)
+{ MkB(11, 22) }
+
+public fn f(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  let @MyBox = a();
+  eq(show(@MyBox.0), "MkB(11, 22)")
+}
+"""
+
+
+def test_show_alias_of_whole_adt_non_generic() -> None:
+    """`type MyBox = Box;` (#1091): show renders the structural form — the
+    recovered declared spelling grounds to the registered ADT instead of
+    loud-skipping (E602)."""
+    assert _run(_SHOW_ALIAS_WHOLE_ADT_NONGEN, fn="f") == 1
+    assert "E602" not in _warnings(_SHOW_ALIAS_WHOLE_ADT_NONGEN)
+
+
+_SHOW_ALIAS_WHOLE_ADT_GENERIC = """\
+data Box<T> { MkB(Int, T, Int) }
+type MB = Box<Int>;
+
+private fn a(-> @MB)
+  requires(true) ensures(true) effects(pure)
+{ MkB(11, 7, 22) }
+
+public fn f(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  let @MB = a();
+  eq(show(@MB.0), "MkB(11, 7, 22)")
+}
+"""
+
+
+def test_show_alias_of_whole_adt_generic() -> None:
+    """`type MB = Box<Int>;` (#1091): the generic-instantiation alias grounds
+    and every field renders at its constructed offset."""
+    assert _run(_SHOW_ALIAS_WHOLE_ADT_GENERIC, fn="f") == 1
+    assert "E602" not in _warnings(_SHOW_ALIAS_WHOLE_ADT_GENERIC)
+
+
+_HASH_ALIAS_WHOLE_ADT_DISTINCT = """\
+data Box<T> { MkB(Int, T, Int) }
+type MB = Box<Int>;
+
+private fn mk(@Int -> @MB)
+  requires(true) ensures(true) effects(pure)
+{ MkB(11, @Int.0, 22) }
+
+public fn f(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  let @MB = mk(4294967303);
+  let @MB = mk(7);
+  hash(@MB.0) == hash(@MB.1)
+}
+"""
+
+
+def test_hash_alias_of_whole_adt_payload_sensitive() -> None:
+    """hash(@MB) folds the real fields (#1091) — payloads distinct at i64
+    width (2^32+7 vs 7 collide in their low 32 bits) hash distinctly."""
+    assert _run(_HASH_ALIAS_WHOLE_ADT_DISTINCT, fn="f") == 0
+
+
+# -- Array-element grounding: the composite render's Array arms receive the
+# -- element type as spelled in the recovered compound (`Array<FI>`), which
+# -- the top-level grounding does not touch (nested args are per-consumer).
+
+_SHOW_ARRAY_OF_ALIASED_FUTURE_SLOT = """\
+type FI = Future<Int>;
+
+private fn mkf(-> @FI)
+  requires(true) ensures(true) effects(pure)
+{ async(5) }
+
+public fn f(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  let @Array<FI> = [mkf(), mkf()];
+  eq(show(@Array<FI>.0), "[5, 5]")
+}
+"""
+
+
+def test_show_array_of_aliased_future_slot() -> None:
+    """show(@Array<FI>) renders each element's peeled payload — the element
+    spelling grounds at the Array arm (the recovered `Array<FI>` is already
+    the full compound; the ELEMENT was the un-ground name)."""
+    assert _run(_SHOW_ARRAY_OF_ALIASED_FUTURE_SLOT, fn="f") == 1
+    assert "E602" not in _warnings(_SHOW_ARRAY_OF_ALIASED_FUTURE_SLOT)
+
+
+_SHOW_ARRAYLIT_OF_ALIASED_FUTURE_SLOTS = """\
+type FI = Future<Int>;
+
+private fn mkf(-> @FI)
+  requires(true) ensures(true) effects(pure)
+{ async(5) }
+
+public fn f(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  let @FI = mkf();
+  eq(show([@FI.0, @FI.0]), "[5, 5]")
+}
+"""
+
+
+def test_show_arraylit_of_aliased_future_slots() -> None:
+    """show of an inline array literal whose elements are aliased-Future
+    slots — the ArrayLit element recovery feeds the same Array arm."""
+    assert _run(_SHOW_ARRAYLIT_OF_ALIASED_FUTURE_SLOTS, fn="f") == 1
+    assert "E602" not in _warnings(_SHOW_ARRAYLIT_OF_ALIASED_FUTURE_SLOTS)
+
+
+_HASH_ARRAY_OF_ALIASED_FUTURE_DISTINCT = """\
+type FI = Future<Int>;
+
+private fn mkf(@Int -> @FI)
+  requires(true) ensures(true) effects(pure)
+{ async(@Int.0) }
+
+public fn f(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  let @Array<FI> = [mkf(4294967303)];
+  let @Array<FI> = [mkf(7)];
+  hash(@Array<FI>.0) == hash(@Array<FI>.1)
+}
+"""
+
+
+def test_hash_array_of_aliased_future_payload_sensitive() -> None:
+    """hash(@Array<FI>) folds each element at the peeled payload's i64 width
+    (2^32+7 vs 7 collide in their low 32 bits)."""
+    assert _run(_HASH_ARRAY_OF_ALIASED_FUTURE_DISTINCT, fn="f") == 0
+
+
+# -- Audit controls (:352 / :375 recovery callers): a Tuple component and a
+# -- generic-ADT constructor argument of an aliased-Future type were ALREADY
+# -- rendered correctly — the #1077 Tuple plan branch and the #1076-grounded
+# -- registered-ADT field resolution ground the recovered raw spellings at
+# -- consumption.  Pinned so the recovery callers stay covered downstream.
+
+_SHOW_TUPLE_ALIASED_FUTURE_COMPONENT = """\
+type FI = Future<Int>;
+
+private fn mkf(-> @FI)
+  requires(true) ensures(true) effects(pure)
+{ async(5) }
+
+public fn f(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  let @FI = mkf();
+  eq(show(Tuple(@FI.0, 42)), "(5, 42)")
+}
+"""
+
+
+def test_control_show_tuple_aliased_future_component() -> None:
+    assert _run(_SHOW_TUPLE_ALIASED_FUTURE_COMPONENT, fn="f") == 1
+
+
+_SHOW_CTOR_ALIASED_FUTURE_ARG = """\
+data Box<T> { MkB(T) }
+type FI = Future<Int>;
+
+private fn mkf(-> @FI)
+  requires(true) ensures(true) effects(pure)
+{ async(5) }
+
+public fn f(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  let @FI = mkf();
+  eq(show(MkB(@FI.0)), "MkB(5)")
+}
+"""
+
+
+def test_control_show_ctor_aliased_future_arg() -> None:
+    assert _run(_SHOW_CTOR_ALIASED_FUTURE_ARG, fn="f") == 1
+
+
+# -- PR #1090 review pins (F2): surfaces the round-1 groundings fixed beyond
+# -- the filed issues' wording — pinned so the CHANGELOG claims stay true.
+
+_SHOW_ALIASED_PRIMITIVE = """\
+type MyInt = Int;
+
+private fn mk(-> @MyInt)
+  requires(true) ensures(true) effects(pure)
+{ 5 }
+
+public fn f(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  let @MyInt = mk();
+  eq(show(@MyInt.0), "5")
+}
+"""
+
+
+def test_show_aliased_primitive_int() -> None:
+    """show of a bare aliased-primitive value (`type MyInt = Int;`) — the
+    #1087 grounding covers plain aliases, not only Future spellings."""
+    assert _run(_SHOW_ALIASED_PRIMITIVE, fn="f") == 1
+    assert "E602" not in _warnings(_SHOW_ALIASED_PRIMITIVE)
+
+
+_SHOW_REFINEMENT_INT = """\
+type Pos = { @Int | @Int.0 > 0 };
+
+private fn mk(-> @Pos)
+  requires(true) ensures(true) effects(pure)
+{ 5 }
+
+public fn f(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  let @Pos = mk();
+  eq(show(@Pos.0), "5")
+}
+"""
+
+
+def test_show_refinement_int() -> None:
+    """show of a refinement-typed value (`type Pos = { @Int | ... };`) — the
+    alias walk resolves the refinement to its base spelling."""
+    assert _run(_SHOW_REFINEMENT_INT, fn="f") == 1
+    assert "E602" not in _warnings(_SHOW_REFINEMENT_INT)
+
+
+_EQ_REFINEMENT_OVER_ADT = """\
+data Box<T> { MkB(Int, T, Int) }
+type NB = { @Box<Int> | true };
+
+private fn a(-> @NB)
+  requires(true) ensures(true) effects(pure)
+{ MkB(11, 7, 22) }
+
+public fn f(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  let @NB = a();
+  let @NB = a();
+  @NB.0 == @NB.1
+}
+"""
+
+
+def test_eq_refinement_over_whole_adt_equal() -> None:
+    """`==` through a refinement of a whole ADT (`type NB = { @Box<Int> |
+    true };`) compares STRUCTURALLY — on the pre-#1085 base this silently
+    pointer-compared (equal values -> 0)."""
+    assert _run(_EQ_REFINEMENT_OVER_ADT, fn="f") == 1
+
+
+_EQ_REFINEMENT_OVER_ADT_DISTINCT = """\
+data Box<T> { MkB(Int, T, Int) }
+type NB = { @Box<Int> | true };
+
+private fn mk(@Int -> @NB)
+  requires(true) ensures(true) effects(pure)
+{ MkB(11, @Int.0, 22) }
+
+public fn f(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  let @NB = mk(7);
+  let @NB = mk(9);
+  @NB.0 == @NB.1
+}
+"""
+
+
+def test_eq_refinement_over_whole_adt_distinct() -> None:
+    assert _run(_EQ_REFINEMENT_OVER_ADT_DISTINCT, fn="f") == 0
+
+
+# =====================================================================
+# #1092 — construction width of an int literal coerced into a generic
+# field instantiated at @Byte.
+#
+# `let @Box<Byte> = MkB(0);` is check-green (the checker coerces an
+# in-range 0..255 literal to @Byte through the generic instantiation —
+# out-of-range, negative, and non-literal @Int arguments are all loud
+# E170 rejections, and a DECLARED `Byte` field rejects the literal with
+# E213).  But construction sized the field from the ARGUMENT's own
+# inferred WASM type (IntLit -> i64, stored at the i64 slot), while
+# every READER — field extraction, the structural-`$eq` helper,
+# show/hash — sizes it from the instantiated field type (Byte -> i32 at
+# the i32 offset): extraction read 0 for a stored 255, and `==` compared
+# equal-looking garbage — `MkB(0) == MkB(255)` returned 1, silently, on
+# a check-green program.  The `@Byte`-slot passthrough (`MkB(@Byte.0)`)
+# stores i32 and was always coherent (pinned below).
+#
+# The width fix keys on the checker-recorded TARGET type of the
+# construction (`_target_codegen_type_full`, the #820 table): these
+# tests therefore compile through the real pipeline — typecheck with
+# artifacts, then compile with the tables threaded, exactly as the CLI
+# does (`vera run`/`compile`/`serve`/`test` all thread them; a bare
+# transform -> compile keeps the documented #798/#820 degraded-path
+# caveat).
+# =====================================================================
+
+def _run_checked(source: str, fn: str | None = None) -> int:
+    """Compile through the REAL pipeline (checker tables threaded) and run.
+
+    parse -> transform -> typecheck_with_artifacts -> compile with
+    ``expr_semantic_types`` / ``expr_target_types`` -> execute.  Asserts the
+    check and the compile are both error-free.  Sources need explicit
+    visibility modifiers (the checker enforces them; the bare `_compile`
+    helper's transform->compile path does not).
+    """
+    import tempfile
+    from pathlib import Path
+
+    from vera.checker import typecheck_with_artifacts
+    from vera.codegen import compile as codegen_compile, execute
+    from vera.parser import parse_file
+    from vera.transform import transform
+
+    f = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".vera", delete=False, encoding="utf-8"
+    )
+    try:
+        with f:
+            f.write(source)
+        tree = parse_file(f.name)
+        program = transform(tree)
+        diags, arts = typecheck_with_artifacts(
+            program, source=source, file=f.name,
+        )
+        errors = [d for d in diags if d.severity == "error"]
+        assert not errors, f"check errors: {errors}"
+        result = codegen_compile(
+            program, source=source, file=f.name,
+            expr_semantic_types=arts.expr_semantic_types,
+            expr_target_types=arts.expr_target_types,
+        )
+        cerrors = [d for d in result.diagnostics if d.severity == "error"]
+        assert not cerrors, f"compile errors: {cerrors}"
+        exec_result = execute(result, fn_name=fn)
+        assert exec_result.value is not None, "Expected a return value"
+        return exec_result.value
+    finally:
+        Path(f.name).unlink(missing_ok=True)
+
+
+_BYTE_LIT_EQ_DISTINCT = """\
+private data Box<T> { MkB(T) }
+
+public fn f(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  let @Box<Byte> = MkB(0);
+  let @Box<Byte> = MkB(255);
+  @Box<Byte>.0 == @Box<Byte>.1
+}
+"""
+
+
+def test_byte_field_inline_literal_eq_distinct() -> None:
+    """MkB(0) vs MkB(255) as `@Box<Byte>` compare UNEQUAL — construction
+    stores the coerced literal at the field's i32 Byte width, where `$eq`
+    reads (was: i64 store at a shifted slot, both reads saw the same bytes,
+    silently equal on a check-green program)."""
+    assert _run_checked(_BYTE_LIT_EQ_DISTINCT, fn="f") == 0
+
+
+_BYTE_LIT_EQ_EQUAL = """\
+private data Box<T> { MkB(T) }
+
+public fn f(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  let @Box<Byte> = MkB(7);
+  let @Box<Byte> = MkB(7);
+  @Box<Byte>.0 == @Box<Byte>.1
+}
+"""
+
+
+def test_byte_field_inline_literal_eq_equal() -> None:
+    assert _run_checked(_BYTE_LIT_EQ_EQUAL, fn="f") == 1
+
+
+_BYTE_LIT_EXTRACTION = """\
+private data Box<T> { MkB(T) }
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  let @Box<Byte> = MkB(255);
+  match @Box<Byte>.0 {
+    MkB(@Byte) -> byte_to_int(@Byte.0)
+  }
+}
+"""
+
+
+def test_byte_field_inline_literal_extraction() -> None:
+    """The strongest #1092 pin: extracting the field reads back the STORED
+    value (was 0 — the i64 store put 255 at a slot the i32 extraction never
+    read)."""
+    assert _run_checked(_BYTE_LIT_EXTRACTION, fn="f") == 255
+
+
+_BYTE_LIT_ALIAS_FORALL_DISTINCT = """\
+private data Box<T> { MkB(T) }
+type MB = Byte;
+
+private forall<T where Eq<T>>
+fn same(@Box<T>, @Box<T> -> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ @Box<T>.1 == @Box<T>.0 }
+
+private fn a(-> @Box<MB>)
+  requires(true) ensures(true) effects(pure)
+{ MkB(0) }
+
+private fn b(-> @Box<MB>)
+  requires(true) ensures(true) effects(pure)
+{ MkB(255) }
+
+public fn f(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{ same(a(), b()) }
+"""
+
+
+def test_byte_field_alias_forall_eq_inline_distinct() -> None:
+    """`type MB = Byte;` under forall-Eq with inline-literal construction:
+    the #1086 grounding admits the alias (was wrong-loud E613 on the base),
+    so the compare must be CORRECT — 0 vs 255 unequal.  The declared-return
+    target (`-> @Box<MB>`) grounds to Byte for the width coercion."""
+    assert _run_checked(_BYTE_LIT_ALIAS_FORALL_DISTINCT, fn="f") == 0
+
+
+_BYTE_PASSTHROUGH_CONTROL_DISTINCT = """\
+private data Box<T> { MkB(T) }
+
+private fn mk(@Byte -> @Box<Byte>)
+  requires(true) ensures(true) effects(pure)
+{ MkB(@Byte.0) }
+
+public fn f(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  let @Box<Byte> = mk(0);
+  let @Box<Byte> = mk(255);
+  @Box<Byte>.0 == @Box<Byte>.1
+}
+"""
+
+
+def test_control_byte_field_passthrough_distinct() -> None:
+    """A `@Byte`-slot passthrough argument always stored i32 — coherent with
+    every reader before and after the fix (pins that the coercion does not
+    disturb the already-correct spelling)."""
+    assert _run_checked(_BYTE_PASSTHROUGH_CONTROL_DISTINCT, fn="f") == 0
+
+
+_BYTE_PASSTHROUGH_CONTROL_EQUAL = """\
+private data Box<T> { MkB(T) }
+
+private fn mk(@Byte -> @Box<Byte>)
+  requires(true) ensures(true) effects(pure)
+{ MkB(@Byte.0) }
+
+public fn f(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  let @Box<Byte> = mk(7);
+  let @Box<Byte> = mk(7);
+  @Box<Byte>.0 == @Box<Byte>.1
+}
+"""
+
+
+def test_control_byte_field_passthrough_equal() -> None:
+    assert _run_checked(_BYTE_PASSTHROUGH_CONTROL_EQUAL, fn="f") == 1
+
+
+_BYTE_INT_INSTANTIATION_CONTROL = """\
+private data Box<T> { MkB(T) }
+
+public fn f(-> @Bool)
+  requires(true) ensures(true) effects(pure)
+{
+  let @Box<Int> = MkB(0);
+  let @Box<Int> = MkB(4294967296);
+  @Box<Int>.0 == @Box<Int>.1
+}
+"""
+
+
+def test_control_int_instantiation_literal_untouched() -> None:
+    """`let @Box<Int> = MkB(0);` — an Int-instantiated literal field keeps
+    its i64 store (the coercion keys on the TARGET arg being Byte; 0 vs
+    2^32 must stay distinct at i64 width)."""
+    assert _run_checked(_BYTE_INT_INSTANTIATION_CONTROL, fn="f") == 0

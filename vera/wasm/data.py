@@ -80,7 +80,7 @@ class DataMixin:
         # compile, not silently skip the function and dangle its call.
         arg_instrs_list: list[list[str]] = []
         arg_wasm_types: list[str] = []
-        for arg in expr.args:
+        for i, arg in enumerate(expr.args):
             arg_instrs = self.translate_expr(arg, env)
             if arg_instrs is None:
                 return None
@@ -111,6 +111,28 @@ class DataMixin:
                         arg,
                         "could not infer constructor argument WASM type",
                     )
+            # #1092: an in-range int literal the checker coerced into a
+            # GENERIC field instantiated at @Byte (`let @Box<Byte> = MkB(0);`
+            # — the only literal-at-Byte-field spelling check admits: a
+            # DECLARED `Byte` field is E213, out-of-range / negative /
+            # non-literal @Int arguments are E170) translated at the
+            # literal's own i64 width and was stored at the i64 slot, while
+            # every READER — field extraction, the structural-`$eq` helper,
+            # show/hash — sizes the field from the instantiated type (Byte
+            # -> i32 at the i32 offset): extraction read 0 for a stored 255
+            # and `MkB(0) == MkB(255)` compared EQUAL, silently, on a
+            # check-green program.  Store the coerced literal at the field's
+            # i32 Byte width, exactly as the (always-correct) `@Byte`-slot
+            # passthrough argument does.  The target instantiation comes
+            # from the checker-recorded target type (the #820 table); an
+            # unthreaded transform->compile keeps the documented #798/#820
+            # degraded-path caveat.
+            if (isinstance(arg, ast.IntLit)
+                    and 0 <= arg.value <= 255
+                    and arg_wt == "i64"
+                    and self._ctor_field_targets_byte(expr, i)):
+                arg_instrs = [f"i32.const {arg.value}"]
+                arg_wt = "i32"
             arg_instrs_list.append(arg_instrs)
             arg_wasm_types.append(arg_wt)
 
@@ -213,6 +235,41 @@ class DataMixin:
         # Leave pointer as result
         instructions.append(f"local.get {tmp}")
         return instructions
+
+    def _ctor_field_targets_byte(
+        self, expr: ast.ConstructorCall, field_i: int,
+    ) -> bool:
+        """Whether constructor field ``field_i`` is a type-parameter field
+        instantiated at ``@Byte`` by the construction's TARGET type (#1092).
+
+        Decides the literal-width coercion in
+        :py:meth:`_translate_constructor_call`: the literal alone cannot —
+        ``MkB(0)`` is equally legal as ``Box<Int>`` (i64 field) and as
+        ``Box<Byte>`` (i32 field); only the checker-recorded target type
+        (``_target_codegen_type_full``, the #820 side-table) knows which.
+        The target's argument name is grounded through the shared
+        canonicalizer so an alias spelling (``Box<MB>``, ``type MB =
+        Byte;``) instantiates like the literal ``Byte``.  Conservative
+        ``False`` when the field is not a bare type parameter, the table is
+        unthreaded, or the target carries no matching argument — the
+        literal then keeps its i64 translation (the pre-#1092 behaviour).
+        """
+        tp_idx = self._ctor_adt_tp_indices.get(expr.name)
+        if not tp_idx or field_i >= len(tp_idx):
+            return False
+        pos = tp_idx[field_i]
+        if pos is None:
+            return False  # concrete declared field (a literal there is E213)
+        target = self._target_codegen_type_full(expr)
+        args = getattr(target, "type_args", None)
+        if not args or pos >= len(args):
+            return False
+        arg_ty = args[pos]
+        base = getattr(arg_ty, "base", arg_ty)  # unwrap a refinement
+        name = getattr(base, "name", None)
+        if name is None:
+            return False
+        return self._canonical_field_type(name) == "Byte"
 
     # -----------------------------------------------------------------
     # Let destructuring
