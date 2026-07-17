@@ -63,6 +63,18 @@ class CallsHandlersMixin:
             raise CodegenSkip(
                 arg, "could not infer show() argument type"
             )
+        # #1087: ground an alias / transparent-`Future` spelling before dispatch.
+        # A bare `Future<Int>` value or an alias of one (`type FI = Future<Int>;`,
+        # `show(@FI.0)`) reached this dispatch as `Future<Int>` / `FI`, matched
+        # no primitive / Unit / composite arm below, and loud-skipped the whole
+        # function (E602) on a check-green program — while `show` of the literal
+        # payload rendered fine.  `_canonical_field_type` resolves alias chains
+        # and peels the transparent wrapper to its payload (`FI` → `Int`),
+        # mirroring the #1076/#1077 grounding on the eq/field-resolution side;
+        # #1077 keyed the Unit arm on erasure, this is the non-Unit sibling.  A
+        # non-alias, non-Future name (a primitive, an ADT, a container) is
+        # returned unchanged, so every other arm is unaffected.
+        vera_type = self._canonical_field_type(vera_type)
 
         # String → identity: show("hello") == "hello"
         if vera_type == "String":
@@ -125,6 +137,10 @@ class CallsHandlersMixin:
             raise CodegenSkip(
                 arg, "could not infer hash() argument type"
             )
+        # #1087: ground an alias / transparent-`Future` spelling — mirrors the
+        # show dispatch above.  A bare or aliased `Future<Int>` (`hash(@FI.0)`)
+        # otherwise matched no arm and loud-skipped the function (E602).
+        vera_type = self._canonical_field_type(vera_type)
 
         arg_instrs = self.translate_expr(arg, env)
         if arg_instrs is None:

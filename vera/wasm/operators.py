@@ -215,6 +215,19 @@ class OperatorsMixin:
                     if (rv_full is not None
                             and self._eq_type_name_fully_concrete(rv_full)):
                         lv = rv_full
+                # #1085: ground the operand's OWN spelling.  An alias of a WHOLE
+                # ADT (`type MyBox = Box<Int>;`) reaches the dispatch as the bare
+                # alias name `MyBox`, absent from `_adt_type_names`, so the
+                # structural branch below was skipped and `==` fell to the scalar
+                # POINTER compare — two structurally equal, distinct-pointer
+                # values compared unequal (0) on a check-green program.  #1076
+                # grounded type ARGUMENTS (`Box<MyInt>`); this grounds the whole
+                # operand.  `_canonical_field_type` resolves alias chains and
+                # peels a transparent `Future<...>` wrapper; a registered ADT or a
+                # genuine free `T` is returned unchanged, so the lost-arg and
+                # free-var controls still route to the scalar fallback.
+                if lv is not None:
+                    lv = self._canonical_field_type(lv)
                 lv_base = lv.split("<", 1)[0] if lv is not None else None
                 if (op in (ast.BinOp.EQ, ast.BinOp.NEQ)
                         and lv is not None
