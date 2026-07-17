@@ -5,8 +5,13 @@ Split from tests/test_codegen.py (#419). Shared helpers live in tests/codegen_he
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from vera import ast as _ast
+    from vera.wasm.context import WasmContext
 
 from tests.codegen_helpers import (
     _IO_PRELUDE,
@@ -1078,7 +1083,7 @@ class TestMapTagFutureStripTermination1097:
     pins the codegen-side defence-in-depth so the failure mode can never be
     a hang."""
 
-    def _ctx(self, aliases):
+    def _ctx(self, aliases: dict[str, _ast.NamedType]) -> WasmContext:
         import vera.wasm.context as wasm_context
 
         ctx = object.__new__(wasm_context.WasmContext)
@@ -1097,14 +1102,22 @@ class TestMapTagFutureStripTermination1097:
             ),
         })
         result: dict[str, str | None] = {}
-        t = threading.Thread(
-            target=lambda: result.setdefault("tag", ctx._map_wasm_tag("F")),
-            daemon=True,
-        )
+        errors: list[BaseException] = []
+
+        def worker() -> None:
+            try:
+                result["tag"] = ctx._map_wasm_tag("F")
+            except BaseException as exc:  # noqa: BLE001 — re-asserted below
+                errors.append(exc)
+
+        t = threading.Thread(target=worker, daemon=True)
         t.start()
         t.join(10)
         assert not t.is_alive(), \
             "Future-strip loop failed to terminate on a cyclic alias"
+        assert not errors, f"tag decider raised instead of returning: {errors}"
+        assert result["tag"] == "b", \
+            "cyclic alias must fall through to the permissive i32 tag"
 
     def test_nested_future_alias_payload_resolves(self) -> None:
         from vera import ast
