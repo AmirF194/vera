@@ -63,6 +63,18 @@ class CallsHandlersMixin:
             raise CodegenSkip(
                 arg, "could not infer show() argument type"
             )
+        # #1087: ground an alias / transparent-`Future` spelling before dispatch.
+        # A bare `Future<Int>` value or an alias of one (`type FI = Future<Int>;`,
+        # `show(@FI.0)`) reached this dispatch as `Future<Int>` / `FI`, matched
+        # no primitive / Unit / composite arm below, and loud-skipped the whole
+        # function (E602) on a check-green program — while `show` of the literal
+        # payload rendered fine.  `_canonical_field_type` resolves alias chains
+        # and peels the transparent wrapper to its payload (`FI` → `Int`),
+        # mirroring the #1076/#1077 grounding on the eq/field-resolution side;
+        # #1077 keyed the Unit arm on erasure, this is the non-Unit sibling.  A
+        # non-alias, non-Future name (a primitive, an ADT, a container) is
+        # returned unchanged, so every other arm is unaffected.
+        vera_type = self._canonical_field_type(vera_type)
 
         # String → identity: show("hello") == "hello"
         if vera_type == "String":
@@ -96,7 +108,17 @@ class CallsHandlersMixin:
         # structurally, recursing into each field's own `show`.  Recover the
         # PARAMETERIZED type (`Option<Int>`, `Array<String>`) so inner field
         # types resolve — `_infer_vera_type` only reports the bare head.
-        param_type = self._parameterized_arg_type(arg, vera_type)
+        # #1091 / PR #1090 review: the recovery prefers the DECLARED spelling,
+        # UNDOING the grounding above — `show(@FOI.0)` (`type FOI =
+        # Future<Option<Int>>;`) grounded to `Option<Int>` at the top only for
+        # the recovery to hand `_show_value` the raw `FOI` (no constructor
+        # plans; E602 function drop), and an alias of a WHOLE ADT (`type MyBox
+        # = Box;`) recovered as `MyBox` the same way.  Ground the recovered
+        # spelling too: a grounded compound (`Option<Int>`, `Box<Int>`,
+        # `Array<FI>`) passes through unchanged.
+        param_type = self._canonical_field_type(
+            self._parameterized_arg_type(arg, vera_type)
+        )
         value_instrs = self.translate_expr(arg, env)
         if value_instrs is None:
             return None
@@ -125,6 +147,10 @@ class CallsHandlersMixin:
             raise CodegenSkip(
                 arg, "could not infer hash() argument type"
             )
+        # #1087: ground an alias / transparent-`Future` spelling — mirrors the
+        # show dispatch above.  A bare or aliased `Future<Int>` (`hash(@FI.0)`)
+        # otherwise matched no arm and loud-skipped the function (E602).
+        vera_type = self._canonical_field_type(vera_type)
 
         arg_instrs = self.translate_expr(arg, env)
         if arg_instrs is None:
@@ -152,7 +178,12 @@ class CallsHandlersMixin:
 
         # Composite (#911): fold the constructor tag with each field's own
         # hash.  Parameterized type recovers inner field types (see show).
-        param_type = self._parameterized_arg_type(arg, vera_type)
+        # #1091 / PR #1090 review: ground the recovered spelling — the
+        # recovery prefers the DECLARED form, undoing the grounding above
+        # (mirrors the show dispatch).
+        param_type = self._canonical_field_type(
+            self._parameterized_arg_type(arg, vera_type)
+        )
         composite = self._hash_value(param_type, arg_instrs, arg)
         if composite is not None:
             return composite
@@ -796,6 +827,13 @@ class CallsHandlersMixin:
             elem_type = type_args[0] if type_args else None
             if elem_type is None:
                 return None
+            # #1091 / PR #1090 review: the element arrives spelled as in the
+            # recovered compound (`Array<FI>` keeps its declared `FI`; the
+            # top-level grounding never touches nested args) — ground it so
+            # the size table, the element load, and the recursive render all
+            # see the payload type (`FI` -> `Int`), exactly as a literal
+            # `Array<Int>` element does.
+            elem_type = self._canonical_field_type(elem_type)
             return self._show_array(elem_type, value_instrs, node, _seen)
 
         # ADT / Tuple / Option / Result — heap pointer, tag-dispatched.
@@ -1153,6 +1191,9 @@ class CallsHandlersMixin:
             elem_type = type_args[0] if type_args else None
             if elem_type is None:
                 return None
+            # #1091 / PR #1090 review: ground the element spelling (mirrors
+            # the show Array arm above).
+            elem_type = self._canonical_field_type(elem_type)
             return self._hash_array(elem_type, value_instrs, node, _seen)
         return self._hash_adt(base, ptype, value_instrs, node, _seen)
 

@@ -972,6 +972,23 @@ class MonomorphizationMixin:
                 if (constraint.ability_name == "Eq"
                         and self._adt_satisfies_eq(eq_name)):
                     continue
+                # #1086: an Eq-constrained var bound to an ALIAS or transparent-
+                # `Future` spelling (`MyInt` via `type MyInt = Int;`, `FI` /
+                # `Future<Int>`, an alias of a WHOLE ADT `MyBox`) is neither a
+                # primitive in `type_set` NOR a registered ADT with a layout, so
+                # both checks above missed it and the gate raised a wrong-loud
+                # E613 on a check-green program (the checker, alias-resolving,
+                # accepted the Eq).  `_type_eq_derivable` grounds the spelling
+                # (hop-by-hop alias walk + transparent-Future peel) and re-judges
+                # — the SAME oracle the `$eq` generator's field resolution
+                # mirrors, so the #732 checker↔codegen differential holds at this
+                # entry point too.  A genuinely non-Eq alias (`type BadArr =
+                # Array<Int>;`) grounds to a non-Eq type and still falls through
+                # to the E613 below.  The emitted clone name / message keep the
+                # un-ground `concrete` (the #772/#932 hard constraint).
+                if (constraint.ability_name == "Eq"
+                        and self._type_eq_derivable(eq_name, frozenset())):
+                    continue
                 # #898: a SPARSE multi-type-parameter ADT reached via the
                 # constructor-inferred path (`id1(MkErr(5))` on
                 # `Res<A, B> { MkOk(A), MkErr(B) }`) recovers only the type
