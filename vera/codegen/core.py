@@ -703,12 +703,19 @@ class CodeGenerator(
         # fused-handle check.  Derived from the return-type registry
         # (local Pass-1 registrations + the Pass-0 cross-module #628
         # harvest), not the local declarations, so imported and
-        # module-qualified calls classify too.
+        # module-qualified calls classify too.  #1109: the registry is
+        # matched with aliases resolved (an alias-spelled `-> @F`
+        # participates like the literal Future spelling) — Pass 0.5/1
+        # have already populated _type_aliases/_type_alias_params.
         self._future_ret_fns = compute_future_ret_fns(
             self._fn_ret_type_exprs,
+            self._type_aliases,
+            self._type_alias_params,
         )
         self._future_ret_module_fns = compute_future_ret_module_fns(
             self._module_fn_ret_type_exprs,
+            self._type_aliases,
+            self._type_alias_params,
         )
 
         # Pass 1.2: inject prelude ADTs and combinator implementations

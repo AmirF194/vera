@@ -106,6 +106,75 @@ def substitute_type_vars(
     return te
 
 
+def resolve_type_alias(
+    te: ast.TypeExpr,
+    type_aliases: dict[str, ast.TypeExpr],
+    type_alias_params: dict[str, tuple[str, ...]],
+) -> ast.TypeExpr | None:
+    """Resolve a ``TypeExpr`` through the alias chain to its terminal shape.
+
+    The general transitive alias walker every representation-level
+    classifier shares — :func:`resolve_fn_type_alias` below is the
+    fn-type-specialised view over this walk, and the fused-await
+    classifier (``vera/wasm/async_fusion.py``, #1109) uses it to
+    resolve alias-typed slots and declared returns before its literal
+    ``Future<Result<String, String>>`` check.  Aliases are transparent
+    everywhere else in the language; a classifier that probes runtime
+    representation must see through them too.
+
+    Lives here — the deliberately codegen-free shared monomorphizer
+    module (see the module docstring / #732) — so the WASM backend,
+    the codegen-free fusion predicates, and the monomorphizer can all
+    import it without an import cycle.
+
+    Walks iteratively (until a terminal shape or a cycle):
+
+    1. Unwraps ``RefinementType`` layers (any nesting depth) — callers
+       classify by runtime representation, and a refinement's
+       representation is its base type's.
+    2. A bared ``FnType`` is terminal wherever it appears.
+    3. For a ``NamedType`` found in ``type_aliases``, substitutes the
+       current ``type_args`` into the alias's type params (for a generic
+       alias like ``type Producer<T> = Future<T>``) and follows the
+       chain one hop.
+    4. A ``NamedType`` that is not an alias is terminal — returned
+       as-is (a primitive, an ADT, the literal ``Future<...>``).
+
+    Returns the terminal ``TypeExpr``, or ``None`` only on a cyclic
+    alias chain (``type A = B; type B = A``).  The type checker rejects
+    circular aliases upstream (``[E132]``, #648); the guard makes the
+    resolver terminate with ``None`` (the caller then falls to its loud
+    backstop) rather than spin forever — the same defence-in-depth
+    ``InferenceMixin._resolve_base_type_name`` and
+    ``_canonical_named_type`` carry.
+    """
+    seen: set[str] = set()
+    while True:
+        while isinstance(te, ast.RefinementType):
+            te = te.base_type
+        if isinstance(te, ast.FnType):
+            return te
+        if not isinstance(te, ast.NamedType):
+            return te
+        if te.name in seen:
+            return None
+        seen.add(te.name)
+        alias = type_aliases.get(te.name)
+        if alias is None:
+            return te
+        # Bind this hop's concrete type args to the alias's params so a
+        # generic alias body's type-var references resolve to the bound
+        # types (``type Producer<T> = Future<T>`` used as
+        # ``Producer<Result<...>>`` → ``Future<Result<...>>``).
+        params = type_alias_params.get(te.name)
+        if params and te.type_args and len(params) == len(te.type_args):
+            alias = substitute_type_vars(alias, dict(zip(params, te.type_args)))
+        if isinstance(alias, (ast.FnType, ast.NamedType, ast.RefinementType)):
+            te = alias
+            continue
+        return None
+
+
 def resolve_fn_type_alias(
     te: ast.TypeExpr,
     type_aliases: dict[str, ast.TypeExpr],
@@ -139,60 +208,24 @@ def resolve_fn_type_alias(
     import it without an import cycle (``vera/wasm/async_fusion.py``
     imports this module, so it cannot host a helper this module needs).
 
-    Walks iteratively (until the terminal ``FnType``, a non-resolvable
-    shape, or a cycle):
-
-    1. Unwraps ``RefinementType`` layers (any nesting depth).
-    2. Treats a bared ``FnType`` as terminal wherever it appears —
-       including an alias body that is a refinement DIRECTLY wrapping
-       an inline fn type (``type Foo = { @fn(...) | p };`` — PR #880
-       review, CodeRabbit Major: pre-fix the peeled ``FnType`` fell
-       through the ``NamedType`` check to ``None``).
-    3. For a ``NamedType`` whose ``type_aliases`` body is a ``FnType``,
-       substitutes the current ``NamedType``'s ``type_args`` into the
-       alias's type params (for a generic alias like
-       ``type Producer<T> = fn(String -> T)``) and loops — the
-       substituted ``FnType`` terminates at step 2.
-    4. For a ``NamedType`` aliasing another ``NamedType`` /
-       ``RefinementType``, substitutes any generic type args at this hop
-       and follows the chain one step.
-    5. Anything else (a bare ``NamedType`` that is not an alias, a
-       primitive) yields ``None`` — no ``FnType`` reachable.
-
-    The ``seen`` set guards against a cyclic alias chain
-    (``type A = B; type B = A``).  The type checker rejects circular
-    aliases upstream (``[E132]``, #648), so a cycle here can only arise
-    from malformed input; the guard makes the resolver terminate with
-    ``None`` (the caller then falls to its loud backstop) rather than
-    spin forever — the same defence-in-depth
-    ``InferenceMixin._resolve_base_type_name`` and
-    ``_canonical_named_type`` carry.
+    The walk itself lives in :func:`resolve_type_alias` above — this is
+    the fn-type-specialised view over it: the terminal shape is returned
+    iff it is an ``FnType``, else ``None`` (a bare ``NamedType`` that is
+    not an alias, a primitive, a terminal ADT — no ``FnType``
+    reachable).  Deriving the two from one walk keeps their depth-N
+    behaviour structurally identical: refinement layers unwrap at any
+    nesting depth (including an alias body that is a refinement
+    DIRECTLY wrapping an inline fn type — ``type Foo = { @fn(...) | p
+    };`` — PR #880 review, CodeRabbit Major), a bared ``FnType`` is
+    terminal wherever it appears, generic alias params are substituted
+    hop by hop (``type Producer<T> = fn(String -> T)`` used as
+    ``Producer<Future<...>>`` → ``fn(String -> Future<...>)``), and the
+    ``seen`` guard terminates a cyclic alias chain with ``None``
+    (defence-in-depth; the checker rejects cycles upstream with
+    ``[E132]``, #648).
     """
-    seen: set[str] = set()
-    while True:
-        while isinstance(te, ast.RefinementType):
-            te = te.base_type
-        if isinstance(te, ast.FnType):
-            return te
-        if not isinstance(te, ast.NamedType):
-            return None
-        if te.name in seen:
-            return None
-        seen.add(te.name)
-        alias = type_aliases.get(te.name)
-        if alias is None:
-            return None
-        # Bind this hop's concrete type args to the alias's params so a
-        # generic alias body's type-var references resolve to the bound
-        # types (``type Producer<T> = fn(String -> T)`` used as
-        # ``Producer<Future<...>>`` → ``fn(String -> Future<...>)``).
-        params = type_alias_params.get(te.name)
-        if params and te.type_args and len(params) == len(te.type_args):
-            alias = substitute_type_vars(alias, dict(zip(params, te.type_args)))
-        if isinstance(alias, (ast.FnType, ast.NamedType, ast.RefinementType)):
-            te = alias
-            continue
-        return None
+    resolved = resolve_type_alias(te, type_aliases, type_alias_params)
+    return resolved if isinstance(resolved, ast.FnType) else None
 
 
 def substitute_type_param_names(name: str, mapping: dict[str, str]) -> str:

@@ -30,7 +30,7 @@ from __future__ import annotations
 import dataclasses
 
 from vera import ast
-from vera.monomorphize import resolve_fn_type_alias
+from vera.monomorphize import resolve_fn_type_alias, resolve_type_alias
 
 # Http op name → (fused import name, expected arity).
 _FUSABLE_HTTP_OPS: dict[str, tuple[str, int]] = {
@@ -115,8 +115,36 @@ def _is_future_result_string_type(
     )
 
 
+def _resolves_to_future_result_string(
+    te: ast.TypeExpr,
+    type_aliases: dict[str, ast.TypeExpr],
+    type_alias_params: dict[str, tuple[str, ...]],
+) -> bool:
+    """True iff ``te`` — with type aliases resolved transitively — is
+    exactly ``Future<Result<String, String>>``.
+
+    Aliases are transparent everywhere else in the language; the
+    fused-await classifier resolves them too (#1109), so an alias-typed
+    slot or an alias-spelled declared return participates exactly like
+    the literal spelling.  The #843 ``apply_fn`` arm already resolved
+    fn-type aliases through :func:`resolve_fn_type_alias`; this helper
+    routes every OTHER classification site through the same transitive
+    walk (:func:`resolve_type_alias`) so their alias coverage cannot
+    drift.  A cyclic or otherwise unresolvable shape conservatively
+    returns ``False`` (identity lowering) — the pre-#1109 behaviour for
+    shapes the resolver cannot see through.
+    """
+    resolved = resolve_type_alias(te, type_aliases, type_alias_params)
+    return (
+        isinstance(resolved, ast.NamedType)
+        and _is_future_result_string_type(resolved.name, resolved.type_args)
+    )
+
+
 def compute_future_ret_fns(
     fn_ret_type_exprs: dict[str, ast.TypeExpr],
+    type_aliases: dict[str, ast.TypeExpr] | None = None,
+    type_alias_params: dict[str, tuple[str, ...]] | None = None,
 ) -> frozenset[str]:
     """Names of fns declared to return ``Future<Result<String, String>>``.
 
@@ -132,21 +160,24 @@ def compute_future_ret_fns(
     by both import-emission passes (the ``_scan_io_ops`` pre-scan and
     the ``WasmContext`` await lowering) so the two agree on which
     directly-awaited call results need the fused-handle runtime check.
-    The match is on the literal type expression — an alias like
-    ``type MyFut = Future<Result<String, String>>`` does not
-    participate (see spec §9.5.4 for the documented v1 boundary).
+    The match resolves type aliases transitively (#1109) — a helper
+    declared ``-> @MyFut`` with
+    ``type MyFut = Future<Result<String, String>>`` participates
+    exactly like the literal spelling.
     """
+    aliases = type_aliases if type_aliases is not None else {}
+    alias_params = type_alias_params if type_alias_params is not None else {}
     names: set[str] = set()
     for fn_name, ret in fn_ret_type_exprs.items():
-        if isinstance(ret, ast.NamedType) and _is_future_result_string_type(
-            ret.name, ret.type_args,
-        ):
+        if _resolves_to_future_result_string(ret, aliases, alias_params):
             names.add(fn_name)
     return frozenset(names)
 
 
 def compute_future_ret_module_fns(
     module_fn_ret_type_exprs: dict[tuple[tuple[str, ...], str], ast.TypeExpr],
+    type_aliases: dict[str, ast.TypeExpr] | None = None,
+    type_alias_params: dict[str, tuple[str, ...]] | None = None,
 ) -> frozenset[tuple[tuple[str, ...], str]]:
     """(module path, name) pairs returning ``Future<Result<String, String>>``.
 
@@ -157,11 +188,11 @@ def compute_future_ret_module_fns(
     misclassify the qualified call in both directions (PR #842 review
     round 2, confirmed with a name-collision repro).
     """
+    aliases = type_aliases if type_aliases is not None else {}
+    alias_params = type_alias_params if type_alias_params is not None else {}
     pairs: set[tuple[tuple[str, ...], str]] = set()
     for key, ret in module_fn_ret_type_exprs.items():
-        if isinstance(ret, ast.NamedType) and _is_future_result_string_type(
-            ret.name, ret.type_args,
-        ):
+        if _resolves_to_future_result_string(ret, aliases, alias_params):
             pairs.add(key)
     return frozenset(pairs)
 
@@ -256,9 +287,14 @@ def apply_fn_awaits_fused_future(
     ret = _apply_fn_closure_ret_type(
         arg.args[0], type_aliases, type_alias_params,
     )
-    return (
-        isinstance(ret, ast.NamedType)
-        and _is_future_result_string_type(ret.name, ret.type_args)
+    if ret is None:
+        return False
+    # The closure's declared return may itself spell the future type
+    # through an alias (`fn(String -> F)` with `type F = Future<...>`)
+    # — resolve it before the literal check, like every other site
+    # (#1109).
+    return _resolves_to_future_result_string(
+        ret, type_aliases, type_alias_params,
     )
 
 
@@ -276,22 +312,26 @@ def await_needs_check(
 
     Matches every shape that can carry a fused future to an await site:
     a ``Future<Result<String, String>>``-typed slot (let binding or
-    parameter), a directly-composed fused ``async(...)``, a call —
-    bare, imported, or module-qualified — to a function whose declared
-    return type is that future type (``future_ret_fns``, computed in
-    ``vera/codegen/core.py`` from the cross-module return-type
-    registry), an ``apply_fn`` on a closure whose *declared* return type
-    is that future type (the #843 indirect-closure arm, classified via
-    ``type_aliases`` + ``type_alias_params`` — the latter drives the
-    generic-alias type-arg substitution), and ``if``/``match``/block
-    compositions of those.  Shapes outside this set keep the identity
-    lowering.  Keep this predicate's coverage in sync with every call
-    shape codegen can produce.
+    parameter — spelled literally or through a type alias, resolved
+    transitively, #1109), a directly-composed fused ``async(...)``, a
+    call — bare, imported, or module-qualified — to a function whose
+    declared return type is that future type (``future_ret_fns``,
+    computed in ``vera/codegen/core.py`` from the cross-module
+    return-type registry), an ``apply_fn`` on a closure whose *declared*
+    return type is that future type (the #843 indirect-closure arm,
+    classified via ``type_aliases`` + ``type_alias_params`` — the
+    latter drives the generic-alias type-arg substitution), and
+    ``if``/``match``/block compositions of those.  Shapes outside this
+    set keep the identity lowering.  Keep this predicate's coverage in
+    sync with every call shape codegen can produce.
     """
     aliases = type_aliases if type_aliases is not None else {}
     alias_params = type_alias_params if type_alias_params is not None else {}
     if isinstance(arg, ast.SlotRef):
-        return _is_future_result_string_type(arg.type_name, arg.type_args)
+        return _resolves_to_future_result_string(
+            ast.NamedType(name=arg.type_name, type_args=arg.type_args),
+            aliases, alias_params,
+        )
     if isinstance(arg, ast.FnCall):
         if fused_async_target(arg) is not None:
             return True
