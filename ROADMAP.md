@@ -48,7 +48,6 @@ Exit criterion: each listed drift class has a generator or a gate, and a release
 | [#653](https://github.com/aallan/vera/issues/653) | Spec audit for §0.2 / §0.3 design-principle violations — the spec held to its own principles. |
 | [#528](https://github.com/aallan/vera/issues/528) | Gate the hand-edited numbers on the veralang.dev homepage against live counts (the Stage 18 landing-page audit found this class live). |
 | [#540](https://github.com/aallan/vera/issues/540) | lychee + markdownlint MD051 cross-doc anchor validation. |
-| [#737](https://github.com/aallan/vera/issues/737) | Complete the first live PyPI `veralang` release and verify both documented installation routes. |
 | [#1095](https://github.com/aallan/vera/issues/1095) | Verify the concurrent-await alias-Future limitation with a genuinely concurrent repro — spec §9.5.4's prose and the KNOWN_ISSUES row update (or fall away) with the verdict. |
 
 ## Stage 21 — The effect hardening sprint
