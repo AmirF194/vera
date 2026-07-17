@@ -9,6 +9,7 @@ Defects in shipped compiler, runtime, or tooling behaviour — this table matche
 | Bug | Issue |
 |-----|-------|
 | `ch05_closure_nat_return` (a run-level conformance program in the pre-commit + CI gate) trapped **once** in a full `check_conformance.py` run (`unreachable` in `main` — the sentinel `assert` or a GC shadow-stack guard) and has not reproduced in ~960 attempts across isolated, parallel, eager-GC, and hash-seed-swept executions; the emitted WAT is deterministic and correct. Suspected rare runtime/GC/wasmtime interaction, tracked so a future intermittent CI red resolves here instead of starting fresh. | [#996](https://github.com/aallan/vera/issues/996) |
+| `show`/`hash` of a value typed as an **alias of a whole ADT** (`type MyBox = Box;` then `show(@MyBox.0)`) loud-skips the enclosing function (E602) — the composite render path's `_parameterized_arg_type` recovers the bare alias name, which `_show_value` cannot resolve to a constructor layout. Loud-skip only, never a wrong value; the direct `@Box` spelling renders correctly. | [#1091](https://github.com/aallan/vera/issues/1091) |
 
 ## Limitations
 
