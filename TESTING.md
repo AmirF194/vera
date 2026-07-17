@@ -45,6 +45,7 @@ python scripts/check_spec_examples.py                # spec code blocks
 python scripts/check_readme_examples.py              # README code blocks
 python scripts/check_skill_examples.py               # SKILL.md code blocks
 python scripts/check_faq_examples.py                 # FAQ.md code blocks
+python scripts/check_pypi_readme_examples.py         # PYPI_README.md code blocks (parse + check + verify)
 python scripts/check_html_examples.py               # docs/index.html code blocks
 python scripts/check_version_sync.py                 # version consistency
 python scripts/check_wheel_availability.py           # pre-flight: every runtime dep has wheels for all supported platforms (#691 backstop)
@@ -645,6 +646,7 @@ Twenty-one scripts in `scripts/` validate cross-cutting concerns beyond unit tes
 | `check_readme_examples.py` | All Vera code blocks in README.md parse correctly |
 | `check_skill_examples.py` | All Vera code blocks in SKILL.md parse correctly |
 | `check_faq_examples.py` | All Vera code blocks in FAQ.md parse correctly |
+| `check_pypi_readme_examples.py` | All Vera code blocks in PYPI_README.md parse, check, and verify |
 | `check_examples_doc.py` | All Vera code blocks in EXAMPLES.md parse correctly |
 | `check_html_examples.py` | All Vera code blocks in docs/index.html pass parse + check + verify |
 | `check_site_assets.py` | Generated site assets under `docs/` are up-to-date |
@@ -725,7 +727,7 @@ Per `spec/00-introduction.md` §0.5.8: fields MAY be added (consumers MUST toler
 
 ## Pre-commit Hooks
 
-Every push is checked by 30 configured hooks across two stages: 28 are configured at the commit stage (after `pre-commit install`), and 2 (`check-changelog-updated`, `uv-lock-check`) are configured at the push stage (after `pre-commit install --hook-type pre-push`). Many commit-stage hooks use per-hook `files:` / `types:` filters and only fire when matching files are staged — a docs-only commit triggers a small subset, a compiler-level commit triggers most. Full list:
+Every push is checked by 31 configured hooks across two stages: 29 are configured at the commit stage (after `pre-commit install`), and 2 (`check-changelog-updated`, `uv-lock-check`) are configured at the push stage (after `pre-commit install --hook-type pre-push`). Many commit-stage hooks use per-hook `files:` / `types:` filters and only fire when matching files are staged — a docs-only commit triggers a small subset, a compiler-level commit triggers most. Full list:
 
 | Hook | What it does |
 |------|-------------|
@@ -746,6 +748,7 @@ Every push is checked by 30 configured hooks across two stages: 28 are configure
 | `check_examples_doc.py` | EXAMPLES.md code blocks parse correctly |
 | `check_skill_examples.py` | SKILL.md code blocks parse correctly |
 | `check_faq_examples.py` | FAQ.md code blocks parse correctly |
+| `check_pypi_readme_examples.py` | PYPI_README.md code blocks parse, check, and verify |
 | `check_html_examples.py` | HTML landing page code blocks pass parse + check + verify |
 | `check_doc_builtin_shadowing.py` | No doc example defines a function named after an opaque built-in (would fail `vera check` with E151); `spec/09` signature reference exempt ([#819](https://github.com/aallan/vera/issues/819)) |
 | `check_e602_clean.py` | No unexpected `[E602]` (body unsupported) / `[E604]` (param unsupported) silent skips outside the explicit allowlist (Layer 1 of [#626](https://github.com/aallan/vera/issues/626)) |
@@ -775,7 +778,7 @@ GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the
 | **test** | Python 3.11, 3.12, 3.13 × ubuntu-latest, macos-15, macos-26, windows-latest, plus advisory ubuntu-24.04-arm × 3.12 (13 combos) | `pytest -v` passes on all combinations |
 | **test** (coverage) | Python 3.12 x Ubuntu only | `pytest --cov=vera --cov-fail-under=80` |
 | **typecheck** | Python 3.12 x Ubuntu | `mypy vera/` clean in strict mode |
-| **lint** | Python 3.12 x Ubuntu | `check_changelog_updated.py`, `check_conformance.py`, `check_examples.py`, `check_examples_readme.py`, `check_version_sync.py`, `check_spec_examples.py`, `check_readme_examples.py`, `check_skill_examples.py`, `check_faq_examples.py`, `check_html_examples.py`, `check_e602_clean.py`, `check_doc_builtin_shadowing.py`, `check_diagnostic_fields.py`, `check_site_assets.py`, `check_licenses.py`, `check_doc_counts.py`, `check_limitations_sync.py`, `ruff check --select S vera/` (security rules) |
+| **lint** | Python 3.12 x Ubuntu | `check_changelog_updated.py`, `check_conformance.py`, `check_examples.py`, `check_examples_readme.py`, `check_version_sync.py`, `check_spec_examples.py`, `check_readme_examples.py`, `check_skill_examples.py`, `check_faq_examples.py`, `check_pypi_readme_examples.py`, `check_html_examples.py`, `check_e602_clean.py`, `check_doc_builtin_shadowing.py`, `check_diagnostic_fields.py`, `check_site_assets.py`, `check_licenses.py`, `check_doc_counts.py`, `check_limitations_sync.py`, `ruff check --select S vera/` (security rules) |
 | **security** | Ubuntu | [Gitleaks](https://github.com/gitleaks/gitleaks-action) secret scanning on full history |
 | **dependency-audit** | Python 3.12 x Ubuntu | `pip-audit --skip-editable --ignore-vuln CVE-2026-4539` — checks all installed packages against the OSV vulnerability database (skips the local editable `vera` package; `CVE-2026-4539` suppressed pending a pygments fix release) |
 | **wheel-preflight** | Python 3.12 x Ubuntu | `python scripts/check_wheel_availability.py` — verifies every runtime dep has prebuilt wheels for every (platform, python-version) tuple documented in README §Supported platforms; structural backstop for #691-class install regressions |

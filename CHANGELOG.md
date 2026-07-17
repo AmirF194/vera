@@ -83,6 +83,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Documentation
 
 - **Spec §11.8 now matches code generation: every non-trivial contract is compiled as a runtime check regardless of the verifier's tier** ([#958](https://github.com/aallan/vera/issues/958)). The section previously claimed Tier-1-proved contracts are omitted from the compiled output; code generation is tier-agnostic (`vera/codegen/contracts.py` has no notion of tiers), so a Tier-1 proof means the emitted check provably never fires, not that it is absent — the runtime guard is the deliberate backstop that keeps a *false* Tier 1 a loud trap rather than a silent wrong answer.
+- **`scripts/check_pypi_readme_examples.py` gates the PyPI project page's Vera blocks** at parse + check + verify (pre-commit hook `pypi-readme-examples` + a CI lint step): the Try-it program on PyPI is now held to the same standard as the other doc surfaces, and a broken contract in it fails the gate.
 - Spec §0.5.1 and SKILL.md now state that `?` inside a type printed by a diagnostic marks a component the checker could not infer (`Array<?>`) — a rendering marker distinct from the typed-hole expression `?` (§4.17) written in source.
 - The concurrent-await alias-`Future` limitation (spec §9.5.4) is now anchored to a tracking issue ([#1095](https://github.com/aallan/vera/issues/1095)), with a matching `KNOWN_ISSUES.md` limitation row: confirming it still reproduces requires a genuinely concurrent repro, since an eager-path probe never reaches the handle-check.
 

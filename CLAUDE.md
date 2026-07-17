@@ -66,6 +66,7 @@ python scripts/check_readme_examples.py # Verify README code blocks parse
 python scripts/check_examples_doc.py  # Verify EXAMPLES.md code blocks parse
 python scripts/check_skill_examples.py # Verify SKILL.md code blocks parse
 python scripts/check_faq_examples.py  # Verify FAQ code blocks parse
+python scripts/check_pypi_readme_examples.py # Verify PYPI_README code blocks parse + check + verify
 python scripts/check_html_examples.py # Verify HTML code blocks parse + check + verify
 python scripts/check_doc_builtin_shadowing.py # Verify no doc example redefines a built-in (E151; #819)
 python scripts/check_diagnostic_fields.py # Verify every diagnostic carries rationale + spec_ref (+ fix for errors; warnings exempt) or a # diag-fields-exempt reason — waives missing/unresolvable fields only, never a factually wrong spec_ref/error_code (#682)
