@@ -72,20 +72,6 @@ The **Vera: Restart Language Server** command restarts the server
 
 ## Installation
 
-### VS Code Marketplace
-
-Install **Vera Language** from the Extensions view, or run:
-
-```bash
-code --install-extension veralang.vera-language
-```
-
-### From VSIX
-
-```bash
-code --install-extension vera-language-0.2.0.vsix
-```
-
 ### From source
 
 **Fresh clone:**
