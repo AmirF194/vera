@@ -232,10 +232,27 @@ def _leaked_placeholders_to_unknown(ty: Type) -> Type:
             tuple(_leaked_placeholders_to_unknown(a) for a in ty.type_args),
         )
     if isinstance(ty, FunctionType):
+        # The effect row scrubs too: ``pretty_effect`` renders each
+        # ``EffectInstance.type_args``, so a leak inside e.g.
+        # ``effects(<State<V#b>>)`` would surface exactly like a
+        # parameter-position leak (PR #1088 review).
+        effect = ty.effect
+        if isinstance(effect, ConcreteEffectRow):
+            effect = ConcreteEffectRow(
+                frozenset(
+                    EffectInstance(
+                        e.name,
+                        tuple(_leaked_placeholders_to_unknown(a)
+                              for a in e.type_args),
+                    )
+                    for e in effect.effects
+                ),
+                effect.row_var,
+            )
         return FunctionType(
             tuple(_leaked_placeholders_to_unknown(p) for p in ty.params),
             _leaked_placeholders_to_unknown(ty.return_type),
-            ty.effect,
+            effect,
         )
     if isinstance(ty, RefinedType):
         return RefinedType(

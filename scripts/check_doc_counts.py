@@ -450,6 +450,11 @@ def main() -> int:
         "total tests",
     )
     check_readme(
+        r"([\d,]+) tests, \d+% code coverage",
+        live_total_tests,
+        "project-status tests",
+    )
+    check_readme(
         r"tests across (\d+) files",
         live_test_files,
         "test file count",

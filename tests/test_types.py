@@ -365,6 +365,19 @@ class TestPrettyInferredType:
         assert pretty_inferred_type(AdtType("Array", (TypeVar("V#b"),))) \
             == "Array<?>"
 
+    def test_builtin_var_in_function_effect_row(self) -> None:
+        """A leaked var inside a function type's EFFECT ROW scrubs too —
+        ``pretty_effect`` renders ``EffectInstance.type_args``, so an
+        unscrubbed row would surface the bare letter (PR #1088 review)."""
+        fn_ty = FunctionType(
+            (INT,), BOOL,
+            ConcreteEffectRow(frozenset({
+                EffectInstance("State", (TypeVar("V#b"),))})),
+        )
+        out = pretty_inferred_type(fn_ty)
+        assert "State<?>" in out, out
+        assert "V" not in out, out
+
     def test_multiple_nested_builtin_vars(self) -> None:
         assert pretty_inferred_type(
             AdtType("Map", (TypeVar("K#b"), TypeVar("V#b")))
