@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **The install section's language-server note names both routes** — the source `.[dev]` install already includes the server, while the PyPI route needs the `veralang[lsp]` extra — instead of an ambiguous "the `[lsp]` extra shown above."
 - **The install section's source-route explanation spans the full column** on veralang.dev. The paragraph carried a `max-width:56ch` cap that left a two-sentence block crammed into the left half beside the full-width code blocks; the cap is removed so it fills the column like the blocks it sits between.
 - **The release workflow's tag-existence probe treats a 404 as "tag absent"** instead of capturing the error body. `gh api` prints the 404 JSON on stdout, so the first production run of the tag/Release job compared `{"message":"Not Found"...}` against the merge SHA, tripped the immutability guard, and failed after PyPI had already accepted the v0.1.5 files; the probe result is now shape-validated to a 40-hex SHA. The v0.1.5 tag and GitHub Release were completed manually from the run's registry-verified artifact per the RELEASING.md recovery runbook.
 

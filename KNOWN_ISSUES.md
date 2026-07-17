@@ -8,6 +8,7 @@ Defects in shipped compiler, runtime, or tooling behaviour — this table matche
 
 | Bug | Issue |
 |-----|-------|
+| A codegen `[E602]` skip drops the function from the emitted module but leaves its callers' `call`/`return_call` in place, so a check- and verify-clean program whose skipped construct sits in a *called helper* fails at `run`/`compile` with a raw wasmtime `unknown func` error instead of a source-located diagnostic. Loud, not silent (never a wrong answer); the fix propagates the skip to callers or diagnoses the dropped callee at the call site. | [#1100](https://github.com/aallan/vera/issues/1100) |
 | `ch05_closure_nat_return` (a run-level conformance program in the pre-commit + CI gate) trapped **once** in a full `check_conformance.py` run (`unreachable` in `main` — the sentinel `assert` or a GC shadow-stack guard) and has not reproduced in ~960 attempts across isolated, parallel, eager-GC, and hash-seed-swept executions; the emitted WAT is deterministic and correct. Suspected rare runtime/GC/wasmtime interaction, tracked so a future intermittent CI red resolves here instead of starting fresh. | [#996](https://github.com/aallan/vera/issues/996) |
 
 ## Limitations

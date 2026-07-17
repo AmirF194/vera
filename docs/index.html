@@ -593,7 +593,7 @@ vera compile --target browser examples/hello_world.vera</pre>
       </div>
       </div>
 
-      <p style="color:var(--ink-500);margin-top:1.25rem">Live proof-aware diagnostics, hover, slot go-to-definition, and typed-hole completion come from the <a href="https://github.com/aallan/vera/blob/main/LSP_SERVER.md">language server</a>, installed with the <code>[lsp]</code> extra shown above (source checkout: <code>pip install -e ".[lsp]"</code>). Any editor with a generic LSP client can point at <code>vera lsp</code> directly.</p>
+      <p style="color:var(--ink-500);margin-top:1.25rem">Live proof-aware diagnostics, hover, slot go-to-definition, and typed-hole completion come from the <a href="https://github.com/aallan/vera/blob/main/LSP_SERVER.md">language server</a>. The source install above (<code>.[dev]</code>) already includes it; on the PyPI route add it with <code>python -m pip install "veralang[lsp]"</code>, or use <code>pip install -e ".[lsp]"</code> for a lighter source checkout. Any editor with a generic LSP client can point at <code>vera lsp</code> directly.</p>
     </div>
   </section>
 
