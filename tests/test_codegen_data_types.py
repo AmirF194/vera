@@ -1024,6 +1024,311 @@ public fn main(-> @Unit)
         # observable), then the match body prints "end".
         assert _run_io(source, fn="main") == "sideend"
 
+    # ---- #1031: a transparent Future<Unit> component erases like bare Unit --
+    # A `Future<Unit>` field is zero-size exactly like `Unit` (types.py
+    # `erases_to_unit` recurses through the transparent `Future` wrapper).  The
+    # three data.py declaration guards and the constructor-argument WASM-type
+    # inference keyed on the bare string "Unit", so `Future<Unit>` (slot name
+    # "Future<Unit>") missed the zero-size branch and `CodegenSkip`ped the
+    # enclosing function (E602) on a check-green program.  These pin the four
+    # sites end-to-end: construction (`Tuple(async(()), n)` — the ctor-arg
+    # inference gate), the let-destructure guard, and the two match-pattern
+    # guards (`_sub_pattern_wasm_type` + `_extract_constructor_fields`).  The
+    # non-zero-size Int component must land at the correct offset after the
+    # zero-size Future<Unit> field and be recovered with the right value.
+
+    def test_tuple_future_unit_component_let_destructure_runs(self) -> None:
+        """let Tuple<@Future<Unit>, @Int> = ... destructures; the Int survives.
+
+        Exercises the ctor-arg inference gate (`async(())` field) and the
+        let-destruct declaration guard (data.py `_translate_let_destruct`).
+        """
+        source = """\
+private fn mkt(@Int -> @Tuple<Future<Unit>, Int>)
+  requires(true) ensures(true) effects(<Async>)
+{ Tuple(async(()), @Int.0) }
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let Tuple<@Future<Unit>, @Int> = mkt(4242);
+  @Int.0
+}
+"""
+        assert _run(source, fn="f") == 4242
+
+    def test_tuple_future_unit_component_match_extract_runs(self) -> None:
+        """match Tuple(@Future<Unit>, @Int) recovers the Int at the right offset.
+
+        Exercises the ctor-arg inference gate plus both match-pattern guards:
+        `_sub_pattern_wasm_type` (offset walk in `_collect_nested_tag_checks`)
+        and `_extract_constructor_fields` (field extraction).
+        """
+        source = """\
+private fn mkt(@Int -> @Tuple<Future<Unit>, Int>)
+  requires(true) ensures(true) effects(<Async>)
+{ Tuple(async(()), @Int.0) }
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @Tuple<Future<Unit>, Int> = mkt(4242);
+  match @Tuple<Future<Unit>, Int>.0 {
+    Tuple(@Future<Unit>, @Int) -> @Int.0
+  }
+}
+"""
+        assert _run(source, fn="f") == 4242
+
+    # ---- #1042: the nested-tag walk gives erased components zero width ----
+    # Construction stores NOTHING for a zero-size component, but the nested
+    # pattern tag walk (`_collect_nested_tag_checks` via
+    # `_sub_pattern_wasm_type`) gave it 4 bytes — the registered layout's
+    # generic type or an "i32" default — so every nested constructor tag
+    # AFTER the erased component was checked at the wrong offset, failed
+    # against garbage, and match fall-through silently selected a LATER arm
+    # (the extraction walks compute offsets correctly, so the wrong arm
+    # returned the real value: -4242 where 4242 was constructed).  The three
+    # tests below pin the discriminating shape — a two-constructor nested
+    # pattern whose tag decides between a positive and a negated arm — for
+    # the transparent `Future<Unit>` spelling, the bare `Unit` spelling
+    # (pre-existing on main since #902's zero-size components), and a user
+    # ADT parent (registered layout, not the recomputed Tuple one).
+
+    def test_tuple_future_unit_then_nested_ctor_picks_right_arm(self) -> None:
+        """Tuple(@Future<Unit>, MkBox(@Int)) selects the MkBox arm.
+
+        RED on base: -4242 (the MkNot arm ran for an MkBox value)."""
+        source = """\
+private data BB { MkBox(Int), MkNot(Int) }
+
+private fn mkt(@Int -> @Tuple<Future<Unit>, BB>)
+  requires(true) ensures(true) effects(<Async>)
+{ Tuple(async(()), MkBox(@Int.0)) }
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @Tuple<Future<Unit>, BB> = mkt(4242);
+  match @Tuple<Future<Unit>, BB>.0 {
+    Tuple(@Future<Unit>, MkBox(@Int)) -> @Int.0,
+    Tuple(@Future<Unit>, MkNot(@Int)) -> 0 - @Int.0
+  }
+}
+"""
+        assert _run(source, fn="f") == 4242
+
+    def test_tuple_bare_unit_then_nested_ctor_picks_right_arm(self) -> None:
+        """The bare-Unit spelling of the same shape (pre-existing on main).
+
+        RED on base: -4242."""
+        source = """\
+private data BB { MkBox(Int), MkNot(Int) }
+
+private fn mkt(@Int -> @Tuple<Unit, BB>)
+  requires(true) ensures(true) effects(pure)
+{ Tuple((), MkBox(@Int.0)) }
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  let @Tuple<Unit, BB> = mkt(4242);
+  match @Tuple<Unit, BB>.0 {
+    Tuple(@Unit, MkBox(@Int)) -> @Int.0,
+    Tuple(@Unit, MkNot(@Int)) -> 0 - @Int.0
+  }
+}
+"""
+        assert _run(source, fn="f") == 4242
+
+    def test_user_adt_future_unit_then_nested_ctor_picks_right_arm(self) -> None:
+        """A user-ADT parent: the walk must not consult the registered
+        layout for the erased component (it gives zero-size fields 4 bytes,
+        #1043) — the binding pattern's own erasure decides the zero width.
+
+        RED on base: -4242."""
+        source = """\
+private data BB { MkBox(Int), MkNot(Int) }
+private data P { MkP(Future<Unit>, BB) }
+
+private fn mkp(@Int -> @P)
+  requires(true) ensures(true) effects(<Async>)
+{ MkP(async(()), MkBox(@Int.0)) }
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @P = mkp(4242);
+  match @P.0 {
+    MkP(@Future<Unit>, MkBox(@Int)) -> @Int.0,
+    MkP(@Future<Unit>, MkNot(@Int)) -> 0 - @Int.0
+  }
+}
+"""
+        assert _run(source, fn="f") == 4242
+
+    # ---- PR #1035 review: an ALIAS to a compound Future<Unit> erases too ----
+    # `_slot_name_erases_to_unit` originally resolved aliases through
+    # `_resolve_base_type_name`, which recurses on the alias target's NAME
+    # only and drops type arguments — "FU" resolved to "Future" (not
+    # "Future<Unit>"), failed the `Future<...>` branch, and the component
+    # fell through to the E602 CodegenSkip on a check+verify-green program.
+    # An alias INSIDE `Future<...>` already worked (the inner name is
+    # resolved after the wrapper is peeled); an alias TO `Future<...>` did
+    # not.  The helper now canonicalizes an alias to its FULL compound
+    # target spelling (via the alias table's TypeExpr) before the zero-size
+    # tests, including chains of aliases ending at a compound.
+
+    def test_tuple_alias_to_future_unit_let_destructure_runs(self) -> None:
+        """type FU = Future<Unit>; a @FU component let-destructures away."""
+        source = """\
+type FU = Future<Unit>;
+
+private fn mkt(@Int -> @Tuple<FU, Int>)
+  requires(true) ensures(true) effects(<Async>)
+{ Tuple(async(()), @Int.0) }
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let Tuple<@FU, @Int> = mkt(4343);
+  @Int.0
+}
+"""
+        assert _run(source, fn="f") == 4343
+
+    def test_tuple_alias_to_future_unit_match_extract_runs(self) -> None:
+        """type FU = Future<Unit>; a @FU match component erases; Int lands."""
+        source = """\
+type FU = Future<Unit>;
+
+private fn mkt(@Int -> @Tuple<FU, Int>)
+  requires(true) ensures(true) effects(<Async>)
+{ Tuple(async(()), @Int.0) }
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @Tuple<FU, Int> = mkt(4343);
+  match @Tuple<FU, Int>.0 {
+    Tuple(@FU, @Int) -> @Int.0
+  }
+}
+"""
+        assert _run(source, fn="f") == 4343
+
+    def test_tuple_alias_chain_to_compound_future_runs(self) -> None:
+        """An alias-of-alias chain ending at a compound (`FUB -> FUA ->
+        Future<UA>`, `UA -> Unit`) erases through every hop: the chain to
+        the compound target and the aliased payload inside it."""
+        source = """\
+type UA = Unit;
+type FUA = Future<UA>;
+type FUB = FUA;
+
+private fn mkt(@Int -> @Tuple<FUB, Int>)
+  requires(true) ensures(true) effects(<Async>)
+{ Tuple(async(()), @Int.0) }
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let Tuple<@FUB, @Int> = mkt(4747);
+  @Int.0
+}
+"""
+        assert _run(source, fn="f") == 4747
+
+    # ---- #1037: an alias to a NON-zero-size compound maps to its WAT type --
+    # `_slot_name_to_wasm_type` resolved aliases through the same name-only
+    # `_resolve_base_type_name` hop PR #1035's review fixed in
+    # `_slot_name_erases_to_unit`: `type FI = Future<Int>` resolved to bare
+    # "Future" (type args dropped), matched no branch, returned None, and the
+    # component/binding E602-skipped its function on a check+verify-green
+    # program — while the direct `Future<Int>` spelling compiled fine.  The
+    # mapper now canonicalizes an alias to its target's full compound
+    # spelling through the same shared walk as the zero-size keying, so an
+    # alias maps exactly like its target written directly: the `FI`
+    # component binds a real i64, `await` recovers the payload, and the
+    # non-alias sibling lands at the correct offset.  Zero-size erasure is
+    # untouched (`FI` is NOT erased — see the #1031 tests above for the
+    # erasing duals).
+
+    def test_tuple_alias_to_future_int_let_destructure_runs(self) -> None:
+        """type FI = Future<Int>; a @FI component binds a real i64 local."""
+        source = """\
+type FI = Future<Int>;
+
+private fn mkt(@Int -> @Tuple<FI, Int>)
+  requires(true) ensures(true) effects(<Async>)
+{ Tuple(async(41), @Int.0) }
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let Tuple<@FI, @Int> = mkt(43);
+  await(@FI.0) * 100 + @Int.0
+}
+"""
+        assert _run(source, fn="f") == 4143
+
+    def test_tuple_alias_to_future_int_match_extract_runs(self) -> None:
+        """type FI = Future<Int>; a @FI match binding extracts the i64 field."""
+        source = """\
+type FI = Future<Int>;
+
+private fn mkt(@Int -> @Tuple<FI, Int>)
+  requires(true) ensures(true) effects(<Async>)
+{ Tuple(async(41), @Int.0) }
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @Tuple<FI, Int> = mkt(43);
+  match @Tuple<FI, Int>.0 {
+    Tuple(@FI, @Int) -> await(@FI.0) * 100 + @Int.0
+  }
+}
+"""
+        assert _run(source, fn="f") == 4143
+
+    def test_tuple_alias_chain_to_future_int_runs(self) -> None:
+        """An alias-of-alias chain to a representable compound (`FIB -> FIA
+        -> Future<IA>`, `IA -> Int`) maps through every hop to i64."""
+        source = """\
+type IA = Int;
+type FIA = Future<IA>;
+type FIB = FIA;
+
+private fn mkt(@Int -> @Tuple<FIB, Int>)
+  requires(true) ensures(true) effects(<Async>)
+{ Tuple(async(41), @Int.0) }
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let Tuple<@FIB, @Int> = mkt(43);
+  await(@FIB.0) * 100 + @Int.0
+}
+"""
+        assert _run(source, fn="f") == 4143
+
+    def test_standalone_let_alias_to_future_int_runs(self) -> None:
+        """A standalone `let @FI = async(41);` binds through the same mapper
+        (the plain-LetStmt caller in context.py) — `let @Future<Int>` already
+        compiled; the alias spelling must too."""
+        source = """\
+type FI = Future<Int>;
+
+public fn f(-> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @FI = async(41);
+  await(@FI.0)
+}
+"""
+        assert _run(source, fn="f") == 41
+
 
 class TestAdtStringFields:
     """ADT constructors with String/Array fields (bug #266)."""

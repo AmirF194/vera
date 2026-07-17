@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+from collections.abc import Iterator
 
 from vera import ast
 from vera.environment import (
@@ -170,78 +171,157 @@ class RegistrationMixin:
     def _check_alias_cycles(self, program: ast.Program) -> None:
         """Detect cyclic type aliases and emit `[E132]`.
 
-        Walks the alias-target chain following the same recursion
-        the codegen helper `_type_expr_to_wasm_type` follows: into
-        `RefinementType.base_type` (no shape change) and across
-        `NamedType` references that name another alias.  Other
-        constructors (`Array<T>`, `FnType`, `(A, B)`) terminate the
-        walk because `_type_expr_to_wasm_type` returns a concrete
-        WASM type at those nodes without recursing into their
-        children — so cycles that pass *through* them are not the
-        ones that trip codegen.
+        Spec §2.6.3 requires the alias reference graph to be acyclic.
+        This walks the directed graph whose nodes are the program's
+        aliases and whose edges run from an alias to every other alias
+        its target *structurally* references — the target's own
+        `NamedType` head, every `type_arg` at any nesting depth, and
+        the base of any `RefinementType` wrapper.
+
+        The rule is structural: not every cyclic spelling would fail
+        later on its own.  `type F = Future<F>` crashes codegen with a
+        `RecursionError` (#1059 — `_type_expr_to_wasm_type` recurses
+        through `Future`'s type argument); `type L = Array<L>` compiles
+        to a degenerate type whose only inhabitant is `[]`; a
+        self-reference inside a type argument the generic alias
+        discards (`type W<T> = Int; type C = W<C>`) even resolves to
+        the generic's concrete body.  All are rejected by the one
+        acyclicity rule rather than by enumerating which spellings
+        happen to crash — no usage analysis of generic parameters.
+
+        Descending into `type_args` is the #1059 extension.  The original
+        #648 pass mirrored codegen's alias walker exactly — bare
+        `type A = B` references and `RefinementType` bases only — and so
+        followed no `type_arg` edge, silently admitting every
+        through-`type_arg` cycle.
+
+        A generic alias's own type *parameters* are excluded from the
+        reference set: in `type Box<T> = Array<T>` the `T` is bound
+        locally and never counts as a reference to a same-named alias,
+        so a parameterised abbreviation is not mistaken for a self-cycle.
         """
         alias_decls: dict[str, ast.TypeAliasDecl] = {}
         for tld in program.declarations:
             if isinstance(tld.decl, ast.TypeAliasDecl):
                 alias_decls.setdefault(tld.decl.name, tld.decl)
 
-        walked: set[str] = set()
-        for name, decl in alias_decls.items():
-            if name in walked:
+        # Standard three-colour DFS: `on_stack` (grey) holds the current
+        # path so a back-edge into it is a cycle; `safe` (black) holds
+        # aliases fully explored with no cycle reachable; `reported`
+        # suppresses a second diagnostic for aliases already named in an
+        # emitted cycle (one E132 per cycle is enough to act on).
+        # Iterative with an explicit frame stack: a *legal* alias chain
+        # declared deepest-first would recurse once per hop and overflow
+        # Python's call stack around a thousand aliases — a checker
+        # crash on valid input, the acyclic sibling of the #1059
+        # RecursionError (PR #1066 review).
+        safe: set[str] = set()
+        reported: set[str] = set()
+
+        def refs_of(name: str) -> list[str]:
+            decl = alias_decls[name]
+            return self._referenced_aliases(
+                decl.type_expr, alias_decls, set(decl.type_params or ())
+            )
+
+        def visit(root: str) -> None:
+            path = [root]
+            on_stack = {root}
+            # Each frame pairs an alias with an iterator over its
+            # outgoing references; exhausting the iterator pops the
+            # frame (the alias is fully explored).
+            frames: list[tuple[str, Iterator[str]]] = [
+                (root, iter(refs_of(root)))
+            ]
+            while frames:
+                name, refs_iter = frames[-1]
+                ref = next(refs_iter, None)
+                if ref is None:
+                    frames.pop()
+                    safe.add(name)
+                    on_stack.discard(name)
+                    path.pop()
+                    continue
+                if ref in on_stack:
+                    cycle = path[path.index(ref):] + [ref]
+                    if not any(n in reported for n in cycle):
+                        self._error(
+                            alias_decls[cycle[0]],
+                            f"Cyclic type alias `{cycle[0]}`: "
+                            f"{' -> '.join(cycle)}.",
+                            rationale=(
+                                "Type aliases must form an acyclic "
+                                "reference graph: expanding an alias must "
+                                "reach a concrete type in finitely many "
+                                "steps.  Cycles threaded through `Future` "
+                                "type arguments crash codegen with "
+                                "unbounded recursion; every other cyclic "
+                                "spelling is rejected by the same "
+                                "structural rule rather than special-cased "
+                                "by whether it happens to compile."
+                            ),
+                            fix=(
+                                "Replace one alias in the cycle with a "
+                                "concrete type, or with an `ADT` declared "
+                                "via `data` (which can be self-referential "
+                                "because the indirection is a heap "
+                                "pointer)."
+                            ),
+                            spec_ref='Chapter 2, Section 2.6.3 "Type Aliases with Refinements"',
+                            error_code="E132",
+                        )
+                        reported.update(cycle)
+                    continue
+                if ref in safe or ref in reported:
+                    continue
+                path.append(ref)
+                on_stack.add(ref)
+                frames.append((ref, iter(refs_of(ref))))
+
+        for name in alias_decls:
+            if name in safe or name in reported:
                 continue
-            seen = {name}
-            chain = [name]
-            te = decl.type_expr
-            while True:
-                target = self._alias_chain_target(te, alias_decls)
-                if target is None:
-                    break
-                if target in seen:
-                    cycle = " -> ".join(chain + [target])
-                    self._error(
-                        decl,
-                        f"Cyclic type alias `{name}`: {cycle}.",
-                        rationale=(
-                            "Type aliases must eventually resolve to a "
-                            "concrete type.  A cycle leaves the alias "
-                            "with no underlying representation and "
-                            "would crash codegen with unbounded "
-                            "recursion."
-                        ),
-                        fix=(
-                            "Replace one alias in the cycle with a "
-                            "concrete type, or with an `ADT` declared "
-                            "via `data` (which can be self-referential "
-                            "because the indirection is a heap "
-                            "pointer)."
-                        ),
-                        spec_ref='Chapter 2, Section 2.6.3 "Type Aliases with Refinements"',
-                        error_code="E132",
-                    )
-                    break
-                seen.add(target)
-                chain.append(target)
-                te = alias_decls[target].type_expr
-            walked.update(seen)
+            visit(name)
 
     @staticmethod
-    def _alias_chain_target(
-        te: ast.TypeExpr, aliases: dict[str, ast.TypeAliasDecl],
-    ) -> str | None:
-        """If `te` would cause codegen's alias walker to recurse into
-        another alias, return that alias's name.  Else None.
+    def _referenced_aliases(
+        te: ast.TypeExpr,
+        aliases: dict[str, ast.TypeAliasDecl],
+        exclude: set[str],
+    ) -> list[str]:
+        """Alias names `te` structurally references, outer-to-inner and
+        left-to-right so the reported cycle path is deterministic.
 
-        Mirrors the recursion shape of
-        `vera/codegen/core.py::_type_expr_to_wasm_type`: peels
-        `RefinementType` layers (which the codegen helper recurses
-        through unconditionally) and stops at the first non-alias
-        constructor or non-aliased `NamedType`.
+        Descends into `NamedType.type_args` (so a self-reference buried
+        in `Future<F>` / `Array<L>` is seen — the #1059 extension) and
+        `RefinementType.base_type` (so a cycle hidden behind a refinement
+        wrapper is seen — #648).  `FnType` parameter/return positions are
+        deliberately NOT descended: a function value is a table-index
+        (pointer) indirection, so an alias reference there never
+        recursively expands the alias's representation — the same
+        exemption spec 2.6.3 grants `data` ADTs.  `type FA = fn(FA ->
+        Int) effects(pure);` therefore registers cleanly (and
+        self-application is separately bounded by finite alias
+        unfolding at the use site).
+        `exclude` holds the enclosing alias's own type parameters, which
+        are locally bound and never count as a reference to a like-named
+        alias.
+
+        Iterative (explicit stack) so a deeply nested spelling cannot
+        overflow the Python call stack; pushes type_args reversed to
+        keep the traversal depth-first left-to-right.
         """
-        while isinstance(te, ast.RefinementType):
-            te = te.base_type
-        if isinstance(te, ast.NamedType) and te.name in aliases:
-            return te.name
-        return None
+        out: list[str] = []
+        stack: list[ast.TypeExpr] = [te]
+        while stack:
+            t = stack.pop()
+            if isinstance(t, ast.NamedType):
+                if t.name in aliases and t.name not in exclude:
+                    out.append(t.name)
+                stack.extend(reversed(t.type_args or ()))
+            elif isinstance(t, ast.RefinementType):
+                stack.append(t.base_type)
+        return out
 
     def _register_decl(
         self, decl: ast.Decl, visibility: str | None = None,

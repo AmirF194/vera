@@ -12,25 +12,13 @@ Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verificati
 
 ## Where we are
 
-7,536 tests, 160 conformance programs, 38 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
+7,992 tests, 163 conformance programs, 39 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
 
 ## Stage 19 — The verification completeness sprint
 
 *`vera verify` tells the whole truth.*
 
-### Bug sprint — monomorphizer and verifier gaps first
-
-Three bugs remain in the sprint's bug-PR cluster (the verification-completeness rows below are the sprint's remaining scope):
-
-**PR D — zero-size declaration guards (2).** [#1031](https://github.com/aallan/vera/issues/1031) a `Future<Unit>` destructure/match component is check-green but E602-skips the enclosing fn — four `wasm/data.py` declaration guards key on the bare `Unit` name instead of representation (`erases_to_unit`); [#1037](https://github.com/aallan/vera/issues/1037) the sibling name-only alias resolution in `_slot_name_to_wasm_type` skips `type FI = Future<Int>;` components the same way. In review as [#1035](https://github.com/aallan/vera/pull/1035).
-
-**PR E — await-scrutinee inference (1).** [#1038](https://github.com/aallan/vera/issues/1038) `match await(@Future<ADT>.0)` is check-green but E602-skips on scrutinee WASM-type inference — unwrap the awaited `Future<T>` the way the let-binding path already does. Fix in progress.
-
-[#996](https://github.com/aallan/vera/issues/996) stays a watch-only row — an unreproducible conformance flake, not a fix target.
-
-KNOWN_ISSUES carries a family of verification-completeness gaps — an obligation not emitted, a guard not planted — individually small and sharing machinery. This stage retires each. The per-component target-type table threaded into codegen (the enabler [#820](https://github.com/aallan/vera/issues/820) built) is the shared metadata the staged narrowing rows below reuse.
-
-Exit criterion: every verification-completeness and guard-deferral row in KNOWN_ISSUES is retired.
+Verification-completeness gaps — an obligation not emitted, a guard not planted — individually small; the `@Nat`-narrowing rows ([#754](https://github.com/aallan/vera/issues/754), [#757](https://github.com/aallan/vera/issues/757), [#765](https://github.com/aallan/vera/issues/765)) reuse the per-component target-type metadata the [#820](https://github.com/aallan/vera/issues/820) enabler provides, while the reporting-completeness and hardening rows each carry their own root cause:
 
 | Issue | What |
 |---|---|
@@ -60,7 +48,7 @@ Exit criterion: each listed drift class has a generator or a gate, and a release
 | [#653](https://github.com/aallan/vera/issues/653) | Spec audit for §0.2 / §0.3 design-principle violations — the spec held to its own principles. |
 | [#528](https://github.com/aallan/vera/issues/528) | Gate the hand-edited numbers on the veralang.dev homepage against live counts (the Stage 18 landing-page audit found this class live). |
 | [#540](https://github.com/aallan/vera/issues/540) | lychee + markdownlint MD051 cross-doc anchor validation. |
-| [#737](https://github.com/aallan/vera/issues/737) | Complete the first live PyPI `veralang` release and verify both documented installation routes. |
+| [#1095](https://github.com/aallan/vera/issues/1095) | Verify the concurrent-await alias-Future limitation with a genuinely concurrent repro — spec §9.5.4's prose and the KNOWN_ISSUES row update (or fall away) with the verdict. |
 
 ## Stage 21 — The effect hardening sprint
 

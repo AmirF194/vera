@@ -1,0 +1,69 @@
+-- Scoreboard: player names -> scores, with a top-score lookup and a
+-- rendered summary line.
+--
+-- `Board` aliases Map<String, Int>, so the builtins are called with the
+-- alias-spelled argument `@Board.0`.  The top score is read with the natural
+-- direct-index spelling `array_sort_by(map_values(@Board.0), cmp)[0]` — the
+-- sorted values are indexed straight off the sort, no intermediate let
+-- binding.
+effect IO {
+  op print(String -> Unit);
+}
+
+type Board = Map<String, Int>;
+
+-- Build the scoreboard: four players and their scores.
+private fn build_board(@Unit -> @Board)
+  requires(true)
+  ensures(map_size(@Board.result) == 4)
+  effects(pure)
+{
+  let @Board = map_insert(map_new(), "alice", 42);
+  let @Board = map_insert(@Board.0, "bob", 17);
+  let @Board = map_insert(@Board.0, "carol", 88);
+  let @Board = map_insert(@Board.0, "dave", 63);
+  @Board.0
+}
+
+-- Highest score on the board.  Sorting the values with a descending
+-- comparator (Less when the first argument is the larger) puts the top score
+-- at index 0, read directly off the sort.  The board must be non-empty so
+-- index 0 is in bounds.
+private fn top_score(@Board -> @Int)
+  requires(map_size(@Board.0) > 0)
+  ensures(true)
+  effects(pure)
+{
+  array_sort_by(map_values(@Board.0), fn(@Int, @Int -> @Ordering) effects(pure) { if @Int.1 > @Int.0 then { Less } else { if @Int.1 < @Int.0 then { Greater } else { Equal } } })[0]
+}
+
+-- Number of players on the board, counted from its keys.
+private fn roster_size(@Board -> @Int)
+  requires(true)
+  ensures(@Int.result >= 0)
+  effects(pure)
+{
+  array_length(map_keys(@Board.0))
+}
+
+-- Render a one-line summary: player count and top score, via `show`.
+private fn summary(@Board -> @String)
+  requires(map_size(@Board.0) > 0)
+  ensures(true)
+  effects(pure)
+{
+  let @Int = top_score(@Board.0);
+  let @Int = roster_size(@Board.0);
+  -- @Int.0 = roster size (most recent binding), @Int.1 = top score.
+  string_concat(string_concat("Players: ", show(@Int.0)), string_concat(", top score: ", show(@Int.1)))
+}
+
+-- Entry point: build the board and print its summary.
+public fn main(@Unit -> @Unit)
+  requires(true)
+  ensures(true)
+  effects(<IO>)
+{
+  let @Board = build_board(());
+  IO.print(string_concat(summary(@Board.0), "\n"))
+}

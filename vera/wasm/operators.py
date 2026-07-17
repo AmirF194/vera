@@ -215,6 +215,19 @@ class OperatorsMixin:
                     if (rv_full is not None
                             and self._eq_type_name_fully_concrete(rv_full)):
                         lv = rv_full
+                # #1085: ground the operand's OWN spelling.  An alias of a WHOLE
+                # ADT (`type MyBox = Box<Int>;`) reaches the dispatch as the bare
+                # alias name `MyBox`, absent from `_adt_type_names`, so the
+                # structural branch below was skipped and `==` fell to the scalar
+                # POINTER compare — two structurally equal, distinct-pointer
+                # values compared unequal (0) on a check-green program.  #1076
+                # grounded type ARGUMENTS (`Box<MyInt>`); this grounds the whole
+                # operand.  `_canonical_field_type` resolves alias chains and
+                # peels a transparent `Future<...>` wrapper; a registered ADT or a
+                # genuine free `T` is returned unchanged, so the lost-arg and
+                # free-var controls still route to the scalar fallback.
+                if lv is not None:
+                    lv = self._canonical_field_type(lv)
                 lv_base = lv.split("<", 1)[0] if lv is not None else None
                 if (op in (ast.BinOp.EQ, ast.BinOp.NEQ)
                         and lv is not None
@@ -479,8 +492,18 @@ class OperatorsMixin:
         registered ADT (`_adt_type_names`) — i.e. a bare `T` left un-substituted
         in a generic function's `@Box<T>` operand that the monomorphizer did not
         specialize to a concrete clone.
+
+        #1070/#1076: an ALIAS or transparent-`Future` spelling (`U` via
+        `type U = Unit;`, `MyInt` via `type MyInt = Int;`, `Future<Int>`,
+        `FU`, chains) is NOT a free variable — it names a concrete type.
+        Classify on the GROUND spelling: without this, `Box<U>` / `Box<MyInt>`
+        were classified as dead base-generic clones and their `==` fell back
+        to the scalar POINTER compare — structurally equal values compared
+        unequal, silently, on a check-green program.  A genuinely unregistered
+        name (`T`) grounds to itself and still classifies free.
         """
-        base = arg.split("<", 1)[0].strip()
+        arg = self._canonical_field_type(arg.strip())
+        base = arg.split("<", 1)[0]
         return (
             base not in self._CONCRETE_NON_ADT_BASES
             and base not in self._adt_type_names
@@ -628,6 +651,17 @@ class OperatorsMixin:
             if len(args) != self._adt_tp_counts.get(base, 0):
                 return False  # under-parameterized: an argument was erased
             return all(self._eq_type_name_fully_concrete(a) for a in args)
+        # #1070/#1076: an ALIAS or transparent-`Future` spelling (`U`,
+        # `MyInt`, `FU`, `Future<Int>`, chains) is NOT a free type variable —
+        # ground it and re-judge (`U` → `Unit`, `MyInt` → `Int`, `Future<Int>`
+        # → `Int`).  Without this, `Box<U>` / `Box<MyInt>` failed the
+        # concreteness gate and the `==` dispatch fell back to the scalar i32
+        # POINTER compare: two structurally equal values compared unequal,
+        # silently, on a check-green program (the checker resolves the alias
+        # and accepts the Eq).  A genuine `T` grounds to itself: no recursion.
+        canonical = self._canonical_field_type(name)
+        if canonical != name:
+            return self._eq_type_name_fully_concrete(canonical)
         # A single-segment name that is neither a registered ADT nor a known
         # concrete base is an unresolved type VARIABLE (``T``).
         return False
@@ -649,8 +683,22 @@ class OperatorsMixin:
           name to its fully-nested form (#932).
 
         ``bare`` is *operand*'s already-computed ``_infer_vera_type`` name.
+
+        #1078: an ``IndexExpr`` operand (an array ELEMENT) arrives as the
+        element type's bare head — ``_infer_index_element_type`` computes the
+        full element ``NamedType`` and then returns only ``.name`` (``Box<Int>``
+        → ``"Box"``) — so a parameterized element was classified as a
+        lost-type-argument clone and ``==`` silently fell back to the scalar
+        POINTER compare.  The indexed collection carries its complete type
+        arguments, so re-derive the full element spelling from it.
         """
         name = self._parameterize_ctor_operand(operand, bare)
+        if (isinstance(operand, ast.IndexExpr)
+                and name is not None
+                and "<" not in name):
+            te = self._infer_index_element_type_expr(operand)
+            if te is not None and te.type_args and te.name == name:
+                name = self._format_named_type(te)
         name = self._recover_lost_type_arg(name, other)
         if name is not None:
             name = self._eq_full_type_names.get(name, name)
@@ -828,17 +876,32 @@ class OperatorsMixin:
                 ]
                 # Concrete offsets from concrete WASM types.
                 concrete = self._concrete_field_layout(field_type_names)
-                first = True
-                for (offset, _wt), ftype in zip(concrete, field_type_names):
-                    cmp_instrs = self._emit_field_eq(offset, ftype)
-                    if cmp_instrs is None:
-                        raise CodegenInvariantError(  # pragma: no cover
-                            f"ADT field type {ftype!r} of {cname!r} has no Eq "
-                            f"comparison; the E613 gate should have rejected it")
-                    body.extend(fpad + ln for ln in cmp_instrs)
-                    if not first:
-                        body.append(f"{fpad}i32.and")
-                    first = False
+                # #1043: a zero-size Unit field ("unit" wt) is equal by
+                # definition — emit NO comparison for it (and don't advance the
+                # `i32.and` chain, which would underflow the stack).  If a
+                # constructor's fields are ALL zero-size, its two values are
+                # equal once the tags match: the then-branch of this
+                # `if (result i32)` must still leave an i32, so emit a constant
+                # `1` (mirrors the no-field-constructors `i32.const 1` above).
+                comparable = [
+                    (offset, ftype)
+                    for (offset, wt), ftype in zip(concrete, field_type_names)
+                    if wt != "unit"
+                ]
+                if not comparable:
+                    body.append(f"{fpad}i32.const 1")
+                else:
+                    first = True
+                    for offset, ftype in comparable:
+                        cmp_instrs = self._emit_field_eq(offset, ftype)
+                        if cmp_instrs is None:
+                            raise CodegenInvariantError(  # pragma: no cover
+                                f"ADT field type {ftype!r} of {cname!r} has no Eq "
+                                f"comparison; the E613 gate should have rejected it")
+                        body.extend(fpad + ln for ln in cmp_instrs)
+                        if not first:
+                            body.append(f"{fpad}i32.and")
+                        first = False
                 body.append(f"{pad}else")
             inner_pad = "  " * (len(ctors_with_fields) + 3)
             body.append(f"{inner_pad}i32.const 1")
@@ -874,14 +937,53 @@ class OperatorsMixin:
         declared type are deep-substituted (``List<T>`` ↦ ``List<Int>`` under
         a ``List<Int>`` comparison); a fully concrete type passes through
         unchanged.
+
+        #1070/#1076: the resolution is GROUNDED — alias chains resolved,
+        transparent ``Future<...>`` peeled (``"U"`` → ``"Unit"``, ``"MyStr"``
+        → ``"String"``, ``"FI"`` → ``"Int"``).  Registration already grounds
+        a DECLARED field type (#773/#1043), but a type argument keeps its
+        use-site spelling, and the show/hash/`$eq` field dispatches key on
+        this NAME: ungrounded they treated the alias as an unknown type and
+        loud-skipped (show/hash) or mis-sized and mis-compared it (`$eq`).
         """
         if tp_idx is not None and field_index < len(tp_idx):
             pos = tp_idx[field_index]
             if pos is not None and pos < len(type_args):
-                return type_args[pos]
+                return self._canonical_field_type(type_args[pos])
         from vera.monomorphize import substitute_type_param_names
 
-        return substitute_type_param_names(raw, tp_mapping)
+        return self._canonical_field_type(
+            substitute_type_param_names(raw, tp_mapping)
+        )
+
+    def _canonical_field_type(self, name: str) -> str:
+        """Ground spelling of a field / type-argument name (#1070, #1076).
+
+        Resolves alias chains to their target's compound spelling (the shared
+        `_canonicalize_alias_slot_name` walk) and peels transparent
+        ``Future<...>`` wrappers to their payload (representation-identical,
+        #841), repeating until stable: ``U`` → ``"Unit"``, ``FU`` /
+        ``Future<Unit>`` → ``"Unit"``, ``MyInt`` → ``"Int"``, ``FI`` /
+        ``Future<Int>`` → ``"Int"``.  A non-alias, non-Future name — a
+        concrete type or a genuine free type variable ``T`` — returns
+        unchanged; alias arguments NESTED inside a compound (``Box<U>``) are
+        not touched here (each consumer canonicalises per nesting level).
+
+        The resolved-field-type consumers (`_eq_field_wasm_type`,
+        `_show_value`, `_hash_value`, `_emit_field_eq`) dispatch on the Vera
+        type NAME, and the `==` dispatch gates classify it — the ground
+        spelling is the one they all understand.  Mirrors
+        ``RegistrationMixin._field_vera_type_name``, which grounds DECLARED
+        field types the same way at registration (#773/#1043); a type
+        ARGUMENT arrives spelled as at the use site and is grounded here.
+        """
+        seen: frozenset[str] = frozenset()
+        while True:
+            name, seen = self._canonicalize_alias_slot_name(name, seen)
+            if name.startswith("Future<") and name.endswith(">"):
+                name = name[7:-1]
+                continue
+            return name
 
     def _concrete_field_layout(
         self, field_type_names: list[str],
@@ -891,8 +993,11 @@ class OperatorsMixin:
         Mirrors the construction site (``_translate_constructor_call``): tag at
         offset 0 (4 bytes), then each field aligned to its natural alignment.
         """
-        sizes = {"i32": 4, "i64": 8, "f64": 8, "i32_pair": 8}
-        aligns = {"i32": 4, "i64": 8, "f64": 8, "i32_pair": 4}
+        # #1043: `"unit"` (a zero-size Unit field) is size 0 / align 1, so it
+        # neither aligns nor advances the offset — the same convention
+        # construction (`_translate_constructor_call`) uses.
+        sizes = {"i32": 4, "i64": 8, "f64": 8, "i32_pair": 8, "unit": 0}
+        aligns = {"i32": 4, "i64": 8, "f64": 8, "i32_pair": 4, "unit": 1}
         offset = 4
         out: list[tuple[int, str]] = []
         for ftype in field_type_names:
@@ -903,15 +1008,30 @@ class OperatorsMixin:
             offset += sizes.get(wt, 8)
         return out
 
-    @staticmethod
-    def _eq_field_wasm_type(ftype: str) -> str:
+    def _eq_field_wasm_type(self, ftype: str) -> str:
         """WASM rep of a concrete field type for structural-eq layout."""
+        # #1070/#1076: ground the spelling first — a type ARGUMENT arrives as
+        # spelled at the use site (`Box<U>`, `Box<MyInt>`, `Box<Future<Int>>`,
+        # alias chains), and the raw-name dispatch mis-sized every such
+        # spelling (an alias fell to the 4-byte ADT-pointer default; a
+        # transparent Future missed its payload's width): the wildcard width
+        # recomputation (#1060) then shifted every later field's read on a
+        # check-green program.  Grounding makes each spelling behave exactly
+        # like its target written literally.
+        ftype = self._canonical_field_type(ftype)
+        # #1043: a zero-size field is the `"unit"` sentinel, which makes
+        # `_concrete_field_layout` advance the offset by nothing (matching
+        # construction) and lets the `$eq` emitter skip the (equal-by-
+        # definition) comparison.  Post-grounding, every erases-to-Unit
+        # spelling IS the literal name.
+        if ftype == "Unit":
+            return "unit"
         base = ftype.split("<", 1)[0]
         if base in ("Int", "Nat"):
             return "i64"
         if base == "Float64":
             return "f64"
-        if base in ("Bool", "Byte", "Unit"):
+        if base in ("Bool", "Byte"):
             return "i32"
         if base in ("String", "Array"):
             return "i32_pair"

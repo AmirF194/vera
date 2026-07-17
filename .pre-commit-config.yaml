@@ -63,7 +63,7 @@ repos:
         pass_filenames: false
         files: '(examples/README\.md$|examples/.*\.vera$)'
 
-      # The five doc-block gates below read the inline vera:skip fence
+      # The six doc-block gates below read the inline vera:skip fence
       # annotations via scripts/doc_annotations.py (#538), so an edit to
       # that shared module (or the gate script itself) re-runs the gate.
       - id: readme-examples
@@ -93,6 +93,13 @@ repos:
         language: system
         pass_filenames: false
         files: '(FAQ\.md$|vera/.*\.py$|vera/grammar\.lark$|scripts/(check_faq_examples|doc_annotations)\.py$)'
+
+      - id: pypi-readme-examples
+        name: pypi readme examples
+        entry: .venv/bin/python scripts/check_pypi_readme_examples.py
+        language: system
+        pass_filenames: false
+        files: '(PYPI_README\.md$|vera/.*\.py$|vera/grammar\.lark$|scripts/(check_pypi_readme_examples|check_html_examples|doc_annotations)\.py$)'
 
       - id: html-examples
         name: html examples

@@ -1,0 +1,19 @@
+-- Conformance: a Map with a zero-size value type is a checker error
+--   (Chapter 2, Section 2.2)
+-- Tests: E135 — `Map<String, Unit>` is rejected at check time (#1075).
+--        Map keys/values and Set elements are raw host-serialized values;
+--        a zero-size value (`Unit`, 0 bytes, no WASM representation —
+--        §2.2) has nothing to store or load, so the map operations would
+--        compile to invalid WASM on a check-green program.  Same
+--        representation principle as the Array<Unit> gate (#945) and the
+--        `@T`-at-Unit family (#900); a boxed `Map<String, Option<Unit>>`
+--        stays legal.  `Map<K, Unit>` is informationally a `Set<K>` — the
+--        rejection keeps one canonical form.
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Map<String, Unit> = map_insert(map_new(), "k", ());
+  array_length(map_values(@Map<String, Unit>.0))
+}

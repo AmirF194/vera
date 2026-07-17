@@ -89,7 +89,7 @@ dependencies. CI enforces that `uv.lock` stays current.
 
 ### Pre-commit Hooks
 
-Every push is checked by 30 configured hooks across two stages: 28 are configured at the commit stage (run after `pre-commit install`), and 2 (`check-changelog-updated` and `uv-lock-check`, described below) are configured at the push stage (run after `pre-commit install --hook-type pre-push`). Most commit-stage hooks have per-hook `files:` / `types:` filters — the `python` type-check only runs when Python files are staged; `check_readme_examples.py` only runs when `README.md` or Vera sources change, etc. A plain-text commit touching only one markdown file triggers a small subset; a compiler-level commit triggers most of them.
+Every push is checked by 31 configured hooks across two stages: 29 are configured at the commit stage (run after `pre-commit install`), and 2 (`check-changelog-updated` and `uv-lock-check`, described below) are configured at the push stage (run after `pre-commit install --hook-type pre-push`). Most commit-stage hooks have per-hook `files:` / `types:` filters — the `python` type-check only runs when Python files are staged; `check_readme_examples.py` only runs when `README.md` or Vera sources change, etc. A plain-text commit touching only one markdown file triggers a small subset; a compiler-level commit triggers most of them.
 
 ![The gate pipeline: file-filtered commit-stage hooks, the push-stage CHANGELOG and uv.lock gates, and CI re-running everything against the platform matrix before anything lands on protected main.](assets/diagrams/ci-gates.svg)
 
@@ -242,9 +242,9 @@ If you are a maintainer setting up branch protection on a fork, configure these 
 
 Contributors don't cut releases. A release-prep PR carries the version and notes; after it merges, the approval-gated release workflow publishes the tested archives through PyPI Trusted Publishing and creates the matching tag and GitHub Release. The maintainer approves the production deployment. See [RELEASING.md](RELEASING.md) for the maintainer runbook. What your PR needs to contain:
 
-1. **Bump the version** in `pyproject.toml` and `vera/__init__.py`, and update the version badge in `docs/index.html` (the version appears twice on the badge line — URL and visible text). `scripts/check_version_sync.py` gates the consistency.
+1. **Bump the version** in `pyproject.toml`, `vera/__init__.py`, `README.md` (the "active development at vX.Y.Z" line), and the version badge in `docs/index.html` (the version appears twice on the badge line — URL and visible text), then regenerate `uv.lock` so its `veralang` entry matches. `scripts/check_version_sync.py` gates all five.
 2. **Add the `## [X.Y.Z]` section** to `CHANGELOG.md` with its compare-link reference at the bottom, and add the version's one-sentence row to the current stage table in `HISTORY.md`.
-3. **Regenerate `uv.lock` and the site assets** (`python scripts/build_site.py`) if dependencies or AI-readable docs changed.
+3. **Regenerate the site assets** (`python scripts/build_site.py`) if AI-readable docs changed, and refresh `uv.lock` for any dependency changes.
 
 Not every PR is a release: small changes can ride along and ship with the next version bump. If you're unsure whether your change merits one, leave the bump out and say so in the PR description — the maintainer will include it in the next release.
 

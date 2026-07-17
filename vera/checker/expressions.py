@@ -32,6 +32,7 @@ from vera.types import (
     is_subtype,
     numeric_join,
     pretty_type,
+    pretty_inferred_type,
     types_equal,
 )
 
@@ -305,7 +306,7 @@ class ExpressionsMixin:
             if type_name not in self._TO_STRING_TYPES:
                 self._error(
                     part,
-                    f"Type '{pretty_type(part_ty)}' cannot be "
+                    f"Type '{pretty_inferred_type(part_ty)}' cannot be "
                     f"automatically converted to String in string "
                     f"interpolation. Only String, Int, Nat, Bool, "
                     f"Byte, and Float64 are supported.",
@@ -495,7 +496,8 @@ class ExpressionsMixin:
                 self._error(
                     expr,
                     f"Operator '{op.value}' requires numeric operands, found "
-                    f"{pretty_type(left_ty)} and {pretty_type(right_ty)}.",
+                    f"{pretty_inferred_type(left_ty)} and "
+                    f"{pretty_inferred_type(right_ty)}.",
                     rationale="Arithmetic operators work on Int, Nat, or "
                               "Float64.",
                     fix=(
@@ -541,8 +543,8 @@ class ExpressionsMixin:
                     or is_subtype(right_base, left_base)):
                 self._error(
                     expr,
-                    f"Cannot compare {pretty_type(left_ty)} with "
-                    f"{pretty_type(right_ty)}.",
+                    f"Cannot compare {pretty_inferred_type(left_ty)} with "
+                    f"{pretty_inferred_type(right_ty)}.",
                     rationale="Equality comparison requires compatible types.",
                     fix=(
                         "Compare values of the same type. One must be a subtype "
@@ -574,8 +576,8 @@ class ExpressionsMixin:
                 self._error(
                     expr,
                     f"Operator '{op.value}' requires orderable operands, "
-                    f"found {pretty_type(left_ty)} and "
-                    f"{pretty_type(right_ty)}.",
+                    f"found {pretty_inferred_type(left_ty)} and "
+                    f"{pretty_inferred_type(right_ty)}.",
                     rationale=(
                         "Ordering operators (<, >, <=, >=) are defined only on "
                         "orderable types — the numeric types and other types "
@@ -620,7 +622,7 @@ class ExpressionsMixin:
                 self._error(
                     expr,
                     f"Left operand of '{op.value}' must be Bool, found "
-                    f"{pretty_type(left_ty)}.",
+                    f"{pretty_inferred_type(left_ty)}.",
                     rationale=(
                         "Logical operators (&&, ||, ==>) combine Bool values; "
                         "their left operand must already be Bool."
@@ -636,7 +638,7 @@ class ExpressionsMixin:
                 self._error(
                     expr,
                     f"Right operand of '{op.value}' must be Bool, found "
-                    f"{pretty_type(right_ty)}.",
+                    f"{pretty_inferred_type(right_ty)}.",
                     rationale=(
                         "Logical operators (&&, ||, ==>) combine Bool values; "
                         "their right operand must already be Bool."
@@ -811,7 +813,7 @@ class ExpressionsMixin:
                 self._error(
                     expr,
                     f"Operator '!' requires Bool operand, found "
-                    f"{pretty_type(operand_ty)}.",
+                    f"{pretty_inferred_type(operand_ty)}.",
                     rationale=(
                         "Logical negation '!' is defined only on Bool; it has "
                         "no meaning for non-Bool operands."
@@ -830,7 +832,7 @@ class ExpressionsMixin:
                 self._error(
                     expr,
                     f"Operator '-' requires numeric operand, found "
-                    f"{pretty_type(operand_ty)}.",
+                    f"{pretty_inferred_type(operand_ty)}.",
                     rationale=(
                         "Unary negation '-' is defined only on the numeric "
                         "types (Int, Nat, Float64)."
@@ -907,7 +909,7 @@ class ExpressionsMixin:
                     self._error(
                         expr.index,
                         f"Array index must be Int or Nat, found "
-                        f"{pretty_type(idx_ty)}.",
+                        f"{pretty_inferred_type(idx_ty)}.",
                         rationale=(
                             "Array elements are addressed by integer position, "
                             "so the index expression must be an Int or Nat."
@@ -923,7 +925,7 @@ class ExpressionsMixin:
 
         self._error(
             expr.collection,
-            f"Cannot index {pretty_type(coll_ty)}: indexing requires "
+            f"Cannot index {pretty_inferred_type(coll_ty)}: indexing requires "
             f"Array<T>.",
             rationale=(
                 "The index operator [] is defined only on Array<T>; other "
@@ -978,7 +980,7 @@ class ExpressionsMixin:
                     self._error(
                         stmt.value,
                         f"Let binding expects {pretty_type(declared_type)}, "
-                        f"value has type {pretty_type(val_type)}.",
+                        f"value has type {pretty_inferred_type(val_type)}.",
                         rationale=(
                             "A let binding's value must be a subtype of the "
                             "binding's declared type."
@@ -986,7 +988,7 @@ class ExpressionsMixin:
                         fix=(
                             f"Give the value type {pretty_type(declared_type)}, "
                             "or change the binding's declared type to match the "
-                            f"value's type {pretty_type(val_type)}."
+                            f"value's type {pretty_inferred_type(val_type)}."
                         ),
                         spec_ref='Chapter 4, Section 4.7 "Let Bindings"',
                         error_code="E170",
@@ -1057,7 +1059,7 @@ class ExpressionsMixin:
                 self._error(
                     expr.body,
                     f"Anonymous function body has type "
-                    f"{pretty_type(body_type)}, expected "
+                    f"{pretty_inferred_type(body_type)}, expected "
                     f"{pretty_type(ret_type)}.",
                     rationale=(
                         "An anonymous function's body must produce a value that "
@@ -1066,7 +1068,7 @@ class ExpressionsMixin:
                     fix=(
                         f"Make the body yield {pretty_type(ret_type)}, or change "
                         "the closure's declared return type to "
-                        f"{pretty_type(body_type)}."
+                        f"{pretty_inferred_type(body_type)}."
                     ),
                     spec_ref='Chapter 5, Section 5.7 "Anonymous Functions (Closures)"',
                     error_code="E171",
@@ -1217,7 +1219,8 @@ class ExpressionsMixin:
             if not is_subtype(base_type(ty), BOOL):
                 self._error(
                     expr.expr,
-                    f"assert() requires Bool, found {pretty_type(ty)}.",
+                    f"assert() requires Bool, found "
+                    f"{pretty_inferred_type(ty)}.",
                     rationale=(
                         "assert() states a condition to be verified, so its "
                         "argument must be a Bool predicate."
@@ -1238,7 +1241,8 @@ class ExpressionsMixin:
             if not is_subtype(base_type(ty), BOOL):
                 self._error(
                     expr.expr,
-                    f"assume() requires Bool, found {pretty_type(ty)}.",
+                    f"assume() requires Bool, found "
+                    f"{pretty_inferred_type(ty)}.",
                     rationale=(
                         "assume() introduces a condition the verifier may take "
                         "as given, so its argument must be a Bool predicate."

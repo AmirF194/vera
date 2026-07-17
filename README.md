@@ -115,7 +115,26 @@ Every diagnostic has a stable error code (`E001`–`E702`) and is available as s
 
 ### Installation
 
-Install from the GitHub source:
+Install the released `veralang` distribution from PyPI:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+python -m pip install veralang
+```
+
+The distribution is named `veralang`, but the installed command remains
+`vera`, and Python code still imports it as `import vera`. For editor and agent integration through the language server, install
+`python -m pip install "veralang[lsp]"`. Do not run `pip install vera`: that
+name belongs to an unrelated project on PyPI. The wheel ships the compiler and
+the `vera` command only — the bundled `examples/`, the conformance suite, and
+the specification live in the repository, not in the wheel.
+
+The GitHub source route is the recommended environment for agents and for
+anyone learning the language — it provides the examples, conformance programs,
+and spec that [SKILL.md](SKILL.md) teaches from, alongside the toolchain — and
+it remains the route for compiler development, unreleased changes, and testing
+the current `main` branch:
 
 ```bash
 git clone https://github.com/aallan/vera.git
@@ -126,9 +145,8 @@ python -m pip install -e ".[dev]"
 ```
 
 `[dev]` includes everything (tests, linters, the language server). For a lighter
-install that only adds editor/agent support to the base toolchain, use
+source install that only adds editor/agent support to the base toolchain, use
 `python -m pip install -e ".[lsp]"` — see [LSP_SERVER.md](LSP_SERVER.md).
-
 
 #### Supported platforms
 
@@ -228,7 +246,7 @@ cp /path/to/vera/SKILL.md ~/.claude/skills/vera-language/SKILL.md
 
 ## Project status
 
-Vera is in **active development** at v0.1.4: 1,900+ commits, 202 releases, 7,514 tests, 91% code coverage, 160 conformance programs, 38 examples, and a 14-chapter specification. Known bugs and limitations are tracked in **[KNOWN_ISSUES.md](KNOWN_ISSUES.md)**. See **[HISTORY.md](HISTORY.md)** for how the compiler was built.
+Vera is in **active development** at v0.1.5: 2,000+ commits, 203 releases, 7,992 tests, 95% code coverage, 163 conformance programs, 39 examples, and a 14-chapter specification. Known bugs and limitations are tracked in **[KNOWN_ISSUES.md](KNOWN_ISSUES.md)**. See **[HISTORY.md](HISTORY.md)** for how the compiler was built.
 
 The reference compiler — parser, AST, type checker, contract verifier (Z3), WASM code generator, module system, browser runtime, and runtime contract insertion — is working. The language specification is in draft across [14 chapters](spec/).
 
@@ -278,7 +296,7 @@ vera/
 │   └── cli.py                     #   Command-line interface
 ├── docs/                          # GitHub Pages site (veralang.dev)
 ├── editors/                       # VS Code extension (LSP client + grammar) + TextMate bundle
-├── examples/                      # 38 example Vera programs
+├── examples/                      # 39 example Vera programs
 ├── tests/                         # Test suite (see TESTING.md)
 └── scripts/                       # CI and validation scripts
 ```

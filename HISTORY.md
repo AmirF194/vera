@@ -1,6 +1,6 @@
 # History
 
-How the Vera compiler was built, from initial commit through the dual-threaded start of Stages 19 and 20, across 96 active development days.
+How the Vera compiler was built, from initial commit through the dual-threaded start of Stages 19 and 20, across 103 active development days.
 
 Vera was developed in an interleaved spiral — each phase added a complete compiler layer with tests, documentation, and working examples before moving to the next. The compiler was built by a single developer working with Claude Code, with CodeRabbit providing AI code review on pull requests from v0.0.80 onwards. The entire project — language design, specification, compiler, test suite, documentation, website — was built from scratch starting 22 February 2026.
 
@@ -470,24 +470,25 @@ Stages 19 and 20 run dual-threaded: community PRs against the single-source spri
 | v0.1.2 | 9 Jul | **The gate-hardening batch** — scheduled limitations-sync, the arm64 advisory lane, the gate-honesty pair ([#956](https://github.com/aallan/vera/issues/956)), and the E009 crash fix from the pre-release sweep. |
 | v0.1.3 | 10 Jul | **Monomorphizer completeness** ([#769](https://github.com/aallan/vera/issues/769)) — registry-complete builtin return tables, recursive type-argument unification, and the scope-aware De Bruijn reindex walker. |
 | v0.1.4 | 11 Jul | **The second burndown** — 19 bug fixes across the checker, verifier, and codegen: the fresh-ctor-var family under `forall`, where-helper scoping, `handle[State<T>]` clause execution, the `@Nat`/`@Int` obligations, and imported-body compilation ([#991](https://github.com/aallan/vera/issues/991)). |
+| v0.1.5 | 17 Jul | **The third burndown and the first PyPI release** — 29 bug-labelled issues fixed across the checker, codegen, and diagnostics, published to PyPI as `veralang` ([#737](https://github.com/aallan/vera/issues/737)). |
 
 ---
 
 ## By the numbers
 
-Nine releases, chosen for the capability each one unlocked rather than even spacing.
+Ten releases, chosen for the capability each one unlocked rather than even spacing.
 
-![Growth across the nine landmark releases: tests from ~50 to 6,779, conformance programs from 0 to 143, examples from 13 to 37, built-in functions from 0 to 164.](assets/diagrams/history-growth.svg)
+![Growth across the ten landmark releases: tests from ~50 to 7,992, conformance programs from 0 to 163, examples from 13 to 39, built-in functions from 0 to 164.](assets/diagrams/history-growth.svg)
 
-| Metric | v0.0.1 (23 Feb) | v0.0.9 (23 Feb) | v0.0.65 (4 Mar) | v0.0.101 (27 Mar) | v0.0.170 (12 Jun) | v0.0.191 (1 Jul) | v0.0.193 (2 Jul) | v0.0.195 (2 Jul) | v0.1.0 (4 Jul) |
-|--------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| Milestone | First release | Runs end-to-end | GC + maturity | Inference effect | Language server | Soundness campaign | HttpServer effect | WASI serve backend | Zero known bugs |
-| Compiler layers | Parser | 5 (full pipeline) | 5 + modules + GC | 5 + modules + GC + browser | 5 + modules + GC + browser + LSP | 5 + modules + GC + browser + LSP | 5 + modules + GC + browser + LSP | 5 + modules + GC + browser + LSP + WASI | 5 + modules + GC + browser + LSP + WASI |
-| Tests | ~50 | ~300 | ~1,400 | 3,095 | 4,342 | 5,559 | 5,615 | 5,808 | 6,779 |
-| Examples | 13 | 15 | 18 | 30 | 35 | 35 | 36 | 36 | 37 |
-| Built-in functions | 0 | 0 | ~30 | 122 | 164 | 164 | 164 | 164 | 164 |
-| Conformance programs | 0 | 0 | 0 | 64 | 89 | 103 | 104 | 104 | 143 |
-| Spec chapters | 7 | 10 | 12 | 13 | 13 | 13 | 13 | 14 | 14 |
-| Python coverage | — | — | 90% | 96% | 95% | 95% | 95% | 95% | 95% |
+| Metric | v0.0.1 (23 Feb) | v0.0.9 (23 Feb) | v0.0.65 (4 Mar) | v0.0.101 (27 Mar) | v0.0.170 (12 Jun) | v0.0.191 (1 Jul) | v0.0.193 (2 Jul) | v0.0.195 (2 Jul) | v0.1.0 (4 Jul) | v0.1.5 (17 Jul) |
+|--------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| Milestone | First release | Runs end-to-end | GC + maturity | Inference effect | Language server | Soundness campaign | HttpServer effect | WASI serve backend | Zero known bugs | First PyPI release |
+| Compiler layers | Parser | 5 (full pipeline) | 5 + modules + GC | 5 + modules + GC + browser | 5 + modules + GC + browser + LSP | 5 + modules + GC + browser + LSP | 5 + modules + GC + browser + LSP | 5 + modules + GC + browser + LSP + WASI | 5 + modules + GC + browser + LSP + WASI | 5 + modules + GC + browser + LSP + WASI |
+| Tests | ~50 | ~300 | ~1,400 | 3,095 | 4,342 | 5,559 | 5,615 | 5,808 | 6,779 | 7,992 |
+| Examples | 13 | 15 | 18 | 30 | 35 | 35 | 36 | 36 | 37 | 39 |
+| Built-in functions | 0 | 0 | ~30 | 122 | 164 | 164 | 164 | 164 | 164 | 164 |
+| Conformance programs | 0 | 0 | 0 | 64 | 89 | 103 | 104 | 104 | 143 | 163 |
+| Spec chapters | 7 | 10 | 12 | 13 | 13 | 13 | 13 | 14 | 14 | 14 |
+| Python coverage | — | — | 90% | 96% | 95% | 95% | 95% | 95% | 95% | 95% |
 
-Total: **1,900+ commits, 200 tagged releases, 96 active development days.**
+Total: **2,000+ commits, 203 tagged releases, 103 active development days.**

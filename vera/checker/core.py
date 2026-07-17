@@ -43,6 +43,7 @@ from vera.types import (
     canonical_type_name,
     is_subtype,
     pretty_type,
+    pretty_inferred_type,
 )
 
 from vera.checker.resolution import ResolutionMixin
@@ -639,7 +640,7 @@ class TypeChecker(
                 self._error(
                     decl.body,
                     f"Function '{decl.name}' body has type "
-                    f"{pretty_type(body_type)}, expected "
+                    f"{pretty_inferred_type(body_type)}, expected "
                     f"{pretty_type(return_type)}.",
                     rationale="The function body's type must match the "
                               "declared return type.",
@@ -784,7 +785,7 @@ class TypeChecker(
                 self._error(
                     contract.expr,
                     f"requires() predicate must be Bool, found "
-                    f"{pretty_type(ty)}.",
+                    f"{pretty_inferred_type(ty)}.",
                     rationale="Contract predicates must evaluate to Bool.",
                     fix="Turn the requires() argument into a Bool-valued "
                         "predicate, e.g. requires(@Int.0 > 0) instead of "
@@ -803,7 +804,7 @@ class TypeChecker(
                 self._error(
                     contract.expr,
                     f"ensures() predicate must be Bool, found "
-                    f"{pretty_type(ty)}.",
+                    f"{pretty_inferred_type(ty)}.",
                     rationale="Contract predicates must evaluate to Bool.",
                     fix="Turn the ensures() argument into a Bool-valued "
                         "predicate over the result, e.g. "
@@ -901,7 +902,7 @@ class TypeChecker(
             self._error(
                 te.predicate,
                 f"Refinement predicate must be Bool, found "
-                f"{pretty_type(ty)}.",
+                f"{pretty_inferred_type(ty)}.",
                 rationale="A refinement type `{ @T | P }` constrains its base "
                           "with a logical predicate `P`, which must evaluate to "
                           "Bool — the same rule contract predicates follow.",

@@ -18,6 +18,7 @@ from vera.types import (
     contains_typevar,
     is_subtype,
     pretty_type,
+    pretty_inferred_type,
     substitute,
     types_equal,
 )
@@ -38,7 +39,7 @@ class ControlFlowMixin:
                 self._error(
                     expr.condition,
                     f"If condition must be Bool, found "
-                    f"{pretty_type(cond_ty)}.",
+                    f"{pretty_inferred_type(cond_ty)}.",
                     rationale="The condition of an if-expression must have "
                               "type Bool.",
                     fix="Replace the condition with a Bool-typed expression, "
@@ -88,13 +89,13 @@ class ControlFlowMixin:
         self._error(
             expr,
             f"If branches have incompatible types: then-branch is "
-            f"{pretty_type(then_ty)}, else-branch is "
-            f"{pretty_type(else_ty)}.",
+            f"{pretty_inferred_type(then_ty)}, else-branch is "
+            f"{pretty_inferred_type(else_ty)}.",
             rationale="Both branches of an if-expression must have "
                       "the same type.",
             fix=f"Make both branches produce the same type: convert one "
-                f"branch to {pretty_type(else_ty)} (or both to a common "
-                f"type), so then and else agree.",
+                f"branch to {pretty_inferred_type(else_ty)} (or both to a "
+                f"common type), so then and else agree.",
             spec_ref='Chapter 4, Section 4.8 "Conditional Expressions"',
             error_code="E301",
         )
@@ -436,7 +437,7 @@ class ControlFlowMixin:
                     self._error(
                         expr.state.init_expr,
                         f"Handler state initial value has type "
-                        f"{pretty_type(init_type)}, expected "
+                        f"{pretty_inferred_type(init_type)}, expected "
                         f"{pretty_type(state_type)}.",
                         rationale="A handler's initial state value must have "
                                   "the declared handler state type.",
@@ -553,7 +554,7 @@ class ControlFlowMixin:
                         self._error(
                             upd_expr,
                             f"State update expression has type "
-                            f"{pretty_type(upd_type)}, expected "
+                            f"{pretty_inferred_type(upd_type)}, expected "
                             f"{pretty_type(state_type)}.",
                             rationale="The value assigned by a 'with' state "
                                       "update must have the handler's declared "

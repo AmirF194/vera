@@ -343,7 +343,7 @@ private fn sum(@List<Int> -> @Int)
         assert result.summary.tier1_verified == 8
 
     def test_overall_tier_counts(self) -> None:
-        """All examples together: 290 T1 / 96 T3 / 386 total (current).
+        """All examples together: 298 T1 / 99 T3 / 397 total (current).
 
         Counts move when examples are added or their contracts become
         more / less verifiable.  Trajectory:
@@ -569,9 +569,15 @@ private fn sum(@List<Int> -> @Int)
         # 281/97/378 pre-#758).  The loop now resolves imports and threads
         # CLI parity ends at 284/96/380; #379's Inference + JSON example adds
         # six Tier-1 obligations, producing 290/96/386.
-        assert t1 == 290, f"Expected 290 T1, got {t1}"
-        assert t3 == 96, f"Expected 96 T3, got {t3}"
-        assert total == 386, f"Expected 386 total, got {total}"
+        #
+        # #1094: examples/scoreboard.vera joins the corpus — build_board's
+        # `map_size(...) == 4` postcondition and the two callers' non-empty-map
+        # preconditions discharge statically (+8 T1) while the top_score /
+        # roster_size / summary bodies fall to runtime (+3 T3), +11 total:
+        # 290/96/386 -> 298/99/397.
+        assert t1 == 298, f"Expected 298 T1, got {t1}"
+        assert t3 == 99, f"Expected 99 T3, got {t3}"
+        assert total == 397, f"Expected 397 total, got {total}"
         assert t3u == 0, f"Expected 0 tier3_unguarded, got {t3u}"
 
 

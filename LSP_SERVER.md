@@ -25,7 +25,14 @@ the introspection commands), see the CLI cookbook,
 ## Install and run
 
 The server lives behind the optional `[lsp]` extra (pure-Python
-dependencies: `pygls`, `lsprotocol`), installed from the GitHub source:
+dependencies: `pygls`, `lsprotocol`):
+
+```bash
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+python -m pip install "veralang[lsp]"
+```
+
+To install the current GitHub source instead:
 
 ```bash
 git clone https://github.com/aallan/vera.git

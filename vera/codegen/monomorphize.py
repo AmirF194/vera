@@ -24,6 +24,7 @@ from vera.monomorphize import (
     declared_return_clone_key,
 )
 from vera.skip import DERIVED_HELPER_DEPTH_CAP
+from vera.slots import type_expr_slot_name
 
 # Types that satisfy the built-in abilities.  #773: `Eq` is structural, so a
 # field of ANY of these — String included (compared by content) — is
@@ -971,6 +972,23 @@ class MonomorphizationMixin:
                 if (constraint.ability_name == "Eq"
                         and self._adt_satisfies_eq(eq_name)):
                     continue
+                # #1086: an Eq-constrained var bound to an ALIAS or transparent-
+                # `Future` spelling (`MyInt` via `type MyInt = Int;`, `FI` /
+                # `Future<Int>`, an alias of a WHOLE ADT `MyBox`) is neither a
+                # primitive in `type_set` NOR a registered ADT with a layout, so
+                # both checks above missed it and the gate raised a wrong-loud
+                # E613 on a check-green program (the checker, alias-resolving,
+                # accepted the Eq).  `_type_eq_derivable` grounds the spelling
+                # (hop-by-hop alias walk + transparent-Future peel) and re-judges
+                # — the SAME oracle the `$eq` generator's field resolution
+                # mirrors, so the #732 checker↔codegen differential holds at this
+                # entry point too.  A genuinely non-Eq alias (`type BadArr =
+                # Array<Int>;`) grounds to a non-Eq type and still falls through
+                # to the E613 below.  The emitted clone name / message keep the
+                # un-ground `concrete` (the #772/#932 hard constraint).
+                if (constraint.ability_name == "Eq"
+                        and self._type_eq_derivable(eq_name, frozenset())):
+                    continue
                 # #898: a SPARSE multi-type-parameter ADT reached via the
                 # constructor-inferred path (`id1(MkErr(5))` on
                 # `Res<A, B> { MkOk(A), MkErr(B) }`) recovers only the type
@@ -1307,4 +1325,45 @@ class MonomorphizationMixin:
             return True
         if base in self._adt_layouts:
             return self._adt_satisfies_eq(name, seen)
+        # #1070/#1076: an ALIAS or transparent-`Future` spelling (`U` via
+        # `type U = Unit;`, `MyInt`, `FI` / `Future<Int>`, chains) names a
+        # concrete type — GROUND it and re-judge.  Must stay in lockstep with
+        # the `$eq` generator, whose field resolution grounds the same
+        # spellings (`_canonical_field_type`): the gate accepting a type the
+        # generator cannot lower (or vice versa) breaks the #732 differential.
+        # Without this, `Box<U> == Box<U>` / `Box<MyInt> == Box<MyInt>` raised
+        # a wrong E613 on a program whose checker (alias-resolving) accepted
+        # the Eq.  A genuine free `T` grounds to itself: no recursion.
+        ground = self._ground_field_type_name(name)
+        if ground != name:
+            return self._type_eq_derivable(ground, seen)
         return False
+
+    def _ground_field_type_name(self, name: str) -> str:
+        """Generator-side mirror of ``OperatorsMixin._canonical_field_type``.
+
+        Ground spelling of a field / type-argument name: alias chains
+        resolved hop by hop, transparent ``Future<…>`` wrappers peeled to
+        their payload (#1070/#1076) — ``U`` → ``"Unit"``, ``MyInt`` →
+        ``"Int"``, ``FI`` / ``Future<Int>`` → ``"Int"``.  The derivability
+        gate runs on the ``CodeGenerator`` (it is threaded into contexts as
+        the ``_adt_eq_derivable`` oracle), which holds ``_type_aliases`` but
+        not the InferenceMixin walk — so the loop is reimplemented here over
+        the same ``type_expr_slot_name`` canonical naming, cycle-cut by
+        ``seen``.  A non-alias, non-Future name returns unchanged.
+        """
+        seen: set[str] = set()
+        while True:
+            if name.startswith("Future<") and name.endswith(">"):
+                name = name[7:-1]
+                continue
+            if name in seen:
+                return name
+            te = self._type_aliases.get(name)
+            if te is None:
+                return name
+            seen.add(name)
+            target = type_expr_slot_name(te)
+            if target is None or target == name:
+                return name
+            name = target

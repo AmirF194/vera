@@ -8,6 +8,7 @@ array_any, array_all, array_flatten, array_sort_by.
 from __future__ import annotations
 
 from vera import ast
+from vera.monomorphize import Monomorphizer
 from vera.skip import CodegenSkip
 from vera.wasm.helpers import (
     WasmSlotEnv,
@@ -17,12 +18,42 @@ from vera.wasm.helpers import (
     _element_wasm_type,
     _is_host_handle_type,
     _is_pair_element_type,
+    _strip_future,
     gc_shadow_push,
 )
 
 
 class CallsArraysMixin:
     """Methods for translating array built-in functions."""
+
+    def _array_of_array_inner(self, nt: "ast.NamedType | None") -> str | None:
+        """T from a ``NamedType`` spelling ``Array<Array<T>>``, else ``None``.
+
+        Shared by ``_translate_array_flatten``'s FnCall arm (#1053) and its
+        alias-spelled SlotRef recovery (#1053 alias extension) — both derive
+        a full return/argument ``NamedType`` and need the same two-layer
+        unwrap.  An alias-spelled MIDDLE layer (``Array<Row>`` with
+        ``type Row = Array<Int>``) is canonicalized before the unwrap
+        (#1067), so the alias chain behaves exactly like the direct
+        spelling; the returned T may itself be an alias name — the caller's
+        size/pair classification canonicalizes it.
+        """
+        if (nt is None or nt.name != "Array" or not nt.type_args
+                or not isinstance(nt.type_args[0], ast.NamedType)):
+            return None
+        mid = nt.type_args[0]
+        if mid.name != "Array" and not mid.type_args:
+            # #1067: alias-spelled middle layer — canonicalize the bare
+            # name to its target's compound spelling and re-parse.
+            canon = self._canonicalize_alias_slot_name(mid.name)[0]
+            if canon != mid.name:
+                parsed = Monomorphizer._parse_type_name(canon)
+                if isinstance(parsed, ast.NamedType):
+                    mid = parsed
+        if (mid.name == "Array" and mid.type_args
+                and isinstance(mid.type_args[0], ast.NamedType)):
+            return self._format_named_type(mid.type_args[0])
+        return None
 
     def _array_elem_triad_or_skip(
         self, arr_arg: "ast.Expr", *, role: str,
@@ -112,6 +143,17 @@ class CallsArraysMixin:
             raise CodegenSkip(
                 elem_arg, "could not infer array_append element type"
             )
+        # Canonicalize an alias-spelled element (#1062): for `@FI.0`
+        # (`type FI = Future<Int>`) the inference returns the bare alias
+        # name unresolved, which the module-level element helpers below
+        # (no alias table) size as the 4-byte i32 default and store with
+        # `i32.store` — an "expected i32, found i64" validation trap on a
+        # check+verify-green `array_append`.  Canonicalize-then-resolve
+        # BEFORE the module-level helpers, mirroring the #1058
+        # literal-store fix; a full compound spelling (`Future<Int>`)
+        # or non-alias name passes through unchanged.
+        elem_type, _ = self._canonicalize_alias_slot_name(elem_type)
+        elem_type = self._resolve_base_type_name(elem_type)
         elem_size = _element_mem_size(elem_type)
         if elem_size is None:  # pragma: no cover — defensive: _element_mem_size never returns None (falls back to 4)
             raise CodegenSkip(
@@ -136,9 +178,17 @@ class CallsArraysMixin:
             elem_ptr = self.alloc_local("i32")
             elem_len = self.alloc_local("i32")
         else:
+            # `Future<T>` is representation-transparent (#841): the local
+            # holding the pushed element must be its payload T's WASM type,
+            # not the i32 default.  `elem_size` / `store_op` already strip
+            # the wrapper (via `_strip_future`), so without stripping here
+            # too a `Future<Int>` payload (i64) is `local.set` into an i32
+            # local — a "expected i32, found i64" validation trap on a
+            # check+verify-green `array_append` (#1057).
+            bare_elem = _strip_future(elem_type)
             elem_val = self.alloc_local(
-                "i64" if elem_type in ("Int", "Nat") else
-                "f64" if elem_type == "Float64" else "i32"
+                "i64" if bare_elem in ("Int", "Nat") else
+                "f64" if bare_elem == "Float64" else "i32"
             )
         # Locals for copy loop and destination
         dst = self.alloc_local("i32")
@@ -637,23 +687,51 @@ class CallsArraysMixin:
     ) -> str | None:
         """Return the Vera element type name for a closure's return value.
 
-        Needed so array_map knows the size / load / store ops for the
-        output element type.  Handles the common case of an anonymous
-        function literal (``fn(...) -> T { ... }``).  Returns ``None``
-        when the return type can't be inferred from the AST alone.
+        Needed so array_map / array_mapi / array_fold know the size /
+        load / store ops for the output element type.  Handles both
+        closure-arg shapes the combinators accept: an inline anonymous
+        function literal (``fn(...) -> T { ... }``) and a fn-typed slot
+        reference (``@Mapper.0`` where ``type Mapper = fn(A -> T)``).
+        Returns ``None`` when no return type can be recovered from the
+        AST alone.
 
-        Post-#630: delegates to `_canonical_named_type` so that
-        closures with `RefinementType` returns (single-level or nested)
-        and aliased return types resolve to the canonical name.  The
-        pre-#630 shape only handled bare `NamedType` — a closure with
-        a refinement return passed to `array_map` would have silently
-        returned `None`, exactly the trigger pattern of the #602 /
-        #614 bug class.
+        Shape dispatch is delegated to :py:meth:`_closure_arg_return_type`
+        — the same resolver ``apply_fn`` uses (#867) — which yields an
+        ``AnonFn``'s declared ``return_type`` directly and resolves a
+        ``SlotRef`` through the transitive ``FnType`` alias chain.  Both
+        results feed `_canonical_named_type`, so `RefinementType` returns
+        (single-level or nested) and aliased return types resolve to the
+        canonical name.  Before #1056 only the ``AnonFn`` arm existed, so
+        a fn-typed slot handed to ``array_map`` E602-dropped with "could
+        not infer array_map closure return type" even though
+        ``apply_fn`` over the identical slot resolved fine; the pre-#630
+        bare-`NamedType`-only shape had the parallel gap for refinement
+        returns (#602 / #614).
+
+        The canonical `NamedType` is rendered as its FULL compound
+        spelling (#1079): returning `.name` dropped the type arguments,
+        so a closure forwarding a `Future<T>` value (a PURE
+        identity/reshuffle closure — `array_map` rejects async ones)
+        inferred bare `"Future"`, which `_element_mem_size` /
+        `_element_wasm_type` cannot `_strip_future` and size at the
+        4-byte i32 default while the payload occupies 8 bytes — an
+        `indirect call type mismatch` trap for Int/Nat/Float64/String
+        payloads and SILENTLY wrong values for 1-byte-packed Bool/Byte,
+        all behind a check+verify-green exit-0 compile.  The bare-head
+        family (#1057's mechanism) at the closure-return site, which
+        the #1045/#1057 element fixes and the #1074 payload
+        canonicalizer never reach.  An alias INSIDE the rendered
+        payload (`Future<Big>`, `type Big = Int`) is canonicalized too
+        (`_canonicalize_alias_slot_name`, the #1074 walk) — the name
+        the deciders key on must be fully resolved.
         """
-        if isinstance(closure_arg, ast.AnonFn):
-            canonical = self._canonical_named_type(closure_arg.return_type)
+        ret_te = self._closure_arg_return_type(closure_arg)
+        if ret_te is not None:
+            canonical = self._canonical_named_type(ret_te)
             if canonical is not None:
-                return canonical.name
+                name, _ = self._canonicalize_alias_slot_name(
+                    self._format_named_type(canonical))
+                return name
         return None
 
     def _translate_array_map(
@@ -1084,7 +1162,21 @@ class CallsArraysMixin:
             return ret
         # Fallback: inspect the init expression.
         if isinstance(init_arg, ast.SlotRef):
-            return init_arg.type_name
+            # #1079 (fallback arm): `SlotRef.type_name` is the bare head
+            # (`@Future<Int>.0` carries `"Future"` with the payload in
+            # `type_args`), the same truncation
+            # `_infer_closure_return_vera_type` had — reachable when the
+            # closure-return dispatch yields None (e.g. an if-expression
+            # between two closures) and mis-typing the accumulator local
+            # (an `expected i32, found i64` validation error).  Render
+            # the full compound spelling and canonicalize any alias in
+            # it (`@FI.0` / `@Future<Big>.0`), exactly like the primary
+            # arm.
+            name = self._ref_vera_type_name(
+                init_arg.type_name, init_arg.type_args,
+            ) or init_arg.type_name
+            name, _ = self._canonicalize_alias_slot_name(name)
+            return name
         if isinstance(init_arg, ast.StringLit):
             return "String"
         if isinstance(init_arg, ast.IntLit):
@@ -1955,16 +2047,27 @@ class CallsArraysMixin:
         # input is not array-of-array shaped and we bail.
         #
         # Second pass: AST walk to recover T.
-        #   - SlotRef typed ``@Array<Array<T>>``: walk type_args twice.
-        #   - Other expressions (FnCall returning Array<Array<T>>,
-        #     array literals, etc.): deferred — recovering T for
-        #     those requires teaching the inference helpers about
-        #     nested generics, which is broader infrastructure work
-        #     tracked separately.  Until then those inputs emit
-        #     "unsupported expressions" at codegen, which is the
-        #     same behaviour as for any other codegen gap.
+        #   - SlotRef typed ``@Array<Array<T>>``: walk type_args twice; an
+        #     alias-spelled slot (``@Grid.0``) canonicalizes through the
+        #     shared rebuilder instead (#1053 alias extension).
+        #   - ArrayLit (#1052): an inline nested literal argument
+        #     (``array_flatten([[10, 20], [30, 40]])``) — T is the inner
+        #     literal's element type, the same ``_infer_array_element_type``
+        #     recovery a nested literal in a ``let`` position uses.
+        #   - FnCall (#1053, converse): a call returning ``Array<Array<T>>``
+        #     — a builtin (``array_flatten(array_map(xs, |x| [...]))``) or a
+        #     registered user fn (``array_flatten(mkn())``) — derive its full
+        #     return NamedType via the shared #1051
+        #     ``_builtin_call_ret_named_type`` derivation and unwrap both
+        #     ``Array<>`` layers.
+        # A genuinely unresolvable argument shape keeps the loud skip.
         outer_elem = self._infer_concat_elem_type(arr_arg)
-        if outer_elem != "Array":
+        # The element probe canonicalizes alias names (#1067), so an
+        # array-shaped outer element may arrive as the bare "Array" (direct
+        # nested spelling) or a full "Array<...>" (canonicalized alias, e.g.
+        # `type Grid = Array<Row>` gives "Array<Int>").
+        if outer_elem is None or (
+                outer_elem != "Array" and not outer_elem.startswith("Array<")):
             raise CodegenSkip(
                 arr_arg,
                 "array_flatten input must be Array<Array<T>>",
@@ -1978,13 +2081,69 @@ class CallsArraysMixin:
                 and arr_arg.type_args[0].name == "Array"
                 and arr_arg.type_args[0].type_args
                 and isinstance(arr_arg.type_args[0].type_args[0], ast.NamedType)):
-                t_type = arr_arg.type_args[0].type_args[0].name
+                inner_te = arr_arg.type_args[0].type_args[0]
+                # Preserve the FULL `Future<…>` spelling for a
+                # representation-transparent element (#841): the bare head
+                # `"Future"` collapses to the 4-byte i32 default in the
+                # element-size / pair deciders below, so the inner copy
+                # loop runs a 4-byte stride over an 8-byte (or two-word
+                # pair) payload and flattens garbage — silent-wrong on a
+                # check+verify-green `array_flatten` (#1057).
+                #
+                # An ALIAS-spelled inner element (`Array<Array<FI>>`,
+                # `type FI = Future<Int>`) is canonicalized to its
+                # target's full compound spelling first (#1062) — the raw
+                # alias name hit the same i32 default.  Mirrors the
+                # canonicalize-then-resolve order of the #1058
+                # literal-store fix; a parameterized inner element keeps
+                # the bare-head behavior (the name-only canonicalizer
+                # cannot substitute its arguments).
+                if inner_te.name == "Future" and inner_te.type_args:
+                    # #1074: canonicalize an alias inside the payload
+                    # (`Future<FlagA>` -> `Future<Bool>`) so the inner copy
+                    # loop sizes the resolved payload, not a bare alias
+                    # that falls to the 4-byte i32 default.
+                    t_type, _ = self._canonicalize_alias_slot_name(
+                        self._format_named_type(inner_te))
+                elif not inner_te.type_args:
+                    canon, _ = self._canonicalize_alias_slot_name(
+                        inner_te.name)
+                    t_type = self._resolve_base_type_name(canon)
+                else:
+                    t_type = inner_te.name
+            if t_type is None:
+                # #1053 alias extension: an alias-spelled slot
+                # (`type Grid = Array<Array<Int>>;` then `@Grid.0`) has no
+                # type_args to walk — resolve through the shared rebuilder,
+                # which canonicalizes the alias to its target's compound
+                # spelling (#1055), and unwrap both Array<> layers.
+                t_type = self._array_of_array_inner(
+                    self._named_type_from_arg_info(arr_arg))
+        elif isinstance(arr_arg, ast.ArrayLit) and arr_arg.elements:
+            # #1052: inline nested array literal — the outer literal's first
+            # element is itself an array literal, so T is that inner literal's
+            # element type.
+            inner = arr_arg.elements[0]
+            if isinstance(inner, ast.ArrayLit):
+                t_type = self._infer_array_element_type(inner)
+        elif isinstance(arr_arg, ast.FnCall):
+            # #1053: a builtin call returning Array<Array<T>> as the argument —
+            # unwrap both Array<> layers of its derived return NamedType.
+            t_type = self._array_of_array_inner(
+                self._builtin_call_ret_named_type(arr_arg))
         if t_type is None:
             raise CodegenSkip(
                 arr_arg,
                 "could not recover inner element type for array_flatten "
-                "(only SlotRef Array<Array<T>> is currently supported)",
+                "(need Array<Array<T>> from a slot or alias, an inline "
+                "nested literal, or a resolvable call)",
             )
+        # #1067: T itself may be an alias spelling (`Array<Array<Row>>`
+        # recovers "Row") — canonicalize before the size/pair
+        # classification, else a pair element is copied at the 4-byte
+        # opaque-pointer stride and the second pass reads past the
+        # destination allocation.
+        t_type = self._canonicalize_alias_slot_name(t_type)[0]
         t_size = _element_mem_size(t_type)
         if t_size is None:  # pragma: no cover — defensive: _element_mem_size never returns None (falls back to 4)
             raise CodegenSkip(

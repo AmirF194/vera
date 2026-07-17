@@ -178,7 +178,7 @@ None of this is Vera-specific, but it validates the design choices. The thesis i
 
 This is a real concern. LLMs are trained on trillions of tokens of Python, TypeScript, and JavaScript. A MojoBench study (NAACL 2025) found that even fine-tuned models achieved only 30–35% improvement over base models on Mojo code generation, illustrating the cold-start problem for new languages.
 
-Vera's approach has three parts. First, the agent-facing documentation (SKILL.md) is designed to be dropped into a model's context window, so the model works from the language specification rather than training data recall. Second, Vera's syntax is deliberately simple and regular — fewer constructs, each with exactly one canonical form — which reduces the surface area a model needs to learn. Third, the conformance test suite (160 programs covering every language feature) gives models concrete examples to learn from and conform to. Simon Willison's December 2025 JustHTML write-up illustrates the same point in practice: an LLM-assisted implementation, guided by the html5lib conformance suite, conformed to the HTML parsing spec by running against its tests — a comprehensive test suite is a strong scaffold for a model implementing to a specification.
+Vera's approach has three parts. First, the agent-facing documentation (SKILL.md) is designed to be dropped into a model's context window, so the model works from the language specification rather than training data recall. Second, Vera's syntax is deliberately simple and regular — fewer constructs, each with exactly one canonical form — which reduces the surface area a model needs to learn. Third, the conformance test suite (163 programs covering every language feature) gives models concrete examples to learn from and conform to. Simon Willison's December 2025 JustHTML write-up illustrates the same point in practice: an LLM-assisted implementation, guided by the html5lib conformance suite, conformed to the HTML parsing spec by running against its tests — a comprehensive test suite is a strong scaffold for a model implementing to a specification.
 
 
 ## How does Vera compare to Dafny / Lean / Koka / F*?
@@ -221,14 +221,14 @@ The reference compiler is under active development. The current release includes
 
 - A seven-stage pipeline: parse, transform, resolve, typecheck, verify, compile, execute
 - A 14-chapter formal specification
-- 7,514 tests, including a 160-program conformance suite
-- 37 working example programs
+- 7,992 tests, including a 163-program conformance suite
+- 39 working example programs
 - 164 built-in functions covering strings, arrays, math, parsing, and data types
 - Four built-in abilities (Eq, Ord, Hash, Show) with constrained generics and ADT auto-derivation
 - Full IO operations (print, read_line, read_char, read_file, write_file, args, exit, get_env, sleep, time, stderr)
 - Algebraic data types, pattern matching, closures, generics with monomorphisation
 - Algebraic effect handlers with resume and state
-- Built-in `<Http>`, `<HttpServer>`, `<Inference>`, `<State>`, `<IO>`, `<Async>`, `<Random>`, and `Exn<T>` (typed exception) effects
+- Built-in `<Http>`, `<HttpServer>`, `<Inference>`, `<State>`, `<IO>`, `<Async>`, `<Random>`, `<Diverge>`, and `Exn<T>` (typed exception) effects
 - `<Inference>` dispatches to Anthropic, OpenAI, Kimi (Moonshot), or Mistral via env vars
 - Collection types: `Map<K,V>`, `Set<T>`, `Array<T>`, `Decimal`, `Json`, `HtmlNode`, `Markdown`
 - String interpolation with auto-conversion for primitive types
@@ -243,11 +243,21 @@ The language is under active development. See the [Roadmap](ROADMAP.md) and [Cha
 
 ## How do I try it?
 
+Clone the repository — the checkout carries the bundled examples this command runs, plus the conformance suite and specification (a PyPI install ships the toolchain only):
+
 ```bash
 git clone https://github.com/aallan/vera.git && cd vera
 python -m venv .venv && source .venv/bin/activate
-pip install -e .
+python -m pip install -e .
 vera run examples/hello_world.vera
+```
+
+If you only need the `vera` command — no examples, spec, or conformance programs — install the released distribution from PyPI:
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+python -m pip install veralang
+vera version
 ```
 
 For agents, point your model at [SKILL.md](https://raw.githubusercontent.com/aallan/vera/main/SKILL.md). It's the complete language reference, designed to be dropped into a context window. For driving the command-line toolchain itself — checking, verifying, testing, running, and debugging Vera, plus the `builtins`/`effects`/`errors` introspection commands — see the CLI cookbook, [TOOLCHAIN.md](TOOLCHAIN.md).

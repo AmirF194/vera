@@ -46,7 +46,7 @@ The practical implication for user code: do **not** insert `nat_to_int` defensiv
 
 - Reading a zero-size slot (`@Unit.0`) is a checker error (**E182**) in every binding form — function parameters, handler-clause operation parameters, and closure parameters alike. The unit value has exactly one spelling: the literal `()`.
 - A `let` binding of a zero-size type (`let @Unit = put(5);`) is a checker error (**E183**): the binding could never be read, and sequencing is the expression statement's job (`put(5);`).
-- An array of a zero-size element type is a checker error (**E135**), and instantiating a type parameter that is *read* at `Unit` is a checker error (**E206**, §2.7).
+- An array of a zero-size element type is a checker error (**E135**), as are a `Map` whose key or value type is zero-size and a `Set` of a zero-size element type — container entries are raw, unboxed values with no representation to store or load. Instantiating a type parameter that is *read* at `Unit` is a checker error (**E206**, §2.7).
 
 These rules key on representation, not on the name `Unit`: a `Future` transparently wrapping a zero-size payload (`Future<Unit>`) is rejected the same way, while boxed shapes with a real runtime representation (`Option<Unit>` — tag plus pointer) are ordinary values.
 
@@ -275,7 +275,7 @@ Type aliases are transparent for refinement subtyping: `PosInt` and `{ @Int | @I
 
 However, type aliases create distinct namespaces for slot references (see Chapter 3): `@PosInt.0` counts only `PosInt` bindings, not `Int` bindings.
 
-A type alias MUST eventually resolve to a concrete type — the chain of alias definitions MUST be acyclic. A cyclic alias (e.g. `type A = B; type B = A`, or a self-reference `type A = A`) has no underlying representation and is rejected with error `E132`. (Recursion *is* permitted through an `ADT` declared via `data`, where the indirection is a heap pointer rather than a direct alias expansion.)
+A type alias MUST eventually resolve to a concrete type — the chain of alias definitions MUST be acyclic. The requirement is structural over every representation-expanding position of the definition: the target's own name, references nested inside type arguments at any depth (`type F = Future<F>`, `type L = Array<L>`, `type A = Future<Array<B>>`) — including arguments the generic alias does not use — and refinement bases. A cyclic alias is rejected with error `E132`. (Recursion *is* permitted where an indirection bounds the expansion: through an `ADT` declared via `data` — a heap pointer — and through function-type parameter or return positions — a function value is a table index, so `type FA = fn(FA -> Int) effects(pure);` is accepted.)
 
 ### 2.6.4 Predicate Verification
 

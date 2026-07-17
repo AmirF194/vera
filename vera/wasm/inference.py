@@ -1347,19 +1347,47 @@ class InferenceMixin:
         """Check if a slot type name is an Array<T> type."""
         return type_name.startswith("Array<")
 
-    def _is_pair_type_name(self, type_name: str) -> bool:
+    def _is_pair_type_name(
+        self, type_name: str, _seen: frozenset[str] = frozenset(),
+    ) -> bool:
         """Check if a slot type name is a pair type (ptr, len).
 
         String and Array<T> are represented as two consecutive i32 locals.
         Bare "Array" also matches — monomorphization may produce slot
         references with type_name="Array" (no type args in the name).
 
+        An alias is canonicalized to its target's FULL compound spelling
+        first (the shared :meth:`_canonicalize_alias_slot_name` walk, #1046):
+        the name-only ``_resolve_base_type_name`` hop drops type arguments,
+        so ``type FS = Future<String>`` resolved to bare ``"Future"``, missed
+        the Future arm below, and the let binding E602-skipped its enclosing
+        function on a check+verify-green program — the pair-payload sibling
+        of the #1037 scalar-alias fix, which wired the canonicalizer into
+        ``_slot_name_to_wasm_type`` but not into this predicate.
+
         Resolves type aliases first so `type Row = Array<Bool>` compiles
         identically to writing `Array<Bool>` directly: a SlotRef with
         type_name "Row" must emit `(local.get ptr; local.get len)` like
         any other Array slot, not just the ptr (#583).
+
+        `Future<T>` is representation-transparent (#841): a `Future<String>`
+        / `Future<Array<T>>` has the SAME `i32_pair` layout as its payload,
+        so it binds and reads as two locals exactly like a bare String /
+        Array.  The transparency is to the PAYLOAD's representation — a
+        scalar payload (`Future<Int>` → i64) or a pointer payload
+        (`Future<Box>` → i32) is NOT a pair.  Mirrors the string-form
+        strip-and-recurse in `_slot_name_to_wasm_type`'s Future arm, and
+        covers both composite-string sites in the let path — the binding
+        (`translate_block`) and the read emit (`_translate_slot_ref`).
+        Without it a `let @Future<String>` fell to the scalar branch, where
+        `_slot_name_to_wasm_type` recursed through the wrapper to a pair
+        inner and returned None, and the whole function was dropped with the
+        [E602] loud skip on a check/verify-green program (#1039).
         """
+        type_name, _seen = self._canonicalize_alias_slot_name(type_name, _seen)
         resolved = self._resolve_base_type_name(type_name)
+        if resolved.startswith("Future<") and resolved.endswith(">"):
+            return self._is_pair_type_name(resolved[7:-1], _seen)
         return (resolved == "String"
                 or resolved == "Array"
                 or resolved.startswith("Array<"))
@@ -1377,9 +1405,36 @@ class InferenceMixin:
         type_name is "Array" with type_args (NamedType("Int"),).
         Also handles chained indexing (e.g. @Array<Array<Int>>.0[0][1])
         by recursively resolving the inner collection's element type.
+
+        Normally returns the bare element name (`te.name`) — dropping the
+        element's own type args is safe because every ADT element is an i32
+        heap pointer and String/Array match on the bare head, so the
+        representation deciders (`_element_mem_size` / `_element_load_op` /
+        `_element_store_op` / `_element_wasm_type` / `_is_pair_element_type`)
+        need no args.  The ONE exception is `Future<T>` (#1045): it is
+        representation-transparent (#841), so its width IS its payload's —
+        a bare "Future" (args dropped) collapses to the i32 default and
+        mis-sizes an i64 payload (`i32.load` on i64 data) or a pair payload
+        (single i32 load of a two-word String).  Render the full
+        `Future<…>` name so `_strip_future` can recover the payload, keeping
+        this in agreement with the array-literal store side, which gets the
+        full name from `_infer_array_element_type` -> `_infer_vera_type`.
+        An alias INSIDE the payload (`Future<FlagA>`, `type FlagA = Bool`) is
+        canonicalized to `Future<Bool>` first (#1074) so the bare alias does
+        not itself fall to the 4-byte default under `_strip_future`.
         """
         te = self._infer_index_element_type_expr(expr)
-        return te.name if te is not None else None
+        if te is None:
+            return None
+        if te.name == "Future" and te.type_args:
+            # #1074: canonicalize an alias sitting inside the payload
+            # (`Future<FlagA>` -> `Future<Bool>`) so `_strip_future` in the
+            # element helpers hands a resolved payload to the size / load
+            # deciders, not a bare alias that falls to the 4-byte default.
+            canon, _ = self._canonicalize_alias_slot_name(
+                self._format_named_type(te))
+            return canon
+        return te.name
 
     def _infer_index_element_type_expr(
         self, expr: ast.IndexExpr,
@@ -1433,11 +1488,275 @@ class InferenceMixin:
             # preserved) so we can feed `_alias_array_element` —
             # that helper inspects `.type_args` on the NamedType.
             canonical = self._canonical_named_type(ret_te)
+            if canonical is None:
+                # #1048: a BUILTIN call has no `_fn_ret_type_exprs` entry
+                # (that registry holds user functions only), so `canonical`
+                # is None above and — pre-fix — the collection fell through
+                # to `return None`, `_translate_index_expr` returned None,
+                # and the enclosing function was dropped via [E602].  Only
+                # the let-bound form (`let @Array<Int> = array_concat(...);
+                # @Array<Int>.0[i]`) worked — it resolves through the SlotRef
+                # arm above, not this FnCall arm.  Recover the builtin's
+                # return NamedType via the same `_get_arg_type_info_wasm`
+                # consultor the sibling Vera-type inference
+                # (`_infer_fncall_vera_type`) and instantiation discovery use,
+                # so all three agree on the shape.  Type-variable-element
+                # builtins (`array_map`/`array_reverse`/`map_keys`/…) are
+                # absent from that consultor's tables — their element type
+                # depends on the arguments — so `_builtin_call_ret_named_type`
+                # derives their return NamedType from the call's arguments per
+                # mechanism class (#1051).  A genuinely unresolvable argument
+                # shape still yields None, so the function keeps the loud
+                # [E602] skip rather than being mis-typed.
+                canonical = self._builtin_call_ret_named_type(coll)
             if canonical is not None:
                 ta_te = self._alias_array_element(
                     canonical.name, canonical.type_args)
                 if ta_te is not None:
                     return ta_te
+        return None
+
+    def _builtin_call_ret_named_type(
+        self, call: ast.FnCall,
+    ) -> ast.NamedType | None:
+        """Full return ``NamedType`` of a builtin ``call`` whose result is a
+        parameterized type (e.g. ``array_concat(...)`` → ``Array<Int>``), or
+        ``None`` if the shape cannot be resolved.
+
+        Two resolution paths:
+
+        1. Builtins whose return NamedType is recoverable from the shared
+           ``(type_name, type_arg_names)`` consultor
+           (:py:meth:`_get_arg_type_info_wasm`, via
+           :py:meth:`_named_type_from_arg_info`): arg-forwarding for
+           ``array_concat`` / ``array_append`` / ``array_slice`` /
+           ``array_filter``, plus the ``_BUILTIN_PARAMETERIZED_RETURNS`` table
+           for the concrete-Array builtins (``array_range``, ``string_split``,
+           ``json_keys``, …).  Sharing that consultor keeps the index element
+           type in lockstep with clone-name discovery (#1048).
+
+        2. #1051: the eight *type-variable-element* Array-returning builtins
+           (``array_reverse`` / ``array_sort_by`` / ``array_flatten`` /
+           ``map_keys`` / ``map_values`` / ``set_to_array`` / ``array_map`` /
+           ``array_mapi``) are deliberately ABSENT from that consultor's tables
+           — their element type depends on the CALL's arguments, not a fixed
+           signature, and ``_BUILTIN_PARAMETERIZED_RETURNS`` is registry-locked
+           to type-var-free returns (``test_parameterized_table_matches_registry``
+           rejects any TypeVar-carrying entry, else discovery would bind a
+           phantom var).  Their return NamedType is derived from the arguments
+           in :py:meth:`_typevar_elem_builtin_ret_named_type`, kept OFF the
+           shared consultor (this helper is only reached from
+           :py:meth:`_infer_index_element_type_expr`), so clone-name discovery
+           is untouched.
+        """
+        nt = self._named_type_from_arg_info(call)
+        if nt is not None:
+            return nt
+        return self._typevar_elem_builtin_ret_named_type(call)
+
+    def _named_type_from_arg_info(
+        self, expr: ast.Expr,
+    ) -> ast.NamedType | None:
+        """Rebuild an expression's parameterized Vera type as a ``NamedType``
+        from the shared :py:meth:`_get_arg_type_info_wasm` consultor:
+        ``(type_name, type_arg_names)`` → ``NamedType``, nested inners parsed
+        via ``Monomorphizer._parse_type_name`` (which handles shapes like
+        ``Array<Json>``).  ``None`` when neither the consultor nor the
+        off-consultor fallbacks below can resolve the shape.
+
+        Alias spellings resolve here so every consumer sees the target
+        type: a bare alias slot canonicalizes (#1055), a GENERIC alias's
+        args substitute through its target (#1068 — `MyMap<Int>` with
+        `type MyMap<V> = Map<String, V>` resolves to `Map<String, Int>`,
+        never a blind read of the alias's own args), and a registered
+        user fn's declared return recovers shapes the consultor reports
+        incompletely or not at all — nested type args (#1053) and bare
+        alias returns (#1071) — OFF the consultor, so clone-name
+        discovery is untouched.  A Block argument resolves via its tail
+        expression (#1071).
+        """
+        # #1071: a Block-wrapped argument (`map_values({ @M.0 })`) types as
+        # its tail expression.
+        while isinstance(expr, ast.Block):
+            expr = expr.expr
+        info = self._get_arg_type_info_wasm(expr)
+        if info is None:
+            # #1071: a user fn whose declared return is a BARE alias of a
+            # container (`fn mkm(-> @M)` with `type M = Map<String, Int>`)
+            # has no type args for the consultor's user-fn arm to report,
+            # so it exits None before any alias handling — recover the
+            # declared return directly.
+            return self._user_fn_declared_ret_named_type(expr)
+        type_name, type_arg_names = info
+        # #1055: an alias-spelled argument (`type Grid = Array<Array<Int>>;`
+        # then `@Grid.0`) arrives as its bare alias name with NO type args,
+        # so the class derivations never see the container shape and the
+        # index E602-dropped where the direct spelling compiled.
+        # Canonicalize to the target's full compound spelling (the #1037
+        # walk) and parse that instead.  A GENERIC alias name is excluded —
+        # its target carries the alias's own free type params, which must
+        # not leak; without args it is unresolvable (falls through to the
+        # arity-checked substitution path below, which yields None).
+        if not type_arg_names and type_name not in self._type_alias_params:
+            canonical, _ = self._canonicalize_alias_slot_name(type_name)
+            if canonical != type_name:
+                parsed = Monomorphizer._parse_type_name(canonical)
+                if isinstance(parsed, ast.NamedType):
+                    return parsed
+                return None
+        if any(a is None for a in type_arg_names):
+            # #1053 user-fn extension: a registered non-generic user fn's
+            # PARAMETERIZED return reaches the consultor with nested type-arg
+            # positions blanked to None (its user-fn arm deliberately reports
+            # only depth-one names, staying in clone-name-discovery lockstep),
+            # so `array_flatten(mkn())` with `mkn(-> @Array<Array<Int>>)`
+            # rebuilt as `("Array", (None,))` and stayed unresolvable.  The
+            # declared return TypeExpr carries the full nesting — canonicalize
+            # it directly, OFF the consultor, so discovery is untouched.
+            return self._user_fn_declared_ret_named_type(expr)
+        # #1068: a GENERIC alias spelling (`type MyMap<V> = Map<String, V>;`
+        # then a `@MyMap<Int>`-returning argument) must never have its type
+        # args consumed as the TARGET's — `("MyMap", ("Int",))`'s single arg
+        # is the alias's V, not the Map's K.  Substitute the args through
+        # the alias target and canonicalize; an arity mismatch (or a target
+        # that resolves to no NamedType) is unresolvable — return None so
+        # the caller keeps the loud skip.
+        alias_params = self._type_alias_params.get(type_name)
+        if alias_params is not None:
+            target = self._type_aliases.get(type_name)
+            if (target is not None
+                    and type_arg_names
+                    and len(type_arg_names) == len(alias_params)):
+                subst: dict[str, ast.TypeExpr] = {
+                    p: Monomorphizer._parse_type_name(a)
+                    for p, a in zip(alias_params, type_arg_names)
+                    if a is not None
+                }
+                resolved = substitute_type_vars(target, subst)
+                return self._canonical_named_type(resolved)
+            return None
+        type_args = tuple(
+            Monomorphizer._parse_type_name(a)
+            for a in type_arg_names
+            if a is not None
+        )
+        return ast.NamedType(name=type_name, type_args=type_args or None)
+
+    def _user_fn_declared_ret_named_type(
+        self, expr: ast.Expr,
+    ) -> ast.NamedType | None:
+        """Canonical ``NamedType`` of a registered NON-generic user fn call's
+        declared return — the off-consultor recovery behind
+        :py:meth:`_named_type_from_arg_info` for return shapes the shared
+        consultor cannot report: nested type args (#1053, blanked for
+        discovery lockstep) and bare alias returns (#1071, no type args to
+        report at all).  ``None`` for anything else — non-calls, generic
+        fns (their declared return is over their OWN type vars), builtins,
+        and unresolvable return TypeExprs — so callers keep the loud skip.
+        """
+        if (not isinstance(expr, ast.FnCall)
+                or expr.name in self._generic_fn_info):
+            return None
+        ret_te = self._fn_ret_type_exprs.get(expr.name)
+        if ret_te is None:
+            return None
+        return self._canonical_named_type(ret_te)
+
+    def _arg_named_type_deep(self, arg: ast.Expr) -> ast.NamedType | None:
+        """Resolve a type-variable-element builtin argument's value
+        ``NamedType`` to full depth.  A ``FnCall`` argument goes through
+        :py:meth:`_builtin_call_ret_named_type` — the shared consultor first,
+        then the per-class derivation in
+        :py:meth:`_typevar_elem_builtin_ret_named_type` — so an inner
+        type-variable-element builtin (``array_reverse(array_reverse(x))``,
+        ``array_reverse(map_values(m))``, ``array_flatten(array_reverse(x))``)
+        resolves rather than dropping the enclosing index.  Every other
+        argument shape (``SlotRef``, ``ArrayLit``, ``ConstructorCall``) goes
+        through the shared consultor directly, so alias- and literal-spelled
+        arguments resolve exactly as before.  Routing a ``FnCall`` through
+        :py:meth:`_builtin_call_ret_named_type` can only add resolutions — it
+        tries the same consultor first — and recursion is bounded by the
+        argument's call-nesting depth (each step strips one ``FnCall`` layer).
+        A ``Block``-wrapped argument (``array_reverse({ array_reverse(x) })``)
+        resolves via its tail expression, matching the container emissions'
+        Block handling (#1071).
+        """
+        while isinstance(arg, ast.Block):
+            arg = arg.expr
+        if isinstance(arg, ast.FnCall):
+            return self._builtin_call_ret_named_type(arg)
+        return self._named_type_from_arg_info(arg)
+
+    def _typevar_elem_builtin_ret_named_type(
+        self, call: ast.FnCall,
+    ) -> ast.NamedType | None:
+        """#1051: derive the return ``NamedType`` of a type-variable-element
+        Array-returning builtin from its arguments, per mechanism class.  Any
+        argument shape that cannot be resolved yields ``None`` — the caller
+        then keeps the loud [E602] skip rather than guessing an element type.
+
+        Arguments are resolved by :py:meth:`_arg_named_type_deep`: a ``SlotRef``
+        array/container argument and a *consultor-resolvable* builtin call
+        (``array_concat`` / ``array_range`` / …) resolve through the shared
+        consultor, and an argument that is itself a type-variable-element
+        builtin (``array_reverse(array_reverse(x))``,
+        ``array_reverse(map_values(m))``, ``array_flatten(array_reverse(x))``)
+        resolves by recursing through :py:meth:`_builtin_call_ret_named_type`
+        back into this per-class derivation.
+        """
+        name = call.name
+        args = call.args
+        # ---- Class 1: argument-forwarding --------------------------------
+        # array_reverse(Array<T>) and array_sort_by(Array<T>, cmp) return
+        # arg0's type verbatim; array_flatten(Array<Array<T>>) returns arg0's
+        # type with one Array<> layer unwrapped.
+        if name in ("array_reverse", "array_sort_by") and args:
+            return self._arg_named_type_deep(args[0])
+        if name == "array_flatten" and args:
+            outer = self._arg_named_type_deep(args[0])
+            if (outer is not None and outer.name == "Array"
+                    and outer.type_args
+                    and isinstance(outer.type_args[0], ast.NamedType)):
+                return outer.type_args[0]
+            return None
+        # ---- Class 2: container-arg-derived ------------------------------
+        # map_keys(Map<K, V>) -> Array<K>; map_values(Map<K, V>) -> Array<V>;
+        # set_to_array(Set<T>) -> Array<T>.
+        if name in ("map_keys", "map_values", "set_to_array") and args:
+            container = self._arg_named_type_deep(args[0])
+            # #1068: verify the resolved argument type IS the expected
+            # container before reading K/V/T off its type args.  The
+            # rebuilder resolves alias spellings (including a generic
+            # alias's substitution through its target), so a well-formed
+            # aliased argument arrives here named `Map`/`Set`; anything
+            # else must not have its args consumed positionally — a
+            # `("MyMap", ("Int",))` read K = Int where the target says
+            # String, deriving an element type the emission contradicts
+            # (a validation-failing module behind a clean `vera compile`).
+            expected = "Set" if name == "set_to_array" else "Map"
+            if (container is None or container.name != expected
+                    or not container.type_args):
+                return None
+            if name == "map_values":
+                if len(container.type_args) < 2:
+                    return None
+                elem = container.type_args[1]
+            else:
+                elem = container.type_args[0]
+            if isinstance(elem, ast.NamedType):
+                return ast.NamedType(name="Array", type_args=(elem,))
+            return None
+        # ---- Class 3: closure-return-derived -----------------------------
+        # array_map(Array<A>, fn(A -> B)) and
+        # array_mapi(Array<A>, fn(A, Nat -> B)) return Array<B>; B is the
+        # closure argument's declared return type.
+        if name in ("array_map", "array_mapi") and len(args) >= 2:
+            ret_te = self._closure_arg_return_type(args[1])
+            if ret_te is not None:
+                elem_nt = self._canonical_named_type(ret_te)
+                if elem_nt is not None:
+                    return ast.NamedType(name="Array", type_args=(elem_nt,))
+            return None
         return None
 
     def _alias_array_element(
@@ -1913,6 +2232,7 @@ class InferenceMixin:
         self,
         type_name: str,
         type_args: tuple[ast.TypeExpr, ...] | None = None,
+        _seen: frozenset[str] = frozenset(),
     ) -> str | None:
         """Map a slot/result ref's ``type_name`` to its WAT stack type.
 
@@ -1929,7 +2249,20 @@ class InferenceMixin:
         #891 the ResultRef arm inferred only the scalar primitives, so an
         ADT-bound return defaulted to ``None`` and the postcondition equality
         compared two i32 heap pointers with ``i64.eq`` (a WASM validation
-        trap)."""
+        trap).
+
+        An alias is canonicalized to its target's FULL compound spelling
+        first (the shared :meth:`_canonicalize_alias_slot_name` walk,
+        #1054): the name-only ``_resolve_base_type_name`` hop drops type
+        arguments, so ``type FA = Future<Option<Int>>`` resolved to bare
+        ``"Future"`` and — since an alias-spelled slot ref carries no AST
+        ``type_args`` — missed the Future arm below, E602-skipping the
+        scrutinee and constructor-argument sites the direct spelling
+        compiles.  The string-form Future arm below handles the
+        canonicalized compound spelling, mirroring
+        ``_slot_name_to_wasm_type``; the alias analog of #1046, in the last
+        mapper of the family without the canonicalizer."""
+        type_name, _seen = self._canonicalize_alias_slot_name(type_name, _seen)
         resolved = self._resolve_base_type_name(type_name)
         if resolved in ("Int", "Nat"):
             return "i64"
@@ -1939,6 +2272,28 @@ class InferenceMixin:
             return "i32"
         if self._is_pair_type_name(resolved):
             return "i32_pair"
+        # Future<T> is WASM-transparent — same representation as its single type
+        # argument.  Mirrors `_slot_name_to_wasm_type`'s string-form Future arm
+        # and `_named_type_to_wasm`'s canonical-walk Future arm; this SlotRef /
+        # ResultRef mapper was the odd one out that lacked it, so a
+        # `match await(@Future<T>.0) { ... }` scrutinee — whose `await` FnCall
+        # arm of `_infer_expr_wasm_type` delegates to this mapper on the
+        # `@Future<T>` slot ref — inferred None and E602-skipped the enclosing
+        # function on a check/verify-green program (#1038).  Delegating to
+        # `_canonical_wasm_type` lowers the inner type through the same walk the
+        # let-binding path uses, so a scalar inner (Future<Int> -> i64), an ADT
+        # inner (Future<Option<Int>>, Future<UserADT> -> i32), and a pair inner
+        # (Future<String> -> i32_pair) all map correctly here.  (A Future<String>
+        # *scrutinee* stays blocked upstream by the separate `let @Future<String>`
+        # pair-binding gap, so this mapper fix alone doesn't reach it end-to-end.)
+        if resolved == "Future" and type_args and len(type_args) == 1:
+            return self._canonical_wasm_type(type_args[0])
+        # String-form dual of the arm above (#1054): an alias-canonicalized
+        # spelling arrives as the full compound STRING ("Future<Option<Int>>")
+        # with no AST type_args — strip the wrapper and recurse on the payload
+        # spelling, exactly like _slot_name_to_wasm_type's Future arm.
+        if resolved.startswith("Future<") and resolved.endswith(">"):
+            return self._ref_type_name_wasm_type(resolved[7:-1], None, _seen)
         base = resolved.split("<")[0] if "<" in resolved else resolved
         # Opaque handle types — i32 handles managed by host runtime
         if base in ("Decimal", "Map", "Set"):
@@ -1957,8 +2312,85 @@ class InferenceMixin:
             return "i32"
         return None
 
-    def _slot_name_to_wasm_type(self, name: str) -> str | None:
-        """Map a slot type name to a WAT type string."""
+    def _canonicalize_alias_slot_name(
+        self, name: str, _seen: frozenset[str] = frozenset(),
+    ) -> tuple[str, frozenset[str]]:
+        """Resolve an alias slot name to its target's FULL compound spelling.
+
+        Hop by hop through alias-of-alias chains (``FUB -> FUA ->
+        Future<UA>``), keeping type arguments intact — unlike
+        ``_resolve_base_type_name``, which recurses on the target's NAME only
+        and drops them (``type FU = Future<Unit>`` resolved to ``"Future"`` —
+        PR #1035 review; ``type FI = Future<Int>`` likewise — #1037).  The
+        shared walk under ``_slot_name_erases_to_unit`` and
+        ``_slot_name_to_wasm_type``, so the zero-size test and the WAT-type
+        mapper canonicalize identically: an alias behaves exactly like
+        writing its target's spelling directly.
+
+        After the top-level hops, an alias sitting INSIDE a transparent
+        ``Future<…>`` payload is canonicalized too (``Future<FlagA>`` ->
+        ``Future<Bool>``, #1074) — the hop-by-hop walk resolves only the
+        outer NAME, so the four array-element-type deciders that route the
+        result to the module-level element-size / store-op helpers
+        (``_infer_concat_elem_type``, ``_translate_array_lit``, the
+        ``array_flatten`` inner walk, ``_infer_index_element_type``) get a
+        payload the size dict can key on, not a bare alias that falls to the
+        4-byte i32 default.
+
+        Returns the canonical name plus the accumulated seen-set; callers
+        whose own recursion re-enters this walk (the transparent
+        ``Future<...>`` payload peel) thread it through so a self-referential
+        type argument (``type F = Future<F>``) terminates.  Alias cycles are
+        a user-facing E132 upstream — the cut here is defence-in-depth,
+        matching ``_resolve_base_type_name``.  A non-alias name, or an alias
+        whose target has no nameable slot form, is returned unchanged for
+        the caller's own fallthrough handling.
+        """
+        while name in self._type_aliases and name not in _seen:
+            target = type_expr_slot_name(self._type_aliases[name])
+            if target is None or target == name:
+                break
+            _seen = _seen | {name}
+            name = target
+        # #1074: recurse into a representation-transparent ``Future<…>``
+        # payload so an alias sitting INSIDE the wrapper is canonicalized
+        # too (``Future<FlagA>`` -> ``Future<Bool>``, ``type BigF =
+        # Future<Big>`` -> ``Future<Int>``).  The hop-by-hop walk above
+        # resolves only a top-level alias NAME (or an alias chain landing
+        # on a ``Future<…>`` compound); the payload spelling it terminates
+        # on is left verbatim.  An aliased payload therefore reached the
+        # module-level element-size / store-op deciders unresolved (they
+        # ``_strip_future`` the wrapper and hand the bare alias to a
+        # name-keyed size dict with no alias table) and fell to the 4-byte
+        # i32 default — a 4-byte stride over 1-byte-packed Bool/Byte
+        # (silent-wrong values) or an ``i32.store`` of an i64/pair payload
+        # (a WASM-validation trap behind an exit-0 compile).  Thread
+        # ``_seen`` through so a self-referential payload (``type F =
+        # Future<F>``) still terminates.
+        if name.startswith("Future<") and name.endswith(">"):
+            inner = name[len("Future<"):-1]
+            inner, _seen = self._canonicalize_alias_slot_name(inner, _seen)
+            name = f"Future<{inner}>"
+        return name, _seen
+
+    def _slot_name_to_wasm_type(
+        self, name: str, _seen: frozenset[str] = frozenset(),
+    ) -> str | None:
+        """Map a slot type name to a WAT type string.
+
+        An alias is canonicalized to its target's full compound spelling
+        first (the shared :meth:`_canonicalize_alias_slot_name` walk): the
+        prior name-only ``_resolve_base_type_name`` hop dropped type
+        arguments, so an alias TO a compound transparent wrapper (``type FI
+        = Future<Int>``) resolved to bare ``"Future"``, matched no branch,
+        and returned ``None`` — E602-skipping the enclosing function of a
+        destructure / match / let binding on a check+verify-green program
+        (#1037; the zero-size dual of the same disease was PR #1035's
+        review finding), while the direct ``Future<Int>`` spelling
+        compiled.  Canonicalizing makes an alias map exactly like its
+        target written directly.
+        """
+        name, _seen = self._canonicalize_alias_slot_name(name, _seen)
         name = self._resolve_base_type_name(name)
         if name in ("Int", "Nat"):
             return "i64"
@@ -1969,7 +2401,7 @@ class InferenceMixin:
         # Future<T> is WASM-transparent — same representation as T
         if name.startswith("Future<") and name.endswith(">"):
             inner = name[7:-1]
-            return self._slot_name_to_wasm_type(inner)
+            return self._slot_name_to_wasm_type(inner, _seen)
         # Map/Set/Decimal are opaque host-import handles (i32)
         if name.startswith("Map<") or name.startswith("Set<") or name == "Decimal":
             return "i32"
@@ -2001,3 +2433,45 @@ class InferenceMixin:
         if name == "Fn":
             return "i32"
         return None
+
+    def _slot_name_erases_to_unit(
+        self, name: str, _seen: frozenset[str] = frozenset(),
+    ) -> bool:
+        """True if a slot type name is *zero-size* — no WASM representation.
+
+        Zero-size means ``Unit``, or a transparent ``Future<…>`` whose payload
+        is itself zero-size (``Future<Unit>``, ``Future<Future<Unit>>``, …).
+        This is the slot-name mirror of :func:`vera.types.erases_to_unit` and
+        codegen's ``_type_expr_to_wasm_type`` (``Future<T>`` is
+        representation-identical to ``T`` — #841), and it follows the same
+        ``Future<…>`` recursion as :meth:`_slot_name_to_wasm_type`.
+
+        An alias is canonicalized to its target's **full compound spelling**
+        first (the shared :meth:`_canonicalize_alias_slot_name` walk, hop by
+        hop for chains, cycle-cut by ``_seen``) — NOT through
+        ``_resolve_base_type_name``, which recurses on the target's name only
+        and drops type arguments (``type FU = Future<Unit>`` resolved to
+        ``"Future"``, missed the ``Future<…>`` branch, and E602-skipped the
+        function on a check+verify-green program; PR #1035 review).  The
+        seen-set threads through the ``Future<…>`` recursion so a
+        self-referential type argument also terminates, and the
+        ``_resolve_base_type_name`` fallthrough still handles what the
+        canonicalizer cannot name (a no-op for non-aliases).
+
+        Distinct from ``_slot_name_to_wasm_type(name) is None``: that predicate
+        ALSO fires for genuinely unrepresentable types (an unknown ADT, a bare
+        type variable), which are a real codegen gap that must still ``CodegenSkip``
+        rather than silently erase.  The declaration-position guards need to tell
+        "erase this zero-size field" apart from "skip — cannot represent", so
+        they key on THIS check, not on ``_slot_name_to_wasm_type`` being ``None``
+        (#1031: the guards previously compared the bare string ``"Unit"``, so a
+        ``Future<Unit>`` component missed the zero-size branch and skipped the
+        whole function on a check-green program).
+        """
+        name, _seen = self._canonicalize_alias_slot_name(name, _seen)
+        name = self._resolve_base_type_name(name)
+        if name == "Unit":
+            return True
+        if name.startswith("Future<") and name.endswith(">"):
+            return self._slot_name_erases_to_unit(name[7:-1], _seen)
+        return False
