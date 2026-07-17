@@ -115,26 +115,66 @@ def _is_future_result_string_type(
     )
 
 
+def _canonicalize_type_expr_aliases(
+    te: ast.TypeExpr,
+    type_aliases: dict[str, ast.TypeExpr],
+    type_alias_params: dict[str, tuple[str, ...]],
+) -> ast.TypeExpr | None:
+    """``te`` with every type alias replaced by its terminal target,
+    recursively.
+
+    :func:`resolve_type_alias` resolves the OUTER alias chain only —
+    ``type F = G`` down to ``Future<...>`` — but leaves an alias sitting
+    INSIDE the terminal's type arguments untouched (``Future<R>`` with
+    ``type R = Result<String, String>``).  The fused-await classifier's
+    terminal check is exact-shape, so a payload alias hides the shape
+    just as effectively as an outer one — the same #1109 mis-lower one
+    level down (PR #1110 review).  This walk canonicalizes both levels:
+    resolve the outer chain, then recurse into the terminal
+    ``NamedType``'s type arguments.  A cyclic shape anywhere yields
+    ``None`` (the caller falls to its conservative identity lowering).
+    """
+    resolved = resolve_type_alias(te, type_aliases, type_alias_params)
+    if resolved is None:
+        return None
+    if isinstance(resolved, ast.NamedType) and resolved.type_args:
+        args: list[ast.TypeExpr] = []
+        for arg in resolved.type_args:
+            canonical = _canonicalize_type_expr_aliases(
+                arg, type_aliases, type_alias_params,
+            )
+            if canonical is None:
+                return None
+            args.append(canonical)
+        resolved = ast.NamedType(name=resolved.name, type_args=tuple(args))
+    return resolved
+
+
 def _resolves_to_future_result_string(
     te: ast.TypeExpr,
     type_aliases: dict[str, ast.TypeExpr],
     type_alias_params: dict[str, tuple[str, ...]],
 ) -> bool:
-    """True iff ``te`` — with type aliases resolved transitively — is
-    exactly ``Future<Result<String, String>>``.
+    """True iff ``te`` — with type aliases resolved transitively, at the
+    outer level AND inside type arguments — is exactly
+    ``Future<Result<String, String>>``.
 
     Aliases are transparent everywhere else in the language; the
     fused-await classifier resolves them too (#1109), so an alias-typed
-    slot or an alias-spelled declared return participates exactly like
-    the literal spelling.  The #843 ``apply_fn`` arm already resolved
-    fn-type aliases through :func:`resolve_fn_type_alias`; this helper
-    routes every OTHER classification site through the same transitive
-    walk (:func:`resolve_type_alias`) so their alias coverage cannot
-    drift.  A cyclic or otherwise unresolvable shape conservatively
-    returns ``False`` (identity lowering) — the pre-#1109 behaviour for
-    shapes the resolver cannot see through.
+    slot, an alias-spelled declared return, or a payload-aliased
+    ``Future<R>`` participates exactly like the literal spelling.  The
+    #843 ``apply_fn`` arm already resolved fn-type aliases through
+    :func:`resolve_fn_type_alias`; this helper routes every OTHER
+    classification site through the same recursive canonicalization
+    (:func:`_canonicalize_type_expr_aliases`) so their alias coverage
+    cannot drift.  Discrimination is unchanged: only the exact terminal
+    spelling classifies — an alias to ``Future<Result<Int, Int>>``,
+    ``Future<String>``, or a non-``Future`` still canonicalizes to a
+    shape the check rejects (identity lowering).  A cyclic or otherwise
+    unresolvable shape conservatively returns ``False`` — the pre-#1109
+    behaviour for shapes the resolver cannot see through.
     """
-    resolved = resolve_type_alias(te, type_aliases, type_alias_params)
+    resolved = _canonicalize_type_expr_aliases(te, type_aliases, type_alias_params)
     return (
         isinstance(resolved, ast.NamedType)
         and _is_future_result_string_type(resolved.name, resolved.type_args)
