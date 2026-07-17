@@ -29,11 +29,10 @@ function loadLanguageClient() {
         return require("vscode-languageclient/node");
     } catch (err) {
         log(
-            "vscode-languageclient is not installed; running in " +
-            "syntax-highlighting-only mode. For language-server " +
-            "features (proof-aware diagnostics, hover, slot " +
-            "go-to-definition, hole completion), run `npm install` " +
-            "in the extension directory. " + err.message,
+            "vscode-languageclient is missing; running in " +
+            "syntax-highlighting-only mode. Reinstall the extension, " +
+            "or run `npm install` when using a source checkout. " +
+            err.message,
         );
         return null;
     }
@@ -118,7 +117,8 @@ async function startClient(lc) {
         log(
             "Failed to start `vera lsp`. Check that the vera binary " +
             "is on PATH (or set the vera.lsp.path setting) and that " +
-            'the [lsp] extra is installed: pip install -e ".[lsp]". ' +
+            "the PyPI package includes the LSP extra: " +
+            'python -m pip install "veralang[lsp]". ' +
             "Details: " + err.message,
         );
         client = undefined;
@@ -126,8 +126,9 @@ async function startClient(lc) {
         // "nothing is showing up" needlessly hard to diagnose.
         const choice = await vscode.window.showWarningMessage(
             "Vera language server failed to start (syntax highlighting " +
-            "still works). Point the vera.lsp.path setting at your " +
-            "vera binary, e.g. .venv/bin/vera in a clone.",
+            "still works). Install it with `python -m pip install " +
+            '\"veralang[lsp]\"`, or point vera.lsp.path at the Vera ' +
+            "executable.",
             "Open Settings",
         );
         if (choice === "Open Settings") {
