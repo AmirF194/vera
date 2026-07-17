@@ -1662,6 +1662,31 @@ class InferenceMixin:
             return None
         return self._canonical_named_type(ret_te)
 
+    def _arg_named_type_deep(self, arg: ast.Expr) -> ast.NamedType | None:
+        """Resolve a type-variable-element builtin argument's value
+        ``NamedType`` to full depth.  A ``FnCall`` argument goes through
+        :py:meth:`_builtin_call_ret_named_type` — the shared consultor first,
+        then the per-class derivation in
+        :py:meth:`_typevar_elem_builtin_ret_named_type` — so an inner
+        type-variable-element builtin (``array_reverse(array_reverse(x))``,
+        ``array_reverse(map_values(m))``, ``array_flatten(array_reverse(x))``)
+        resolves rather than dropping the enclosing index.  Every other
+        argument shape (``SlotRef``, ``ArrayLit``, ``ConstructorCall``) goes
+        through the shared consultor directly, so alias- and literal-spelled
+        arguments resolve exactly as before.  Routing a ``FnCall`` through
+        :py:meth:`_builtin_call_ret_named_type` can only add resolutions — it
+        tries the same consultor first — and recursion is bounded by the
+        argument's call-nesting depth (each step strips one ``FnCall`` layer).
+        A ``Block``-wrapped argument (``array_reverse({ array_reverse(x) })``)
+        resolves via its tail expression, matching the container emissions'
+        Block handling (#1071).
+        """
+        while isinstance(arg, ast.Block):
+            arg = arg.expr
+        if isinstance(arg, ast.FnCall):
+            return self._builtin_call_ret_named_type(arg)
+        return self._named_type_from_arg_info(arg)
+
     def _typevar_elem_builtin_ret_named_type(
         self, call: ast.FnCall,
     ) -> ast.NamedType | None:
@@ -1670,14 +1695,14 @@ class InferenceMixin:
         argument shape that cannot be resolved yields ``None`` — the caller
         then keeps the loud [E602] skip rather than guessing an element type.
 
-        Argument types come from :py:meth:`_named_type_from_arg_info` (the
-        shared consultor), so a ``SlotRef`` array/container argument resolves,
-        as does an argument that is itself a *consultor-resolvable* builtin call
-        (``array_concat`` / ``array_range`` / …, via the consultor's own FnCall
-        arm).  An argument that is itself a type-variable-element builtin
-        (``array_flatten(...)`` etc.) stays unresolved here — but such nested
-        calls already fail to emit as a call argument upstream, so the enclosing
-        index drops regardless.
+        Arguments are resolved by :py:meth:`_arg_named_type_deep`: a ``SlotRef``
+        array/container argument and a *consultor-resolvable* builtin call
+        (``array_concat`` / ``array_range`` / …) resolve through the shared
+        consultor, and an argument that is itself a type-variable-element
+        builtin (``array_reverse(array_reverse(x))``,
+        ``array_reverse(map_values(m))``, ``array_flatten(array_reverse(x))``)
+        resolves by recursing through :py:meth:`_builtin_call_ret_named_type`
+        back into this per-class derivation.
         """
         name = call.name
         args = call.args
@@ -1686,9 +1711,9 @@ class InferenceMixin:
         # arg0's type verbatim; array_flatten(Array<Array<T>>) returns arg0's
         # type with one Array<> layer unwrapped.
         if name in ("array_reverse", "array_sort_by") and args:
-            return self._named_type_from_arg_info(args[0])
+            return self._arg_named_type_deep(args[0])
         if name == "array_flatten" and args:
-            outer = self._named_type_from_arg_info(args[0])
+            outer = self._arg_named_type_deep(args[0])
             if (outer is not None and outer.name == "Array"
                     and outer.type_args
                     and isinstance(outer.type_args[0], ast.NamedType)):
@@ -1698,7 +1723,7 @@ class InferenceMixin:
         # map_keys(Map<K, V>) -> Array<K>; map_values(Map<K, V>) -> Array<V>;
         # set_to_array(Set<T>) -> Array<T>.
         if name in ("map_keys", "map_values", "set_to_array") and args:
-            container = self._named_type_from_arg_info(args[0])
+            container = self._arg_named_type_deep(args[0])
             # #1068: verify the resolved argument type IS the expected
             # container before reading K/V/T off its type args.  The
             # rebuilder resolves alias spellings (including a generic

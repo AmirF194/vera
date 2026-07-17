@@ -971,7 +971,13 @@ class CallsMixin:
         inline comments on the two arms below), with the #1053 rebuilder
         arm as the broader fall-through for alias-spelled array arguments
         the name-keyed arm cannot resolve.
+
+        A ``Block``-wrapped expression (``array_reverse({ ... })``)
+        resolves via its tail expression, matching the container
+        emissions' Block handling (#1071).
         """
+        while isinstance(expr, ast.Block):
+            expr = expr.expr
         if isinstance(expr, ast.SlotRef):
             if expr.type_name == "Array" and expr.type_args:
                 ta = expr.type_args[0]

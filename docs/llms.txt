@@ -39,7 +39,7 @@ Current version: 0.1.5. The reference compiler is written in Python. Install the
 
 ## Examples
 
-- [examples/](https://github.com/aallan/vera/tree/main/examples): 38 verified example programs covering closures, generics, effects, pattern matching, string operations, async, markdown, JSON, HTML, HTTP, inference, regex, modules, and more.
+- [examples/](https://github.com/aallan/vera/tree/main/examples): 39 verified example programs covering closures, generics, effects, pattern matching, string operations, async, markdown, JSON, HTML, HTTP, inference, regex, modules, and more.
 
 ## Compiler and Tooling
 
@@ -56,4 +56,4 @@ Current version: 0.1.5. The reference compiler is written in Python. Install the
 - [TESTING.md](https://raw.githubusercontent.com/aallan/vera/main/TESTING.md): Test suite architecture, coverage data, and test conventions.
 - [KNOWN_ISSUES.md](https://raw.githubusercontent.com/aallan/vera/main/KNOWN_ISSUES.md): Known bugs and limitations.
 - [CONTRIBUTING.md](https://raw.githubusercontent.com/aallan/vera/main/CONTRIBUTING.md): Contribution guidelines.
-- [Conformance Suite](https://github.com/aallan/vera/tree/main/tests/conformance): 161 programs validating every language feature against the spec.
+- [Conformance Suite](https://github.com/aallan/vera/tree/main/tests/conformance): 162 programs validating every language feature against the spec.
