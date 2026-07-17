@@ -470,7 +470,7 @@ Stages 19 and 20 run dual-threaded: community PRs against the single-source spri
 | v0.1.2 | 9 Jul | **The gate-hardening batch** — scheduled limitations-sync, the arm64 advisory lane, the gate-honesty pair ([#956](https://github.com/aallan/vera/issues/956)), and the E009 crash fix from the pre-release sweep. |
 | v0.1.3 | 10 Jul | **Monomorphizer completeness** ([#769](https://github.com/aallan/vera/issues/769)) — registry-complete builtin return tables, recursive type-argument unification, and the scope-aware De Bruijn reindex walker. |
 | v0.1.4 | 11 Jul | **The second burndown** — 19 bug fixes across the checker, verifier, and codegen: the fresh-ctor-var family under `forall`, where-helper scoping, `handle[State<T>]` clause execution, the `@Nat`/`@Int` obligations, and imported-body compilation ([#991](https://github.com/aallan/vera/issues/991)). |
-| v0.1.5 | 17 Jul | **The third burndown and the first PyPI release** — 28 checker, codegen, and diagnostics bug fixes, published to PyPI as `veralang` ([#737](https://github.com/aallan/vera/issues/737)). |
+| v0.1.5 | 17 Jul | **The third burndown and the first PyPI release** — 28 bug-labelled issues fixed across the checker, codegen, and diagnostics, published to PyPI as `veralang` ([#737](https://github.com/aallan/vera/issues/737)). |
 
 ---
 
@@ -484,7 +484,7 @@ Nine releases, chosen for the capability each one unlocked rather than even spac
 |--------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | Milestone | First release | Runs end-to-end | GC + maturity | Inference effect | Language server | Soundness campaign | HttpServer effect | WASI serve backend | Zero known bugs | First PyPI release |
 | Compiler layers | Parser | 5 (full pipeline) | 5 + modules + GC | 5 + modules + GC + browser | 5 + modules + GC + browser + LSP | 5 + modules + GC + browser + LSP | 5 + modules + GC + browser + LSP | 5 + modules + GC + browser + LSP + WASI | 5 + modules + GC + browser + LSP + WASI | 5 + modules + GC + browser + LSP + WASI |
-| Tests | ~50 | ~300 | ~1,400 | 3,095 | 4,342 | 5,559 | 5,615 | 5,808 | 6,779 | 7,972 |
+| Tests | ~50 | ~300 | ~1,400 | 3,095 | 4,342 | 5,559 | 5,615 | 5,808 | 6,779 | 7,973 |
 | Examples | 13 | 15 | 18 | 30 | 35 | 35 | 36 | 36 | 37 | 39 |
 | Built-in functions | 0 | 0 | ~30 | 122 | 164 | 164 | 164 | 164 | 164 | 164 |
 | Conformance programs | 0 | 0 | 0 | 64 | 89 | 103 | 104 | 104 | 143 | 162 |

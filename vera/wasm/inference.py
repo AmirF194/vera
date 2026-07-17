@@ -1677,7 +1677,12 @@ class InferenceMixin:
         :py:meth:`_builtin_call_ret_named_type` can only add resolutions — it
         tries the same consultor first — and recursion is bounded by the
         argument's call-nesting depth (each step strips one ``FnCall`` layer).
+        A ``Block``-wrapped argument (``array_reverse({ array_reverse(x) })``)
+        resolves via its tail expression, matching the container emissions'
+        Block handling (#1071).
         """
+        while isinstance(arg, ast.Block):
+            arg = arg.expr
         if isinstance(arg, ast.FnCall):
             return self._builtin_call_ret_named_type(arg)
         return self._named_type_from_arg_info(arg)

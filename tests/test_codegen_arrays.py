@@ -1252,6 +1252,18 @@ public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
 """
         assert _run(src, fn="g") == 10
 
+    def test_block_wrapped_nested_reverse_direct_index(self) -> None:
+        """A Block-wrapped nested builtin argument resolves via its tail
+        expression on both the emission-side element inference and the
+        index-side deep resolution (PR #1096 review).  reverse twice =
+        identity; [0] = 10."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  array_reverse({ array_reverse([10, 20]) })[0]
+}
+"""
+        assert _run(src, fn="g") == 10
+
     def test_reverse_single_letbound_control(self) -> None:
         """Control: a single let-bound array_reverse resolves via the SlotRef arm
         and stays green independently of the nested-arg fix.  [0] = 30."""

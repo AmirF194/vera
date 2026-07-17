@@ -3084,7 +3084,7 @@ The reference compiler is under active development. The current release includes
 
 - A seven-stage pipeline: parse, transform, resolve, typecheck, verify, compile, execute
 - A 14-chapter formal specification
-- 7,972 tests, including a 162-program conformance suite
+- 7,973 tests, including a 162-program conformance suite
 - 39 working example programs
 - 164 built-in functions covering strings, arrays, math, parsing, and data types
 - Four built-in abilities (Eq, Ord, Hash, Show) with constrained generics and ADT auto-derivation
