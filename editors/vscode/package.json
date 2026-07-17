@@ -1,9 +1,9 @@
 {
 	"name": "vera-language",
 	"displayName": "Vera Language",
-	"description": "Language support for the Vera programming language: proof-aware diagnostics, hover, slot go-to-definition, and typed-hole completion via the vera lsp language server, plus full syntax highlighting - for a statically typed, purely functional language with algebraic effects and mandatory contracts, designed for LLM-generated code.",
+	"description": "Proof-aware Vera language support: diagnostics, hover, slot navigation, typed-hole completion, and syntax highlighting.",
 	"version": "0.2.0",
-	"publisher": "aallan",
+	"publisher": "veralang",
 	"license": "MIT",
 	"repository": {
 		"type": "git",
@@ -61,7 +61,7 @@
 				"vera.lsp.path": {
 					"type": "string",
 					"default": "vera",
-					"description": "Command used to launch the language server. Resolution order: this setting (if changed from the default), then a workspace-local venv (.venv/bin/vera, or .venv\\Scripts\\vera.exe on Windows), then \"vera\" from PATH. The server needs the [lsp] extra: pip install -e \".[lsp]\"."
+					"description": "Command used to launch the language server. Resolution order: this setting (if changed from the default), then a workspace-local venv (.venv/bin/vera, or .venv\\Scripts\\vera.exe on Windows), then \"vera\" from PATH. Install the server from PyPI with: python -m pip install \"veralang[lsp]\"."
 				}
 			}
 		},
@@ -76,7 +76,15 @@
 	"activationEvents": [
 		"onLanguage:vera"
 	],
+	"scripts": {
+		"check": "node --check extension.js",
+		"package": "vsce package",
+		"package:list": "vsce ls --tree"
+	},
 	"dependencies": {
 		"vscode-languageclient": "^9.0.1"
+	},
+	"devDependencies": {
+		"@vscode/vsce": "3.9.2"
 	}
 }

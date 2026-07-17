@@ -4,6 +4,7 @@
 
 Language server integration.
 
+- First VS Code Marketplace release as `veralang.vera-language`
 - The extension now starts Vera's language server (`vera lsp`) for
   `.vera` files: proof-aware diagnostics with verification-tier hints,
   expression-type hover, De Bruijn slot go-to-definition, and

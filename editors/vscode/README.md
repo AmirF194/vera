@@ -18,9 +18,9 @@ edit and provides:
 - **Typed-hole completion** — at a `?` hole, completion lists the
   in-scope bindings that fit, with their types.
 
-Requires the `vera` binary with the `[lsp]` extra (see
-[Requirements](#requirements)); without it the extension quietly stays
-in syntax-highlighting-only mode. See [LSP_SERVER.md](../../LSP_SERVER.md)
+Requires the `vera` binary with the `[lsp]` extra from PyPI (see
+[Requirements](#requirements)); without it the extension stays in
+syntax-highlighting-only mode. See [LSP_SERVER.md](../../LSP_SERVER.md)
 for everything the server can do, including the custom methods for
 coding agents.
 
@@ -44,21 +44,21 @@ coding agents.
 
 ## Requirements
 
-For language-server features the extension needs a `vera` binary that
-can serve LSP — from a clone of the repo:
+For language-server features the extension needs Python 3.11+ and a
+`vera` binary with the optional LSP dependencies:
 
 ```bash
-pip install -e ".[lsp]"     # or ".[dev]", which includes it
+python -m pip install "veralang[lsp]"
 ```
 
-The extension finds the binary in this order: the `vera.lsp.path`
-setting (if you changed it), a **workspace-local venv**
-(`.venv/bin/vera` — which means a standard from-source clone needs no
-configuration at all), then `vera` from `PATH`. VS Code launched from
-the GUI does not inherit your shell's `PATH`, so the workspace-venv
-detection is what makes the zero-config case work. If the server
-fails to start you get one warning with an *Open Settings* button;
-syntax highlighting works with no binary at all.
+The base `veralang` installation does not include the optional language
+server dependencies, so keep the `[lsp]` extra in the command. The
+extension finds the binary in this order: the `vera.lsp.path` setting
+(if changed from its default), a workspace-local virtual environment
+(`.venv/bin/vera` or `.venv\\Scripts\\vera.exe`), then `vera` from
+`PATH`. If a GUI-launched VS Code cannot see the Python installation,
+set `vera.lsp.path` to the absolute path of the `vera` executable.
+Syntax highlighting works without the binary.
 
 ## Settings
 
@@ -72,7 +72,23 @@ The **Vera: Restart Language Server** command restarts the server
 
 ## Installation
 
-### From source (recommended for now)
+### VS Code Marketplace
+
+Install **Vera Language** from the Extensions view, or run:
+
+```bash
+code --install-extension veralang.vera-language
+```
+
+[Open Vera Language in the VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=veralang.vera-language).
+
+### From VSIX
+
+```bash
+code --install-extension vera-language-0.2.0.vsix
+```
+
+### From source
 
 **Fresh clone:**
 
@@ -93,18 +109,6 @@ Then reload VS Code. Any `.vera` file will be recognised automatically.
 The `npm install` fetches the LSP client library
 (`vscode-languageclient`); skipping it is fine — you just get syntax
 highlighting without the language server.
-
-### From VSIX
-
-If a packaged `.vsix` is available:
-
-```bash
-code --install-extension vera-language-0.2.0.vsix
-```
-
-### VS Code Marketplace
-
-Not yet published. This is planned once the language reaches a stable release.
 
 ## Scope reference
 
@@ -132,6 +136,7 @@ The grammar uses standard TextMate scope conventions, so it works with any colou
 
 - [Vera language](https://veralang.dev/)
 - [Vera on GitHub](https://github.com/aallan/vera)
+- [Vera Language on the VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=veralang.vera-language)
 - [TextMate bundle](https://github.com/aallan/vera/tree/main/editors/textmate) (same grammar, TextMate 2 packaging)
 
 ## Licence
