@@ -1,6 +1,6 @@
 # Vera Examples
 
-38 example programs demonstrating Vera's features. All examples pass `vera check` and `vera verify`.
+39 example programs demonstrating Vera's features. All examples pass `vera check` and `vera verify`.
 
 ## Running Examples
 
@@ -64,6 +64,7 @@ Examples that use only the IO and Random host families (e.g. `hello_world.vera`,
 | `list_ops.vera` | `vera run examples/list_ops.vera --fn test_list` | Recursive ADTs (linked list), sum, length |
 | `mutual_recursion.vera` | `vera run examples/mutual_recursion.vera --fn is_even -- 4` | Mutually recursive functions (is_even/is_odd) |
 | `collections.vera` | `vera run examples/collections.vera` | Map and Set operations, word frequency analysis |
+| `scoreboard.vera` | `vera run examples/scoreboard.vera` | Map alias (`type Board = Map<String, Int>`), direct-indexing a sorted `map_values`, `show` rendering |
 
 ### Standard Library
 

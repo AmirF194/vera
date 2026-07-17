@@ -1678,6 +1678,20 @@
     ]
   },
   {
+    "id": "ch09_nested_builtin_index",
+    "file": "ch09_nested_builtin_index.vera",
+    "chapter": 9,
+    "title": "Direct index of a nested type-variable-element builtin (#1094)",
+    "level": "run",
+    "spec_ref": "Section 9.6.21",
+    "features": [
+      "array_reverse",
+      "array_sort_by",
+      "array_flatten",
+      "map_values"
+    ]
+  },
+  {
     "id": "ch09_string_char_utilities",
     "file": "ch09_string_char_utilities.vera",
     "chapter": 9,

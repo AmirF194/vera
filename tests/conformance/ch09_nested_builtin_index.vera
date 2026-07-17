@@ -1,0 +1,100 @@
+-- Conformance: directly indexing a NESTED type-variable-element builtin
+-- result (Chapter 9, Section 9.6.21)
+-- Tests: array_reverse, array_sort_by, array_flatten, map_values indexed
+--        directly at the outer call (no let binding), with the INNER call
+--        itself a type-variable-element builtin.
+--
+-- #1094: `array_reverse(array_reverse(x))[0]`,
+-- `array_sort_by(map_values(m), cmp)[0]`, `array_flatten(array_reverse(x))[0]`
+-- and friends check and verify, but codegen used to drop the enclosing
+-- function via [E602] because the outer builtin's element-type derivation
+-- resolved its argument through the shared consultor only, which cannot
+-- report a nested type-variable-element inner call.  The derivation now
+-- recurses through the same per-class resolver, so the element type is
+-- recovered and the direct-index spelling compiles and runs.
+--
+-- `main` calls every helper so a regression (a dropped helper) yields a
+-- dangling call and fails `vera run`, not just a silently skipped function.
+-- ================================================================
+-- reverse_of_reverse
+-- array_reverse(array_reverse(x))[0]: reverse twice is identity, so the
+-- head of the original array survives.
+-- ================================================================
+public fn reverse_of_reverse(-> @Int)
+  requires(true)
+  ensures(@Int.result == 10)
+  effects(pure)
+{
+  array_reverse(array_reverse([10, 20, 30]))[0]
+}
+
+-- ================================================================
+-- sort_by_of_reverse
+-- array_sort_by(array_reverse(x), asc)[0]: the inner array_reverse is a
+-- type-variable-element builtin; sorting ascending makes [0] the minimum.
+-- ================================================================
+public fn sort_by_of_reverse(-> @Int)
+  requires(true)
+  ensures(@Int.result == 10)
+  effects(pure)
+{
+  array_sort_by(array_reverse([30, 10, 20]), fn(@Int, @Int -> @Ordering) effects(pure) { if @Int.1 < @Int.0 then { Less } else { if @Int.1 > @Int.0 then { Greater } else { Equal } } })[0]
+}
+
+-- ================================================================
+-- reverse_of_map_values
+-- array_reverse(map_values(m))[0]: the inner map_values derives its element
+-- type from the Map<K, V> argument.  A single-entry map keeps the reversed
+-- head deterministic without depending on map iteration order.
+-- ================================================================
+public fn reverse_of_map_values(-> @Int)
+  requires(true)
+  ensures(@Int.result == 77)
+  effects(pure)
+{
+  let @Map<String, Int> = map_insert(map_new(), "k", 77);
+  array_reverse(map_values(@Map<String, Int>.0))[0]
+}
+
+-- ================================================================
+-- sort_by_of_map_values
+-- array_sort_by(map_values(m), asc)[0]: a three-entry map; sorting the
+-- values ascending is order-independent, so [0] is the minimum (10)
+-- regardless of map iteration order.
+-- ================================================================
+public fn sort_by_of_map_values(-> @Int)
+  requires(true)
+  ensures(@Int.result == 10)
+  effects(pure)
+{
+  let @Map<String, Int> = map_insert(map_insert(map_insert(map_new(), "a", 30), "b", 10), "c", 20);
+  array_sort_by(map_values(@Map<String, Int>.0), fn(@Int, @Int -> @Ordering) effects(pure) { if @Int.1 < @Int.0 then { Less } else { if @Int.1 > @Int.0 then { Greater } else { Equal } } })[0]
+}
+
+-- ================================================================
+-- flatten_of_reverse
+-- array_flatten(array_reverse(x))[0]: the flatten unwraps one Array<> layer
+-- off the reversed nested array.  reverse -> [[30, 40], [10, 20]];
+-- flatten -> [30, 40, 10, 20]; [0] = 30 (30, not 10, proves the reverse
+-- happened across the flatten boundary).
+-- ================================================================
+public fn flatten_of_reverse(-> @Int)
+  requires(true)
+  ensures(@Int.result == 30)
+  effects(pure)
+{
+  array_flatten(array_reverse([[10, 20], [30, 40]]))[0]
+}
+
+-- ================================================================
+-- main
+-- Aggregate every direct-nested-index form so the run exercises them all:
+-- 10 + 10 + 77 + 10 + 30 = 137.
+-- ================================================================
+public fn main(-> @Int)
+  requires(true)
+  ensures(@Int.result == 137)
+  effects(pure)
+{
+  reverse_of_reverse() + sort_by_of_reverse() + reverse_of_map_values() + sort_by_of_map_values() + flatten_of_reverse()
+}
