@@ -18,7 +18,7 @@ Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verificati
 
 *`vera verify` tells the whole truth.*
 
-Verification-completeness gaps — an obligation not emitted, a guard not planted — individually small and sharing the per-component target-type metadata the [#820](https://github.com/aallan/vera/issues/820) enabler provides:
+Verification-completeness gaps — an obligation not emitted, a guard not planted — individually small; the `@Nat`-narrowing rows ([#754](https://github.com/aallan/vera/issues/754), [#757](https://github.com/aallan/vera/issues/757), [#765](https://github.com/aallan/vera/issues/765)) reuse the per-component target-type metadata the [#820](https://github.com/aallan/vera/issues/820) enabler provides, while the reporting-completeness and hardening rows each carry their own root cause:
 
 | Issue | What |
 |---|---|
