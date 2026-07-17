@@ -300,6 +300,12 @@ jobs:
           tag_sha="$(gh api \
             "repos/$GITHUB_REPOSITORY/git/ref/tags/v${VERSION}" \
             --jq .object.sha 2>/dev/null || true)"
+          # gh api prints the 404 error body on stdout, so an absent tag
+          # captures error JSON rather than an empty string — treat anything
+          # that is not a 40-hex SHA as "tag does not exist".
+          if ! printf '%s' "$tag_sha" | grep -qE '^[0-9a-f]{40}$'; then
+            tag_sha=""
+          fi
           if [ -z "$tag_sha" ]; then
             gh api --method POST \
               "repos/$GITHUB_REPOSITORY/git/refs" \

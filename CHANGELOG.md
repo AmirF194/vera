@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The release workflow's tag-existence probe treats a 404 as "tag absent"** instead of capturing the error body. `gh api` prints the 404 JSON on stdout, so the first production run of the tag/Release job compared `{"message":"Not Found"...}` against the merge SHA, tripped the immutability guard, and failed after PyPI had already accepted the v0.1.5 files; the probe result is now shape-validated to a 40-hex SHA. The v0.1.5 tag and GitHub Release were completed manually from the run's registry-verified artifact per the RELEASING.md recovery runbook.
+
 ## [0.1.5] - 2026-07-17
 
 ### Added
