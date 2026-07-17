@@ -461,15 +461,18 @@ class CallsContainersMixin:
         added later it would belong here as a new tag (e.g. ``"a"``)
         with matching ``_map_wasm_types`` entry.
         """
-        # #1097: canonicalize an alias name and peel transparent
-        # ``Future<…>`` wrappers to the payload (re-canonicalizing per hop,
-        # so ``type FI = Future<Int>`` and nested ``Future<FI2>`` chains
-        # both resolve) BEFORE the tag chain below classifies it.
+        # #1097: canonicalize an alias name, then peel transparent
+        # ``Future<…>`` wrappers to the payload BEFORE the tag chain below
+        # classifies it.  ONE canonicalize suffices: it resolves alias
+        # payloads at every depth (``type FI = Future<Int>`` and nested
+        # ``Future<FI2>`` chains both come back fully spelled), so the
+        # strip is a plain textual peel — matching ``_strip_future`` — and
+        # a cyclic alias (already E132 at check) cannot spin it: the
+        # canonicalizer's ``_seen`` guard runs once, never per hop.
         if vera_type is not None:
             vera_type, _ = self._canonicalize_alias_slot_name(vera_type)
             while vera_type.startswith("Future<") and vera_type.endswith(">"):
                 vera_type = vera_type[len("Future<"):-1]
-                vera_type, _ = self._canonicalize_alias_slot_name(vera_type)
         if vera_type in ("Int", "Nat"):
             return "i"   # i64
         if vera_type == "Float64":

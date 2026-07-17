@@ -1069,3 +1069,51 @@ public fn main(-> @Int) requires(true) ensures(true) effects(<Async>) {
         assert "main" not in result.exports, \
             "Future<Array<Int>> map value must drop loudly, not emit invalid WASM"
         assert any(d.error_code == "E602" for d in result.diagnostics)
+
+
+class TestMapTagFutureStripTermination1097:
+    """The ``_map_wasm_tag`` Future-strip terminates on a cyclic Future alias
+    and resolves nested alias payloads through the single up-front
+    canonicalize (PR #1098 review).  A cyclic alias is E132 at check; this
+    pins the codegen-side defence-in-depth so the failure mode can never be
+    a hang."""
+
+    def _ctx(self, aliases):
+        import vera.wasm.context as wasm_context
+
+        ctx = object.__new__(wasm_context.WasmContext)
+        ctx._type_aliases = aliases
+        return ctx
+
+    def test_future_cycle_alias_terminates(self) -> None:
+        import threading
+
+        from vera import ast
+
+        ctx = self._ctx({
+            "F": ast.NamedType(
+                name="Future",
+                type_args=(ast.NamedType(name="F", type_args=None),),
+            ),
+        })
+        result: dict[str, str | None] = {}
+        t = threading.Thread(
+            target=lambda: result.setdefault("tag", ctx._map_wasm_tag("F")),
+            daemon=True,
+        )
+        t.start()
+        t.join(10)
+        assert not t.is_alive(), \
+            "Future-strip loop failed to terminate on a cyclic alias"
+
+    def test_nested_future_alias_payload_resolves(self) -> None:
+        from vera import ast
+
+        ctx = self._ctx({
+            "FI2": ast.NamedType(
+                name="Future",
+                type_args=(ast.NamedType(name="Int", type_args=None),),
+            ),
+        })
+        assert ctx._map_wasm_tag("Future<FI2>") == "i"
+        assert ctx._map_wasm_tag("FI2") == "i"

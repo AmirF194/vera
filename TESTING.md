@@ -119,7 +119,7 @@ python scripts/check_wheel_availability.py           # pre-flight: every runtime
 | `test_codegen_string_builtins.py` | 153 | 1,395 | parse\_nat/float/int/bool (Result-returning), base64, URL encode/decode/parse/join, search/transform builtins (#198), universal to-string (#106) (#419 split) |
 | `test_codegen_numeric.py` | 86 | 1,104 | Math builtins (#199), numeric type conversions (#208), Float64 predicates + constants (#212), int64-min / float-carry to-string regressions (#475) (#419 split) |
 | `test_codegen_io.py` | 42 | 824 | IO operations (#135: read\_line, read\_file, write\_file, args, exit, get\_env, sleep, time, stderr), Markdown + Regex host bindings (#419 split) |
-| `test_codegen_collections.py` | 67 | 1,071 | Map + Set collections (#62), wrapper-handle bit-31 tagging (#578) (#419 split) |
+| `test_codegen_collections.py` | 69 | 1,119 | Map + Set collections (#62), wrapper-handle bit-31 tagging (#578) (#419 split) |
 | `test_codegen_json.py` | 59 | 984 | Json collection, typed accessors (#419 split) |
 | `test_codegen_decimal.py` | 57 | 780 | Decimal collection, Decimal monomorphization (#419 split) |
 | `test_codegen_host_effects.py` | 58 | 964 | Html/Http/Inference host effects, provider dispatch, postcondition host-import propagation (#823) (#419 split) |
