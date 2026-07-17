@@ -431,3 +431,72 @@ class TestCanonicalizeTypeExprAliases:
             isinstance(arg, ast.NamedType) and arg.name == "Result"
             for arg in resolved.type_args
         )
+
+    def test_refinement_wrapped_payload_cycle_returns_none(self) -> None:
+        """`type A = Future<{ @A | true }>` — the cycle hides under a
+        refinement layer: the bare argument is a RefinementType, so the
+        guard must probe the refinement's BASE for the name (PR #1110
+        review).  Canonicalize → None, predicate → False, never
+        RecursionError."""
+        from vera import ast
+        from vera.wasm.async_fusion import (
+            _canonicalize_type_expr_aliases,
+            _resolves_to_future_result_string,
+        )
+
+        aliases = {
+            "A": ast.NamedType(
+                name="Future",
+                type_args=(
+                    ast.RefinementType(
+                        base_type=ast.NamedType(name="A", type_args=None),
+                        predicate=ast.BoolLit(value=True),
+                    ),
+                ),
+            ),
+        }
+        result = _canonicalize_type_expr_aliases(
+            ast.NamedType(name="A", type_args=None), aliases, {},
+        )
+        assert result is None
+        assert not _resolves_to_future_result_string(
+            ast.NamedType(name="A", type_args=None), aliases, {},
+        )
+
+    def test_refinement_wrapped_alias_still_resolves(self) -> None:
+        """A VALID refinement-wrapped payload alias resolves to its
+        representation base: `Future<{ @R | true }>` with
+        `type R = Result<String, String>` canonicalizes to the literal
+        future spelling (refinements erase at runtime, so representation
+        classification peels them — same rule the outer resolver uses)."""
+        from vera import ast
+        from vera.wasm.async_fusion import (
+            _canonicalize_type_expr_aliases,
+            _resolves_to_future_result_string,
+        )
+
+        aliases = {
+            "R": ast.NamedType(
+                name="Result",
+                type_args=(
+                    ast.NamedType(name="String", type_args=None),
+                    ast.NamedType(name="String", type_args=None),
+                ),
+            ),
+        }
+        refined = ast.RefinementType(
+            base_type=ast.NamedType(name="R", type_args=None),
+            predicate=ast.BoolLit(value=True),
+        )
+        resolved = _canonicalize_type_expr_aliases(
+            ast.NamedType(name="Future", type_args=(refined,)), aliases, {},
+        )
+        assert isinstance(resolved, ast.NamedType)
+        assert resolved.name == "Future"
+        assert resolved.type_args is not None
+        inner = resolved.type_args[0]
+        assert isinstance(inner, ast.NamedType)
+        assert inner.name == "Result"
+        assert _resolves_to_future_result_string(
+            ast.NamedType(name="Future", type_args=(refined,)), aliases, {},
+        )

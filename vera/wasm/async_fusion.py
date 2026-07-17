@@ -154,12 +154,22 @@ def _canonicalize_type_expr_aliases(
     if isinstance(resolved, ast.NamedType) and resolved.type_args:
         args: list[ast.TypeExpr] = []
         for arg in resolved.type_args:
-            if isinstance(arg, ast.NamedType) and arg.name in _active:
+            # The cycle probe unwraps refinement layers first: a
+            # refinement-wrapped alias (`Future<{ @A | true }>`) cycles
+            # through the refinement's BASE, and the resolver peels the
+            # refinement inside the recursion — so guarding on the bare
+            # argument's name alone would miss the repeat and spin
+            # (PR #1110 review).  Direct `NamedType` arguments probe as
+            # themselves, unchanged.
+            probe = arg
+            while isinstance(probe, ast.RefinementType):
+                probe = probe.base_type
+            if isinstance(probe, ast.NamedType) and probe.name in _active:
                 return None
             canonical = _canonicalize_type_expr_aliases(
                 arg, type_aliases, type_alias_params,
-                (_active | {arg.name})
-                if isinstance(arg, ast.NamedType)
+                (_active | {probe.name})
+                if isinstance(probe, ast.NamedType)
                 else _active,
             )
             if canonical is None:
