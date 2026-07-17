@@ -61,12 +61,20 @@ public fn safe_divide(@Int, @Int -> @Int)
 {
   @Int.0 / @Int.1
 }
+
+public fn main(-> @Int)
+  requires(true)
+  ensures(@Int.result == 5)
+  effects(pure)
+{
+  safe_divide(2, 10)
+}
 ```
 
 ```bash
 vera check program.vera
-vera verify program.vera
-vera run program.vera --fn safe_divide -- 10 2
+vera verify program.vera    # proves main returns 5 from safe_divide's contract
+vera run program.vera       # prints 5
 ```
 
 See the [CLI cookbook](https://github.com/aallan/vera/blob/main/TOOLCHAIN.md),
