@@ -476,9 +476,9 @@ Stages 19 and 20 run dual-threaded: community PRs against the single-source spri
 
 ## By the numbers
 
-Nine releases, chosen for the capability each one unlocked rather than even spacing.
+Ten releases, chosen for the capability each one unlocked rather than even spacing.
 
-![Growth across the nine landmark releases: tests from ~50 to 6,779, conformance programs from 0 to 143, examples from 13 to 37, built-in functions from 0 to 164.](assets/diagrams/history-growth.svg)
+![Growth across the ten landmark releases: tests from ~50 to 7,992, conformance programs from 0 to 163, examples from 13 to 39, built-in functions from 0 to 164.](assets/diagrams/history-growth.svg)
 
 | Metric | v0.0.1 (23 Feb) | v0.0.9 (23 Feb) | v0.0.65 (4 Mar) | v0.0.101 (27 Mar) | v0.0.170 (12 Jun) | v0.0.191 (1 Jul) | v0.0.193 (2 Jul) | v0.0.195 (2 Jul) | v0.1.0 (4 Jul) | v0.1.5 (17 Jul) |
 |--------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
