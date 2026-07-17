@@ -934,8 +934,49 @@ class CallsMixin:
             return None
         return self._canonicalize_alias_slot_name(t)[0]
 
+    def _concat_elem_name_from_named(self, elem: ast.NamedType) -> str:
+        """Element-type name for a ``NamedType`` array element on the
+        concat-inference path, shared by the three arms of
+        :meth:`_infer_concat_elem_type_raw` so they classify identically
+        (#1097).
+
+        A representation-transparent ``Future<…>`` element (#841) returns
+        its FULL canonicalized spelling: the array-element size / store
+        helpers ``_strip_future`` the wrapper and size the payload, but a
+        bare head ``"Future"`` (type argument dropped) collapses to the
+        4-byte i32 default and the copy loop runs a wrong stride over the
+        8-byte (or two-word pair) elements — silent garbage on a
+        check+verify-green program (#1057).  An alias INSIDE the payload is
+        canonicalized (``Future<FlagA>`` -> ``Future<Bool>``, #1074).  A
+        bare name canonicalizes + resolves (``type FI = Future<Int>``
+        element -> ``Future<Int>``, #1062).  A parameterized non-``Future``
+        element keeps its bare head — the name-only canonicalizer cannot
+        substitute arguments.  The ``map_values(...)`` FnCall and
+        rebuilt-SlotRef arms (#1053) previously returned this element's bare
+        head unconditionally, so ``array_concat(map_values(m), …)`` over a
+        ``Map<_, Future<Int>>`` ran the wrong stride (the site-2 latent half
+        of #1097).
+        """
+        if elem.name == "Future" and elem.type_args:
+            canon, _ = self._canonicalize_alias_slot_name(
+                self._format_named_type(elem))
+            return canon
+        if not elem.type_args:
+            canon, _ = self._canonicalize_alias_slot_name(elem.name)
+            return self._resolve_base_type_name(canon)
+        return elem.name
+
     def _infer_concat_elem_type_raw(self, expr: ast.Expr) -> str | None:
         """Uncanonicalized element-name inference — see the public wrapper.
+
+        All three element-bearing arms (the direct `Array<T>` SlotRef, the
+        #1053 rebuilt-SlotRef arm, and the #1053 FnCall-return arm) classify
+        a `NamedType` element through the shared
+        :meth:`_concat_elem_name_from_named` so they agree exactly (#1097);
+        the two rebuilt arms previously returned the element's bare head, so
+        `array_concat(map_values(m), …)` over a `Map<_, Future<Int>>` ran a
+        wrong stride while the let-bound `@Array<Future<Int>>` SlotRef (the
+        direct arm) was correct.
 
         For a `Future<T>` element the FULL `Future<…>` spelling is
         preserved (not the bare head `"Future"`), mirroring the sibling
@@ -982,19 +1023,10 @@ class CallsMixin:
             if expr.type_name == "Array" and expr.type_args:
                 ta = expr.type_args[0]
                 if isinstance(ta, ast.NamedType):
-                    if ta.name == "Future" and ta.type_args:
-                        # #1074: canonicalize an alias inside the payload
-                        # (`Future<FlagA>` -> `Future<Bool>`) so the copy
-                        # loop's element helpers size the resolved payload,
-                        # not a bare alias that falls to the 4-byte default.
-                        canon, _ = self._canonicalize_alias_slot_name(
-                            self._format_named_type(ta))
-                        return canon
-                    if not ta.type_args:
-                        canon, _ = self._canonicalize_alias_slot_name(
-                            ta.name)
-                        return self._resolve_base_type_name(canon)
-                    return ta.name
+                    # Element handling (Future full-spelling #1074, bare-name
+                    # canonicalize #1062, parameterized bare head) is shared
+                    # with the two rebuilt arms below via the #1097 helper.
+                    return self._concat_elem_name_from_named(ta)
             # #1064: alias-named COLLECTION (`type Flags = Array<Bool>;`
             # concat of `@Flags` slots) — the slot name misses the
             # "Array" match above, so the probe returned None and each
@@ -1030,9 +1062,12 @@ class CallsMixin:
             # Runs after the #1064 name-keyed arm: that arm returns on
             # success, so this is the broader fall-through.
             nt = self._named_type_from_arg_info(expr)
-            if (nt is not None and nt.name == "Array" and nt.type_args
-                    and isinstance(nt.type_args[0], ast.NamedType)):
-                return nt.type_args[0].name
+            if nt is not None and nt.name == "Array" and nt.type_args:
+                elem = nt.type_args[0]
+                if isinstance(elem, ast.NamedType):
+                    # #1097: mirror the direct arm — a Future<T> element
+                    # keeps its full spelling, not the bare "Future" head.
+                    return self._concat_elem_name_from_named(elem)
         if isinstance(expr, ast.ArrayLit):
             if expr.elements:
                 t = self._infer_vera_type(expr.elements[0])
@@ -1092,7 +1127,13 @@ class CallsMixin:
             # keeping the loud [E602] skip.
             ret_nt = self._builtin_call_ret_named_type(expr)
             if (ret_nt is not None and ret_nt.name == "Array"
-                    and ret_nt.type_args
-                    and isinstance(ret_nt.type_args[0], ast.NamedType)):
-                return ret_nt.type_args[0].name
+                    and ret_nt.type_args):
+                elem = ret_nt.type_args[0]
+                if isinstance(elem, ast.NamedType):
+                    # #1097: mirror the direct arm — a Future<T> element of
+                    # an Array-returning builtin (e.g. map_values over a
+                    # Map<_, Future<Int>>) keeps its full spelling so the
+                    # concat copy loop strides at the payload width, not the
+                    # bare "Future" head's 4-byte default.
+                    return self._concat_elem_name_from_named(elem)
         return None

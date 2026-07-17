@@ -1927,6 +1927,22 @@
     ]
   },
   {
+    "id": "ch09_map_future_values",
+    "file": "ch09_map_future_values.vera",
+    "chapter": 9,
+    "title": "Map/Set with representation-transparent Future<T> entries",
+    "level": "run",
+    "spec_ref": "Section 9.5.4",
+    "features": [
+      "map",
+      "set",
+      "future",
+      "async_effect",
+      "map_values",
+      "array_concat"
+    ]
+  },
+  {
     "id": "ch09_markdown",
     "file": "ch09_markdown.vera",
     "chapter": 9,
