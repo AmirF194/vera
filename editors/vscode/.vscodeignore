@@ -1,7 +1,11 @@
 .git/**
 .gitignore
+.DS_Store
 .vscode/**
 *.vsix
+esbuild.js
+extension.js
+node_modules/**
 package-lock.json
 *.md
 !README.md
