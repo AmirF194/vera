@@ -1750,6 +1750,186 @@ public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
         assert _run(src, fn="g") == 8589934597
 
 
+class TestContainerZeroSizeBackstop1075:
+    """#1075 codegen backstop: the ANNOTATION-FREE zero-size container
+    spelling (`map_values(map_insert(map_new(), "k", ()))`) never passes
+    through type resolution — its `Map<String, Unit>` type exists only in
+    inference — so the E135 check gate (TestContainerZeroSizeRejected1075
+    in test_checker_types.py) cannot fire.  Pre-fix it compiled exit-0 to
+    INVALID WASM ("expected i32 but nothing on stack": the Unit value
+    pushes no operand where the host import expects an i32).
+    `_map_wasm_tag` now returns None for a zero-size type name, so the
+    emission takes the loud-skip path — correct-or-loud, never an invalid
+    module.
+    """
+
+    def test_inline_unit_map_value_loud_skip(self) -> None:
+        """The inference-only Map spelling drops loudly via [E602]."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  array_length(map_values(map_insert(map_new(), "k", ())))
+}
+"""
+        result = _compile_ok(src)
+        assert "g" not in result.exports, \
+            "inline zero-size Map value must drop, not emit invalid WASM"
+        assert any(d.error_code == "E602" for d in result.diagnostics), \
+            "the zero-size backstop must keep the loud E602 skip"
+
+    def test_inline_unit_set_elem_loud_skip(self) -> None:
+        """The inference-only Set spelling drops loudly via [E602]."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  array_length(set_to_array(set_add(set_new(), ())))
+}
+"""
+        result = _compile_ok(src)
+        assert "g" not in result.exports, \
+            "inline zero-size Set element must drop, not emit invalid WASM"
+        assert any(d.error_code == "E602" for d in result.diagnostics), \
+            "the zero-size backstop must keep the loud E602 skip"
+
+    def test_empty_map_keys_still_compiles_control(self) -> None:
+        """The genuinely element-type-free empty-collection shape keeps its
+        permissive fall-through — the backstop keys on a KNOWN zero-size
+        name, not on None."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  array_length(map_keys(map_new()))
+}
+"""
+        assert _run(src, fn="g") == 0
+
+    # ---- Recursive erasure (PR #1083 adversarial review) -------------------
+    # The first backstop compared the inferred name against two LITERAL
+    # strings ("Unit", "Future<Unit>") while the checker gate uses recursive
+    # erasure — any indirection defeated it and compiled exit-0 to invalid
+    # WASM.  The tag refusal now keys on the same recursive oracle the
+    # checker and the zero-size declaration guards use
+    # (`_slot_name_erases_to_unit`), and container ENTRY types resolve
+    # rebuilder-first so a parameterized user-fn return arrives as its full
+    # spelling instead of the #911 bare head ("Future").
+
+    def test_nested_future_map_value_loud_skip(self) -> None:
+        """async(async(())) — Future<Future<Unit>> — as a map value (p2)."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(<Async>) {
+  map_size(map_insert(map_new(), "k", async(async(()))))
+}
+"""
+        result = _compile_ok(src)
+        assert "g" not in result.exports, \
+            "nested-Future zero-size map value must drop, not emit invalid WASM"
+        assert any(d.error_code == "E602" for d in result.diagnostics)
+
+    def test_nested_future_set_elem_loud_skip(self) -> None:
+        """async(async(())) as a set element (p5)."""
+        src = """
+public fn g(-> @Int) requires(true) ensures(true) effects(<Async>) {
+  set_size(set_add(set_new(), async(async(()))))
+}
+"""
+        result = _compile_ok(src)
+        assert "g" not in result.exports, \
+            "nested-Future zero-size set element must drop, not emit invalid WASM"
+        assert any(d.error_code == "E602" for d in result.diagnostics)
+
+    def test_alias_future_unit_return_map_value_loud_skip(self) -> None:
+        """A user fn returning `@FU` (`type FU = Future<Unit>`) as a map
+        value (p10) — the alias name canonicalizes through the oracle."""
+        src = """
+type FU = Future<Unit>;
+
+private fn mkfu(@Unit -> @FU)
+  requires(true) ensures(true) effects(<Async>)
+{ async(()) }
+
+public fn g(-> @Int) requires(true) ensures(true) effects(<Async>) {
+  map_size(map_insert(map_new(), "k", mkfu(())))
+}
+"""
+        result = _compile_ok(src)
+        assert "g" not in result.exports, \
+            "alias-hidden Future<Unit> map value must drop, not emit invalid WASM"
+        assert any(d.error_code == "E602" for d in result.diagnostics)
+
+    def test_future_unit_return_map_value_loud_skip(self) -> None:
+        """A user fn returning `@Future<Unit>` directly as a map value (p11)
+        — the parameterized return must reach the tag as its FULL spelling
+        (the rebuilder-first entry typing), not the bare "Future" head."""
+        src = """
+private fn mk(@Unit -> @Future<Unit>)
+  requires(true) ensures(true) effects(<Async>)
+{ async(()) }
+
+public fn g(-> @Int) requires(true) ensures(true) effects(<Async>) {
+  map_size(map_insert(map_new(), "k", mk(())))
+}
+"""
+        result = _compile_ok(src)
+        assert "g" not in result.exports, \
+            "Future<Unit>-returning map value must drop, not emit invalid WASM"
+        assert any(d.error_code == "E602" for d in result.diagnostics)
+
+    def test_async_task_alias_map_value_loud_skip(self) -> None:
+        """The natural shape (p12): a map of `async(IO.print(...))` tasks
+        behind `type Task = Future<Unit>`."""
+        src = """
+effect IO { op print(String -> Unit); }
+type Task = Future<Unit>;
+
+private fn spawn(@String -> @Task)
+  requires(true) ensures(true) effects(<Async, IO>)
+{ async(IO.print(@String.0)) }
+
+public fn g(-> @Int) requires(true) ensures(true) effects(<Async, IO>) {
+  map_size(map_insert(map_new(), "k", spawn("hi")))
+}
+"""
+        result = _compile_ok(src)
+        assert "g" not in result.exports, \
+            "Task-alias async map value must drop, not emit invalid WASM"
+        assert any(d.error_code == "E602" for d in result.diagnostics)
+
+    def test_unit_return_map_value_loud_skip_pin(self) -> None:
+        """p13 pin: a pure fn returning bare `@Unit` as a map value keeps
+        dropping loudly (already caught pre-review; must not regress)."""
+        src = """
+private fn nop(@Int -> @Unit)
+  requires(true) ensures(true) effects(pure)
+{ () }
+
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  map_size(map_insert(map_new(), "k", nop(1)))
+}
+"""
+        result = _compile_ok(src)
+        assert "g" not in result.exports
+        assert any(d.error_code == "E602" for d in result.diagnostics)
+
+    def test_alias_array_return_map_value_loud_skip(self) -> None:
+        """The Array dual through the same entry resolver: a user fn
+        returning `@Names` (`type Names = Array<String>`) as a map value
+        reaches the tag as `Array<String>` and takes the existing
+        Array-reject loud skip — the raw alias name previously fell through
+        to the "b" tag (one i32 slot for a two-slot pair)."""
+        src = """
+type Names = Array<String>;
+
+private fn mkn(@Unit -> @Names)
+  requires(true) ensures(true) effects(pure)
+{ ["a", "b"] }
+
+public fn g(-> @Int) requires(true) ensures(true) effects(pure) {
+  map_size(map_insert(map_new(), "k", mkn(())))
+}
+"""
+        result = _compile_ok(src)
+        assert "g" not in result.exports, \
+            "alias-of-Array map value must drop, not mis-tag as a scalar"
+        assert any(d.error_code == "E602" for d in result.diagnostics)
+
+
 # =====================================================================
 # C8e: Arrays of compound types (#132)
 # =====================================================================
