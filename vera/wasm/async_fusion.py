@@ -119,6 +119,7 @@ def _canonicalize_type_expr_aliases(
     te: ast.TypeExpr,
     type_aliases: dict[str, ast.TypeExpr],
     type_alias_params: dict[str, tuple[str, ...]],
+    _active: frozenset[str] = frozenset(),
 ) -> ast.TypeExpr | None:
     """``te`` with every type alias replaced by its terminal target,
     recursively.
@@ -131,8 +132,21 @@ def _canonicalize_type_expr_aliases(
     just as effectively as an outer one — the same #1109 mis-lower one
     level down (PR #1110 review).  This walk canonicalizes both levels:
     resolve the outer chain, then recurse into the terminal
-    ``NamedType``'s type arguments.  A cyclic shape anywhere yields
-    ``None`` (the caller falls to its conservative identity lowering).
+    ``NamedType``'s type arguments.
+
+    ``_active`` is the path-local cycle guard: names already being
+    resolved on THIS recursion path.  A cyclic payload alias
+    (``type A = Future<A>``, or the mutual ``A = Future<B> / B = Array<A>``)
+    regenerates itself one descent at a time — the outer resolver's
+    seen-set never fires because each hop terminates at a non-alias
+    container — so without the guard the walk spins (RecursionError,
+    PR #1111-review).  Detecting the repeat yields ``None`` and the
+    caller falls to its conservative identity lowering.  The set unions
+    per descent, so it unwinds with the path: a name repeated across
+    SIBLING branches (``Pair<R, R>``) is not a cycle and still resolves
+    (the checker rejects alias cycles upstream with ``[E132]``, #1059 —
+    this is defence-in-depth, matching :func:`resolve_type_alias` and
+    ``_canonicalize_alias_slot_name``).
     """
     resolved = resolve_type_alias(te, type_aliases, type_alias_params)
     if resolved is None:
@@ -140,8 +154,13 @@ def _canonicalize_type_expr_aliases(
     if isinstance(resolved, ast.NamedType) and resolved.type_args:
         args: list[ast.TypeExpr] = []
         for arg in resolved.type_args:
+            if isinstance(arg, ast.NamedType) and arg.name in _active:
+                return None
             canonical = _canonicalize_type_expr_aliases(
                 arg, type_aliases, type_alias_params,
+                (_active | {arg.name})
+                if isinstance(arg, ast.NamedType)
+                else _active,
             )
             if canonical is None:
                 return None

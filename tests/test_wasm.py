@@ -342,3 +342,92 @@ class TestSubstituteTypeVarsFnType:
         assert eff_arg.name == "T", (
             "Effect type-var should NOT be substituted; #659 review F5"
         )
+
+
+class TestCanonicalizeTypeExprAliases:
+    """PR #1110 review (CodeRabbit): the recursive payload-alias
+    canonicalization behind the fused-await terminal check must terminate
+    on a cyclic payload alias with the documented ``None`` (the checker
+    rejects alias cycles upstream with [E132], #1059 — the guard is
+    defence-in-depth against an unguarded RecursionError, matching
+    ``resolve_type_alias`` and ``_canonicalize_alias_slot_name``), and its
+    active set must be path-local so sibling repeats still resolve."""
+
+    def test_payload_alias_cycle_returns_none(self) -> None:
+        """`type A = Future<A>` — the cycle regenerates one descent at a
+        time (each hop terminates at a non-alias container, so the outer
+        resolver's seen-set never fires).  The path-local guard detects
+        the repeat: canonicalize → None, and the public predicate →
+        False (conservative identity lowering), never RecursionError."""
+        from vera import ast
+        from vera.wasm.async_fusion import (
+            _canonicalize_type_expr_aliases,
+            _resolves_to_future_result_string,
+        )
+
+        aliases = {
+            "A": ast.NamedType(
+                name="Future",
+                type_args=(ast.NamedType(name="A", type_args=None),),
+            ),
+        }
+        result = _canonicalize_type_expr_aliases(
+            ast.NamedType(name="A", type_args=None), aliases, {},
+        )
+        assert result is None
+        assert not _resolves_to_future_result_string(
+            ast.NamedType(name="A", type_args=None), aliases, {},
+        )
+
+    def test_mutual_payload_cycle_returns_none(self) -> None:
+        """`type A = Future<B>; type B = Array<A>;` — the mutual case."""
+        from vera import ast
+        from vera.wasm.async_fusion import _canonicalize_type_expr_aliases
+
+        aliases = {
+            "A": ast.NamedType(
+                name="Future",
+                type_args=(ast.NamedType(name="B", type_args=None),),
+            ),
+            "B": ast.NamedType(
+                name="Array",
+                type_args=(ast.NamedType(name="A", type_args=None),),
+            ),
+        }
+        assert _canonicalize_type_expr_aliases(
+            ast.NamedType(name="A", type_args=None), aliases, {},
+        ) is None
+
+    def test_sibling_repeats_are_not_cycles(self) -> None:
+        """The active set unwinds with the path: `Pair<R, R>` — the same
+        alias in two SIBLING branches — fully resolves both, and so does
+        the deeper `Future<Pair<R, R>>` nesting."""
+        from vera import ast
+        from vera.wasm.async_fusion import _canonicalize_type_expr_aliases
+
+        aliases = {
+            "R": ast.NamedType(
+                name="Result",
+                type_args=(
+                    ast.NamedType(name="String", type_args=None),
+                    ast.NamedType(name="String", type_args=None),
+                ),
+            ),
+        }
+        resolved = _canonicalize_type_expr_aliases(
+            ast.NamedType(
+                name="Pair",
+                type_args=(
+                    ast.NamedType(name="R", type_args=None),
+                    ast.NamedType(name="R", type_args=None),
+                ),
+            ),
+            aliases, {},
+        )
+        assert isinstance(resolved, ast.NamedType)
+        assert resolved.name == "Pair"
+        assert resolved.type_args is not None
+        assert all(
+            isinstance(arg, ast.NamedType) and arg.name == "Result"
+            for arg in resolved.type_args
+        )
