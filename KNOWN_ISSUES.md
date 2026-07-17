@@ -8,6 +8,7 @@ Defects in shipped compiler, runtime, or tooling behaviour — this table matche
 
 | Bug | Issue |
 |-----|-------|
+| Cross-module type-alias namespaces merge flatly in codegen (`setdefault` on bare name, first module wins), so two imported modules defining the same alias name with different targets corrupt one module's function signatures — check-clean (the checker is module-correct), then an invalid WASM module or wrong values at run time. The fix preserves per-module alias maps keyed by module path; the workaround is unique alias names across a program's module graph. | [#1111](https://github.com/aallan/vera/issues/1111) |
 | A codegen `[E602]` skip drops the function from the emitted module but leaves its callers' `call`/`return_call` in place, so a check- and verify-clean program whose skipped construct sits in a *called helper* fails at `run`/`compile` with a raw wasmtime `unknown func` error instead of a source-located diagnostic. Loud, not silent (never a wrong answer); the fix propagates the skip to callers or diagnoses the dropped callee at the call site. | [#1100](https://github.com/aallan/vera/issues/1100) |
 | `ch05_closure_nat_return` (a run-level conformance program in the pre-commit + CI gate) trapped **once** in a full `check_conformance.py` run (`unreachable` in `main` — the sentinel `assert` or a GC shadow-stack guard) and has not reproduced in ~960 attempts across isolated, parallel, eager-GC, and hash-seed-swept executions; the emitted WAT is deterministic and correct. Suspected rare runtime/GC/wasmtime interaction, tracked so a future intermittent CI red resolves here instead of starting fresh. | [#996](https://github.com/aallan/vera/issues/996) |
 
@@ -55,7 +56,6 @@ Things Vera cannot do yet, as distinct from defects in what it claims to do.
 | `runtime.mjs` doesn't export its string-marshalling helpers, so JavaScript cannot pass `String` arguments into Vera functions in the browser. This forces browser programs into the compute-upfront/drain-stdout pattern; exporting the helpers is roadmap Tier 3. | [#603](https://github.com/aallan/vera/issues/603) |
 | `IO.sleep` busy-waits the browser's main thread, freezing the tab for the sleep duration — animations and paced simulations don't run meaningfully under `--target browser`. The JSPI-based suspend/resume fix is roadmap Tier 3, demoted below correctness work. | [#609](https://github.com/aallan/vera/issues/609) |
 | ANSI escape sequences render as literal control characters in the browser DOM, so terminal-style programs display garbage under `--target browser`. A minimal ANSI-subset interpreter in `runtime.mjs` is roadmap Tier 3. | [#610](https://github.com/aallan/vera/issues/610) |
-| The concurrent `await` lowering does not resolve type aliases in its handle-check classification — a future bound through an alias-typed `let` is skipped (`[E602]`) before any await could mis-lower (spec §9.5.4). Confirming this still reproduces requires a genuinely concurrent repro: an eager-path probe never reaches the handle-check, so a clean compile of a pure body proves nothing. | [#1095](https://github.com/aallan/vera/issues/1095) |
 
 ## Refactoring needed
 

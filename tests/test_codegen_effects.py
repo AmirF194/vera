@@ -1953,6 +1953,298 @@ public fn main(@Unit -> @Unit)
         assert out == "OK-PAYLOAD-843", out
 
 
+class TestConcurrentAsyncAlias1109:
+    """#1109 (found probing #1095): the fused-await classifier matched the
+    literal type ``Future<Result<String, String>>`` only, so a future bound
+    through an alias-typed ``let`` — or returned from a helper declared to
+    return the alias — fused its ``async`` (call-shape fusion ignores the
+    binding type) but identity-lowered the ``await``: the kind-4 handle
+    wrapper was read as the Result ADT and every match fell to ``Err`` on a
+    successful request.  Aliases are transparent everywhere else; the
+    classifier now resolves them (transitively, param-substituting) before
+    the literal check.  Pins: the ``async_await`` import must be emitted for
+    both alias shapes, and the Ok payload must arrive byte-exact."""
+
+    def test_alias_let_future_imports_async_await(self) -> None:
+        """WAT shape: alias-typed let binding classifies for the fused-handle
+        check — async fuses AND the await imports async_await."""
+        result = _compile_ok("""
+type F = Future<Result<String, String>>;
+
+public fn fetch(@String -> @Result<String, String>)
+  requires(true) ensures(true) effects(<Http, Async>)
+{
+  let @F = async(Http.get(@String.0));
+  await(@F.0)
+}
+""")
+        assert '(import "vera" "async_http_get"' in result.wat, result.wat[:800]
+        assert '(import "vera" "async_await"' in result.wat
+        assert '(import "vera" "http_get"' not in result.wat
+
+    def test_alias_fn_return_future_imports_async_await(self) -> None:
+        """WAT shape, sibling: a helper declared `-> @F` registers in the
+        future-return registry, so await(fetch(...)) emits the check."""
+        result = _compile_ok("""
+type F = Future<Result<String, String>>;
+
+private fn fetch(@String -> @F)
+  requires(true) ensures(true) effects(<Http, Async>)
+{
+  async(Http.get(@String.0))
+}
+
+public fn run(@String -> @Result<String, String>)
+  requires(true) ensures(true) effects(<Http, Async>)
+{
+  await(fetch(@String.0))
+}
+""")
+        assert '(import "vera" "async_http_get"' in result.wat, result.wat[:800]
+        assert '(import "vera" "async_await"' in result.wat
+
+    def test_alias_let_future_ok_payload_intact(self) -> None:
+        """Runtime: the aliased future must deliver the REAL response body
+        through the Ok arm — pre-fix the identity await read the wrapper as
+        the ADT and every match fell to Err on a 200."""
+        import http.server
+        import threading
+
+        body = b"OK-PAYLOAD-1109-LET"
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802 (stdlib API name)
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args: object) -> None:
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            out = _run_io(f"""
+type F = Future<Result<String, String>>;
+
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO, Http, Async>)
+{{
+  let @F = async(Http.get("http://127.0.0.1:{port}/ok"));
+  let @Result<String, String> = await(@F.0);
+  match @Result<String, String>.0 {{
+    Ok(@String) -> IO.print(@String.0),
+    Err(@String) -> IO.print("ERR")
+  }};
+  ()
+}}
+""")
+        finally:
+            server.shutdown()
+            server.server_close()
+        assert out == "OK-PAYLOAD-1109-LET", out
+
+    def test_alias_fn_return_future_ok_payload_intact(self) -> None:
+        """Runtime, sibling: await(fetch(url)) with `-> @F` delivers the real
+        body through the Ok arm."""
+        import http.server
+        import threading
+
+        body = b"OK-PAYLOAD-1109-FN"
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802 (stdlib API name)
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args: object) -> None:
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            out = _run_io(f"""
+type F = Future<Result<String, String>>;
+
+private fn fetch(@String -> @F)
+  requires(true) ensures(true) effects(<Http, Async>)
+{{
+  async(Http.get(@String.0))
+}}
+
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO, Http, Async>)
+{{
+  let @Result<String, String> = await(fetch("http://127.0.0.1:{port}/ok"));
+  match @Result<String, String>.0 {{
+    Ok(@String) -> IO.print(@String.0),
+    Err(@String) -> IO.print("ERR")
+  }};
+  ()
+}}
+""")
+        finally:
+            server.shutdown()
+            server.server_close()
+        assert out == "OK-PAYLOAD-1109-FN", out
+
+    def test_payload_alias_future_imports_async_await(self) -> None:
+        """WAT shape: an alias INSIDE the future's payload (`Future<R>` with
+        `type R = Result<String, String>`) classifies too — the terminal
+        check canonicalizes type arguments recursively, not just the outer
+        name (PR #1110 review: the outer-name-only resolver left this shape
+        identity-lowered — same #1109 mis-lower one level down)."""
+        result = _compile_ok("""
+type R = Result<String, String>;
+
+public fn fetch(@String -> @R)
+  requires(true) ensures(true) effects(<Http, Async>)
+{
+  let @Future<R> = async(Http.get(@String.0));
+  await(@Future<R>.0)
+}
+""")
+        assert '(import "vera" "async_http_get"' in result.wat, result.wat[:800]
+        assert '(import "vera" "async_await"' in result.wat
+        assert '(import "vera" "http_get"' not in result.wat
+
+    def test_payload_alias_future_ok_payload_intact(self) -> None:
+        """Runtime: `Future<R>` delivers the real body through the Ok arm."""
+        import http.server
+        import threading
+
+        body = b"OK-PAYLOAD-1109-PAYLOAD"
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802 (stdlib API name)
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args: object) -> None:
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            out = _run_io(f"""
+type R = Result<String, String>;
+
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO, Http, Async>)
+{{
+  let @Future<R> = async(Http.get("http://127.0.0.1:{port}/ok"));
+  let @R = await(@Future<R>.0);
+  match @R.0 {{
+    Ok(@String) -> IO.print(@String.0),
+    Err(@String) -> IO.print("ERR")
+  }};
+  ()
+}}
+""")
+        finally:
+            server.shutdown()
+            server.server_close()
+        assert out == "OK-PAYLOAD-1109-PAYLOAD", out
+
+    def test_alias_chain_fn_return_imports_async_await(self) -> None:
+        """WAT shape: a TWO-HOP alias chain on a helper's declared return
+        (`-> @F` with `type F = G; type G = Future<...>`) registers in the
+        future-return registry — transitive resolution in
+        compute_future_ret_fns, not just the slot arm."""
+        result = _compile_ok("""
+type G = Future<Result<String, String>>;
+type F = G;
+
+private fn fetch(@String -> @F)
+  requires(true) ensures(true) effects(<Http, Async>)
+{
+  async(Http.get(@String.0))
+}
+
+public fn run(@String -> @Result<String, String>)
+  requires(true) ensures(true) effects(<Http, Async>)
+{
+  await(fetch(@String.0))
+}
+""")
+        assert '(import "vera" "async_http_get"' in result.wat, result.wat[:800]
+        assert '(import "vera" "async_await"' in result.wat
+
+    def test_two_async_gets_overlap_deterministically_aliased(self) -> None:
+        """The alias-typed overlap pin (PR #1110 review): two fused gets
+        bound through an alias CHAIN (`type G = Future<...>; type F = G`)
+        actually overlap — the server holds request A until B arrives (3s
+        bound), so eager evaluation answers SEQUENTIAL (A times out before
+        B is ever issued) while concurrent answers CONCURRENT for both —
+        AND both real payloads arrive through the Ok arms.  Genuine
+        concurrency and transitive alias substitution in one regression."""
+        import http.server
+        import threading
+
+        arrived_b = threading.Event()
+        log: list[str] = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802 (stdlib API name)
+                log.append(self.path)
+                if self.path == "/a":
+                    ok = arrived_b.wait(timeout=3.0)
+                    body = b"CONCURRENT" if ok else b"SEQUENTIAL"
+                else:
+                    arrived_b.set()
+                    body = b"CONCURRENT"
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args: object) -> None:
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            out = _run_io(f"""
+type G = Future<Result<String, String>>;
+type F = G;
+
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO, Http, Async>)
+{{
+  let @F = async(Http.get("http://127.0.0.1:{port}/a"));
+  let @G = async(Http.get("http://127.0.0.1:{port}/b"));
+  let @Result<String, String> = await(@F.0);
+  match @Result<String, String>.0 {{
+    Ok(@String) -> IO.print(@String.0),
+    Err(@String) -> IO.print("ERR-A")
+  }};
+  let @Result<String, String> = await(@G.0);
+  match @Result<String, String>.0 {{
+    Ok(@String) -> IO.print(@String.0),
+    Err(@String) -> IO.print("ERR-B")
+  }};
+  ()
+}}
+""")
+        finally:
+            server.shutdown()
+            server.server_close()
+        assert out == "CONCURRENTCONCURRENT", (out, log)
+
+
 class TestHttpServerCompilability305:
     """#305: a handler declaring <HttpServer> compiles to WASM (the
     marker effect is in the compilability whitelist) and exports."""
