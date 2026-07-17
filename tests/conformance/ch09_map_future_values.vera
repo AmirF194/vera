@@ -1,0 +1,68 @@
+-- Conformance: Map/Set with representation-transparent Future<T> entries (Chapter 9)
+-- Tests: Future<Int> / Future<String> map values, map_get round-trip, map_values,
+-- array_concat over map_values, Set<Future<Int>> elements (#1097).
+-- Future<T> is representation-transparent (#841): a Future<Int> IS an i64 and a
+-- Future<String> IS an i32_pair, so the Map/Set host tag must strip the transparent
+-- Future<...> wrapper to the payload rather than mis-tagging it as a single i32.
+effect IO {
+  op print(String -> Unit);
+}
+
+-- Round-trip a Future<Int> map value: insert, map_get, await the payload.
+public fn roundtrip_int(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<Async>)
+{
+  let @Map<String, Future<Int>> = map_insert(map_new(), "a", async(11));
+  match map_get(@Map<String, Future<Int>>.0, "a") {
+    None -> 0,
+    Some(@Future<Int>) -> await(@Future<Int>.0)
+  }
+}
+
+-- Round-trip a Future<String> map value (a pair payload, not a single i32).
+public fn roundtrip_string(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<Async>)
+{
+  let @Map<String, Future<String>> = map_insert(map_new(), "a", async("worldwide"));
+  match map_get(@Map<String, Future<String>>.0, "a") {
+    None -> 0,
+    Some(@Future<String>) -> string_length(await(@Future<String>.0))
+  }
+}
+
+-- array_concat over map_values (site 2): each map_values yields both payloads,
+-- so the four-element sum is 2*(11 + 22) = 66 regardless of iteration order.
+public fn concat_map_values(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<Async>)
+{
+  let @Map<String, Future<Int>> = map_insert(map_insert(map_new(), "a", async(11)), "b", async(22));
+  let @Array<Future<Int>> = array_concat(map_values(@Map<String, Future<Int>>.0), map_values(@Map<String, Future<Int>>.0));
+  await(@Array<Future<Int>>.0[0]) + await(@Array<Future<Int>>.0[1]) + await(@Array<Future<Int>>.0[2]) + await(@Array<Future<Int>>.0[3])
+}
+
+-- A Set<Future<Int>> element routes through the same host tag classifier.
+public fn set_future(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<Async>)
+{
+  set_size(set_add(set_new(), async(7)))
+}
+
+public fn main(@Unit -> @Unit)
+  requires(true)
+  ensures(true)
+  effects(<IO, Async>)
+{
+  IO.print(to_string(roundtrip_int(())));
+  IO.print(to_string(roundtrip_string(())));
+  IO.print(to_string(concat_map_values(())));
+  IO.print(to_string(set_future(())));
+  ()
+}

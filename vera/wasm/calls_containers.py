@@ -426,6 +426,24 @@ class CallsContainersMixin:
         Used to build monomorphized host import names like
         ``map_insert$ki_vi`` (key=i64, value=i64).
 
+        A representation-transparent ``Future<…>`` wrapper is stripped to
+        its payload first (#1097, #841): a ``Future<Int>`` IS an i64, a
+        ``Future<String>`` IS an i32_pair, so the tag must classify the
+        payload, not the opaque head.  An alias name is canonicalized to
+        its target's full compound spelling before stripping (``type FI =
+        Future<Int>``), re-canonicalized per wrapper hop so alias-of-Future
+        chains resolve.  Pre-strip, a ``Future<Int>`` value fell through to
+        the ``"b"`` (single-i32) tag while the value expression pushed an
+        i64 — the registered host import disagreed with the stack and a
+        check+verify-green program compiled exit-0 to an INVALID module
+        ("type mismatch: expected i32, found i64", or "values remaining on
+        stack" for the i32_pair payload).  Stripping happens BEFORE the
+        chain, so the zero-size erasure arm still fires on the payload
+        (``Future<Unit>`` -> ``Unit`` -> the ``None`` rejection) and an
+        ``Array<T>`` payload (``Future<Array<Int>>`` -> ``Array<Int>``)
+        reaches the existing Array-reject ``None`` path — a loud skip, not
+        an invalid module.
+
         Returns ``None`` for ``Array<T>`` values: arrays lower to
         ``i32_pair`` (ptr + len), but pre-#475 the fallback routed
         every non-primitive / non-String type to ``"b"`` (single
@@ -443,6 +461,18 @@ class CallsContainersMixin:
         added later it would belong here as a new tag (e.g. ``"a"``)
         with matching ``_map_wasm_types`` entry.
         """
+        # #1097: canonicalize an alias name, then peel transparent
+        # ``Future<…>`` wrappers to the payload BEFORE the tag chain below
+        # classifies it.  ONE canonicalize suffices: it resolves alias
+        # payloads at every depth (``type FI = Future<Int>`` and nested
+        # ``Future<FI2>`` chains both come back fully spelled), so the
+        # strip is a plain textual peel — matching ``_strip_future`` — and
+        # a cyclic alias (already E132 at check) cannot spin it: the
+        # canonicalizer's ``_seen`` guard runs once, never per hop.
+        if vera_type is not None:
+            vera_type, _ = self._canonicalize_alias_slot_name(vera_type)
+            while vera_type.startswith("Future<") and vera_type.endswith(">"):
+                vera_type = vera_type[len("Future<"):-1]
         if vera_type in ("Int", "Nat"):
             return "i"   # i64
         if vera_type == "Float64":
