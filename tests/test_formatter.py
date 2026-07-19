@@ -218,13 +218,17 @@ class TestFormatDeclarations:
         _fmt_check(
             """
             private data Option<T> {
+              -- no value
               None,
+              -- one value
               Some(T)
             }
             """,
             """
             private data Option<T> {
+              -- no value
               None,
+              -- one value
               Some(T)
             }
             """,
@@ -246,13 +250,17 @@ class TestFormatDeclarations:
         _fmt_check(
             """
             effect Counter {
+              -- read the counter
               op get_count(Unit -> Int);
+              -- update the counter
               op increment(Unit -> Unit);
             }
             """,
             """
             effect Counter {
+              -- read the counter
               op get_count(Unit -> Int);
+              -- update the counter
               op increment(Unit -> Unit);
             }
             """,
@@ -262,11 +270,13 @@ class TestFormatDeclarations:
         _fmt_check(
             """
             ability Eq<T> {
+              -- compare values
               op eq(T, T -> Bool);
             }
             """,
             """
             ability Eq<T> {
+              -- compare values
               op eq(T, T -> Bool);
             }
             """,
