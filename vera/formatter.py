@@ -239,12 +239,10 @@ def _attach_comments(
             anchors.append(tld.span.line)
             if tld.span.end_line > last_end:
                 last_end = tld.span.end_line
-        # Interior anchors let comments inside function bodies attach
-        # to the statement/expression they precede rather than falling
-        # to the footer.  last_end stays top-level-only so that the
-        # header/footer boundary is unaffected.
-        if isinstance(tld.decl, FnDecl):
-            _collect_interior_anchors(tld.decl, anchors)
+        # Interior anchors let comments inside declarations attach to the
+        # item they precede rather than falling to the footer.  last_end stays
+        # top-level-only so that the header/footer boundary is unaffected.
+        _collect_interior_anchors(tld.decl, anchors)
 
     # Also consider module/import spans
     first_code_line = 0
@@ -318,6 +316,14 @@ def _collect_interior_anchors(node: object, anchors: list[int]) -> None:
         if node.where_fns:
             for wfn in node.where_fns:
                 _collect_interior_anchors(wfn, anchors)
+    elif isinstance(node, DataDecl):
+        for constructor in node.constructors:
+            if constructor.span:
+                anchors.append(constructor.span.line)
+    elif isinstance(node, (EffectDecl, AbilityDecl)):
+        for operation in node.operations:
+            if operation.span:
+                anchors.append(operation.span.line)
 
 
 # =====================================================================
@@ -626,6 +632,8 @@ class Formatter:
         # Constructors — each on its own line, indented
         self._indent_inc()
         for i, ctor in enumerate(data.constructors):
+            if ctor.span:
+                self._emit_comments(ctor.span.line)
             comma = "," if i < len(data.constructors) - 1 else ""
             if ctor.fields is not None:
                 fields = ", ".join(self._fmt_type_bare(f) for f in ctor.fields)
@@ -680,6 +688,8 @@ class Formatter:
 
         self._indent_inc()
         for op in eff.operations:
+            if op.span:
+                self._emit_comments(op.span.line)
             self._emit_op_decl(op)
         self._indent_dec()
         self._line("}")
@@ -710,6 +720,8 @@ class Formatter:
 
         self._indent_inc()
         for op in ab.operations:
+            if op.span:
+                self._emit_comments(op.span.line)
             self._emit_op_decl(op)
         self._indent_dec()
         self._line("}")
