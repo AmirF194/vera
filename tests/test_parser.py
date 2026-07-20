@@ -387,9 +387,11 @@ class TestComments:
 
     def test_unterminated_block_comment_reports_e020(self) -> None:
         # The grammar only sees the wreckage a malformed comment leaves
-        # behind, so without a pre-lex diagnostic this is reported as an
-        # unexpected `{` token rather than as the unterminated comment
-        # it is (#1112).
+        # behind.  For this input the old non-greedy regex matched through
+        # the *inner* `-}`, so the failure surfaced as a missing-contract
+        # complaint at end of input — lines away from the `{-` at fault
+        # (#1112).  "Unexpected `{`" was the shape when no `-}` appeared
+        # anywhere in the file.
         with pytest.raises(ParseError) as exc:
             parse("{- outer {- inner -}\nprivate fn f(@Int -> @Int)\n")
         assert exc.value.diagnostic.error_code == "E020"
@@ -504,9 +506,8 @@ class TestAnnotationRetention:
         """The negative direction, so a wrong-but-defaulted field cannot pass.
 
         Without this, an implementation that returned ``("left", "right")``
-        unconditionally — or one that never populated the field at all —
-        would be indistinguishable from a correct one on the positive
-        tests alone.
+        unconditionally would be indistinguishable from a correct one on
+        the positive tests alone.
         """
         ast = parse_to_ast("""
         private fn add(@Int, @Int -> @Int)
@@ -543,8 +544,8 @@ class TestAnnotationRetention:
     def test_two_labels_on_one_line_both_survive(self) -> None:
         """The spec's own example, and the case a line-keyed store cannot hold.
 
-        ``_Attached.inline`` is ``dict[int, Comment]`` keyed by line, so
-        it structurally admits one comment per line; both labels here sit
+        ``_Attached.inline`` *was* ``dict[int, Comment]`` keyed by line,
+        so it structurally admitted one comment per line; both labels here sit
         on the signature line.  Retention therefore cannot be built on
         that container (#1123).
         """

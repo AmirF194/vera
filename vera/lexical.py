@@ -13,7 +13,10 @@ counted depth correctly (and ``tests/test_formatter.py`` asserted it),
 while the grammar's ``%ignore /\\{-[\\s\\S]*?-\\}/`` closed at the
 *first* ``-}``.  The same text was therefore a single nested comment to
 ``vera fmt`` and a syntax error to ``vera check``.  Deriving every
-consumer from one scan makes that drift impossible by construction.
+consumer from one scan makes that drift impossible **for block
+comments**.  Line and annotation comments are still recognised
+independently by ``grammar.lark``; the two agree today, but a change to
+either form has to be made on both sides.
 
 This module deliberately imports nothing from ``vera.parser`` or
 ``vera.formatter`` — the formatter already imports the parser, so a
@@ -23,6 +26,22 @@ shared helper has to sit below both.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
+
+#: A comment's syntactic form.  A `Literal` rather than `str` because
+#: mypy runs with ``--strict-equality``: a mistyped comparison against a
+#: `str` field is silently always-false, and the symptom is comments
+#: quietly ceasing to be handled.
+CommentKind = Literal["line", "block", "annotation"]
+
+#: A malformed-comment case.  Also a `Literal`, and more load-bearing than
+#: :data:`CommentKind`: ``vera/errors.py`` indexes ``_COMMENT_PROBLEMS``
+#: with it unguarded, so a value added here and not there is a bare
+#: ``KeyError`` escaping the CLI's ``except VeraError`` — the #966
+#: raw-traceback mode.
+CommentProblemKind = Literal[
+    "unterminated_block", "unterminated_annotation", "nested_annotation",
+]
 
 #: Attribute under which :func:`vera.parser.parse` stashes the source's
 #: annotation labels on the Lark tree, and :func:`vera.transform.transform`
@@ -32,6 +51,8 @@ ANNOTATIONS_ATTR = "vera_annotations"
 __all__ = [
     "ANNOTATIONS_ATTR",
     "AnnotationLabel",
+    "CommentKind",
+    "CommentProblemKind",
     "CommentProblem",
     "CommentSpan",
     "annotation_labels",
@@ -52,7 +73,7 @@ class CommentSpan:
     both run to end of input.
     """
 
-    kind: str          # "line" | "block" | "annotation"
+    kind: CommentKind
     start: int
     end: int
     terminated: bool
@@ -145,9 +166,10 @@ def blank_block_comments(source: str) -> tuple[str, int | None]:
     Returns ``(blanked_source, unterminated_line)`` where
     ``unterminated_line`` is the 1-based line of the first block comment
     that never closes, or ``None`` when every block comment is balanced.
-    The caller reports that as a diagnostic; leaving it to the grammar
-    would surface as a confusing "unexpected end of input" far from the
-    offending ``{-``.
+    No caller consumes it today: :func:`find_comment_problems` runs first
+    and raises E020 from its own scan.  Kept because the blanking pass
+    already knows the answer, and a caller that blanks without diagnosing
+    would otherwise have no way to notice.
     """
     spans = scan_comments(source)
     chars = list(source)
@@ -174,8 +196,7 @@ class CommentProblem:
     its error code and wording.
     """
 
-    kind: str          # "unterminated_block" | "unterminated_annotation"
-                       # | "nested_annotation"
+    kind: CommentProblemKind
     line: int          # 1-based
     column: int        # 1-based
 

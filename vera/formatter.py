@@ -87,7 +87,7 @@ from vera.ast import (
     HoleExpr,
     WildcardPattern,
 )
-from vera.lexical import scan_comments
+from vera.lexical import CommentKind, scan_comments
 from vera.parser import parse as vera_parse, parse_file
 from vera.transform import transform
 
@@ -113,7 +113,7 @@ def _encode_string_escapes(s: str) -> str:
 @dataclass
 class Comment:
     """A comment extracted from source text."""
-    kind: str       # "line" | "block" | "annotation"
+    kind: CommentKind
     text: str       # Full text including delimiters
     line: int       # 1-based start line
     column: int     # 1-based start column
@@ -148,9 +148,30 @@ def extract_comments(source: str) -> list[Comment]:
     return comments
 
 
+def _flatten_comment(comment: Comment) -> str:
+    """A comment's text as one physical line.
+
+    A `{- -}` or `/* */` may span lines while still being inline.  Emitting
+    it verbatim puts a newline inside one output line, and the
+    continuation survives the final join carrying its *original* source
+    indentation — a physically misindented line, against spec 1.8 rule 1.
+    Collapse only when it spans lines, so a single-line comment keeps its
+    internal spacing.
+    """
+    text = comment.text
+    return text.strip() if "\n" not in text else " ".join(text.split())
+
+
 def _annotation_suffix(label: str | None) -> str:
-    """Render a binding's annotation label, or nothing at all."""
-    return f" /* {label} */" if label else ""
+    """Render a binding's annotation label, or nothing at all.
+
+    The label comes from the AST, where it kept whatever line structure it
+    had in source, so it needs the same flattening as a claimed comment —
+    this path splices straight into a signature line.
+    """
+    if not label:
+        return ""
+    return f" /* {' '.join(label.split())} */"
 
 
 # =====================================================================
@@ -419,8 +440,12 @@ class Formatter:
         second one behind an already-labelled slot, belongs to no slot and
         must survive as an ordinary comment.  Matching runs in source
         order against the consumed labels, which the walk produces in slot
-        order — the same order — so a repeated label text still pairs off
-        correctly.
+        order — the same order.  Pairing is by text, first match wins, so
+        it is exact unless an *unconsumed* in-paren annotation shares its
+        text with a label consumed by a later slot: then the wrong object
+        is retired and the survivors emit out of source order.  Nothing is
+        lost and the result is stable; matching by position rather than
+        text would remove the caveat.
         """
         wanted = [text for text in consumed if text]
         if not wanted:
@@ -458,17 +483,25 @@ class Formatter:
         if not claimed:
             return
         self._claimed_inline.update(id(c) for c in claimed)
-        # A `{- -}` may span lines while still being inline.  Appending it
-        # verbatim would put a newline inside one `self._lines` entry,
-        # and the continuation would survive the final join carrying its
-        # original source indentation — a physically misindented line,
-        # against spec 1.8 rule 1.  Collapse only when it spans lines, so
-        # single-line comments keep their internal spacing.
-        text = " ".join(
-            c.text.strip() if "\n" not in c.text else " ".join(c.text.split())
-            for c in claimed
-        )
-        self._lines[-1] = f"{self._lines[-1]}  {text}"
+        # A `--` runs to end of line, so anything appended after one is
+        # swallowed into its text and stops being a separate comment on
+        # re-read.  At most one line comment may share a physical line and
+        # it has to be last; whatever follows goes on its own line.  The
+        # alternative — sorting line comments last — would reorder them
+        # against the source.
+        head: list[str] = []
+        tail: list[str] = []
+        seen_line_comment = False
+        for comment in claimed:
+            rendered = _flatten_comment(comment)
+            if seen_line_comment:
+                tail.append(rendered)
+            else:
+                head.append(rendered)
+                seen_line_comment = comment.kind == "line"
+        self._lines[-1] = f"{self._lines[-1]}  {' '.join(head)}"
+        for rendered in tail:
+            self._line(rendered)
 
     def _emit_header_comments(self) -> None:
         for c in self._attached.header:
@@ -487,13 +520,23 @@ class Formatter:
         self._emit_header_comments()
 
         if prog.module:
+            # `_attach_comments` files a comment above the module line into
+            # `before[module_line]`; without this read it is another bucket
+            # written and never consumed, and `examples/vera/math.vera`
+            # loses its two header lines.
+            if prog.module.span:
+                self._emit_comments(prog.module.span.line)
             self._emit_module(prog.module)
+            self._claim_inline(prog.module)
 
         if prog.imports:
             if prog.module:
                 self._blank()
             for imp in prog.imports:
+                if imp.span:
+                    self._emit_comments(imp.span.line)
                 self._emit_import(imp)
+                self._claim_inline(imp)
 
         first_decl = True
         for tld in prog.declarations:
@@ -508,6 +551,12 @@ class Formatter:
             if tld.span:
                 self._emit_comments(tld.span.line)
             self._emit_top_level(tld)
+            # Backstop for every declaration form.  `_emit_fn_decl` has its
+            # own, but `data`/`type`/`effect`/`ability` have no interior
+            # claim points, so without this a trailing comment anywhere in
+            # them is filed into `_Attached.inline` and never read — the
+            # deletion #1123 fixed for functions only.
+            self._claim_inline(tld)
 
         self._emit_footer_comments()
 
@@ -647,13 +696,21 @@ class Formatter:
         extracted comment stream: spec 1.3 makes them part of the AST,
         and each belongs to a slot index rather than to a source line —
         two labels routinely share the signature's line, which the
-        line-keyed inline store cannot represent (#1123).
+        line-keyed store this replaced could not represent (#1123).
         """
-        labels = param_annotations or ()
+        # `strict=True` rather than index arithmetic: a desynced
+        # `param_annotations` would otherwise silently drop trailing labels
+        # (too short) or ghost ones (too long), which is precisely the
+        # quiet deletion spec 1.8 rule 11 forbids.  `dataclasses.replace`
+        # is the house idiom for rewriting an `FnDecl`, so the arity holds
+        # today only because no pass rewrites `params`.
+        labels = (
+            param_annotations if param_annotations is not None
+            else (None,) * len(params)
+        )
         param_strs = ", ".join(
-            self._fmt_param_type(p)
-            + _annotation_suffix(labels[i] if i < len(labels) else None)
-            for i, p in enumerate(params)
+            self._fmt_param_type(p) + _annotation_suffix(label)
+            for p, label in zip(params, labels, strict=True)
         )
         ret = self._fmt_param_type(return_type) + _annotation_suffix(
             return_annotation,
@@ -727,6 +784,7 @@ class Formatter:
                 self._line(f"{ctor.name}({fields}){comma}")
             else:
                 self._line(f"{ctor.name}{comma}")
+            self._claim_inline(ctor)
         self._indent_dec()
         self._line("}")
 
@@ -778,6 +836,7 @@ class Formatter:
             if op.span:
                 self._emit_comments(op.span.line)
             self._emit_op_decl(op)
+            self._claim_inline(op)
         self._indent_dec()
         self._line("}")
 
@@ -810,6 +869,7 @@ class Formatter:
             if op.span:
                 self._emit_comments(op.span.line)
             self._emit_op_decl(op)
+            self._claim_inline(op)
         self._indent_dec()
         self._line("}")
 

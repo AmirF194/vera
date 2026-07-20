@@ -52,6 +52,17 @@ def _fmt_check(source: str, expected: str) -> None:
 # Comment extraction
 # =====================================================================
 
+_TRIVIAL_FN = """
+public fn keep(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  @Int.0
+}
+"""
+
+
 def _line_with(text: str, needle: str) -> str:
     """The single output line containing `needle` (fails if 0 or >1)."""
     hits = [ln for ln in text.splitlines() if needle in ln]
@@ -246,8 +257,10 @@ class TestCommentExtraction:
         """Signature, contract and effects trailers are outside any statement.
 
         The block-body hook cannot reach them, so each needs its own claim
-        point; without them these three positions stay silently deleted
-        while body comments look fixed.
+        point; without them all three are swept to the declaration
+        backstop and land on the closing brace instead of trailing the
+        construct they belong to.  Nothing is deleted, which is why this
+        test asserts placement rather than presence.
         """
         out = format_source(dedent("""\
             public fn f(@Int -> @Int) -- on the signature
@@ -411,6 +424,84 @@ class TestCommentExtraction:
         """))
         assert "= 1;" in _line_with(out, "{- first -}")
         assert "= 2;" in _line_with(out, "{- second -}")
+
+    @pytest.mark.parametrize("src,marker,anchor", [
+        ("private data Color {\n  Red,  -- warm\n  Green\n}\n",
+         "-- warm", "Red"),
+        ("effect Log {\n  op write(String -> Unit);  -- writes\n}\n",
+         "-- writes", "op write"),
+        ("ability Show<T> {\n  op show(T -> String);  -- renders\n}\n",
+         "-- renders", "op show"),
+        ("type Row = Array<Bool>;  -- the row\n",
+         "-- the row", "type Row"),
+        ("module demo;  -- the entry point\n",
+         "-- the entry point", "module demo"),
+        ("module demo;\nimport other;  -- pulled in\n",
+         "-- pulled in", "import other"),
+    ])
+    def test_non_fn_declarations_keep_their_comments(
+        self, src: str, marker: str, anchor: str,
+    ) -> None:
+        """Every declaration form, not just `fn` (#1123).
+
+        The claim points and the backstop all began life inside
+        `_emit_fn_decl`, so `data`, `effect`, `ability`, `type`, `module`
+        and `import` had none and dropped trailing comments outright —
+        while the CHANGELOG and spec 1.8 rule 11 claimed otherwise. Found
+        by review, because every earlier test used a function.
+
+        Asserting the anchor, not just presence: the declaration backstop
+        would otherwise satisfy a presence check by sweeping the comment
+        to the end of the declaration, leaving the per-item claim points
+        untested. That is exactly how the gap survived the first time.
+        """
+        out = format_source(src + _TRIVIAL_FN)
+        assert anchor in _line_with(out, marker)
+        assert format_source(out) == out, "must reach a fixed point"
+
+    def test_line_comment_does_not_swallow_the_next_comment(self) -> None:
+        """A `--` runs to EOL, so nothing may be appended after one.
+
+        Claimed comments are joined onto one physical line; putting a
+        second comment after a `--` folds it into that comment's text, so
+        four comments re-read as one and the attribution is unrecoverable.
+        At most one line comment per physical line, and it must be last.
+        """
+        out = format_source(dedent("""\
+            public fn f(@Int -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {  -- open brace
+              @Int.0
+            }  -- close brace
+        """))
+        # Both survive as *separate* comments, so a re-scan still sees two.
+        assert len(extract_comments(out)) == 2
+        assert format_source(out) == out
+
+    def test_multiline_annotation_label_stays_on_one_line(self) -> None:
+        """The AST-driven label path needs the same collapse as claiming.
+
+        `_claim_inline_range` flattens a multi-line comment; the label
+        emitted from `param_annotations` went through `_annotation_suffix`
+        instead, which spliced the raw text and left the continuation
+        carrying its original source indentation.
+        """
+        out = format_source(dedent("""\
+            public fn f(@Int /* the number
+               to double */ -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              @Int.0
+            }
+        """))
+        assert "the number to double" in out
+        for line in out.splitlines():
+            indent = len(line) - len(line.lstrip())
+            assert indent % 2 == 0, f"non-canonical indent: {line!r}"
 
     def test_annotation_label_is_not_emitted_twice(self) -> None:
         """A binding label comes from the AST, so the inline path must skip it.
@@ -1460,3 +1551,66 @@ class TestIdempotency:
         formatted = format_source(source, file=str(path))
         tree = vera_parse(formatted)
         transform(tree)  # Should not raise
+
+
+class TestCorpusCommentPreservation:
+    """No corpus file may lose a comment when formatted.
+
+    The whole of #1123 survived because the corpus contains no inline
+    comments to lose and nothing format-checks it, so a regression that
+    deleted every inline comment in the language passed the full gate.
+    These two tests close that: the sweep guards real files as soon as any
+    gains a comment, and the fixture gives it something to bite on today.
+    """
+
+    ALL_SOURCES = sorted(
+        [*(Path(__file__).parent.parent / "examples").rglob("*.vera"),
+         *(Path(__file__).parent / "conformance").glob("*.vera")],
+    )
+
+    @pytest.mark.parametrize(
+        "path", ALL_SOURCES, ids=lambda p: p.name,
+    )
+    def test_formatting_preserves_every_comment(self, path: Path) -> None:
+        src = path.read_text(encoding="utf-8")
+        before = len(extract_comments(src))
+        after = len(extract_comments(format_source(src)))
+        assert after == before, f"{path.name}: {before} -> {after} comments"
+
+    def test_comments_in_every_position_survive(self) -> None:
+        """One fixture carrying a comment in each construct the emitter has.
+
+        Deliberately not a `.vera` corpus file: `vera fmt` is not run over
+        the corpus by any gate, so a fixture there would guard nothing.
+        """
+        src = dedent("""            module demo;  -- the module
+            import other;  -- the import
+
+            type Row = Array<Bool>;  -- the alias
+
+            private data Color {
+              Red,  -- warm
+              Green  -- cool
+            }
+
+            effect Log {
+              op write(String -> Unit);  -- the op
+            }
+
+            public fn f(@Int -> @Int)  -- the signature
+              requires(true)  -- the precondition
+              ensures(true)
+              effects(pure)  -- the effects
+            {
+              @Int.0 + 1  -- the body
+            }
+        """)
+        out = format_source(src)
+        for marker in (
+            "-- the module", "-- the import", "-- the alias",
+            "-- warm", "-- cool", "-- the op", "-- the signature",
+            "-- the precondition", "-- the effects", "-- the body",
+        ):
+            assert marker in out, f"lost {marker!r}"
+        assert len(extract_comments(out)) == len(extract_comments(src))
+        assert format_source(out) == out

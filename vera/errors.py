@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+from vera.lexical import CommentProblemKind
+
 
 @dataclass
 class SourceLocation:
@@ -362,7 +364,10 @@ _COMMENT_PROBLEMS = {
         "nesting never returns to depth zero, so the comment runs to the end "
         "of the file and swallows the code after it.",
         "Add a matching `-}` for this `{-`. A `{-` *inside* a block comment "
-        "opens a nested comment that needs its own closer too.",
+        "opens a nested comment that needs its own closer too. If you meant "
+        "a block whose value is negative, separate the delimiters — write "
+        "`{ -1 }`, because `{` immediately followed by `-` always opens a "
+        "comment.",
     ),
     "unterminated_annotation": (
         "E021",
@@ -386,7 +391,7 @@ _COMMENT_PROBLEMS = {
 
 
 def diagnose_comment_problem(
-    kind: str,
+    kind: CommentProblemKind,
     line: int,
     column: int,
     source: str,
