@@ -85,6 +85,60 @@ class TestCommentExtraction:
         comments = extract_comments("fn foo() {}\n")
         assert len(comments) == 0
 
+    def test_annotation_labels_survive_formatting(self) -> None:
+        """`vera fmt` must not delete a binding's label (spec 1.3, #1112).
+
+        Labels are emitted from the AST rather than from the comment
+        stream: they are the one comment form the spec requires the AST
+        to carry, and the line-keyed inline store could not hold two on
+        one line anyway (#1123).
+        """
+        out = format_source(dedent("""\
+            private fn add(@Int /* left */, @Int /* right */ -> @Int /* sum */)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              @Int.0 + @Int.1
+            }
+        """))
+        assert "/* left */" in out
+        assert "/* right */" in out
+        assert "/* sum */" in out
+
+    def test_annotation_formatting_is_idempotent(self) -> None:
+        """Formatting the formatted output must be a fixed point.
+
+        Emitting labels re-introduces comments into the formatter's own
+        input, so this is the check that they round-trip rather than
+        accumulating or shifting slot on a second pass.
+        """
+        src = dedent("""\
+            private fn area(@Int /* width */, @Int /* height */ -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              @Int.0 * @Int.1
+            }
+        """)
+        once = format_source(src)
+        twice = format_source(once)
+        assert once == twice
+
+    def test_unlabelled_signature_gains_no_annotation(self) -> None:
+        """The negative direction — no label must mean no emitted `/* */`."""
+        out = format_source(dedent("""\
+            private fn add(@Int, @Int -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              @Int.0 + @Int.1
+            }
+        """))
+        assert "/*" not in out
+
     def test_comments_inside_string_ignored(self) -> None:
         comments = extract_comments('"-- not a comment"\n')
         assert len(comments) == 0

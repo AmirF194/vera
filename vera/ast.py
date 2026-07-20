@@ -233,6 +233,14 @@ class FnDecl(Decl):
     effect: EffectRow
     body: Block
     where_fns: tuple[FnDecl, ...] | None
+    # Annotation-comment labels (spec 1.3), positional so they survive
+    # De Bruijn addressing: `param_annotations[i]` labels `params[i]`,
+    # and an unlabelled slot holds None rather than being omitted —
+    # collapsing the gaps would shift every later label onto the wrong
+    # slot.  None (rather than a tuple of Nones) means the AST was built
+    # without source, so nothing is known either way.
+    param_annotations: tuple[str | None, ...] | None = None
+    return_annotation: str | None = None
 
 
 @dataclass(frozen=True)

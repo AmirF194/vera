@@ -20,7 +20,12 @@ from vera.errors import (
     diagnose_comment_problem,
     diagnose_lark_error,
 )
-from vera.lexical import blank_block_comments, find_comment_problems
+from vera.lexical import (
+    ANNOTATIONS_ATTR,
+    annotation_labels,
+    blank_block_comments,
+    find_comment_problems,
+)
 
 _GRAMMAR_PATH = Path(__file__).parent / "grammar.lark"
 
@@ -79,12 +84,22 @@ def parse(source: str, file: Optional[str] = None) -> Tree[Any]:
         ))
     prepared, _ = blank_block_comments(source)
     try:
-        return parser.parse(prepared)
+        tree = parser.parse(prepared)
     except LarkError as exc:
         # Diagnose against the ORIGINAL source: the blanked copy would
         # quote a line of spaces back at the user.
         diagnostic = diagnose_lark_error(exc, source, file=file)
         raise ParseError(diagnostic) from exc
+
+    # Annotation comments are `%ignore`d, so they never reach the tree —
+    # but spec 1.3 requires them in the AST.  Carrying them on the parse
+    # result lets `transform()` attach them without taking a `source`
+    # argument, which would mean updating every one of its call sites and
+    # leaving a future caller free to omit it and silently lose labels on
+    # that path.  `setattr` because the attribute belongs to Lark's Tree,
+    # which we do not own; `transform()` reads it back by the same name.
+    setattr(tree, ANNOTATIONS_ATTR, annotation_labels(source))
+    return tree
 
 
 def parse_file(path: str | Path) -> Tree[Any]:

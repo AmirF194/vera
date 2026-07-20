@@ -144,6 +144,11 @@ def extract_comments(source: str) -> list[Comment]:
     return comments
 
 
+def _annotation_suffix(label: str | None) -> str:
+    """Render a binding's annotation label, or nothing at all."""
+    return f" /* {label} */" if label else ""
+
+
 # =====================================================================
 # Comment attachment
 # =====================================================================
@@ -463,7 +468,12 @@ class Formatter:
                 parts.append(f"forall<{vars_str}>")
 
         parts.append("fn")
-        parts.append(fn.name + self._fmt_signature(fn.params, fn.return_type))
+        parts.append(fn.name + self._fmt_signature(
+            fn.params,
+            fn.return_type,
+            fn.param_annotations,
+            fn.return_annotation,
+        ))
 
         self._line(" ".join(parts))
 
@@ -505,10 +515,26 @@ class Formatter:
         self,
         params: tuple[TypeExpr, ...],
         return_type: TypeExpr,
+        param_annotations: tuple[str | None, ...] | None = None,
+        return_annotation: str | None = None,
     ) -> str:
-        """Format function signature: (@T1, @T2 -> @R)."""
-        param_strs = ", ".join(self._fmt_param_type(p) for p in params)
-        ret = self._fmt_param_type(return_type)
+        """Format function signature: (@T1, @T2 -> @R).
+
+        Annotation-comment labels are emitted from the AST, not from the
+        extracted comment stream: spec 1.3 makes them part of the AST,
+        and each belongs to a slot index rather than to a source line —
+        two labels routinely share the signature's line, which the
+        line-keyed inline store cannot represent (#1123).
+        """
+        labels = param_annotations or ()
+        param_strs = ", ".join(
+            self._fmt_param_type(p)
+            + _annotation_suffix(labels[i] if i < len(labels) else None)
+            for i, p in enumerate(params)
+        )
+        ret = self._fmt_param_type(return_type) + _annotation_suffix(
+            return_annotation,
+        )
         if param_strs:
             return f"({param_strs} -> {ret})"
         return f"(-> {ret})"

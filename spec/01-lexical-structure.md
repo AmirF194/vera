@@ -32,11 +32,15 @@ Vera supports three comment forms:
 
 **Block comments** begin with `{-` and end with `-}`. They nest: a `{-` inside a block comment begins a nested block comment that must be closed by its own `-}`.
 
-**Annotation comments** begin with `/*` and end with `*/`. They do not nest. Annotation comments are semantically ignored by the compiler but are preserved in the AST. They serve as optional human-readable labels for bindings:
+**Annotation comments** begin with `/*` and end with `*/`. They do not nest. They are semantically ignored by the compiler: no annotation comment changes how a program type-checks, verifies, or runs.
+
+They serve as optional human-readable labels for bindings, recovering the readability that structural slot references leave implicit — `@Int.0` records where a value comes from, never what it means:
 
 ```
-fn(@Int /* width */, @Int /* height */ -> @Int)
+fn(@Int /* width */, @Int /* height */ -> @Int /* area */)
 ```
+
+A label written on a **function parameter** or on the **return slot** is preserved in the AST, attached to that slot's position rather than to a source line, and re-emitted by `vera fmt`. An annotation comment in any other position is an ordinary comment: still accepted and still ignored, but not carried in the AST.
 
 ## 1.4 Keywords
 

@@ -24,9 +24,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+#: Attribute under which :func:`vera.parser.parse` stashes the source's
+#: annotation labels on the Lark tree, and :func:`vera.transform.transform`
+#: reads them back.  Named here so the two sides cannot drift apart.
+ANNOTATIONS_ATTR = "vera_annotations"
+
 __all__ = [
+    "ANNOTATIONS_ATTR",
+    "AnnotationLabel",
     "CommentProblem",
     "CommentSpan",
+    "annotation_labels",
     "blank_block_comments",
     "find_comment_problems",
     "scan_comments",
@@ -168,6 +176,55 @@ def _locate(source: str, offset: int) -> tuple[int, int]:
     line = source.count("\n", 0, offset) + 1
     line_start = source.rfind("\n", 0, offset) + 1
     return line, offset - line_start + 1
+
+
+@dataclass(frozen=True)
+class AnnotationLabel:
+    """An annotation comment, positioned the way Lark spans are.
+
+    Line and column are 1-based and ``end_column`` is exclusive, so a
+    label can be compared directly against an AST node's
+    :class:`~vera.ast.Span` without converting between coordinate
+    systems.  ``text`` is the inner text with ``/*``, ``*/`` and
+    surrounding whitespace removed — the label itself, which is what
+    spec 1.3 means by a human-readable label for a binding.
+    """
+
+    text: str
+    line: int
+    column: int
+    end_line: int
+    end_column: int
+
+    @property
+    def start(self) -> tuple[int, int]:
+        """Sort/compare key for the opening ``/*``."""
+        return (self.line, self.column)
+
+
+def annotation_labels(source: str) -> tuple[AnnotationLabel, ...]:
+    """Every terminated annotation comment in ``source``, in source order.
+
+    Unterminated ones are skipped: they are already an E021 parse error,
+    and their extent runs to end of input, so treating one as a label
+    would attach the rest of the file to a binding.
+    """
+    labels: list[AnnotationLabel] = []
+
+    for span in scan_comments(source):
+        if span.kind != "annotation" or not span.terminated:
+            continue
+        line, column = _locate(source, span.start)
+        end_line, end_column = _locate(source, span.end)
+        labels.append(AnnotationLabel(
+            text=source[span.start + 2:span.end - 2].strip(),
+            line=line,
+            column=column,
+            end_line=end_line,
+            end_column=end_column,
+        ))
+
+    return tuple(labels)
 
 
 def find_comment_problems(source: str) -> list[CommentProblem]:
