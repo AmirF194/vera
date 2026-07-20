@@ -503,6 +503,31 @@ class TestCommentExtraction:
             indent = len(line) - len(line.lstrip())
             assert indent % 2 == 0, f"non-canonical indent: {line!r}"
 
+    def test_each_match_arm_keeps_its_own_comment(self) -> None:
+        """An arm comment belongs to its arm, not the match's closing brace.
+
+        A match arm is not a `Block`, so `_emit_block_body`'s claim never
+        reaches it and every arm comment fell to the declaration backstop.
+        Placement is the only thing that catches this: the comments still
+        survive and the result is still idempotent when they are all piled
+        onto the closing brace, so neither invariant in
+        `TestCommentInvariants` can see it.
+        """
+        out = format_source(dedent("""\
+            public fn f(@Int -> @String)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              match @Int.0 {
+                0 -> "zero",  -- the zero case
+                _ -> "other"  -- everything else
+              }
+            }
+        """))
+        assert '"zero"' in _line_with(out, "-- the zero case")
+        assert '"other"' in _line_with(out, "-- everything else")
+
     def test_annotation_label_is_not_emitted_twice(self) -> None:
         """A binding label comes from the AST, so the inline path must skip it.
 
@@ -1614,3 +1639,120 @@ class TestCorpusCommentPreservation:
             assert marker in out, f"lost {marker!r}"
         assert len(extract_comments(out)) == len(extract_comments(src))
         assert format_source(out) == out
+
+
+_COMMENT_SHAPES = {
+    "trailing statement": "  @Int.0 + 1  -- trailing\n",
+    "trailing block": "  @Int.0 + 1  {- trailing -}\n",
+    "two on one statement": "  @Int.0 + 1  {- a -} -- b\n",
+    "two statements one line": "  let @Int = 1; -- one\n  @Int.0 -- two\n",
+    "own line": "  -- above\n  @Int.0\n",
+    "multi-line block": "  @Int.0 {- spans\n     two lines -}\n",
+    "brace trailers": None,          # supplied whole below
+    "match arms": None,
+    "if branches": None,
+    "nested block": "  if @Int.0 > 0 then {\n    1  -- yes\n  } else {\n    0  -- no\n  }\n",
+}
+
+_WHOLE_FILE_SHAPES = {
+    "brace trailers": """public fn f(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{  -- open
+  @Int.0
+}  -- close
+""",
+    "match arms": """public fn f(@Int -> @String)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  match @Int.0 {
+    0 -> "zero",  -- zero
+    _ -> "other"  -- other
+  }
+}
+""",
+    "if branches": """public fn f(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  if @Int.0 >= 0 then {
+    1  -- positive
+  } else {
+    0  -- negative
+  }
+}
+""",
+    "declaration forms": """module demo;  -- mod
+import other;  -- imp
+
+type Row = Array<Bool>;  -- alias
+
+private data Color {
+  Red,  -- warm
+  Green  -- cool
+}
+
+effect Log {
+  op write(String -> Unit);  -- op
+}
+
+public fn f(@Int -> @Int)  -- sig
+  requires(true)  -- pre
+  ensures(true)
+  effects(pure)  -- eff
+{
+  @Int.0  -- body
+}
+""",
+    "signature labels": """public fn area(@Int /* w */, @Int /* h */ -> @Int /* a */)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  @Int.1 * @Int.0
+}
+""",
+}
+
+
+def _wrap(body: str) -> str:
+    return (
+        "public fn f(@Int -> @Int)\n"
+        "  requires(true)\n  ensures(true)\n  effects(pure)\n{\n"
+        + body + "}\n"
+    )
+
+
+class TestCommentInvariants:
+    """Two invariants over every comment shape, not a hand-picked few.
+
+    Count-preservation and idempotence are the pair that catches this
+    whole bug family. Every defect found in review was invisible to one
+    of them alone: deletion and merging show up in the count, relocation
+    and drift only in idempotence — and a comment that walks out of its
+    function on each pass violates only the second.
+    """
+
+    ALL = {
+        **{k: _wrap(v) for k, v in _COMMENT_SHAPES.items() if v is not None},
+        **_WHOLE_FILE_SHAPES,
+    }
+
+    @pytest.mark.parametrize("name", sorted(ALL))
+    def test_no_comment_is_lost_or_merged(self, name: str) -> None:
+        src = self.ALL[name]
+        before = len(extract_comments(src))
+        after = len(extract_comments(format_source(src)))
+        assert after == before, f"{name}: {before} comments in, {after} out"
+
+    @pytest.mark.parametrize("name", sorted(ALL))
+    def test_formatting_reaches_a_fixed_point(self, name: str) -> None:
+        once = format_source(self.ALL[name])
+        assert format_source(once) == once, (
+            f"{name}: not idempotent — a comment that moves on every pass "
+            f"drifts out of the construct it documents"
+        )

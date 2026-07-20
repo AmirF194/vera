@@ -489,19 +489,34 @@ class Formatter:
         # it has to be last; whatever follows goes on its own line.  The
         # alternative — sorting line comments last — would reorder them
         # against the source.
-        head: list[str] = []
-        tail: list[str] = []
-        seen_line_comment = False
-        for comment in claimed:
-            rendered = _flatten_comment(comment)
-            if seen_line_comment:
-                tail.append(rendered)
+        # A `--` runs to end of line, so anything appended after one is
+        # swallowed into its text and stops being a separate comment on
+        # re-read.  Line comments therefore go last, and everything stays
+        # on this one physical line.
+        #
+        # Spilling the remainder onto a *new* line instead would turn an
+        # inline comment into an own-line one, and own-line comments
+        # attach to the nearest anchor *after* them — for a comment
+        # following the last statement in a block that is the next
+        # top-level declaration, so it walks out of the function on each
+        # pass.  Reordering within a single claim is the lesser evil: all
+        # of these are already being relocated to the same construct, so
+        # their relative order carries nothing a reader can rely on.
+        blocks = [c for c in claimed if c.kind != "line"]
+        lines = [c for c in claimed if c.kind == "line"]
+        rendered = [_flatten_comment(c) for c in blocks]
+        # Only the final line comment can stay in `--` form; any earlier
+        # one is re-delimited as `{- ... -}` so it remains a *distinct*
+        # comment on re-read instead of being absorbed into the next.
+        for i, comment in enumerate(lines):
+            text = _flatten_comment(comment)
+            if i == len(lines) - 1 or "-}" in text:
+                rendered.append(text)
             else:
-                head.append(rendered)
-                seen_line_comment = comment.kind == "line"
-        self._lines[-1] = f"{self._lines[-1]}  {' '.join(head)}"
-        for rendered in tail:
-            self._line(rendered)
+                rendered.insert(
+                    len(rendered) - 0, "{- " + text[2:].strip() + " -}",
+                )
+        self._lines[-1] = f"{self._lines[-1]}  {' '.join(rendered)}"
 
     def _emit_header_comments(self) -> None:
         for c in self._attached.header:
@@ -994,6 +1009,16 @@ class Formatter:
             else:
                 body = self._fmt_expr(arm.body)
                 self._line(f"{pat} -> {body}{comma}")
+            # An arm is not a Block, so `_emit_block_body`'s hook never
+            # reaches it and every arm comment fell through to the
+            # declaration backstop — which piled them all onto the match's
+            # closing brace, out of the arm they document.
+            nxt = expr.arms[i + 1] if i + 1 < len(expr.arms) else None
+            nxt_span = getattr(nxt, "span", None)
+            self._claim_inline(
+                arm,
+                (nxt_span.line, nxt_span.column) if nxt_span else None,
+            )
         self._indent_dec()
         self._line("}")
 
