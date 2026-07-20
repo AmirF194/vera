@@ -116,6 +116,14 @@ class TestCommentExtraction:
         assert out.count("/* left */") == 1
         assert out.count("/* right */") == 1
         assert out.count("/* sum */") == 1
+        # Each on its own slot, in order. The counts above survive any
+        # permutation, and a permuted emission otherwise only shows up as
+        # an idempotence failure (it oscillates on the second pass), which
+        # reports the wrong problem.
+        assert out.splitlines()[0] == (
+            "private fn add(@Int /* left */, @Int /* right */ "
+            "-> @Int /* sum */)"
+        )
 
     def test_annotation_formatting_is_idempotent(self) -> None:
         """Formatting the formatted output must be a fixed point.
