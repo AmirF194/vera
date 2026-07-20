@@ -116,6 +116,7 @@ class Comment:
     kind: str       # "line" | "block" | "annotation"
     text: str       # Full text including delimiters
     line: int       # 1-based start line
+    column: int     # 1-based start column
     end_line: int   # 1-based end line
     inline: bool    # True if code precedes this comment on the same line
     paren_depth: int = 0  # see lexical.CommentSpan.paren_depth
@@ -139,6 +140,7 @@ def extract_comments(source: str) -> list[Comment]:
             kind=span.kind,
             text=source[span.start:span.end],
             line=source.count("\n", 0, span.start) + 1,
+            column=span.start - line_start + 1,
             end_line=source.count("\n", 0, span.end) + 1,
             inline=source[line_start:span.start].strip() != "",
             paren_depth=span.paren_depth,
@@ -378,7 +380,11 @@ class Formatter:
             for cline in c.text.split("\n"):
                 self._line(cline.strip() if c.kind == "block" else cline.strip())
 
-    def _claim_inline(self, node: object) -> None:
+    def _claim_inline(
+        self,
+        node: object,
+        upper: tuple[int, int] | None = None,
+    ) -> None:
         """Append inline comments inside ``node``'s span to its last line.
 
         Called immediately after a construct is emitted, so
@@ -391,30 +397,63 @@ class Formatter:
         span = getattr(node, "span", None)
         if span is None:
             return
-        self._claim_inline_range(span.line, span.end_line)
+        self._claim_inline_range(span.line, span.end_line, upper)
 
-    def _suppress_signature_labels(self, start: int, end: int) -> None:
-        """Mark annotation comments on a signature as already placed.
+    def _suppress_signature_labels(
+        self,
+        start: int,
+        end: int,
+        consumed: tuple[str | None, ...],
+    ) -> None:
+        """Mark the annotations re-emitted as slot labels as already placed.
 
-        Within a signature an annotation comment is a binding label held
-        on the AST and re-emitted by :meth:`_fmt_signature`.  Retiring it
-        here — rather than letting a claim point skip it — means no later
-        claim, including the declaration backstop, can print it a second
-        time.  The idempotence test is what catches a regression.
+        Within a signature an annotation comment *may* be a binding label
+        held on the AST and re-emitted by :meth:`_fmt_signature`.
+        Retiring those here — rather than letting a claim point skip them
+        — means no later claim, including the declaration backstop, can
+        print one a second time; the idempotence test catches a
+        regression.
+
+        Only the ones actually consumed, though.  The label walk takes the
+        first annotation *after* each slot, so a leading annotation, or a
+        second one behind an already-labelled slot, belongs to no slot and
+        must survive as an ordinary comment.  Matching runs in source
+        order against the consumed labels, which the walk produces in slot
+        order — the same order — so a repeated label text still pairs off
+        correctly.
         """
+        wanted = [text for text in consumed if text]
+        if not wanted:
+            return
         for comment in self._attached.inline:
+            if not wanted:
+                return
             if (comment.kind == "annotation"
                     and comment.paren_depth > 0
-                    and start <= comment.line <= end):
+                    and start <= comment.line <= end
+                    and comment.text[2:-2].strip() == wanted[0]):
                 self._claimed_inline.add(id(comment))
+                wanted.pop(0)
 
-    def _claim_inline_range(self, start: int, end: int) -> None:
-        """Claim unplaced inline comments on source lines ``start..end``."""
+    def _claim_inline_range(
+        self,
+        start: int,
+        end: int,
+        upper: tuple[int, int] | None = None,
+    ) -> None:
+        """Claim unplaced inline comments on source lines ``start..end``.
+
+        ``upper`` bounds the claim by a following construct's start
+        position.  Two statements can share a line, and a line-granular
+        claim would hand both their trailing comments to whichever is
+        emitted first, so the cut has to compare full (line, column).
+        """
         if not self._lines:
             return
         claimed = [
             c for c in self._attached.inline
             if id(c) not in self._claimed_inline and start <= c.line <= end
+            and (upper is None or (c.line, c.column) < upper)
         ]
         if not claimed:
             return
@@ -545,7 +584,11 @@ class Formatter:
                 if fn.return_type.span is not None
                 else fn.span.line
             )
-            self._suppress_signature_labels(fn.span.line, sig_end)
+            self._suppress_signature_labels(
+                fn.span.line,
+                sig_end,
+                (*(fn.param_annotations or ()), fn.return_annotation),
+            )
             self._claim_inline_range(fn.span.line, sig_end)
 
         # Contract clauses — each on its own line, indented 2 spaces
@@ -811,11 +854,16 @@ class Formatter:
 
     def _emit_block_body(self, block: Block) -> None:
         """Emit the interior of a block (statements then expression)."""
-        for stmt in block.statements:
+        following: list[object] = [*block.statements[1:], block.expr]
+        for stmt, nxt in zip(block.statements, following):
             if stmt.span:
                 self._emit_comments(stmt.span.line)
             self._emit_stmt(stmt)
-            self._claim_inline(stmt)
+            nxt_span = getattr(nxt, "span", None)
+            self._claim_inline(
+                stmt,
+                (nxt_span.line, nxt_span.column) if nxt_span else None,
+            )
         if block.expr.span:
             self._emit_comments(block.expr.span.line)
         self._emit_block_expr(block.expr)

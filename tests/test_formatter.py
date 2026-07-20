@@ -335,6 +335,58 @@ class TestCommentExtraction:
         assert "@Int)" in line
         assert "@Int /* not a label */" not in line
 
+    def test_unconsumed_annotation_in_parens_is_kept(self) -> None:
+        """An in-paren annotation that labels nothing is still a comment.
+
+        The label walk takes the first annotation *after* each slot, so a
+        leading one — and a second one behind an already-labelled slot —
+        is consumed by nobody. Retiring every in-paren annotation would
+        delete exactly those, which is the defect this PR exists to fix.
+        """
+        out = format_source(dedent("""\
+            public fn f(/* lead */ @Int -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              @Int.0
+            }
+        """))
+        assert "/* lead */" in out
+
+        out2 = format_source(dedent("""\
+            public fn f(@Int /* label */ /* extra */ -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              @Int.0
+            }
+        """))
+        assert "/* label */" in out2, "the consumed label must still emit"
+        assert "/* extra */" in out2, "the unconsumed one must not be dropped"
+
+    def test_same_line_statements_keep_their_own_comments(self) -> None:
+        """Claiming by line alone gives every same-line comment to the first.
+
+        Two statements may share a source line, so a line-granular claim
+        hands both trailing comments to whichever is emitted first. The
+        claim has to compare full (line, column) positions and stop at the
+        next statement's start.
+        """
+        out = format_source(dedent("""\
+            public fn f(@Int -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              let @Int = 1; {- first -} let @Int = 2; {- second -}
+              @Int.0
+            }
+        """))
+        assert "= 1;" in _line_with(out, "{- first -}")
+        assert "= 2;" in _line_with(out, "{- second -}")
+
     def test_annotation_label_is_not_emitted_twice(self) -> None:
         """A binding label comes from the AST, so the inline path must skip it.
 
