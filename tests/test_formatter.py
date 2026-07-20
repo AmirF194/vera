@@ -125,6 +125,31 @@ class TestCommentExtraction:
             "-> @Int /* sum */)"
         )
 
+    def test_unlabelled_slot_does_not_shift_later_labels(self) -> None:
+        """A None gap must hold its position through emission.
+
+        `test_partially_labelled_params_keep_their_positions` pins this on
+        the AST; this pins the *emitted* signature, which is a separate
+        failure surface. Compacting the gaps away in `_fmt_signature`
+        moves `/* right */` onto parameter 0 — a label naming the wrong
+        slot, which is the mistake positional storage exists to prevent —
+        and neither the AST tests nor idempotence catch it: unlike a
+        permutation, a compaction reaches a fixed point on the second
+        pass, so `fmt(fmt(x)) == fmt(x)` still holds.
+        """
+        out = format_source(dedent("""\
+            private fn add(@Int, @Int /* right */ -> @Int /* sum */)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              @Int.0 + @Int.1
+            }
+        """))
+        assert out.splitlines()[0] == (
+            "private fn add(@Int, @Int /* right */ -> @Int /* sum */)"
+        )
+
     def test_annotation_formatting_is_idempotent(self) -> None:
         """Formatting the formatted output must be a fixed point.
 
