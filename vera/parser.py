@@ -14,8 +14,13 @@ if TYPE_CHECKING:
 from lark import Lark, Tree
 from lark.exceptions import LarkError
 
-from vera.errors import Diagnostic, ParseError, diagnose_lark_error
-from vera.lexical import blank_block_comments
+from vera.errors import (
+    Diagnostic,
+    ParseError,
+    diagnose_comment_problem,
+    diagnose_lark_error,
+)
+from vera.lexical import blank_block_comments, find_comment_problems
 
 _GRAMMAR_PATH = Path(__file__).parent / "grammar.lark"
 
@@ -63,13 +68,16 @@ def parse(source: str, file: Optional[str] = None) -> Tree[Any]:
     # (#1112).  Blanking preserves length and line structure exactly, so
     # `propagate_positions` offsets, every diagnostic's line/column, and
     # the formatter's span-based comment attachment all stay faithful.
-    prepared, unterminated_line = blank_block_comments(source)
-    if unterminated_line is not None:
-        # An unterminated `{-` would otherwise blank the rest of the
-        # file, leaving the parser to report a contextless "unexpected
-        # end of input".  Hand it the original text instead so the
-        # error lands on the offending opener.
-        prepared = source
+    # A malformed comment is diagnosed here rather than left to the
+    # grammar.  The grammar only ever sees the wreckage — an
+    # unterminated `/*` reaches it as a stray `/` — so it blames the
+    # wrong token, several lines from the delimiter that actually
+    # caused the problem (E020/E021/E023).
+    for problem in find_comment_problems(source):
+        raise ParseError(diagnose_comment_problem(
+            problem.kind, problem.line, problem.column, source, file=file,
+        ))
+    prepared, _ = blank_block_comments(source)
     try:
         return parser.parse(prepared)
     except LarkError as exc:

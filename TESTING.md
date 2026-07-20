@@ -6,7 +6,7 @@ This is the single source of truth for Vera's testing infrastructure, coverage d
 
 | Metric | Value |
 |--------|-------|
-| **Tests** | 8,008 across 127 files (~106,000 lines of test code; 7,900 passed + 26 stress, 79 skipped) |
+| **Tests** | 8,011 across 127 files (~106,000 lines of test code; 7,900 passed + 26 stress, 79 skipped) |
 | **Compiler code coverage** | 95% Python, 61% JavaScript — 91% combined (CI minimum: 80%) |
 | **Conformance programs** | 163 programs across 9 spec chapters, validating every language feature |
 | **Example programs** | 39, all validated through `vera check` + `vera verify` |
@@ -55,7 +55,7 @@ python scripts/check_wheel_availability.py           # pre-flight: every runtime
 
 | File | Tests | Lines | What it covers |
 |------|------:|------:|----------------|
-| `test_parser.py` | 136 | 1017 | Grammar rules, operator precedence, parse errors |
+| `test_parser.py` | 139 | 1042 | Grammar rules, operator precedence, parse errors |
 | `test_ast.py` | 132 | 1,122 | AST transformation, node structure, serialisation, string escape sequences, ability declarations |
 | `test_checker_types.py` | 209 | 3063 | Primitive types, literals, binary/unary ops, generics, constructors, refinement types, arrays, tuples, zero-size container rejection (E135 for Map/Set — #1075), return/match-arm types, the fresh-ctor-var family (a bare `None` adopting the expected type at return/`let`/match #971, nested ctor fields #979, comparison operands #981, and call/op/init arguments #993 — with cross-ADT and `None == None` guardrail rejections), byte-arithmetic + integer-literal-range rejection (#420 split), the #898 cross-argument type-argument merge (`eq2(MkErr(5), MkOk("x"))` fully determines `Res<String, Int>` and type-checks; a per-parameter conflict `eq2(MkOk("x"), MkOk(5))` is a clear E205; a determined-non-Eq type still type-checks), the #900/#939 generic-over-zero-size rejection (E206 fires only when the `forall<T>` READS `@T` and `T` erases to no WASM local — bare `Unit` OR a transparent `Future<Unit>` (#939) — in the body (direct return, match scrutinee, nested `let`/`if`) OR in a `requires`/`ensures` clause (#939); a `@T`-unread generic like `firstInt`/`ignore`, a boxed `Option<Unit>`, a `Future<Int>`, and the built-in `async(IO.print(...))` over Unit all stay accepted), and the #945 array-of-zero-size rejection (`Array<Unit>` / a bare `[()]` is E135 at both the type-resolution and array-literal gates — emitted exactly once, the literal gate defers to the annotation when both apply (including a refined `{ @Array<Unit> \| p }` annotation, whose `RefinedType` the guard strips via `base_type`), and a zero-size `Array` param reports E135 once via the general exact-duplicate diagnostic dedup (PR #938); `Array<Int>` stays accepted) |
 | `test_checker_int_nat.py` | 8 | 153 | #755 — mixed `Int <op> Nat` arithmetic joins to the formal LUB `Int` (not `Nat`); direct `expr_types` observation that `@Int.0 - 2`, `@Int.0 + @Nat.0`, `@Int.0 * @Nat.0`, `@Int.0 / @Nat.0`, and `@Int.0 % @Nat.0` synthesise `Int` (the DIV/MOD pins kill a per-operator `numeric_join` bypass nothing else in the suite catches), with `Nat`/`Nat` → `Nat` and `Int`/`Int` → `Int` guards against over-correction |

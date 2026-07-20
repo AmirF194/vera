@@ -106,6 +106,7 @@ Every diagnostic has a stable error code. Common codes:
 |------|---------|
 | W001 | Typed hole (`?`) — expected type and available bindings reported |
 | E001 | Missing contract block (requires/ensures/effects) |
+| E020 | Unterminated block comment — `{-` with no matching `-}` (they nest, so each needs its own closer) |
 | E121 | Function body type doesn't match return type |
 | E130 | Unresolved slot reference (@T.n has no matching binding) |
 | E140 | Arithmetic requires numeric operands |

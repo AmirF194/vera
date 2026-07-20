@@ -24,7 +24,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-__all__ = ["CommentSpan", "scan_comments", "blank_block_comments"]
+__all__ = [
+    "CommentProblem",
+    "CommentSpan",
+    "blank_block_comments",
+    "find_comment_problems",
+    "scan_comments",
+]
 
 
 @dataclass(frozen=True)
@@ -140,3 +146,62 @@ def blank_block_comments(source: str) -> tuple[str, int | None]:
                 chars[i] = " "
 
     return "".join(chars), unterminated
+
+
+@dataclass(frozen=True)
+class CommentProblem:
+    """A malformed comment, located for a diagnostic.
+
+    Reported as facts rather than messages: this module stays free of
+    diagnostic policy, and ``vera/parser.py`` maps each ``kind`` onto
+    its error code and wording.
+    """
+
+    kind: str          # "unterminated_block" | "unterminated_annotation"
+                       # | "nested_annotation"
+    line: int          # 1-based
+    column: int        # 1-based
+
+
+def _locate(source: str, offset: int) -> tuple[int, int]:
+    """1-based (line, column) of a character offset."""
+    line = source.count("\n", 0, offset) + 1
+    line_start = source.rfind("\n", 0, offset) + 1
+    return line, offset - line_start + 1
+
+
+def find_comment_problems(source: str) -> list[CommentProblem]:
+    """Malformed comments in ``source``, in source order.
+
+    Each of these otherwise surfaces as a token-level complaint naming
+    the wrong culprit — an unterminated ``/*`` is reported as an
+    unexpected ``/`` — because the grammar only ever sees the wreckage
+    a malformed comment leaves behind.  Detecting them during the scan
+    that already knows where every comment starts and ends lets the
+    parser name the real problem and point at the delimiter.
+    """
+    problems: list[CommentProblem] = []
+
+    for span in scan_comments(source):
+        if span.kind == "block" and not span.terminated:
+            line, column = _locate(source, span.start)
+            problems.append(CommentProblem("unterminated_block", line, column))
+
+        elif span.kind == "annotation":
+            if not span.terminated:
+                line, column = _locate(source, span.start)
+                problems.append(
+                    CommentProblem("unterminated_annotation", line, column),
+                )
+                continue
+            # Annotation comments do not nest (spec 1.3), so the span
+            # closed at the first `*/` and a second `/*` inside it is
+            # the author expecting nesting they do not have.
+            interior = source.find("/*", span.start + 2, max(span.end - 2, 0))
+            if interior != -1:
+                line, column = _locate(source, interior)
+                problems.append(
+                    CommentProblem("nested_annotation", line, column),
+                )
+
+    return problems

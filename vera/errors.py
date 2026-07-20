@@ -354,6 +354,62 @@ def unexpected_token(
     )
 
 
+_COMMENT_PROBLEMS = {
+    "unterminated_block": (
+        "E020",
+        "Unterminated block comment. The `{-` opened here is never closed.",
+        "Block comments nest, so each `{-` needs its own `-}`; this one's "
+        "nesting never returns to depth zero, so the comment runs to the end "
+        "of the file and swallows the code after it.",
+        "Add a matching `-}` for this `{-`. A `{-` *inside* a block comment "
+        "opens a nested comment that needs its own closer too.",
+    ),
+    "unterminated_annotation": (
+        "E021",
+        "Unterminated annotation comment. The `/*` opened here has no "
+        "closing `*/`.",
+        "Annotation comments are delimited by `/*` and `*/`; without a "
+        "closer the comment extends to the end of the file.",
+        "Add a closing `*/`, or use `--` for a comment that runs to the end "
+        "of the line.",
+    ),
+    "nested_annotation": (
+        "E023",
+        "Annotation comments do not nest. This `/*` sits inside an "
+        "annotation comment that already closed at the first `*/`.",
+        "Only block comments (`{- -}`) nest; an annotation comment ends at "
+        "the first `*/`, so everything after it is parsed as code.",
+        "Remove the inner `/*`, or use a block comment `{- ... {- ... -} "
+        "... -}` if you need nesting.",
+    ),
+}
+
+
+def diagnose_comment_problem(
+    kind: str,
+    line: int,
+    column: int,
+    source: str,
+    file: Optional[str] = None,
+) -> Diagnostic:
+    """Diagnostic for a malformed comment found during the pre-lex scan.
+
+    Without these the grammar only sees the wreckage a malformed comment
+    leaves behind and blames the wrong token — an unterminated `/*` is
+    reported as an unexpected `/`.
+    """
+    code, description, rationale, fix = _COMMENT_PROBLEMS[kind]
+    return Diagnostic(
+        description=description,
+        location=SourceLocation(file=file, line=line, column=column),
+        source_line=_get_source_line(source, line),
+        rationale=rationale,
+        fix=fix,
+        spec_ref='Chapter 1, Section 1.3 "Comments"',
+        error_code=code,
+    )
+
+
 # =====================================================================
 # Pattern matching for Lark exceptions
 # =====================================================================
@@ -452,6 +508,10 @@ ERROR_CODES: dict[str, str] = {
     "E011": "Circular import detected",
     "E012": "Cannot resolve import (no file found)",
     "E013": "Error parsing imported module",
+    # E02x — Comments (lexical)
+    "E020": "Unterminated block comment",
+    "E021": "Unterminated annotation comment",
+    "E023": "Annotation comments do not nest",
     # E1xx — Type Checker: Core & Expressions
     "E120": "Data invariant not Bool",
     "E121": "Function body type mismatch",

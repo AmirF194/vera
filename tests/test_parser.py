@@ -379,6 +379,31 @@ class TestComments:
         }
         """)
 
+    def test_unterminated_block_comment_reports_e020(self) -> None:
+        # The grammar only sees the wreckage a malformed comment leaves
+        # behind, so without a pre-lex diagnostic this is reported as an
+        # unexpected `{` token rather than as the unterminated comment
+        # it is (#1112).
+        with pytest.raises(ParseError) as exc:
+            parse("{- outer {- inner -}\nprivate fn f(@Int -> @Int)\n")
+        assert exc.value.diagnostic.error_code == "E020"
+        assert exc.value.diagnostic.location.line == 1
+
+    def test_unterminated_annotation_comment_reports_e021(self) -> None:
+        with pytest.raises(ParseError) as exc:
+            parse("/* never closed\nprivate fn f(@Int -> @Int)\n")
+        assert exc.value.diagnostic.error_code == "E021"
+
+    def test_nested_annotation_comment_reports_e023(self) -> None:
+        # Annotation comments do not nest (spec 1.3): the span closes at
+        # the first `*/`, so the diagnostic points at the INNER `/*` the
+        # author expected to nest, not at the trailing `*/` the grammar
+        # chokes on.
+        with pytest.raises(ParseError) as exc:
+            parse("/* a /* b */ */\nprivate fn f(@Int -> @Int)\n")
+        assert exc.value.diagnostic.error_code == "E023"
+        assert exc.value.diagnostic.location.column == 6
+
     def test_unterminated_nested_block_comment_is_rejected(self) -> None:
         # The inner comment closes, the outer never does.  Nesting must
         # not make an unbalanced comment silently swallow the rest of
