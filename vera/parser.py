@@ -15,6 +15,7 @@ from lark import Lark, Tree
 from lark.exceptions import LarkError
 
 from vera.errors import Diagnostic, ParseError, diagnose_lark_error
+from vera.lexical import blank_block_comments
 
 _GRAMMAR_PATH = Path(__file__).parent / "grammar.lark"
 
@@ -57,9 +58,23 @@ def parse(source: str, file: Optional[str] = None) -> Tree[Any]:
             a fix suggestion, and a spec reference.
     """
     parser = _get_parser()
+    # Block comments nest (spec 1.3), which a regular expression cannot
+    # express — so they are resolved before the grammar sees the source
+    # (#1112).  Blanking preserves length and line structure exactly, so
+    # `propagate_positions` offsets, every diagnostic's line/column, and
+    # the formatter's span-based comment attachment all stay faithful.
+    prepared, unterminated_line = blank_block_comments(source)
+    if unterminated_line is not None:
+        # An unterminated `{-` would otherwise blank the rest of the
+        # file, leaving the parser to report a contextless "unexpected
+        # end of input".  Hand it the original text instead so the
+        # error lands on the offending opener.
+        prepared = source
     try:
-        return parser.parse(source)
+        return parser.parse(prepared)
     except LarkError as exc:
+        # Diagnose against the ORIGINAL source: the blanked copy would
+        # quote a line of spaces back at the user.
         diagnostic = diagnose_lark_error(exc, source, file=file)
         raise ParseError(diagnostic) from exc
 

@@ -3644,7 +3644,8 @@ STRING_LIT: /\"([^\"\\]|\\.)*\"/
 
 %ignore /\s+/
 %ignore /--[^\n]*/
-%ignore /\{-[\s\S]*?-\}/
+// Block comments are nestable (spec 1.3) and are resolved by
+// vera/lexical.py before parsing -- a regex cannot count depth.
 %ignore /\/\*[^*]*\*+([^\/*][^*]*\*+)*\//
 
 ```

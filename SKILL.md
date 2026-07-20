@@ -1926,7 +1926,6 @@ See: spec Chapter 8 for the full module system specification.
 
 ## Comments
 
-<!-- vera:skip-parse category="FRAGMENT" reason="Comment syntax example" -->
 ```vera
 -- line comment
 

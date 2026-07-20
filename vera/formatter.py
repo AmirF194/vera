@@ -87,6 +87,7 @@ from vera.ast import (
     HoleExpr,
     WildcardPattern,
 )
+from vera.lexical import scan_comments
 from vera.parser import parse as vera_parse, parse_file
 from vera.transform import transform
 
@@ -120,89 +121,26 @@ class Comment:
 
 
 def extract_comments(source: str) -> list[Comment]:
-    """Extract all comments from Vera source, preserving positions."""
+    """Extract all comments from Vera source, preserving positions.
+
+    The scan itself lives in :mod:`vera.lexical`, shared with the
+    parser's pre-lex pass, so the two cannot disagree about where a
+    comment starts or ends.  That disagreement is exactly what caused
+    #1112: this extractor counted block-comment nesting depth (and the
+    suite asserted it) while the grammar's regex closed at the first
+    ``-}``, so identical text was one comment to ``vera fmt`` and a
+    syntax error to ``vera check``.
+    """
     comments: list[Comment] = []
-    src = source
-    pos = 0
-
-    while pos < len(src):
-        # Line comment: --
-        if src[pos:pos + 2] == "--":
-            line_no = source[:pos].count("\n") + 1
-            end = src.find("\n", pos)
-            if end == -1:
-                end = len(src)
-            text = src[pos:end]
-            # Check if code precedes this comment on the same line
-            line_start = source.rfind("\n", 0, pos) + 1
-            before = source[line_start:pos]
-            inline = before.strip() != ""
-            comments.append(Comment(
-                kind="line", text=text, line=line_no,
-                end_line=line_no, inline=inline,
-            ))
-            pos = end
-            continue
-
-        # Block comment: {- ... -}  (nestable)
-        if src[pos:pos + 2] == "{-":
-            start_line = source[:pos].count("\n") + 1
-            line_start = source.rfind("\n", 0, pos) + 1
-            before = source[line_start:pos]
-            inline = before.strip() != ""
-            depth = 1
-            j = pos + 2
-            while j < len(src) and depth > 0:
-                if src[j:j + 2] == "{-":
-                    depth += 1
-                    j += 2
-                elif src[j:j + 2] == "-}":
-                    depth -= 1
-                    j += 2
-                else:
-                    j += 1
-            text = src[pos:j]
-            end_line = source[:j].count("\n") + 1
-            comments.append(Comment(
-                kind="block", text=text, line=start_line,
-                end_line=end_line, inline=inline,
-            ))
-            pos = j
-            continue
-
-        # Annotation comment: /* ... */
-        if src[pos:pos + 2] == "/*":
-            start_line = source[:pos].count("\n") + 1
-            line_start = source.rfind("\n", 0, pos) + 1
-            before = source[line_start:pos]
-            inline = before.strip() != ""
-            end = src.find("*/", pos + 2)
-            if end == -1:
-                end = len(src)
-            else:
-                end += 2
-            text = src[pos:end]
-            end_line = source[:end].count("\n") + 1
-            comments.append(Comment(
-                kind="annotation", text=text, line=start_line,
-                end_line=end_line, inline=inline,
-            ))
-            pos = end
-            continue
-
-        # Inside a string literal — skip to avoid false matches
-        if src[pos] == '"':
-            j = pos + 1
-            while j < len(src) and src[j] != '"':
-                if src[j] == '\\':
-                    j += 2
-                else:
-                    j += 1
-            pos = j + 1
-            continue
-
-        pos += 1
-
+    for span in scan_comments(source):
+        line_start = source.rfind("\n", 0, span.start) + 1
+        comments.append(Comment(
+            kind=span.kind,
+            text=source[span.start:span.end],
+            line=source.count("\n", 0, span.start) + 1,
+            end_line=source.count("\n", 0, span.end) + 1,
+            inline=source[line_start:span.start].strip() != "",
+        ))
     return comments
 
 

@@ -351,6 +351,50 @@ class TestComments:
         }
         """)
 
+    def test_nested_block_comment(self) -> None:
+        # Spec 1.3: block comments nest -- a `{-` inside a block comment
+        # begins a nested comment that must be closed by its own `-}`
+        # (#1112).  A non-greedy regex terminal closes at the FIRST `-}`,
+        # leaving `still outer -}` as stray tokens.
+        parse("""
+        {- outer {- inner -} still outer -}
+        private fn f(@Int -> @Int)
+          requires(true)
+          ensures(true)
+          effects(pure)
+        {
+          @Int.0
+        }
+        """)
+
+    def test_deeply_nested_block_comment(self) -> None:
+        parse("""
+        {- one {- two {- three -} two -} one -}
+        private fn f(@Int -> @Int)
+          requires(true)
+          ensures(true)
+          effects(pure)
+        {
+          @Int.0
+        }
+        """)
+
+    def test_unterminated_nested_block_comment_is_rejected(self) -> None:
+        # The inner comment closes, the outer never does.  Nesting must
+        # not make an unbalanced comment silently swallow the rest of
+        # the file -- it stays a parse error.
+        with pytest.raises(ParseError):
+            parse("""
+        {- outer {- inner -}
+        private fn f(@Int -> @Int)
+          requires(true)
+          ensures(true)
+          effects(pure)
+        {
+          @Int.0
+        }
+        """)
+
     def test_annotation_comment(self) -> None:
         parse("""
         private fn add(@Int /* left */, @Int /* right */ -> @Int /* sum */)
