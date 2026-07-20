@@ -109,9 +109,12 @@ class TestCommentExtraction:
               @Int.0 + @Int.1
             }
         """))
-        assert "/* left */" in out
-        assert "/* right */" in out
-        assert "/* sum */" in out
+        # Exactly once, not merely present: the label is emitted from the
+        # AST *and* visible to the inline-comment path, so a presence
+        # assertion cannot tell correct emission from double emission.
+        assert out.count("/* left */") == 1
+        assert out.count("/* right */") == 1
+        assert out.count("/* sum */") == 1
 
     def test_annotation_formatting_is_idempotent(self) -> None:
         """Formatting the formatted output must be a fixed point.
