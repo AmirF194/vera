@@ -4,7 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from vera.parser import parse, parse_file, typecheck_file, verify_file
+from vera.parser import (
+    parse,
+    parse_file,
+    parse_to_ast,
+    typecheck_file,
+    verify_file,
+)
 from vera.errors import ParseError
 
 EXAMPLES_DIR = Path(__file__).parent.parent / "examples"
@@ -351,6 +357,77 @@ class TestComments:
         }
         """)
 
+    def test_nested_block_comment(self) -> None:
+        # Spec 1.3: block comments nest -- a `{-` inside a block comment
+        # begins a nested comment that must be closed by its own `-}`
+        # (#1112).  A non-greedy regex terminal closes at the FIRST `-}`,
+        # leaving `still outer -}` as stray tokens.
+        parse("""
+        {- outer {- inner -} still outer -}
+        private fn f(@Int -> @Int)
+          requires(true)
+          ensures(true)
+          effects(pure)
+        {
+          @Int.0
+        }
+        """)
+
+    def test_deeply_nested_block_comment(self) -> None:
+        parse("""
+        {- one {- two {- three -} two -} one -}
+        private fn f(@Int -> @Int)
+          requires(true)
+          ensures(true)
+          effects(pure)
+        {
+          @Int.0
+        }
+        """)
+
+    def test_unterminated_block_comment_reports_e020(self) -> None:
+        # The grammar only sees the wreckage a malformed comment leaves
+        # behind.  For this input the old non-greedy regex matched through
+        # the *inner* `-}`, so the failure surfaced as a missing-contract
+        # complaint at end of input — lines away from the `{-` at fault
+        # (#1112).  "Unexpected `{`" was the shape when no `-}` appeared
+        # anywhere in the file.
+        with pytest.raises(ParseError) as exc:
+            parse("{- outer {- inner -}\nprivate fn f(@Int -> @Int)\n")
+        assert exc.value.diagnostic.error_code == "E020"
+        assert exc.value.diagnostic.location.line == 1
+
+    def test_unterminated_annotation_comment_reports_e021(self) -> None:
+        with pytest.raises(ParseError) as exc:
+            parse("/* never closed\nprivate fn f(@Int -> @Int)\n")
+        assert exc.value.diagnostic.error_code == "E021"
+
+    def test_nested_annotation_comment_reports_e023(self) -> None:
+        # Annotation comments do not nest (spec 1.3): the span closes at
+        # the first `*/`, so the diagnostic points at the INNER `/*` the
+        # author expected to nest, not at the trailing `*/` the grammar
+        # chokes on.
+        with pytest.raises(ParseError) as exc:
+            parse("/* a /* b */ */\nprivate fn f(@Int -> @Int)\n")
+        assert exc.value.diagnostic.error_code == "E023"
+        assert exc.value.diagnostic.location.column == 6
+
+    def test_unterminated_nested_block_comment_is_rejected(self) -> None:
+        # The inner comment closes, the outer never does.  Nesting must
+        # not make an unbalanced comment silently swallow the rest of
+        # the file -- it stays a parse error.
+        with pytest.raises(ParseError):
+            parse("""
+        {- outer {- inner -}
+        private fn f(@Int -> @Int)
+          requires(true)
+          ensures(true)
+          effects(pure)
+        {
+          @Int.0
+        }
+        """)
+
     def test_annotation_comment(self) -> None:
         parse("""
         private fn add(@Int /* left */, @Int /* right */ -> @Int /* sum */)
@@ -387,6 +464,133 @@ class TestComments:
           @Int.0
         }
         """)
+
+
+class TestAnnotationRetention:
+    """Annotation comments survive into the AST (spec 1.3, #1112).
+
+    Spec 1.3 calls annotation comments "optional human-readable labels
+    for bindings" and states they are "preserved in the AST".  They are
+    the readability that De Bruijn slot references give up: ``@Int.0``
+    says *where* a value comes from but never *what it means*, so the
+    label belongs to the slot's position, not to its type.
+    """
+
+    def test_params_carry_their_labels(self) -> None:
+        ast = parse_to_ast("""
+        private fn add(@Int /* left */, @Int /* right */ -> @Int)
+          requires(true)
+          ensures(true)
+          effects(pure)
+        {
+          @Int.0 + @Int.1
+        }
+        """)
+        fn = ast.declarations[0].decl
+        assert fn.param_annotations == ("left", "right")
+
+    def test_return_slot_carries_its_label(self) -> None:
+        ast = parse_to_ast("""
+        private fn add(@Int, @Int -> @Int /* sum */)
+          requires(true)
+          ensures(true)
+          effects(pure)
+        {
+          @Int.0 + @Int.1
+        }
+        """)
+        fn = ast.declarations[0].decl
+        assert fn.return_annotation == "sum"
+
+    def test_unlabelled_slots_carry_no_label(self) -> None:
+        """The negative direction, so a wrong-but-defaulted field cannot pass.
+
+        Without this, an implementation that returned ``("left", "right")``
+        unconditionally would be indistinguishable from a correct one on
+        the positive tests alone.
+        """
+        ast = parse_to_ast("""
+        private fn add(@Int, @Int -> @Int)
+          requires(true)
+          ensures(true)
+          effects(pure)
+        {
+          @Int.0 + @Int.1
+        }
+        """)
+        fn = ast.declarations[0].decl
+        assert fn.param_annotations == (None, None)
+        assert fn.return_annotation is None
+
+    def test_partially_labelled_params_keep_their_positions(self) -> None:
+        """A label belongs to a slot index, so gaps must not shift it.
+
+        Labelling only the second parameter is the case that separates
+        positional storage from "collect the labels in order" — the
+        latter would report ``("right",)`` and mis-attribute it to slot 0.
+        """
+        ast = parse_to_ast("""
+        private fn add(@Int, @Int /* right */ -> @Int)
+          requires(true)
+          ensures(true)
+          effects(pure)
+        {
+          @Int.0 + @Int.1
+        }
+        """)
+        fn = ast.declarations[0].decl
+        assert fn.param_annotations == (None, "right")
+
+    def test_two_labels_on_one_line_both_survive(self) -> None:
+        """The spec's own example, and the case a line-keyed store cannot hold.
+
+        ``_Attached.inline`` *was* ``dict[int, Comment]`` keyed by line,
+        so it structurally admitted one comment per line; both labels here sit
+        on the signature line.  Retention therefore cannot be built on
+        that container (#1123).
+        """
+        ast = parse_to_ast("""
+        private fn area(@Int /* width */, @Int /* height */ -> @Int)
+          requires(true)
+          ensures(true)
+          effects(pure)
+        {
+          @Int.0 * @Int.1
+        }
+        """)
+        fn = ast.declarations[0].decl
+        assert fn.param_annotations == ("width", "height")
+
+    def test_where_helper_slots_carry_their_labels(self) -> None:
+        """Helpers are functions too, so the walk has to recurse.
+
+        Without the ``where_fns`` recursion the outer function's labels
+        still resolve, so every other test here passes while helpers
+        silently lose theirs.
+        """
+        ast = parse_to_ast("""
+        private fn outer(@Int /* outer_in */ -> @Int)
+          requires(true)
+          ensures(true)
+          effects(pure)
+        {
+          double(@Int.0)
+        }
+        where {
+          fn double(@Int /* inner_in */ -> @Int /* doubled */)
+            requires(true)
+            ensures(true)
+            effects(pure)
+          {
+            @Int.0 * 2
+          }
+        }
+        """)
+        fn = ast.declarations[0].decl
+        assert fn.param_annotations == ("outer_in",)
+        helper = fn.where_fns[0]
+        assert helper.param_annotations == ("inner_in",)
+        assert helper.return_annotation == "doubled"
 
 
 # =====================================================================

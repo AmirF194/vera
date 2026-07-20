@@ -712,6 +712,7 @@ Every diagnostic has a unique code grouped by compiler phase:
 | E001–E008 | Parse | `errors.py` factory functions |
 | E009 | Transform: string escapes | `transform.py` |
 | E010 | Transform: unhandled rule | `transform.py` |
+| E020, E021, E023 | Parse: malformed comments (lexical) | `lexical.py` scan + `errors.py` factory |
 | E1xx | Type check: core + expressions | `checker/core.py`, `checker/expressions.py` |
 | E2xx | Type check: calls | `checker/calls.py` |
 | E3xx | Type check: control flow | `checker/control.py` |

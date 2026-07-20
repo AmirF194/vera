@@ -32,11 +32,22 @@ Vera supports three comment forms:
 
 **Block comments** begin with `{-` and end with `-}`. They nest: a `{-` inside a block comment begins a nested block comment that must be closed by its own `-}`.
 
-**Annotation comments** begin with `/*` and end with `*/`. They do not nest. Annotation comments are semantically ignored by the compiler but are preserved in the AST. They serve as optional human-readable labels for bindings:
+**Annotation comments** begin with `/*` and end with `*/`. They do not nest. They are semantically ignored by the compiler: no annotation comment changes how a program type-checks, verifies, or runs.
+
+They serve as optional human-readable labels for bindings, recovering the readability that structural slot references leave implicit — `@Int.0` records where a value comes from, never what it means:
 
 ```
-fn(@Int /* width */, @Int /* height */ -> @Int)
+public fn area(@Int /* width */, @Int /* height */ -> @Int /* area */)
+  requires(@Int.1 > 0)
+  requires(@Int.0 > 0)
+  ensures(true)
+  effects(pure)
+{
+  @Int.1 * @Int.0
+}
 ```
+
+A label written on a **function parameter** or on the **return slot** is preserved in the AST, attached to that slot's position rather than to a source line, and re-emitted by `vera fmt`. An annotation comment in any other position is an ordinary comment: still accepted and still ignored, but not carried in the AST.
 
 ## 1.4 Keywords
 
@@ -254,8 +265,11 @@ Rules:
 8. **One statement per line** in block context
 9. **No trailing whitespace** on any line
 10. **File ends with a single newline**
+11. **Comments are preserved.** A formatter MUST NOT discard a comment. One occupying a line of its own stays on its own line, above the statement or declaration it precedes. One with code before it on the same line is claimed by the first construct emitted whose source-line range covers it, cut off at the next construct's start, and emitted after that construct separated by two spaces — so a comment trailing a statement stays with that statement. Where reformatting leaves no such position, the comment moves to the end of the enclosing declaration rather than being dropped. At most one line comment may share a physical line, and it must come last, since `--` runs to end of line and would otherwise absorb whatever followed. Annotation-comment labels on a parameter or return slot are emitted from their binding instead (Section 1.3).
 
 ## 1.9 Token Precedence
+
+`{-` always opens a block comment, so a `{` immediately followed by `-` is never a block containing a negated value. Write `{ -1 }` with a separating space for that.
 
 When the lexer encounters ambiguity, it applies these rules in order:
 

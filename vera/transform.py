@@ -7,10 +7,13 @@ bottom-up, so children are already transformed when a parent runs.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from lark import Token, Transformer, Tree, v_args
 from lark.exceptions import VisitError
+
+from vera.lexical import ANNOTATIONS_ATTR, AnnotationLabel
 
 from vera.ast import (
     AbilityConstraint,
@@ -1430,6 +1433,90 @@ def _unwrap_visit_error(exc: VisitError) -> VeraError | None:
     return inner if isinstance(inner, VeraError) else None
 
 
+_FAR_FUTURE = (1 << 30, 0)
+
+
+def _label_between(
+    labels: tuple[AnnotationLabel, ...],
+    lower: tuple[int, int],
+    upper: tuple[int, int],
+) -> str | None:
+    """The label in ``[lower, upper)``, or None.
+
+    Only whitespace and punctuation separate a binding from its label, so
+    the first match is the right one; anything past ``upper`` belongs to
+    the next binding.
+    """
+    for label in labels:
+        # depth 0 is outside the signature's parens, so however close it
+        # sits to a slot it is an ordinary comment, not a label (spec 1.3).
+        if label.depth > 0 and lower <= label.start < upper:
+            return label.text
+    return None
+
+
+def _annotate_fn(fn: FnDecl, labels: tuple[AnnotationLabel, ...]) -> FnDecl:
+    """Attach annotation-comment labels to one function's binding slots.
+
+    A label follows the slot it names, so each slot claims the first
+    label between its own end and the start of the next slot.  The return
+    slot has no following slot, so it is bounded by the first contract
+    (or the body) — otherwise a comment sitting anywhere later in the
+    declaration would be read as the return's label.
+    """
+    sites: list[Any] = [*fn.params, fn.return_type]
+
+    if fn.contracts and fn.contracts[0].span is not None:
+        tail = (fn.contracts[0].span.line, fn.contracts[0].span.column)
+    elif fn.body.span is not None:
+        tail = (fn.body.span.line, fn.body.span.column)
+    else:
+        tail = _FAR_FUTURE
+
+    found: list[str | None] = []
+    for i, site in enumerate(sites):
+        if site.span is None:
+            found.append(None)
+            continue
+        nxt = sites[i + 1] if i + 1 < len(sites) else None
+        upper = (
+            (nxt.span.line, nxt.span.column)
+            if nxt is not None and nxt.span is not None
+            else tail
+        )
+        lower = (site.span.end_line, site.span.end_column)
+        found.append(_label_between(labels, lower, upper))
+
+    return replace(
+        fn,
+        param_annotations=tuple(found[:-1]),
+        return_annotation=found[-1],
+        where_fns=(
+            tuple(_annotate_fn(w, labels) for w in fn.where_fns)
+            if fn.where_fns is not None
+            else None
+        ),
+    )
+
+
+def _attach_annotations(
+    program: Program,
+    labels: tuple[AnnotationLabel, ...],
+) -> Program:
+    """Populate every function's annotation labels from the source scan.
+
+    Runs even when ``labels`` is empty, so an unlabelled function reports
+    a tuple of Nones rather than "unknown" — the two are different facts,
+    and only the latter should be indistinguishable from an AST built
+    without source.
+    """
+    return replace(program, declarations=tuple(
+        replace(tld, decl=_annotate_fn(tld.decl, labels))
+        if isinstance(tld.decl, FnDecl) else tld
+        for tld in program.declarations
+    ))
+
+
 def transform(tree: Tree[Any]) -> Program:
     """Transform a Lark parse tree into a Vera AST.
 
@@ -1447,9 +1534,19 @@ def transform(tree: Tree[Any]) -> Program:
             the CLI's ``except VeraError`` as a raw traceback (#966).
     """
     try:
-        return _transformer.transform(tree)
+        program = _transformer.transform(tree)
     except VisitError as exc:
         inner = _unwrap_visit_error(exc)
         if inner is not None:
             raise inner from None
         raise
+
+    # Annotation comments are `%ignore`d by the grammar, so `parse()`
+    # carries them on the tree for spec 1.3's "preserved in the AST".
+    # A tree built by hand has no such attribute and keeps None labels,
+    # which is why the check is for presence rather than truthiness — an
+    # empty scan still means "this source has no labels", not "unknown".
+    labels = getattr(tree, ANNOTATIONS_ATTR, None)
+    if labels is not None:
+        program = _attach_annotations(program, labels)
+    return program

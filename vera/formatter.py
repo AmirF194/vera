@@ -87,6 +87,7 @@ from vera.ast import (
     HoleExpr,
     WildcardPattern,
 )
+from vera.lexical import CommentKind, scan_comments
 from vera.parser import parse as vera_parse, parse_file
 from vera.transform import transform
 
@@ -112,98 +113,65 @@ def _encode_string_escapes(s: str) -> str:
 @dataclass
 class Comment:
     """A comment extracted from source text."""
-    kind: str       # "line" | "block" | "annotation"
+    kind: CommentKind
     text: str       # Full text including delimiters
     line: int       # 1-based start line
+    column: int     # 1-based start column
     end_line: int   # 1-based end line
     inline: bool    # True if code precedes this comment on the same line
+    paren_depth: int = 0  # see lexical.CommentSpan.paren_depth
 
 
 def extract_comments(source: str) -> list[Comment]:
-    """Extract all comments from Vera source, preserving positions."""
+    """Extract all comments from Vera source, preserving positions.
+
+    The scan itself lives in :mod:`vera.lexical`, shared with the
+    parser's pre-lex pass, so the two cannot disagree about where a
+    comment starts or ends.  That disagreement is exactly what caused
+    #1112: this extractor counted block-comment nesting depth (and the
+    suite asserted it) while the grammar's regex closed at the first
+    ``-}``, so identical text was one comment to ``vera fmt`` and a
+    syntax error to ``vera check``.
+    """
     comments: list[Comment] = []
-    src = source
-    pos = 0
-
-    while pos < len(src):
-        # Line comment: --
-        if src[pos:pos + 2] == "--":
-            line_no = source[:pos].count("\n") + 1
-            end = src.find("\n", pos)
-            if end == -1:
-                end = len(src)
-            text = src[pos:end]
-            # Check if code precedes this comment on the same line
-            line_start = source.rfind("\n", 0, pos) + 1
-            before = source[line_start:pos]
-            inline = before.strip() != ""
-            comments.append(Comment(
-                kind="line", text=text, line=line_no,
-                end_line=line_no, inline=inline,
-            ))
-            pos = end
-            continue
-
-        # Block comment: {- ... -}  (nestable)
-        if src[pos:pos + 2] == "{-":
-            start_line = source[:pos].count("\n") + 1
-            line_start = source.rfind("\n", 0, pos) + 1
-            before = source[line_start:pos]
-            inline = before.strip() != ""
-            depth = 1
-            j = pos + 2
-            while j < len(src) and depth > 0:
-                if src[j:j + 2] == "{-":
-                    depth += 1
-                    j += 2
-                elif src[j:j + 2] == "-}":
-                    depth -= 1
-                    j += 2
-                else:
-                    j += 1
-            text = src[pos:j]
-            end_line = source[:j].count("\n") + 1
-            comments.append(Comment(
-                kind="block", text=text, line=start_line,
-                end_line=end_line, inline=inline,
-            ))
-            pos = j
-            continue
-
-        # Annotation comment: /* ... */
-        if src[pos:pos + 2] == "/*":
-            start_line = source[:pos].count("\n") + 1
-            line_start = source.rfind("\n", 0, pos) + 1
-            before = source[line_start:pos]
-            inline = before.strip() != ""
-            end = src.find("*/", pos + 2)
-            if end == -1:
-                end = len(src)
-            else:
-                end += 2
-            text = src[pos:end]
-            end_line = source[:end].count("\n") + 1
-            comments.append(Comment(
-                kind="annotation", text=text, line=start_line,
-                end_line=end_line, inline=inline,
-            ))
-            pos = end
-            continue
-
-        # Inside a string literal — skip to avoid false matches
-        if src[pos] == '"':
-            j = pos + 1
-            while j < len(src) and src[j] != '"':
-                if src[j] == '\\':
-                    j += 2
-                else:
-                    j += 1
-            pos = j + 1
-            continue
-
-        pos += 1
-
+    for span in scan_comments(source):
+        line_start = source.rfind("\n", 0, span.start) + 1
+        comments.append(Comment(
+            kind=span.kind,
+            text=source[span.start:span.end],
+            line=source.count("\n", 0, span.start) + 1,
+            column=span.start - line_start + 1,
+            end_line=source.count("\n", 0, span.end) + 1,
+            inline=source[line_start:span.start].strip() != "",
+            paren_depth=span.paren_depth,
+        ))
     return comments
+
+
+def _flatten_comment(comment: Comment) -> str:
+    """A comment's text as one physical line.
+
+    A `{- -}` or `/* */` may span lines while still being inline.  Emitting
+    it verbatim puts a newline inside one output line, and the
+    continuation survives the final join carrying its *original* source
+    indentation — a physically misindented line, against spec 1.8 rule 1.
+    Collapse only when it spans lines, so a single-line comment keeps its
+    internal spacing.
+    """
+    text = comment.text
+    return text.strip() if "\n" not in text else " ".join(text.split())
+
+
+def _annotation_suffix(label: str | None) -> str:
+    """Render a binding's annotation label, or nothing at all.
+
+    The label comes from the AST, where it kept whatever line structure it
+    had in source, so it needs the same flattening as a claimed comment —
+    this path splices straight into a signature line.
+    """
+    if not label:
+        return ""
+    return f" /* {' '.join(label.split())} */"
 
 
 # =====================================================================
@@ -215,8 +183,12 @@ class _Attached:
     """Comments attached to positions in the formatted output."""
     # key = AST node start line; value = comments before that node
     before: dict[int, list[Comment]]
-    # key = AST node start line; value = inline comment on that line
-    inline: dict[int, Comment]
+    # Comments with code before them on their line, in source order.  Held
+    # as a flat list rather than keyed by line because placement is decided
+    # at emission time: each is claimed by the innermost construct whose
+    # span contains it.  A line-keyed store could hold only one per line,
+    # which loses a second trailing comment outright (#1123).
+    inline: list[Comment]
     # Comments before first declaration
     header: list[Comment]
     # Comments after last declaration
@@ -229,7 +201,7 @@ def _attach_comments(
 ) -> _Attached:
     """Map comments to AST node positions."""
     if not comments:
-        return _Attached(before={}, inline={}, header=[], footer=[])
+        return _Attached(before={}, inline=[], header=[], footer=[])
 
     # Collect anchor lines from top-level declarations
     anchors: list[int] = []
@@ -263,11 +235,11 @@ def _attach_comments(
     header: list[Comment] = []
     footer: list[Comment] = []
     before: dict[int, list[Comment]] = {}
-    inline: dict[int, Comment] = {}
+    inline: list[Comment] = []
 
     for c in comments:
         if c.inline:
-            inline[c.line] = c
+            inline.append(c)
             continue
 
         # Find the nearest anchor AFTER this comment
@@ -396,6 +368,10 @@ class Formatter:
         self._lines: list[str] = []
         self._indent: int = 0
         self._attached = attached
+        # Identities of inline comments already placed.  Inner
+        # constructs finish emitting first, so claiming greedily gives
+        # each comment to the innermost construct that contains it.
+        self._claimed_inline: set[int] = set()
 
     # -- Output helpers -----------------------------------------------
 
@@ -425,6 +401,123 @@ class Formatter:
             for cline in c.text.split("\n"):
                 self._line(cline.strip() if c.kind == "block" else cline.strip())
 
+    def _claim_inline(
+        self,
+        node: object,
+        upper: tuple[int, int] | None = None,
+    ) -> None:
+        """Append inline comments inside ``node``'s span to its last line.
+
+        Called immediately after a construct is emitted, so
+        ``self._lines[-1]`` is that construct's final output line.
+        Because nested constructs are emitted -- and so claim -- first,
+        a comment ends up on the innermost construct containing it,
+        which is a fixed point: re-formatting finds it already trailing
+        that construct and leaves it there.
+        """
+        span = getattr(node, "span", None)
+        if span is None:
+            return
+        self._claim_inline_range(span.line, span.end_line, upper)
+
+    def _suppress_signature_labels(
+        self,
+        start: int,
+        end: int,
+        consumed: tuple[str | None, ...],
+    ) -> None:
+        """Mark the annotations re-emitted as slot labels as already placed.
+
+        Within a signature an annotation comment *may* be a binding label
+        held on the AST and re-emitted by :meth:`_fmt_signature`.
+        Retiring those here — rather than letting a claim point skip them
+        — means no later claim, including the declaration backstop, can
+        print one a second time; the idempotence test catches a
+        regression.
+
+        Only the ones actually consumed, though.  The label walk takes the
+        first annotation *after* each slot, so a leading annotation, or a
+        second one behind an already-labelled slot, belongs to no slot and
+        must survive as an ordinary comment.  Matching runs in source
+        order against the consumed labels, which the walk produces in slot
+        order — the same order.  Pairing is by text, first match wins, so
+        it is exact unless an *unconsumed* in-paren annotation shares its
+        text with a label consumed by a later slot: then the wrong object
+        is retired and the survivors emit out of source order.  Nothing is
+        lost and the result is stable; matching by position rather than
+        text would remove the caveat.
+        """
+        wanted = [text for text in consumed if text]
+        if not wanted:
+            return
+        for comment in self._attached.inline:
+            if not wanted:
+                return
+            if (comment.kind == "annotation"
+                    and comment.paren_depth > 0
+                    and start <= comment.line <= end
+                    and comment.text[2:-2].strip() == wanted[0]):
+                self._claimed_inline.add(id(comment))
+                wanted.pop(0)
+
+    def _claim_inline_range(
+        self,
+        start: int,
+        end: int,
+        upper: tuple[int, int] | None = None,
+    ) -> None:
+        """Claim unplaced inline comments on source lines ``start..end``.
+
+        ``upper`` bounds the claim by a following construct's start
+        position.  Two statements can share a line, and a line-granular
+        claim would hand both their trailing comments to whichever is
+        emitted first, so the cut has to compare full (line, column).
+        """
+        if not self._lines:
+            return
+        claimed = [
+            c for c in self._attached.inline
+            if id(c) not in self._claimed_inline and start <= c.line <= end
+            and (upper is None or (c.line, c.column) < upper)
+        ]
+        if not claimed:
+            return
+        self._claimed_inline.update(id(c) for c in claimed)
+        # A `--` runs to end of line, so anything appended after one is
+        # swallowed into its text and stops being a separate comment on
+        # re-read.  At most one line comment may share a physical line and
+        # it has to be last; whatever follows goes on its own line.  The
+        # alternative — sorting line comments last — would reorder them
+        # against the source.
+        # A `--` runs to end of line, so anything appended after one is
+        # swallowed into its text and stops being a separate comment on
+        # re-read.  Line comments therefore go last, and everything stays
+        # on this one physical line.
+        #
+        # Spilling the remainder onto a *new* line instead would turn an
+        # inline comment into an own-line one, and own-line comments
+        # attach to the nearest anchor *after* them — for a comment
+        # following the last statement in a block that is the next
+        # top-level declaration, so it walks out of the function on each
+        # pass.  Reordering within a single claim is the lesser evil: all
+        # of these are already being relocated to the same construct, so
+        # their relative order carries nothing a reader can rely on.
+        blocks = [c for c in claimed if c.kind != "line"]
+        lines = [c for c in claimed if c.kind == "line"]
+        rendered = [_flatten_comment(c) for c in blocks]
+        # Only the final line comment can stay in `--` form; any earlier
+        # one is re-delimited as `{- ... -}` so it remains a *distinct*
+        # comment on re-read instead of being absorbed into the next.
+        for i, comment in enumerate(lines):
+            text = _flatten_comment(comment)
+            if i == len(lines) - 1 or "-}" in text:
+                rendered.append(text)
+            else:
+                rendered.insert(
+                    len(rendered) - 0, "{- " + text[2:].strip() + " -}",
+                )
+        self._lines[-1] = f"{self._lines[-1]}  {' '.join(rendered)}"
+
     def _emit_header_comments(self) -> None:
         for c in self._attached.header:
             for cline in c.text.split("\n"):
@@ -442,13 +535,23 @@ class Formatter:
         self._emit_header_comments()
 
         if prog.module:
+            # `_attach_comments` files a comment above the module line into
+            # `before[module_line]`; without this read it is another bucket
+            # written and never consumed, and `examples/vera/math.vera`
+            # loses its two header lines.
+            if prog.module.span:
+                self._emit_comments(prog.module.span.line)
             self._emit_module(prog.module)
+            self._claim_inline(prog.module)
 
         if prog.imports:
             if prog.module:
                 self._blank()
             for imp in prog.imports:
+                if imp.span:
+                    self._emit_comments(imp.span.line)
                 self._emit_import(imp)
+                self._claim_inline(imp)
 
         first_decl = True
         for tld in prog.declarations:
@@ -463,6 +566,12 @@ class Formatter:
             if tld.span:
                 self._emit_comments(tld.span.line)
             self._emit_top_level(tld)
+            # Backstop for every declaration form.  `_emit_fn_decl` has its
+            # own, but `data`/`type`/`effect`/`ability` have no interior
+            # claim points, so without this a trailing comment anywhere in
+            # them is filed into `_Attached.inline` and never read — the
+            # deletion #1123 fixed for functions only.
+            self._claim_inline(tld)
 
         self._emit_footer_comments()
 
@@ -525,17 +634,36 @@ class Formatter:
                 parts.append(f"forall<{vars_str}>")
 
         parts.append("fn")
-        parts.append(fn.name + self._fmt_signature(fn.params, fn.return_type))
+        parts.append(fn.name + self._fmt_signature(
+            fn.params,
+            fn.return_type,
+            fn.param_annotations,
+            fn.return_annotation,
+        ))
 
         self._line(" ".join(parts))
+        if fn.span is not None:
+            sig_end = (
+                fn.return_type.span.end_line
+                if fn.return_type.span is not None
+                else fn.span.line
+            )
+            self._suppress_signature_labels(
+                fn.span.line,
+                sig_end,
+                (*(fn.param_annotations or ()), fn.return_annotation),
+            )
+            self._claim_inline_range(fn.span.line, sig_end)
 
         # Contract clauses — each on its own line, indented 2 spaces
         self._indent_inc()
         for c in fn.contracts:
             self._emit_contract(c)
+            self._claim_inline(c)
 
         # Effects clause
         self._line(f"effects({self._fmt_effect_row(fn.effect)})")
+        self._claim_inline(fn.effect)
         self._indent_dec()
 
         # Opening brace on its own line (function body convention)
@@ -553,6 +681,13 @@ class Formatter:
         if fn.where_fns:
             self._emit_where_block(fn.where_fns)
 
+        # Backstop: anything inside this declaration that no inner
+        # construct claimed (an effects-clause trailer, say) lands here
+        # rather than being dropped.  Relocating a comment is recoverable;
+        # deleting one is not.
+        if fn.span is not None:
+            self._claim_inline_range(fn.span.line, fn.span.end_line)
+
     def _emit_where_block(self, fns: tuple[FnDecl, ...]) -> None:
         self._line("where {")
         for i, fn in enumerate(fns):
@@ -567,10 +702,34 @@ class Formatter:
         self,
         params: tuple[TypeExpr, ...],
         return_type: TypeExpr,
+        param_annotations: tuple[str | None, ...] | None = None,
+        return_annotation: str | None = None,
     ) -> str:
-        """Format function signature: (@T1, @T2 -> @R)."""
-        param_strs = ", ".join(self._fmt_param_type(p) for p in params)
-        ret = self._fmt_param_type(return_type)
+        """Format function signature: (@T1, @T2 -> @R).
+
+        Annotation-comment labels are emitted from the AST, not from the
+        extracted comment stream: spec 1.3 makes them part of the AST,
+        and each belongs to a slot index rather than to a source line —
+        two labels routinely share the signature's line, which the
+        line-keyed store this replaced could not represent (#1123).
+        """
+        # `strict=True` rather than index arithmetic: a desynced
+        # `param_annotations` would otherwise silently drop trailing labels
+        # (too short) or ghost ones (too long), which is precisely the
+        # quiet deletion spec 1.8 rule 11 forbids.  `dataclasses.replace`
+        # is the house idiom for rewriting an `FnDecl`, so the arity holds
+        # today only because no pass rewrites `params`.
+        labels = (
+            param_annotations if param_annotations is not None
+            else (None,) * len(params)
+        )
+        param_strs = ", ".join(
+            self._fmt_param_type(p) + _annotation_suffix(label)
+            for p, label in zip(params, labels, strict=True)
+        )
+        ret = self._fmt_param_type(return_type) + _annotation_suffix(
+            return_annotation,
+        )
         if param_strs:
             return f"({param_strs} -> {ret})"
         return f"(-> {ret})"
@@ -640,6 +799,7 @@ class Formatter:
                 self._line(f"{ctor.name}({fields}){comma}")
             else:
                 self._line(f"{ctor.name}{comma}")
+            self._claim_inline(ctor)
         self._indent_dec()
         self._line("}")
 
@@ -691,6 +851,7 @@ class Formatter:
             if op.span:
                 self._emit_comments(op.span.line)
             self._emit_op_decl(op)
+            self._claim_inline(op)
         self._indent_dec()
         self._line("}")
 
@@ -723,6 +884,7 @@ class Formatter:
             if op.span:
                 self._emit_comments(op.span.line)
             self._emit_op_decl(op)
+            self._claim_inline(op)
         self._indent_dec()
         self._line("}")
 
@@ -767,13 +929,20 @@ class Formatter:
 
     def _emit_block_body(self, block: Block) -> None:
         """Emit the interior of a block (statements then expression)."""
-        for stmt in block.statements:
+        following: list[object] = [*block.statements[1:], block.expr]
+        for stmt, nxt in zip(block.statements, following):
             if stmt.span:
                 self._emit_comments(stmt.span.line)
             self._emit_stmt(stmt)
+            nxt_span = getattr(nxt, "span", None)
+            self._claim_inline(
+                stmt,
+                (nxt_span.line, nxt_span.column) if nxt_span else None,
+            )
         if block.expr.span:
             self._emit_comments(block.expr.span.line)
         self._emit_block_expr(block.expr)
+        self._claim_inline(block.expr)
 
     def _emit_block_expr(self, expr: Expr) -> None:
         """Emit a block's result expression (may be multi-line)."""
@@ -840,6 +1009,16 @@ class Formatter:
             else:
                 body = self._fmt_expr(arm.body)
                 self._line(f"{pat} -> {body}{comma}")
+            # An arm is not a Block, so `_emit_block_body`'s hook never
+            # reaches it and every arm comment fell through to the
+            # declaration backstop — which piled them all onto the match's
+            # closing brace, out of the arm they document.
+            nxt = expr.arms[i + 1] if i + 1 < len(expr.arms) else None
+            nxt_span = getattr(nxt, "span", None)
+            self._claim_inline(
+                arm,
+                (nxt_span.line, nxt_span.column) if nxt_span else None,
+            )
         self._indent_dec()
         self._line("}")
 

@@ -163,6 +163,7 @@ Every diagnostic has a stable error code (`E001`–`E702`). Codes are grouped by
 |-------|-------|
 | E001–E009 | Parse & transform errors |
 | E010 | Transform errors |
+| E020, E021, E023 | Parse: malformed comments (lexical) |
 | E1xx | Type check: core + expressions |
 | E2xx | Type check: calls |
 | E3xx | Type check: control flow |

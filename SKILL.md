@@ -150,6 +150,7 @@ Every diagnostic has a stable error code grouped by compiler phase:
 
 - **W001** — Typed hole (`?`) — expected type and available bindings reported (warning, not error)
 - **E001–E007** — Parse errors (missing contracts, unexpected tokens)
+- **E020, E021, E023** — Malformed comments: unterminated `{-` (E020) or `/*` (E021), or a `/*` nested inside another (E023 — only `{- -}` nests). Each names the delimiter at fault and how to close it.
 - **E010** — Transform errors (internal)
 - **E120–E176** — Type check: core + expressions (type mismatches, slot resolution, operators)
 - **E200–E233** — Type check: calls (unresolved functions, argument mismatches, module calls)
@@ -1926,7 +1927,6 @@ See: spec Chapter 8 for the full module system specification.
 
 ## Comments
 
-<!-- vera:skip-parse category="FRAGMENT" reason="Comment syntax example" -->
 ```vera
 -- line comment
 
