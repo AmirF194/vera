@@ -118,6 +118,7 @@ class Comment:
     line: int       # 1-based start line
     end_line: int   # 1-based end line
     inline: bool    # True if code precedes this comment on the same line
+    paren_depth: int = 0  # see lexical.CommentSpan.paren_depth
 
 
 def extract_comments(source: str) -> list[Comment]:
@@ -140,6 +141,7 @@ def extract_comments(source: str) -> list[Comment]:
             line=source.count("\n", 0, span.start) + 1,
             end_line=source.count("\n", 0, span.end) + 1,
             inline=source[line_start:span.start].strip() != "",
+            paren_depth=span.paren_depth,
         ))
     return comments
 
@@ -401,7 +403,9 @@ class Formatter:
         time.  The idempotence test is what catches a regression.
         """
         for comment in self._attached.inline:
-            if comment.kind == "annotation" and start <= comment.line <= end:
+            if (comment.kind == "annotation"
+                    and comment.paren_depth > 0
+                    and start <= comment.line <= end):
                 self._claimed_inline.add(id(comment))
 
     def _claim_inline_range(self, start: int, end: int) -> None:
@@ -415,7 +419,16 @@ class Formatter:
         if not claimed:
             return
         self._claimed_inline.update(id(c) for c in claimed)
-        text = " ".join(c.text.strip() for c in claimed)
+        # A `{- -}` may span lines while still being inline.  Appending it
+        # verbatim would put a newline inside one `self._lines` entry,
+        # and the continuation would survive the final join carrying its
+        # original source indentation — a physically misindented line,
+        # against spec 1.8 rule 1.  Collapse only when it spans lines, so
+        # single-line comments keep their internal spacing.
+        text = " ".join(
+            c.text.strip() if "\n" not in c.text else " ".join(c.text.split())
+            for c in claimed
+        )
         self._lines[-1] = f"{self._lines[-1]}  {text}"
 
     def _emit_header_comments(self) -> None:

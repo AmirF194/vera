@@ -1448,7 +1448,9 @@ def _label_between(
     the next binding.
     """
     for label in labels:
-        if lower <= label.start < upper:
+        # depth 0 is outside the signature's parens, so however close it
+        # sits to a slot it is an ordinary comment, not a label (spec 1.3).
+        if label.depth > 0 and lower <= label.start < upper:
             return label.text
     return None
 

@@ -56,6 +56,10 @@ class CommentSpan:
     start: int
     end: int
     terminated: bool
+    #: Parenthesis nesting depth at the opening delimiter.  A binding
+    #: label always sits inside a signature's parens, so depth 0 marks a
+    #: comment that cannot be one however close to a slot it looks.
+    paren_depth: int = 0
 
 
 def scan_comments(source: str) -> list[CommentSpan]:
@@ -71,6 +75,7 @@ def scan_comments(source: str) -> list[CommentSpan]:
     src = source
     n = len(src)
     pos = 0
+    depth = 0
 
     while pos < n:
         # Line comment — runs to end of line.
@@ -78,25 +83,25 @@ def scan_comments(source: str) -> list[CommentSpan]:
             end = src.find("\n", pos)
             if end == -1:
                 end = n
-            spans.append(CommentSpan("line", pos, end, True))
+            spans.append(CommentSpan("line", pos, end, True, depth))
             pos = end
             continue
 
         # Block comment — nestable, so count depth rather than
         # scanning for the first closer.
         if src[pos:pos + 2] == "{-":
-            depth = 1
+            block_depth = 1
             j = pos + 2
-            while j < n and depth > 0:
+            while j < n and block_depth > 0:
                 if src[j:j + 2] == "{-":
-                    depth += 1
+                    block_depth += 1
                     j += 2
                 elif src[j:j + 2] == "-}":
-                    depth -= 1
+                    block_depth -= 1
                     j += 2
                 else:
                     j += 1
-            spans.append(CommentSpan("block", pos, j, depth == 0))
+            spans.append(CommentSpan("block", pos, j, block_depth == 0, depth))
             pos = j
             continue
 
@@ -105,7 +110,7 @@ def scan_comments(source: str) -> list[CommentSpan]:
             close = src.find("*/", pos + 2)
             terminated = close != -1
             end = n if close == -1 else close + 2
-            spans.append(CommentSpan("annotation", pos, end, terminated))
+            spans.append(CommentSpan("annotation", pos, end, terminated, depth))
             pos = end
             continue
 
@@ -117,6 +122,10 @@ def scan_comments(source: str) -> list[CommentSpan]:
             pos = j + 1
             continue
 
+        if src[pos] == "(":
+            depth += 1
+        elif src[pos] == ")":
+            depth = max(0, depth - 1)
         pos += 1
 
     return spans
@@ -195,6 +204,8 @@ class AnnotationLabel:
     column: int
     end_line: int
     end_column: int
+    #: See :attr:`CommentSpan.paren_depth`.
+    depth: int = 0
 
     @property
     def start(self) -> tuple[int, int]:
@@ -222,6 +233,7 @@ def annotation_labels(source: str) -> tuple[AnnotationLabel, ...]:
             column=column,
             end_line=end_line,
             end_column=end_column,
+            depth=span.paren_depth,
         ))
 
     return tuple(labels)

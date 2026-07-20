@@ -12,6 +12,7 @@ from vera.formatter import (
     extract_comments,
     format_source,
 )
+from vera.parser import parse_to_ast
 
 
 EXAMPLES_DIR = Path(__file__).parent.parent / "examples"
@@ -269,6 +270,62 @@ class TestCommentExtraction:
             }
         """))
         assert "-- brace trailer" in out
+
+    def test_multiline_inline_comment_stays_on_one_line(self) -> None:
+        """A claimed comment must not inject raw newlines into a line.
+
+        `{- -}` may span lines while still being inline. Appending its text
+        verbatim to an emitted line puts the continuation into the same
+        `_lines` entry carrying its *original* source indentation, which
+        survives the final join as a physically misindented line — against
+        spec 1.8 rule 1 (2 spaces per level).
+        """
+        out = format_source(dedent("""\
+            public fn f(@Int -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              @Int.0 + 1 {- this comment
+                 spans two lines -}
+            }
+        """))
+        assert "this comment" in out and "spans two lines" in out
+        # Whole comment on the code's line, and every line canonically indented.
+        line = _line_with(out, "this comment")
+        assert "spans two lines" in line
+        assert "@Int.0 + 1" in line
+        for ln in out.splitlines():
+            indent = len(ln) - len(ln.lstrip())
+            assert indent % 2 == 0, f"non-canonical indent {indent}: {ln!r}"
+
+    def test_annotation_outside_the_parens_is_not_a_binding_label(self) -> None:
+        """Only a comment inside the signature's parens labels a binding.
+
+        Spec 1.3 makes an annotation elsewhere an ordinary comment. The
+        return slot's label search is bounded by the first contract, so a
+        comment after the closing paren would otherwise be adopted as the
+        return label and re-emitted *inside* the parens — turning a
+        trailing remark into a claim about the return value.
+        """
+        src = dedent("""\
+            public fn f(@Int -> @Int) /* not a label */
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              @Int.0
+            }
+        """)
+        fn = parse_to_ast(src).declarations[0].decl
+        assert fn.return_annotation is None
+        out = format_source(src)
+        # Preserved, but left outside the signature: after the closing
+        # paren as an ordinary trailing comment, not inside it as a label.
+        line = _line_with(out, "not a label")
+        assert line.rstrip().endswith("/* not a label */")
+        assert "@Int)" in line
+        assert "@Int /* not a label */" not in line
 
     def test_annotation_label_is_not_emitted_twice(self) -> None:
         """A binding label comes from the AST, so the inline path must skip it.
