@@ -37,7 +37,14 @@ Vera supports three comment forms:
 They serve as optional human-readable labels for bindings, recovering the readability that structural slot references leave implicit — `@Int.0` records where a value comes from, never what it means:
 
 ```
-fn area(@Int /* width */, @Int /* height */ -> @Int /* area */)
+public fn area(@Int /* width */, @Int /* height */ -> @Int /* area */)
+  requires(@Int.1 > 0)
+  requires(@Int.0 > 0)
+  ensures(true)
+  effects(pure)
+{
+  @Int.1 * @Int.0
+}
 ```
 
 A label written on a **function parameter** or on the **return slot** is preserved in the AST, attached to that slot's position rather than to a source line, and re-emitted by `vera fmt`. An annotation comment in any other position is an ordinary comment: still accepted and still ignored, but not carried in the AST.
