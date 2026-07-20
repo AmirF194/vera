@@ -158,8 +158,12 @@ class _Attached:
     """Comments attached to positions in the formatted output."""
     # key = AST node start line; value = comments before that node
     before: dict[int, list[Comment]]
-    # key = AST node start line; value = inline comment on that line
-    inline: dict[int, Comment]
+    # Comments with code before them on their line, in source order.  Held
+    # as a flat list rather than keyed by line because placement is decided
+    # at emission time: each is claimed by the innermost construct whose
+    # span contains it.  A line-keyed store could hold only one per line,
+    # which loses a second trailing comment outright (#1123).
+    inline: list[Comment]
     # Comments before first declaration
     header: list[Comment]
     # Comments after last declaration
@@ -172,7 +176,7 @@ def _attach_comments(
 ) -> _Attached:
     """Map comments to AST node positions."""
     if not comments:
-        return _Attached(before={}, inline={}, header=[], footer=[])
+        return _Attached(before={}, inline=[], header=[], footer=[])
 
     # Collect anchor lines from top-level declarations
     anchors: list[int] = []
@@ -206,11 +210,11 @@ def _attach_comments(
     header: list[Comment] = []
     footer: list[Comment] = []
     before: dict[int, list[Comment]] = {}
-    inline: dict[int, Comment] = {}
+    inline: list[Comment] = []
 
     for c in comments:
         if c.inline:
-            inline[c.line] = c
+            inline.append(c)
             continue
 
         # Find the nearest anchor AFTER this comment
@@ -339,6 +343,10 @@ class Formatter:
         self._lines: list[str] = []
         self._indent: int = 0
         self._attached = attached
+        # Identities of inline comments already placed.  Inner
+        # constructs finish emitting first, so claiming greedily gives
+        # each comment to the innermost construct that contains it.
+        self._claimed_inline: set[int] = set()
 
     # -- Output helpers -----------------------------------------------
 
@@ -367,6 +375,48 @@ class Formatter:
         for c in comments:
             for cline in c.text.split("\n"):
                 self._line(cline.strip() if c.kind == "block" else cline.strip())
+
+    def _claim_inline(self, node: object) -> None:
+        """Append inline comments inside ``node``'s span to its last line.
+
+        Called immediately after a construct is emitted, so
+        ``self._lines[-1]`` is that construct's final output line.
+        Because nested constructs are emitted -- and so claim -- first,
+        a comment ends up on the innermost construct containing it,
+        which is a fixed point: re-formatting finds it already trailing
+        that construct and leaves it there.
+        """
+        span = getattr(node, "span", None)
+        if span is None:
+            return
+        self._claim_inline_range(span.line, span.end_line)
+
+    def _suppress_signature_labels(self, start: int, end: int) -> None:
+        """Mark annotation comments on a signature as already placed.
+
+        Within a signature an annotation comment is a binding label held
+        on the AST and re-emitted by :meth:`_fmt_signature`.  Retiring it
+        here — rather than letting a claim point skip it — means no later
+        claim, including the declaration backstop, can print it a second
+        time.  The idempotence test is what catches a regression.
+        """
+        for comment in self._attached.inline:
+            if comment.kind == "annotation" and start <= comment.line <= end:
+                self._claimed_inline.add(id(comment))
+
+    def _claim_inline_range(self, start: int, end: int) -> None:
+        """Claim unplaced inline comments on source lines ``start..end``."""
+        if not self._lines:
+            return
+        claimed = [
+            c for c in self._attached.inline
+            if id(c) not in self._claimed_inline and start <= c.line <= end
+        ]
+        if not claimed:
+            return
+        self._claimed_inline.update(id(c) for c in claimed)
+        text = " ".join(c.text.strip() for c in claimed)
+        self._lines[-1] = f"{self._lines[-1]}  {text}"
 
     def _emit_header_comments(self) -> None:
         for c in self._attached.header:
@@ -476,14 +526,24 @@ class Formatter:
         ))
 
         self._line(" ".join(parts))
+        if fn.span is not None:
+            sig_end = (
+                fn.return_type.span.end_line
+                if fn.return_type.span is not None
+                else fn.span.line
+            )
+            self._suppress_signature_labels(fn.span.line, sig_end)
+            self._claim_inline_range(fn.span.line, sig_end)
 
         # Contract clauses — each on its own line, indented 2 spaces
         self._indent_inc()
         for c in fn.contracts:
             self._emit_contract(c)
+            self._claim_inline(c)
 
         # Effects clause
         self._line(f"effects({self._fmt_effect_row(fn.effect)})")
+        self._claim_inline(fn.effect)
         self._indent_dec()
 
         # Opening brace on its own line (function body convention)
@@ -500,6 +560,13 @@ class Formatter:
         # Where block
         if fn.where_fns:
             self._emit_where_block(fn.where_fns)
+
+        # Backstop: anything inside this declaration that no inner
+        # construct claimed (an effects-clause trailer, say) lands here
+        # rather than being dropped.  Relocating a comment is recoverable;
+        # deleting one is not.
+        if fn.span is not None:
+            self._claim_inline_range(fn.span.line, fn.span.end_line)
 
     def _emit_where_block(self, fns: tuple[FnDecl, ...]) -> None:
         self._line("where {")
@@ -735,9 +802,11 @@ class Formatter:
             if stmt.span:
                 self._emit_comments(stmt.span.line)
             self._emit_stmt(stmt)
+            self._claim_inline(stmt)
         if block.expr.span:
             self._emit_comments(block.expr.span.line)
         self._emit_block_expr(block.expr)
+        self._claim_inline(block.expr)
 
     def _emit_block_expr(self, expr: Expr) -> None:
         """Emit a block's result expression (may be multi-line)."""

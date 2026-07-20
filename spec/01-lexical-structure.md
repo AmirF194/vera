@@ -258,6 +258,7 @@ Rules:
 8. **One statement per line** in block context
 9. **No trailing whitespace** on any line
 10. **File ends with a single newline**
+11. **Comments are preserved.** A formatter MUST NOT discard a comment. One occupying a line of its own stays on its own line, immediately above the construct it precedes. One with code before it on the same line is emitted after the innermost construct containing it, separated by two spaces — so a comment trailing a statement stays with that statement. Where reformatting leaves no such position, the comment moves to the end of the enclosing declaration rather than being dropped. Annotation-comment labels on a parameter or return slot are emitted from their binding instead (Section 1.3).
 
 ## 1.9 Token Precedence
 

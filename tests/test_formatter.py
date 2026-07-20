@@ -51,6 +51,13 @@ def _fmt_check(source: str, expected: str) -> None:
 # Comment extraction
 # =====================================================================
 
+def _line_with(text: str, needle: str) -> str:
+    """The single output line containing `needle` (fails if 0 or >1)."""
+    hits = [ln for ln in text.splitlines() if needle in ln]
+    assert len(hits) == 1, f"expected exactly one line with {needle!r}, got {hits}"
+    return hits[0]
+
+
 class TestCommentExtraction:
     def test_line_comment(self) -> None:
         comments = extract_comments("-- hello\n")
@@ -125,6 +132,178 @@ class TestCommentExtraction:
         once = format_source(src)
         twice = format_source(once)
         assert once == twice
+
+    def test_inline_line_comment_survives_formatting(self) -> None:
+        """`vera fmt` must not delete a trailing `--` comment (#1123)."""
+        out = format_source(dedent("""\
+            public fn add(@Int, @Int -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              @Int.1 + @Int.0 -- sum the operands
+            }
+        """))
+        line = _line_with(out, "-- sum the operands")
+        assert "@Int.1 + @Int.0" in line, (
+            "must trail its own expression, not be swept to the backstop"
+        )
+
+    def test_inline_block_comment_survives_formatting(self) -> None:
+        """The same for `{- -}`, which is equally inline-capable (#1123)."""
+        out = format_source(dedent("""\
+            public fn add(@Int, @Int -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              @Int.1 + @Int.0 {- sum the operands -}
+            }
+        """))
+        line = _line_with(out, "{- sum the operands -}")
+        assert "@Int.1 + @Int.0" in line
+
+    def test_each_statement_keeps_its_own_inline_comment(self) -> None:
+        """Two trailing comments must not collapse onto one statement.
+
+        The old store was `dict[int, Comment]` keyed by line, so this is
+        the shape that proves attachment is per-construct rather than
+        per-line, and that neither comment overwrites the other.
+        """
+        out = format_source(dedent("""\
+            public fn add(@Int, @Int -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              let @Int = @Int.1 + @Int.0; -- first the sum
+              @Int.0 * 2 -- then double it
+            }
+        """))
+        # Each must trail its own statement — checking presence alone
+        # would pass even if both were swept to the declaration backstop.
+        assert "let" in _line_with(out, "-- first the sum")
+        assert "@Int.0 * 2" in _line_with(out, "-- then double it")
+
+    def test_inline_comment_formatting_is_idempotent(self) -> None:
+        """Re-emitting inline comments must reach a fixed point.
+
+        Emission puts the comment back into the formatter's own input, so
+        this is what proves it lands somewhere stable rather than drifting
+        one construct outward on every pass.
+        """
+        src = dedent("""\
+            public fn add(@Int, @Int -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              @Int.1 + @Int.0 -- sum the operands
+            }
+        """)
+        once = format_source(src)
+        twice = format_source(once)
+        assert once == twice
+
+    def test_inline_comment_in_declaration_header_survives(self) -> None:
+        """Signature, contract and effects trailers are outside any statement.
+
+        The block-body hook cannot reach them, so each needs its own claim
+        point; without them these three positions stay silently deleted
+        while body comments look fixed.
+        """
+        out = format_source(dedent("""\
+            public fn f(@Int -> @Int) -- on the signature
+              requires(true) -- on the contract
+              ensures(true)
+              effects(pure) -- on the effects
+            {
+              @Int.0
+            }
+        """))
+        assert "fn f(" in _line_with(out, "-- on the signature")
+        assert "requires(" in _line_with(out, "-- on the contract")
+        assert "effects(" in _line_with(out, "-- on the effects")
+
+    def test_inline_comment_inside_nested_block_survives(self) -> None:
+        """A comment in an if-branch belongs to the branch, not the function.
+
+        Inner constructs are emitted first and claim greedily, so this is
+        what pins "innermost wins" rather than everything collecting at the
+        end of the enclosing declaration.
+        """
+        out = format_source(dedent("""\
+            public fn f(@Int -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              if @Int.0 >= 0 then {
+                1 -- the positive case
+              } else {
+                0
+              }
+            }
+        """))
+        assert _line_with(out, "-- the positive case").strip().startswith("1")
+
+    def test_comment_on_a_brace_line_is_not_dropped(self) -> None:
+        """The declaration backstop, which is the only thing covering this.
+
+        A comment on the opening brace sits inside the function but inside
+        no statement, contract, effects clause or signature, so every
+        precise hook misses it. It is relocated to the end of the
+        declaration rather than deleted: moving a comment is recoverable,
+        deleting one is not.
+        """
+        out = format_source(dedent("""\
+            public fn f(@Int -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            { -- brace trailer
+              @Int.0
+            }
+        """))
+        assert "-- brace trailer" in out
+
+    def test_annotation_label_is_not_emitted_twice(self) -> None:
+        """A binding label comes from the AST, so the inline path must skip it.
+
+        Both mechanisms can see the same `/* */`: the signature emitter
+        renders it from `param_annotations`, and it is also an inline
+        comment by position. Claiming it in both places prints it twice.
+        """
+        out = format_source(dedent("""\
+            private fn area(@Int /* width */, @Int /* height */ -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              @Int.0 * @Int.1
+            }
+        """))
+        assert out.count("/* width */") == 1
+        assert out.count("/* height */") == 1
+
+    def test_own_line_comments_are_unaffected(self) -> None:
+        """The guard: own-line comments already worked and must keep working."""
+        out = format_source(dedent("""\
+            -- header comment
+            public fn add(@Int, @Int -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              -- explain the sum
+              @Int.1 + @Int.0
+            }
+        """))
+        assert "-- header comment" in out
+        assert "-- explain the sum" in out
+        # Still on its own line, not folded onto the expression.
+        explain = next(ln for ln in out.splitlines() if "explain the sum" in ln)
+        assert explain.strip() == "-- explain the sum"
 
     def test_unlabelled_signature_gains_no_annotation(self) -> None:
         """The negative direction — no label must mean no emitted `/* */`."""
