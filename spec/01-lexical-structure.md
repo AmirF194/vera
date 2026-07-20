@@ -32,7 +32,7 @@ Vera supports three comment forms:
 
 **Block comments** begin with `{-` and end with `-}`. They nest: a `{-` inside a block comment begins a nested block comment that must be closed by its own `-}`.
 
-**Annotation comments** begin with `/*` and end with `*/`. They do not nest. Annotation comments are semantically ignored by the compiler but are preserved in the CST. They serve as optional human-readable labels for bindings:
+**Annotation comments** begin with `/*` and end with `*/`. They do not nest. Annotation comments are semantically ignored by the compiler but are preserved in the AST. They serve as optional human-readable labels for bindings:
 
 ```
 fn(@Int /* width */, @Int /* height */ -> @Int)
