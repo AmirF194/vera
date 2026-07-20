@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-07-20
+
 ### Fixed
 
 - **`vera fmt` no longer deletes inline comments** ([#1123](https://github.com/aallan/vera/issues/1123)). A comment with code before it on the same line -- `--`, `{- -}` and `/* */` alike -- was classified, filed into `_Attached.inline`, and then dropped, because nothing ever read that store; only comments occupying a whole line survived. `vera fmt --check` compounded it by reporting such a file as non-canonical, so the remedy it prescribed (`vera fmt --write`) was what performed the deletion, in place and with nothing on stderr. Placement is now decided at emission time by a single rule -- a comment is claimed by the **innermost construct whose span contains it** -- with claim points after each statement, block result, signature, contract clause and effects clause, and a declaration-level backstop so a comment that fits no inner construct (on a brace or `where` line, say) is relocated rather than discarded. Claims compare full (line, column) positions and stop at the next construct's start, since two statements may share a line and a line-granular claim would hand both their trailing comments to whichever is emitted first. Because nested constructs emit first, claiming greedily yields innermost-wins, and the result is a fixed point: re-formatting finds each comment already trailing its construct. Annotation labels on a parameter or return slot are exempt -- they come from the AST -- and the signature claim skips them so they are not emitted twice. A claimed comment is collapsed onto one physical line when its text spans several — a `{- -}` can be multi-line and still inline, and appending it verbatim would leave the continuation carrying its original source indentation through the final join, against spec 1.8's two-spaces-per-level rule. Spec 1.8 gains the preservation rule it never stated, which is why the deletion went unnoticed.
@@ -3025,7 +3027,8 @@ Small docs sweep — closes six aging documentation issues in one PR.  No code c
 - Grammar: handler body simplified to avoid LALR reduce/reduce conflict
 - `pyproject.toml`: corrected build backend, package discovery, PEP 639 compliance
 
-[Unreleased]: https://github.com/aallan/vera/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/aallan/vera/compare/v0.1.6...HEAD
+[0.1.6]: https://github.com/aallan/vera/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/aallan/vera/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/aallan/vera/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/aallan/vera/compare/v0.1.2...v0.1.3

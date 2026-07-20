@@ -471,6 +471,7 @@ Stages 19 and 20 run dual-threaded: community PRs against the single-source spri
 | v0.1.3 | 10 Jul | **Monomorphizer completeness** ([#769](https://github.com/aallan/vera/issues/769)) — registry-complete builtin return tables, recursive type-argument unification, and the scope-aware De Bruijn reindex walker. |
 | v0.1.4 | 11 Jul | **The second burndown** — 19 bug fixes across the checker, verifier, and codegen: the fresh-ctor-var family under `forall`, where-helper scoping, `handle[State<T>]` clause execution, the `@Nat`/`@Int` obligations, and imported-body compilation ([#991](https://github.com/aallan/vera/issues/991)). |
 | v0.1.5 | 17 Jul | **The third burndown and the first PyPI release** — 29 bug-labelled issues fixed across the checker, codegen, and diagnostics, published to PyPI as `veralang` ([#737](https://github.com/aallan/vera/issues/737)). |
+| v0.1.6 | 20 Jul | **The comment system** — block comments nest, malformed ones get their own `E02x` diagnostics, annotation labels reach the AST, and `vera fmt` stops deleting comments it had silently dropped since the formatter was written ([#1112](https://github.com/aallan/vera/issues/1112)). |
 
 ---
 
