@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+
+- **`brace-expansion` raised to `2.1.2` in the VS Code extension lockfile, off the range affected by [GHSA-3jxr-9vmj-r5cp](https://github.com/advisories/GHSA-3jxr-9vmj-r5cp)** (CVE-2026-13149; GitHub severity high, CVSS 3.1 base 5.3 — availability only, `AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L`).  The advisory is exponential-time expansion of consecutive non-expanding `{}` groups, reachable only by whoever supplies the glob pattern.  It arrived as a runtime transitive of the language client — `vscode-languageclient@9.0.1` → `minimatch@5.1.9` → `brace-expansion@2.1.1` — so it ships inside the VSIX, but every pattern reaching that `minimatch` is a document selector written in the extension's own source rather than anything a workspace or document can influence; practical exposure is correspondingly low.  `minimatch@5.1.9` already declares `brace-expansion: ^2.0.1`, which admits the patched `2.1.2`, so the fix is a three-field lockfile bump that leaves `package.json`, the language-client major, and the packaged file inventory untouched.
+
 ## [0.1.6] - 2026-07-20
 
 ### Fixed
