@@ -12,6 +12,7 @@
 "use strict";
 
 const cp = require("node:child_process");
+const fs = require("node:fs");
 const path = require("node:path");
 
 // Every path `vsce ls` should report, relative to editors/vscode.
@@ -38,11 +39,27 @@ const FORBIDDEN_EXTENSIONS = [
 ];
 
 function packagedFiles() {
+    // Run vsce's entry script under this Node rather than going through
+    // node_modules/.bin. On Windows that shim is a .cmd, which spawnSync
+    // refuses to execute directly — it needs a command interpreter, and
+    // the workarounds (`shell: true`, or spawning cmd.exe /c) reintroduce
+    // quoting hazards for paths containing spaces. Naming the script and
+    // letting process.execPath run it is one code path on every platform.
+    //
+    // The path is built directly instead of via require.resolve: a
+    // package can make subpaths unreachable by declaring an `exports`
+    // map, which is exactly how vscode-languageclient 10 broke this
+    // extension's build.  A layout that moved would fail loudly here.
     const vsce = path.join(
-        __dirname, "node_modules", ".bin",
-        process.platform === "win32" ? "vsce.cmd" : "vsce",
+        __dirname, "node_modules", "@vscode", "vsce", "vsce",
     );
-    const result = cp.spawnSync(vsce, ["ls"], {
+    if (!fs.existsSync(vsce)) {
+        throw new Error(
+            `vsce not found at ${vsce} — run \`npm ci\` in ` +
+            "editors/vscode first.",
+        );
+    }
+    const result = cp.spawnSync(process.execPath, [vsce, "ls"], {
         cwd: __dirname,
         encoding: "utf8",
     });
