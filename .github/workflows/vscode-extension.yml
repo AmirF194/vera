@@ -49,6 +49,9 @@ jobs:
       - name: Inspect packaged files
         run: npm run package:list
 
+      - name: Check packaged contents
+        run: npm run check:package
+
       - name: Build VSIX
         run: npm run package
 

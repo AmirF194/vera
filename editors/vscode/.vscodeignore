@@ -3,6 +3,7 @@
 .DS_Store
 .vscode/**
 *.vsix
+check-package-contents.js
 esbuild.js
 extension.js
 node_modules/**

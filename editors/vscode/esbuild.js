@@ -6,9 +6,6 @@ const esbuild = require("esbuild");
 
 const extensionRoot = __dirname;
 const distDir = path.join(extensionRoot, "dist");
-const terminateProcess = require.resolve(
-    "vscode-languageclient/lib/node/terminateProcess.sh",
-);
 
 async function main() {
     fs.rmSync(distDir, { recursive: true, force: true });
@@ -24,13 +21,14 @@ async function main() {
         platform: "node",
         target: "node16",
     });
-
-    const packagedTerminateProcess = path.join(
-        distDir,
-        "terminateProcess.sh",
-    );
-    fs.copyFileSync(terminateProcess, packagedTerminateProcess);
-    fs.chmodSync(packagedTerminateProcess, 0o755);
+    // Nothing is copied alongside the bundle. Up to
+    // vscode-languageclient 9 the client shelled out to a packaged
+    // `terminateProcess.sh`, so the build resolved that file out of
+    // node_modules, copied it here and marked it executable. Version 10
+    // inlines the same process-tree walk as a string in
+    // lib/node/processes.js and pipes it to /bin/sh, so the helper no
+    // longer exists upstream and esbuild carries it into the bundle
+    // like any other code. The VSIX is now pure JSON, JS and assets.
 }
 
 main().catch((error) => {
