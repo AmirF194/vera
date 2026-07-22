@@ -257,6 +257,15 @@ Rules:
      @Int.0
    }
    ```
+   This holds in **value position** as well as statement position. A `match`, `if` or `handle` bound by a `let`, or used as a block's result, is written exactly as one used as a statement — the text introducing it (`let @Int = `) shares the opening line, and the trailing `;` rides the closing brace:
+   ```
+   let @Int = if @Bool.0 then {
+     1
+   } else {
+     2
+   };
+   ```
+   The rule is unconditional. A form that depended on position would give one construct two textual representations — the "equivalent alternatives" §0.2.3 excludes and the single canonical formatting §1.2 requires — and would oblige a generator to decide which one to emit at every site instead of applying one rule everywhere (§0.3.1). The expanded form is more verbose than a flattened one; that is not an argument against it, since §0.2.2 ranks explicitness above convenience and §0.3.1 makes human readability a non-goal.
 3. **Commas**: followed by a single space: `@Int.0, @Int.1`
 4. **Operators**: surrounded by single spaces: `@Int.0 + @Int.1`
 5. **Semicolons**: no space before, newline after (in block context)

@@ -49,14 +49,46 @@ private fn count_neighbors(@Array<Array<Bool>>, @Int, @Int -> @Nat)
 {
   -- @Int.1 = row, @Int.0 = col
   let @Nat = 0;
-  let @Nat = if cell_at(@Array<Array<Bool>>.0, @Int.1 - 1, @Int.0 - 1) then { @Nat.0 + 1 } else { @Nat.0 };
-  let @Nat = if cell_at(@Array<Array<Bool>>.0, @Int.1 - 1, @Int.0) then { @Nat.0 + 1 } else { @Nat.0 };
-  let @Nat = if cell_at(@Array<Array<Bool>>.0, @Int.1 - 1, @Int.0 + 1) then { @Nat.0 + 1 } else { @Nat.0 };
-  let @Nat = if cell_at(@Array<Array<Bool>>.0, @Int.1, @Int.0 - 1) then { @Nat.0 + 1 } else { @Nat.0 };
-  let @Nat = if cell_at(@Array<Array<Bool>>.0, @Int.1, @Int.0 + 1) then { @Nat.0 + 1 } else { @Nat.0 };
-  let @Nat = if cell_at(@Array<Array<Bool>>.0, @Int.1 + 1, @Int.0 - 1) then { @Nat.0 + 1 } else { @Nat.0 };
-  let @Nat = if cell_at(@Array<Array<Bool>>.0, @Int.1 + 1, @Int.0) then { @Nat.0 + 1 } else { @Nat.0 };
-  let @Nat = if cell_at(@Array<Array<Bool>>.0, @Int.1 + 1, @Int.0 + 1) then { @Nat.0 + 1 } else { @Nat.0 };
+  let @Nat = if cell_at(@Array<Array<Bool>>.0, @Int.1 - 1, @Int.0 - 1) then {
+    @Nat.0 + 1
+  } else {
+    @Nat.0
+  };
+  let @Nat = if cell_at(@Array<Array<Bool>>.0, @Int.1 - 1, @Int.0) then {
+    @Nat.0 + 1
+  } else {
+    @Nat.0
+  };
+  let @Nat = if cell_at(@Array<Array<Bool>>.0, @Int.1 - 1, @Int.0 + 1) then {
+    @Nat.0 + 1
+  } else {
+    @Nat.0
+  };
+  let @Nat = if cell_at(@Array<Array<Bool>>.0, @Int.1, @Int.0 - 1) then {
+    @Nat.0 + 1
+  } else {
+    @Nat.0
+  };
+  let @Nat = if cell_at(@Array<Array<Bool>>.0, @Int.1, @Int.0 + 1) then {
+    @Nat.0 + 1
+  } else {
+    @Nat.0
+  };
+  let @Nat = if cell_at(@Array<Array<Bool>>.0, @Int.1 + 1, @Int.0 - 1) then {
+    @Nat.0 + 1
+  } else {
+    @Nat.0
+  };
+  let @Nat = if cell_at(@Array<Array<Bool>>.0, @Int.1 + 1, @Int.0) then {
+    @Nat.0 + 1
+  } else {
+    @Nat.0
+  };
+  let @Nat = if cell_at(@Array<Array<Bool>>.0, @Int.1 + 1, @Int.0 + 1) then {
+    @Nat.0 + 1
+  } else {
+    @Nat.0
+  };
   @Nat.0
 }
 

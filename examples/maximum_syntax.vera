@@ -180,7 +180,11 @@ private fn to_percentage(@PosInt -> @Percentage)
   -- The verifier checks assertions.
   assert(@PosInt.0 > 0);
   -- `if`/`then`/`else` is an expression, not a statement.
-  let @Int = if @PosInt.0 > 100 then { 100 } else { @PosInt.0 };
+  let @Int = if @PosInt.0 > 100 then {
+    100
+  } else {
+    @PosInt.0
+  };
   let @Float64 = int_to_float(@Int.0) / 100.0;
   -- `assume` tells the verifier the fact is true.
   -- The verifier does not check assumptions.

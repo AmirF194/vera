@@ -348,6 +348,23 @@ def _unwrap_redundant_block(node: Expr) -> Expr:
     return node
 
 
+def _stmt_value(stmt: Stmt) -> Expr | None:
+    """The expression a statement holds, whatever kind it is.
+
+    All three statement kinds put an expression in value position, and
+    all three emit it through the same rule-2 path, so both the anchor
+    walk and the emitter need one answer rather than three branches
+    that can drift apart.
+    """
+    if isinstance(stmt, LetStmt):
+        return stmt.value
+    if isinstance(stmt, LetDestruct):
+        return stmt.value
+    if isinstance(stmt, ExprStmt):
+        return stmt.expr
+    return None  # pragma: no cover - Stmt has no fourth kind
+
+
 def _collect_interior_anchors(node: object, anchors: list[int]) -> None:
     """Recursively collect span start lines from interior AST nodes.
 
@@ -359,6 +376,13 @@ def _collect_interior_anchors(node: object, anchors: list[int]) -> None:
         for stmt in node.statements:
             if stmt.span:
                 anchors.append(stmt.span.line)
+            # And into whatever the statement holds.  Only the
+            # statement's own start line was an anchor, so every
+            # position *inside* a statement — a match arm, a handler
+            # clause, a branch's statements — was invisible here and a
+            # comment written above one fell through to the next
+            # statement, documenting something it was not written for.
+            _collect_interior_anchors(_stmt_value(stmt), anchors)
         if node.expr.span:
             anchors.append(node.expr.span.line)
         # Recurse into the result expression for nested multi-line forms
@@ -1191,36 +1215,54 @@ class Formatter:
     # -- Statements ----------------------------------------------------
 
     def _emit_stmt(self, stmt: Stmt) -> None:
+        # Every statement kind ends in an expression under a `;`, and
+        # rule 2 does not care which one introduced it — only the text
+        # before the construct differs.  Splitting that text out as a
+        # prefix is what lets all three share one rule-2 path.
         if isinstance(stmt, LetStmt):
             te = self._fmt_param_type(stmt.type_expr)
-            val = self._fmt_expr(stmt.value)
-            self._line(f"let {te} = {val};")
+            self._emit_value(stmt.value, f"let {te} = ", ";")
         elif isinstance(stmt, LetDestruct):
             bindings = ", ".join(
                 self._fmt_param_type(b) for b in stmt.type_bindings
             )
-            val = self._fmt_expr(stmt.value)
-            self._line(f"let {stmt.constructor}<{bindings}> = {val};")
+            self._emit_value(
+                stmt.value, f"let {stmt.constructor}<{bindings}> = ", ";",
+            )
         elif isinstance(stmt, ExprStmt):
-            # A match/if/handle in statement position gets the same
-            # multi-line treatment it gets as a block's result
-            # expression; only the trailing `;` differs.  Flattening
-            # here put a whole nested match on one line (rule 2).
-            #
-            # The unwrap is what makes that reachable through a written
-            # `{ match ... };`: the block holds its content in `expr`
-            # with `statements` empty, so without it `_needs_own_lines`
-            # sees a Block, answers no, and the construct flattens —
-            # the same hole this branch exists to close, one level out.
-            expr = _unwrap_redundant_block(stmt.expr)
-            if _needs_own_lines(expr):
-                if expr is not stmt.expr:
-                    span = getattr(expr, "span", None)
-                    if span:
-                        self._emit_comments(span.line)
-                self._emit_own_lines(expr, "", ";")
-            else:
-                self._line(f"{self._fmt_expr(expr)};")
+            self._emit_value(stmt.expr, "", ";")
+
+    def _emit_value(self, value: Expr, prefix: str, suffix: str) -> None:
+        """Emit an expression in value position, honouring rule 2.
+
+        Rule 2 is unconditional (spec §1.8): a `match`/`if`/`handle`
+        opens its brace on the line that introduces it and closes on a
+        line of its own, whether it is a statement, a block result, a
+        match-arm body, or the value a `let` binds.  Value position
+        alone used to flatten, which gave one construct two textual
+        forms selected by where it sat — exactly the "equivalent
+        alternatives" DESIGN.md principle 3 exists to rule out, and a
+        per-site condition a generator would have to evaluate rather
+        than the single unconditional rule principle 6 asks for.
+
+        The unwrap is what makes that reachable through a written
+        `{ match ... }`: a block holding no statements keeps its
+        content in `expr`, so without it `_needs_own_lines` sees a
+        Block, answers no, and the construct flattens anyway.
+        """
+        node = _unwrap_redundant_block(value)
+        if _needs_own_lines(node):
+            if node is not value:
+                # Unwrapping drops the block's span, and any comment
+                # anchored inside it would go with it — a *discarded*
+                # comment, which rule 11 forbids outright.  Emit them
+                # against the inner construct before the unwrap bites.
+                span = getattr(node, "span", None)
+                if span:
+                    self._emit_comments(span.line)
+            self._emit_own_lines(node, prefix, suffix)
+        else:
+            self._line(f"{prefix}{self._fmt_expr(node)}{suffix}")
 
     # -- Multi-line expressions ----------------------------------------
 

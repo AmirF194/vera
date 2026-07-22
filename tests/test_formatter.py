@@ -1286,8 +1286,19 @@ class TestMatchBlockArms:
         block_close = [line for line in lines if line.strip() == "}"]
         assert len(block_close) >= 1  # at least one bare }
 
-    def test_match_arm_block_inline_context(self) -> None:
-        """Match in let-binding position wraps block arm in braces inline."""
+    def test_match_arm_block_in_let_binding_context(self) -> None:
+        """A match bound by a `let` keeps its arm block multi-line.
+
+        This used to assert the inline form
+        (`{ let @Int = 10; @Int.0 + 1 }` on one line, under the name
+        `test_match_arm_block_inline_context`), pinning a `let` value
+        as the one position where rule 2 did not apply.  That made the
+        canonical shape of a construct depend on where it sat, which is
+        the "no equivalent alternatives" rule DESIGN.md principle 3
+        rules out.  Rule 2 now holds in value position too, so the
+        binding expands exactly as statement position does and the
+        trailing `;` rides the closing brace.
+        """
         src = _fmt("""
             public fn f(@Int -> @Int)
               requires(true)
@@ -1298,8 +1309,18 @@ class TestMatchBlockArms:
               @Int.0
             }
         """)
-        # Block arm body must be wrapped in braces in inline form
-        assert "{ let @Int = 10; @Int.0 + 1 }" in src
+        lines = src.splitlines()
+        assert lines[lines.index("{") + 1:-1] == [
+            "  let @Int = match @Int.0 {",
+            "    0 -> {",
+            "      let @Int = 10;",
+            "      @Int.0 + 1",
+            "    },",
+            "    _ -> 0",
+            "  };",
+            "  @Int.0",
+        ], src
+        assert format_source(src) == src, "second pass differs"
 
     def test_match_arm_block_in_exprstmt(self) -> None:
         """A match in statement position keeps its arm block multi-line.
@@ -2629,3 +2650,297 @@ class TestCanonicalFormGaps:
             "  ()",
         ], f"exactly one blank, and only below the comment:\n{out}"
         assert format_source(out) == out, "second pass differs"
+
+    # -- F6: rule 2 in value position ----------------------------------
+    #
+    # Rule 2 ("opening brace on the same line, closing brace on its own
+    # line aligned with the construct") was implemented in statement
+    # position, block-result position and match-arm-body position, but
+    # not where a construct is the *value* of a binding.  So the same
+    # `if` was written two ways depending on where it sat:
+    #
+    #     let @Int = if @Bool.0 then { 1 } else { 2 };   -- flat
+    #     if @Bool.0 then { 1 } else { 2 }               -- five lines
+    #
+    # A position-dependent canonical form is two equivalent alternatives
+    # for one construct, which DESIGN.md principle 3 forbids, and a
+    # conditional rule a generator must evaluate per site, which
+    # principle 6 rejects in favour of one unconditional rule.  Rule 2
+    # holds in every position.
+
+    @staticmethod
+    def _no_line_holds_both_braces(out: str) -> None:
+        """No emitted line may open a brace and close it again.
+
+        `} else {` closes one brace before opening the next, which is
+        the canonical `if` hinge rule 2 prescribes; the violation is an
+        opening brace whose match arrives on the *same* line, so the
+        test is that no `{` precedes a `}`.
+        """
+        offenders = [
+            ln for ln in out.splitlines()
+            if "{" in ln and "}" in ln and ln.index("{") < ln.rindex("}")
+        ]
+        assert not offenders, (
+            "rule 2: a brace pair shares a line:\n  "
+            + "\n  ".join(offenders)
+            + f"\nfull output:\n{out}"
+        )
+
+    @staticmethod
+    def _reparses_and_is_fixed_point(out: str) -> None:
+        """Output must re-parse and be unchanged by a second pass."""
+        parse_to_ast(out)
+        assert format_source(out) == out, (
+            f"second pass differs.\nFirst:\n{out}\n"
+            f"Second:\n{format_source(out)}"
+        )
+
+    def test_a_let_bound_if_takes_its_own_lines(self) -> None:
+        """`let @T = if ...` expands exactly as statement position does."""
+        out = _fmt("""
+            public fn f(@Bool -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              let @Int = if @Bool.0 then { 1 } else { 2 };
+              @Int.0
+            }
+        """)
+        assert self._body_lines(out) == [
+            "  let @Int = if @Bool.0 then {",
+            "    1",
+            "  } else {",
+            "    2",
+            "  };",
+            "  @Int.0",
+        ], f"a let-bound `if` must obey rule 2:\n{out}"
+        self._no_line_holds_both_braces(out)
+        self._reparses_and_is_fixed_point(out)
+
+    def test_a_let_bound_match_takes_its_own_lines(self) -> None:
+        """The `match` sibling of the `if` case, same rule, same shape."""
+        out = _fmt("""
+            public fn f(@Int -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              let @Int = match @Int.0 { 0 -> 10, _ -> 20 };
+              @Int.0
+            }
+        """)
+        assert self._body_lines(out) == [
+            "  let @Int = match @Int.0 {",
+            "    0 -> 10,",
+            "    _ -> 20",
+            "  };",
+            "  @Int.0",
+        ], f"a let-bound `match` must obey rule 2:\n{out}"
+        self._no_line_holds_both_braces(out)
+        self._reparses_and_is_fixed_point(out)
+
+    def test_a_let_destructure_of_a_match_takes_its_own_lines(self) -> None:
+        """`LetDestruct` is a second value position with the same gap.
+
+        It routes through the same `_fmt_expr` call as `LetStmt`, so a
+        fix that covers only `let @T = ...` leaves the destructuring
+        form flat — the sibling-miss this suite exists to catch.
+        """
+        out = _fmt("""
+            public fn f(@Int -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              let Tuple<@Int, @Int> = match @Int.0 {
+                0 -> Tuple(1, 2),
+                _ -> Tuple(3, 4)
+              };
+              @Int.0 + @Int.1
+            }
+        """)
+        assert self._body_lines(out) == [
+            "  let Tuple<@Int, @Int> = match @Int.0 {",
+            "    0 -> Tuple(1, 2),",
+            "    _ -> Tuple(3, 4)",
+            "  };",
+            "  @Int.0 + @Int.1",
+        ], f"a let-destructured `match` must obey rule 2:\n{out}"
+        self._no_line_holds_both_braces(out)
+        self._reparses_and_is_fixed_point(out)
+
+    def test_a_let_bound_block_wrapped_match_does_not_flatten(self) -> None:
+        """`let @T = { match ... };` unwraps rather than collapsing.
+
+        The block holds its content in `expr` with `statements` empty,
+        so a `statements`-only emptiness test reads it as flat and puts
+        the whole construct on one line — the same hole the statement
+        path closes with `_unwrap_redundant_block`.
+        """
+        out = _fmt("""
+            public fn f(@Int -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              let @Int = { match @Int.0 { 0 -> 10, _ -> 20 } };
+              @Int.0
+            }
+        """)
+        assert self._body_lines(out) == [
+            "  let @Int = match @Int.0 {",
+            "    0 -> 10,",
+            "    _ -> 20",
+            "  };",
+            "  @Int.0",
+        ], f"a block-wrapped let value must not flatten:\n{out}"
+        self._no_line_holds_both_braces(out)
+        self._reparses_and_is_fixed_point(out)
+
+    def test_a_let_bound_nested_construct_keeps_every_brace_apart(
+        self,
+    ) -> None:
+        """Nesting inside a let value must not re-flatten one level in.
+
+        The outer construct expanding is not evidence the inner one
+        does: the arm body reaches a different emitter branch, and the
+        flattening fallback lives there too.
+        """
+        out = _fmt("""
+            public fn f(@Int -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              let @Int = match @Int.0 {
+                0 -> if @Int.0 > 0 then { 1 } else { 2 },
+                _ -> 20
+              };
+              @Int.0
+            }
+        """)
+        assert self._body_lines(out) == [
+            "  let @Int = match @Int.0 {",
+            "    0 -> if @Int.0 > 0 then {",
+            "      1",
+            "    } else {",
+            "      2",
+            "    },",
+            "    _ -> 20",
+            "  };",
+            "  @Int.0",
+        ], f"the nested `if` must expand too:\n{out}"
+        self._no_line_holds_both_braces(out)
+        self._reparses_and_is_fixed_point(out)
+
+    def test_a_comment_above_a_let_bound_construct_is_not_duplicated(
+        self,
+    ) -> None:
+        """The unwrap must consume a comment once, not drop or repeat it.
+
+        Expanding a let value changes which lines exist, and two
+        anchors collapsing onto one line is what made a comment emit
+        twice on the second pass earlier in this work.
+        """
+        out = _fmt("""
+            public fn f(@Int -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              -- Pick a branch.
+              let @Int = { match @Int.0 { 0 -> 10, _ -> 20 } };
+              @Int.0
+            }
+        """)
+        assert out.count("-- Pick a branch.") == 1, (
+            f"the comment must appear exactly once:\n{out}"
+        )
+        assert self._body_lines(out) == [
+            "  -- Pick a branch.",
+            "  let @Int = match @Int.0 {",
+            "    0 -> 10,",
+            "    _ -> 20",
+            "  };",
+            "  @Int.0",
+        ], f"the comment must stay above its statement:\n{out}"
+        self._reparses_and_is_fixed_point(out)
+
+    # A statement's *value* was never walked for anchors, so every
+    # position inside one — arms, handler clauses, branch statements —
+    # was invisible to comment attachment and the comment fell through
+    # to whatever came after the statement.  Expanding let values turns
+    # those positions into real lines, which makes the misattribution
+    # visible rather than merely latent.
+
+    def test_a_comment_above_an_arm_of_a_let_bound_match_stays_there(
+        self,
+    ) -> None:
+        """Position, not presence: the comment survives either way.
+
+        Before the anchor walk descended into a statement's value, this
+        comment was emitted *below* the whole `let`, documenting the
+        next statement instead of the arm it was written above.  A
+        count assertion passes in both worlds; only position separates
+        them.
+        """
+        out = _fmt("""
+            public fn f(@Int -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              let @Int = match @Int.0 {
+                -- The zero case.
+                0 -> 10,
+                _ -> 20
+              };
+              @Int.0
+            }
+        """)
+        assert self._body_lines(out) == [
+            "  let @Int = match @Int.0 {",
+            "    -- The zero case.",
+            "    0 -> 10,",
+            "    _ -> 20",
+            "  };",
+            "  @Int.0",
+        ], f"the comment must stay on its arm:\n{out}"
+        self._reparses_and_is_fixed_point(out)
+
+    def test_a_comment_above_an_arm_of_a_statement_match_stays_there(
+        self,
+    ) -> None:
+        """The `ExprStmt` sibling of the `let` case, same missing walk.
+
+        Statement position already emitted its arms on their own lines,
+        so this misattribution was reachable before the let-value
+        change and is fixed by the same descent.
+        """
+        out = _fmt("""
+            effect IO { op print(String -> Unit); }
+
+            public fn f(@Int -> @Unit)
+              requires(true)
+              ensures(true)
+              effects(<IO>)
+            {
+              match @Int.0 {
+                -- The zero case.
+                0 -> IO.print("a"),
+                _ -> IO.print("b")
+              };
+              IO.print("done")
+            }
+        """)
+        assert self._body_lines(out) == [
+            "  match @Int.0 {",
+            "    -- The zero case.",
+            '    0 -> IO.print("a"),',
+            '    _ -> IO.print("b")',
+            "  };",
+            '  IO.print("done")',
+        ], f"the comment must stay on its arm:\n{out}"
+        self._reparses_and_is_fixed_point(out)

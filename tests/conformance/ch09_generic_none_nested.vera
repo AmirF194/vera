@@ -70,8 +70,23 @@ public fn main(@Unit -> @Int)
   ensures(@Int.result == 0)
   effects(pure)
 {
-  let @Int = match nest(()) { Some(@Option<Int>) -> match @Option<Int>.0 { Some(@Int) -> 1, None -> 55 }, None -> 2 };
-  let @Int = match nest3(()) { Some(@Option<Option<Int>>) -> match @Option<Option<Int>>.0 { Some(@Option<Int>) -> match @Option<Int>.0 { Some(@Int) -> 3, None -> 66 }, None -> 4 }, None -> 5 };
+  let @Int = match nest(()) {
+    Some(@Option<Int>) -> match @Option<Int>.0 {
+      Some(@Int) -> 1,
+      None -> 55
+    },
+    None -> 2
+  };
+  let @Int = match nest3(()) {
+    Some(@Option<Option<Int>>) -> match @Option<Option<Int>>.0 {
+      Some(@Option<Int>) -> match @Option<Int>.0 {
+        Some(@Int) -> 3,
+        None -> 66
+      },
+      None -> 4
+    },
+    None -> 5
+  };
   let @Int = option_unwrap_or(nothing(()), 77);
   let @Int = option_unwrap_or(nothing_rev(()), 88);
   if @Int.3 == 55 then {

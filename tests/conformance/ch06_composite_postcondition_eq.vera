@@ -67,7 +67,9 @@ public fn main(@Unit -> @Int)
   let @Option<Int> = some_of(2);
   let @Outer = mk_outer(2);
   let @Box2<Int> = id2(MkBox2(0));
-  let @Int = match @Box.0 { MkBox(@Int) -> @Int.0 };
+  let @Int = match @Box.0 {
+    MkBox(@Int) -> @Int.0
+  };
   let @Int = @Int.0 + match @Option<Int>.0 { Some(@Int) -> @Int.0, None -> 0 };
   let @Int = @Int.0 + match @Outer.0 { MkOuter(@Inner) -> match @Inner.0 { MkInner(@Int) -> @Int.0 } };
   let @Int = @Int.0 + match @Box2<Int>.0 { MkBox2(@Int) -> @Int.0 };

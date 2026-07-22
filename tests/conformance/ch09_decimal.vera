@@ -130,9 +130,21 @@ public fn test_decimal_compare(@Unit -> @Int)
   ensures(@Int.result == 7)
   effects(pure)
 {
-  let @Int = match decimal_compare(decimal_from_int(3), decimal_from_int(7)) { Less -> 1, Equal -> 0, Greater -> 0 };
-  let @Int = match decimal_compare(decimal_from_int(7), decimal_from_int(7)) { Less -> 0, Equal -> 2, Greater -> 0 };
-  let @Int = match decimal_compare(decimal_from_int(9), decimal_from_int(7)) { Less -> 0, Equal -> 0, Greater -> 4 };
+  let @Int = match decimal_compare(decimal_from_int(3), decimal_from_int(7)) {
+    Less -> 1,
+    Equal -> 0,
+    Greater -> 0
+  };
+  let @Int = match decimal_compare(decimal_from_int(7), decimal_from_int(7)) {
+    Less -> 0,
+    Equal -> 2,
+    Greater -> 0
+  };
+  let @Int = match decimal_compare(decimal_from_int(9), decimal_from_int(7)) {
+    Less -> 0,
+    Equal -> 0,
+    Greater -> 4
+  };
   @Int.0 + @Int.1 + @Int.2
 }
 
