@@ -19,7 +19,10 @@ public fn main(@Unit -> @Int)
   effects(pure)
 {
   match wrap(7) {
-    Some(@Option<Int>) -> match @Option<Int>.0 { Some(@Int) -> @Int.0, None -> 0 },
+    Some(@Option<Int>) -> match @Option<Int>.0 {
+      Some(@Int) -> @Int.0,
+      None -> 0
+    },
     None -> 0
   }
 }

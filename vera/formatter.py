@@ -13,6 +13,7 @@ format_source(source, file=None) -> str
 
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import dataclass
 
 from vera.ast import (
@@ -100,10 +101,48 @@ _STRING_ENCODE_MAP = {
     "\0": "\\0",
 }
 
+# Unicode general categories whose members carry no visible glyph of their
+# own: controls, format characters (zero-width joiners, bidi overrides),
+# surrogates, private use, unassigned, and the line/paragraph separators.
+_INVISIBLE_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"})
+
+
+def _is_unreadable(ch: str) -> bool:
+    """Whether *ch* must be escaped because it cannot be read as itself.
+
+    Rule 1.8 is about a canonical form a reader can trust, and a
+    character that renders as nothing — a zero-width space, a bidi
+    override, an unassigned code point — defeats that: two literals that
+    look identical are not, and the difference is invisible in review.
+    Everything printable stays literal, including non-ASCII: ``café`` and
+    an emoji read fine as themselves and escaping them would make the
+    canonical form *less* legible than the source.
+
+    Space-separator (``Zs``) is split: the ASCII space is the ordinary
+    one and stays, while a no-break or hair space is a look-alike that
+    only an escape distinguishes.
+    """
+    category = unicodedata.category(ch)
+    if category in _INVISIBLE_CATEGORIES:
+        return True
+    return category == "Zs" and ch != " "
+
 
 def _encode_string_escapes(s: str) -> str:
     """Re-encode special characters as Vera escape sequences."""
-    return "".join(_STRING_ENCODE_MAP.get(c, c) for c in s)
+    out: list[str] = []
+    for c in s:
+        mapped = _STRING_ENCODE_MAP.get(c)
+        if mapped is not None:
+            out.append(mapped)
+        elif _is_unreadable(c):
+            # Uppercase hex, at least four digits: `\u{200B}` matches the
+            # spelling the spec's escape table uses, and the decoder
+            # accepts 1-6 digits so a wider code point simply gets more.
+            out.append(f"\\u{{{ord(c):04X}}}")
+        else:
+            out.append(c)
+    return "".join(out)
 
 
 # =====================================================================
@@ -120,6 +159,12 @@ class Comment:
     end_line: int   # 1-based end line
     inline: bool    # True if code precedes this comment on the same line
     paren_depth: int = 0  # see lexical.CommentSpan.paren_depth
+    # True when the source line straight after this comment is blank.
+    # A comment block deliberately held off the declaration below it is a
+    # different thing from one written against it, and only the source
+    # knows which: the AST records no gap, so without this the separation
+    # is unrecoverable at emission time and the block gets glued on.
+    blank_after: bool = False
 
 
 def extract_comments(source: str) -> list[Comment]:
@@ -134,16 +179,25 @@ def extract_comments(source: str) -> list[Comment]:
     syntax error to ``vera check``.
     """
     comments: list[Comment] = []
+    lines = source.split("\n")
     for span in scan_comments(source):
         line_start = source.rfind("\n", 0, span.start) + 1
+        end_line = source.count("\n", 0, span.end) + 1
+        # `lines[end_line]` is the line *after* the comment's last one
+        # (`end_line` is 1-based).  Past the end of the file there is no
+        # separation to preserve, and a trailing blank would be stripped
+        # from the output anyway.
         comments.append(Comment(
             kind=span.kind,
             text=source[span.start:span.end],
             line=source.count("\n", 0, span.start) + 1,
             column=span.start - line_start + 1,
-            end_line=source.count("\n", 0, span.end) + 1,
+            end_line=end_line,
             inline=source[line_start:span.start].strip() != "",
             paren_depth=span.paren_depth,
+            blank_after=(
+                end_line < len(lines) and lines[end_line].strip() == ""
+            ),
         ))
     return comments
 
@@ -260,6 +314,34 @@ def _attach_comments(
                      header=header, footer=footer)
 
 
+def _needs_own_lines(node: object) -> bool:
+    """True for constructs whose braces rule 2 puts on their own lines.
+
+    `match`, `if` and `handle` all emit a brace that must close on a
+    line of its own aligned with the construct, so none of them may be
+    flattened into a containing line.
+    """
+    return isinstance(node, (MatchExpr, IfExpr, HandleExpr))
+
+
+def _unwrap_redundant_block(node: Expr) -> Expr:
+    """Strip a block that only wraps a single multi-line construct.
+
+    `{ match ... }` and `match ...` are two textual forms of one
+    construct, which rule 1.8 forbids; the bare form is canonical.
+    The wrapper matters because a block holding no statements keeps its
+    content in `expr`, so a `statements`-only test reads it as empty
+    and flattens the construct inside it.
+    """
+    if (
+        isinstance(node, Block)
+        and not node.statements
+        and _needs_own_lines(node.expr)
+    ):
+        return node.expr
+    return node
+
+
 def _collect_interior_anchors(node: object, anchors: list[int]) -> None:
     """Recursively collect span start lines from interior AST nodes.
 
@@ -280,12 +362,34 @@ def _collect_interior_anchors(node: object, anchors: list[int]) -> None:
         _collect_interior_anchors(node.else_branch, anchors)
     elif isinstance(node, MatchExpr):
         for arm in node.arms:
+            # The arm itself is an anchor, not just its body: a comment
+            # above `Red -> 1` precedes the arm, and without this the
+            # innermost span containing it is the match, so every arm
+            # comment piled up together at the top (#1136).
+            if arm.span:
+                anchors.append(arm.span.line)
             _collect_interior_anchors(arm.body, anchors)
     elif isinstance(node, HandleExpr):
         _collect_interior_anchors(node.body, anchors)
     elif isinstance(node, FnDecl):
+        # Contract and effect clauses each occupy their own line
+        # (rule 7), so each is a position a comment can precede.  Only
+        # the declaration's span used to cover the gap between the
+        # signature and `requires(`, which sent those comments to the
+        # top of the body (#1136).
+        for contract in node.contracts:
+            if contract.span:
+                anchors.append(contract.span.line)
+        if node.effect.span:
+            anchors.append(node.effect.span.line)
         _collect_interior_anchors(node.body, anchors)
         if node.where_fns:
+            # The `where` keyword line itself, before the functions
+            # inside it: without this anchor the nearest position after a
+            # comment above `where {` is the first where-function, so the
+            # comment was pulled into the block and re-indented (#1136).
+            if node.where_span:
+                anchors.append(node.where_span.line)
             for wfn in node.where_fns:
                 _collect_interior_anchors(wfn, anchors)
     elif isinstance(node, DataDecl):
@@ -395,11 +499,21 @@ class Formatter:
         self._indent -= 1
 
     def _emit_comments(self, anchor: int) -> None:
-        """Emit comments attached before the given anchor line."""
+        """Emit comments attached before the given anchor line.
+
+        A comment the source separated from what follows it keeps exactly
+        one blank line of separation, however many it had: a header block
+        held off its declaration reads as a header, and glued on it reads
+        as a remark about the first line.  The gap is only reproduced
+        when there was one in source, and never for a comment sharing the
+        anchor's line, where "after the comment" is still the same line.
+        """
         comments = self._attached.before.get(anchor, [])
         for c in comments:
             for cline in c.text.split("\n"):
                 self._line(cline.strip() if c.kind == "block" else cline.strip())
+            if c.blank_after and c.end_line < anchor:
+                self._blank()
 
     def _claim_inline(
         self,
@@ -658,10 +772,14 @@ class Formatter:
         # Contract clauses — each on its own line, indented 2 spaces
         self._indent_inc()
         for c in fn.contracts:
+            if c.span:
+                self._emit_comments(c.span.line)
             self._emit_contract(c)
             self._claim_inline(c)
 
         # Effects clause
+        if fn.effect.span:
+            self._emit_comments(fn.effect.span.line)
         self._line(f"effects({self._fmt_effect_row(fn.effect)})")
         self._claim_inline(fn.effect)
         self._indent_dec()
@@ -679,6 +797,8 @@ class Formatter:
 
         # Where block
         if fn.where_fns:
+            if fn.where_span:
+                self._emit_comments(fn.where_span.line)
             self._emit_where_block(fn.where_fns)
 
         # Backstop: anything inside this declaration that no inner
@@ -976,13 +1096,39 @@ class Formatter:
             val = self._fmt_expr(stmt.value)
             self._line(f"let {stmt.constructor}<{bindings}> = {val};")
         elif isinstance(stmt, ExprStmt):
-            self._line(f"{self._fmt_expr(stmt.expr)};")
+            # A match/if/handle in statement position gets the same
+            # multi-line treatment it gets as a block's result
+            # expression; only the trailing `;` differs.  Flattening
+            # here put a whole nested match on one line (rule 2).
+            if _needs_own_lines(stmt.expr):
+                self._emit_own_lines(stmt.expr, "", ";")
+            else:
+                self._line(f"{self._fmt_expr(stmt.expr)};")
 
     # -- Multi-line expressions ----------------------------------------
 
-    def _emit_if(self, expr: IfExpr) -> None:
+    def _emit_own_lines(
+        self, node: Expr, prefix: str = "", suffix: str = "",
+    ) -> None:
+        """Emit a rule-2 construct, opening on the caller's line.
+
+        The prefix (`Ok(_) -> `) shares the line with the opening
+        brace; the closing brace still gets a line of its own.
+        """
+        if isinstance(node, MatchExpr):
+            self._emit_match(node, prefix, suffix)
+        elif isinstance(node, IfExpr):
+            self._emit_if(node, prefix, suffix)
+        elif isinstance(node, HandleExpr):
+            self._emit_handle(node, prefix, suffix)
+        else:  # pragma: no cover - guarded by _needs_own_lines
+            raise AssertionError(f"not a multi-line construct: {node!r}")
+
+    def _emit_if(
+        self, expr: IfExpr, prefix: str = "", suffix: str = "",
+    ) -> None:
         cond = self._fmt_expr(expr.condition)
-        self._line(f"if {cond} then {{")
+        self._line(f"{prefix}if {cond} then {{")
         self._indent_inc()
         self._emit_block_body(expr.then_branch)
         self._indent_dec()
@@ -990,24 +1136,35 @@ class Formatter:
         self._indent_inc()
         self._emit_block_body(expr.else_branch)
         self._indent_dec()
-        self._line("}")
+        self._line(f"}}{suffix}")
 
-    def _emit_match(self, expr: MatchExpr) -> None:
+    def _emit_match(
+        self, expr: MatchExpr, prefix: str = "", suffix: str = "",
+    ) -> None:
         scrut = self._fmt_expr(expr.scrutinee)
-        self._line(f"match {scrut} {{")
+        self._line(f"{prefix}match {scrut} {{")
         self._indent_inc()
         for i, arm in enumerate(expr.arms):
             comma = "," if i < len(expr.arms) - 1 else ""
+            if arm.span:
+                self._emit_comments(arm.span.line)
             pat = self._fmt_pattern(arm.pattern)
-            if isinstance(arm.body, Block) and arm.body.statements:
+            # A block wrapping nothing but a nested match/if/handle
+            # keeps that construct in `expr`, not `statements`, so the
+            # test below read it as empty and flattened the whole thing
+            # onto one line against rule 2.
+            body_node = _unwrap_redundant_block(arm.body)
+            if isinstance(body_node, Block) and body_node.statements:
                 # Multi-statement block: emit multi-line with braces
                 self._line(f"{pat} -> {{")
                 self._indent_inc()
-                self._emit_block_body(arm.body)
+                self._emit_block_body(body_node)
                 self._indent_dec()
                 self._line(f"}}{comma}")
+            elif _needs_own_lines(body_node):
+                self._emit_own_lines(body_node, f"{pat} -> ", comma)
             else:
-                body = self._fmt_expr(arm.body)
+                body = self._fmt_expr(body_node)
                 self._line(f"{pat} -> {body}{comma}")
             # An arm is not a Block, so `_emit_block_body`'s hook never
             # reaches it and every arm comment fell through to the
@@ -1020,9 +1177,11 @@ class Formatter:
                 (nxt_span.line, nxt_span.column) if nxt_span else None,
             )
         self._indent_dec()
-        self._line("}")
+        self._line(f"}}{suffix}")
 
-    def _emit_handle(self, expr: HandleExpr) -> None:
+    def _emit_handle(
+        self, expr: HandleExpr, prefix: str = "", suffix: str = "",
+    ) -> None:
         eff = self._fmt_effect_ref(expr.effect)
         state_str = ""
         if expr.state:
@@ -1031,7 +1190,7 @@ class Formatter:
             init = self._fmt_expr(st.init_expr)
             state_str = f"({te} = {init})"
 
-        self._line(f"handle[{eff}]{state_str} {{")
+        self._line(f"{prefix}handle[{eff}]{state_str} {{")
         self._indent_inc()
         for i, clause in enumerate(expr.clauses):
             comma = "," if i < len(expr.clauses) - 1 else ""
@@ -1041,7 +1200,7 @@ class Formatter:
         self._indent_inc()
         self._emit_block_body(expr.body)
         self._indent_dec()
-        self._line("}")
+        self._line(f"}}{suffix}")
 
     def _emit_handler_clause(self, clause: HandlerClause, comma: str) -> None:
         params = ", ".join(

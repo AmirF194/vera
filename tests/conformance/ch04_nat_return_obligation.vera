@@ -47,7 +47,11 @@ public fn clamp_positive(@Int -> @Nat)
 {
   match @Int.0 {
     0 -> 0,
-    _ -> if @Int.0 >= 0 then { @Int.0 } else { 0 }
+    _ -> if @Int.0 >= 0 then {
+      @Int.0
+    } else {
+      0
+    }
   }
 }
 

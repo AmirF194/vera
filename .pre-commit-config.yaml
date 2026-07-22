@@ -56,6 +56,13 @@ repos:
         pass_filenames: false
         files: '(\.vera$|vera/.*\.py$|vera/grammar\.lark$)'
 
+      - id: corpus-canonical
+        name: corpus canonical form
+        entry: .venv/bin/python scripts/check_corpus_canonical.py
+        language: system
+        pass_filenames: false
+        files: '(\.vera$|vera/formatter\.py$|vera/lexical\.py$|vera/grammar\.lark$|scripts/check_corpus_canonical\.py$)'
+
       - id: examples-readme
         name: examples readme
         entry: .venv/bin/python scripts/check_examples_readme.py

@@ -115,7 +115,13 @@ private fn check_urlparts_destructure(@Unit -> @Int)
   effects(pure)
 {
   match url_parse("https://example.com/path?q=1#frag") {
-    Ok(@UrlParts) -> match @UrlParts.0 { UrlParts(@String, @String, @String, @String, @String) -> if string_length(@String.3) > 0 then { 1 } else { 0 } },
+    Ok(@UrlParts) -> match @UrlParts.0 {
+      UrlParts(@String, @String, @String, @String, @String) -> if string_length(@String.3) > 0 then {
+        1
+      } else {
+        0
+      }
+    },
     Err(_) -> 0
   }
 }

@@ -23,9 +23,7 @@ public fn main(@Unit -> @Unit)
   effects(<IO>)
 {
   match IO.read_char(()) {
-    Ok(@String) ->
-      IO.print(string_concat("You pressed: ", @String.0)),
-    Err(@String) ->
-      IO.stderr(string_concat("read_char failed: ", @String.0))
+    Ok(@String) -> IO.print(string_concat("You pressed: ", @String.0)),
+    Err(@String) -> IO.stderr(string_concat("read_char failed: ", @String.0))
   }
 }

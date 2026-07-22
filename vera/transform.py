@@ -593,8 +593,10 @@ class VeraTransformer(Transformer):
         body = children[idx]
         idx += 1
         where_fns = None
+        where_span = None
         if idx < len(children) and isinstance(children[idx], _WhereFns):
             where_fns = children[idx].fns
+            where_span = children[idx].span
         return FnDecl(
             name=name,
             forall_vars=forall_vars,
@@ -605,6 +607,7 @@ class VeraTransformer(Transformer):
             effect=effect,
             body=body,
             where_fns=where_fns,
+            where_span=where_span,
             span=_span_from_meta(meta),
         )
 
@@ -687,9 +690,14 @@ class VeraTransformer(Transformer):
         # children: [Block] (from block_contents)
         return children[0]
 
-    def where_block(self, children):
+    @v_args(meta=True)
+    def where_block(self, meta, children):
         # children: [FnDecl, FnDecl, ...]
-        return _WhereFns(fns=tuple(children))
+        # The span starts at the `where` keyword, which is filtered out
+        # of the tree; only the rule's own meta records where it began,
+        # and the formatter needs that line to anchor a comment written
+        # above the block.
+        return _WhereFns(fns=tuple(children), span=_span_from_meta(meta))
 
     # =================================================================
     # Data Type Declarations

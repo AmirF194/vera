@@ -80,7 +80,14 @@ private fn parse_current_temp(@String -> @Result<Float64, String>)
 {
   match json_parse(@String.0) {
     Err(@String) -> Err(@String.0),
-    Ok(@Json) -> if has_required_fields(@Json.0) then { match current_temp(@Json.0) { Some(@Float64) -> Ok(@Float64.0), None -> Err("current.temp_c missing or wrong type") } } else { Err("response missing required fields") }
+    Ok(@Json) -> if has_required_fields(@Json.0) then {
+      match current_temp(@Json.0) {
+        Some(@Float64) -> Ok(@Float64.0),
+        None -> Err("current.temp_c missing or wrong type")
+      }
+    } else {
+      Err("response missing required fields")
+    }
   }
 }
 
@@ -92,7 +99,14 @@ private fn parse_average_temp(@String -> @Result<Float64, String>)
 {
   match json_parse(@String.0) {
     Err(@String) -> Err(@String.0),
-    Ok(@Json) -> if has_required_fields(@Json.0) then { match json_get_array(@Json.0, "hourly") { Some(@Array<Json>) -> Ok(average(@Array<Json>.0)), None -> Err("hourly missing or not an array") } } else { Err("response missing required fields") }
+    Ok(@Json) -> if has_required_fields(@Json.0) then {
+      match json_get_array(@Json.0, "hourly") {
+        Some(@Array<Json>) -> Ok(average(@Array<Json>.0)),
+        None -> Err("hourly missing or not an array")
+      }
+    } else {
+      Err("response missing required fields")
+    }
   }
 }
 
@@ -134,6 +148,13 @@ public fn main(@Unit -> @Int)
   let @String = "{\"location\":\"London\",\"current\":{\"temp_c\":18.5,\"condition\":\"Cloudy\"},\"hourly\":[17.0,17.5,18.0,18.5,19.0]}";
   match parse_current_temp(@String.0) {
     Err(_) -> 1,
-    Ok(@Float64) -> match parse_average_temp(@String.0) { Err(_) -> 1, Ok(@Float64) -> if round1(@Float64.0) == 18.0 then { 0 } else { 1 } }
+    Ok(@Float64) -> match parse_average_temp(@String.0) {
+      Err(_) -> 1,
+      Ok(@Float64) -> if round1(@Float64.0) == 18.0 then {
+        0
+      } else {
+        1
+      }
+    }
   }
 }

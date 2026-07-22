@@ -1300,7 +1300,15 @@ class TestMatchBlockArms:
         assert "{ let @Int = 10; @Int.0 + 1 }" in src
 
     def test_match_arm_block_in_exprstmt(self) -> None:
-        """Match as ExprStmt preserves block arm braces in inline form."""
+        """A match in statement position keeps its arm block multi-line.
+
+        This used to assert the inline form
+        (`{ IO.print("a"); IO.print("b") }` on one line), which put a
+        match's braces on a single line against rule 2 and two
+        statements on one line against rule 8.  Statement position now
+        gets the same treatment as result position; the trailing `;`
+        rides the closing brace.
+        """
         src = _fmt("""
             effect IO { op print(String -> Unit); }
 
@@ -1313,8 +1321,17 @@ class TestMatchBlockArms:
               IO.print("done")
             }
         """)
-        # Block arm in inline match must have braces
-        assert "{ IO.print(\"a\"); IO.print(\"b\") }" in src
+        assert src.splitlines()[-9:-1] == [
+            "  match @Int.0 {",
+            "    0 -> {",
+            '      IO.print("a");',
+            '      IO.print("b")',
+            "    },",
+            '    _ -> IO.print("c")',
+            "  };",
+            '  IO.print("done")',
+        ], src
+        parse_to_ast(src)
 
 
 # =====================================================================
@@ -1756,3 +1773,227 @@ class TestCommentInvariants:
             f"{name}: not idempotent — a comment that moves on every pass "
             f"drifts out of the construct it documents"
         )
+
+
+# =====================================================================
+# Canonical-form gaps that blocked the corpus gate (#1124)
+# =====================================================================
+
+class TestCanonicalFormGaps:
+    """The four defects that kept `examples/` off `vera fmt --check`.
+
+    Every one is an *omission* rather than an error: the formatter
+    emits something, the suite stays green, and only an assertion about
+    where a construct ended up can tell the difference.  The corpus
+    gate exists because that class cannot be caught by counting.
+    """
+
+    # -- F1 (#1136): leading-comment attachment ------------------------
+    #
+    # A comment is claimed by the innermost construct whose span
+    # *contains* it, never bound to the construct that *follows* it.
+    # Three positions have no anchor, so each one's comment falls
+    # through to the enclosing declaration and is re-emitted elsewhere.
+
+    def test_own_line_comment_stays_above_each_contract_clause(self) -> None:
+        """All three clauses, including `ensures` between the others."""
+        out = _fmt("""
+            public fn demo(@Int -> @Int)
+              -- before requires
+              requires(true)
+              -- before ensures
+              ensures(true) -- after ensures
+              -- before effects
+              effects(pure)
+            {
+              @Int.0
+            }
+        """)
+        assert out.splitlines() == [
+            "public fn demo(@Int -> @Int)",
+            "  -- before requires",
+            "  requires(true)",
+            "  -- before ensures",
+            "  ensures(true)  -- after ensures",
+            "  -- before effects",
+            "  effects(pure)",
+            "{",
+            "  @Int.0",
+            "}",
+        ]
+
+    def test_own_line_comment_stays_above_a_where_clause(self) -> None:
+        """The `where` block is a construct a comment can precede."""
+        out = _fmt("""
+            public fn is_even(@Nat -> @Bool)
+              requires(true)
+              ensures(true)
+              decreases(@Nat.0)
+              effects(pure)
+            {
+              if @Nat.0 == 0 then {
+                true
+              } else {
+                is_odd(@Nat.0 - 1)
+              }
+            }
+            -- Trailing where for mutual recursion.
+            where {
+              fn is_odd(@Nat -> @Bool)
+                requires(true)
+                ensures(true)
+                decreases(@Nat.0)
+                effects(pure)
+              {
+                if @Nat.0 == 0 then {
+                  false
+                } else {
+                  is_even(@Nat.0 - 1)
+                }
+              }
+            }
+        """)
+        lines = out.splitlines()
+        comment = "-- Trailing where for mutual recursion."
+        idx = next(i for i, ln in enumerate(lines) if comment in ln)
+        assert lines[idx] == comment, (
+            f"comment must stay at column 0, got {lines[idx]!r}"
+        )
+        assert lines[idx + 1].startswith("where"), (
+            f"comment must stay directly above `where`, got {lines[idx + 1]!r}"
+        )
+
+    def test_own_line_comment_stays_above_a_match_arm(self) -> None:
+        """Arms are anchors too — a comment must not leave the match."""
+        out = _fmt("""
+            private data Colour {
+              Red,
+              Green
+            }
+
+            public fn rank(@Colour -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              match @Colour.0 {
+                -- warm
+                Red -> 1,
+                -- cool
+                Green -> 2
+              }
+            }
+        """)
+        lines = out.splitlines()
+        for comment, arm in (("-- warm", "Red -> 1"), ("-- cool", "Green -> 2")):
+            idx = next(i for i, ln in enumerate(lines) if comment in ln)
+            assert lines[idx].strip() == comment
+            assert lines[idx + 1].strip().startswith(arm), (
+                f"{comment!r} must stay directly above {arm!r}, "
+                f"got {lines[idx + 1]!r}"
+            )
+
+    # -- F2: nested match collapses, violating 1.8 rule 2 --------------
+
+    def test_a_nested_match_keeps_its_closing_brace_on_its_own_line(
+        self,
+    ) -> None:
+        """`{ match ... }` has empty `statements`, so it took the inline path.
+
+        Rule 2 requires the closing brace on its own line aligned with
+        the construct.  A top-level match already obeys it; a match
+        reached through a block whose only content is a trailing
+        expression did not.
+        """
+        out = _fmt("""
+            public fn main(-> @Unit)
+              requires(true)
+              ensures(true)
+              effects(<IO>)
+            {
+              match IO.write_file("a.txt", "x") {
+                Ok(_) -> {
+                  match IO.read_file("a.txt") {
+                    Ok(@String) -> IO.print(@String.0),
+                    Err(@String) -> IO.print(@String.0)
+                  }
+                },
+                Err(@String) -> IO.print(@String.0)
+              };
+
+              ()
+            }
+        """)
+        for line in out.splitlines():
+            assert not ("{" in line and "}" in line and "match" in line), (
+                f"rule 2: a match's braces must not share a line: {line!r}"
+            )
+        # And the nesting must survive as nesting, not one long line.
+        assert max(len(ln) for ln in out.splitlines()) < 100, (
+            f"collapsed to a long line:\n{out}"
+        )
+        # Layout assertions alone are satisfied by output that no
+        # longer parses: moving the closing brace onto its own line
+        # drops the arm's `,` and the statement's `;` with it unless
+        # they are carried over too.
+        parse_to_ast(out)
+        assert format_source(out) == out, "second pass differs"
+
+    # -- F3: blank line before a leading comment block ------------------
+
+    def test_blank_line_between_a_comment_block_and_its_declaration(
+        self,
+    ) -> None:
+        """A separated header block must not be glued to what follows."""
+        out = _fmt("""
+            -- A note about the type below.
+            -- It runs to two lines.
+
+            private data Colour {
+              Red,
+              Green
+            }
+        """)
+        lines = out.splitlines()
+        decl = next(i for i, ln in enumerate(lines) if ln.startswith("private"))
+        assert lines[decl - 1] == "", (
+            f"blank line separating the header block was swallowed:\n{out}"
+        )
+
+    # -- F4: escape normalisation --------------------------------------
+    #
+    # Ruling: escape what cannot be read safely, keep printable
+    # non-ASCII literal.  `_STRING_ENCODE_MAP` covered six characters,
+    # so everything else — including invisibles — passed through raw.
+
+    def test_printable_non_ascii_stays_literal(self) -> None:
+        out = _fmt("""
+            public fn main(-> @Unit)
+              requires(true)
+              ensures(true)
+              effects(<IO>)
+            {
+              IO.print("café \U0001F600\\n");
+              ()
+            }
+        """)
+        assert "café \U0001F600" in out, out
+
+    def test_invisible_characters_are_escaped_so_they_cannot_hide(
+        self,
+    ) -> None:
+        """A zero-width space in source must become visible as `\\u{200B}`."""
+        out = _fmt(
+            'public fn main(-> @Unit)\n'
+            '  requires(true)\n'
+            '  ensures(true)\n'
+            '  effects(<IO>)\n'
+            '{\n'
+            '  IO.print("a​b\\n");\n'
+            '  ()\n'
+            '}\n'
+        )
+        assert "\\u{200B}" in out, (
+            f"a zero-width space must not survive as an invisible byte:\n{out!r}"
+        )
+        assert "​" not in out, "the raw invisible character is still there"

@@ -43,7 +43,11 @@ private fn test_if_arm(@Unit -> @Unit)
   ensures(true)
   effects(<IO>)
 {
-  if true then { marker(()) } else { IO.print("never") };
+  if true then {
+    marker(())
+  } else {
+    IO.print("never")
+  };
   IO.print("d\n")
 }
 

@@ -241,6 +241,12 @@ class FnDecl(Decl):
     # without source, so nothing is known either way.
     param_annotations: tuple[str | None, ...] | None = None
     return_annotation: str | None = None
+    # Source span of the `where { ... }` block, when there is one.  The
+    # keyword has no node of its own — `where_fns` holds only the
+    # functions inside — so a comment written above `where` has no
+    # position after it to attach to and gets pulled into the block.
+    # None means either no where-block or an AST built without source.
+    where_span: Span | None = None
 
 
 @dataclass(frozen=True)
@@ -725,6 +731,9 @@ class _ForallVars:
 class _WhereFns:
     """Sentinel: where-block function declarations."""
     fns: tuple[FnDecl, ...]
+    # Span of the whole `where { ... }`, carried through to
+    # `FnDecl.where_span` so the keyword line is addressable.
+    span: Span | None = None
 
 
 @dataclass(frozen=True)

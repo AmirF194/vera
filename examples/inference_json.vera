@@ -44,7 +44,10 @@ private fn score_clarity(@String -> @Result<Int, String>)
       -- In the parse-error arm, @String.2 is the original raw completion.
       match json_parse(@String.0) {
         Err(@String) -> Err("Invalid JSON response: \(@String.0). Raw response: \(@String.2)"),
-        Ok(@Json) -> match json_get_int(@Json.0, "score") { None -> Err("Response has no integer \"score\" field"), Some(@Int) -> Ok(normalize_score(@Int.0)) }
+        Ok(@Json) -> match json_get_int(@Json.0, "score") {
+          None -> Err("Response has no integer \"score\" field"),
+          Some(@Int) -> Ok(normalize_score(@Int.0))
+        }
       }
     }
   }

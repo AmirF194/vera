@@ -136,7 +136,11 @@ public fn test_nested_array_collapse(@Unit -> @Int)
   effects(pure)
 {
   match first_of_first_array([Some(100)], [Some(3)]) {
-    Some(@Int) -> if @Int.0 == 100 then { 1 } else { 0 },
+    Some(@Int) -> if @Int.0 == 100 then {
+      1
+    } else {
+      0
+    },
     None -> 0
   }
 }

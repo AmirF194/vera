@@ -72,7 +72,10 @@ public fn test_html_attr_present(@Unit -> @Int)
   effects(pure)
 {
   match html_parse("<a href=\"url\">x</a>") {
-    Ok(@HtmlNode) -> match html_attr(@HtmlNode.0, "href") { Some(@String) -> string_length(@String.0), None -> 0 },
+    Ok(@HtmlNode) -> match html_attr(@HtmlNode.0, "href") {
+      Some(@String) -> string_length(@String.0),
+      None -> 0
+    },
     Err(@String) -> 0 - 1
   }
 }
@@ -87,7 +90,10 @@ public fn test_html_attr_absent(@Unit -> @Int)
   effects(pure)
 {
   match html_parse("<p>text</p>") {
-    Ok(@HtmlNode) -> match html_attr(@HtmlNode.0, "class") { Some(@String) -> 1, None -> 0 },
+    Ok(@HtmlNode) -> match html_attr(@HtmlNode.0, "class") {
+      Some(@String) -> 1,
+      None -> 0
+    },
     Err(@String) -> 0 - 1
   }
 }
