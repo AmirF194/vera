@@ -21,8 +21,11 @@ import sys
 # only the MPL-covered source files themselves must remain under MPL.
 # LGPL is included because it explicitly permits linking from non-copyleft code
 # (unlike GPL); a Python tool distributed as source automatically satisfies the
-# LGPL requirement that the covered library can be replaced. The only current
-# LGPL dependency is chardet (via cyclonedx-bom, used for SBOM generation).
+# LGPL requirement that the covered library can be replaced. Nothing Vera
+# installs is currently LGPL: the pattern is kept so that a transitive arriving
+# under it does not fail the gate for a licence that is in fact compatible.
+# (`chardet` used to reach here via `cyclonedx-bom`, but that is installed only
+# by the separate `sbom` CI job, which this gate does not run in.)
 
 _COMPATIBLE_PATTERNS: list[str] = [
     "mit",

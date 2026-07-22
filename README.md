@@ -284,6 +284,7 @@ vera/
 │   ├── parser.py                  #   Parser module
 │   ├── ast.py                     #   Typed AST node definitions
 │   ├── transform.py               #   Lark parse tree → AST transformer
+│   ├── resolver.py                #   Slot and name resolution
 │   ├── checker/                   #   Type checker (mixin package)
 │   ├── verifier.py                #   Contract verifier (Z3)
 │   ├── codegen/                   #   Code generation (13 modules)
@@ -330,13 +331,18 @@ If you use Vera in your research, please cite:
 
 Vera is licensed under the [MIT License](LICENSE).
 
-All direct dependencies are MIT or Apache-2.0. One transitive dependency (`chardet`, via `cyclonedx-bom`) is LGPL v2+, which is compatible with MIT redistribution. Licence compliance is enforced by CI.
+Every dependency Vera redistributes is under a permissive licence compatible with MIT. `scripts/check_licenses.py` enforces this for the Python side on every commit and in CI, checking installed packages transitively; the npm packages the VS Code extension bundles are listed here but are not yet gate-enforced.
 
 | Dependency | Licence | Role |
 |-----------|---------|------|
 | [Lark](https://github.com/lark-parser/lark) | MIT | LALR(1) parser generator |
 | [z3-solver](https://github.com/Z3Prover/z3) | MIT | SMT solver for contract verification |
-| [wasmtime](https://github.com/bytecodealliance/wasmtime) | Apache-2.0 | WebAssembly runtime |
+| [wasmtime](https://github.com/bytecodealliance/wasmtime) | Apache-2.0 WITH LLVM-exception | WebAssembly runtime |
+| [pygls](https://github.com/openlawlibrary/pygls) | Apache-2.0 | Language-server framework (`[lsp]` extra) |
+| [lsprotocol](https://github.com/microsoft/lsprotocol) | MIT | LSP type definitions (`[lsp]` extra) |
+| [vscode-languageclient](https://github.com/microsoft/vscode-languageserver-node) | MIT | LSP client bundled into the VS Code extension |
+
+The first three are the toolchain's runtime dependencies; `pygls` and `lsprotocol` arrive with the `[lsp]` extra, which the editor integration needs. `vscode-languageclient` is bundled into the `.vsix` along with its own transitives — `vscode-jsonrpc`, `vscode-languageserver-protocol`, `vscode-languageserver-types`, `vscode-languageserver-textdocument` and `brace-expansion` (MIT), `semver` (ISC), and `minimatch` (BlueOak-1.0.0). ISC and BlueOak-1.0.0 are permissive and impose no condition MIT does not.
 
 Copyright &copy; 2026 Alasdair Allan
 
