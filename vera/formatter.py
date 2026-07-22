@@ -1198,6 +1198,10 @@ class Formatter:
             # the same hole this branch exists to close, one level out.
             expr = _unwrap_redundant_block(stmt.expr)
             if _needs_own_lines(expr):
+                if expr is not stmt.expr:
+                    span = getattr(expr, "span", None)
+                    if span:
+                        self._emit_comments(span.line)
                 self._emit_own_lines(expr, "", ";")
             else:
                 self._line(f"{self._fmt_expr(expr)};")
@@ -1261,6 +1265,15 @@ class Formatter:
                 self._indent_dec()
                 self._line(f"}}{comma}")
             elif _needs_own_lines(body_node):
+                # Unwrapping the redundant block drops its span, and any
+                # comment anchored inside it goes with it — a *discarded*
+                # comment, which rule 11 forbids outright.  Emit them
+                # against the inner construct before the unwrap takes
+                # effect.
+                if body_node is not arm.body:
+                    span = getattr(body_node, "span", None)
+                    if span:
+                        self._emit_comments(span.line)
                 self._emit_own_lines(body_node, f"{pat} -> ", comma)
             else:
                 body = self._fmt_expr(body_node)
@@ -1298,6 +1311,12 @@ class Formatter:
             if clause.span:
                 self._emit_comments(clause.span.line)
             self._emit_handler_clause(clause, comma)
+            nxt = expr.clauses[i + 1] if i + 1 < len(expr.clauses) else None
+            nxt_span = getattr(nxt, "span", None)
+            self._claim_inline(
+                clause,
+                (nxt_span.line, nxt_span.column) if nxt_span else None,
+            )
         self._indent_dec()
         self._line("} in {")
         self._indent_inc()

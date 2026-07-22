@@ -2132,6 +2132,75 @@ class TestCanonicalFormGaps:
             "made this necessary would not be covered"
         )
 
+    def test_unwrapping_a_redundant_block_keeps_its_comments(self) -> None:
+        """Rule 11 forbids *discarding* a comment, not just moving it.
+
+        Dropping the `{ }` around a nested match drops its span, and any
+        comment anchored inside went with it — one comment in, zero out.
+        Count is the right assertion here precisely because this is the
+        one failure mode counting can see.
+        """
+        src = dedent("""\
+            private data C {
+              R,
+              G
+            }
+
+            public fn f(@C -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              match @C.0 {
+                R -> {
+                  -- inner note
+                  match @C.0 {
+                    R -> 1,
+                    G -> 2
+                  }
+                },
+                G -> 0
+              }
+            }
+        """)
+        out = format_source(src)
+        assert len(extract_comments(out)) == len(extract_comments(src)), (
+            f"a comment was discarded by the unwrap:\n{out}"
+        )
+        assert "-- inner note" in out
+        parse_to_ast(out)
+        assert format_source(out) == out, "second pass differs"
+
+    def test_trailing_comment_stays_on_its_handler_clause(self) -> None:
+        """A trailing comment belongs to its clause, not the closing brace."""
+        out = _fmt("""
+            effect Counter {
+              op get(Unit -> Int);
+              op inc(Unit -> Unit);
+            }
+
+            public fn c(@Int -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              handle[Counter](@Int = 0) {
+                get(@Unit) -> resume(@Int.0), -- trailing on get
+                inc(@Unit) -> resume(())
+              } in {
+                @Int.0
+              }
+            }
+        """)
+        line = next(
+            ln for ln in out.splitlines() if "trailing on get" in ln
+        )
+        assert "get(@Unit)" in line, (
+            f"comment swept off its clause onto {line!r}"
+        )
+        parse_to_ast(out)
+        assert format_source(out) == out, "second pass differs"
+
     # -- F3: blank line before a leading comment block ------------------
 
     def test_blank_line_between_a_comment_block_and_its_declaration(
