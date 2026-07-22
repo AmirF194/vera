@@ -21,14 +21,14 @@ async function main() {
         platform: "node",
         target: "node16",
     });
-    // Nothing is copied alongside the bundle. Up to
-    // vscode-languageclient 9 the client shelled out to a packaged
-    // `terminateProcess.sh`, so the build resolved that file out of
-    // node_modules, copied it here and marked it executable. Version 10
-    // inlines the same process-tree walk as a string in
-    // lib/node/processes.js and pipes it to /bin/sh, so the helper no
-    // longer exists upstream and esbuild carries it into the bundle
-    // like any other code. The VSIX is now pure JSON, JS and assets.
+    // Nothing is copied alongside the bundle, and nothing should be:
+    // vscode-languageclient keeps its process-tree kill script inline
+    // and esbuild carries that string into the bundle like any other
+    // code, so there is no asset to stage here. Earlier versions of
+    // the client shelled out to a packaged `terminateProcess.sh` and
+    // this build staged it; re-adding a copy step would put an
+    // executable back in the VSIX for nothing. See the CHANGELOG for
+    // the version history.
 }
 
 main().catch((error) => {

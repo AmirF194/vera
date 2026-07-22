@@ -6,6 +6,7 @@
 check-package-contents.js
 esbuild.js
 extension.js
+test/**
 node_modules/**
 package-lock.json
 *.md

@@ -79,7 +79,8 @@
 	"scripts": {
 		"build": "node esbuild.js",
 		"check": "node --check extension.js && node --check esbuild.js && node --check check-package-contents.js",
-		"check:package": "npm run build && node check-package-contents.js",
+		"check:package": "node check-package-contents.js",
+		"test": "node --test",
 		"package": "vsce package",
 		"package:list": "npm run build && vsce ls --tree",
 		"vscode:prepublish": "npm run build"

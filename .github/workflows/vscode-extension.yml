@@ -46,14 +46,19 @@ jobs:
       - name: Check extension source
         run: npm run check
 
+      - name: Test extension scripts
+        run: npm test
+
       - name: Inspect packaged files
         run: npm run package:list
 
-      - name: Check packaged contents
-        run: npm run check:package
-
       - name: Build VSIX
         run: npm run package
+
+      # After packaging: the check reads the built .vsix, since vsce
+      # synthesises entries and re-runs the build during packaging.
+      - name: Check packaged contents
+        run: npm run check:package
 
       - name: Upload VSIX
         uses: actions/upload-artifact@v7
