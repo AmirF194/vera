@@ -14,5 +14,6 @@ public fn main(-> @Unit)
     },
     Err(@String) -> IO.print(@String.0)
   };
+
   ()
 }

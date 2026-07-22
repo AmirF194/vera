@@ -145,6 +145,27 @@ def _encode_string_escapes(s: str) -> str:
     return "".join(out)
 
 
+def blank_source_lines(source: str) -> frozenset[int]:
+    """The 1-based line numbers in *source* that hold only whitespace.
+
+    A blank line is the one piece of a program's layout the AST cannot
+    record: two statements separated by a paragraph break parse to
+    exactly the same tree as two written back to back.  So the formatter
+    is given the source's blank lines directly, and reproduces a gap only
+    where there was one -- the alternative is to strip every gap (which
+    is what deleted the paragraph breaks from `examples/file_io.vera`)
+    or to invent one everywhere (which would be worse).
+
+    Lines inside a block comment are read as they appear in source, not
+    as the parser's blanked copy sees them, so a `{- -}` spanning an
+    empty line does not read as a separator.
+    """
+    return frozenset(
+        i for i, line in enumerate(source.split("\n"), start=1)
+        if not line.strip()
+    )
+
+
 # =====================================================================
 # Comment extraction
 # =====================================================================
@@ -159,12 +180,6 @@ class Comment:
     end_line: int   # 1-based end line
     inline: bool    # True if code precedes this comment on the same line
     paren_depth: int = 0  # see lexical.CommentSpan.paren_depth
-    # True when the source line straight after this comment is blank.
-    # A comment block deliberately held off the declaration below it is a
-    # different thing from one written against it, and only the source
-    # knows which: the AST records no gap, so without this the separation
-    # is unrecoverable at emission time and the block gets glued on.
-    blank_after: bool = False
 
 
 def extract_comments(source: str) -> list[Comment]:
@@ -179,25 +194,16 @@ def extract_comments(source: str) -> list[Comment]:
     syntax error to ``vera check``.
     """
     comments: list[Comment] = []
-    lines = source.split("\n")
     for span in scan_comments(source):
         line_start = source.rfind("\n", 0, span.start) + 1
-        end_line = source.count("\n", 0, span.end) + 1
-        # `lines[end_line]` is the line *after* the comment's last one
-        # (`end_line` is 1-based).  Past the end of the file there is no
-        # separation to preserve, and a trailing blank would be stripped
-        # from the output anyway.
         comments.append(Comment(
             kind=span.kind,
             text=source[span.start:span.end],
             line=source.count("\n", 0, span.start) + 1,
             column=span.start - line_start + 1,
-            end_line=end_line,
+            end_line=source.count("\n", 0, span.end) + 1,
             inline=source[line_start:span.start].strip() != "",
             paren_depth=span.paren_depth,
-            blank_after=(
-                end_line < len(lines) and lines[end_line].strip() == ""
-            ),
         ))
     return comments
 
@@ -468,10 +474,19 @@ def _needs_parens(child: Expr, parent_op: BinOp, side: str) -> bool:
 class Formatter:
     """Walk a Vera AST and emit canonically formatted source text."""
 
-    def __init__(self, attached: _Attached) -> None:
+    def __init__(
+        self,
+        attached: _Attached,
+        blank_lines: frozenset[int] = frozenset(),
+    ) -> None:
         self._lines: list[str] = []
         self._indent: int = 0
         self._attached = attached
+        # Source lines holding only whitespace, from
+        # :func:`blank_source_lines`.  Defaulted so a caller that has an
+        # AST but no text still formats -- it simply gets no gaps, which
+        # is the behaviour that predates this.
+        self._blank_lines = blank_lines
         # Identities of inline comments already placed.  Inner
         # constructs finish emitting first, so claiming greedily gives
         # each comment to the innermost construct that contains it.
@@ -489,8 +504,44 @@ class Formatter:
         self._lines.append(text)
 
     def _blank(self) -> None:
-        """Emit a blank line."""
+        """Emit a blank line, unless the output already ends in one.
+
+        Three paths reproduce a gap -- the comment emitter for the space
+        *below* a comment, the block emitter for the space *above* one,
+        and the declaration loop's unconditional separator.  As written
+        none of them can land back to back, because the comment they
+        bracket always sits between; clamping here is what makes rule
+        13's "at most one" a property of the emitter rather than of an
+        argument about its callers, so a fourth caller cannot break it.
+        Nothing may open the output with a blank either.
+        """
+        if not self._lines or not self._lines[-1].strip():
+            return
         self._lines.append("")
+
+    def _leading_source_line(self, span_line: int) -> int:
+        """The first source line emitted for a node starting at *span_line*.
+
+        Comments attached above the node are emitted before it, so the
+        gap separating it from what precedes it sits above the *comment
+        block*, not above the node itself.
+        """
+        comments = self._attached.before.get(span_line, ())
+        return min((c.line for c in comments), default=span_line)
+
+    def _blank_if_separated(self, node: object) -> None:
+        """Reproduce a single blank line the source held above *node*.
+
+        Only where the source had one: a gap between statements is a
+        paragraph break the author wrote, and neither keeping every gap
+        nor discarding every gap can be recovered from the AST, which
+        records no separation at all (rule 13).
+        """
+        span = getattr(node, "span", None)
+        if span is None:
+            return
+        if self._leading_source_line(span.line) - 1 in self._blank_lines:
+            self._blank()
 
     def _indent_inc(self) -> None:
         self._indent += 1
@@ -512,7 +563,18 @@ class Formatter:
         for c in comments:
             for cline in c.text.split("\n"):
                 self._line(cline.strip() if c.kind == "block" else cline.strip())
-            if c.blank_after and c.end_line < anchor:
+            # The gap *below* the comment, read from the same source map
+            # as the gap *above* it (`_blank_if_separated`).  The two are
+            # halves of one rule rather than two mechanisms, and neither
+            # needs to know about the other: the comment itself always
+            # lands between them, so they cannot stack.  Past the end of
+            # the file the line is simply absent from the map, so a
+            # trailing gap reproduces nothing.  `end_line < anchor`
+            # restates the attachment invariant -- `_attach_comments`
+            # files a comment only under an anchor strictly below it, so
+            # a comment sharing the anchor's line, where "after the
+            # comment" is still that line, cannot reach here.
+            if c.end_line < anchor and c.end_line + 1 in self._blank_lines:
                 self._blank()
 
     def _claim_inline(
@@ -1048,9 +1110,23 @@ class Formatter:
     # -- Block body (statements + expression) --------------------------
 
     def _emit_block_body(self, block: Block) -> None:
-        """Emit the interior of a block (statements then expression)."""
+        """Emit the interior of a block (statements then expression).
+
+        The result expression takes the same gap treatment as a
+        statement: it is the last thing in the block, and the break
+        before it -- `match ...;`, blank, `()` -- is the commonest
+        paragraph break there is.  A walk over `statements` alone leaves
+        it stripped.
+
+        Neither the first statement nor a block whose whole content is
+        the result expression takes one, though: a gap held against the
+        opening brace separates nothing, and rule 2 already gives the
+        brace its own line.
+        """
         following: list[object] = [*block.statements[1:], block.expr]
-        for stmt, nxt in zip(block.statements, following):
+        for i, (stmt, nxt) in enumerate(zip(block.statements, following)):
+            if i:
+                self._blank_if_separated(stmt)
             if stmt.span:
                 self._emit_comments(stmt.span.line)
             self._emit_stmt(stmt)
@@ -1059,6 +1135,8 @@ class Formatter:
                 stmt,
                 (nxt_span.line, nxt_span.column) if nxt_span else None,
             )
+        if block.statements:
+            self._blank_if_separated(block.expr)
         if block.expr.span:
             self._emit_comments(block.expr.span.line)
         self._emit_block_expr(block.expr)
@@ -1100,10 +1178,17 @@ class Formatter:
             # multi-line treatment it gets as a block's result
             # expression; only the trailing `;` differs.  Flattening
             # here put a whole nested match on one line (rule 2).
-            if _needs_own_lines(stmt.expr):
-                self._emit_own_lines(stmt.expr, "", ";")
+            #
+            # The unwrap is what makes that reachable through a written
+            # `{ match ... };`: the block holds its content in `expr`
+            # with `statements` empty, so without it `_needs_own_lines`
+            # sees a Block, answers no, and the construct flattens —
+            # the same hole this branch exists to close, one level out.
+            expr = _unwrap_redundant_block(stmt.expr)
+            if _needs_own_lines(expr):
+                self._emit_own_lines(expr, "", ";")
             else:
-                self._line(f"{self._fmt_expr(stmt.expr)};")
+                self._line(f"{self._fmt_expr(expr)};")
 
     # -- Multi-line expressions ----------------------------------------
 
@@ -1468,5 +1553,5 @@ def format_source(source: str, file: str | None = None) -> str:
         tree = vera_parse(source)
     program = transform(tree)
     attached = _attach_comments(comments, program)
-    fmt = Formatter(attached)
+    fmt = Formatter(attached, blank_source_lines(source))
     return fmt.format_program(program)

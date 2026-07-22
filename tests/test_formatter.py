@@ -9,6 +9,8 @@ from textwrap import dedent
 import pytest
 
 from vera.formatter import (
+    Formatter,
+    _Attached,
     extract_comments,
     format_source,
 )
@@ -1939,6 +1941,35 @@ class TestCanonicalFormGaps:
         parse_to_ast(out)
         assert format_source(out) == out, "second pass differs"
 
+    def test_a_block_wrapped_match_statement_does_not_flatten(self) -> None:
+        """`{ match ... };` reaches the same hole one level out.
+
+        The multi-line branch keys on the expression being a
+        match/if/handle, but a written block wrapper holds the match in
+        `expr` with `statements` empty — so the branch saw a Block,
+        declined, and the construct flattened exactly as it did before
+        the fix.  Found in review of PR #1138; the arm path already
+        unwrapped, the statement path did not.
+        """
+        out = _fmt("""
+            effect IO { op print(String -> Unit); }
+
+            public fn f(@Int -> @Unit)
+              requires(true)
+              ensures(true)
+              effects(<IO>)
+            {
+              { match @Int.0 { 0 -> IO.print("a"), _ -> IO.print("b") } };
+              IO.print("done")
+            }
+        """)
+        for line in out.splitlines():
+            assert not ("{" in line and "}" in line and "match" in line), (
+                f"rule 2: a match's braces must not share a line: {line!r}"
+            )
+        parse_to_ast(out)
+        assert format_source(out) == out, "second pass differs"
+
     # -- F3: blank line before a leading comment block ------------------
 
     def test_blank_line_between_a_comment_block_and_its_declaration(
@@ -1997,3 +2028,300 @@ class TestCanonicalFormGaps:
             f"a zero-width space must not survive as an invisible byte:\n{out!r}"
         )
         assert "​" not in out, "the raw invisible character is still there"
+
+    # -- F5: blank lines between statements ----------------------------
+    #
+    # F3 taught the emitter to keep the blank under a *comment* block,
+    # which left the formatter inconsistent: a blank below a comment
+    # survived while a blank between two plain statements did not.  The
+    # AST records no gap, so only the source line map can tell them
+    # apart.  Both halves matter — preserving a real blank and never
+    # inventing one — and only the second catches an over-eager fix.
+
+    def _body_lines(self, out: str) -> list[str]:
+        """The lines strictly inside the outermost `{ ... }`."""
+        lines = out.splitlines()
+        open_i = lines.index("{")
+        close_i = len(lines) - 1 - lines[::-1].index("}")
+        return lines[open_i + 1:close_i]
+
+    def test_a_blank_line_between_two_statements_survives(self) -> None:
+        """A paragraph break between statements is authored, not noise."""
+        out = _fmt("""
+            public fn main(-> @Unit)
+              requires(true)
+              ensures(true)
+              effects(<IO>)
+            {
+              IO.print("a");
+
+              IO.print("b");
+              ()
+            }
+        """)
+        assert self._body_lines(out) == [
+            '  IO.print("a");',
+            "",
+            '  IO.print("b");',
+            "  ()",
+        ], f"the blank between the two statements was swallowed:\n{out}"
+        assert format_source(out) == out, "second pass differs"
+
+    def test_a_blank_line_before_a_block_result_survives(self) -> None:
+        """The `examples/file_io.vera` shape: `match ...;`, blank, `()`.
+
+        The result expression is not a statement, so a fix that only
+        walks `block.statements` leaves this one stripped.
+        """
+        out = _fmt("""
+            public fn main(-> @Unit)
+              requires(true)
+              ensures(true)
+              effects(<IO>)
+            {
+              match IO.read_file("a.txt") {
+                Ok(@String) -> IO.print(@String.0),
+                Err(@String) -> IO.print(@String.0)
+              };
+
+              ()
+            }
+        """)
+        lines = out.splitlines()
+        end = next(i for i, ln in enumerate(lines) if ln.strip() == "};")
+        assert lines[end + 1] == "", (
+            f"blank before the trailing `()` was swallowed:\n{out}"
+        )
+        assert lines[end + 2].strip() == "()", (
+            f"expected `()` after the blank, got {lines[end + 2]!r}:\n{out}"
+        )
+        assert format_source(out) == out, "second pass differs"
+
+    def test_consecutive_blank_lines_collapse_to_one(self) -> None:
+        """However many the source had, the canonical form has one."""
+        out = _fmt("""
+            public fn main(-> @Unit)
+              requires(true)
+              ensures(true)
+              effects(<IO>)
+            {
+              IO.print("a");
+
+
+
+              IO.print("b");
+              ()
+            }
+        """)
+        assert self._body_lines(out) == [
+            '  IO.print("a");',
+            "",
+            '  IO.print("b");',
+            "  ()",
+        ], f"a run of blanks must collapse to exactly one:\n{out}"
+        assert format_source(out) == out, "second pass differs"
+
+    def test_no_blank_line_is_invented_where_source_had_none(self) -> None:
+        """The anti-invention direction — what an over-eager fix breaks.
+
+        Source with no gaps must format with no gaps: preserving a blank
+        is a source-driven decision, not a per-statement default.
+        """
+        out = _fmt("""
+            public fn main(-> @Unit)
+              requires(true)
+              ensures(true)
+              effects(<IO>)
+            {
+              let @Int = 1;
+              IO.print("a");
+              IO.print("b");
+              match IO.read_file("a.txt") {
+                Ok(@String) -> IO.print(@String.0),
+                Err(@String) -> IO.print(@String.0)
+              };
+              ()
+            }
+        """)
+        assert "" not in self._body_lines(out), (
+            f"a blank line was invented where the source had none:\n{out}"
+        )
+        assert format_source(out) == out, "second pass differs"
+
+    def test_no_blank_line_opens_or_closes_a_block(self) -> None:
+        """A gap against a brace is padding, not a paragraph break.
+
+        Rule 2 puts the braces on their own lines; a blank held against
+        one separates nothing, so it is not reproduced even though the
+        source line really was empty.
+        """
+        out = _fmt("""
+            public fn main(-> @Unit)
+              requires(true)
+              ensures(true)
+              effects(<IO>)
+            {
+
+              IO.print("a");
+              ()
+
+            }
+        """)
+        body = self._body_lines(out)
+        assert body and body[0] != "" and body[-1] != "", (
+            f"a blank must not sit against a brace:\n{out}"
+        )
+        assert format_source(out) == out, "second pass differs"
+
+    def test_no_blank_line_opens_a_block_holding_only_a_result(self) -> None:
+        """The same rule where the result expression is the *first* thing.
+
+        A block with no statements keeps its whole content in `expr`, so
+        the gap-above-the-result rule reaches it with nothing before it
+        and the gap it would reproduce is the one against the brace.
+        """
+        out = _fmt("""
+            public fn main(-> @Unit)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+
+              ()
+            }
+        """)
+        assert self._body_lines(out) == ["  ()"], (
+            f"a statements-free block must open flush with its brace:\n{out}"
+        )
+        assert format_source(out) == out, "second pass differs"
+
+    def test_a_whitespace_only_line_counts_as_a_blank(self) -> None:
+        """Source reaching the formatter is not canonical yet.
+
+        Rule 9 strips trailing whitespace on the way *out*, so a
+        separator carrying stray spaces on the way *in* is ordinary —
+        and it is the same paragraph break as an empty line.  Testing
+        for an empty string instead of a blank one would drop the gap
+        from exactly the files that most need reformatting.  Written
+        without `dedent`, which normalises such lines away.
+        """
+        out = format_source(
+            'public fn main(-> @Unit)\n'
+            '  requires(true)\n'
+            '  ensures(true)\n'
+            '  effects(<IO>)\n'
+            '{\n'
+            '  IO.print("a");\n'
+            '     \n'  # the separator: whitespace, not empty
+            '  IO.print("b");\n'
+            '  ()\n'
+            '}\n'
+        )
+        assert self._body_lines(out) == [
+            '  IO.print("a");',
+            "",
+            '  IO.print("b");',
+            "  ()",
+        ], f"a whitespace-only line is a blank line:\n{out!r}"
+        assert format_source(out) == out, "second pass differs"
+
+    def test_top_level_declarations_always_get_exactly_one_blank(self) -> None:
+        """Rule 13's second half: a separator, not a preserved gap.
+
+        Unlike a gap inside a block this one does not read from source —
+        none and three both come out as one — so extending gap
+        preservation outward must not make the separator conditional.
+        """
+        fn = (
+            "public fn {}(-> @Unit)\n  requires(true)\n  ensures(true)\n"
+            "  effects(pure)\n{{\n  ()\n}}\n"
+        )
+        a, b = fn.format("a"), fn.format("b")
+        for gap in ("", "\n", "\n\n\n"):
+            out = format_source(a + gap + b)
+            assert out.count("\n\n") == 1, (
+                f"source gap {gap!r} must yield exactly one blank:\n{out}"
+            )
+            assert "}\n\npublic fn b" in out, (
+                f"the separator must sit between the declarations:\n{out}"
+            )
+
+    def test_the_emitter_never_stacks_two_blank_lines(self) -> None:
+        """Rule 13's "at most one" is enforced at the emitter, not per caller.
+
+        Three call sites reproduce a gap — the declaration separator,
+        the comment emitter for the space *below* a comment, the block
+        emitter for the space *above* one — and no source arrangement
+        currently puts two of them back to back, because the comment
+        they bracket always lands between them.  Clamping here is what
+        keeps that true for a fourth: a caller cannot open the output
+        with a blank or stack one on another, whatever it knows about
+        the others.
+        """
+        fmt = Formatter(_Attached(before={}, inline=[], header=[], footer=[]))
+        fmt._blank()
+        assert fmt._lines == [], "a blank must not open the output"
+        fmt._line("x")
+        fmt._blank()
+        fmt._blank()
+        fmt._blank()
+        assert fmt._lines == ["x", ""], (
+            f"blank lines must not stack: {fmt._lines!r}"
+        )
+
+    def test_a_blank_above_and_below_a_comment_both_survive(self) -> None:
+        """Two independent gaps: one before the comment, one after it."""
+        out = _fmt("""
+            public fn main(-> @Unit)
+              requires(true)
+              ensures(true)
+              effects(<IO>)
+            {
+              IO.print("a");
+
+              -- A note held off the statement below it.
+
+              IO.print("b");
+              ()
+            }
+        """)
+        assert self._body_lines(out) == [
+            '  IO.print("a");',
+            "",
+            "  -- A note held off the statement below it.",
+            "",
+            '  IO.print("b");',
+            "  ()",
+        ], f"both gaps must survive, each as one blank:\n{out}"
+        assert format_source(out) == out, "second pass differs"
+
+    def test_a_comment_with_a_blank_after_it_yields_exactly_one_blank(
+        self,
+    ) -> None:
+        """The double-fire guard: two code paths, one blank line.
+
+        `_emit_comments` reproduces the gap *below* a comment and the
+        statement emitter reproduces the gap *above* one.  A fix that
+        lets both fire on the same source blank emits two.
+        """
+        out = _fmt("""
+            public fn main(-> @Unit)
+              requires(true)
+              ensures(true)
+              effects(<IO>)
+            {
+              IO.print("a");
+              -- A note held off the statement below it.
+
+              IO.print("b");
+              ()
+            }
+        """)
+        assert self._body_lines(out) == [
+            '  IO.print("a");',
+            "  -- A note held off the statement below it.",
+            "",
+            '  IO.print("b");',
+            "  ()",
+        ], f"exactly one blank, and only below the comment:\n{out}"
+        assert format_source(out) == out, "second pass differs"
