@@ -2974,6 +2974,22 @@ class TestMainInProcess:
                 main()
             assert exc_info.value.code == 0
 
+    def test_fmt_check_rejects_crlf(self, tmp_path: Path) -> None:
+        """--check must agree with the corpus gate: CRLF is not canonical.
+
+        read_text's universal-newline translation used to erase the CR
+        before the comparison, so a CRLF file compared equal to its LF
+        formatting and --check reported OK — while the corpus gate reads
+        bytes and rejects it. Two surfaces judging one file differently.
+        """
+        f = tmp_path / "crlf.vera"
+        f.write_bytes(
+            b"public fn f(@Int -> @Int)\r\n  requires(true)\r\n"
+            b"  ensures(true)\r\n  effects(pure)\r\n{\r\n  @Int.0\r\n}\r\n"
+        )
+        rc = cmd_fmt(str(f), check=True)
+        assert rc == 1, "a CRLF file must not be reported canonical"
+
     def test_fmt_dispatch(self, capsys: pytest.CaptureFixture[str]) -> None:
         """fmt command dispatches."""
         from unittest.mock import patch

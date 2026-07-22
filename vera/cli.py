@@ -1408,11 +1408,20 @@ def cmd_fmt(
 
     try:
         p = Path(path)
-        source = p.read_text(encoding="utf-8")
+        # Read bytes, not text: read_text's universal-newline translation
+        # erases carriage returns before we can see them, so a CRLF file
+        # would compare equal to its LF formatting and --check would call
+        # it canonical — disagreeing with the corpus gate, which reads
+        # bytes and rejects any CR. Canonical Vera is LF-only (spec 1.8
+        # rule 10). Normalise for formatting, but a file that HELD a CR
+        # was not already canonical.
+        raw = p.read_bytes()
+        had_cr = b"\r" in raw
+        source = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
         formatted = format_source(source, file=str(p))
 
         if check:
-            if source == formatted:
+            if source == formatted and not had_cr:
                 print(f"OK: {path}")
                 return 0
             print(f"Would reformat: {path}", file=sys.stderr)
