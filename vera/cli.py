@@ -1428,7 +1428,12 @@ def cmd_fmt(
             return 1
 
         if write:
-            p.write_text(formatted, encoding="utf-8")
+            # Write bytes, not text: Path.write_text opens in text mode,
+            # which on Windows translates every "\n" to "\r\n" — so the
+            # *canonical* formatter would emit non-canonical CRLF output
+            # (spec 1.8 rule 10 is LF-only), and --check would then flag
+            # what --write just produced. Bytes bypass the translation.
+            p.write_bytes(formatted.encode("utf-8"))
             print(f"Formatted: {path}")
             return 0
 
