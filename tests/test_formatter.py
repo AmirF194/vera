@@ -2060,6 +2060,48 @@ class TestCanonicalFormGaps:
         parse_to_ast(out)
         assert format_source(out) == out, "second pass differs"
 
+    def test_own_line_comment_stays_above_a_handler_clause(self) -> None:
+        """The fourth position with no anchor of its own (#1136).
+
+        Handler clauses were never anchored, so both clause comments
+        fell through to the declaration backstop and were re-emitted
+        together below the whole `handle`, out of the clauses they
+        document.
+        """
+        out = _fmt("""
+            effect Counter {
+              op get(Unit -> Int);
+              op inc(Unit -> Unit);
+            }
+
+            public fn counted(@Int -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              handle[Counter](@Int = 0) {
+                -- read the counter
+                get(@Unit) -> resume(@Int.0),
+                -- bump it
+                inc(@Unit) -> resume(())
+              } in {
+                @Int.0
+              }
+            }
+        """)
+        lines = out.splitlines()
+        for comment, clause in (
+            ("-- read the counter", "get(@Unit) ->"),
+            ("-- bump it", "inc(@Unit) ->"),
+        ):
+            i = next(n for n, ln in enumerate(lines) if comment in ln)
+            assert clause in lines[i + 1], (
+                f"{comment!r} must sit directly above {clause!r}, "
+                f"got {lines[i + 1]!r}\n{out}"
+            )
+        parse_to_ast(out)
+        assert format_source(out) == out, "second pass differs"
+
     # -- F3: blank line before a leading comment block ------------------
 
     def test_blank_line_between_a_comment_block_and_its_declaration(

@@ -376,6 +376,12 @@ def _collect_interior_anchors(node: object, anchors: list[int]) -> None:
                 anchors.append(arm.span.line)
             _collect_interior_anchors(arm.body, anchors)
     elif isinstance(node, HandleExpr):
+        for clause in node.clauses:
+            # Same as a match arm: without an anchor the innermost span
+            # containing a clause comment is the handle, so every one
+            # fell through to the declaration backstop (#1136).
+            if clause.span:
+                anchors.append(clause.span.line)
         _collect_interior_anchors(node.body, anchors)
     elif isinstance(node, FnDecl):
         # Contract and effect clauses each occupy their own line
@@ -1289,6 +1295,8 @@ class Formatter:
             comma = "," if i < len(expr.clauses) - 1 else ""
             if i:
                 self._blank_if_separated(clause)
+            if clause.span:
+                self._emit_comments(clause.span.line)
             self._emit_handler_clause(clause, comma)
         self._indent_dec()
         self._line("} in {")
