@@ -48,7 +48,11 @@ public fn main(@Unit -> @Int)
   let @Array<Bool> = [true, false];
   let @UnitToBool = make_array_capture(@Array<Bool>.0);
   let @Bool = apply_fn(@UnitToBool.0, ());
-  let @Int = if @Bool.0 then { 1 } else { 0 };
+  let @Int = if @Bool.0 then {
+    1
+  } else {
+    0
+  };
   -- Sum: 42 + 7 + 1 = 50. Return 0 on success.
   let @Int = @Int.2 + @Int.1 + @Int.0;
   if @Int.0 == 50 then {

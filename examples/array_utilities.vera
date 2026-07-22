@@ -129,23 +129,47 @@ public fn main(-> @Int)
 {
   let @Int = merge_sections(());
   -- flatten: 7 grades total
-  let @Int = if @Int.0 == 7 then { 1 } else { 0 };
+  let @Int = if @Int.0 == 7 then {
+    1
+  } else {
+    0
+  };
   let @Int = count_above_cutoff(());
   -- mapi fold: 6 grades are >= 50 (85, 72, 91, 60, 78, 55).  Only
   -- 45 fails the >=50 threshold.
-  let @Int = if @Int.0 == 6 then { @Int.1 + 1 } else { @Int.1 };
+  let @Int = if @Int.0 == 6 then {
+    @Int.1 + 1
+  } else {
+    @Int.1
+  };
   let @Bool = anyone_failed(());
   -- any: grade 45 fails → true
-  let @Int = if @Bool.0 then { @Int.0 + 1 } else { @Int.0 };
+  let @Int = if @Bool.0 then {
+    @Int.0 + 1
+  } else {
+    @Int.0
+  };
   let @Bool = everyone_passed(());
   -- all: not everyone passed → false
-  let @Int = if @Bool.0 then { @Int.0 } else { @Int.0 + 1 };
+  let @Int = if @Bool.0 then {
+    @Int.0
+  } else {
+    @Int.0 + 1
+  };
   let @Int = first_above(80);
   -- find: first grade > 80 is 91
-  let @Int = if @Int.0 == 91 then { @Int.1 + 1 } else { @Int.1 };
+  let @Int = if @Int.0 == 91 then {
+    @Int.1 + 1
+  } else {
+    @Int.1
+  };
   let @Int = lowest_grade(());
   -- sort + reverse: lowest is 45
-  let @Int = if @Int.0 == 45 then { @Int.1 + 1 } else { @Int.1 };
+  let @Int = if @Int.0 == 45 then {
+    @Int.1 + 1
+  } else {
+    @Int.1
+  };
   -- Final sanity check: count is 6 so far; one more for program
   -- completion.
   @Int.0 + 1

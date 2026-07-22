@@ -704,7 +704,7 @@ class TestCmdCompile:
         # Copy hello_world.vera to tmp_path
         src = Path(HELLO_WORLD)
         dest = tmp_path / "hello_world.vera"
-        dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+        dest.write_bytes(src.read_bytes())
         rc = cmd_compile(str(dest))
         assert rc == 0
         wasm = tmp_path / "hello_world.wasm"
@@ -1724,7 +1724,7 @@ class TestCmdFmt:
     ) -> None:
         """Default mode prints formatted source to stdout."""
         path = tmp_path / "test.vera"
-        path.write_text(_non_canonical_source(), encoding="utf-8")
+        path.write_bytes(_non_canonical_source().encode("utf-8"))
         rc = cmd_fmt(str(path))
         assert rc == 0
         out = capsys.readouterr().out
@@ -1735,7 +1735,7 @@ class TestCmdFmt:
     ) -> None:
         """--check returns 0 for already-canonical source."""
         path = tmp_path / "test.vera"
-        path.write_text(_canonical_source(), encoding="utf-8")
+        path.write_bytes(_canonical_source().encode("utf-8"))
         rc = cmd_fmt(str(path), check=True)
         assert rc == 0
         out = capsys.readouterr().out
@@ -1746,7 +1746,7 @@ class TestCmdFmt:
     ) -> None:
         """--check returns 1 for non-canonical source."""
         path = tmp_path / "test.vera"
-        path.write_text(_non_canonical_source(), encoding="utf-8")
+        path.write_bytes(_non_canonical_source().encode("utf-8"))
         rc = cmd_fmt(str(path), check=True)
         assert rc == 1
         err = capsys.readouterr().err
@@ -1755,7 +1755,7 @@ class TestCmdFmt:
     def test_write_in_place(self, tmp_path: Path) -> None:
         """--write overwrites the file with canonical form."""
         path = tmp_path / "test.vera"
-        path.write_text(_non_canonical_source(), encoding="utf-8")
+        path.write_bytes(_non_canonical_source().encode("utf-8"))
         rc = cmd_fmt(str(path), write=True)
         assert rc == 0
         result = path.read_text(encoding="utf-8")
@@ -1764,7 +1764,7 @@ class TestCmdFmt:
     def test_write_idempotent(self, tmp_path: Path) -> None:
         """--write on already-canonical file leaves it unchanged."""
         path = tmp_path / "test.vera"
-        path.write_text(_canonical_source(), encoding="utf-8")
+        path.write_bytes(_canonical_source().encode("utf-8"))
         rc = cmd_fmt(str(path), write=True)
         assert rc == 0
         assert path.read_text(encoding="utf-8") == _canonical_source()
@@ -1811,7 +1811,7 @@ class TestCmdFmtMain:
 
     def test_dispatch_fmt_check_canonical(self, tmp_path: Path) -> None:
         path = tmp_path / "test.vera"
-        path.write_text(_canonical_source(), encoding="utf-8")
+        path.write_bytes(_canonical_source().encode("utf-8"))
         result = subprocess.run(
             [sys.executable, "-m", "vera.cli", "fmt", "--check", str(path)],
             capture_output=True, text=True,
@@ -1822,7 +1822,7 @@ class TestCmdFmtMain:
 
     def test_dispatch_fmt_check_non_canonical(self, tmp_path: Path) -> None:
         path = tmp_path / "test.vera"
-        path.write_text(_non_canonical_source(), encoding="utf-8")
+        path.write_bytes(_non_canonical_source().encode("utf-8"))
         result = subprocess.run(
             [sys.executable, "-m", "vera.cli", "fmt", "--check", str(path)],
             capture_output=True, text=True,
@@ -1833,7 +1833,7 @@ class TestCmdFmtMain:
 
     def test_dispatch_fmt_write(self, tmp_path: Path) -> None:
         path = tmp_path / "test.vera"
-        path.write_text(_non_canonical_source(), encoding="utf-8")
+        path.write_bytes(_non_canonical_source().encode("utf-8"))
         result = subprocess.run(
             [sys.executable, "-m", "vera.cli", "fmt", "--write", str(path)],
             capture_output=True, text=True,
@@ -2452,7 +2452,7 @@ class TestCmdCompileBrowser:
         """Without -o, browser target creates <stem>_browser/ next to source."""
         src = Path(HELLO_WORLD)
         dest = tmp_path / "hello_world.vera"
-        dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+        dest.write_bytes(src.read_bytes())
         rc = cmd_compile(str(dest), target="browser")
         assert rc == 0
         captured = capsys.readouterr()
@@ -2974,6 +2974,22 @@ class TestMainInProcess:
                 main()
             assert exc_info.value.code == 0
 
+    def test_fmt_check_rejects_crlf(self, tmp_path: Path) -> None:
+        """--check must agree with the corpus gate: CRLF is not canonical.
+
+        read_text's universal-newline translation used to erase the CR
+        before the comparison, so a CRLF file compared equal to its LF
+        formatting and --check reported OK — while the corpus gate reads
+        bytes and rejects it. Two surfaces judging one file differently.
+        """
+        f = tmp_path / "crlf.vera"
+        f.write_bytes(
+            b"public fn f(@Int -> @Int)\r\n  requires(true)\r\n"
+            b"  ensures(true)\r\n  effects(pure)\r\n{\r\n  @Int.0\r\n}\r\n"
+        )
+        rc = cmd_fmt(str(f), check=True)
+        assert rc == 1, "a CRLF file must not be reported canonical"
+
     def test_fmt_dispatch(self, capsys: pytest.CaptureFixture[str]) -> None:
         """fmt command dispatches."""
         from unittest.mock import patch
@@ -3158,7 +3174,7 @@ class TestMainInProcess:
         from unittest.mock import patch
         src = Path(INCREMENT)
         dest = tmp_path / "test.vera"
-        dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+        dest.write_bytes(src.read_bytes())
         with patch("sys.argv", ["vera", "fmt", "--write", str(dest)]):
             with pytest.raises(SystemExit) as exc_info:
                 from vera.cli import main
@@ -3172,7 +3188,7 @@ class TestMainInProcess:
         from unittest.mock import patch
         src = Path(INCREMENT)
         dest = tmp_path / "test.vera"
-        dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+        dest.write_bytes(src.read_bytes())
         with patch("sys.argv", ["vera", "fmt", "--check", str(dest)]):
             with pytest.raises(SystemExit) as exc_info:
                 from vera.cli import main

@@ -43,7 +43,11 @@ public fn test_parse_bool_true(@Unit -> @Int)
   effects(pure)
 {
   match parse_bool("true") {
-    Ok(@Bool) -> if @Bool.0 then { 1 } else { 0 },
+    Ok(@Bool) -> if @Bool.0 then {
+      1
+    } else {
+      0
+    },
     Err(_) -> 0 - 1
   }
 }
@@ -54,7 +58,11 @@ public fn test_parse_bool_false(@Unit -> @Int)
   effects(pure)
 {
   match parse_bool("false") {
-    Ok(@Bool) -> if @Bool.0 then { 1 } else { 0 },
+    Ok(@Bool) -> if @Bool.0 then {
+      1
+    } else {
+      0
+    },
     Err(_) -> 0 - 1
   }
 }

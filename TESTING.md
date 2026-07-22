@@ -6,7 +6,7 @@ This is the single source of truth for Vera's testing infrastructure, coverage d
 
 | Metric | Value |
 |--------|-------|
-| **Tests** | 8,281 across 127 files (~106,000 lines of test code; 8,176 passed + 26 stress, 79 skipped) |
+| **Tests** | 8,343 across 127 files (~106,000 lines of test code; 8,238 passed + 26 stress, 79 skipped) |
 | **Compiler code coverage** | 95% Python, 61% JavaScript — 91% combined (CI minimum: 80%) |
 | **Conformance programs** | 163 programs across 9 spec chapters, validating every language feature |
 | **Example programs** | 40, all validated through `vera check` + `vera verify` |
@@ -144,8 +144,8 @@ python scripts/check_wheel_availability.py           # pre-flight: every runtime
 | `test_string_length_soundness.py` | 15 | 278 | #802 — string_length code-point vs UTF-8 byte soundness: a non-literal `string_length` defers to Tier 3 (the issue's `"é"` probe no longer proves `== 1` at Tier 1), a string-literal length is modeled at its exact UTF-8 byte count (`== 2` for `"é"`), and the boolean predicates `string_contains` / `string_starts_with` / `string_ends_with` stay Tier 1 (sound under UTF-8 self-synchronization), while a predicate over an astral (> U+2FFFF) or lone-surrogate literal defers to Tier 3 (z3.StringVal cannot model those code points) |
 | `test_errors.py` | 62 | 657 | Error code registry, diagnostic formatting, serialisation, SourceLocation, and error display sync — the canonical `E001` diagnostic must match each of its mirrors: `README.md`, `docs/index.html`, `spec/00-introduction.md`, `AGENTS.md`'s example `--json` block, and the hardcoded example in `scripts/build_site.py` that generates `docs/index.md` (#829; `AGENTS.md`'s ellipsis-truncated description/rationale are prefix-compared, its `error_code`/`spec_ref`/`fix` exactly) |
 | `test_eq_contract_874.py` | 11 |      378 | `eq`/`compare` ability ops in contract position: codegen canonicalization + verifier Tier-1 discharge/counterexample, where-fn contracts, compare Ordering-sort materialization, shadowing guard (#874) |
-| `test_formatter.py` | 390 | 1,758 | Comment extraction, interior comment positioning, expression/declaration formatting, match arm block bodies, idempotency, parenthesization, spec rules, ability declarations |
-| `test_cli.py` | 264 | 4,142 | CLI commands (check, verify, compile, run, serve, test, fmt, version, quiet), subprocess integration, JSON error paths (including the `verify --json` `obligations` array and its summary-reproducibility pin, #967), runtime traps, arg validation, multi-file resolution, IO exit codes, --explain-slots, `builtins`/`effects`/`errors` introspection dispatch, and a USAGE-completeness guard (every dispatched `cmd_<name>` handler has a help row) |
+| `test_formatter.py` | 451 | 3,676 | Comment extraction, interior comment positioning, expression/declaration formatting, match arm block bodies, §1.8 rule 2 in value position (a `let`-bound `match`/`if` expands exactly as one in statement position, and a comment above an arm inside a statement's value stays on that arm), blank-line preservation (§1.8 rule 13 — gaps between statements, before a block result and around a comment, collapsed to one and never invented), idempotency, parenthesization, spec rules, ability declarations |
+| `test_cli.py` | 265 | 4,158 | CLI commands (check, verify, compile, run, serve, test, fmt, version, quiet), subprocess integration, JSON error paths (including the `verify --json` `obligations` array and its summary-reproducibility pin, #967), runtime traps, arg validation, multi-file resolution, IO exit codes, --explain-slots, `builtins`/`effects`/`errors` introspection dispatch, and a USAGE-completeness guard (every dispatched `cmd_<name>` handler has a help row) |
 | `test_introspect.py` | 38 | 192 | `vera builtins/effects/errors --json` registry introspection (#539): the `{schema, items}` envelope, count-equals-registry differential per registry, error-phase derivation, effect/ability `kind` tagging, the parameterised `Exn<T>` effect, and best-effort `since` attribution with full-coverage guards |
 | `test_resolver.py` | 20 | 602 | Module resolution, path lookup, parse caching, circular import detection, the E011/E012/E013 diagnostic contract, internal-error isolation (a compiler bug is not masked as E013), and the transitive-closure return of `resolve_imports` (#890 — a diamond yields each reachable module once, direct imports tagged `direct`, the transitive one not) |
 | `test_types.py` | 82 | 443 | Type operations: subtyping, effect subtyping, equality, substitution, pretty-printing (including leaked-placeholder rendering to `?`, #1069), canonical names |
@@ -635,12 +635,13 @@ When extending the compiler, add tests following the existing patterns:
 
 ## Validation Scripts
 
-Twenty-one scripts in `scripts/` validate cross-cutting concerns beyond unit tests (one of them — `build_site.py` — generates rather than checks; the doc-block gates share the fence-annotation reader `scripts/doc_annotations.py`, a helper module rather than a gate):
+Twenty-two scripts in `scripts/` validate cross-cutting concerns beyond unit tests (one of them — `build_site.py` — generates rather than checks; the doc-block gates share the fence-annotation reader `scripts/doc_annotations.py`, a helper module rather than a gate):
 
 | Script | What it validates |
 |--------|-------------------|
 | `check_conformance.py` | All 163 conformance entries hold at their declared level (parse/check/verify/run) — positives pass; the negatives fail `check` with their `expected_error` E-code |
 | `check_examples.py` | All 40 `.vera` examples pass `vera check` + `vera verify` |
+| `check_corpus_canonical.py` | All 209 corpus programs (recursive over `examples/` + `tests/conformance/`) are in canonical form under `vera fmt` |
 | `check_examples_readme.py` | Every `vera run` command in examples/README.md references an existing file and exported function |
 | `check_spec_examples.py` | 189 parseable code blocks from spec chapters: parse, type-check, and verify |
 | `check_readme_examples.py` | All Vera code blocks in README.md parse correctly |
@@ -727,7 +728,7 @@ Per `spec/00-introduction.md` §0.5.8: fields MAY be added (consumers MUST toler
 
 ## Pre-commit Hooks
 
-Every push is checked by 31 configured hooks across two stages: 29 are configured at the commit stage (after `pre-commit install`), and 2 (`check-changelog-updated`, `uv-lock-check`) are configured at the push stage (after `pre-commit install --hook-type pre-push`). Many commit-stage hooks use per-hook `files:` / `types:` filters and only fire when matching files are staged — a docs-only commit triggers a small subset, a compiler-level commit triggers most. Full list:
+Every push is checked by 32 configured hooks across two stages: 30 are configured at the commit stage (after `pre-commit install`), and 2 (`check-changelog-updated`, `uv-lock-check`) are configured at the push stage (after `pre-commit install --hook-type pre-push`). Many commit-stage hooks use per-hook `files:` / `types:` filters and only fire when matching files are staged — a docs-only commit triggers a small subset, a compiler-level commit triggers most. Full list:
 
 | Hook | What it does |
 |------|-------------|
@@ -743,6 +744,7 @@ Every push is checked by 31 configured hooks across two stages: 29 are configure
 | `pytest tests/ -q` | Run full test suite |
 | `check_conformance.py` | All 163 conformance entries hold at their declared level — positives pass; negatives fail `check` with their `expected_error` E-code |
 | `check_examples.py` | All 40 examples pass `vera check` + `vera verify` |
+| `check_corpus_canonical.py` | All 209 `examples/` + `tests/conformance/` programs (recursive) are in canonical form (`vera fmt`) |
 | `check_examples_readme.py` | `vera run` commands in `examples/README.md` reference existing files and exported functions |
 | `check_readme_examples.py` | README code blocks parse correctly |
 | `check_examples_doc.py` | EXAMPLES.md code blocks parse correctly |
@@ -778,7 +780,7 @@ GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the
 | **test** | Python 3.11, 3.12, 3.13 × ubuntu-latest, macos-15, macos-26, windows-latest, plus advisory ubuntu-24.04-arm × 3.12 (13 combos) | `pytest -v` passes on all combinations |
 | **test** (coverage) | Python 3.12 x Ubuntu only | `pytest --cov=vera --cov-fail-under=80` |
 | **typecheck** | Python 3.12 x Ubuntu | `mypy vera/` clean in strict mode |
-| **lint** | Python 3.12 x Ubuntu | `check_changelog_updated.py`, `check_conformance.py`, `check_examples.py`, `check_examples_readme.py`, `check_version_sync.py`, `check_spec_examples.py`, `check_readme_examples.py`, `check_skill_examples.py`, `check_faq_examples.py`, `check_pypi_readme_examples.py`, `check_html_examples.py`, `check_e602_clean.py`, `check_doc_builtin_shadowing.py`, `check_diagnostic_fields.py`, `check_site_assets.py`, `check_licenses.py`, `check_doc_counts.py`, `check_limitations_sync.py`, `ruff check --select S vera/` (security rules) |
+| **lint** | Python 3.12 x Ubuntu | `check_changelog_updated.py`, `check_conformance.py`, `check_examples.py`, `check_corpus_canonical.py`, `check_examples_readme.py`, `check_version_sync.py`, `check_spec_examples.py`, `check_readme_examples.py`, `check_skill_examples.py`, `check_faq_examples.py`, `check_pypi_readme_examples.py`, `check_html_examples.py`, `check_e602_clean.py`, `check_doc_builtin_shadowing.py`, `check_diagnostic_fields.py`, `check_site_assets.py`, `check_licenses.py`, `check_doc_counts.py`, `check_limitations_sync.py`, `ruff check --select S vera/` (security rules) |
 | **security** | Ubuntu | [Gitleaks](https://github.com/gitleaks/gitleaks-action) secret scanning on full history |
 | **dependency-audit** | Python 3.12 x Ubuntu | `pip-audit --skip-editable --ignore-vuln CVE-2026-4539` — checks all installed packages against the OSV vulnerability database (skips the local editable `vera` package; `CVE-2026-4539` suppressed pending a pygments fix release) |
 | **wheel-preflight** | Python 3.12 x Ubuntu | `python scripts/check_wheel_availability.py` — verifies every runtime dep has prebuilt wheels for every (platform, python-version) tuple documented in README §Supported platforms; structural backstop for #691-class install regressions |

@@ -186,6 +186,7 @@ pytest tests/test_conformance.py -v    # Conformance suite only
 mypy vera/                             # Type-check the compiler
 python scripts/check_conformance.py    # All 163 conformance programs hold (positives pass; negatives fail with their E-code)
 python scripts/check_examples.py       # All 40 examples must pass
+python scripts/check_corpus_canonical.py # All 209 corpus programs in canonical form
 ```
 
 Test helpers follow a pattern: `_check_ok(source)` / `_check_err(source, match)` / `_verify_ok(source)` / `_verify_err(source, match)`. See existing tests for examples.

@@ -56,6 +56,20 @@ repos:
         pass_filenames: false
         files: '(\.vera$|vera/.*\.py$|vera/grammar\.lark$)'
 
+      - id: corpus-canonical
+        name: corpus canonical form
+        entry: .venv/bin/python scripts/check_corpus_canonical.py
+        language: system
+        pass_filenames: false
+        # Canonical form is a product of the whole front end, not just
+        # the formatter: this PR changed it from `vera/transform.py` and
+        # `vera/ast.py` (a new `where_span`), neither of which a
+        # formatter-only pattern matches.  Match all Python under
+        # `vera/` (same reasoning as walker-coverage and
+        # diagnostic-fields) so no input to `vera fmt` can change
+        # without re-running the gate.
+        files: '(\.vera$|vera/.*\.py$|vera/grammar\.lark$|scripts/check_corpus_canonical\.py$)'
+
       - id: examples-readme
         name: examples readme
         entry: .venv/bin/python scripts/check_examples_readme.py

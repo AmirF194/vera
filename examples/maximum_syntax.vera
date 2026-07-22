@@ -8,7 +8,6 @@ effect Counter {
   -- Single line comments can be indented.
   -- Semi-colons separate op declarations.
   op increment(Unit -> Unit);
-
   -- The normal style is 2-space indents, snake_case function names and
   -- CamelCase names for types/effects. Vera does not have variable
   -- names.
@@ -31,12 +30,10 @@ effect Exn<E> {
 
 -- Refinement types
 type PosInt = { @Int | @Int.0 > 0 };
+
 -- In float literals the decimal point is required. We couldn't replace
 -- 0.0 with 0 below.
-type Percentage = {
-  @Float64 |
-  @Float64.0 >= 0.0 && @Float64.0 <= 1.0
-};
+type Percentage = { @Float64 | @Float64.0 >= 0.0 && @Float64.0 <= 1.0 };
 
 -- None of the following are valid:
 -- type Number = Int;
@@ -183,7 +180,11 @@ private fn to_percentage(@PosInt -> @Percentage)
   -- The verifier checks assertions.
   assert(@PosInt.0 > 0);
   -- `if`/`then`/`else` is an expression, not a statement.
-  let @Int = if @PosInt.0 > 100 then { 100 } else { @PosInt.0 };
+  let @Int = if @PosInt.0 > 100 then {
+    100
+  } else {
+    @PosInt.0
+  };
   let @Float64 = int_to_float(@Int.0) / 100.0;
   -- `assume` tells the verifier the fact is true.
   -- The verifier does not check assumptions.
@@ -325,8 +326,7 @@ public fn respond(@Request -> @Response)
 {
   match @Request.0 {
     -- `\( )` interpolates an expression into a string literal.
-    Request(@String, @String, @Map<String, String>, @String) ->
-      Response(200, map_insert(map_new(), "content-type", "text/plain"), "hello, \(@String.1)")
+    Request(@String, @String, @Map<String, String>, @String) -> Response(200, map_insert(map_new(), "content-type", "text/plain"), "hello, \(@String.1)")
   }
 }
 
@@ -387,7 +387,7 @@ public fn main(@Unit -> @Unit)
   -- The rest of the escape sequences: \\ (backslash), \t (tab), \r
   -- (carriage return), \0 (null), and \u{XXXX} (Unicode code point,
   -- 1-6 hex digits).
-  IO.print("escapes: backslash=\\ tab=[\t] cr=[\r] null=[\0] unicode=\u{1F600}\n");
+  IO.print("escapes: backslash=\\ tab=[\t] cr=[\r] null=[\0] unicode=😀\n");
   IO.print("all_positive([1, 2, 3]) = \(all_positive([1, 2, 3]))\n");
   IO.print("has_negative([1, -2, 3]) = \(has_negative([1, -2, 3]))\n");
   -- float_to_string converts a non-String result before interpolation --

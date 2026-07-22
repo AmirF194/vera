@@ -17,7 +17,9 @@ private fn length(@Chain -> @Nat)
 {
   match @Chain.0 {
     Tip -> 0,
-    Link(@Tuple<Chain, Int>) -> match @Tuple<Chain, Int>.0 { Tuple(@Chain, @Int) -> 1 + length(@Chain.0) }
+    Link(@Tuple<Chain, Int>) -> match @Tuple<Chain, Int>.0 {
+      Tuple(@Chain, @Int) -> 1 + length(@Chain.0)
+    }
   }
 }
 

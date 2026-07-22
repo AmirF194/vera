@@ -22,6 +22,10 @@ public fn main(@Unit -> @Int)
 {
   let @Tuple<Unit, Int> = mkt(42);
   match @Tuple<Unit, Int>.0 {
-    Tuple(@Unit, @Int) -> if @Int.0 == 42 then { 0 } else { 1 }
+    Tuple(@Unit, @Int) -> if @Int.0 == 42 then {
+      0
+    } else {
+      1
+    }
   }
 }

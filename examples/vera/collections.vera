@@ -3,6 +3,12 @@
 
 module vera.collections;
 
-public data List<T> { Nil, Cons(T, List<T>) }
+public data List<T> {
+  Nil,
+  Cons(T, List<T>)
+}
 
-public data Option<T> { None, Some(T) }
+public data Option<T> {
+  None,
+  Some(T)
+}

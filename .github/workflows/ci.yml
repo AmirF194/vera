@@ -138,6 +138,9 @@ jobs:
       - name: Check all examples type-check and verify cleanly
         run: python scripts/check_examples.py
 
+      - name: Check the corpus is in canonical form
+        run: python scripts/check_corpus_canonical.py
+
       - name: Check vera run commands in examples/README.md are valid
         run: python scripts/check_examples_readme.py
 

@@ -25,7 +25,19 @@ private fn cell_at(@Array<Array<Bool>>, @Int, @Int -> @Bool)
   -- @Int.1 = row, @Int.0 = col (rightmost is .0)
   match int_to_nat(@Int.1) {
     None -> false,
-    Some(@Nat) -> if @Nat.0 >= array_length(@Array<Array<Bool>>.0) then { false } else { let @Array<Bool> = @Array<Array<Bool>>.0[@Nat.0]; match int_to_nat(@Int.0) { None -> false, Some(@Nat) -> if @Nat.0 >= array_length(@Array<Bool>.0) then { false } else { @Array<Bool>.0[@Nat.0] } } }
+    Some(@Nat) -> if @Nat.0 >= array_length(@Array<Array<Bool>>.0) then {
+      false
+    } else {
+      let @Array<Bool> = @Array<Array<Bool>>.0[@Nat.0];
+      match int_to_nat(@Int.0) {
+        None -> false,
+        Some(@Nat) -> if @Nat.0 >= array_length(@Array<Bool>.0) then {
+          false
+        } else {
+          @Array<Bool>.0[@Nat.0]
+        }
+      }
+    }
   }
 }
 
@@ -37,14 +49,46 @@ private fn count_neighbors(@Array<Array<Bool>>, @Int, @Int -> @Nat)
 {
   -- @Int.1 = row, @Int.0 = col
   let @Nat = 0;
-  let @Nat = if cell_at(@Array<Array<Bool>>.0, @Int.1 - 1, @Int.0 - 1) then { @Nat.0 + 1 } else { @Nat.0 };
-  let @Nat = if cell_at(@Array<Array<Bool>>.0, @Int.1 - 1, @Int.0) then { @Nat.0 + 1 } else { @Nat.0 };
-  let @Nat = if cell_at(@Array<Array<Bool>>.0, @Int.1 - 1, @Int.0 + 1) then { @Nat.0 + 1 } else { @Nat.0 };
-  let @Nat = if cell_at(@Array<Array<Bool>>.0, @Int.1, @Int.0 - 1) then { @Nat.0 + 1 } else { @Nat.0 };
-  let @Nat = if cell_at(@Array<Array<Bool>>.0, @Int.1, @Int.0 + 1) then { @Nat.0 + 1 } else { @Nat.0 };
-  let @Nat = if cell_at(@Array<Array<Bool>>.0, @Int.1 + 1, @Int.0 - 1) then { @Nat.0 + 1 } else { @Nat.0 };
-  let @Nat = if cell_at(@Array<Array<Bool>>.0, @Int.1 + 1, @Int.0) then { @Nat.0 + 1 } else { @Nat.0 };
-  let @Nat = if cell_at(@Array<Array<Bool>>.0, @Int.1 + 1, @Int.0 + 1) then { @Nat.0 + 1 } else { @Nat.0 };
+  let @Nat = if cell_at(@Array<Array<Bool>>.0, @Int.1 - 1, @Int.0 - 1) then {
+    @Nat.0 + 1
+  } else {
+    @Nat.0
+  };
+  let @Nat = if cell_at(@Array<Array<Bool>>.0, @Int.1 - 1, @Int.0) then {
+    @Nat.0 + 1
+  } else {
+    @Nat.0
+  };
+  let @Nat = if cell_at(@Array<Array<Bool>>.0, @Int.1 - 1, @Int.0 + 1) then {
+    @Nat.0 + 1
+  } else {
+    @Nat.0
+  };
+  let @Nat = if cell_at(@Array<Array<Bool>>.0, @Int.1, @Int.0 - 1) then {
+    @Nat.0 + 1
+  } else {
+    @Nat.0
+  };
+  let @Nat = if cell_at(@Array<Array<Bool>>.0, @Int.1, @Int.0 + 1) then {
+    @Nat.0 + 1
+  } else {
+    @Nat.0
+  };
+  let @Nat = if cell_at(@Array<Array<Bool>>.0, @Int.1 + 1, @Int.0 - 1) then {
+    @Nat.0 + 1
+  } else {
+    @Nat.0
+  };
+  let @Nat = if cell_at(@Array<Array<Bool>>.0, @Int.1 + 1, @Int.0) then {
+    @Nat.0 + 1
+  } else {
+    @Nat.0
+  };
+  let @Nat = if cell_at(@Array<Array<Bool>>.0, @Int.1 + 1, @Int.0 + 1) then {
+    @Nat.0 + 1
+  } else {
+    @Nat.0
+  };
   @Nat.0
 }
 
@@ -218,7 +262,7 @@ private fn render(@Array<Array<Bool>>, @Nat, @Nat, @Nat -> @Unit)
   let @Array<String> = array_map(@Array<Array<Bool>>.0, fn(@Array<Bool> -> @String) effects(pure) { row_str(@Array<Bool>.0) });
   let @String = string_join(@Array<String>.0, "\n");
   -- After let: @String.0 = the joined grid
-  let @String = "[HConway's Game of Life - generation \(@Nat.2)/\(@Nat.1) - population \(@Nat.0)[K\n\(@String.0)\n";
+  let @String = "\u{001B}[HConway's Game of Life - generation \(@Nat.2)/\(@Nat.1) - population \(@Nat.0)\u{001B}[K\n\(@String.0)\n";
   IO.print(@String.0)
 }
 
@@ -231,7 +275,7 @@ public fn main(@Unit -> @Unit)
   effects(<IO>)
 {
   -- One-time full screen clear so the first frame paints over a blank canvas.
-  IO.print("[2J[H");
+  IO.print("\u{001B}[2J\u{001B}[H");
   let @Array<Array<Bool>> = make_grid(22, 80);
   run_loop(@Array<Array<Bool>>.0, 1, 300)
 }

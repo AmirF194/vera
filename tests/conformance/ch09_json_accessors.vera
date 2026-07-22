@@ -48,7 +48,11 @@ public fn test_json_as_bool_match(@Unit -> @Int)
   effects(pure)
 {
   match json_as_bool(JBool(true)) {
-    Some(@Bool) -> if @Bool.0 then { 1 } else { 0 },
+    Some(@Bool) -> if @Bool.0 then {
+      1
+    } else {
+      0
+    },
     None -> 0
   }
 }
@@ -110,7 +114,11 @@ public fn test_json_as_number_match(@Unit -> @Int)
   effects(pure)
 {
   match json_as_number(JNumber(3.14)) {
-    Some(@Float64) -> if @Float64.0 > 3.0 && @Float64.0 < 4.0 then { 1 } else { 0 },
+    Some(@Float64) -> if @Float64.0 > 3.0 && @Float64.0 < 4.0 then {
+      1
+    } else {
+      0
+    },
     None -> 0
   }
 }
@@ -126,7 +134,10 @@ public fn test_json_get_string(@Unit -> @Int)
 {
   match json_parse("{\"name\":\"Alice\"}") {
     Err(@String) -> 0,
-    Ok(@Json) -> match json_get_string(@Json.0, "name") { Some(@String) -> string_length(@String.0), None -> 0 }
+    Ok(@Json) -> match json_get_string(@Json.0, "name") {
+      Some(@String) -> string_length(@String.0),
+      None -> 0
+    }
   }
 }
 
@@ -141,7 +152,10 @@ public fn test_json_get_int(@Unit -> @Int)
 {
   match json_parse("{\"age\":30}") {
     Err(@String) -> 0,
-    Ok(@Json) -> match json_get_int(@Json.0, "age") { Some(@Int) -> @Int.0, None -> 0 }
+    Ok(@Json) -> match json_get_int(@Json.0, "age") {
+      Some(@Int) -> @Int.0,
+      None -> 0
+    }
   }
 }
 
@@ -156,7 +170,14 @@ public fn test_json_get_bool(@Unit -> @Int)
 {
   match json_parse("{\"active\":true}") {
     Err(@String) -> 0,
-    Ok(@Json) -> match json_get_bool(@Json.0, "active") { Some(@Bool) -> if @Bool.0 then { 1 } else { 0 }, None -> 0 }
+    Ok(@Json) -> match json_get_bool(@Json.0, "active") {
+      Some(@Bool) -> if @Bool.0 then {
+        1
+      } else {
+        0
+      },
+      None -> 0
+    }
   }
 }
 
@@ -171,7 +192,10 @@ public fn test_json_get_missing_field(@Unit -> @Int)
 {
   match json_parse("{\"name\":\"Alice\"}") {
     Err(@String) -> 0,
-    Ok(@Json) -> match json_get_int(@Json.0, "nonexistent") { Some(@Int) -> 0, None -> 1 }
+    Ok(@Json) -> match json_get_int(@Json.0, "nonexistent") {
+      Some(@Int) -> 0,
+      None -> 1
+    }
   }
 }
 
@@ -186,7 +210,10 @@ public fn test_json_get_wrong_type(@Unit -> @Int)
 {
   match json_parse("{\"name\":\"Alice\"}") {
     Err(@String) -> 0,
-    Ok(@Json) -> match json_get_int(@Json.0, "name") { Some(@Int) -> 0, None -> 1 }
+    Ok(@Json) -> match json_get_int(@Json.0, "name") {
+      Some(@Int) -> 0,
+      None -> 1
+    }
   }
 }
 
@@ -201,7 +228,10 @@ public fn test_json_get_array_length(@Unit -> @Int)
 {
   match json_parse("{\"tags\":[1,2,3]}") {
     Err(@String) -> 0,
-    Ok(@Json) -> match json_get_array(@Json.0, "tags") { Some(@Array<Json>) -> nat_to_int(array_length(@Array<Json>.0)), None -> 0 }
+    Ok(@Json) -> match json_get_array(@Json.0, "tags") {
+      Some(@Array<Json>) -> nat_to_int(array_length(@Array<Json>.0)),
+      None -> 0
+    }
   }
 }
 
@@ -216,7 +246,10 @@ public fn test_json_as_object(@Unit -> @Int)
 {
   match json_parse("{\"k\":1}") {
     Err(@String) -> 0,
-    Ok(@Json) -> match json_as_object(@Json.0) { Some(@Map<String, Json>) -> 1, None -> 0 }
+    Ok(@Json) -> match json_as_object(@Json.0) {
+      Some(@Map<String, Json>) -> 1,
+      None -> 0
+    }
   }
 }
 
@@ -231,6 +264,13 @@ public fn test_json_get_number_float(@Unit -> @Int)
 {
   match json_parse("{\"score\":3.14}") {
     Err(@String) -> 0,
-    Ok(@Json) -> match json_get_number(@Json.0, "score") { Some(@Float64) -> if @Float64.0 > 3.0 && @Float64.0 < 4.0 then { 1 } else { 0 }, None -> 0 }
+    Ok(@Json) -> match json_get_number(@Json.0, "score") {
+      Some(@Float64) -> if @Float64.0 > 3.0 && @Float64.0 < 4.0 then {
+        1
+      } else {
+        0
+      },
+      None -> 0
+    }
   }
 }

@@ -12,7 +12,11 @@ public fn string_ordering_witness(@Unit -> @Int)
   ensures(@Int.result == 123456)
   effects(pure)
 {
-  let @Int = if "apple" < "banana" then { 100000 } else { 0 };
+  let @Int = if "apple" < "banana" then {
+    100000
+  } else {
+    0
+  };
   let @Int = @Int.0 + if "banana" > "apple" then { 20000 } else { 0 };
   let @Int = @Int.0 + if "a" <= "a" then { 3000 } else { 0 };
   let @Int = @Int.0 + if "b" >= "a" then { 400 } else { 0 };

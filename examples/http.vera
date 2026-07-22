@@ -11,15 +11,13 @@ private fn fetch_title(@String -> @Result<String, String>)
 {
   let @Result<String, String> = Http.get(@String.0);
   match @Result<String, String>.0 {
-    Ok(@String) ->
-      match json_parse(@String.0) {
-        Ok(@Json) ->
-          match json_get(@Json.0, "title") {
-            Some(@Json) -> Ok(json_stringify(@Json.0)),
-            None -> Err("missing title field")
-          },
-        Err(@String) -> Err(@String.0)
+    Ok(@String) -> match json_parse(@String.0) {
+      Ok(@Json) -> match json_get(@Json.0, "title") {
+        Some(@Json) -> Ok(json_stringify(@Json.0)),
+        None -> Err("missing title field")
       },
+      Err(@String) -> Err(@String.0)
+    },
     Err(@String) -> Err(@String.0)
   }
 }

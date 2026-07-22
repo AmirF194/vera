@@ -18,8 +18,14 @@ private fn summarise(@Result<String, String>, @Result<String, String> -> @Int)
   -- Encode which fetches succeeded: 0 = both failed, 1 = only first,
   -- 2 = only second, 3 = both succeeded.
   match @Result<String, String>.1 {
-    Ok(@String) -> match @Result<String, String>.0 { Ok(@String) -> 3, Err(@String) -> 1 },
-    Err(@String) -> match @Result<String, String>.0 { Ok(@String) -> 2, Err(@String) -> 0 }
+    Ok(@String) -> match @Result<String, String>.0 {
+      Ok(@String) -> 3,
+      Err(@String) -> 1
+    },
+    Err(@String) -> match @Result<String, String>.0 {
+      Ok(@String) -> 2,
+      Err(@String) -> 0
+    }
   }
 }
 

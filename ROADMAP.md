@@ -12,7 +12,7 @@ Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verificati
 
 ## Where we are
 
-8,281 tests, 163 conformance programs, 40 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
+8,343 tests, 163 conformance programs, 40 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
 
 ## Stage 19 — The verification completeness sprint
 
@@ -115,6 +115,7 @@ Exit criterion: the LSP limitation rows are retired, and a fresh VeraBench run (
 | [#424](https://github.com/aallan/vera/issues/424) | Register veralang.dev with llms.txt directories. |
 | [#525](https://github.com/aallan/vera/issues/525) | Close the remaining Agent Score gaps on veralang.dev. |
 | [#225](https://github.com/aallan/vera/issues/225) | VeraBench: pass@k evaluation, more models, more tiers — the sprint's measurement. |
+| [#1139](https://github.com/aallan/vera/issues/1139) | Formatter internals: parse-time comment ownership and a single recursive renderer, making comment preservation and one-canonical-form structural properties rather than invariants spread across the emitters; retires the remaining relocation cases and the inline/multi-line dual paths. |
 
 ## Stage 24 — The browser sprint
 

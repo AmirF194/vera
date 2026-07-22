@@ -10,7 +10,9 @@ public fn test_parse_full(@Unit -> @Int)
   effects(pure)
 {
   match url_parse("https://example.com/path?q=1#frag") {
-    Ok(@UrlParts) -> match @UrlParts.0 { UrlParts(@String, @String, @String, @String, @String) -> string_length(@String.4) },
+    Ok(@UrlParts) -> match @UrlParts.0 {
+      UrlParts(@String, @String, @String, @String, @String) -> string_length(@String.4)
+    },
     Err(_) -> 0 - 1
   }
 }
@@ -21,7 +23,9 @@ public fn test_parse_no_query(@Unit -> @Int)
   effects(pure)
 {
   match url_parse("https://example.com/path") {
-    Ok(@UrlParts) -> match @UrlParts.0 { UrlParts(@String, @String, @String, @String, @String) -> string_length(@String.2) },
+    Ok(@UrlParts) -> match @UrlParts.0 {
+      UrlParts(@String, @String, @String, @String, @String) -> string_length(@String.2)
+    },
     Err(_) -> 0 - 1
   }
 }
@@ -68,7 +72,12 @@ public fn test_roundtrip(@Unit -> @Int)
   effects(pure)
 {
   match url_parse("https://example.com/path?q=1#frag") {
-    Ok(@UrlParts) -> match url_parse(url_join(@UrlParts.0)) { Ok(@UrlParts) -> match @UrlParts.0 { UrlParts(@String, @String, @String, @String, @String) -> string_length(@String.4) }, Err(_) -> 0 - 2 },
+    Ok(@UrlParts) -> match url_parse(url_join(@UrlParts.0)) {
+      Ok(@UrlParts) -> match @UrlParts.0 {
+        UrlParts(@String, @String, @String, @String, @String) -> string_length(@String.4)
+      },
+      Err(_) -> 0 - 2
+    },
     Err(_) -> 0 - 1
   }
 }

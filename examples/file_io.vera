@@ -8,11 +8,9 @@ public fn main(-> @Unit)
   effects(<IO>)
 {
   match IO.write_file("hello.txt", "Hello from Vera!\n") {
-    Ok(_) -> {
-      match IO.read_file("hello.txt") {
-        Ok(@String) -> IO.print(@String.0),
-        Err(@String) -> IO.print(@String.0)
-      }
+    Ok(_) -> match IO.read_file("hello.txt") {
+      Ok(@String) -> IO.print(@String.0),
+      Err(@String) -> IO.print(@String.0)
     },
     Err(@String) -> IO.print(@String.0)
   };

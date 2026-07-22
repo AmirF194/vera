@@ -47,7 +47,11 @@ public fn test_match_option_decimal(@Unit -> @Int)
 {
   let @Option<Decimal> = decimal_div(decimal_from_int(10), decimal_from_int(2));
   match @Option<Decimal>.0 {
-    Some(@Decimal) -> if decimal_eq(@Decimal.0, decimal_from_int(5)) then { 1 } else { 0 },
+    Some(@Decimal) -> if decimal_eq(@Decimal.0, decimal_from_int(5)) then {
+      1
+    } else {
+      0
+    },
     None -> 0
   }
 }
