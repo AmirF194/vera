@@ -2201,6 +2201,79 @@ class TestCanonicalFormGaps:
         parse_to_ast(out)
         assert format_source(out) == out, "second pass differs"
 
+    def test_own_line_comment_stays_above_a_where_function(self) -> None:
+        """The `where` keyword was anchored; the functions inside were not."""
+        out = _fmt("""
+            public fn is_even(@Nat -> @Bool)
+              requires(true)
+              ensures(true)
+              decreases(@Nat.0)
+              effects(pure)
+            {
+              if @Nat.0 == 0 then { true } else { is_odd(@Nat.0 - 1) }
+            }
+            where {
+              -- comment above where-fn is_odd
+              fn is_odd(@Nat -> @Bool)
+                requires(true)
+                ensures(true)
+                decreases(@Nat.0)
+                effects(pure)
+              {
+                if @Nat.0 == 0 then { false } else { is_even(@Nat.0 - 1) }
+              }
+            }
+        """)
+        lines = out.splitlines()
+        i = next(n for n, ln in enumerate(lines) if "above where-fn" in ln)
+        assert lines[i + 1].strip().startswith("fn is_odd"), (
+            f"comment drifted onto {lines[i + 1]!r} — it documents the "
+            f"function, not its first clause\n{out}"
+        )
+        parse_to_ast(out)
+        assert format_source(out) == out, "second pass differs"
+
+    def test_comment_above_a_brace_less_nested_match_is_not_duplicated(
+        self,
+    ) -> None:
+        """Two anchors can collapse onto one line — and did.
+
+        Anchoring the nested match fixed the drift, but `_emit_comments`
+        read the store without consuming it. After the first pass put
+        `Some(@Int) -> match ... {` on one line, the arm anchor and the
+        match anchor were the same line, so the comment was emitted
+        twice on the second pass. Idempotence is the only assertion
+        that sees it; position and count both pass on pass one.
+        """
+        out = _fmt("""
+            public fn f(@Option<Int> -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              match @Option<Int>.0 {
+                Some(@Int) ->
+                  -- comment above nested match
+                  match @Option<Int>.0 {
+                    Some(@Int) -> @Int.0,
+                    None -> 0
+                  },
+                None -> 0
+              }
+            }
+        """)
+        assert out.count("-- comment above nested match") == 1, (
+            f"comment duplicated:\n{out}"
+        )
+        lines = out.splitlines()
+        i = next(n for n, ln in enumerate(lines) if "above nested match" in ln)
+        assert "match" in lines[i + 1], (
+            f"comment must stay above the nested match, got "
+            f"{lines[i + 1]!r}"
+        )
+        parse_to_ast(out)
+        assert format_source(out) == out, "second pass differs"
+
     # -- F3: blank line before a leading comment block ------------------
 
     def test_blank_line_between_a_comment_block_and_its_declaration(

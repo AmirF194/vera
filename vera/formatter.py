@@ -367,6 +367,12 @@ def _collect_interior_anchors(node: object, anchors: list[int]) -> None:
         _collect_interior_anchors(node.then_branch, anchors)
         _collect_interior_anchors(node.else_branch, anchors)
     elif isinstance(node, MatchExpr):
+        # The match's own line is an anchor too: a comment above a
+        # nested `match` used directly as an arm body would otherwise
+        # fall through to that match's first arm, silently changing
+        # what it appears to document.
+        if node.span:
+            anchors.append(node.span.line)
         for arm in node.arms:
             # The arm itself is an anchor, not just its body: a comment
             # above `Red -> 1` precedes the arm, and without this the
@@ -403,6 +409,10 @@ def _collect_interior_anchors(node: object, anchors: list[int]) -> None:
             if node.where_span:
                 anchors.append(node.where_span.line)
             for wfn in node.where_fns:
+                # And each function inside it, or a comment above one
+                # attaches to its first contract clause instead.
+                if wfn.span:
+                    anchors.append(wfn.span.line)
                 _collect_interior_anchors(wfn, anchors)
     elif isinstance(node, DataDecl):
         for constructor in node.constructors:
@@ -565,7 +575,11 @@ class Formatter:
         when there was one in source, and never for a comment sharing the
         anchor's line, where "after the comment" is still the same line.
         """
-        comments = self._attached.before.get(anchor, [])
+        # Consume, don't peek: two anchors can collapse onto one
+        # line after reformatting (an arm and the nested match it
+        # holds), and a non-consuming read emits the comment once
+        # per anchor — duplicating it on the second pass.
+        comments = self._attached.before.pop(anchor, [])
         for c in comments:
             for cline in c.text.split("\n"):
                 self._line(cline.strip() if c.kind == "block" else cline.strip())
@@ -888,6 +902,8 @@ class Formatter:
             if i > 0:
                 self._blank()
             self._indent_inc()
+            if fn.span:
+                self._emit_comments(fn.span.line)
             self._emit_fn_decl(fn, None)
             self._indent_dec()
         self._line("}")
@@ -1270,10 +1286,9 @@ class Formatter:
                 # comment, which rule 11 forbids outright.  Emit them
                 # against the inner construct before the unwrap takes
                 # effect.
-                if body_node is not arm.body:
-                    span = getattr(body_node, "span", None)
-                    if span:
-                        self._emit_comments(span.line)
+                span = getattr(body_node, "span", None)
+                if span:
+                    self._emit_comments(span.line)
                 self._emit_own_lines(body_node, f"{pat} -> ", comma)
             else:
                 body = self._fmt_expr(body_node)
