@@ -69,8 +69,8 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 |--------|------:|-------|---------|---------|
 | `grammar.lark` | 343 | Parse | LALR(1) grammar definition | *(consumed by Lark)* |
 | `parser.py` | 153 | Parse | Lark frontend, error diagnosis | `parse()`, `parse_file()` |
-| `transform.py` | 1,390 | Transform | Lark tree → AST transformer | `transform()` |
-| `ast.py` | 875 | Transform | Frozen dataclass AST nodes, source formatting | `Program`, `Node`, `Expr`, `format_expr` |
+| `transform.py` | 1,560 | Transform | Lark tree → AST transformer | `transform()` |
+| `ast.py` | 895 | Transform | Frozen dataclass AST nodes, source formatting | `Program`, `Node`, `Expr`, `format_expr` |
 | `types.py` | 533 | Type check | Semantic type representation | `Type`, `is_subtype()` |
 | `environment.py` | 2,002 | Type check | Type environment, scope stacks, ability registry, all built-in registrations | `TypeEnv`, `AbilityInfo` |
 | `checker/` | 4,745 | Type check | Two-pass type checker (mixin package) | `typecheck()` |
@@ -139,7 +139,7 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `  wasi_host.py` | 213 | | Built-in `wasi-p2` runner via `add_wasip2` — `vera run --target wasi-p2` (#237, #853) | |
 | `  server.py` | 150 | | `vera serve` HTTP driver for `handle(Request -> Response)` (#305) | |
 | `tester.py` | 956 | Test | Z3-guided input generation, WASM execution, tier classification | `test()` |
-| `formatter.py` | 1,122 | Format | Canonical code formatter | `format_source()` |
+| `formatter.py` | 1,951 | Format | Canonical code formatter | `format_source()` |
 | `errors.py` | 582 | All | Diagnostic class, error hierarchy, error code registry | `Diagnostic`, `VeraError`, `ERROR_CODES` |
 | `browser/` | 138 | Execute | Browser runtime for compiled WASM (package) | `emit_browser_bundle()` |
 | ` ├ emit.py` | 137 | | Browser bundle emission (wasm + runtime + html) | `emit_browser_bundle()` |

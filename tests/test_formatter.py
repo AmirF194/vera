@@ -2986,3 +2986,691 @@ class TestCanonicalFormGaps:
             '  IO.print("done")',
         ], f"the comment must stay on its arm:\n{out}"
         self._reparses_and_is_fixed_point(out)
+
+    # -- Adversarial-review fixes (PR #1138 review): comment deletion,
+    # renderer fidelity, anchor gaps, and the structural backstop.
+    #
+    # Every test in this block began as a confirmed finding with an
+    # exact repro.  The deletion cases are rule 11 violations (a
+    # formatter MUST NOT discard a comment); the fidelity cases are
+    # programs whose meaning or parseability the formatter destroyed.
+
+    def test_comment_above_a_value_position_match_on_next_line_survives(
+        self,
+    ) -> None:
+        """A match bound directly (no block) never flushed its bucket.
+
+        `_collect_interior_anchors` files the comment under the match's
+        own span line, but `_emit_value` popped that bucket only on the
+        unwrap path — a value that IS the match deleted the comment.
+        """
+        out = _fmt("""
+            private fn f(@Int -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              let @Int =
+                -- KEEP ME
+                match @Int.0 {
+                  0 -> 1,
+                  _ -> 2
+                };
+              @Int.0
+            }
+        """)
+        assert out.count("KEEP ME") == 1, (
+            f"COMMENT DELETED: count={out.count('KEEP ME')}\n{out}"
+        )
+        lines = out.splitlines()
+        i = next(n for n, ln in enumerate(lines) if "KEEP ME" in ln)
+        assert "let @Int = match" in lines[i + 1], (
+            f"comment must sit above the let it documents:\n{out}"
+        )
+        self._reparses_and_is_fixed_point(out)
+
+    def test_comment_inside_a_flattened_redundant_block_value_survives(
+        self,
+    ) -> None:
+        """The plain-expression flatten path had no comment rescue.
+
+        `let @Int = { -- keep me \\n 5 };` flattens to `let @Int = 5;`
+        via `_emit_value`'s else branch, which never emitted the
+        comment anchored at the inner expression's line.
+        """
+        out = _fmt("""
+            public fn main(@Unit -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              let @Int = {
+                -- keep me
+                5
+              };
+              @Int.0
+            }
+        """)
+        assert out.count("keep me") == 1, (
+            f"COMMENT LOST: appears {out.count('keep me')} times\n{out}"
+        )
+        self._reparses_and_is_fixed_point(out)
+
+    def test_comment_inside_a_flattened_match_arm_block_survives(
+        self,
+    ) -> None:
+        """The arm loop's flatten branch is a distinct unfixed site.
+
+        `pat -> { -- note \\n expr }` flattens to `pat -> expr` without
+        the `_emit_comments` rescue the `_needs_own_lines` branch has.
+        """
+        out = _fmt("""
+            public fn main(@Unit -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              match 1 {
+                0 -> 0,
+                _ -> {
+                  -- important note about this arm
+                  42
+                }
+              }
+            }
+        """)
+        assert out.count("important note") == 1, (
+            f"COMMENT LOST: appears {out.count('important note')} times\n{out}"
+        )
+        self._reparses_and_is_fixed_point(out)
+
+    def test_a_statement_bearing_block_as_a_let_value_renders_faithfully(
+        self,
+    ) -> None:
+        """A block WITH statements in value position must keep braces.
+
+        The flat path emitted `let @Int = let @Int = ...;` — output
+        that no longer parses — and deleted the interior comment.
+        """
+        out = _fmt("""
+            private fn f(@Int -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              let @Int = {
+                -- BLOCKDOC interior
+                let @Int = @Int.0 + 1;
+                @Int.0
+              };
+              @Int.0
+            }
+        """)
+        assert "BLOCKDOC" in out, f"COMMENT LOST:\n{out}"
+        self._reparses_and_is_fixed_point(out)
+
+    def test_an_orphaned_before_bucket_relocates_not_deletes(self) -> None:
+        """The structural backstop: no bucket may die unemitted.
+
+        Every deletion in this block shared one mechanism — a
+        `before` bucket keyed to a line no emitter visits.  Rule 11
+        sanctions relocation to the end of the enclosing declaration;
+        it forbids deletion.  This constructs the orphan directly, so
+        the backstop is tested even after every known producer of
+        orphans is fixed.
+        """
+        from vera.formatter import (
+            Comment,
+            _attach_comments,
+            blank_source_lines,
+        )
+        src = dedent("""\
+            private fn f(@Int -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              @Int.0
+            }
+        """)
+        program = parse_to_ast(src)
+        attached = _attach_comments(extract_comments(src), program)
+        # Key a bucket to the body's closing-brace line: inside the
+        # declaration's span, never an anchor any emitter pops.
+        orphan = Comment(
+            kind="line", text="-- orphaned but not forgotten",
+            line=6, column=1, end_line=6, inline=False,
+        )
+        attached.before[7] = [orphan]
+        out = Formatter(attached, blank_source_lines(src)).format_program(
+            program,
+        )
+        assert "-- orphaned but not forgotten" in out, (
+            f"orphan bucket was deleted, not relocated:\n{out}"
+        )
+        parse_to_ast(out)
+
+    def test_postcondition_rejects_comment_loss(self) -> None:
+        """format_source must refuse to return comment-losing output."""
+        from vera.formatter import (
+            FormatterPostconditionError,
+            _check_postconditions,
+        )
+        src = dedent("""\
+            private fn f(@Int -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              -- documented
+              @Int.0
+            }
+        """)
+        lossy = src.replace("  -- documented\n", "")
+        with pytest.raises(FormatterPostconditionError) as exc:
+            _check_postconditions(src, lossy, None)
+        assert "comment" in str(exc.value).lower()
+
+    def test_postcondition_rejects_unparseable_output(self) -> None:
+        """format_source must refuse to return destroyed output."""
+        from vera.formatter import (
+            FormatterPostconditionError,
+            _check_postconditions,
+        )
+        src = dedent("""\
+            private fn f(@Int -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              @Int.0
+            }
+        """)
+        with pytest.raises(FormatterPostconditionError) as exc:
+            _check_postconditions(src, "let @Int = let @Int = 1;", None)
+        assert "parse" in str(exc.value).lower()
+
+    def test_postcondition_rejects_a_non_fixed_point(self) -> None:
+        """Output a second pass would rewrite is not canonical."""
+        from vera.formatter import (
+            FormatterPostconditionError,
+            _check_postconditions,
+        )
+        src = dedent("""\
+            private fn f(@Int -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+                  @Int.0
+            }
+        """)
+        # The source itself parses and holds its (zero) comments, but
+        # is not canonical: handing it back as "output" must fail the
+        # fixed-point invariant.
+        with pytest.raises(FormatterPostconditionError) as exc:
+            _check_postconditions(src, src, None)
+        assert "fixed point" in str(exc.value).lower()
+
+    def test_comment_above_a_value_position_if_stays_outside(self) -> None:
+        """IfExpr needs the same self-anchor MatchExpr already has.
+
+        Without it the comment attached to the first anchor *inside*
+        the construct and was emitted inside the then-branch,
+        documenting the branch result instead of the whole if.
+        """
+        out = _fmt("""
+            private fn f(@Int -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              let @Int =
+                -- ABOUT THE WHOLE IF
+                if @Int.0 > 0 then {
+                  1
+                } else {
+                  2
+                };
+              @Int.0
+            }
+        """)
+        lines = out.splitlines()
+        i = next(n for n, ln in enumerate(lines) if "ABOUT THE WHOLE IF" in ln)
+        assert "let @Int = if" in lines[i + 1], (
+            f"comment must sit above the let, not inside the if:\n{out}"
+        )
+        self._reparses_and_is_fixed_point(out)
+
+    def test_comment_above_a_value_position_handle_stays_outside(
+        self,
+    ) -> None:
+        """HandleExpr needs the same self-anchor as MatchExpr."""
+        out = _fmt("""
+            private fn f(@Int -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              let @Int =
+                -- ABOUT THE WHOLE HANDLE
+                handle[Exn<Int>] {
+                  throw(@Int) -> { @Int.0 }
+                } in {
+                  @Int.1 + 1
+                };
+              @Int.0
+            }
+        """)
+        lines = out.splitlines()
+        i = next(
+            n for n, ln in enumerate(lines) if "ABOUT THE WHOLE HANDLE" in ln
+        )
+        assert "let @Int = handle[Exn<Int>]" in lines[i + 1], (
+            f"comment must sit above the let, not inside the handle:\n{out}"
+        )
+        self._reparses_and_is_fixed_point(out)
+
+    def test_comment_between_arrow_and_next_line_body_stays_on_its_arm(
+        self,
+    ) -> None:
+        """A plain next-line arm body is a position a comment precedes.
+
+        Without a body anchor the comment fell through to the NEXT
+        arm's line — and for the last arm, to the file footer.
+        """
+        out = _fmt("""
+            private fn f(@Int -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              match @Int.0 {
+                0 ->
+                  -- ABOUT ARM ZERO
+                  1,
+                _ ->
+                  -- ABOUT LAST ARM
+                  3
+              }
+            }
+        """)
+        lines = out.splitlines()
+        i = next(n for n, ln in enumerate(lines) if "ABOUT ARM ZERO" in ln)
+        assert lines[i + 1].strip().startswith("0 -> 1"), (
+            f"comment must stay on arm zero, not drift to the next:\n{out}"
+        )
+        j = next(n for n, ln in enumerate(lines) if "ABOUT LAST ARM" in ln)
+        assert lines[j + 1].strip().startswith("_ -> 3"), (
+            f"comment must stay on the last arm, not escape the fn:\n{out}"
+        )
+        self._reparses_and_is_fixed_point(out)
+
+    def test_comment_inside_a_handler_clause_body_stays_on_its_clause(
+        self,
+    ) -> None:
+        """Clause bodies render on one line; their comments must not
+        migrate to the next clause (or into the in-block)."""
+        out = _fmt("""
+            private fn tally(@Int -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              handle[State<Int>](@Int = @Int.0) {
+                get(@Unit) -> {
+                  -- MARKA inside get clause
+                  resume(@Int.0)
+                },
+                put(@Int) -> {
+                  -- MARKB inside put clause
+                  resume(())
+                }
+              } in {
+                put(get(()) + 1);
+                get(())
+              }
+            }
+        """)
+        lines = out.splitlines()
+        ia = next(n for n, ln in enumerate(lines) if "MARKA" in ln)
+        assert "get(@Unit) ->" in lines[ia + 1], (
+            f"MARKA must stay on the get clause it documents:\n{out}"
+        )
+        ib = next(n for n, ln in enumerate(lines) if "MARKB" in ln)
+        assert "put(@Int) ->" in lines[ib + 1], (
+            f"MARKB must stay on the put clause it documents:\n{out}"
+        )
+        self._reparses_and_is_fixed_point(out)
+
+    def test_small_and_large_float_literals_stay_lexable(self) -> None:
+        """FLOAT_LIT has no exponent form; repr()'s `1e-05` destroys
+        the program.  The emitted decimal must round-trip exactly."""
+        tiny = "0." + "0" * 323 + "5"          # 5e-324, min subnormal
+        huge = "1" + "0" * 300 + ".0"          # 1e300
+        src = dedent(f"""\
+            public fn f(@Unit -> @Float64)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {{
+              let @Float64 = 0.00001;
+              let @Float64 = 10000000000000000.0;
+              let @Float64 = {huge};
+              let @Float64 = {tiny};
+              @Float64.0
+            }}
+        """)
+        out = format_source(src)
+        for ln in out.splitlines():
+            if "let @Float64" in ln:
+                assert "e" not in ln.split("=")[1], (
+                    f"unlexable exponent form emitted: {ln!r}"
+                )
+        assert parse_to_ast(out) == parse_to_ast(src), (
+            f"float values must round-trip identically:\n{out}"
+        )
+        self._reparses_and_is_fixed_point(out)
+
+    def test_indexing_a_parenthesized_expression_keeps_the_parens(
+        self,
+    ) -> None:
+        """`(x |> f())[0]` must not become `x |> f()[0]` — indexing
+        binds tightest, so an operator collection needs parens."""
+        src = dedent("""\
+            private fn boxit(@Int -> @Array<Int>)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              [@Int.0, @Int.0 + 1]
+            }
+
+            public fn main(@Unit -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              (5 |> boxit())[0]
+            }
+        """)
+        out = format_source(src)
+        assert "(5 |> boxit())[0]" in out, (
+            f"parens dropped — output is a different program:\n{out}"
+        )
+        assert parse_to_ast(out) == parse_to_ast(src), (
+            f"formatted AST differs from the source AST:\n{out}"
+        )
+        self._reparses_and_is_fixed_point(out)
+
+    def test_indexing_a_parenthesized_operator_expression_is_silent_safe(
+        self,
+    ) -> None:
+        """`(0 - xs)[0]` reparsing as `0 - xs[0]` is the silent case."""
+        src = dedent("""\
+            public fn f(@Array<Int> -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              (0 - @Array<Int>.0)[0]
+            }
+        """)
+        out = format_source(src)
+        assert parse_to_ast(out) == parse_to_ast(src), (
+            f"formatted AST differs from the source AST:\n{out}"
+        )
+        self._reparses_and_is_fixed_point(out)
+
+    def test_a_block_statement_keeps_its_braces_and_its_scope(self) -> None:
+        """`{ let @Int = 100; () };` must not leak its binding.
+
+        Dropping the braces is check-clean both sides but changes
+        which slot `@Int.0` resolves to — a silent runtime change.
+        """
+        src = dedent("""\
+            public fn f(@Int -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              { let @Int = 100; () };
+              @Int.0
+            }
+        """)
+        out = format_source(src)
+        assert parse_to_ast(out) == parse_to_ast(src), (
+            f"braces lost — the binding leaks into the enclosing "
+            f"scope:\n{out}"
+        )
+        self._reparses_and_is_fixed_point(out)
+
+    def test_a_grouping_block_keeps_its_braces(self) -> None:
+        """`{ 1 + 2 } * 3` is 9; `1 + 2 * 3` is 7."""
+        src = dedent("""\
+            public fn f(@Unit -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              { 1 + 2 } * 3
+            }
+        """)
+        out = format_source(src)
+        assert parse_to_ast(out) == parse_to_ast(src), (
+            f"grouping braces lost — 9 became 7:\n{out}"
+        )
+        self._reparses_and_is_fixed_point(out)
+
+    def test_a_statement_block_as_a_sub_expression_value_parses(
+        self,
+    ) -> None:
+        """`let @Int = { let ...; ... };` must re-parse after fmt."""
+        src = dedent("""\
+            public fn g(@Unit -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              let @Int = { let @Int = 1; @Int.0 + 1 };
+              @Int.0
+            }
+        """)
+        out = format_source(src)
+        assert parse_to_ast(out) == parse_to_ast(src), (
+            f"formatted AST differs from the source AST:\n{out}"
+        )
+        self._reparses_and_is_fixed_point(out)
+
+    def test_a_blank_line_inside_a_block_comment_is_not_a_separator(
+        self,
+    ) -> None:
+        """blank_source_lines must skip comment-interior lines.
+
+        The docstring already promises this; the implementation was a
+        raw whitespace scan that manufactured a paragraph break the
+        author never wrote.
+        """
+        src = (
+            "private fn f(@Int -> @Int)\n"
+            "  requires(true)\n"
+            "  ensures(true)\n"
+            "  effects(pure)\n"
+            "{\n"
+            "  let @Int = @Int.0 + 1;  {-\n"
+            "\n"
+            "  -} let @Int = @Int.0 + 2;\n"
+            "  @Int.0\n"
+            "}\n"
+        )
+        out = format_source(src)
+        assert "" not in self._body_lines(out), (
+            f"phantom blank line emitted between statements:\n{out}"
+        )
+        self._reparses_and_is_fixed_point(out)
+
+    def test_the_corpus_gate_flags_crlf_files(self, tmp_path, monkeypatch,
+                                              capsys) -> None:
+        """Canonical form is LF; a CRLF corpus file must not pass."""
+        import sys as _sys
+        root = Path(__file__).parent.parent
+        _sys.path.insert(0, str(root / "scripts"))
+        import check_corpus_canonical as gate
+
+        canonical = format_source(dedent("""\
+            public fn f(@Int -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              @Int.0
+            }
+        """))
+        corpus = tmp_path / "corpus"
+        corpus.mkdir()
+        (corpus / "crlf.vera").write_bytes(
+            canonical.replace("\n", "\r\n").encode("utf-8")
+        )
+        monkeypatch.setattr(gate, "_ROOT", tmp_path)
+        monkeypatch.setattr(gate, "_CORPUS_DIRS", ("corpus",))
+        assert gate.main() == 1, "CRLF file certified as canonical"
+        err = capsys.readouterr().err
+        assert "crlf.vera" in err
+        assert "LF" in err, f"error must name the canonical line ending: {err}"
+
+    def test_the_corpus_gate_reports_unreadable_files(self, tmp_path,
+                                                      monkeypatch,
+                                                      capsys) -> None:
+        """Invalid UTF-8 joins the broken report; the sweep continues."""
+        import sys as _sys
+        root = Path(__file__).parent.parent
+        _sys.path.insert(0, str(root / "scripts"))
+        import check_corpus_canonical as gate
+
+        corpus = tmp_path / "corpus"
+        corpus.mkdir()
+        (corpus / "bad_utf8.vera").write_bytes(
+            b"fn f(@Int -> @Int)\n  requires(true)\n  \xff\xfe garbage\n"
+        )
+        # A second, stale file: the sweep must still reach and report it.
+        (corpus / "stale.vera").write_text(
+            "public fn f(@Int -> @Int)\n"
+            "  requires(true)\n"
+            "  ensures(true)\n"
+            "  effects(pure)\n"
+            "{\n"
+            "      @Int.0\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(gate, "_ROOT", tmp_path)
+        monkeypatch.setattr(gate, "_CORPUS_DIRS", ("corpus",))
+        rc = gate.main()  # must not raise UnicodeDecodeError
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "bad_utf8.vera" in err, f"unreadable file unreported: {err}"
+        assert "stale.vera" in err, (
+            f"sweep aborted before reaching later files: {err}"
+        )
+
+    def test_format_source_formats_the_passed_source_not_the_file(
+        self,
+    ) -> None:
+        """`file` is a diagnostic label, not an alternate input."""
+        src = dedent("""\
+            fn triple(@Int -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              @Int.0 * 3
+            }
+        """)
+        root = Path(__file__).parent.parent
+        out = format_source(src, file=str(root / "examples/vera/math.vera"))
+        assert "triple" in out, "the passed source was discarded"
+        assert "vera.math" not in out, "the on-disk file was formatted"
+
+    def test_where_span_serializes_as_a_structured_span(self) -> None:
+        """`ast --json` must not emit two span encodings."""
+        src = dedent("""\
+            private fn f(@Int -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              g(@Int.0)
+            }
+            where {
+              fn g(@Int -> @Int)
+                requires(true)
+                ensures(true)
+                effects(pure)
+              {
+                @Int.0
+              }
+            }
+        """)
+        decl = parse_to_ast(src).declarations[0].decl
+        d = decl.to_dict()
+        assert isinstance(d["where_span"], dict), (
+            f"where_span serialized as {type(d['where_span']).__name__}: "
+            f"{d['where_span']!r}"
+        )
+        assert set(d["where_span"]) == {
+            "line", "column", "end_line", "end_column",
+        }
+
+    def test_where_span_is_position_blind_like_every_other_span(
+        self,
+    ) -> None:
+        """Node equality and repr must not leak source positions."""
+        src = dedent("""\
+            private fn f(@Int -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              g(@Int.0)
+            }
+            where {
+              fn g(@Int -> @Int)
+                requires(true)
+                ensures(true)
+                effects(pure)
+              {
+                @Int.0
+              }
+            }
+        """)
+        d1 = parse_to_ast(src).declarations[0].decl
+        d2 = parse_to_ast("\n\n" + src).declarations[0].decl
+        assert d1 == d2, (
+            "byte-identical decls at different offsets must compare equal"
+        )
+        assert "where_span=" not in repr(d1), (
+            "where_span leaks source position into repr"
+        )
+
+    def test_a_redundant_block_unwraps_at_block_result_position_too(
+        self,
+    ) -> None:
+        """`{ match ... }` is canonical bare in every position."""
+        out = _fmt("""
+            private fn f(@Int -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              let @Int = @Int.0;
+              { match @Int.0 { 0 -> 1, _ -> 2 } }
+            }
+        """)
+        assert self._body_lines(out) == [
+            "  let @Int = @Int.0;",
+            "  match @Int.0 {",
+            "    0 -> 1,",
+            "    _ -> 2",
+            "  }",
+        ], f"the redundant wrapper must unwrap at result position:\n{out}"
+        self._reparses_and_is_fixed_point(out)

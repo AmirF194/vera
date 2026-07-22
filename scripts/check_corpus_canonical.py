@@ -14,8 +14,9 @@ so both of those invariants stay green while a comment drifts out of
 the construct it documents (#1136).  Comparing each file against its
 own canonical form is the assertion that catches position.
 
-Runs `vera fmt` in-process rather than shelling out per file: 203
-subprocesses cost seconds, one import costs milliseconds.
+Runs `vera fmt` in-process rather than shelling out per file: a
+subprocess per corpus program costs seconds, one import costs
+milliseconds.
 """
 
 from __future__ import annotations
@@ -62,16 +63,38 @@ def main() -> int:
 
     stale: list[Path] = []
     broken: list[tuple[Path, str]] = []
+    crlf: list[Path] = []
 
     for path in files:
-        source = path.read_text(encoding="utf-8")
         try:
+            # Bytes, not read_text: universal-newline translation
+            # erases every `\r` before the comparison, which certified
+            # a CRLF (or bare-CR) file — a second byte representation
+            # of the same program — as canonical.  The read sits
+            # inside the try so an unreadable file (invalid UTF-8, a
+            # dangling symlink) joins the report instead of aborting
+            # the sweep with a traceback and hiding every file after
+            # it.
+            raw = path.read_bytes()
+            if b"\r" in raw:
+                crlf.append(path)
+                continue
+            source = raw.decode("utf-8")
             formatted = format_source(source, file=str(path))
         except Exception as exc:  # noqa: BLE001 - reported, not swallowed
             broken.append((path, f"{type(exc).__name__}: {exc}"))
             continue
         if formatted != source:
             stale.append(path)
+
+    if crlf:
+        print(
+            f"ERROR: {len(crlf)} corpus file(s) contain CR bytes;"
+            " canonical form uses LF line endings only:",
+            file=sys.stderr,
+        )
+        for path in crlf:
+            print(f"  {path.relative_to(_ROOT)}", file=sys.stderr)
 
     if broken:
         print(
@@ -94,7 +117,7 @@ def main() -> int:
             file=sys.stderr,
         )
 
-    if broken or stale:
+    if broken or stale or crlf:
         return 1
 
     print(f"All {len(files)} corpus programs are in canonical form.")
