@@ -43,14 +43,33 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Scoped to production dependencies: those are what esbuild
+      # bundles into the VSIX and ships to users.  An advisory against
+      # a build-only package (vsce's own tree, say) is worth knowing
+      # about but must not block an unrelated PR, since the fix is
+      # rarely ours to make.  Verified load-bearing against the lockfile
+      # as it stood before #1129: this gate fails on that tree, where
+      # `brace-expansion` was a runtime transitive of the language
+      # client.
+      - name: Audit shipped dependencies
+        run: npm audit --omit=dev --audit-level=high
+
       - name: Check extension source
         run: npm run check
+
+      - name: Test extension scripts
+        run: npm test
 
       - name: Inspect packaged files
         run: npm run package:list
 
       - name: Build VSIX
         run: npm run package
+
+      # After packaging: the check reads the built .vsix, since vsce
+      # synthesises entries and re-runs the build during packaging.
+      - name: Check packaged contents
+        run: npm run check:package
 
       - name: Upload VSIX
         uses: actions/upload-artifact@v7

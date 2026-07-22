@@ -21,6 +21,24 @@ updates:
       - "dependencies"
     open-pull-requests-limit: 5
 
+  # VS Code extension dependencies (npm).
+  # Without this entry the extension's tree was only ever updated when
+  # GitHub raised a security alert — security updates fire off the
+  # advisory database regardless of what is configured here, version
+  # updates do not.  That is how a `vscode-languageclient` major bump
+  # first arrived bundled into a CVE fix (PR #1127) rather than as a
+  # routine bump months earlier.
+  - package-ecosystem: "npm"
+    directory: "/editors/vscode"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "deps"
+    labels:
+      - "dependencies"
+    open-pull-requests-limit: 5
+
   # GitHub Actions versions
   - package-ecosystem: "github-actions"
     directory: "/"

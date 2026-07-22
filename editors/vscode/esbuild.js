@@ -6,9 +6,6 @@ const esbuild = require("esbuild");
 
 const extensionRoot = __dirname;
 const distDir = path.join(extensionRoot, "dist");
-const terminateProcess = require.resolve(
-    "vscode-languageclient/lib/node/terminateProcess.sh",
-);
 
 async function main() {
     fs.rmSync(distDir, { recursive: true, force: true });
@@ -24,13 +21,14 @@ async function main() {
         platform: "node",
         target: "node16",
     });
-
-    const packagedTerminateProcess = path.join(
-        distDir,
-        "terminateProcess.sh",
-    );
-    fs.copyFileSync(terminateProcess, packagedTerminateProcess);
-    fs.chmodSync(packagedTerminateProcess, 0o755);
+    // Nothing is copied alongside the bundle, and nothing should be:
+    // vscode-languageclient keeps its process-tree kill script inline
+    // and esbuild carries that string into the bundle like any other
+    // code, so there is no asset to stage here. Earlier versions of
+    // the client shelled out to a packaged `terminateProcess.sh` and
+    // this build staged it; re-adding a copy step would put an
+    // executable back in the VSIX for nothing. See the CHANGELOG for
+    // the version history.
 }
 
 main().catch((error) => {
