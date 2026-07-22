@@ -1352,13 +1352,7 @@ class Formatter:
         self, expr: HandleExpr, prefix: str = "", suffix: str = "",
     ) -> None:
         eff = self._fmt_effect_ref(expr.effect)
-        state_str = ""
-        if expr.state:
-            st = expr.state
-            te = self._fmt_param_type(st.type_expr)
-            init = self._fmt_expr(st.init_expr)
-            state_str = f"({te} = {init})"
-
+        state_str = self._fmt_handler_state(expr)
         self._line(f"{prefix}handle[{eff}]{state_str} {{")
         self._indent_inc()
         for i, clause in enumerate(expr.clauses):
@@ -1381,7 +1375,14 @@ class Formatter:
         self._indent_dec()
         self._line(f"}}{suffix}")
 
-    def _emit_handler_clause(self, clause: HandlerClause, comma: str) -> None:
+    def _fmt_handler_clause(self, clause: HandlerClause) -> str:
+        """One clause as a single line, without its separator.
+
+        Shared by the multi-line emitter and the inline renderer: two
+        independent renderings of the same node are how the inline path
+        came to emit a literal ellipsis while the multi-line one was
+        correct.
+        """
         params = ", ".join(
             self._fmt_param_type(p) for p in clause.params
         )
@@ -1393,10 +1394,18 @@ class Formatter:
             val = self._fmt_expr(clause.state_update[1])
             with_str = f" with {te} = {val}"
 
-        self._line(
-            f"{clause.op_name}({params}) -> "
-            f"{{ {body} }}{with_str}{comma}"
-        )
+        return f"{clause.op_name}({params}) -> {{ {body} }}{with_str}"
+
+    def _fmt_handler_state(self, expr: HandleExpr) -> str:
+        """The `(@T = init)` initialiser, or nothing at all."""
+        if not expr.state:
+            return ""
+        te = self._fmt_param_type(expr.state.type_expr)
+        init = self._fmt_expr(expr.state.init_expr)
+        return f"({te} = {init})"
+
+    def _emit_handler_clause(self, clause: HandlerClause, comma: str) -> None:
+        self._line(f"{self._fmt_handler_clause(clause)}{comma}")
 
     # -- Inline expression formatting ----------------------------------
 
@@ -1573,10 +1582,30 @@ class Formatter:
         return self._fmt_expr(body)
 
     def _fmt_handle_inline(self, expr: HandleExpr) -> str:
-        """Format handle as inline (shouldn't normally be needed)."""
-        # This is a fallback — handles are typically multi-line
+        """A `handle` reached through a sub-expression position.
+
+        This returned `handle[E] { ... }` — a literal ellipsis — on the
+        belief the path was unreachable, which its `# pragma: no cover`
+        recorded.  `handle_expr` is a bare alternative of `primary_expr`
+        in the grammar, so it is reachable from every operand, argument
+        and element position, and the stub deleted the state
+        initialiser, every clause and the `in` body, emitting something
+        that no longer parsed.
+
+        The braces here share a line, which rule 2 would not choose.
+        That is deliberate and narrow: unparseable output is strictly
+        worse than badly-shaped output, because a misformatted program
+        can still be reformatted and a destroyed one cannot.  Giving
+        nested constructs a multi-line path so this renderer is never
+        needed is the wider fix.
+        """
         eff = self._fmt_effect_ref(expr.effect)
-        return f"handle[{eff}] {{ ... }}"  # pragma: no cover
+        state = self._fmt_handler_state(expr)
+        clauses = ", ".join(
+            self._fmt_handler_clause(c) for c in expr.clauses
+        )
+        body = self._fmt_block_inline(expr.body)
+        return f"handle[{eff}]{state} {{ {clauses} }} in {{ {body} }}"
 
     def _fmt_block_inline(self, block: Block) -> str:
         """Format a block's body inline (no braces)."""

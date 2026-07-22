@@ -2295,6 +2295,48 @@ class TestCanonicalFormGaps:
         parse_to_ast(out)
         assert format_source(out) == out, "second pass differs"
 
+    def test_a_handle_in_operand_position_is_not_destroyed(self) -> None:
+        """`_fmt_handle_inline` emitted a literal ellipsis (#1136 sweep).
+
+        The stub never read `expr.state`, `expr.clauses` or
+        `expr.body`, so a `handle` reached through any sub-expression
+        position formatted to `handle[E] { ... }` — state, every clause
+        and the `in` body deleted — and the result did not parse. It
+        carried `# pragma: no cover` on the belief the path was
+        unreachable, but `handle_expr` is a bare alternative of
+        `primary_expr` in the grammar.
+
+        Worse than the relocations this PR fixes elsewhere: those moved
+        a comment, this destroys the program.
+        """
+        out = _fmt("""
+            effect Counter {
+              op get(Unit -> Int);
+              op inc(Unit -> Unit);
+            }
+
+            public fn run(@Unit -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              1 + handle[Counter](@Int = 0) {
+                get(@Unit) -> resume(@Int.0),
+                inc(@Unit) -> resume(())
+              } in {
+                get(())
+              }
+            }
+        """)
+        assert "..." not in out, f"the stub's ellipsis survived:\n{out}"
+        for fragment in ("@Int = 0", "get(", "inc(", "} in {"):
+            assert fragment in out, (
+                f"{fragment!r} was deleted by formatting:\n{out}"
+            )
+        # The output must still be a program.
+        parse_to_ast(out)
+        assert format_source(out) == out, "second pass differs"
+
     # -- F3: blank line before a leading comment block ------------------
 
     def test_blank_line_between_a_comment_block_and_its_declaration(
