@@ -165,13 +165,31 @@ function analyse(entries, expected) {
 
     const actual = entries.map((entry) => entry.name).sort();
     const wanted = [...expected].sort();
+
+    // Checked before the comparisons below, which are by membership and
+    // so cannot see a repeat: a zip may legally name the same path
+    // twice, and readers disagree about which copy wins, so a second
+    // entry under an allowlisted, inert, already-expected name would
+    // otherwise satisfy every assertion here.
+    const seen = new Set();
+    const duplicates = [];
     for (const name of actual) {
+        if (seen.has(name) && !duplicates.includes(name)) {
+            duplicates.push(name);
+        }
+        seen.add(name);
+    }
+    for (const name of duplicates) {
+        problems.push(`duplicate entry in the package: ${name}`);
+    }
+
+    for (const name of seen) {
         if (!wanted.includes(name)) {
             problems.push(`unexpected file in the package: ${name}`);
         }
     }
     for (const name of wanted) {
-        if (!actual.includes(name)) {
+        if (!seen.has(name)) {
             problems.push(`expected file missing from the package: ${name}`);
         }
     }

@@ -98,6 +98,49 @@ test("adding a bad file to EXPECTED does not silence the other assertions", () =
     assert.ok(problems.some((p) => p.includes("executable file")), problems);
 });
 
+// A zip may name the same path twice. Membership comparison cannot see
+// that, so a second copy of an expected, inert, non-executable name
+// would otherwise satisfy every other assertion.
+
+test("a duplicated expected entry is reported", () => {
+    const entries = [
+        ...cleanEntries(),
+        { name: "extension/package.json", mode: 0o644 },
+    ];
+    const problems = messages(entries);
+    assert.ok(
+        problems.some((p) => p.includes("duplicate entry")
+            && p.includes("extension/package.json")),
+        problems,
+    );
+});
+
+test("a duplicate does not mask the missing-file check", () => {
+    const entries = [
+        ...cleanEntries().filter((e) => e.name !== "extension/readme.md"),
+        { name: "extension/package.json", mode: 0o644 },
+    ];
+    const problems = messages(entries);
+    assert.ok(problems.some((p) => p.includes("duplicate entry")), problems);
+    assert.ok(
+        problems.some((p) => p.includes("expected file missing")
+            && p.includes("extension/readme.md")),
+        problems,
+    );
+});
+
+test("a duplicated unexpected file reports both problems once each", () => {
+    const stray = { name: "extension/stray.js", mode: 0o644 };
+    const problems = messages([...cleanEntries(), stray, { ...stray }]);
+    assert.strictEqual(
+        problems.filter((p) => p.includes("duplicate entry")).length, 1,
+    );
+    assert.strictEqual(
+        problems.filter((p) => p.includes("unexpected file")).length, 1,
+        "the unexpected-file message should not repeat per copy",
+    );
+});
+
 test("an empty archive is a failure, not a vacuous pass", () => {
     const problems = messages([]);
     assert.deepStrictEqual(problems, ["archive contains no entries at all"]);
