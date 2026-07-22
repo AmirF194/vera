@@ -651,7 +651,7 @@ class Formatter:
         comments = self._attached.before.pop(anchor, [])
         for c in comments:
             for cline in c.text.split("\n"):
-                self._line(cline.strip() if c.kind == "block" else cline.strip())
+                self._line(cline.strip())
             # The gap *below* the comment, read from the same source map
             # as the gap *above* it (`_blank_if_separated`).  The two are
             # halves of one rule rather than two mechanisms, and neither
