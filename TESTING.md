@@ -640,7 +640,7 @@ Twenty-one scripts in `scripts/` validate cross-cutting concerns beyond unit tes
 | Script | What it validates |
 |--------|-------------------|
 | `check_conformance.py` | All 163 conformance entries hold at their declared level (parse/check/verify/run) — positives pass; the negatives fail `check` with their `expected_error` E-code |
-| `check_examples.py` | All 39 `.vera` examples pass `vera check` + `vera verify` |
+| `check_examples.py` | All 40 `.vera` examples pass `vera check` + `vera verify` |
 | `check_examples_readme.py` | Every `vera run` command in examples/README.md references an existing file and exported function |
 | `check_spec_examples.py` | 189 parseable code blocks from spec chapters: parse, type-check, and verify |
 | `check_readme_examples.py` | All Vera code blocks in README.md parse correctly |
