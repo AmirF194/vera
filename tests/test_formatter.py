@@ -2102,6 +2102,36 @@ class TestCanonicalFormGaps:
         parse_to_ast(out)
         assert format_source(out) == out, "second pass differs"
 
+    def test_the_corpus_gate_reaches_nested_module_directories(self) -> None:
+        """The gate must sweep everything `vera check` can reach.
+
+        A direct-child `glob` skipped the six imported modules under
+        `examples/vera/` and `tests/conformance/vera/`, and one of them
+        was in fact non-canonical while the gate reported the corpus
+        clean -- `examples/modules.vera` imports it. Asserted as a
+        differential against an independent recursive walk rather than
+        a fixed count, so adding a module cannot silently re-open it.
+        """
+        import sys
+        root = Path(__file__).parent.parent
+        sys.path.insert(0, str(root / "scripts"))
+        from check_corpus_canonical import _corpus_files
+
+        swept = {p.resolve() for p in _corpus_files()}
+        expected = {
+            p.resolve()
+            for d in ("examples", "tests/conformance")
+            for p in (root / d).rglob("*.vera")
+        }
+        assert swept == expected, (
+            f"gate misses {sorted(expected - swept)}; "
+            f"over-reaches {sorted(swept - expected)}"
+        )
+        assert any(p.parent.name == "vera" for p in swept), (
+            "no nested module directory in the sweep — the case that "
+            "made this necessary would not be covered"
+        )
+
     # -- F3: blank line before a leading comment block ------------------
 
     def test_blank_line_between_a_comment_block_and_its_declaration(

@@ -34,9 +34,19 @@ _CORPUS_DIRS = ("examples", "tests/conformance")
 
 
 def _corpus_files() -> list[Path]:
+    """Every Vera source under the corpus roots, at any depth.
+
+    `glob` rather than `rglob` checked only direct children, so the six
+    imported modules under `examples/vera/` and
+    `tests/conformance/vera/` were skipped -- and one of them was in
+    fact non-canonical while this script reported the corpus clean.
+    `examples/modules.vera` imports it, so a corpus program was built
+    from source the corpus gate never looked at.  The sweep must reach
+    everything `vera check` can reach.
+    """
     files: list[Path] = []
     for d in _CORPUS_DIRS:
-        files.extend(sorted((_ROOT / d).glob("*.vera")))
+        files.extend(sorted((_ROOT / d).rglob("*.vera")))
     return files
 
 
