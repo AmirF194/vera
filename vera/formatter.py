@@ -1237,6 +1237,8 @@ class Formatter:
         self._indent_inc()
         for i, arm in enumerate(expr.arms):
             comma = "," if i < len(expr.arms) - 1 else ""
+            if i:
+                self._blank_if_separated(arm)
             if arm.span:
                 self._emit_comments(arm.span.line)
             pat = self._fmt_pattern(arm.pattern)

@@ -1334,6 +1334,10 @@ class TestMatchBlockArms:
             '  IO.print("done")',
         ], src
         parse_to_ast(src)
+        # The suffix-bearing layout must also be a fixed point:
+        # the `;` rides the closing brace, and re-emitting it is
+        # where a dropped or doubled suffix would show up.
+        assert format_source(src) == src, "second pass differs"
 
 
 # =====================================================================
@@ -1995,6 +1999,64 @@ class TestCanonicalFormGaps:
         assert lines[req + 1] == "", f"gap above ensures lost:\n{out}"
         ens = lines.index("  ensures(true)")
         assert lines[ens + 1] == "", f"gap above effects lost:\n{out}"
+        parse_to_ast(out)
+        assert format_source(out) == out, "second pass differs"
+
+    def test_blank_lines_between_arms_and_handler_clauses_survive(self) -> None:
+        """The other two repeated own-line item kinds.
+
+        Arms looked correct under a loose probe that searched the whole
+        body for any blank — the one it found sat between the `data`
+        declaration and the function.  Asserting the line *directly
+        after* the first arm is what distinguishes them.
+        """
+        out = _fmt("""
+            effect Counter {
+              op get(Unit -> Int);
+              op inc(Unit -> Unit);
+            }
+
+            private data C {
+              R,
+              G
+            }
+
+            public fn rank(@C -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              match @C.0 {
+                R -> 1,
+
+                G -> 2
+              }
+            }
+
+            public fn counted(@Int -> @Int)
+              requires(true)
+              ensures(true)
+              effects(pure)
+            {
+              handle[Counter](@Int = 0) {
+                get(@Unit) -> resume(@Int.0),
+
+                inc(@Unit) -> resume(())
+              } in {
+                @Int.0
+              }
+            }
+        """)
+        lines = out.splitlines()
+
+        def gap_after(needle: str) -> None:
+            i = next(n for n, ln in enumerate(lines) if needle in ln)
+            assert lines[i + 1] == "", (
+                f"gap after {needle!r} lost:\n{out}"
+            )
+
+        gap_after("R -> 1,")
+        gap_after("get(@Unit) ->")
         parse_to_ast(out)
         assert format_source(out) == out, "second pass differs"
 
