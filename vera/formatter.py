@@ -833,13 +833,19 @@ class Formatter:
 
         # Contract clauses — each on its own line, indented 2 spaces
         self._indent_inc()
-        for c in fn.contracts:
+        for i, c in enumerate(fn.contracts):
+            # Rule 13 applies to any repeated own-line item, not just
+            # statements: a gap between two clauses is the same authored
+            # paragraph break, and the AST records it nowhere.
+            if i:
+                self._blank_if_separated(c)
             if c.span:
                 self._emit_comments(c.span.line)
             self._emit_contract(c)
             self._claim_inline(c)
 
         # Effects clause
+        self._blank_if_separated(fn.effect)
         if fn.effect.span:
             self._emit_comments(fn.effect.span.line)
         self._line(f"effects({self._fmt_effect_row(fn.effect)})")
@@ -1279,6 +1285,8 @@ class Formatter:
         self._indent_inc()
         for i, clause in enumerate(expr.clauses):
             comma = "," if i < len(expr.clauses) - 1 else ""
+            if i:
+                self._blank_if_separated(clause)
             self._emit_handler_clause(clause, comma)
         self._indent_dec()
         self._line("} in {")

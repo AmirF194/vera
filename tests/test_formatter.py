@@ -1970,6 +1970,34 @@ class TestCanonicalFormGaps:
         parse_to_ast(out)
         assert format_source(out) == out, "second pass differs"
 
+    def test_blank_lines_between_repeated_own_line_items_survive(self) -> None:
+        """Rule 13 covers any repeated own-line item, not just statements.
+
+        Match arms already went through the arm anchor, but contract
+        clauses, the effects row and handler clauses each emitted
+        straight from their loop with no gap check, so an authored
+        paragraph break between two clauses was dropped.  Raised in
+        review of PR #1138.
+        """
+        out = _fmt("""
+            public fn f(@Int -> @Int)
+              requires(true)
+
+              ensures(true)
+
+              effects(pure)
+            {
+              @Int.0
+            }
+        """)
+        lines = out.splitlines()
+        req = lines.index("  requires(true)")
+        assert lines[req + 1] == "", f"gap above ensures lost:\n{out}"
+        ens = lines.index("  ensures(true)")
+        assert lines[ens + 1] == "", f"gap above effects lost:\n{out}"
+        parse_to_ast(out)
+        assert format_source(out) == out, "second pass differs"
+
     # -- F3: blank line before a leading comment block ------------------
 
     def test_blank_line_between_a_comment_block_and_its_declaration(
