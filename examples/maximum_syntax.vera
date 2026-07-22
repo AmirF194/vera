@@ -1,0 +1,403 @@
+-- This is a single line comment.
+{- This is a multi-line
+comment. -}
+
+-- An effect is a named capability a function can use: a set of typed
+-- operations, declared once and referenced via `effects(...)` clauses.
+effect Counter {
+  -- Single line comments can be indented.
+  -- Semi-colons separate op declarations.
+  op increment(Unit -> Unit);
+
+  -- The normal style is 2-space indents, snake_case function names and
+  -- CamelCase names for types/effects. Vera does not have variable
+  -- names.
+  op get_count(Unit -> Int);
+}
+
+-- Generic effects using <TypeArg> to define type arguments. CamelCase
+-- or single letters for these.
+effect Logger<T> {
+  -- Unit is type of the empty value which is spelled ()
+  op log(T -> Unit);
+}
+
+-- Exn is partially builtin like State however it still needs to be
+-- defined.
+effect Exn<E> {
+  -- Never is the type of an expression that never produces a value.
+  op throw(E -> Never);
+}
+
+-- Refinement types
+type PosInt = { @Int | @Int.0 > 0 };
+-- In float literals the decimal point is required. We couldn't replace
+-- 0.0 with 0 below.
+type Percentage = {
+  @Float64 |
+  @Float64.0 >= 0.0 && @Float64.0 <= 1.0
+};
+
+-- None of the following are valid:
+-- type Number = Int;
+-- type Number = @Int;
+-- type Number = { @Int };
+-- However one can do:
+type Number = { @Int | true };
+
+-- Function type aliases
+type IntPredicate = fn(Int -> Bool) effects(pure);
+
+-- Algebraic data type
+-- Visibility keywords are public and private. There is no default:
+-- every top-level `fn`/`data` must say one or the other, or it's a
+-- compile error.
+private data List<T> {
+  Nil,
+  Cons(T, List<T>)
+}
+
+-- ADTs where no constructor takes a field can be used as enums.
+private data Color {
+  Red,
+  Green,
+  Blue
+}
+
+-- `_` is the match wildcard: it catches every constructor not matched
+-- by an earlier arm.
+private fn is_green(@Color -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  match @Color.0 {
+    Green -> true,
+    _ -> false
+  }
+}
+
+-- `Tuple<A, B>` construction (`Tuple(a, b)`), match-arm destructuring,
+-- and `let`-destructuring (`let Tuple<@A, @B> = expr;`, used in `main`
+-- below) are all distinct from destructuring a user `data` ADT.
+private fn swap(@Tuple<Int, String> -> @Tuple<String, Int>)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  match @Tuple<Int, String>.0 {
+    Tuple(@Int, @String) -> Tuple(@String.0, @Int.0)
+  }
+}
+
+-- `forall<T>` makes a function generic over any type T.
+private forall<T> fn identity(@T -> @T)
+  -- `requires` is the precondition; `true` means no constraint on the argument.
+  requires(true)
+  -- `@T.result` refers to the return value, but only inside `ensures`.
+  ensures(@T.result == @T.0)
+  -- pure if there are no effects. You must declare
+  effects(pure)
+{
+  -- No semi-colon on the return statement. `return` is not a keyword.
+  @T.0
+}
+
+-- `forall<T where Eq<T>>` constrains T to types with the Eq ability, so
+-- `==` can be used on values of type T below.
+private forall<T where Eq<T>> fn list_contains(@List<T>, @T -> @Bool)
+  requires(true)
+  ensures(true)
+  -- `decreases` gives the verifier a termination measure, so recursion
+  -- is proven to terminate rather than merely assumed to.
+  decreases(@List<T>.0)
+  effects(pure)
+{
+  -- `match` destructures an ADT by its constructors.
+  match @List<T>.0 {
+    Nil -> false,
+    Cons(@T, @List<T>) -> @T.0 == @T.1 || list_contains(@List<T>.0, @T.1)
+  }
+}
+
+-- `Nat` is a non-negative integer.
+-- `@Nat.0 - 1` below is a checked subtraction, guarded against
+-- underflow.
+private fn is_even(@Nat -> @Bool)
+  requires(true)
+  ensures(true)
+  decreases(@Nat.0)
+  effects(pure)
+{
+  if @Nat.0 == 0 then {
+    true
+  } else {
+    is_odd(@Nat.0 - 1)
+  }
+}
+-- Trailing where for mutual recursion.
+where {
+  fn is_odd(@Nat -> @Bool)
+    requires(true)
+    ensures(true)
+    decreases(@Nat.0)
+    effects(pure)
+  {
+    if @Nat.0 == 0 then {
+      false
+    } else {
+      is_even(@Nat.0 - 1)
+    }
+  }
+}
+
+-- `forall(binder, count, predicate)` is the bounded universal
+-- quantifier for contracts in addition to the generics `forall<T>`.
+private fn all_positive(@Array<Int> -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  forall(@Int, array_length(@Array<Int>.0), fn(@Int -> @Bool) effects(pure) { @Array<Int>.0[@Int.0] > 0 })
+}
+
+-- `exists(...)` is the existential counterpart.
+private fn has_negative(@Array<Int> -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  exists(@Int, array_length(@Array<Int>.0), fn(@Int -> @Bool) effects(pure) { @Array<Int>.0[@Int.0] < 0 })
+}
+
+-- A refinement type can be used directly as a parameter or return type.
+-- Converting between a refinement and a different base type still goes
+-- through the ordinary conversion builtin (`int_to_float` here).
+private fn to_percentage(@PosInt -> @Percentage)
+  requires(true)
+  -- `==>` is logical implication.
+  ensures(@PosInt.0 > 100 ==> @Percentage.result == 1.0)
+  effects(pure)
+{
+  -- `assert` documents an intermediate fact for the verifier.
+  -- The verifier checks assertions.
+  assert(@PosInt.0 > 0);
+  -- `if`/`then`/`else` is an expression, not a statement.
+  let @Int = if @PosInt.0 > 100 then { 100 } else { @PosInt.0 };
+  let @Float64 = int_to_float(@Int.0) / 100.0;
+  -- `assume` tells the verifier the fact is true.
+  -- The verifier does not check assumptions.
+  assume(@Float64.0 <= 1.0);
+  @Float64.0
+}
+
+private fn count_to_three(@Unit -> @Unit)
+  requires(true)
+  ensures(true)
+  -- `<Counter>` puts a user-defined effect in the function's row.
+  effects(<Counter>)
+{
+  -- User-defined effect operations are called qualified: `Effect.op(...)`.
+  Counter.increment(());
+  Counter.increment(());
+  Counter.increment(())
+}
+
+-- `<Logger<Int>>` instantiates the generic custom effect's type
+-- variable.
+private fn log_twice(@Int -> @Unit)
+  requires(true)
+  ensures(true)
+  effects(<Logger<Int>>)
+{
+  Logger.log(@Int.0);
+  Logger.log(@Int.0)
+}
+
+-- old()/new() refer to the ambient State<T> before/after this function's
+-- own body -- they are only meaningful while the effect is still in the
+-- function's own row, not once a `handle` block below has discharged it.
+private fn increment_and_return(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == old(State<Int>) && new(State<Int>) == old(State<Int>) + 1)
+  effects(<State<Int>>)
+{
+  -- Unlike a user effect, the built-in State operations are called bare:
+  -- `get`/`put`, not `State.get`/`State.put`.
+  let @Int = get(());
+  put(@Int.0 + 1);
+  @Int.0
+}
+
+-- `handle[Effect](@T = init) { clauses } in { body }` discharges an
+-- effect: `body` may use it freely, and each clause says how. Every
+-- clause ends by calling `resume`, which continues `body` with a value.
+public fn run_increment(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>](@Int = 0) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) }
+  } in {
+    increment_and_return(())
+  }
+}
+
+-- The put clause's `with` overrides the intrinsic store: `@Int.1` is the
+-- put argument (state binds last, so it has the higher index here), so
+-- this handler doubles every stored value instead of storing it as-is.
+public fn run_counter(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>](@Int = 0) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) } with @Int = @Int.1 * 2
+  } in {
+    put(0);
+    put(get(()) + 1);
+    put(get(()) + 1);
+    get(())
+  }
+}
+
+-- `/* ... */` is a third comment kind: an inline annotation attached to
+-- a parameter, distinct from `--` line and `{- -}` block comments. It
+-- doesn't nest, and it's preserved in the AST as a human-readable label.
+private fn checked_div(@Int /* numerator */, @Int /* denominator */ -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<Exn<Int>>)
+{
+  if @Int.1 == 0 then {
+    throw(0 - 1)
+  } else {
+    @Int.0 / @Int.1
+  }
+}
+
+-- Exn's handler has no initial state -- unlike State, its clause list is
+-- everything: whatever `throw` is caught with becomes the handle
+-- expression's value, and the handled body is abandoned (no `resume`).
+public fn safe_div(@Int, @Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[Exn<Int>] {
+    throw(@Int) -> { @Int.0 }
+  } in {
+    checked_div(@Int.0, @Int.1)
+  }
+}
+
+-- `<Async>` needs no `handle` block: `async`/`await` and the `Future<T>`
+-- type are host-level, not a user-defined effect with clauses.
+private fn roundtrip(@Int -> @Int)
+  requires(true)
+  ensures(@Int.result == @Int.0)
+  effects(<Async>)
+{
+  let @Future<Int> = async(@Int.0);
+  await(@Future<Int>.0)
+}
+
+-- Likewise `<Random>` is a bare marker; its operations are called
+-- qualified, like a user effect's.
+public fn roll_dice(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<Random>)
+{
+  Random.random_int(1, 6)
+}
+
+-- `handle(Request -> Response)` is what `vera serve` looks for by name;
+-- this is the same shape under a different name, purely to show the
+-- built-in Request/Response ADTs and the <HttpServer> marker effect.
+public fn respond(@Request -> @Response)
+  requires(true)
+  ensures(true)
+  effects(<HttpServer>)
+{
+  match @Request.0 {
+    -- `\( )` interpolates an expression into a string literal.
+    Request(@String, @String, @Map<String, String>, @String) ->
+      Response(200, map_insert(map_new(), "content-type", "text/plain"), "hello, \(@String.1)")
+  }
+}
+
+-- Json is a built-in ADT: parsed or hand-built values pattern-match like
+-- any other constructor.
+private fn describe_json(@Json -> @String)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  match @Json.0 {
+    JNull -> "null",
+    JBool(@Bool) -> "bool",
+    JNumber(@Float64) -> "number",
+    JString(@String) -> "string",
+    JArray(@Array<Json>) -> "array",
+    JObject(@Map<String, Json>) -> "object"
+  }
+}
+
+-- Ordering -- the built-in ADT behind the Ord ability's `compare`.
+private fn describe_order(@Ordering -> @String)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  match @Ordering.0 {
+    Less -> "less",
+    Equal -> "equal",
+    Greater -> "greater"
+  }
+}
+
+-- `|>` pipes a value into the next call as its first argument.
+private fn compare_ints(@Int, @Int -> @String)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  compare(@Int.1, @Int.0) |> describe_order()
+}
+
+-- The entry point is the function main() it has the type @Unit -> @Unit
+-- it should be public.
+public fn main(@Unit -> @Unit)
+  requires(true)
+  ensures(true)
+  -- An effects row can list more than one effect.
+  effects(<IO, Async>)
+{
+  let @List<Int> = Cons(1, Cons(2, Cons(3, Nil)));
+  IO.print("contains 2? \(list_contains(@List<Int>.0, 2))\n");
+  IO.print("identity(7) = \(identity(7))\n");
+  IO.print("is_green(Green) = \(is_green(Green))\n");
+  IO.print("is_even(4) = \(is_even(4))\n");
+  let Tuple<@String, @Int> = swap(Tuple(1, "one"));
+  IO.print("swap(1, \"one\") = (\(@String.0), \(@Int.0))\n");
+  -- The rest of the escape sequences: \\ (backslash), \t (tab), \r
+  -- (carriage return), \0 (null), and \u{XXXX} (Unicode code point,
+  -- 1-6 hex digits).
+  IO.print("escapes: backslash=\\ tab=[\t] cr=[\r] null=[\0] unicode=\u{1F600}\n");
+  IO.print("all_positive([1, 2, 3]) = \(all_positive([1, 2, 3]))\n");
+  IO.print("has_negative([1, -2, 3]) = \(has_negative([1, -2, 3]))\n");
+  -- float_to_string converts a non-String result before interpolation --
+  -- a @Percentage refinement isn't auto-converted the way a bare Float64 is.
+  IO.print("to_percentage(150) = \(float_to_string(to_percentage(150)))\n");
+  IO.print("run_increment() = \(run_increment(()))\n");
+  IO.print("run_counter() = \(run_counter(()))\n");
+  IO.print("safe_div(10, 0) = \(safe_div(10, 0))\n");
+  IO.print("roundtrip(42) = \(roundtrip(42))\n");
+  IO.print("describe_json(JBool(true)) = \(describe_json(JBool(true)))\n");
+  IO.print("compare_ints(1, 2) = \(compare_ints(1, 2))\n");
+  ()
+}

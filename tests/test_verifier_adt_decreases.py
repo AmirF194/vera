@@ -343,7 +343,7 @@ private fn sum(@List<Int> -> @Int)
         assert result.summary.tier1_verified == 8
 
     def test_overall_tier_counts(self) -> None:
-        """All examples together: 298 T1 / 99 T3 / 397 total (current).
+        """All examples together: 349 T1 / 105 T3 / 454 total (current).
 
         Counts move when examples are added or their contracts become
         more / less verifiable.  Trajectory:
@@ -575,9 +575,44 @@ private fn sum(@List<Int> -> @Int)
         # preconditions discharge statically (+8 T1) while the top_score /
         # roster_size / summary bodies fall to runtime (+3 T3), +11 total:
         # 290/96/386 -> 298/99/397.
-        assert t1 == 298, f"Expected 298 T1, got {t1}"
-        assert t3 == 99, f"Expected 99 T3, got {t3}"
-        assert total == 397, f"Expected 397 total, got {total}"
+        #
+        # examples/maximum_syntax.vera (syntax-breadth showcase) joins the
+        # corpus — its many trivial `requires(true)`/`ensures(true)` pairs
+        # discharge statically (+39 T1), while `increment_and_return`'s
+        # `old(State<Int>)`/`new(State<Int>)` postcondition (undecidable, plus
+        # the two `int_overflow` sub-obligations it and its body carry) and
+        # `roundtrip`'s `<Async>` postcondition fall to runtime (+4 T3),
+        # +43 total: 298/99/397 -> 337/103/440.
+        #
+        # A later pass added the generic custom-effect demo (`effect
+        # Logger<T>` + `log_twice`, showing `<Logger<Int>>` row
+        # instantiation) to the same example — its trivial
+        # `requires(true)`/`ensures(true)` pair discharges statically, same
+        # shape as `count_to_three`'s: +2 T1, +0 T3, +2 total:
+        # 337/103/440 -> 339/103/442.
+        #
+        # `to_percentage`'s `Percentage` refinement was rebased from Int
+        # (0..100) to Float64 (0..1), converting through `int_to_float(...)
+        # / 100.0`. Both of the function's own obligations that previously
+        # discharged at Tier 1 -- its `==>` postcondition and the return
+        # value's `refine_bind` into `@Percentage` -- now involve a float
+        # division Z3 can't decide, so both drop to Tier 3: -2 T1, +2 T3,
+        # +0 total (same two obligations, different tier): 339/103/442 ->
+        # 337/105/442.
+        #
+        # A further pass filled in the remaining syntax gaps found by
+        # comparing the example against grammar.lark / spec: a plain enum
+        # `data Color` + wildcard match (`is_green`), `Tuple<A, B>`
+        # construction/destructuring (`swap`), and a `Nat`-typed mutual
+        # recursion pair declared via a trailing `where` block (`is_even`/
+        # `is_odd`). All four are simple `requires(true)`/`ensures(true)`
+        # pairs (`is_even`/`is_odd` also each add one `decreases`
+        # obligation) that discharge statically, same shape as
+        # `count_to_three`'s: +12 T1, +0 T3, +12 total: 337/105/442 ->
+        # 349/105/454.
+        assert t1 == 349, f"Expected 349 T1, got {t1}"
+        assert t3 == 105, f"Expected 105 T3, got {t3}"
+        assert total == 454, f"Expected 454 total, got {total}"
         assert t3u == 0, f"Expected 0 tier3_unguarded, got {t3u}"
 
 

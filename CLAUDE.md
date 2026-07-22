@@ -59,7 +59,7 @@ VERA_EAGER_GC=1 vera run file.vera  # Force GC on every alloc (see ENVIRONMENT.m
 mypy vera/                        # Type-check the compiler itself
 
 python scripts/check_conformance.py    # Verify all 163 conformance programs (positives pass their level; negatives fail with their expected_error E-code)
-python scripts/check_examples.py      # Verify all 39 examples parse + check + verify
+python scripts/check_examples.py      # Verify all 40 examples parse + check + verify
 python scripts/check_examples_readme.py # Verify vera run commands in examples/README.md
 python scripts/check_spec_examples.py # Verify spec code blocks parse
 python scripts/check_readme_examples.py # Verify README code blocks parse
@@ -87,7 +87,7 @@ See [`TOOLCHAIN.md`](TOOLCHAIN.md) for the CLI cookbook — driving the toolchai
 
 - `spec/` — Language specification (Chapters 0-13)
 - `vera/` — Reference compiler: grammar, parser, AST, transformer, type checker, verifier, codegen, CLI
-- `examples/` — 39 example Vera programs (all must pass `vera check` and `vera verify`)
+- `examples/` — 40 example Vera programs (all must pass `vera check` and `vera verify`)
 - `tests/` — Test suite (unit tests + conformance suite)
 - `tests/conformance/` — 163 conformance programs validating every language feature against the spec
 - `scripts/` — CI and validation scripts
@@ -127,7 +127,7 @@ Before changing code — **adding or removing** — write the test that proves y
 
 - Pre-commit hooks run mypy + pytest + conformance suite + example validation on every commit
 - All 163 conformance programs in `tests/conformance/` must hold at their declared level — positive entries pass, and the negative fixtures (`ch02_generic_over_unit_rejected`, `ch02_map_unit_value_rejected`, `ch04_let_unit_rejected`, `ch05_apply_fn_arity`, `ch05_where_helper_outer_slot_rejected`, `ch07_handler_state_body_scope_rejected`, `ch07_state_unit_op_param_read_rejected`, `ch08_circular_import`, `ch08_visibility_private`, `ch09_builtin_redefinition`, `ch09_ord_adt_rejected`, `ch09_eq_non_derivable_rejected`) must *fail* `check` with their `expected_error` E-code
-- All 39 examples in `examples/` must pass `vera check` and `vera verify`
+- All 40 examples in `examples/` must pass `vera check` and `vera verify`
 - Version must stay in sync across `pyproject.toml`, `vera/__init__.py`, `docs/index.html`, `README.md`, and `uv.lock` (gated by `scripts/check_version_sync.py`); CHANGELOG.md must also carry a matching `## [X.Y.Z]` section
 - All tests must pass: `pytest tests/ -v`
 - Type checking must be clean: `mypy vera/`
