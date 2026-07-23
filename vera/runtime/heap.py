@@ -1102,6 +1102,119 @@ def _alloc_array_of_f64(
 
 
 # =====================================================================
+# #229 — <DB> effect marshalling: nested nullable rows / params
+# =====================================================================
+#
+# `DB.query` / `DB.execute` move `Option<String>` cells across the boundary:
+# `None` is SQL NULL, `Some(s)` a value (DESIGN principle 2 — never collapsed
+# to "").  The layouts mirror the existing `_alloc_*` family:
+#   - Option<String>: a 4-byte heap pointer to an ADT — None is tag 0 at +0;
+#     Some is tag 1 at +0, str_ptr at +4, str_len at +8 (see
+#     `_alloc_option_some_string` / `_alloc_option_none`).
+#   - Array<Option<String>>: (backing_ptr, count); backing holds `count`
+#     4-byte Option pointers.
+#   - Array<Array<Option<String>>>: (backing_ptr, count); backing holds
+#     `count` 8-byte (row_ptr, n_cols) pairs.
+
+def _read_wasm_array_of_options_of_string(
+    caller: wasmtime.Caller, ptr: int, count: int,
+) -> list[str | None]:
+    """Read an ``Array<Option<String>>`` (a ``DB`` params argument) from WASM
+    memory into a Python list of ``str`` (Some) / ``None`` (None).
+
+    The backing at ``ptr`` holds ``count`` 4-byte i32 pointers, each to an
+    ``Option<String>`` ADT.  ``count == 0`` is the empty array (``ptr`` is the
+    null pair pointer and is never dereferenced).  No allocation happens here,
+    so no GC rooting is needed.
+    """
+    out: list[str | None] = []
+    for i in range(count):
+        opt_ptr = _read_i32(caller, ptr + i * 4)
+        if _read_i32(caller, opt_ptr) == 1:       # Some(String) — tag 1
+            s_ptr = _read_i32(caller, opt_ptr + 4)
+            s_len = _read_i32(caller, opt_ptr + 8)
+            out.append(_read_wasm_string(caller, s_ptr, s_len))
+        else:                                      # None — tag 0
+            out.append(None)
+    return out
+
+def _alloc_array_of_options_of_string(
+    caller: wasmtime.Caller, cells: list[str | None],
+) -> tuple[int, int]:
+    """Allocate an ``Array<Option<String>>`` on the WASM heap.
+
+    Returns ``(backing_ptr, count)`` — each element is a 4-byte i32 pointer to
+    an ``Option<String>`` ADT (``Some(s)`` for a ``str`` cell, ``None`` for a
+    Python ``None``).
+    """
+    count = len(cells)
+    if count == 0:
+        return (0, 0)
+    # GC-rooting (#229 / #692 class): root the backing across the per-cell
+    # Option (and its inner string) allocs.  Each cell's Option ptr is written
+    # into the now-rooted backing immediately, so no element pointer is ever
+    # held unrooted across an alloc.
+    with _ShadowGuard(caller) as guard:
+        backing_ptr = _call_alloc(caller, count * 4)
+        guard.push(backing_ptr)
+        for i, cell in enumerate(cells):
+            opt_ptr = (
+                _alloc_option_none(caller) if cell is None
+                else _alloc_option_some_string(caller, cell)
+            )
+            _write_i32(caller, backing_ptr + i * 4, opt_ptr)
+    return (backing_ptr, count)
+
+def _alloc_result_ok_rows(
+    caller: wasmtime.Caller, rows: list[list[str | None]],
+) -> int:
+    """Allocate ``Result.Ok(Array<Array<Option<String>>>)`` — the ``DB.query``
+    result grid — and return the ADT pointer.
+
+    The outer backing holds ``len(rows)`` 8-byte (row_ptr, n_cols) pairs; each
+    row is an ``Array<Option<String>>``.  The ``Result.Ok`` wrapper is the
+    12-byte pair-payload shape (tag 0 at +0, ptr at +4, count at +8) — the same
+    as ``_alloc_result_ok_string``, with an array payload.
+    """
+    # One guard spans the whole build: the outer backing is rooted before any
+    # row is allocated and stays rooted through the final Result.Ok alloc, so
+    # every row (and, transitively, its cells and strings) stays reachable from
+    # the shadow stack the entire time.  Each row's (ptr, count) is written into
+    # the rooted outer backing immediately after the row is built, so no row
+    # pointer is held unrooted across an alloc.
+    with _ShadowGuard(caller) as guard:
+        n_rows = len(rows)
+        outer_ptr = 0
+        if n_rows != 0:
+            outer_ptr = _call_alloc(caller, n_rows * 8)
+            guard.push(outer_ptr)
+            for i, row in enumerate(rows):
+                row_ptr, n_cols = _alloc_array_of_options_of_string(caller, row)
+                _write_i32(caller, outer_ptr + i * 8, row_ptr)
+                _write_i32(caller, outer_ptr + i * 8 + 4, n_cols)
+        # Layout: tag(i32)=0 at +0, backing_ptr(i32) at +4, count(i32) at +8
+        adt_ptr = _call_alloc(caller, 12)
+        _write_i32(caller, adt_ptr, 0)            # tag = Ok
+        _write_i32(caller, adt_ptr + 4, outer_ptr)
+        _write_i32(caller, adt_ptr + 8, n_rows)
+    return adt_ptr
+
+def _alloc_result_ok_i64(
+    caller: wasmtime.Caller, value: int,
+) -> int:
+    """Allocate ``Result.Ok(Int)`` — the ``DB.execute`` affected-row count.
+
+    Layout: tag(i32)=0 at +0, payload(i64) at +8 (8-byte aligned), 16 bytes
+    total — mirroring ``_alloc_option_some_i64``.  No shadow-rooting: the
+    payload is an i64 value, not a heap pointer.
+    """
+    adt_ptr = _call_alloc(caller, 16)
+    _write_i32(caller, adt_ptr, 0)                # tag = Ok
+    _write_i64(caller, adt_ptr + 8, value)
+    return adt_ptr
+
+
+# =====================================================================
 # #305 — HttpServer handler marshalling (Request build / Response read)
 # =====================================================================
 
