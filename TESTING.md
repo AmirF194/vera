@@ -6,7 +6,7 @@ This is the single source of truth for Vera's testing infrastructure, coverage d
 
 | Metric | Value |
 |--------|-------|
-| **Tests** | 8,350 across 127 files (~106,000 lines of test code; 8,245 passed + 26 stress, 79 skipped) |
+| **Tests** | 8,351 across 128 files (~106,000 lines of test code; 8,246 passed + 26 stress, 79 skipped) |
 | **Compiler code coverage** | 95% Python, 61% JavaScript — 91% combined (CI minimum: 80%) |
 | **Conformance programs** | 163 programs across 9 spec chapters, validating every language feature |
 | **Example programs** | 40, all validated through `vera check` + `vera verify` |
@@ -62,6 +62,7 @@ python scripts/check_wheel_availability.py           # pre-flight: every runtime
 | `test_checker_patterns.py` | 59 | 936 | Pattern matching, match-arm typing, exhaustiveness, pattern/match coverage, bidirectional inference, typed holes (#420 split) |
 | `test_checker_functions.py` | 78 | 984 | Function signatures, slot references, result refs, calls, control flow, higher-order, where-blocks (incl. #969 closed-scope isolation over bodies + contract clauses, nested-where hint targeting, handler-vs-where hint ordering), expression diagnostics, IO operations, string interpolation (#420 split) |
 | `test_checker_effects.py` | 67 | 1,066 | Effect declarations, abilities, effect subtyping, async effect, handler typing (#420 split) |
+| `test_db_effect.py` | 7 | 106 | #229 — the built-in `<DB>` effect: `DB.query` / `DB.execute` type-check under `effects(<DB>)` (E122 without it; E204 on a non-`String` SQL argument), plus the `db_sql_ops` identity stash / `is_db_sql_op` that the #309 literal-provenance gate keys on — object-identity, not the value-equal / user-shadowable op name (mutation-validated: an `==`/name key flips the look-alike test RED) |
 | `test_checker_modules.py` | 45 | 975 | Module-call diagnostics, cross-module typing, visibility enforcement, builtin redefinition, parsed module calls (#420 split) |
 | `test_checker_errors.py` | 56 | 866 | Error codes, resolution-coverage diagnostics, contracts, error accumulation (#420 split); cyclic type aliases incl. #1059 self-reference through a type argument (`Future<F>`, mutual `Future<B>`/`Future<A>`, `Array<L>`) rejected E132 |
 | `test_checker_builtins_collections.py` | 97 | 848 | Map / Set / Decimal / Json / Html / Http / Inference built-in type-checking (#420 split) |
