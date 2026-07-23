@@ -14,7 +14,7 @@ This is the single source of truth for Vera's testing infrastructure, coverage d
 | **README code blocks** | 3 Vera blocks (3 validated, 0 annotated) |
 | **FAQ code blocks** | 1 Vera block in FAQ.md (0 validated, 1 annotated snippet) |
 | **HTML code blocks** | 4 Vera blocks in docs/index.html (4 validated: parse + check + verify) |
-| **Contract verification** | 349 of 454 obligations (76.9%) across the 40 examples verified statically (Tier 1) — the denominator grew with the auto-synthesised primitive-op obligations of the soundness campaign |
+| **Contract verification** | 357 of 462 obligations (77.3%) across the 42 examples verified statically (Tier 1) — the denominator grew with the auto-synthesised primitive-op obligations of the soundness campaign |
 | **CI matrix** | 13 combinations (Python 3.11/3.12/3.13 × ubuntu-latest/macos-15/macos-26/windows-latest, plus an advisory ubuntu-24.04-arm × 3.12 cell) + browser parity (Node.js 22) + wheel-availability preflight |
 
 ## Running Tests
@@ -40,7 +40,7 @@ mypy vera/                                           # strict mode
 
 # Validation scripts
 python scripts/check_conformance.py                  # conformance suite (164 programs, see manifest.json)
-python scripts/check_examples.py                     # 40 example programs
+python scripts/check_examples.py                     # 42 example programs
 python scripts/check_spec_examples.py                # spec code blocks
 python scripts/check_readme_examples.py              # README code blocks
 python scripts/check_skill_examples.py               # SKILL.md code blocks
@@ -386,13 +386,13 @@ The lowest-coverage files of any size are `vera/lsp/server.py` at 64% (pygls fea
 
 Vera's verifier classifies each contract into one of three tiers. **Tier 1** contracts are proved correct statically by Z3; the non-trivial runtime check is still emitted as a defensive backstop (code generation is tier-agnostic — see spec §11.8), so a Tier-1 proof means the guard provably never fires, not that it is absent. **Tier 3** contracts cannot be fully decided by the SMT solver, so their runtime check is the only line of defence. The verifier never rejects a valid program; it simply warns when a contract drops to Tier 3.
 
-Across all 40 example programs (live sums of `vera verify --json`; regenerate by summing the `verification` block over `examples/*.vera`):
+Across all 42 example programs (live sums of `vera verify --json`; regenerate by summing the `verification` block over `examples/*.vera`):
 
 | Metric | Value |
 |--------|-------|
-| **Tier 1 (static)** | 349 obligations — proved automatically by Z3 |
+| **Tier 1 (static)** | 357 obligations — proved automatically by Z3 |
 | **Tier 3 (runtime)** | 105 obligations — checked at runtime |
-| **Total** | 454 obligations (76.9% static; the summary's `total` field equals `tier1_verified + tier3_runtime`, derived from the reified obligation stream) |
+| **Total** | 462 obligations (77.3% static; the summary's `total` field equals `tier1_verified + tier3_runtime`, derived from the reified obligation stream) |
 
 The Tier 3 population is dominated by a few built-in-heavy examples (`life.vera` 24, `array_utilities.vera` 12, `collections.vera` 11, `string_utilities.vera` 6, `gc_pressure.vera` 5, `html.vera` 5), with a long tail of one to four per example across eighteen more.  The recurring reasons: postconditions over collection/string/HTML built-in pipelines outside the decidable fragment, `decreases` metrics the fragment cannot express, `old`/`new` state modelling (not yet implemented), and generic type parameters without a Z3 sort.
 
@@ -411,7 +411,7 @@ How Vera language features (by spec chapter) map to test files and example progr
 | Ch 2: Types | ADTs (algebraic data types), Option, Result | test_codegen_*, test_checker_* | ch02_adt_basic, ch02_adt_recursive, ch02_option_result | pattern_matching, list_ops |
 | Ch 2: Types | Refinement types | test_codegen_*, test_verifier_* | ch02_refinement_types | refinement_types, safe_divide |
 | Ch 2: Types | Generics (`forall<T>`) | test_codegen_monomorphize, test_checker_* | ch02_generics | generics |
-| Ch 3: Slots | `@T.n` references, De Bruijn indexing | test_checker_*, test_codegen_* | ch03_slot_basic, ch03_slot_indexing, ch03_slot_result | all 40 examples |
+| Ch 3: Slots | `@T.n` references, De Bruijn indexing | test_checker_*, test_codegen_* | ch03_slot_basic, ch03_slot_indexing, ch03_slot_result | all 42 examples |
 | Ch 4: Expressions | Arithmetic, comparison, boolean, unary ops | test_codegen_*, test_checker_* | ch04_arithmetic, ch04_comparison, ch04_boolean_ops, ch04_int_overflow | factorial, absolute_value |
 | Ch 4: Expressions | If/else, let, match, pipe operator | test_codegen_*, test_checker_* | ch04_if_else, ch04_let_binding, ch04_match_basic, ch04_match_nested, ch04_pipe_operator | pattern_matching |
 | Ch 4: Expressions | String and array builtins | test_codegen_* | ch04_string_builtins, ch04_array_ops | string_ops |
@@ -475,7 +475,7 @@ _run_trap(source, fn, args)    # compile + execute, assert WASM trap
 
 ## Round-Trip Testing
 
-Every one of the 40 example programs in `examples/` is tested through **every pipeline stage** via parametrised tests: parsing, AST transformation, type checking, contract verification, WASM compilation, and execution. If you add a new `.vera` example, it is automatically included in the round-trip suite.
+Every one of the 42 example programs in `examples/` is tested through **every pipeline stage** via parametrised tests: parsing, AST transformation, type checking, contract verification, WASM compilation, and execution. If you add a new `.vera` example, it is automatically included in the round-trip suite.
 
 The formatter has **idempotency tests**: `format(format(x)) == format(x)` for all tested programs.
 
