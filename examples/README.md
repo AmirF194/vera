@@ -49,6 +49,7 @@ Examples that use only the IO and Random host families (e.g. `hello_world.vera`,
 | `effect_handler.vera` | `vera run examples/effect_handler.vera` | State, Exn effects, handler blocks, resume |
 | `io_operations.vera` | `vera run examples/io_operations.vera` | IO.print, IO.read_file, IO.write_file, IO.exit |
 | `file_io.vera` | `vera run examples/file_io.vera` | File read/write with error handling |
+| `database.vera` | `vera run examples/database.vera` | <DB> effect: parameterised SQL on in-memory SQLite, Option<String> cells (SQL NULL = None) |
 | `async_futures.vera` | `vera run examples/async_futures.vera` | Async effect, Future type, eager async/await composition (these scalar wraps stay eager) |
 | `async_http_fanout.vera` | `vera run examples/async_http_fanout.vera` | Concurrent async fan-out: two `async(Http.get)` calls overlap on host worker threads then await (#841), Tier-1 status-range contract, network I/O (requires network) |
 | `http.vera` | `vera run examples/http.vera` | Http.get, JSON parsing, network I/O (requires network) |

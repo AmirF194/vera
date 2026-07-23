@@ -193,6 +193,7 @@ def _run_node(
 # Excludes:
 #   - io_operations: uses IO.read_line interactively
 #   - file_io: uses IO.read_file/write_file (browser returns Result.Err)
+#   - database: uses DB.query/DB.execute (browser returns Result.Err)
 #   - modules: depends on imports (doesn't compile standalone)
 EXAMPLES_WITH_MAIN = [
     "hello_world",

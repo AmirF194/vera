@@ -1372,6 +1372,7 @@ effects(<Http, IO>)              -- network + IO
 effects(<Async>)                 -- async computation
 effects(<HttpServer>)            -- HTTP request handler (vera serve)
 effects(<Random>)                -- non-deterministic (random number generation)
+effects(<DB>)                    -- SQL database access
 effects(<Diverge>)               -- may not terminate
 effects(<Diverge, IO>)           -- divergent with IO
 ```
@@ -1662,6 +1663,40 @@ public fn print_random_card(-> @Unit)
   IO.print(int_to_string(pick_card(())))
 }
 ```
+
+### DB effect
+
+The `DB` effect executes SQL against a relational database. Like `IO` and `Http`, it is built-in — no `effect DB { ... }` declaration is needed. Functions that read or write the database must declare `effects(<DB>)`.
+
+| Operation | Signature | Description |
+|-----------|-----------|-------------|
+| `DB.execute` | `String, Array<Option<String>> -> Result<Int, String>` | Runs a write (`CREATE`/`INSERT`/`UPDATE`/`DELETE`); `Ok` carries the affected-row count |
+| `DB.query` | `String, Array<Option<String>> -> Result<Array<Array<Option<String>>>, String>` | Runs a `SELECT`; `Ok` is a grid of rows, each cell an `Option<String>` (SQL `NULL` is `None`) |
+
+The second argument is the positional parameter list bound to the `?` placeholders: `Some(v)` binds a value, `None` binds SQL `NULL`. Bind data as parameters rather than splicing it into the SQL text — a bound value can never be parsed as SQL, the standard defence against injection.
+
+```vera
+public fn insert_and_count(-> @Int)
+  requires(true)
+  ensures(true)
+  effects(<DB>)
+{
+  match DB.execute("CREATE TABLE users (name TEXT, nickname TEXT)", []) {
+    Err(@String) -> -1,
+    Ok(@Int) -> match DB.execute("INSERT INTO users (name, nickname) VALUES (?, ?)", [Some("Ada"), None]) {
+      Err(@String) -> -1,
+      Ok(@Int) -> match DB.query("SELECT name, nickname FROM users", []) {
+        Err(@String) -> -1,
+        Ok(@Array<Array<Option<String>>>) -> array_length(@Array<Array<Option<String>>>.0)
+      }
+    }
+  }
+}
+```
+
+A query result is `Array<Array<Option<String>>>` — rows of cells, each cell `Some(text)` or `None` for SQL `NULL`. `NULL` and `""` stay distinct; read a `NOT NULL` column with `option_unwrap_or(cell, "")`. Both operations return `Result`, so a failed statement is the `Err(String)` arm, never a trap.
+
+The connection is chosen by `VERA_DB_URL` (default `sqlite::memory:`, or `sqlite:///path/to/file.db`). In v1 the effect is SQLite-only, single-connection, and un-mockable (`handle[DB]` awaits #372). The browser runtime returns `Err` for every `DB` operation, and `vera compile --target wasi-p2` rejects `<DB>`.
 
 ### Effect handlers
 
@@ -2396,7 +2431,7 @@ public fn main(@Unit -> @Unit)
 
 ## Conformance Suite
 
-The `tests/conformance/` directory contains 163 small programs — most self-contained, with the Chapter 8 module-system programs and a few cross-module Chapter 7 and 9 programs importing companion `_lib.vera` / `_mid.vera` modules — that validate every language feature against the spec — often one program per feature, though some features (slot references, match, contracts) span several. These are the best minimal working examples of Vera syntax and semantics.
+The `tests/conformance/` directory contains 164 small programs — most self-contained, with the Chapter 8 module-system programs and a few cross-module Chapter 7 and 9 programs importing companion `_lib.vera` / `_mid.vera` modules — that validate every language feature against the spec — often one program per feature, though some features (slot references, match, contracts) span several. These are the best minimal working examples of Vera syntax and semantics.
 
 Each program is organized by spec chapter (`ch01_int_literals.vera`, `ch04_match_basic.vera`, `ch07_state_handler.vera`, etc.) and the `manifest.json` file maps features to programs. When you need to see how a specific construct works, check the conformance program before reading the spec.
 
@@ -2423,6 +2458,8 @@ These are known limitations in the current reference implementation. Most are tr
 | `map_new()` / `set_new()` require type context | The empty-collection constructors `map_new()` and `set_new()` cannot infer their key/value types without a surrounding type annotation. Assign the result to a typed `let` binding: `let @Map<String, Int> = map_new();` | — |
 | `Inference.complete` has no `max_tokens` or temperature controls | The host implementation uses provider defaults. Custom parameters (max tokens, temperature, top-p, system prompt) are not yet supported at the Vera level. | [#370](https://github.com/aallan/vera/issues/370) |
 | `Inference` effect has no user-defined handlers | In the current implementation, `Inference` is always host-backed (dispatches to a real API). User-defined handlers for mocking, local models, or replay are not yet supported. | [#372](https://github.com/aallan/vera/issues/372) |
+| `DB` effect has no user-defined handlers | `DB` is always host-backed; `handle[DB]` for mocking or replay is not yet supported (shared with the other host effects). Test against `sqlite::memory:` for a hermetic real database. | [#372](https://github.com/aallan/vera/issues/372) |
+| `DB` effect is SQLite-only with positional string rows | Phase 1 supports SQLite only, a single connection per run, and stringly-typed positional rows (`Array<Array<Option<String>>>`). Named columns, typed cells, other backends, and transactions are future work. | [#1143](https://github.com/aallan/vera/issues/1143) |
 | Browser target: `IO.sleep` freezes the tab | `IO.sleep` busy-waits the browser's main thread, so animations and paced simulations don't run meaningfully under `--target browser`. Until the JSPI-based suspend/resume fix lands, write browser-target programs as a pure simulation core with a JS driver, or stick to terminal output. | [#609](https://github.com/aallan/vera/issues/609) |
 | Browser target: ANSI escapes render as literal text | ANSI escape sequences (cursor control, screen clear) appear as literal control characters in the DOM rather than being interpreted. Terminal-style rendering needs the planned ANSI-subset interpreter in `runtime.mjs`; no language change is required. | [#610](https://github.com/aallan/vera/issues/610) |
 

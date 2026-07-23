@@ -610,9 +610,15 @@ private fn sum(@List<Int> -> @Int)
         # obligation) that discharge statically, same shape as
         # `count_to_three`'s: +12 T1, +0 T3, +12 total: 337/105/442 ->
         # 349/105/454.
-        assert t1 == 349, f"Expected 349 T1, got {t1}"
+        #
+        # #229: `examples/database.vera` (the `<DB>` effect demo) adds two
+        # functions -- `insert_user` and `main` -- each carrying a trivial
+        # `requires(true)`/`ensures(true)` pair (2 requires + 2 ensures) that
+        # all discharge statically at Tier 1: +4 T1, +0 T3, +4 total:
+        # 349/105/454 -> 353/105/458.
+        assert t1 == 353, f"Expected 353 T1, got {t1}"
         assert t3 == 105, f"Expected 105 T3, got {t3}"
-        assert total == 454, f"Expected 454 total, got {total}"
+        assert total == 458, f"Expected 458 total, got {total}"
         assert t3u == 0, f"Expected 0 tier3_unguarded, got {t3u}"
 
 

@@ -1,0 +1,29 @@
+-- Conformance: DB effect (Chapter 9, #229)
+-- Tests: the built-in DB effect's two ops on in-memory SQLite:
+--   execute(String, Array<Option<String>>) -> Result<Int, String>   (writes)
+--   query(String, Array<Option<String>>) -> Result<Array<Array<Option<String>>>, String>  (reads)
+-- Exercises a parameterised INSERT with a NULL cell (None), row-grid readback,
+-- Option<String> cells, and Result matching.  Runs offline against sqlite::memory:
+-- (the VERA_DB_URL default), so it executes at "run" level in CI.
+-- Spec: Section 9.5.7 (DB stdlib reference), Section 7.7.7 (DB effect).
+public fn main(-> @Int)
+  requires(true)
+  ensures(true)
+  effects(<DB>)
+{
+  let @Array<Option<String>> = [];
+  match DB.execute("CREATE TABLE t (k TEXT, v TEXT)", @Array<Option<String>>.0) {
+    Err(@String) -> 1,
+    Ok(@Int) -> match DB.execute("INSERT INTO t (k, v) VALUES (?, ?)", [Some("key"), None]) {
+      Err(@String) -> 1,
+      Ok(@Int) -> match DB.query("SELECT k, v FROM t", @Array<Option<String>>.0) {
+        Err(@String) -> 1,
+        Ok(@Array<Array<Option<String>>>) -> if array_length(@Array<Array<Option<String>>>.0) == 1 then {
+          0
+        } else {
+          1
+        }
+      }
+    }
+  }
+}

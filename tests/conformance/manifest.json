@@ -2283,6 +2283,22 @@
     ]
   },
   {
+    "id": "ch09_db",
+    "file": "ch09_db.vera",
+    "chapter": 9,
+    "title": "DB effect (execute/query on SQLite, Option<String> cells, Result matching)",
+    "level": "run",
+    "spec_ref": "Section 9.5.7",
+    "features": [
+      "db_effect",
+      "db_execute",
+      "db_query",
+      "option_cells",
+      "result",
+      "sqlite"
+    ]
+  },
+  {
     "id": "ch09_host_store_gc_reachability",
     "file": "ch09_host_store_gc_reachability.vera",
     "chapter": 9,
