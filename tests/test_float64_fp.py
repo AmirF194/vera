@@ -21,6 +21,7 @@ Written test-first: each FAILS on the pre-fix (Real-sort) verifier.
 from __future__ import annotations
 
 import pytest
+import z3
 
 from vera.parser import parse_to_ast
 from vera.checker import typecheck_with_artifacts
@@ -36,6 +37,20 @@ def _verify(source: str) -> VerifyResult:
         expr_types=arts.expr_semantic_types,
         expr_target_types=arts.expr_target_types,
     )
+
+
+def _check_valid_unknown(
+    self: SmtContext, goal: z3.ExprRef, assumptions: list[z3.ExprRef],
+) -> SmtResult:
+    """``SmtContext.check_valid`` stub that always reports ``unknown``.
+
+    Signature matches ``check_valid`` (so ``monkeypatch.setattr`` is
+    type-correct) and ignores its arguments: every validity query returns the
+    incomplete-solver ``SmtResult``, forcing the Tier-3 fallback deterministically
+    with no dependence on solver latency — see
+    ``test_unsound_relation_stays_unproved_under_tier3_fallback`` (#1121).
+    """
+    return SmtResult(status="unknown")
 
 
 class TestFloat64FpSoundness797:
@@ -91,10 +106,7 @@ public fn idf(@Float64 -> @Float64)
         # obligation deterministically falls to the conservative runtime tier on
         # every runner.  A regression narrowing the accept-set back to
         # `violated` is then caught here, not only on the slow Windows cell.
-        monkeypatch.setattr(
-            SmtContext, "check_valid",
-            lambda self, goal, assumptions: SmtResult(status="unknown"),
-        )
+        monkeypatch.setattr(SmtContext, "check_valid", _check_valid_unknown)
         result = _verify("""
 public fn inc(@Float64 -> @Float64)
   requires(true) ensures(@Float64.result > @Float64.0) effects(pure)
