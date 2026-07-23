@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-07-24
+
 ### Fixed
 
 - **A bare (unqualified) effect-operation call the WASM backend cannot route is now a clean checker error** ([#1148](https://github.com/aallan/vera/issues/1148)). An effect op called without its qualifier — `query("SELECT ...", [])`, `print("hi")` — type-checked but failed `vera compile` with a confusing `Function 'query' is not defined in this module`, a check-green→codegen-fail disagreement. Codegen routes a bare op call only for the built-in `State` / `Exn` ops (`get` / `put` / `throw`, backed by host cells) or when the effect is handled by an enclosing `handle` block; every other bare op — `IO` / `DB` / `Http` / `Inference` / `Random` and user effects — has no bare route. The checker now rejects the unroutable case at check time (`E217`, the safe direction of the disagreement), steering to the qualified `Effect.op(...)` spelling or a `handle[Effect]` block, via a handled-effect stack in `_check_handle` that mirrors codegen's routing capability. The State/Exn carve-out keys on the op name as well as the effect name, so a user `effect State` / `effect Exn` shadow declaring some other op is still rejected rather than silently miscompiled. Surfaced by the #309 adversarial reviews. Spec §7.4.
@@ -47,6 +49,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Documentation
 
 - **The README's licence table covers everything Vera redistributes, and its project structure names every pipeline stage.**  The table listed only the three Python runtime dependencies, omitting the `[lsp]` extra (`pygls`, Apache-2.0; `lsprotocol`, MIT) and the npm packages bundled into the `.vsix` — where `minimatch` is BlueOak-1.0.0 and `semver` is ISC, so the previous claim that all dependencies were "MIT or Apache-2.0" did not hold for the shipped extension.  "Licence compliance is enforced by CI" also overstated: `scripts/check_licenses.py` runs `pip-licenses` and has no npm coverage at all, which the text now says.  The note about `chardet` arriving under LGPL via `cyclonedx-bom` was stale in a way worth spelling out — `cyclonedx-bom` is not a Vera dependency and appears in no manifest; it is installed ad hoc by the separate `sbom` CI job, which is not the job the licence gate runs in, so neither package has ever been in the environment being checked.  The same claim inside `check_licenses.py` is corrected.  `wasmtime` is Apache-2.0 **WITH LLVM-exception**.  Separately, the project-structure listing sat directly beneath the words "seven-stage pipeline" while naming six of the seven stages: `resolver.py` is now among them.
+- **v0.1.7 release documentation sweep.** Aligned the spec §9.5 built-in-effects summary with the shipped set — `Async`, `Inference`, `HttpServer`, and `DB`, replacing the stale "future effects for concurrency and LLM inference" wording — removed the now-shipped `#309` (contract-verified SQL) from the ROADMAP standard-library horizon, and dropped the fixed `#1121` row from the KNOWN_ISSUES bugs table. The drifted, ungated `vera/README` module-map line counts are tracked as [#1150](https://github.com/aallan/vera/issues/1150).
 
 ### Changed
 
@@ -3077,7 +3080,8 @@ Small docs sweep — closes six aging documentation issues in one PR.  No code c
 - Grammar: handler body simplified to avoid LALR reduce/reduce conflict
 - `pyproject.toml`: corrected build backend, package discovery, PEP 639 compliance
 
-[Unreleased]: https://github.com/aallan/vera/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/aallan/vera/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/aallan/vera/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/aallan/vera/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/aallan/vera/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/aallan/vera/compare/v0.1.3...v0.1.4
