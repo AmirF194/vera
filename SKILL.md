@@ -1695,14 +1695,16 @@ handle[EffectName<TypeArgs>](@StateType = initial_value) {
 }
 ```
 
-Use `resume(value)` in a handler clause to continue the handled computation with the given return value. Optionally update handler state with a `with` clause:
+Use `resume(value)` in a handler clause to continue the handled computation with the given return value.
+
+For `State<T>`, `put(x)` stores `x` as the new state **intrinsically** — the canonical clause `put(@T) -> { resume(()) }` needs no `with` (see `run_counter` above). A `with @T = expr` clause **overrides** that intrinsic store, letting a clause *transform* what gets written. Inside a `put` clause the state slot `@T.0` is the state **before** the store and `@T.1` is the argument being stored (operation parameters bind first, state last — most-recent wins):
 
 <!-- vera:skip-parse category="FRAGMENT" reason="Handler with-clause, bare put arm expression" -->
 ```vera
-put(@Int) -> { resume(()) } with @Int = @Int.0
+put(@Int) -> { resume(()) } with @Int = @Int.1 * 2   -- store double the argument
 ```
 
-The `with @T = expr` clause updates the handler's state when resuming. The type must match the handler's state type declaration.
+Because `@T.0` is the pre-store state, `with @T = @T.0` keeps the *old* state — it silently undoes the `put`. For an ordinary "store the argument" `put`, omit `with` entirely; reach for it only to transform the stored value. The `with` expression's type must match the handler's state type.
 
 ### Qualified operation calls
 
@@ -1735,7 +1737,7 @@ public fn sum_with_state(@Nat -> @Int)
 {
   handle[State<Int>](@Int = 0) {
     get(@Unit) -> { resume(@Int.0) },
-    put(@Int) -> { resume(()) } with @Int = @Int.0
+    put(@Int) -> { resume(()) }
   } in {
     sum_loop(@Nat.0, 1)
   }
@@ -1761,7 +1763,7 @@ Key points:
 - The outer function `sum_with_state` is **pure** — the handler discharges the State effect
 - The `where` block helper `sum_loop` has `effects(<State<Int>>)` — it uses `get`/`put` directly
 - Functions inside `where` blocks do NOT take `public`/`private` visibility
-- The `with @Int = @Int.0` clause updates the handler state when `put` resumes
+- The `put` clause stores its argument as the new state intrinsically — no `with` clause is needed for the common "store the value" case (a `with` clause is only for *transforming* the stored value; see the handler-syntax notes above)
 - Pure helper functions (like `add_value`) can be called from the `where` block helper (`sum_loop`)
 - The `decreases` clause on the loop helper ensures termination
 
