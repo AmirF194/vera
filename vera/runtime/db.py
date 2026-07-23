@@ -90,7 +90,7 @@ def _db_query(
         cursor = conn.execute(sql, params)
         rows = [[_cell(v) for v in row] for row in cursor.fetchall()]
         return _alloc_result_ok_rows(caller, rows)
-    except sqlite3.Error as exc:
+    except (sqlite3.Error, sqlite3.Warning) as exc:
         return _alloc_result_err_string(caller, str(exc))
 
 
@@ -106,7 +106,7 @@ def _db_execute(
         cursor = conn.execute(sql, params)
         conn.commit()
         return _alloc_result_ok_i64(caller, cursor.rowcount)
-    except sqlite3.Error as exc:
+    except (sqlite3.Error, sqlite3.Warning) as exc:
         return _alloc_result_err_string(caller, str(exc))
 
 
@@ -139,7 +139,7 @@ def register_db(
     try:
         conn = _open_connection(env_vars)
         open_error: str | None = None
-    except sqlite3.Error as exc:
+    except (sqlite3.Error, sqlite3.Warning) as exc:
         conn = None
         open_error = f"cannot open database: {exc}"
 

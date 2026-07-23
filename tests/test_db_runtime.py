@@ -93,6 +93,22 @@ class TestDbRuntime229:
         result = _db_execute(caller, conn, "NOT VALID SQL", [])
         assert _read_i32(caller, result) == 1  # Err tag
 
+    def test_multi_statement_sql_is_err_not_a_raised_warning(self) -> None:
+        # sqlite3 refuses multiple statements in one `execute` — raising
+        # `sqlite3.ProgrammingError` on current Python and `sqlite3.Warning`
+        # on some versions.  `Warning` is NOT a subclass of `Error` (they are
+        # DB-API siblings), so the handler catches both; either way a
+        # semicolon-joined CREATE + INSERT must surface as `Result.Err`, not
+        # escape the host callback as an uncaught exception.
+        caller = _gc_caller()
+        conn = sqlite3.connect(":memory:")
+        result = _db_execute(
+            caller, conn,
+            "CREATE TABLE t (n INTEGER); INSERT INTO t VALUES (1)", [],
+        )
+        # Reaching this assert at all means no exception escaped.
+        assert _read_i32(caller, result) == 1  # Err tag
+
     def test_open_connection_defaults_to_memory(self) -> None:
         # No VERA_DB_URL → a hermetic in-memory database (no config needed).
         conn = _open_connection({})

@@ -114,6 +114,18 @@ class TestOptionStringArrayRoundTrip:
         ptr, count = _alloc_array_of_options_of_string(caller, cells)
         assert _read_wasm_array_of_options_of_string(caller, ptr, count) == cells
 
+    def test_out_of_bounds_pointer_array_raises_not_sigbus(self) -> None:
+        # A guest-controlled (ptr, count) whose pointer array runs past WASM
+        # memory must raise a clean out_of_bounds trap, not SIGBUS in the raw
+        # ctypes slice inside `_read_i32` (#1145 class).  The pre-fix failure is
+        # a hard SIGBUS that would abort pytest, so the RED baseline is proven
+        # out-of-process; this asserts the fixed clean-raise.
+        caller = _gc_caller()
+        with pytest.raises(
+            wasmtime.WasmtimeError, match="out of bounds memory access",
+        ):
+            _read_wasm_array_of_options_of_string(caller, 10_000_000, 4)
+
 
 class TestResultOkRowsRoundTrip:
     """``_alloc_result_ok_rows`` — the ``DB.query`` result grid."""

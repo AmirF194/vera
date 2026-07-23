@@ -343,7 +343,7 @@ private fn sum(@List<Int> -> @Int)
         assert result.summary.tier1_verified == 8
 
     def test_overall_tier_counts(self) -> None:
-        """All examples together: 349 T1 / 105 T3 / 454 total (current).
+        """All examples together: 353 T1 / 105 T3 / 458 total (current).
 
         Counts move when examples are added or their contracts become
         more / less verifiable.  Trajectory:

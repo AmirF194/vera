@@ -1126,7 +1126,26 @@ def _read_wasm_array_of_options_of_string(
     ``Option<String>`` ADT.  ``count == 0`` is the empty array (``ptr`` is the
     null pair pointer and is never dereferenced).  No allocation happens here,
     so no GC rooting is needed.
+
+    The ``(ptr, count)`` pointer-array range is bounds-checked before the walk
+    (#1145 class): each ``_read_i32(ptr + i*4)`` goes through a raw ``ctypes``
+    slice with no bounds checking, so a guest-controlled out-of-range pair
+    would read past the memory region into wasmtime's guard page and kill the
+    host with ``SIGBUS``.  An out-of-range pair instead raises a clean
+    ``out_of_bounds`` trap, matching a native guest OOB.  (The inner
+    ``opt_ptr`` field reads remain a separate hardening surface; the ``Some``
+    payload's string read is already guarded by :func:`_read_wasm_string`.)
     """
+    if count > 0:
+        memory = caller["memory"]
+        assert isinstance(memory, wasmtime.Memory)  # noqa: S101
+        mem_size = memory.data_len(caller)
+        if ptr < 0 or ptr + count * 4 > mem_size:
+            raise wasmtime.WasmtimeError(
+                "out of bounds memory access: DB parameter array of "
+                f"{count} pointer(s) at offset {ptr} exceeds WASM memory "
+                f"size {mem_size}"
+            )
     out: list[str | None] = []
     for i in range(count):
         opt_ptr = _read_i32(caller, ptr + i * 4)

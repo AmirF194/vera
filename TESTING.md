@@ -6,7 +6,7 @@ This is the single source of truth for Vera's testing infrastructure, coverage d
 
 | Metric | Value |
 |--------|-------|
-| **Tests** | 8,429 across 130 files (~106,000 lines of test code; 8,324 passed + 26 stress, 79 skipped) |
+| **Tests** | 8,431 across 130 files (~106,000 lines of test code; 8,326 passed + 26 stress, 79 skipped) |
 | **Compiler code coverage** | 95% Python, 61% JavaScript — 91% combined (CI minimum: 80%) |
 | **Conformance programs** | 164 programs across 9 spec chapters, validating every language feature |
 | **Example programs** | 41, all validated through `vera check` + `vera verify` |
@@ -63,8 +63,8 @@ python scripts/check_wheel_availability.py           # pre-flight: every runtime
 | `test_checker_functions.py` | 78 | 984 | Function signatures, slot references, result refs, calls, control flow, higher-order, where-blocks (incl. #969 closed-scope isolation over bodies + contract clauses, nested-where hint targeting, handler-vs-where hint ordering), expression diagnostics, IO operations, string interpolation (#420 split) |
 | `test_checker_effects.py` | 67 | 1,066 | Effect declarations, abilities, effect subtyping, async effect, handler typing (#420 split) |
 | `test_db_effect.py` | 7 | 106 | #229 — the built-in `<DB>` effect: `DB.query` / `DB.execute` type-check under `effects(<DB>)` (E122 without it; E204 on a non-`String` SQL argument), plus the `db_sql_ops` identity stash / `is_db_sql_op` that the #309 literal-provenance gate keys on — object-identity, not the value-equal / user-shadowable op name (mutation-validated: an `==`/name key flips the look-alike test RED) |
-| `test_db_marshalling.py` | 31 | 176 | #229 — the `<DB>` marshalling helpers: `Array<Option<String>>` params (inbound reader), `Array<Array<Option<String>>>` query grids (`_alloc_result_ok_rows`) and `Result<Int>` row-counts, round-tripped through an `InstanceCaller` over a real compiled module — each case run normally AND under `VERA_EAGER_GC=1` (every `$alloc` fires `$gc_collect`), the large-grid case forcing free-block reuse; mutation-validated (dropping a shadow-stack root corrupts the read-back / SIGBUSes the swept-pointer read) |
-| `test_db_runtime.py` | 19 | 243 | #229 — the `<DB>` host binding (`vera/runtime/db.py`) on stdlib `sqlite3`: create/insert/select round-trips against `:memory:`, NULL cells → `None`, the affected-row count (incl. the `-1` DDL sentinel), a BLOB cell UTF-8-decoded with replacement, the `Err`-not-crash error path, an unopenable `VERA_DB_URL` deferred to an `Err` (not a host crash), and injection-safety (a malicious param binds as a literal, table intact); plus `_open_connection`'s `VERA_DB_URL` surface (memory + file URLs, in-memory default) and `register_db`'s bind/no-op paths |
+| `test_db_marshalling.py` | 32 | 188 | #229 — the `<DB>` marshalling helpers: `Array<Option<String>>` params (inbound reader), `Array<Array<Option<String>>>` query grids (`_alloc_result_ok_rows`) and `Result<Int>` row-counts, round-tripped through an `InstanceCaller` over a real compiled module — each case run normally AND under `VERA_EAGER_GC=1` (every `$alloc` fires `$gc_collect`), the large-grid case forcing free-block reuse; mutation-validated (dropping a shadow-stack root corrupts the read-back / SIGBUSes the swept-pointer read) |
+| `test_db_runtime.py` | 20 | 259 | #229 — the `<DB>` host binding (`vera/runtime/db.py`) on stdlib `sqlite3`: create/insert/select round-trips against `:memory:`, NULL cells → `None`, the affected-row count (incl. the `-1` DDL sentinel), a BLOB cell UTF-8-decoded with replacement, the `Err`-not-crash error path, an unopenable `VERA_DB_URL` deferred to an `Err` (not a host crash), and injection-safety (a malicious param binds as a literal, table intact); plus `_open_connection`'s `VERA_DB_URL` surface (memory + file URLs, in-memory default) and `register_db`'s bind/no-op paths |
 | `test_checker_modules.py` | 45 | 975 | Module-call diagnostics, cross-module typing, visibility enforcement, builtin redefinition, parsed module calls (#420 split) |
 | `test_checker_errors.py` | 56 | 866 | Error codes, resolution-coverage diagnostics, contracts, error accumulation (#420 split); cyclic type aliases incl. #1059 self-reference through a type argument (`Future<F>`, mutual `Future<B>`/`Future<A>`, `Array<L>`) rejected E132 |
 | `test_checker_builtins_collections.py` | 97 | 848 | Map / Set / Decimal / Json / Html / Http / Inference built-in type-checking (#420 split) |
@@ -643,7 +643,7 @@ Twenty-two scripts in `scripts/` validate cross-cutting concerns beyond unit tes
 | Script | What it validates |
 |--------|-------------------|
 | `check_conformance.py` | All 164 conformance entries hold at their declared level (parse/check/verify/run) — positives pass; the negatives fail `check` with their `expected_error` E-code |
-| `check_examples.py` | All 40 `.vera` examples pass `vera check` + `vera verify` |
+| `check_examples.py` | All 41 `.vera` examples pass `vera check` + `vera verify` |
 | `check_corpus_canonical.py` | All 211 corpus programs (recursive over `examples/` + `tests/conformance/`) are in canonical form under `vera fmt` |
 | `check_examples_readme.py` | Every `vera run` command in examples/README.md references an existing file and exported function |
 | `check_spec_examples.py` | 189 parseable code blocks from spec chapters: parse, type-check, and verify |
@@ -746,7 +746,7 @@ Every push is checked by 32 configured hooks across two stages: 30 are configure
 | `mypy vera/` | Type-check compiler in strict mode |
 | `pytest tests/ -q` | Run full test suite |
 | `check_conformance.py` | All 164 conformance entries hold at their declared level — positives pass; negatives fail `check` with their `expected_error` E-code |
-| `check_examples.py` | All 40 examples pass `vera check` + `vera verify` |
+| `check_examples.py` | All 41 examples pass `vera check` + `vera verify` |
 | `check_corpus_canonical.py` | All 211 `examples/` + `tests/conformance/` programs (recursive) are in canonical form (`vera fmt`) |
 | `check_examples_readme.py` | `vera run` commands in `examples/README.md` reference existing files and exported functions |
 | `check_readme_examples.py` | README code blocks parse correctly |
