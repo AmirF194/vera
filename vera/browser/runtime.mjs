@@ -2773,8 +2773,10 @@ function buildImportObject(module, moduleBytes) {
   // ── DB host imports (#229) ─────────────────────────────────────
   // SQL execution needs a database driver and credentials that cannot
   // live safely in client-side JavaScript.  Both ops return a
-  // Result<_, String>, so a deliberate Err (12-byte tag=1 layout, shared
-  // by both Ok payload shapes) is a valid value on either — mirroring the
+  // Result<_, String>, so a deliberate Err is a valid value on either op: a
+  // Result is tag-dispatched (tag 1 = Err, str_ptr @+4, str_len @+8), so a
+  // fully-formed Err never touches the Ok payload — whose size differs by op
+  // (db_query's grid Ok is 12 bytes, db_execute's Int Ok is 16).  Mirrors the
   // Inference stub above.
 
   if (needed.has("db_query")) {

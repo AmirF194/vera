@@ -6,7 +6,7 @@ This is the single source of truth for Vera's testing infrastructure, coverage d
 
 | Metric | Value |
 |--------|-------|
-| **Tests** | 8,420 across 130 files (~106,000 lines of test code; 8,315 passed + 26 stress, 79 skipped) |
+| **Tests** | 8,429 across 130 files (~106,000 lines of test code; 8,324 passed + 26 stress, 79 skipped) |
 | **Compiler code coverage** | 95% Python, 61% JavaScript — 91% combined (CI minimum: 80%) |
 | **Conformance programs** | 164 programs across 9 spec chapters, validating every language feature |
 | **Example programs** | 41, all validated through `vera check` + `vera verify` |
@@ -64,7 +64,7 @@ python scripts/check_wheel_availability.py           # pre-flight: every runtime
 | `test_checker_effects.py` | 67 | 1,066 | Effect declarations, abilities, effect subtyping, async effect, handler typing (#420 split) |
 | `test_db_effect.py` | 7 | 106 | #229 — the built-in `<DB>` effect: `DB.query` / `DB.execute` type-check under `effects(<DB>)` (E122 without it; E204 on a non-`String` SQL argument), plus the `db_sql_ops` identity stash / `is_db_sql_op` that the #309 literal-provenance gate keys on — object-identity, not the value-equal / user-shadowable op name (mutation-validated: an `==`/name key flips the look-alike test RED) |
 | `test_db_marshalling.py` | 31 | 176 | #229 — the `<DB>` marshalling helpers: `Array<Option<String>>` params (inbound reader), `Array<Array<Option<String>>>` query grids (`_alloc_result_ok_rows`) and `Result<Int>` row-counts, round-tripped through an `InstanceCaller` over a real compiled module — each case run normally AND under `VERA_EAGER_GC=1` (every `$alloc` fires `$gc_collect`), the large-grid case forcing free-block reuse; mutation-validated (dropping a shadow-stack root corrupts the read-back / SIGBUSes the swept-pointer read) |
-| `test_db_runtime.py` | 16 | 203 | #229 — the `<DB>` host binding (`vera/runtime/db.py`) on stdlib `sqlite3`: create/insert/select round-trips against `:memory:`, NULL cells → `None`, the affected-row count, the `Err`-not-crash error path, and injection-safety (a malicious param binds as a literal, table intact); plus `_open_connection`'s `VERA_DB_URL` surface (memory + file URLs, in-memory default) and `register_db`'s bind/no-op paths |
+| `test_db_runtime.py` | 19 | 243 | #229 — the `<DB>` host binding (`vera/runtime/db.py`) on stdlib `sqlite3`: create/insert/select round-trips against `:memory:`, NULL cells → `None`, the affected-row count (incl. the `-1` DDL sentinel), a BLOB cell UTF-8-decoded with replacement, the `Err`-not-crash error path, an unopenable `VERA_DB_URL` deferred to an `Err` (not a host crash), and injection-safety (a malicious param binds as a literal, table intact); plus `_open_connection`'s `VERA_DB_URL` surface (memory + file URLs, in-memory default) and `register_db`'s bind/no-op paths |
 | `test_checker_modules.py` | 45 | 975 | Module-call diagnostics, cross-module typing, visibility enforcement, builtin redefinition, parsed module calls (#420 split) |
 | `test_checker_errors.py` | 56 | 866 | Error codes, resolution-coverage diagnostics, contracts, error accumulation (#420 split); cyclic type aliases incl. #1059 self-reference through a type argument (`Future<F>`, mutual `Future<B>`/`Future<A>`, `Array<L>`) rejected E132 |
 | `test_checker_builtins_collections.py` | 97 | 848 | Map / Set / Decimal / Json / Html / Http / Inference built-in type-checking (#420 split) |

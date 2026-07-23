@@ -143,12 +143,13 @@ class TypeEnv:
     constructors: dict[str, ConstructorInfo] = field(default_factory=dict)
 
     # #309: the built-in ``<DB>`` SQL-executing ops (``query`` / ``execute``),
-    # retained by IDENTITY so the literal-provenance gate can key on the exact
-    # objects, not the op name.  ``OpInfo`` is an unhashable, value-equal
-    # dataclass, so a user ``effect DB { op query(...) }`` with identical field
-    # values would compare ``==`` to the built-in — a name or set key would
-    # misfire.  Populated in ``_register_builtins``; queried via
-    # ``is_db_sql_op``.  Empty until the built-ins register.
+    # retained by IDENTITY so the forthcoming literal-provenance gate can key on
+    # the exact objects, not the op name.  ``OpInfo`` is an unhashable,
+    # value-equal dataclass, so a user ``effect DB { op query(...) }`` with
+    # identical field values would compare ``==`` to the built-in — a name or
+    # set key would misfire.  Populated in ``_register_builtins``; exposed via
+    # ``is_db_sql_op`` (consumed by the #309 gate once it lands).  Empty until
+    # the built-ins register.
     db_sql_ops: tuple[OpInfo, ...] = field(default_factory=tuple)
 
     # Type variables currently in scope (from forall<T>)
@@ -550,12 +551,14 @@ class TypeEnv:
         #     — outer rows, inner columns, each cell nullable;
         #   - `execute` returns the affected-row count (`Int`; sqlite reports -1
         #     when it cannot count) or an `Err` message.
-        # The SQL string is the FIRST argument; the literal-provenance checker
-        # (#309) rejects a non-literal there, so injection is a compile error.
+        # The SQL string is the FIRST argument.  A forthcoming literal-provenance
+        # checker (#309) will reject a non-literal there, making injection a
+        # compile-time error; until it lands, runtime `?`-parameterisation is the
+        # injection defence (a bound value never becomes SQL).
         # Host-backed and un-mockable like Http / Inference — `handle[DB]` is
         # #372's class (host effects aren't user-handleable) and is a stated
         # limitation.  A user `effect DB { ... }` still routes to the host
-        # (DB is a reserved host qualifier), so the #309 gate keys on op
+        # (DB is a reserved host qualifier), so the #309 gate will key on op
         # identity via `is_db_sql_op`, not on the (shadowable) name.
         _option_string = AdtType("Option", (STRING,))
         _param_array = AdtType("Array", (_option_string,))
@@ -575,8 +578,9 @@ class TypeEnv:
             },
         )
         # #309: retain the SQL-executing DB ops BY IDENTITY (see the
-        # `db_sql_ops` field) so the literal-provenance gate keys on these
-        # exact objects.  Both reach the real database, so both must be gated.
+        # `db_sql_ops` field) so the forthcoming literal-provenance gate can key
+        # on these exact objects.  Both reach the real database, so both must be
+        # gated once the gate lands.
         _db_ops = self.effects["DB"].operations
         self.db_sql_ops = (_db_ops["query"], _db_ops["execute"])
 
@@ -2107,8 +2111,8 @@ class TypeEnv:
         """Return True iff ``op`` IS (by identity) a built-in ``<DB>``
         SQL-executing operation (``DB.query`` / ``DB.execute``).
 
-        The #309 literal-provenance gate keys on this rather than on the op
-        name so that:
+        The forthcoming #309 literal-provenance gate will key on this rather
+        than on the op name so that:
 
           - an unrelated effect with an op *named* ``query`` (or a user
             ``effect DB { ... }`` shadowing the built-in) never trips the gate,

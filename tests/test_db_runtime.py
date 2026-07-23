@@ -131,6 +131,46 @@ class TestDbRuntime229:
             {"VERA_DB_URL": "sqlite::memory:"},
         )
 
+    def test_create_table_rowcount_is_minus_one(self) -> None:
+        # A statement sqlite cannot count (DDL like CREATE TABLE) reports
+        # rowcount -1; the documented sentinel must survive marshalling as a
+        # signed i64, not clamp to 0 or turn into lastrowid.
+        caller = _gc_caller()
+        conn = sqlite3.connect(":memory:")
+        result = _db_execute(caller, conn, "CREATE TABLE t (n INTEGER)", [])
+        assert _decode_result_ok_i64(caller, result) == -1
+
+    def test_blob_column_decodes_via_utf8_replace(self) -> None:
+        # A BLOB cell is bytes, not str: `_cell` UTF-8-decodes it with
+        # replacement (not `str(bytes)`, which would yield the `b'...'` repr).
+        # 0xc1 is a never-valid UTF-8 lead byte → U+FFFD.
+        caller = _gc_caller()
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE b (x BLOB)")
+        conn.execute("INSERT INTO b VALUES (X'6869c1')")  # 'h', 'i', 0xc1
+        result = _db_query(caller, conn, "SELECT x FROM b", [])
+        assert _decode_result_ok_rows(caller, result) == [["hi�"]]
+
+    def test_bad_db_url_surfaces_as_err_not_crash(self, monkeypatch) -> None:
+        # An unopenable VERA_DB_URL (a file in a missing directory) must reach
+        # the program's `Err` arm, not crash the host with an uncaught sqlite3
+        # traceback at connection-open time.  Before the deferred-open fix,
+        # `register_db` raised `sqlite3.OperationalError` during setup.
+        monkeypatch.setenv(
+            "VERA_DB_URL", "sqlite:////no_such_dir_1145_xyz/db.sqlite",
+        )
+        src = """
+public fn main(-> @Int)
+  requires(true) ensures(true) effects(<DB>)
+{
+  match DB.query("SELECT 1", []) {
+    Ok(@Array<Array<Option<String>>>) -> 0,
+    Err(@String) -> 42
+  }
+}
+"""
+        assert _run(src) == 42
+
 
 class TestDbEndToEnd229:
     """S4: a real Vera program using ``<DB>`` compiles (checker → codegen

@@ -12,11 +12,13 @@ array (``Array<Option<String>>``) and returning a ``Result``:
     when it cannot report one, e.g. ``CREATE TABLE``).
 
 Parameters are bound through ``?`` placeholders (``sqlite3`` parameterisation), so
-a parameter value is never interpreted as SQL — combined with the #309 checker
-gate that requires the SQL string itself to be a compile-time literal, injection
-is impossible by construction.  Phase 1 is stringly-typed: a parameter binds as
-TEXT / NULL and a returned cell is stringified (``None`` for NULL); numeric and
-BLOB columns come back as their ``str`` form.
+a parameter value is never interpreted as SQL — the runtime defence against
+injection.  A forthcoming checker gate (#309) will additionally require the SQL
+string itself to be a compile-time literal, making injection a *compile-time*
+error; until it lands, the runtime parameterisation is the guarantee in force.
+Phase 1 is stringly-typed: a parameter binds as TEXT / NULL and a returned cell
+is stringified — a numeric column via ``str()``, a BLOB via UTF-8 decode with
+replacement, and SQL ``NULL`` as ``None``.
 
 Like ``Http`` / ``Inference`` this is host-backed and not user-handleable
 (``handle[DB]`` is #372's class); one connection is opened per program run and
@@ -118,11 +120,28 @@ def register_db(
     A single connection is opened per program run (only when a DB op is actually
     used) and captured by the op closures, so state built by one call is visible
     to the next.  Each closure reads its SQL string and parameter array out of
-    WASM memory, executes, and returns the marshalled Result pointer.
+    WASM memory, executes, and returns the marshalled Result pointer.  If the
+    connection cannot be opened (an unopenable ``VERA_DB_URL``), the failure is
+    captured and returned as the effect's ``Err`` from each op when invoked —
+    not raised — so the program handles it in its own ``match``, the same as a
+    query/execute driver error.
     """
     if not ({"db_query", "db_execute"} & ops_used):
         return
-    conn = _open_connection(env_vars)
+    # Opening the connection can itself fail (an unopenable VERA_DB_URL — a path
+    # in a missing directory, a directory, a permissions or corrupt-file error).
+    # That must surface as the effect's `Err` value, the same contract as a
+    # query/execute driver error, NOT as an uncaught host traceback that bypasses
+    # the program's own `match ... { Err(...) -> ... }`.  So the open is deferred:
+    # on failure `conn` is None and each op returns the captured error when
+    # actually invoked.
+    conn: sqlite3.Connection | None
+    try:
+        conn = _open_connection(env_vars)
+        open_error: str | None = None
+    except sqlite3.Error as exc:
+        conn = None
+        open_error = f"cannot open database: {exc}"
 
     _sig = wasmtime.FuncType(
         [wasmtime.ValType.i32(), wasmtime.ValType.i32(),
@@ -135,11 +154,16 @@ def register_db(
             caller: wasmtime.Caller,
             sql_ptr: int, sql_len: int, params_ptr: int, params_count: int,
         ) -> int:
+            active = conn
+            if active is None:
+                return _alloc_result_err_string(
+                    caller, open_error or "cannot open database",
+                )
             sql = _read_wasm_string(caller, sql_ptr, sql_len)
             params = _read_wasm_array_of_options_of_string(
                 caller, params_ptr, params_count,
             )
-            return _db_query(caller, conn, sql, params)
+            return _db_query(caller, active, sql, params)
 
         linker.define_func(
             "vera", "db_query", _sig, host_db_query, access_caller=True,
@@ -150,11 +174,16 @@ def register_db(
             caller: wasmtime.Caller,
             sql_ptr: int, sql_len: int, params_ptr: int, params_count: int,
         ) -> int:
+            active = conn
+            if active is None:
+                return _alloc_result_err_string(
+                    caller, open_error or "cannot open database",
+                )
             sql = _read_wasm_string(caller, sql_ptr, sql_len)
             params = _read_wasm_array_of_options_of_string(
                 caller, params_ptr, params_count,
             )
-            return _db_execute(caller, conn, sql, params)
+            return _db_execute(caller, active, sql, params)
 
         linker.define_func(
             "vera", "db_execute", _sig, host_db_execute, access_caller=True,
