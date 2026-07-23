@@ -1282,6 +1282,20 @@
     ]
   },
   {
+    "id": "ch07_bare_effect_op_rejected",
+    "file": "ch07_bare_effect_op_rejected.vera",
+    "chapter": 7,
+    "title": "Bare (unqualified) effect-op call the WASM backend cannot route is a checker error",
+    "level": "check",
+    "spec_ref": "Section 7.4",
+    "expected_error": "E217",
+    "features": [
+      "effects",
+      "effect_op",
+      "check_error"
+    ]
+  },
+  {
     "id": "ch08_module_decl",
     "file": "ch08_module_decl.vera",
     "chapter": 8,
@@ -2320,6 +2334,20 @@
     "level": "check",
     "spec_ref": "Section 9.5.7",
     "expected_error": "E208",
+    "features": [
+      "db_effect",
+      "sql_provenance",
+      "check_error"
+    ]
+  },
+  {
+    "id": "ch09_sql_numbered_placeholder_rejected",
+    "file": "ch09_sql_numbered_placeholder_rejected.vera",
+    "chapter": 9,
+    "title": "Numbered/named SQL placeholder is a checker error (anonymous ? only)",
+    "level": "check",
+    "spec_ref": "Section 9.5.7",
+    "expected_error": "E209",
     "features": [
       "db_effect",
       "sql_provenance",

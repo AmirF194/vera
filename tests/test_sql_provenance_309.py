@@ -196,15 +196,28 @@ class TestSqlPlaceholderCount309:
             '  DB.query("SELECT * FROM u WHERE a = ?", @Array<Option<String>>.0)',
             param="@Array<Option<String>>"))
 
-    def test_named_params_defer_no_false_e208(self) -> None:
-        # Named placeholders (:name) make the positional count unreliable, so
-        # count_placeholders returns None and the gate defers to the host — even
-        # with a statically-sized params array whose length differs from the
-        # naive `?`-count (here 0).  A naive counter would false-reject with
-        # E208; the defer keeps the static check sound.
-        _check_ok(_db_fn(
+    def test_named_params_rejected_e209(self) -> None:
+        # Named placeholders (:name / @name / $name) bind against a mapping, not
+        # Vera's positional Array<Option<String>>, so they always fail at run
+        # time.  Vera supports only anonymous `?` (one canonical form), so the
+        # gate rejects them at compile time: E209.
+        _check_code(_db_fn(
             '  DB.query("SELECT * FROM u WHERE a = :a AND b = :b", '
-            '[Some("x")])'))
+            '[Some("x")])'), "E209")
+
+    def test_numbered_params_rejected_e209(self) -> None:
+        # Numbered placeholders (?NNN) — Cortex flagged `SELECT ?2` with one
+        # param as a statically-knowable mismatch the None-deferral hid.  Vera
+        # supports only anonymous `?`, so reject at compile time (E209) rather
+        # than defer to a runtime binding-count error.
+        _check_code(_db_fn('  DB.query("SELECT ?2", [Some("x")])'), "E209")
+
+    def test_dollar_in_identifier_not_named_param(self) -> None:
+        # #1147 adversarial workflow (over-rejection): `a$b` is a valid SQLite
+        # identifier — `$` is a legit mid-token identifier char — NOT a $name
+        # placeholder.  sqlite3 binds `SELECT a$b` with zero params, so literal
+        # SQL using such an identifier must NOT be rejected E209 (or E208).
+        _check_ok(_db_fn('  DB.query("SELECT a$b FROM t", [])'))
 
 
 class TestCountPlaceholdersMatchesSqlite309:
@@ -229,6 +242,7 @@ class TestCountPlaceholdersMatchesSqlite309:
         "SELECT 'a''b', ?",            # 1 — doubled-quote escape in a string
         "SELECT 1 AS `a?b`, ?",        # 1 — ? inside a backtick identifier
         "SELECT 1 AS [a?b], ?",        # 1 — ? inside a bracket identifier
+        "SELECT 1 AS a$b, ?",          # 1 — $ mid-identifier is NOT a $name param
         "SELECT ? WHERE 1 = ?",        # 2
         "SELECT '? ? ?', ?, ?",        # 2 — three ? inside a literal, two real
         "SELECT ?, ? -- ? ' trailing", # 2 — line comment ? / ' ignored
@@ -262,6 +276,32 @@ class TestCountPlaceholdersMatchesSqlite309:
     def test_named_and_numbered_params_defer(self, sql: str) -> None:
         # Returning None is what makes the gate defer E208 rather than
         # false-reject: a naive `?`-count would disagree with sqlite here.
+        assert count_placeholders(sql) is None
+
+    # #1147 adversarial workflow: sqlite3's IdChar rule accepts ANY byte >= 0x80
+    # (non-ASCII) and `$` as a bind-parameter name character, but the checker's
+    # named-param detection used Python `str.isalnum()`, which is False for
+    # high-byte SYMBOL chars (£ U+00A3, € U+20AC) and for `$` — so
+    # `count_placeholders` returned an int instead of None, the gate emitted no
+    # E209 (or a wrong E208), and a query sqlite binds by name passed `check`
+    # then failed at run time.  Each of these IS a named parameter to sqlite3.
+    HIGH_BYTE_NAMED = [
+        "SELECT :€x",       # named, first name-char is € (U+20AC, non-ASCII)
+        "SELECT :£x",       # named, first name-char is £ (U+00A3, a symbol)
+        "SELECT ?, :€x",    # anonymous ? MIXED with a high-byte named param
+        "SELECT $$x",            # $-prefixed param whose first name-char is '$'
+        "SELECT @¥v",       # @-named, first name-char is ¥ (U+00A5)
+    ]
+
+    @pytest.mark.parametrize("sql", HIGH_BYTE_NAMED)
+    def test_high_byte_named_params_defer_matching_sqlite(self, sql: str) -> None:
+        # Pin sqlite3 itself: it prepares each as having >= 1 NAMED parameter,
+        # so an empty positional bind is a ProgrammingError (missing binding).
+        conn = sqlite3.connect(":memory:")
+        with pytest.raises(sqlite3.ProgrammingError):
+            conn.execute(sql, [])
+        # The checker MUST agree: defer (None) so the gate emits E209, never a
+        # positional int that would disagree with the host's real param count.
         assert count_placeholders(sql) is None
 
 
@@ -361,4 +401,125 @@ class TestDbEffectShadowGated309:
             "@Result<Array<Array<Option<String>>>, String>)\n"
             "  requires(true) ensures(true) effects(<DB>)\n"
             '{ DB.query("SELECT * FROM users", []) }\n'
+        )
+
+    def test_unresolved_db_query_spelling_still_gated(self) -> None:
+        # Cortex Finding 1: a user `effect DB` that does NOT declare `query`.
+        # Op resolution FAILS (E220 warning), so the resolved-op gate never runs
+        # — but codegen routes the `DB.query` SPELLING to `$vera.db_query`
+        # regardless, so a runtime SQL string still reaches the host.  The gate
+        # must fire on the spelling: E207.
+        _check_code(
+            "effect DB {\n  op ping(Unit -> Unit);\n}\n"
+            "public fn run(@String -> "
+            "@Result<Array<Array<Option<String>>>, String>)\n"
+            "  requires(true) ensures(true) effects(<DB>)\n"
+            "{ DB.query(@String.0, []) }\n",
+            "E207",
+        )
+
+    def test_unresolved_db_execute_spelling_still_gated(self) -> None:
+        # Same for the write path (execute) — arbitrary DDL/DML otherwise.
+        _check_code(
+            "effect DB {\n  op ping(Unit -> Unit);\n}\n"
+            "public fn run(@String -> @Result<Int, String>)\n"
+            "  requires(true) ensures(true) effects(<DB>)\n"
+            "{ DB.execute(@String.0, []) }\n",
+            "E207",
+        )
+
+    def test_generic_effect_db_unbound_arity_still_gated(self) -> None:
+        # #1147 adversarial workflow: a GENERIC ``effect DB<T>`` referenced at
+        # UNBOUND arity ``effects(<DB>)`` leaves the op's first param a raw
+        # TypeVar.  Codegen routes DB.query to the host by qualifier name
+        # regardless, so the gate must too: it runs whenever the call is an
+        # ``is_db_sql_op`` (parent_effect == "DB" + op name), independent of the
+        # arg's static type — so a runtime @String param is E207.
+        _check_code(
+            "effect DB<T> {\n  op query(T, Array<Option<String>> -> "
+            "Result<Array<Array<Option<String>>>, String>);\n}\n"
+            "public fn run(@String -> "
+            "@Result<Array<Array<Option<String>>>, String>)\n"
+            "  requires(true) ensures(true) effects(<DB>)\n"
+            "{ DB.query(@String.0, []) }\n",
+            "E207",
+        )
+
+    def test_typevar_laundered_sql_arg_still_gated(self) -> None:
+        # #1147 adversarial workflow (SEVERE): the runtime SQL string is
+        # laundered through a generic function parameter so its STATIC type at
+        # the DB.query call site is a raw TypeVar (@T), not String.  The old
+        # ``is_subtype(arg, String)`` guard was False for a TypeVar arg, so the
+        # gate skipped — yet monomorphization binds T = String and codegen routes
+        # to ``$vera.db_query``, executing attacker SQL (` OR '1'='1` tautologies
+        # ran; runtime `DROP TABLE` executed).  The `@T.0` slot argument is not
+        # literal-provenance, so the gate — now keyed on the codegen routing axis
+        # alone — must reject it (E207).
+        _check_code(
+            "effect DB<T> {\n"
+            "  op query(T, Array<Option<String>> -> "
+            "Result<Array<Array<Option<String>>>, String>);\n"
+            "  op execute(String, Array<Option<String>> -> "
+            "Result<Int, String>);\n"
+            "}\n"
+            "private forall<T> fn runq(@T -> "
+            "@Result<Array<Array<Option<String>>>, String>)\n"
+            "  requires(true) ensures(true) effects(<DB>)\n"
+            "{ DB.query(@T.0, []) }\n"
+            "public fn attack(@String -> "
+            "@Result<Array<Array<Option<String>>>, String>)\n"
+            "  requires(true) ensures(true) effects(<DB>)\n"
+            "{ runq(@String.0) }\n",
+            "E207",
+        )
+
+    def test_user_effect_db_shadow_nonstring_int_param_rejected(self) -> None:
+        # #1147 adversarial workflow: a user `effect DB` shadow declares the SQL
+        # op's first param as `Int` (not String).  `DB.query(42, ...)` then
+        # type-checks against the user's Int param (no E204) — but codegen still
+        # routes it to the host by qualifier name, marshalling the i64 where the
+        # host expects an (i32 ptr, i32 len), yielding INVALID WASM from a
+        # check-clean program.  The gate must run regardless of the declared
+        # param type (a non-String param does not fire the E204 that would make
+        # E207 a cascade), so the non-literal `42` is rejected (E207).
+        _check_code(
+            "effect DB {\n"
+            "  op query(Int, Array<Option<String>> -> "
+            "Result<Array<Array<Option<String>>>, String>);\n"
+            "}\n"
+            "public fn main(-> @Int)\n"
+            "  requires(true) ensures(true) effects(<DB>)\n"
+            "{\n"
+            "  let @Array<Option<String>> = [];\n"
+            "  match DB.query(42, @Array<Option<String>>.0) {\n"
+            "    Err(@String) -> 1,\n"
+            "    Ok(@Array<Array<Option<String>>>) -> 0\n"
+            "  }\n"
+            "}\n",
+            "E207",
+        )
+
+    def test_user_effect_db_shadow_nonstring_array_param_rejected(self) -> None:
+        # Sibling of the Int case: a user `effect DB` shadow whose SQL op takes
+        # an `Array<Option<String>>` first param.  A runtime array slot passes
+        # check against the user's declared param but reaches the SQL host
+        # ungated (its bytes marshalled as the SQL (ptr,len)).  The slot is not
+        # literal-provenance, so the gate must reject it (E207).
+        _check_code(
+            "effect DB {\n"
+            "  op query(Array<Option<String>>, Array<Option<String>> -> "
+            "Result<Array<Array<Option<String>>>, String>);\n"
+            "}\n"
+            "public fn main(-> @Int)\n"
+            "  requires(true) ensures(true) effects(<DB>)\n"
+            "{\n"
+            "  let @Array<Option<String>> = [Some(\"SELECT 1\")];\n"
+            "  let @Array<Option<String>> = [];\n"
+            "  match DB.query(@Array<Option<String>>.1, "
+            "@Array<Option<String>>.0) {\n"
+            "    Err(@String) -> 1,\n"
+            "    Ok(@Array<Array<Option<String>>>) -> 0\n"
+            "  }\n"
+            "}\n",
+            "E207",
         )

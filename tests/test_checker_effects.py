@@ -1064,3 +1064,88 @@ public fn handle(@Request -> @Response)
         info = env.effects.get("HttpServer")
         assert info is not None, "HttpServer missing from the effect registry"
         assert info.operations == {}, "HttpServer must be a marker effect"
+
+
+class TestBareEffectOpRoutable1148:
+    """#1148: a BARE (unqualified) effect-op call is codegen-routable only for
+    State/Exn (get/put/throw) or when handled by an enclosing `handle` block.
+    Every other bare op call (IO/DB/Http/Inference/Random and user effects)
+    failed `vera compile` with a confusing "Function 'op' is not defined"; the
+    checker now rejects it (E217) at check time.  Qualified `Effect.op(...)`,
+    State/Exn bare ops, and handled bare ops stay accepted."""
+
+    def test_bare_unhandled_host_op_rejected(self) -> None:
+        _check_err("""
+effect IO { op print(String -> Unit); }
+public fn run(-> @Unit) requires(true) ensures(true) effects(<IO>)
+{ print("hi") }
+""", "must be called qualified")
+
+    def test_bare_unhandled_user_op_rejected(self) -> None:
+        _check_err("""
+effect Foo { op bar(Unit -> Unit); }
+public fn run(-> @Unit) requires(true) ensures(true) effects(<Foo>)
+{ bar(()) }
+""", "must be called qualified")
+
+    def test_qualified_host_op_accepted(self) -> None:
+        _check_ok("""
+effect IO { op print(String -> Unit); }
+public fn run(-> @Unit) requires(true) ensures(true) effects(<IO>)
+{ IO.print("hi") }
+""")
+
+    def test_bare_op_handled_by_enclosing_handle_accepted(self) -> None:
+        _check_ok("""
+effect Foo { op bar(Unit -> Int); }
+private fn run(@Unit -> @Int) requires(true) ensures(true) effects(pure)
+{ handle[Foo] { bar(@Unit) -> { resume(0) } } in { bar(()) } }
+""")
+
+    def test_bare_state_ops_accepted_unhandled(self) -> None:
+        # Clause 1: State (and Exn) bare ops route to host cells even without an
+        # enclosing handle — get/put/throw must stay accepted, or the fix would
+        # break every State helper (e.g. maximum_syntax's increment helper).
+        _check_ok("""
+public fn counter(-> @Int)
+  requires(true) ensures(true) effects(<State<Int>>)
+{ put(get(()) + 1); get(()) }
+""")
+
+    def test_bare_exn_throw_accepted_unhandled(self) -> None:
+        # The Exn side of clause 1: bare `throw` routes to a host tag, so it
+        # stays accepted with no enclosing handle — the fix must not over-reject.
+        _check_ok("""
+public fn boom(-> @Int)
+  requires(true) ensures(true) effects(<Exn<String>>)
+{ throw("kaboom") }
+""")
+
+    def test_bare_op_on_state_named_shadow_rejected(self) -> None:
+        # #1147 adversarial workflow: the State/Exn carve-out keyed on the effect
+        # NAME only, but codegen bare-routes ONLY get/put (State) and throw
+        # (Exn) — not an arbitrary op of an effect that merely happens to be
+        # named State.  A user `effect State<T>` with a non-get/put op, called
+        # bare, passed check but hard-failed compile ("Function 'sneak' is not
+        # defined") — the exact check<->codegen disagreement E217 exists to
+        # close.  The carve-out now also requires the op NAME to be bare-routable.
+        _check_err("""
+effect State<T> {
+  op sneak(Int -> Unit);
+}
+public fn f(@Unit -> @Int)
+  requires(true) ensures(true) effects(<State<Int>>)
+{ sneak(5); 0 }
+""", "must be called qualified")
+
+    def test_bare_op_on_exn_named_shadow_rejected(self) -> None:
+        # Sibling of the State case: a user `effect Exn<E>` with a non-throw op,
+        # called bare, must be E217 (codegen bare-routes only throw for Exn).
+        _check_err("""
+effect Exn<E> {
+  op boom(Int -> Unit);
+}
+public fn f(@Unit -> @Int)
+  requires(true) ensures(true) effects(<Exn<String>>)
+{ boom(5); 0 }
+""", "must be called qualified")

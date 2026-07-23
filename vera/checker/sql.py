@@ -125,6 +125,24 @@ def resolve_literal_string(expr: ast.Expr, env: TypeEnv) -> str | None:
     return None
 
 
+def _is_sqlite_id_char(ch: str) -> bool:
+    """True if ``ch`` is a SQLite identifier / bind-parameter-name character.
+
+    SQLite's ``IdChar`` accepts alphanumerics, ``_``, ``$``, and ANY byte
+    ``>= 0x80`` (every byte of a non-ASCII UTF-8 character), so a ``:name`` /
+    ``@name`` / ``$name`` bind parameter whose first name character is non-ASCII
+    or ``$`` — ``:€x``, ``:£x``, ``$$x``, ``@¥v`` — is a NAMED parameter to the
+    sqlite3 host.  Python ``str.isalnum()`` is ``False`` for high-byte SYMBOL
+    characters (``£``, ``€``) and for ``$``, so using it alone under-detected
+    these: ``count_placeholders`` returned a positional ``int`` instead of
+    ``None``, the gate emitted no ``E209`` (or a wrong ``E208``), and a query the
+    host binds by name passed ``check`` then failed at run time (#1147
+    adversarial workflow).  This mirrors sqlite3 so the count defers on exactly
+    what the host binds by name.
+    """
+    return ch.isalnum() or ch == "_" or ch == "$" or ord(ch) >= 0x80
+
+
 def count_placeholders(sql: str) -> int | None:
     """Count anonymous ``?`` placeholders in ``sql``, quote- and comment-aware.
 
@@ -185,8 +203,15 @@ def count_placeholders(sql: str) -> int | None:
             if i + 1 < n and sql[i + 1].isdigit():
                 return None
             count += 1
-        elif c in (":", "@", "$") and i + 1 < n and (
-            sql[i + 1].isalnum() or sql[i + 1] == "_"
+        elif c in (":", "@", "$") and i + 1 < n and _is_sqlite_id_char(
+            sql[i + 1]
+        ) and not (
+            # ``$`` is a valid mid-token identifier char in SQLite — ``a$b`` is
+            # ONE identifier, not a ``$name`` param — so it begins a named
+            # placeholder only at a token boundary, never right after an
+            # identifier char.  ``:`` and ``@`` cannot appear inside an
+            # identifier, so they always begin a param.
+            c == "$" and i > 0 and _is_sqlite_id_char(sql[i - 1])
         ):
             # :name / @name / $name is a NAMED placeholder — likewise defer.
             return None

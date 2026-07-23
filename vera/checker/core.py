@@ -158,23 +158,39 @@ def typecheck_with_artifacts(
     checker.expr_target_types = {}
     checker.hole_sites = []
     checker.check_program(program)
-    return checker.errors, CheckArtifacts(
+
+    module_arts: ModuleArtifacts = {}
+    diagnostics = list(checker.errors)
+    if collect_module_artifacts:
+        module_arts, body_errors = _collect_module_artifacts(resolved_modules)
+        # Merge imported-body errors (Cortex #1147 Finding 2), deduped against
+        # the top-level program's own diagnostics — a module's E151, say, can be
+        # reported by both the top-level registration and its sub-check.
+        top_keys = {
+            (d.location.file, d.location.line, d.location.column,
+             d.error_code, d.description)
+            for d in diagnostics
+        }
+        for e in body_errors:
+            key = (e.location.file, e.location.line, e.location.column,
+                   e.error_code, e.description)
+            if key not in top_keys:
+                diagnostics.append(e)
+
+    return diagnostics, CheckArtifacts(
         expr_types=checker.expr_types,
         holes=checker.hole_sites,
         expr_semantic_types=checker.expr_semantic_types,
         expr_target_types=checker.expr_target_types,
-        module_artifacts=(
-            _collect_module_artifacts(resolved_modules)
-            if collect_module_artifacts
-            else {}
-        ),
+        module_artifacts=module_arts,
     )
 
 
 def _collect_module_artifacts(
     resolved_modules: list[ResolvedModule] | None,
-) -> ModuleArtifacts:
-    """Collect each resolved module's OWN span-keyed side-tables (#987).
+) -> tuple[ModuleArtifacts, list[Diagnostic]]:
+    """Collect each resolved module's OWN span-keyed side-tables (#987) and its
+    OWN check ERRORS (Cortex #1147 Finding 2).
 
     The top-level program's ``expr_target_types`` / ``expr_semantic_types`` are
     keyed by bare span ``(line, col, end_line, end_col)`` with no file identity,
@@ -216,6 +232,8 @@ def _collect_module_artifacts(
     """
     mods = resolved_modules or []
     result: ModuleArtifacts = {}
+    body_errors: list[Diagnostic] = []
+    seen: set[tuple[str | None, int, int, str, str]] = set()
     for mod in mods:
         mod_direct = {imp.path for imp in mod.program.imports}
         sub_resolved = [
@@ -236,7 +254,21 @@ def _collect_module_artifacts(
         sub.hole_sites = []
         sub.check_program(mod.program)
         result[mod.path] = (sub_semantic, sub_target)
-    return result
+        # Cortex #1147 Finding 2: surface each imported body's OWN check ERRORS.
+        # The body is compiled into the flat WASM module, so a body that fails
+        # its standalone check — e.g. a library whose SQL is non-literal (E207)
+        # — must fail the compile too; dropping ``sub.errors`` let an injection
+        # slip through the import door.  ERRORS only (warnings stay with the
+        # body's own ``vera check``); deduped by location + code + text.
+        for e in sub.errors:
+            if e.severity != "error":
+                continue
+            key = (e.location.file, e.location.line, e.location.column,
+                   e.error_code, e.description)
+            if key not in seen:
+                seen.add(key)
+                body_errors.append(e)
+    return result, body_errors
 
 
 # =====================================================================
@@ -288,6 +320,12 @@ class TypeChecker(
         # unbound-slot error.  Push/pop straddles the body check in
         # _check_handle; empty everywhere else.
         self._handler_body_state_tnames: list[str] = []
+        # #1148: base names of effects handled by enclosing `handle` blocks
+        # currently in scope.  Push/pop straddles the body check in
+        # _check_handle.  A BARE op call to a non-State/Exn effect is codegen-
+        # routable only when its effect is in this stack (rewritten to the
+        # handler clause); otherwise it is E217.
+        self._handled_effects: list[str] = []
         # #969: canonical slot-type names bound by the PARENT function whose
         # where-block is currently being checked.  A where-helper is a closed,
         # param-rooted scope (spec §5): its body cannot read the outer

@@ -1,0 +1,14 @@
+-- Chapter 9, Section 9.5.7 — SQL placeholder syntax (#309).
+-- Features: db_effect, sql_provenance, check_error.
+--
+-- The SQL is literal (so no E207), but it uses a numbered placeholder (?2).
+-- Vera's params argument is a positional Array<Option<String>>, so only
+-- anonymous ? placeholders have a well-defined binding; numbered (?NNN) and
+-- named (:name) forms are rejected at COMPILE time (E209).
+public fn numbered(-> @Result<Array<Array<Option<String>>>, String>)
+  requires(true)
+  ensures(true)
+  effects(<DB>)
+{
+  DB.query("SELECT ?2", [Some("x")])
+}
