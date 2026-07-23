@@ -6,7 +6,7 @@ This is the single source of truth for Vera's testing infrastructure, coverage d
 
 | Metric | Value |
 |--------|-------|
-| **Tests** | 8,486 across 131 files (~106,000 lines of test code; 8,381 passed + 26 stress, 79 skipped) |
+| **Tests** | 8,486 across 131 files (~106,000 lines of test code; 8,376 passed + 26 stress, 84 skipped) |
 | **Compiler code coverage** | 95% Python, 61% JavaScript — 91% combined (CI minimum: 80%) |
 | **Conformance programs** | 166 programs across 9 spec chapters, validating every language feature |
 | **Example programs** | 42, all validated through `vera check` + `vera verify` |
@@ -222,7 +222,7 @@ Almost all programs are at the `run` level — they compile and execute, produci
 
 ### Skipped tests
 
-`pytest tests/ -v` skips 51 conformance-stage tests across the two categories below (the suite's remaining skips are platform- or tool-gated and documented beside the tests that declare them):
+`pytest tests/ -v` skips 55 conformance-stage tests across the two categories below (the suite's remaining skips are platform- or tool-gated and documented beside the tests that declare them):
 
 **Level-limited skips** — the conformance framework only runs tests up to the declared level; stages beyond that level are automatically skipped. These are expected and correct.
 
@@ -275,6 +275,10 @@ Almost all programs are at the `run` level — they compile and execute, produci
 | `test_run[ch09_math_builtins]` | `ch09_math_builtins.vera` | `verify` | `run` | `verify`-level programs don't get a `run` test |
 | `test_verify[ch09_ord_adt_rejected]` | `ch09_ord_adt_rejected.vera` | `check` | `verify` | `check`-level negative test (`expected_error: E242`): verify stage not run |
 | `test_run[ch09_ord_adt_rejected]` | `ch09_ord_adt_rejected.vera` | `check` | `run` | `check`-level negative test: no `run` stage |
+| `test_verify[ch09_sql_injection_rejected]` | `ch09_sql_injection_rejected.vera` | `check` | `verify` | `check`-level negative test (`expected_error: E207`): verify stage not run |
+| `test_run[ch09_sql_injection_rejected]` | `ch09_sql_injection_rejected.vera` | `check` | `run` | `check`-level negative test: no `run` stage |
+| `test_verify[ch09_sql_placeholder_mismatch_rejected]` | `ch09_sql_placeholder_mismatch_rejected.vera` | `check` | `verify` | `check`-level negative test (`expected_error: E208`): verify stage not run |
+| `test_run[ch09_sql_placeholder_mismatch_rejected]` | `ch09_sql_placeholder_mismatch_rejected.vera` | `check` | `run` | `check`-level negative test: no `run` stage |
 
 **Environment-gated skips** — these programs require network access or a live API key that is not available in CI. They pass `vera check` (type-checking) but cannot be executed.
 
