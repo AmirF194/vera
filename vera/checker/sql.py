@@ -128,9 +128,10 @@ def count_placeholders(sql: str) -> int:
 
     A ``?`` inside a SQL string literal (``'...'`` or ``"..."``) is data, not a
     placeholder, and is not counted; SQL's doubled-quote escape (``''`` / ``""``
-    inside a like-quoted string) is handled.  The result is what the sqlite3
-    host binds the positional params against, so it is the count the E208 arity
-    check compares to a statically-sized params array.
+    inside a like-quoted string) is handled, and a ``?`` inside a ``--`` line
+    comment or a ``/* ... */`` block comment is skipped as well.  The result is
+    what the sqlite3 host binds the positional params against, so it is the
+    count the E208 arity check compares to a statically-sized params array.
     """
     count = 0
     quote: str | None = None
@@ -147,6 +148,17 @@ def count_placeholders(sql: str) -> int:
                     continue
                 quote = None
             i += 1
+            continue
+        # Outside a string literal, skip SQL comments whole so their contents
+        # (apostrophes, ? marks) affect neither quote tracking nor the count —
+        # sqlite3 ignores them too.
+        if c == "-" and i + 1 < n and sql[i + 1] == "-":
+            nl = sql.find("\n", i + 2)          # line comment: to end of line
+            i = n if nl == -1 else nl + 1
+            continue
+        if c == "/" and i + 1 < n and sql[i + 1] == "*":
+            end = sql.find("*/", i + 2)         # block comment: to closing */
+            i = n if end == -1 else end + 2
             continue
         if c in ("'", '"'):
             quote = c

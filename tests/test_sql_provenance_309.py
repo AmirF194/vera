@@ -85,10 +85,23 @@ public fn run(-> @Result<Array<Array<Option<String>>>, String>)
         )
 
     def test_let_bound_nonliteral_slot_rejected(self) -> None:
-        # A let whose value is a runtime slot has no literal provenance, so a
-        # later DB.query on that slot is rejected.
+        # A let whose value is a runtime slot (the @String parameter) has no
+        # literal provenance, so a later DB.query on that let is rejected.
         _check_code(
-            _db_fn('  let @String = @String.1;\n  DB.query(@String.0, [])'),
+            _db_fn('  let @String = @String.0;\n  DB.query(@String.0, [])'),
+            "E207",
+        )
+
+    def test_conditional_sql_rejected(self) -> None:
+        # An `if` expression is conservatively rejected even when both arms are
+        # string literals — resolve_literal_string does not walk conditionals in
+        # v1.  This pins the soundness asymmetry: an unhandled shape can only
+        # false-REJECT a valid program, never wrong-ACCEPT one.  (A bare `if`
+        # does not parse as a call argument, so the let-bound form carries the
+        # IfExpr into the gate.)
+        _check_code(
+            _db_fn('  let @String = if true then { "SELECT 1" } '
+                   'else { "SELECT 2" };\n  DB.query(@String.0, [])'),
             "E207",
         )
 
@@ -185,6 +198,9 @@ class TestCountPlaceholdersMatchesSqlite309:
         "SELECT 'a''b', ?",            # 1 — doubled-quote escape in a string
         "SELECT ? WHERE 1 = ?",        # 2
         "SELECT '? ? ?', ?, ?",        # 2 — three ? inside a literal, two real
+        "SELECT ?, ? -- ? ' trailing", # 2 — line comment ? / ' ignored
+        "SELECT ? /* ' ? */, ?",       # 2 — block comment ' / ? ignored
+        "SELECT ?\n-- ?\n, ?",         # 2 — line comment on its own line
     ]
 
     @pytest.mark.parametrize("sql", CASES)
