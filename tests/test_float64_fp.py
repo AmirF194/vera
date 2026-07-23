@@ -20,8 +20,12 @@ Written test-first: each FAILS on the pre-fix (Real-sort) verifier.
 
 from __future__ import annotations
 
+import pytest
+import z3
+
 from vera.parser import parse_to_ast
 from vera.checker import typecheck_with_artifacts
+from vera.smt import SmtContext, SmtResult
 from vera.verifier import VerifyResult, verify
 
 
@@ -35,34 +39,86 @@ def _verify(source: str) -> VerifyResult:
     )
 
 
+def _check_valid_unknown(
+    self: SmtContext, goal: z3.ExprRef, assumptions: list[z3.ExprRef],
+) -> SmtResult:
+    """``SmtContext.check_valid`` stub that always reports ``unknown``.
+
+    Signature matches ``check_valid`` (so ``monkeypatch.setattr`` is
+    type-correct) and ignores its arguments: every validity query returns the
+    incomplete-solver ``SmtResult``, forcing the Tier-3 fallback deterministically
+    with no dependence on solver latency — see
+    ``test_unsound_relation_stays_unproved_under_tier3_fallback`` (#1121).
+    """
+    return SmtResult(status="unknown")
+
+
 class TestFloat64FpSoundness797:
     def test_rounding_relation_not_proved(self) -> None:
         # The issue's probe: `result > input` for `input + 1.0` is FALSE at large
         # `x` (ULP >= 2, so `x + 1.0` rounds back to `x`), at `+Inf`, and at
         # `NaN`.  Z3 Real proved it for all inputs (unsound); the FP sort must
-        # not — it flips to a counterexample (violated) or Tier 3.
+        # not.
+        #
+        # The soundness property is `status != "verified"` — proving a false
+        # property is the unsoundness this test guards.  Both the counterexample
+        # (`violated`) and the conservative Tier-3 fallback (`timeout`/`tier3`,
+        # when the solver exhausts its budget on the slow CI cell) are safe
+        # outcomes; asserting exactly `violated` was runner-speed-sensitive and
+        # red-flagged unrelated PRs (#1121).
         result = _verify("""
 public fn inc(@Float64 -> @Float64)
   requires(true) ensures(@Float64.result > @Float64.0) effects(pure)
 { @Float64.0 + 1.0 }
 """)
         ens = [o for o in result.obligations if o.kind == "ensures"]
-        assert ens and all(o.status == "violated" for o in ens), [
+        assert ens and all(o.status != "verified" for o in ens), [
             (o.kind, o.status) for o in result.obligations
         ]
 
     def test_reflexive_equality_not_proved(self) -> None:
         # `result == input` for the identity is FALSE at `NaN` (`NaN != NaN`).
-        # Real's exact reflexivity proved it (unsound); FP must not.
+        # Real's exact reflexivity proved it (unsound); FP must not.  Same
+        # soundness assertion and same runner-speed fix as the sibling above
+        # (#1121): the guarantee is `!= "verified"`, not exactly `violated` —
+        # this test has the identical latent Tier-3-timeout flake.
         result = _verify("""
 public fn idf(@Float64 -> @Float64)
   requires(true) ensures(@Float64.result == @Float64.0) effects(pure)
 { @Float64.0 }
 """)
         ens = [o for o in result.obligations if o.kind == "ensures"]
-        assert ens and all(o.status == "violated" for o in ens), [
+        assert ens and all(o.status != "verified" for o in ens), [
             (o.kind, o.status) for o in result.obligations
         ]
+
+    def test_unsound_relation_stays_unproved_under_tier3_fallback(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Deterministic guard for #1121: pin the Tier-3 fallback branch WITHOUT
+        # depending on solver latency.  On a fast runner the two tests above
+        # only ever observe `violated`, so the widened `!= verified` accept-set
+        # is never exercised against the `timeout`/`tier3` outcome there — this
+        # test forces it.  Rather than starve the solver with `timeout_ms=1`
+        # (itself runner-speed dependent — the very flake class #1121 fixes; a
+        # fast box can discharge the query inside 1 ms and return `violated`),
+        # stub the validity query to return `unknown` unconditionally, so every
+        # obligation deterministically falls to the conservative runtime tier on
+        # every runner.  A regression narrowing the accept-set back to
+        # `violated` is then caught here, not only on the slow Windows cell.
+        monkeypatch.setattr(SmtContext, "check_valid", _check_valid_unknown)
+        result = _verify("""
+public fn inc(@Float64 -> @Float64)
+  requires(true) ensures(@Float64.result > @Float64.0) effects(pure)
+{ @Float64.0 + 1.0 }
+""")
+        ens = [o for o in result.obligations if o.kind == "ensures"]
+        # The stubbed solver returns `unknown`, so the obligation falls to the
+        # conservative runtime tier — never `verified`.
+        assert ens and all(o.status in ("timeout", "tier3") for o in ens), [
+            (o.kind, o.status) for o in result.obligations
+        ]
+        assert all(o.status != "verified" for o in ens)
 
     def test_nan_guarded_equality_still_verifies(self) -> None:
         # A genuinely-sound contract: with `!float_is_nan(input)` excluding the
