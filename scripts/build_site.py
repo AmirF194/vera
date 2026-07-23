@@ -553,6 +553,7 @@ Full source and data: [{REPO}-bench]({REPO}-bench).
 
 - **No variable names** — Typed [De Bruijn indices]({RAW}/DE_BRUIJN.md) (`@T.n`) replace variable names: `@Int.0` is the most-recent `Int` binding, `@Int.1` the one before. The whole class of naming hallucinations is removed at the language level, not caught after the fact.
 - **Full contracts** — Mandatory preconditions, postconditions, invariants, and effect declarations on every function. Z3 generates test inputs from the contracts and runs them through WASM — no manual test cases.
+- **SQL injection won't compile** — The `<DB>` effect accepts only a literal query string — built from string literals, never spliced from a runtime value. Interpolating user input into SQL is a compile-time error (`E207`); every value flows through a `?` placeholder instead. Injection safety stops being a discipline you remember and becomes one the compiler enforces.
 - **Algebraic effects** — IO, Http, HttpServer, State, Exceptions, Async, Inference, DB, Random, Diverge — declared, typed, and handled explicitly. Pure by default.
 - **Refinement types** — Types that express constraints like "a list of positive integers of length `n`".
 - **Three-tier verification** — Static via [Z3](https://www.microsoft.com/en-us/research/project/z3-3/) plus runtime fallback, shipped; the Z3-guided middle tier is specified, not yet implemented.
