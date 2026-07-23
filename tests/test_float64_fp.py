@@ -40,29 +40,68 @@ class TestFloat64FpSoundness797:
         # The issue's probe: `result > input` for `input + 1.0` is FALSE at large
         # `x` (ULP >= 2, so `x + 1.0` rounds back to `x`), at `+Inf`, and at
         # `NaN`.  Z3 Real proved it for all inputs (unsound); the FP sort must
-        # not — it flips to a counterexample (violated) or Tier 3.
+        # not.
+        #
+        # The soundness property is `status != "verified"` — proving a false
+        # property is the unsoundness this test guards.  Both the counterexample
+        # (`violated`) and the conservative Tier-3 fallback (`timeout`/`tier3`,
+        # when the solver exhausts its budget on the slow CI cell) are safe
+        # outcomes; asserting exactly `violated` was runner-speed-sensitive and
+        # red-flagged unrelated PRs (#1121).
         result = _verify("""
 public fn inc(@Float64 -> @Float64)
   requires(true) ensures(@Float64.result > @Float64.0) effects(pure)
 { @Float64.0 + 1.0 }
 """)
         ens = [o for o in result.obligations if o.kind == "ensures"]
-        assert ens and all(o.status == "violated" for o in ens), [
+        assert ens and all(o.status != "verified" for o in ens), [
             (o.kind, o.status) for o in result.obligations
         ]
 
     def test_reflexive_equality_not_proved(self) -> None:
         # `result == input` for the identity is FALSE at `NaN` (`NaN != NaN`).
-        # Real's exact reflexivity proved it (unsound); FP must not.
+        # Real's exact reflexivity proved it (unsound); FP must not.  Same
+        # soundness assertion and same runner-speed fix as the sibling above
+        # (#1121): the guarantee is `!= "verified"`, not exactly `violated` —
+        # this test has the identical latent Tier-3-timeout flake.
         result = _verify("""
 public fn idf(@Float64 -> @Float64)
   requires(true) ensures(@Float64.result == @Float64.0) effects(pure)
 { @Float64.0 }
 """)
         ens = [o for o in result.obligations if o.kind == "ensures"]
-        assert ens and all(o.status == "violated" for o in ens), [
+        assert ens and all(o.status != "verified" for o in ens), [
             (o.kind, o.status) for o in result.obligations
         ]
+
+    def test_unsound_relation_stays_unproved_under_tier3_fallback(self) -> None:
+        # Deterministic guard for #1121: force the exact Tier-3 fallback the
+        # slow CI cell hits by starving the solver (timeout_ms=1), and assert
+        # the false property is STILL not proved.  On a fast runner the two
+        # tests above only ever observe `violated`, so the widened `!= verified`
+        # assertion is never exercised against the `timeout` outcome — this test
+        # pins that branch so a regression narrowing the accept-set back to
+        # `violated` is caught here rather than only on Windows.
+        source = """
+public fn inc(@Float64 -> @Float64)
+  requires(true) ensures(@Float64.result > @Float64.0) effects(pure)
+{ @Float64.0 + 1.0 }
+"""
+        ast = parse_to_ast(source)
+        _d, arts = typecheck_with_artifacts(ast, source)
+        result = verify(
+            ast, source,
+            expr_types=arts.expr_semantic_types,
+            expr_target_types=arts.expr_target_types,
+            timeout_ms=1,
+        )
+        ens = [o for o in result.obligations if o.kind == "ensures"]
+        # The starved solver returns `unknown`, so the obligation falls to the
+        # conservative runtime tier — never `verified`.
+        assert ens and all(o.status in ("timeout", "tier3") for o in ens), [
+            (o.kind, o.status) for o in result.obligations
+        ]
+        assert all(o.status != "verified" for o in ens)
 
     def test_nan_guarded_equality_still_verifies(self) -> None:
         # A genuinely-sound contract: with `!float_is_nan(input)` excluding the
