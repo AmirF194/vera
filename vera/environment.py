@@ -142,6 +142,16 @@ class TypeEnv:
     abilities: dict[str, AbilityInfo] = field(default_factory=dict)
     constructors: dict[str, ConstructorInfo] = field(default_factory=dict)
 
+    # #309: the built-in ``<DB>`` SQL-executing ops (``query`` / ``execute``),
+    # retained by IDENTITY so the forthcoming literal-provenance gate can key on
+    # the exact objects, not the op name.  ``OpInfo`` is an unhashable,
+    # value-equal dataclass, so a user ``effect DB { op query(...) }`` with
+    # identical field values would compare ``==`` to the built-in — a name or
+    # set key would misfire.  Populated in ``_register_builtins``; exposed via
+    # ``is_db_sql_op`` (consumed by the #309 gate once it lands).  Empty until
+    # the built-ins register.
+    db_sql_ops: tuple[OpInfo, ...] = field(default_factory=tuple)
+
     # Type variables currently in scope (from forall<T>)
     type_params: dict[str, TypeVar] = field(default_factory=dict)
 
@@ -530,6 +540,49 @@ class TypeEnv:
                 ),
             },
         )
+
+        # DB effect — SQL database access via host imports (#229).
+        # Functions using DB.query / DB.execute must declare effects(<DB>).
+        # Phase 1 is positional and stringly-typed:
+        #   - a parameter is `Option<String>` — Some binds a value, None binds
+        #     SQL NULL (DESIGN principle 2: absence is a distinct value, never
+        #     collapsed to "");
+        #   - `query` returns the result grid as `Array<Array<Option<String>>>`
+        #     — outer rows, inner columns, each cell nullable;
+        #   - `execute` returns the affected-row count (`Int`; sqlite reports -1
+        #     when it cannot count) or an `Err` message.
+        # The SQL string is the FIRST argument.  A forthcoming literal-provenance
+        # checker (#309) will reject a non-literal there, making injection a
+        # compile-time error; until it lands, runtime `?`-parameterisation is the
+        # injection defence (a bound value never becomes SQL).
+        # Host-backed and un-mockable like Http / Inference — `handle[DB]` is
+        # #372's class (host effects aren't user-handleable) and is a stated
+        # limitation.  A user `effect DB { ... }` still routes to the host
+        # (DB is a reserved host qualifier), so the #309 gate will key on op
+        # identity via `is_db_sql_op`, not on the (shadowable) name.
+        _option_string = AdtType("Option", (STRING,))
+        _param_array = AdtType("Array", (_option_string,))
+        _row_grid = AdtType("Array", (AdtType("Array", (_option_string,)),))
+        self.effects["DB"] = EffectInfo(
+            name="DB",
+            type_params=None,
+            operations={
+                "query": OpInfo(
+                    "query", (STRING, _param_array),
+                    AdtType("Result", (_row_grid, STRING)), "DB",
+                ),
+                "execute": OpInfo(
+                    "execute", (STRING, _param_array),
+                    AdtType("Result", (INT, STRING)), "DB",
+                ),
+            },
+        )
+        # #309: retain the SQL-executing DB ops BY IDENTITY (see the
+        # `db_sql_ops` field) so the forthcoming literal-provenance gate can key
+        # on these exact objects.  Both reach the real database, so both must be
+        # gated once the gate lands.
+        _db_ops = self.effects["DB"].operations
+        self.db_sql_ops = (_db_ops["query"], _db_ops["execute"])
 
         # Ordering ADT — result type for Ord's compare operation (§9.8).
         self.data_types["Ordering"] = AdtInfo(
@@ -2053,6 +2106,24 @@ class TypeEnv:
             if op_name in ab.operations:
                 return ab.operations[op_name]
         return None
+
+    def is_db_sql_op(self, op: OpInfo) -> bool:
+        """Return True iff ``op`` IS (by identity) a built-in ``<DB>``
+        SQL-executing operation (``DB.query`` / ``DB.execute``).
+
+        The forthcoming #309 literal-provenance gate will key on this rather
+        than on the op name so that:
+
+          - an unrelated effect with an op *named* ``query`` (or a user
+            ``effect DB { ... }`` shadowing the built-in) never trips the gate,
+            and
+          - conversely, only calls that reach the real database are gated.
+
+        Identity (``is``), not ``==``: ``OpInfo`` is a value-equal dataclass,
+        so a structurally-identical look-alike op must NOT match.  The set is
+        two elements, so the linear scan is trivial.
+        """
+        return any(op is db_op for db_op in self.db_sql_ops)
 
     def is_type_name(self, name: str) -> bool:
         """Check if a name refers to a known type (primitive, ADT, or alias)."""

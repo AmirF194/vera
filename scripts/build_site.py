@@ -83,7 +83,7 @@ Contracts are mandatory — every function must declare `requires(...)`, \
 `ensures(...)`, and `effects(...)`. The Z3 SMT solver verifies contracts \
 statically where possible; remaining contracts become runtime assertions. \
 All side effects (IO, Http, HttpServer, State, Exceptions, Async, Inference, \
-Random) are tracked in the type system via algebraic effects.
+DB, Random, Diverge) are tracked in the type system via algebraic effects.
 
 Current version: {version}. The reference compiler is written in Python. \
 Install the `veralang` distribution from PyPI or use `pip install -e ".[dev]"` from \
@@ -130,7 +130,7 @@ closures, generics, and mutual recursion.
 - [Chapter 6: Contracts]({RAW}/spec/06-contracts.md): Preconditions, \
 postconditions, termination measures, and quantifiers.
 - [Chapter 7: Effects]({RAW}/spec/07-effects.md): Algebraic effects, \
-handlers, IO, Http, HttpServer, State, Exceptions, Async, Inference, and Random.
+handlers, IO, Http, HttpServer, State, Exceptions, Async, Inference, DB, Random, and Diverge.
 - [Chapter 8: Modules]({RAW}/spec/08-modules.md): Module system, imports, \
 and visibility.
 - [Chapter 9: Standard Library]({RAW}/spec/09-standard-library.md): All \
@@ -553,7 +553,7 @@ Full source and data: [{REPO}-bench]({REPO}-bench).
 
 - **No variable names** — Typed [De Bruijn indices]({RAW}/DE_BRUIJN.md) (`@T.n`) replace variable names: `@Int.0` is the most-recent `Int` binding, `@Int.1` the one before. The whole class of naming hallucinations is removed at the language level, not caught after the fact.
 - **Full contracts** — Mandatory preconditions, postconditions, invariants, and effect declarations on every function. Z3 generates test inputs from the contracts and runs them through WASM — no manual test cases.
-- **Algebraic effects** — IO, Http, HttpServer, State, Exceptions, Async, Inference, Random, Diverge — declared, typed, and handled explicitly. Pure by default.
+- **Algebraic effects** — IO, Http, HttpServer, State, Exceptions, Async, Inference, DB, Random, Diverge — declared, typed, and handled explicitly. Pure by default.
 - **Refinement types** — Types that express constraints like "a list of positive integers of length `n`".
 - **Three-tier verification** — Static via [Z3](https://www.microsoft.com/en-us/research/project/z3-3/) plus runtime fallback, shipped; the Z3-guided middle tier is specified, not yet implemented.
 - **Diagnostics as instructions** — Every error is a natural-language explanation with a concrete fix, designed for LLM consumption.
@@ -653,7 +653,7 @@ For other models: point them at [`SKILL.md`]({SITE}/SKILL.md) via system prompt,
 
 ## Status
 
-Vera is under [active development]({RAW}/ROADMAP.md). A complete compiler with 164 built-in functions, nine algebraic effects (IO, Http, HttpServer, State, Exceptions, Async, Inference, Random, Diverge), contract-driven testing via [Z3](https://www.microsoft.com/en-us/research/project/z3-3/), and a 14-chapter specification. A {n_conformance}-program conformance suite and {n_examples} worked examples are validated against the spec on every pull request. All of it is developed openly on [GitHub]({REPO}) and released under the MIT licence.
+Vera is under [active development]({RAW}/ROADMAP.md). A complete compiler with 164 built-in functions, ten algebraic effects (IO, Http, HttpServer, State, Exceptions, Async, Inference, DB, Random, Diverge), contract-driven testing via [Z3](https://www.microsoft.com/en-us/research/project/z3-3/), and a 14-chapter specification. A {n_conformance}-program conformance suite and {n_examples} worked examples are validated against the spec on every pull request. All of it is developed openly on [GitHub]({REPO}) and released under the MIT licence.
 
 ## Links
 

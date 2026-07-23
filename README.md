@@ -246,11 +246,11 @@ cp /path/to/vera/SKILL.md ~/.claude/skills/vera-language/SKILL.md
 
 ## Project status
 
-Vera is in **active development** at v0.1.6: 2,000+ commits, 203 releases, 8,350 tests, 95% code coverage, 163 conformance programs, 40 examples, and a 14-chapter specification. Known bugs and limitations are tracked in **[KNOWN_ISSUES.md](KNOWN_ISSUES.md)**. See **[HISTORY.md](HISTORY.md)** for how the compiler was built.
+Vera is in **active development** at v0.1.6: 2,000+ commits, 203 releases, 8,444 tests, 95% code coverage, 164 conformance programs, 42 examples, and a 14-chapter specification. Known bugs and limitations are tracked in **[KNOWN_ISSUES.md](KNOWN_ISSUES.md)**. See **[HISTORY.md](HISTORY.md)** for how the compiler was built.
 
 The reference compiler — parser, AST, type checker, contract verifier (Z3), WASM code generator, module system, browser runtime, and runtime contract insertion — is working. The language specification is in draft across [14 chapters](spec/).
 
-**Key features delivered:** [typed De Bruijn indices](DE_BRUIJN.md) (`@T.n`), mandatory contracts, algebraic effects (IO, Http, HttpServer, State, Exceptions, Async, Inference, Random, Diverge), refinement types, constrained generics (Eq, Ord, Hash, Show), algebraic data types, pattern matching, modules, 164 built-in functions (strings, arrays, maps, sets, decimals, math, JSON, HTML, Markdown, regex, base64, URL), contract-driven testing, canonical formatter, browser runtime, three-tier verification design (Z3 static and runtime fallback shipped; the Z3-guided tier is specified, not yet implemented), a [language server](LSP_SERVER.md) with warm incremental verification and agent-facing proof-delta methods, and contract-verified HTTP handlers served natively (`vera serve`) or as wasi:http components for stock `wasmtime serve` (`--target wasi-p2 --world server`).
+**Key features delivered:** [typed De Bruijn indices](DE_BRUIJN.md) (`@T.n`), mandatory contracts, algebraic effects (IO, Http, HttpServer, State, Exceptions, Async, Inference, DB, Random, Diverge), refinement types, constrained generics (Eq, Ord, Hash, Show), algebraic data types, pattern matching, modules, 164 built-in functions (strings, arrays, maps, sets, decimals, math, JSON, HTML, Markdown, regex, base64, URL), contract-driven testing, canonical formatter, browser runtime, three-tier verification design (Z3 static and runtime fallback shipped; the Z3-guided tier is specified, not yet implemented), a [language server](LSP_SERVER.md) with warm incremental verification and agent-facing proof-delta methods, and contract-verified HTTP handlers served natively (`vera serve`) or as wasi:http components for stock `wasmtime serve` (`--target wasi-p2 --world server`).
 
 **What's next:** the path from "working language" to "the language agents actually use" — see **[ROADMAP.md](ROADMAP.md)** for the four strategic milestones. The flagship goal is a verified MCP tool server where contracts guarantee tool schemas at compile time. **[VeraBench](https://github.com/aallan/vera-bench)** — a 50-problem benchmark across 5 difficulty tiers — now covers 6 models across 3 providers (v0.0.7). The headline result: Kimi K2.5 achieves 100% run_correct on Vera, beating both Python (86%) and TypeScript (91%). Three models beat TypeScript on Vera; the flagship tier averages 93% Vera vs 93% Python — essentially parity. These are single-run results with high variance — see the [full report](https://github.com/aallan/vera-bench) for details.
 
@@ -297,7 +297,7 @@ vera/
 │   └── cli.py                     #   Command-line interface
 ├── docs/                          # GitHub Pages site (veralang.dev)
 ├── editors/                       # VS Code extension (LSP client + grammar) + TextMate bundle
-├── examples/                      # 40 example Vera programs
+├── examples/                      # 42 example Vera programs
 ├── tests/                         # Test suite (see TESTING.md)
 └── scripts/                       # CI and validation scripts
 ```

@@ -193,6 +193,8 @@ def _run_node(
 # Excludes:
 #   - io_operations: uses IO.read_line interactively
 #   - file_io: uses IO.read_file/write_file (browser returns Result.Err)
+#   - database: uses DB.query/DB.execute (browser returns Result.Err)
+#   - sqlitedb: uses DB.query on an on-disk file (browser returns Result.Err)
 #   - modules: depends on imports (doesn't compile standalone)
 EXAMPLES_WITH_MAIN = [
     "hello_world",
@@ -3055,3 +3057,41 @@ public fn main(@Unit -> @Unit)
 }
 """
         assert self._parity_stdout(src, tmp_path) == "100.0|200.0|0.0001|3.14"
+
+
+class TestDbBrowserStub229:
+    """#229 — the ``<DB>`` effect is host-backed (stdlib ``sqlite3``); the
+    browser runtime cannot run SQL, so ``db_query`` / ``db_execute`` are
+    deliberate ``Result.Err`` stubs (a driver + credentials can't live in
+    client-side JS).  A DB program therefore links and runs in the browser,
+    taking the ``Err`` arm — never a ``LinkError`` for a missing import."""
+
+    def test_db_query_takes_err_arm_in_browser(self, tmp_path: Path) -> None:
+        src = """
+public fn main(-> @Int)
+  requires(true) ensures(true) effects(<DB>)
+{
+  match DB.query("SELECT 1", []) {
+    Ok(@Array<Array<Option<String>>>) -> 1,
+    Err(@String) -> 0
+  }
+}
+"""
+        wasm_path, _ = _compile_vera(src, tmp_path)
+        result = _run_node(wasm_path, fn="main")
+        assert result["value"] == 0  # the Err stub, not a LinkError
+
+    def test_db_execute_takes_err_arm_in_browser(self, tmp_path: Path) -> None:
+        src = """
+public fn main(-> @Int)
+  requires(true) ensures(true) effects(<DB>)
+{
+  match DB.execute("CREATE TABLE t (x)", []) {
+    Ok(@Int) -> 1,
+    Err(@String) -> 0
+  }
+}
+"""
+        wasm_path, _ = _compile_vera(src, tmp_path)
+        result = _run_node(wasm_path, fn="main")
+        assert result["value"] == 0

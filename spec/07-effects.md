@@ -395,6 +395,26 @@ effect Async {}
 
 The `Async` effect has no operations — it is a marker. Declaring `effects(<Async>)` enables the built-in generic functions `async(expr)` and `await(future)`, making concurrency explicit and trackable in the effect row. See Chapter 9, Section 9.5.4 for the operation signatures, the `Future<T>` type, and the concurrency semantics (#841).
 
+### 7.7.7 `DB`
+
+```
+effect DB {
+  op query(String, Array<Option<String>> -> Result<Array<Array<Option<String>>>, String>);
+  op execute(String, Array<Option<String>> -> Result<Int, String>);
+}
+```
+
+The `DB` effect executes SQL against a relational database (#229, since v0.1.7). Functions that read or write the database must declare `effects(<DB>)`, making database access visible in the type signature.
+
+| Operation | Signature | Description |
+|-----------|-----------|-------------|
+| `query` | `String, Array<Option<String>> -> Result<Array<Array<Option<String>>>, String>` | Runs a read (`SELECT`); the `Ok` grid is rows of cells, each cell an `Option<String>` where SQL `NULL` is `None` |
+| `execute` | `String, Array<Option<String>> -> Result<Int, String>` | Runs a write (`CREATE`/`INSERT`/`UPDATE`/`DELETE`); `Ok` carries the affected-row count (SQLite reports `-1` where no count applies) |
+
+The second argument is the **positional parameter list** — the values bound, in order, to the `?` placeholders in the SQL. Each parameter is an `Option<String>`: `Some(v)` binds a value, `None` binds SQL `NULL`. Passing data as parameters — rather than assembling it into the SQL text — is what keeps a value from being parsed as SQL, the standard defence against injection. See §9.5.7 for the row and parameter marshalling.
+
+Like `IO`, `DB` is built-in — no `effect DB { ... }` declaration is needed. Both operations return `Result`: a failed statement (malformed SQL, a constraint violation, an unreachable database) surfaces as `Err(String)`, never a trap, so every call site must `match` the failure arm. Operations are host-backed; the connection is chosen by the `VERA_DB_URL` environment variable, defaulting to an in-memory SQLite database (`sqlite::memory:`). In v1 the effect is un-mockable — `handle[DB]` awaits the user-handleable-host-effect machinery (#372) — and targets SQLite only. The browser runtime answers every `DB` operation with `Err` (a deliberate stub, §12), and the wasi-p2 target rejects `<DB>` at compile time.
+
 ## 7.8 Effect Subtyping
 
 A function with fewer effects can be used where more effects are expected:

@@ -22,6 +22,7 @@ from __future__ import annotations
 SINCE: dict[str, str] = {
     # --- Effects ---
     "Async": "0.0.82",
+    "DB": "0.1.7",
     "Diverge": "0.0.49",
     "Exn": "0.0.62",
     "Http": "0.0.99",

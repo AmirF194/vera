@@ -878,6 +878,7 @@ class FunctionCompilationMixin:
         self._http_ops_used.update(ctx._http_ops_used)
         self._async_ops_used.update(ctx._async_ops_used)
         self._inference_ops_used.update(ctx._inference_ops_used)
+        self._db_ops_used.update(ctx._db_ops_used)  # #229
         self._random_ops_used.update(ctx._random_ops_used)
         self._math_ops_used.update(ctx._math_ops_used)
         self._needs_overflow_trap = (

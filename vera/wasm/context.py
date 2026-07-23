@@ -216,6 +216,8 @@ class WasmContext(
         ] = frozenset()
         # Inference host-import tracking (propagated to codegen core)
         self._inference_ops_used: set[str] = set()
+        # DB host-import tracking (#229; propagated to codegen core)
+        self._db_ops_used: set[str] = set()
         # Random host-import tracking (propagated to codegen core, #465)
         self._random_ops_used: set[str] = set()
         # Math host-import tracking (propagated to codegen core, #467)
@@ -974,6 +976,9 @@ class WasmContext(
                 return False
             # Inference.complete returns Result<String, String> — not void
             if expr.qualifier == "Inference":
+                return False
+            # DB.query / DB.execute both return a Result — not void (#229)
+            if expr.qualifier == "DB":
                 return False
             # All Random ops produce values (Int, Float64, or Bool); never void. (#465)
             if expr.qualifier == "Random":

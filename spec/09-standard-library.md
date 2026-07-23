@@ -606,6 +606,37 @@ data Response { Response(Int, Map<String, String>, String) }
 - Request handling is sequential in v1; concurrent handling is future work (#406).
 - Native-only: the serve driver is part of the reference (wasmtime) runtime; the browser runtime does not serve HTTP (documented divergence, §12).
 
+### 9.5.7 DB
+
+The `DB` effect (a built-in, §7.7.7) executes SQL through the host (#229, since v0.1.7). `execute` runs writes and returns the affected-row count; `query` runs reads and returns a grid of cells:
+
+```vera
+public fn seed_and_count(-> @Int)
+  requires(true)
+  ensures(true)
+  effects(<DB>)
+{
+  match DB.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, nickname TEXT)", []) {
+    Err(@String) -> -1,
+    Ok(@Int) -> match DB.execute("INSERT INTO users (name, nickname) VALUES (?, ?)", [Some("Ada"), None]) {
+      Err(@String) -> -1,
+      Ok(@Int) -> match DB.query("SELECT name, nickname FROM users", []) {
+        Err(@String) -> -1,
+        Ok(@Array<Array<Option<String>>>) -> array_length(@Array<Array<Option<String>>>.0)
+      }
+    }
+  }
+}
+```
+
+**Row and parameter marshalling.**  A query result is an `Array<Array<Option<String>>>`: the outer array is the rows, each row is an array of cells, and each cell is an `Option<String>`.  A cell that is SQL `NULL` marshals to `None`; a present value marshals to `Some(text)`.  `NULL` and the empty string `""` therefore stay distinct — the effect never collapses one into the other (DESIGN principle 2, no implicit behaviour).  A `NOT NULL` column is read with `option_unwrap_or(cell, "")`, or matched explicitly when the caller must handle absence.
+
+Parameters travel the same shape one level down: the `Array<Option<String>>` second argument binds positionally to the `?` placeholders — `Some(v)` for a value, `None` for `NULL`.  All values cross the host boundary as UTF-8 strings; a non-text SQLite column is rendered to its text form on the way out.
+
+- **Failure is a value.**  Both operations return `Result<_, String>`; a driver error is the `Err(msg)` arm, never a trap, so a database call is checked like any other `Result`.
+- **Connection.**  `VERA_DB_URL` selects the database — `sqlite::memory:` by default, or `sqlite:///path/to/file.db` for a file.  One connection is used per program run.
+- **Portability.**  Native only: the browser runtime returns `Err` for every `DB` operation (documented divergence, §12), and `vera compile --target wasi-p2` rejects a program that uses `<DB>`.
+
 ## 9.6 Built-in Functions
 
 Built-in functions are always in scope as the single canonical definition of each operation. A user or module function whose name matches a built-in is a compile error (**E151**): there is one canonical form, so a second definition is redundant, and for the verifier-modelled built-ins it is silently unsound — the verifier would reason with the built-in's idealized model while code generation runs the user's body, letting a postcondition be *proved* against the built-in yet *violated at runtime*. Call the built-in directly (no import is needed) or choose a distinct name for genuinely different behaviour. The Option/Result/Json/Html combinators listed in the standard prelude (Section 9.1.2) are the exception: they are ordinary Vera functions the prelude injects, so a same-named user definition soundly replaces them.

@@ -48,6 +48,11 @@ class CompilabilityMixin:
                         self._needs_memory = True
                     elif eff.name == "Inference":
                         self._needs_memory = True
+                    elif eff.name == "DB":
+                        # #229 — host-import SQL effect; the ops read
+                        # Option<String> params and return row grids on
+                        # the heap.
+                        self._needs_memory = True
                     elif eff.name == "Random":
                         # #465 — host-import effect, no memory need
                         # (no allocations or heap returns).
@@ -57,7 +62,7 @@ class CompilabilityMixin:
                             decl,
                             f"Function '{decl.name}' uses unsupported "
                             f"effect '{eff.name}' — skipped.",
-                            rationale="Only pure, IO, Http, Inference, "
+                            rationale="Only pure, IO, Http, Inference, DB, "
                             "Random, State<T>, Exn<E>, and Async "
                             "effects are compilable.",
                             error_code="E603",
@@ -288,6 +293,8 @@ class CompilabilityMixin:
                 self._http_ops_used.add(f"http_{node.name}")
             elif node.qualifier == "Inference":
                 self._inference_ops_used.add(f"inference_{node.name}")
+            elif node.qualifier == "DB":
+                self._db_ops_used.add(f"db_{node.name}")  # #229
             elif node.qualifier == "Random":
                 # #465 — op names already begin with `random_`
                 # (`random_int`/`random_float`/`random_bool`), which

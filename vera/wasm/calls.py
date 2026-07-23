@@ -583,7 +583,7 @@ class CallsMixin:
         # "get"/"post" with possible user effect ops; the qualifier check prevents
         # misrouting Http.get into _effect_ops when inside a handle[State<T>] body
         # where _effect_ops["get"] is populated.
-        _host_import_qualifiers = {"Http", "Inference", "IO", "Random"}
+        _host_import_qualifiers = {"Http", "Inference", "IO", "Random", "DB"}
         if call.qualifier not in _host_import_qualifiers and call.name in self._effect_ops:
             target_name, _is_void = self._effect_ops[call.name]
             if call.name == "throw":
@@ -600,6 +600,13 @@ class CallsMixin:
         elif call.qualifier == "Inference":
             wasm_name = f"inference_{call.name}"
             self._inference_ops_used.add(wasm_name)
+            self.needs_alloc = True
+            instructions.append(f"call $vera.{wasm_name}")
+        elif call.qualifier == "DB":
+            # #229 — DB.query / DB.execute → `call $vera.db_<op>`; both return
+            # a Result ADT heap pointer, so $alloc is required.
+            wasm_name = f"db_{call.name}"
+            self._db_ops_used.add(wasm_name)
             self.needs_alloc = True
             instructions.append(f"call $vera.{wasm_name}")
         elif call.qualifier == "Random":

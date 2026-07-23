@@ -1,0 +1,60 @@
+-- SQLite database access via the <DB> effect: create, parameterised insert, query back.
+--
+-- Runs against an in-memory SQLite database (the default when VERA_DB_URL is unset), so it
+-- executes offline with no configuration:
+--   vera run examples/database.vera
+--
+-- Parameters bind positionally to `?` placeholders as Option<String>: Some(v) binds a value,
+-- None binds SQL NULL. Because data is bound as a parameter — never spliced into the SQL
+-- text — a value cannot be parsed as SQL, the standard defence against injection.
+
+-- Insert one user; the nickname may be absent (SQL NULL) via None.
+private fn insert_user(@String, @Option<String> -> @Result<Int, String>)
+  requires(true)
+  ensures(true)
+  effects(<DB>)
+{
+  DB.execute("INSERT INTO users (name, nickname) VALUES (?, ?)", [Some(@String.0), @Option<String>.0])
+}
+
+public fn main(-> @Int)
+  requires(true)
+  ensures(true)
+  effects(<DB, IO>)
+{
+  let @Array<Option<String>> = [];
+  match DB.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, nickname TEXT)", @Array<Option<String>>.0) {
+    Err(@String) -> {
+      IO.print(@String.0);
+      1
+    },
+    Ok(@Int) -> match insert_user("Ada", Some("Countess")) {
+      Err(@String) -> {
+        IO.print(@String.0);
+        1
+      },
+      Ok(@Int) -> match insert_user("Alan", None) {
+        Err(@String) -> {
+          IO.print(@String.0);
+          1
+        },
+        Ok(@Int) -> match DB.query("SELECT name, nickname FROM users ORDER BY id", @Array<Option<String>>.0) {
+          Err(@String) -> {
+            IO.print(@String.0);
+            1
+          },
+          Ok(@Array<Array<Option<String>>>) -> {
+            IO.print("database round-trip succeeded");
+            -- The query returns Array<Array<Option<String>>>: a NULL cell is None,
+            -- a present value is Some(text) — SQL NULL and "" stay distinct by design.
+            if array_length(@Array<Array<Option<String>>>.0) == 2 then {
+              0
+            } else {
+              1
+            }
+          }
+        }
+      }
+    }
+  }
+}
