@@ -775,7 +775,11 @@ class CallsMixin:
         if len(args) >= 2 and isinstance(args[1], ast.ArrayLit):
             want = count_placeholders(sql)
             got = len(args[1].elements)
-            if want != got:
+            # ``want is None`` -> the SQL uses named/numbered placeholders whose
+            # arity is not a plain positional count; defer to the sqlite3 host
+            # rather than risk a spurious E208 (Vera's params array is
+            # positional, so such SQL fails at run time regardless).
+            if want is not None and want != got:
                 self._error(
                     node,
                     f"The SQL has {want} '?' placeholder(s) but "

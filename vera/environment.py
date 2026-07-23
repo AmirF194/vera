@@ -126,12 +126,29 @@ class Binding:
     # those), else None.  Computed eagerly when the binding is created — in its
     # own scope — so the SQL literal-provenance gate can follow a let chain
     # through slot references without re-walking a De Bruijn-shifted environment.
+    # Only the ``let`` source tracks provenance; ``param`` / ``match`` /
+    # ``handler`` / ``destruct`` bindings are always None (conservative — a
+    # String parameter used as SQL is correctly rejected).  ``None`` means "no
+    # literal available"; ``""`` is the literal empty string — consumers MUST
+    # test ``is None``, never truthiness, or the empty literal misroutes.
     literal_str: str | None = None
 
 
 # =====================================================================
 # Type environment
 # =====================================================================
+
+# #309: the names of the built-in ``<DB>`` SQL-executing ops.  These are the ops
+# codegen lowers to the host database (``wasm/calls.py`` routes any ``DB.<op>``
+# to ``$vera.db_<op>`` by qualifier NAME), so they are exactly the calls the
+# literal-provenance gate must check.  The gate keys on ``parent_effect == "DB"``
+# and membership here — the SAME axis codegen routes on — NOT on built-in OpInfo
+# identity, which would gate only the ambient built-in and miss a user
+# ``effect DB { op query(...) }`` shadow (the idiomatic way to declare a host
+# effect, cf. every example's ``effect IO``) that still reaches the host.  A
+# differential test pins this set against the built-in DB effect's declared ops.
+DB_SQL_OP_NAMES: frozenset[str] = frozenset({"query", "execute"})
+
 
 @dataclass
 class TypeEnv:
@@ -147,16 +164,6 @@ class TypeEnv:
     effects: dict[str, EffectInfo] = field(default_factory=dict)
     abilities: dict[str, AbilityInfo] = field(default_factory=dict)
     constructors: dict[str, ConstructorInfo] = field(default_factory=dict)
-
-    # #309: the built-in ``<DB>`` SQL-executing ops (``query`` / ``execute``),
-    # retained by IDENTITY so the forthcoming literal-provenance gate can key on
-    # the exact objects, not the op name.  ``OpInfo`` is an unhashable,
-    # value-equal dataclass, so a user ``effect DB { op query(...) }`` with
-    # identical field values would compare ``==`` to the built-in — a name or
-    # set key would misfire.  Populated in ``_register_builtins``; exposed via
-    # ``is_db_sql_op`` (consumed by the #309 gate once it lands).  Empty until
-    # the built-ins register.
-    db_sql_ops: tuple[OpInfo, ...] = field(default_factory=tuple)
 
     # Type variables currently in scope (from forall<T>)
     type_params: dict[str, TypeVar] = field(default_factory=dict)
@@ -557,15 +564,18 @@ class TypeEnv:
         #     — outer rows, inner columns, each cell nullable;
         #   - `execute` returns the affected-row count (`Int`; sqlite reports -1
         #     when it cannot count) or an `Err` message.
-        # The SQL string is the FIRST argument.  A forthcoming literal-provenance
-        # checker (#309) will reject a non-literal there, making injection a
-        # compile-time error; until it lands, runtime `?`-parameterisation is the
-        # injection defence (a bound value never becomes SQL).
+        # The SQL string is the FIRST argument.  The literal-provenance checker
+        # (#309) rejects a non-literal there, making injection a compile-time
+        # error; runtime `?`-parameterisation carries all data (a bound value
+        # never becomes SQL).
         # Host-backed and un-mockable like Http / Inference — `handle[DB]` is
         # #372's class (host effects aren't user-handleable) and is a stated
-        # limitation.  A user `effect DB { ... }` still routes to the host
-        # (DB is a reserved host qualifier), so the #309 gate will key on op
-        # identity via `is_db_sql_op`, not on the (shadowable) name.
+        # limitation.  `DB` is a reserved host qualifier: a user
+        # `effect DB { ... }` declaration — the idiomatic way to use a host
+        # effect (cf. every example's `effect IO`) — still routes to the host,
+        # so the #309 gate keys on `parent_effect == "DB"` + op name
+        # (`is_db_sql_op`), the SAME axis codegen routes on, NOT the built-in op
+        # identity, which would miss the shadow.
         _option_string = AdtType("Option", (STRING,))
         _param_array = AdtType("Array", (_option_string,))
         _row_grid = AdtType("Array", (AdtType("Array", (_option_string,)),))
@@ -583,12 +593,6 @@ class TypeEnv:
                 ),
             },
         )
-        # #309: retain the SQL-executing DB ops BY IDENTITY (see the
-        # `db_sql_ops` field) so the forthcoming literal-provenance gate can key
-        # on these exact objects.  Both reach the real database, so both must be
-        # gated once the gate lands.
-        _db_ops = self.effects["DB"].operations
-        self.db_sql_ops = (_db_ops["query"], _db_ops["execute"])
 
         # Ordering ADT — result type for Ord's compare operation (§9.8).
         self.data_types["Ordering"] = AdtInfo(
@@ -2134,22 +2138,27 @@ class TypeEnv:
         return None
 
     def is_db_sql_op(self, op: OpInfo) -> bool:
-        """Return True iff ``op`` IS (by identity) a built-in ``<DB>``
-        SQL-executing operation (``DB.query`` / ``DB.execute``).
+        """Return True iff ``op`` is a ``<DB>`` SQL-executing operation
+        (``DB.query`` / ``DB.execute``) — the calls the #309 literal-provenance
+        gate must check.
 
-        The forthcoming #309 literal-provenance gate will key on this rather
-        than on the op name so that:
+        Keyed on ``parent_effect == "DB"`` and the op name (``DB_SQL_OP_NAMES``),
+        which is the SAME axis codegen routes on: ``wasm/calls.py`` lowers any
+        ``DB.<op>`` to the host import ``$vera.db_<op>`` by qualifier NAME.  So
+        this predicate gates *exactly* the set codegen emits to the database
+        (the CLAUDE.md cross-component-soundness invariant).
 
-          - an unrelated effect with an op *named* ``query`` (or a user
-            ``effect DB { ... }`` shadowing the built-in) never trips the gate,
-            and
-          - conversely, only calls that reach the real database are gated.
-
-        Identity (``is``), not ``==``: ``OpInfo`` is a value-equal dataclass,
-        so a structurally-identical look-alike op must NOT match.  The set is
-        two elements, so the linear scan is trivial.
+        It deliberately does NOT key on built-in ``OpInfo`` identity: ``DB`` is a
+        reserved host qualifier, so a user ``effect DB { op query(...) }``
+        declaration — the idiomatic way to use a host effect (cf. every
+        example's ``effect IO``) — constructs a *distinct* ``OpInfo`` that still
+        routes to the host.  An identity key gated only the ambient built-in and
+        let the shadow's runtime SQL reach ``conn.execute`` ungated — a silent
+        injection bypass (#309 review).  A non-``DB`` effect with an op merely
+        *named* ``query`` has a different ``parent_effect`` and is routed to the
+        user's handler, not the host, so it is correctly not gated.
         """
-        return any(op is db_op for db_op in self.db_sql_ops)
+        return op.parent_effect == "DB" and op.name in DB_SQL_OP_NAMES
 
     def is_type_name(self, name: str) -> bool:
         """Check if a name refers to a known type (primitive, ADT, or alias)."""

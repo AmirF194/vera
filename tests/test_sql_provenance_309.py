@@ -12,8 +12,10 @@ a **compile-time** error (E207), deterministic and solver-free.  When the SQL
 mismatch is E208; when the params length is dynamic, the count check defers to
 the runtime (sqlite3 raises, surfacing as ``Result.Err``).
 
-The gate keys on ``env.is_db_sql_op`` (OpInfo **identity**, not the op name),
-so a user ``effect DB { op query(...) }`` look-alike is never gated.
+The gate keys on ``env.is_db_sql_op`` (``parent_effect == "DB"`` **and** the op
+name — the same axis codegen routes to the host database on), so it gates the
+built-in ``DB`` ops AND a user ``effect DB { op query(...) }`` shadow (which
+still routes to the host), but never an unrelated effect's own ``query`` op.
 """
 from __future__ import annotations
 
@@ -112,6 +114,20 @@ class TestSqlProvenanceAccept309:
     def test_direct_literal_accepted(self) -> None:
         _check_ok(_db_fn('  DB.query("SELECT * FROM users", [])'))
 
+    def test_empty_string_literal_accepted(self) -> None:
+        # The empty string is a genuine literal (0 placeholders), so it is
+        # accepted.  This is the distinguishing input for the gate's central
+        # ``literal_str is None`` invariant: a regression to a truthiness test
+        # (``if not sql`` / ``if binding.literal_str``) would misroute "" to
+        # E207 and still pass every other test — so pin it explicitly.
+        _check_ok(_db_fn('  DB.query("", [])'))
+
+    def test_let_bound_empty_string_accepted(self) -> None:
+        # The empty literal round-trips through ``Binding.literal_str`` (which is
+        # "" here, NOT None): the slot resolves to "" and is accepted.
+        _check_ok(_db_fn(
+            '  let @String = "";\n  DB.query(@String.0, [])'))
+
     def test_concat_of_literals_accepted(self) -> None:
         _check_ok(_db_fn(
             '  DB.query(string_concat("SELECT * ", "FROM users"), [])'))
@@ -180,15 +196,30 @@ class TestSqlPlaceholderCount309:
             '  DB.query("SELECT * FROM u WHERE a = ?", @Array<Option<String>>.0)',
             param="@Array<Option<String>>"))
 
+    def test_named_params_defer_no_false_e208(self) -> None:
+        # Named placeholders (:name) make the positional count unreliable, so
+        # count_placeholders returns None and the gate defers to the host — even
+        # with a statically-sized params array whose length differs from the
+        # naive `?`-count (here 0).  A naive counter would false-reject with
+        # E208; the defer keeps the static check sound.
+        _check_ok(_db_fn(
+            '  DB.query("SELECT * FROM u WHERE a = :a AND b = :b", '
+            '[Some("x")])'))
+
 
 class TestCountPlaceholdersMatchesSqlite309:
-    """The checker↔runtime lockstep: ``count_placeholders`` MUST agree with
-    what sqlite3 actually binds, or the E208 arity check would disagree with the
-    host on some program.  Pinned differentially against sqlite3 itself: binding
-    exactly ``count_placeholders(sql)`` params is accepted, one more is
-    rejected — which brackets sqlite3's own count to equal ours."""
+    """The checker↔runtime lockstep: for anonymous ``?`` placeholders,
+    ``count_placeholders`` MUST agree with what sqlite3 actually binds, or the
+    E208 arity check would disagree with the host on some program.  Pinned
+    differentially against sqlite3 itself: binding exactly
+    ``count_placeholders(sql)`` params is accepted, one more is rejected — which
+    brackets sqlite3's own count to equal ours.  (Named/numbered placeholders
+    are out of this differential's scope: ``count_placeholders`` returns ``None``
+    for them and the gate defers — see ``test_named_and_numbered_params_defer``.)
+    """
 
     CASES = [
+        "",                            # 0 — empty statement binds nothing
         "SELECT 1",                    # 0
         "SELECT ?",                    # 1
         "SELECT ?, ?",                 # 2
@@ -196,6 +227,8 @@ class TestCountPlaceholdersMatchesSqlite309:
         "SELECT '?', ?",               # 1 — quoted ? is data
         'SELECT "?", ?',               # 1 — double-quoted ? is data
         "SELECT 'a''b', ?",            # 1 — doubled-quote escape in a string
+        "SELECT 1 AS `a?b`, ?",        # 1 — ? inside a backtick identifier
+        "SELECT 1 AS [a?b], ?",        # 1 — ? inside a bracket identifier
         "SELECT ? WHERE 1 = ?",        # 2
         "SELECT '? ? ?', ?, ?",        # 2 — three ? inside a literal, two real
         "SELECT ?, ? -- ? ' trailing", # 2 — line comment ? / ' ignored
@@ -206,12 +239,30 @@ class TestCountPlaceholdersMatchesSqlite309:
     @pytest.mark.parametrize("sql", CASES)
     def test_count_matches_sqlite(self, sql: str) -> None:
         n = count_placeholders(sql)
+        assert n is not None, "CASES are all anonymous-? SQL (int count)"
         conn = sqlite3.connect(":memory:")
         # Exactly n bindings: accepted (no bindings-count error).
         conn.execute(sql, [None] * n)
         # One too many: sqlite3 rejects — proving it counts exactly n, as we do.
         with pytest.raises(sqlite3.ProgrammingError):
             conn.execute(sql, [None] * (n + 1))
+
+    # Named (:name / @name / $name) and numbered (?NNN) placeholders: the
+    # positional count is not the bound-parameter count, so count_placeholders
+    # returns None and the gate defers the arity check to the sqlite3 host.
+    DEFER_CASES = [
+        "SELECT ?1, ?1",               # numbered, one bound param
+        "SELECT ?5",                   # numbered
+        "SELECT :a AND :b",            # named, two bound params, zero ?
+        "SELECT @x, ?",                # named @ mixed with anonymous ?
+        "SELECT $y",                   # named $
+    ]
+
+    @pytest.mark.parametrize("sql", DEFER_CASES)
+    def test_named_and_numbered_params_defer(self, sql: str) -> None:
+        # Returning None is what makes the gate defer E208 rather than
+        # false-reject: a naive `?`-count would disagree with sqlite here.
+        assert count_placeholders(sql) is None
 
 
 class TestSqlGateScoping309:
@@ -232,10 +283,11 @@ public fn run(-> @Result<Array<Array<Option<String>>>, String>)
         )
 
     def test_unrelated_effect_query_op_not_gated(self) -> None:
-        # A user effect with its own `query` op is a DISTINCT OpInfo, so
-        # is_db_sql_op is False (identity, not name): the provenance gate never
-        # fires, and a non-literal arg to the user's op is accepted.  Keying on
-        # the op name instead would wrongly reject this.
+        # A user effect NOT named `DB` (here `Analytics`) has `parent_effect ==
+        # "Analytics"`, so it is NOT a DB SQL op and the provenance gate never
+        # fires: a non-literal arg to the user's own op is accepted.  This is
+        # sound because codegen routes such an op to the user's handler, not to
+        # the host database — only qualifier `DB` reaches `$vera.db_*`.
         src = """
 effect Analytics {
   op query(String -> String);
@@ -246,3 +298,66 @@ public fn run(@String -> @String)
 { Analytics.query(@String.0) }
 """
         _check_ok(src)
+
+
+class TestDbEffectShadowGated309:
+    """The gate MUST fire on a user-declared ``effect DB`` shadow, not only the
+    ambient built-in — because codegen routes *any* ``DB.query`` / ``DB.execute``
+    to the host database by qualifier **name** (``wasm/calls.py``), regardless of
+    whether the ``DB`` effect is the built-in or a user redefinition.
+
+    The original #309 gate keyed on built-in ``OpInfo`` **identity**, which gated
+    a strict *subset* of what codegen sends to the database: a user
+    ``effect DB { op query(...) }`` type-checked clean, compiled to
+    ``call $vera.db_query``, and executed an attacker-controlled string — a
+    silent SQL-injection bypass of the flagship guarantee.  Declaring a host
+    effect is the *idiomatic* way to use it (every example declares ``effect IO
+    { ... }``), so this shadow is the common path, not an exotic one.
+
+    The fix keys the gate on the same axis codegen routes on — ``parent_effect
+    == "DB"`` and the op name is a host-routed SQL op — so the checker gates
+    *exactly* the set codegen emits (the CLAUDE.md cross-component invariant;
+    DESIGN.md principle 2, no implicit behaviour)."""
+
+    _SHADOW = (
+        "effect DB {\n"
+        "  op query(String, Array<Option<String>> -> "
+        "Result<Array<Array<Option<String>>>, String>);\n"
+        "  op execute(String, Array<Option<String>> -> Result<Int, String>);\n"
+        "}\n"
+    )
+
+    def test_user_effect_db_shadow_query_still_gated(self) -> None:
+        # The exact injection vector: a user redeclares `effect DB` and passes
+        # the runtime @String param straight to DB.query.  Must be E207 — this
+        # call compiles to `call $vera.db_query` and reaches conn.execute.
+        _check_code(
+            self._SHADOW
+            + "public fn run(@String -> "
+            "@Result<Array<Array<Option<String>>>, String>)\n"
+            "  requires(true) ensures(true) effects(<DB>)\n"
+            "{ DB.query(@String.0, []) }\n",
+            "E207",
+        )
+
+    def test_user_effect_db_shadow_execute_still_gated(self) -> None:
+        # The write path (execute) routes to the host identically, so a runtime
+        # SQL string is arbitrary DDL/DML — must also be E207.
+        _check_code(
+            self._SHADOW
+            + "public fn run(@String -> @Result<Int, String>)\n"
+            "  requires(true) ensures(true) effects(<DB>)\n"
+            "{ DB.execute(@String.0, []) }\n",
+            "E207",
+        )
+
+    def test_user_effect_db_shadow_literal_still_accepted(self) -> None:
+        # The gate rejects runtime-derived SQL, not the `effect DB` declaration
+        # itself: a literal query through the shadow is still accepted.
+        _check_ok(
+            self._SHADOW
+            + "public fn run(-> "
+            "@Result<Array<Array<Option<String>>>, String>)\n"
+            "  requires(true) ensures(true) effects(<DB>)\n"
+            '{ DB.query("SELECT * FROM users", []) }\n'
+        )

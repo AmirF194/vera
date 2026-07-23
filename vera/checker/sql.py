@@ -64,7 +64,9 @@ def resolve_literal_string(expr: ast.Expr, env: TypeEnv) -> str | None:
     #   FnCall             → Handled: string_concat(a, b) of two resolving
     #                        operands; every other builtin/user call → None.
     #   SlotRef            → Handled: the binding's eager literal_str (or None).
-    #   BinaryExpr         → None: no String-producing binary operator exists.
+    #   BinaryExpr         → None: arithmetic/comparison/logic operators don't
+    #                        yield String, and a `|>` pipe (also a BinaryExpr)
+    #                        is a runtime call result.
     #   UnaryExpr          → None: no String-producing unary operator exists.
     #   IndexExpr          → None: an indexed element is a runtime value.
     #   IntLit             → None: not a String.
@@ -123,33 +125,46 @@ def resolve_literal_string(expr: ast.Expr, env: TypeEnv) -> str | None:
     return None
 
 
-def count_placeholders(sql: str) -> int:
-    """Count positional ``?`` placeholders in ``sql``, quote-aware.
+def count_placeholders(sql: str) -> int | None:
+    """Count anonymous ``?`` placeholders in ``sql``, quote- and comment-aware.
 
-    A ``?`` inside a SQL string literal (``'...'`` or ``"..."``) is data, not a
-    placeholder, and is not counted; SQL's doubled-quote escape (``''`` / ``""``
-    inside a like-quoted string) is handled, and a ``?`` inside a ``--`` line
-    comment or a ``/* ... */`` block comment is skipped as well.  The result is
-    what the sqlite3 host binds the positional params against, so it is the
-    count the E208 arity check compares to a statically-sized params array.
+    Returns the number of anonymous ``?`` placeholders — what the sqlite3 host
+    binds a *positional* params array against — so it is the count the E208
+    arity check compares to a statically-sized params array.  A ``?`` inside a
+    string literal (``'...'`` / ``"..."``), a quoted identifier (``` `...` ```
+    backtick / ``[...]`` bracket), or a ``--`` line / ``/* ... */`` block comment
+    is data, not a placeholder, and is skipped (SQL's doubled-delimiter escape
+    inside a ``'`` / ``"`` / ``` ` ``` string is handled; ``[...]`` has no escape,
+    a ``]`` always closes).
+
+    Returns ``None`` when the SQL uses a NON-anonymous placeholder syntax —
+    numbered (``?NNN``) or named (``:name`` / ``@name`` / ``$name``) — because
+    the plain positional count no longer equals the number of bound parameters
+    (``?1 ... ?1`` binds one; ``:a AND :b`` binds two with zero ``?``).  The
+    caller then DEFERS the arity check to the sqlite3 host at run time rather
+    than emit a spurious E208.  Vera's params API is positional-only, so such
+    SQL fails at run time regardless; deferring keeps the static check sound
+    (it never false-rejects).  The ``?``-only agreement with sqlite3 is pinned
+    by the differential in ``tests/test_sql_provenance_309.py``.
     """
     count = 0
-    quote: str | None = None
+    quote: str | None = None      # active string/identifier delimiter, else None
     i = 0
     n = len(sql)
     while i < n:
         c = sql[i]
         if quote is not None:
             if c == quote:
-                # A doubled quote ('' or "") is an escaped quote, still inside
-                # the string literal — skip both characters.
-                if i + 1 < n and sql[i + 1] == quote:
+                # A doubled delimiter ('', "", ``) is an escaped delimiter,
+                # still inside the string/identifier — skip both characters.
+                # ([...] bracket quoting has no escape: a ] always closes.)
+                if quote != "]" and i + 1 < n and sql[i + 1] == quote:
                     i += 2
                     continue
                 quote = None
             i += 1
             continue
-        # Outside a string literal, skip SQL comments whole so their contents
+        # Outside a quote, skip SQL comments whole so their contents
         # (apostrophes, ? marks) affect neither quote tracking nor the count —
         # sqlite3 ignores them too.
         if c == "-" and i + 1 < n and sql[i + 1] == "-":
@@ -160,9 +175,20 @@ def count_placeholders(sql: str) -> int:
             end = sql.find("*/", i + 2)         # block comment: to closing */
             i = n if end == -1 else end + 2
             continue
-        if c in ("'", '"'):
-            quote = c
+        if c in ("'", '"', "`"):
+            quote = c                           # string / backtick identifier
+        elif c == "[":
+            quote = "]"                         # bracket identifier, closed by ]
         elif c == "?":
+            # ?NNN is a NUMBERED placeholder — the positional count is unreliable
+            # (a repeated ?N binds once), so defer the arity check to the host.
+            if i + 1 < n and sql[i + 1].isdigit():
+                return None
             count += 1
+        elif c in (":", "@", "$") and i + 1 < n and (
+            sql[i + 1].isalnum() or sql[i + 1] == "_"
+        ):
+            # :name / @name / $name is a NAMED placeholder — likewise defer.
+            return None
         i += 1
     return count
