@@ -20,8 +20,11 @@ Written test-first: each FAILS on the pre-fix (Real-sort) verifier.
 
 from __future__ import annotations
 
+import pytest
+
 from vera.parser import parse_to_ast
 from vera.checker import typecheck_with_artifacts
+from vera.smt import SmtContext, SmtResult
 from vera.verifier import VerifyResult, verify
 
 
@@ -74,29 +77,31 @@ public fn idf(@Float64 -> @Float64)
             (o.kind, o.status) for o in result.obligations
         ]
 
-    def test_unsound_relation_stays_unproved_under_tier3_fallback(self) -> None:
-        # Deterministic guard for #1121: force the exact Tier-3 fallback the
-        # slow CI cell hits by starving the solver (timeout_ms=1), and assert
-        # the false property is STILL not proved.  On a fast runner the two
-        # tests above only ever observe `violated`, so the widened `!= verified`
-        # assertion is never exercised against the `timeout` outcome — this test
-        # pins that branch so a regression narrowing the accept-set back to
-        # `violated` is caught here rather than only on Windows.
-        source = """
+    def test_unsound_relation_stays_unproved_under_tier3_fallback(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Deterministic guard for #1121: pin the Tier-3 fallback branch WITHOUT
+        # depending on solver latency.  On a fast runner the two tests above
+        # only ever observe `violated`, so the widened `!= verified` accept-set
+        # is never exercised against the `timeout`/`tier3` outcome there — this
+        # test forces it.  Rather than starve the solver with `timeout_ms=1`
+        # (itself runner-speed dependent — the very flake class #1121 fixes; a
+        # fast box can discharge the query inside 1 ms and return `violated`),
+        # stub the validity query to return `unknown` unconditionally, so every
+        # obligation deterministically falls to the conservative runtime tier on
+        # every runner.  A regression narrowing the accept-set back to
+        # `violated` is then caught here, not only on the slow Windows cell.
+        monkeypatch.setattr(
+            SmtContext, "check_valid",
+            lambda self, goal, assumptions: SmtResult(status="unknown"),
+        )
+        result = _verify("""
 public fn inc(@Float64 -> @Float64)
   requires(true) ensures(@Float64.result > @Float64.0) effects(pure)
 { @Float64.0 + 1.0 }
-"""
-        ast = parse_to_ast(source)
-        _d, arts = typecheck_with_artifacts(ast, source)
-        result = verify(
-            ast, source,
-            expr_types=arts.expr_semantic_types,
-            expr_target_types=arts.expr_target_types,
-            timeout_ms=1,
-        )
+""")
         ens = [o for o in result.obligations if o.kind == "ensures"]
-        # The starved solver returns `unknown`, so the obligation falls to the
+        # The stubbed solver returns `unknown`, so the obligation falls to the
         # conservative runtime tier — never `verified`.
         assert ens and all(o.status in ("timeout", "tier3") for o in ens), [
             (o.kind, o.status) for o in result.obligations
