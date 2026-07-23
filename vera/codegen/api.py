@@ -42,6 +42,7 @@ from typing import cast
 from vera.codegen.memory import ConstructorLayout
 from vera.runtime.html import register_html
 from vera.runtime.http import register_http
+from vera.runtime.db import register_db
 from vera.runtime.inference import register_inference
 from vera.runtime.json import register_json
 from vera.runtime.map import register_map
@@ -90,6 +91,7 @@ class CompileResult:
     http_ops_used: set[str] = field(default_factory=set)
     async_ops_used: set[str] = field(default_factory=set)  # #841
     inference_ops_used: set[str] = field(default_factory=set)
+    db_ops_used: set[str] = field(default_factory=set)  # #229
     random_ops_used: set[str] = field(default_factory=set)  # #465
     math_ops_used: set[str] = field(default_factory=set)  # #467
     fn_param_types: dict[str, list[str]] = field(default_factory=dict)
@@ -982,6 +984,12 @@ def execute(
     # -----------------------------------------------------------------
     if result.inference_ops_used:
         register_inference(linker, result.inference_ops_used, env_vars)
+
+    # -----------------------------------------------------------------
+    # DB effect host functions (#229) — SQL via stdlib sqlite3
+    # -----------------------------------------------------------------
+    if result.db_ops_used:
+        register_db(linker, result.db_ops_used, env_vars)
     # ---------------------------------------------------------------
     # Random host functions (#465).  Lazy import — `random` is
     # stdlib so the import is cheap, but only pull it in when needed.

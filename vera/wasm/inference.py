@@ -275,6 +275,9 @@ class InferenceMixin:
         if expr.qualifier == "Inference":
             # complete returns Result<String, String> (i32 heap ptr)
             return "i32"
+        if expr.qualifier == "DB":
+            # query / execute both return a Result ADT (i32 heap ptr) (#229)
+            return "i32"
         # User-defined effect ops (e.g. Exn.throw, State.get/put)
         if expr.name in self._effect_ops:
             _target_name, is_void = self._effect_ops[expr.name]

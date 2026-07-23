@@ -267,6 +267,23 @@ class AssemblyMixin:
             self._needs_alloc = True
             self._needs_memory = True
 
+        # DB effect host imports (#229): db_query / db_execute take
+        # (sql_ptr, sql_len, params_ptr, params_count) and return an i32
+        # Result ADT pointer.
+        if "db_query" in self._db_ops_used:
+            parts.append(
+                '  (import "vera" "db_query" '
+                "(func $vera.db_query (param i32 i32 i32 i32) (result i32)))"
+            )
+        if "db_execute" in self._db_ops_used:
+            parts.append(
+                '  (import "vera" "db_execute" '
+                "(func $vera.db_execute (param i32 i32 i32 i32) (result i32)))"
+            )
+        if self._db_ops_used:
+            self._needs_alloc = True
+            self._needs_memory = True
+
         # Random effect host imports (#465).  None of these allocate
         # or return heap data — `random_int` returns a scalar i64,
         # `random_float` returns f64, `random_bool` returns i32 (0/1).
@@ -513,6 +530,7 @@ class AssemblyMixin:
             or self._http_ops_used
             or self._async_ops_used
             or self._inference_ops_used
+            or self._db_ops_used
             or self._needs_alloc
         ):
             parts.append('  (export "alloc" (func $alloc))')

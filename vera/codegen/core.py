@@ -198,6 +198,7 @@ class CodeGenerator(
             tuple[tuple[str, ...], str]
         ] = frozenset()
         self._inference_ops_used: set[str] = set()  # Inference host-import builtins
+        self._db_ops_used: set[str] = set()  # #229 DB host-import builtins
         self._random_ops_used: set[str] = set()  # Random host-import builtins (#465)
         self._math_ops_used: set[str] = set()  # Math host-import builtins (#467)
 
@@ -653,6 +654,7 @@ class CodeGenerator(
                 http_ops_used=set(),
                 async_ops_used=set(),
                 inference_ops_used=set(),
+                db_ops_used=set(),
                 random_ops_used=set(),
                 math_ops_used=set(),
             )
@@ -821,6 +823,7 @@ class CodeGenerator(
                 http_ops_used=set(self._http_ops_used),
                 async_ops_used=set(self._async_ops_used),
                 inference_ops_used=set(self._inference_ops_used),
+                db_ops_used=set(self._db_ops_used),
                 random_ops_used=set(self._random_ops_used),
                 math_ops_used=set(self._math_ops_used),
             )
@@ -1201,6 +1204,7 @@ class CodeGenerator(
                 http_ops_used=set(self._http_ops_used),
                 async_ops_used=set(self._async_ops_used),
                 inference_ops_used=set(self._inference_ops_used),
+                db_ops_used=set(self._db_ops_used),
                 random_ops_used=set(self._random_ops_used),
                 math_ops_used=set(self._math_ops_used),
             )
@@ -1237,6 +1241,7 @@ class CodeGenerator(
             http_ops_used=set(self._http_ops_used),
             async_ops_used=set(self._async_ops_used),
             inference_ops_used=set(self._inference_ops_used),
+            db_ops_used=set(self._db_ops_used),
             random_ops_used=set(self._random_ops_used),
             math_ops_used=set(self._math_ops_used),
             fn_param_types=fn_param_types,

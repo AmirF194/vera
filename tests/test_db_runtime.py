@@ -19,6 +19,8 @@ import pytest
 from vera.runtime.db import _db_execute, _db_query, _open_connection
 from vera.runtime.heap import _read_i32, _read_wasm_string
 
+from tests.codegen_helpers import _run
+
 # Reuse the S2 InstanceCaller harness + the row-grid decoder (helpers, not
 # tests — the ``test_``-prefix collection rule leaves them alone).
 from tests.test_db_marshalling import _decode_result_ok_rows, _gc_caller
@@ -128,3 +130,74 @@ class TestDbRuntime229:
             linker, {"db_query", "db_execute"},
             {"VERA_DB_URL": "sqlite::memory:"},
         )
+
+
+class TestDbEndToEnd229:
+    """S4: a real Vera program using ``<DB>`` compiles (checker → codegen
+    routing → ``register_db`` → sqlite) and runs end-to-end against the default
+    in-memory database — no config needed."""
+
+    _QUERY_ROWS = """
+public fn main(-> @Int)
+  requires(true) ensures(true) effects(<DB>)
+{
+  let @Result<Int, String> = DB.execute("CREATE TABLE t (name TEXT)", []);
+  let @Result<Int, String> = DB.execute("INSERT INTO t VALUES (?)", [Some("alice")]);
+  let @Result<Int, String> = DB.execute("INSERT INTO t VALUES (?)", [None]);
+  match DB.query("SELECT name FROM t", []) {
+    Ok(@Array<Array<Option<String>>>) -> array_length(@Array<Array<Option<String>>>.0),
+    Err(@String) -> 0 - 1
+  }
+}
+"""
+
+    def test_query_row_count(self) -> None:
+        # Two rows inserted (one with a NULL name, so the grid carries a None
+        # cell) → the query round-trips to a 2-row grid.
+        assert _run(self._QUERY_ROWS) == 2
+
+    def test_query_survives_eager_gc(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # The S2 rooting holds through the REAL host path: baked into $alloc,
+        # every allocation in the grid marshalling fires $gc_collect, yet the
+        # row count reads back correct.
+        monkeypatch.setenv("VERA_EAGER_GC", "1")
+        assert _run(self._QUERY_ROWS) == 2
+
+    def test_execute_rowcount(self) -> None:
+        src = """
+public fn main(-> @Int)
+  requires(true) ensures(true) effects(<DB>)
+{
+  let @Result<Int, String> = DB.execute("CREATE TABLE t (n INTEGER)", []);
+  let @Result<Int, String> = DB.execute("INSERT INTO t VALUES (1)", []);
+  let @Result<Int, String> = DB.execute("INSERT INTO t VALUES (2)", []);
+  match DB.execute("DELETE FROM t", []) {
+    Ok(@Int) -> @Int.0,
+    Err(@String) -> 0 - 1
+  }
+}
+"""
+        assert _run(src) == 2  # DELETE removed both rows
+
+    def test_param_injection_is_bound_as_literal(self) -> None:
+        # The runtime half of the #309 guarantee: an injection-looking param is
+        # bound as a value (matches nothing), and the table survives — the query
+        # after still sees the one real row.
+        src = """
+public fn main(-> @Int)
+  requires(true) ensures(true) effects(<DB>)
+{
+  let @Result<Int, String> = DB.execute("CREATE TABLE u (name TEXT)", []);
+  let @Result<Int, String> = DB.execute("INSERT INTO u VALUES (?)", [Some("bob")]);
+  match DB.query("SELECT name FROM u WHERE name = ?", [Some("bob'; DROP TABLE u--")]) {
+    Ok(@Array<Array<Option<String>>>) -> match DB.query("SELECT name FROM u", []) {
+      Ok(@Array<Array<Option<String>>>) -> array_length(@Array<Array<Option<String>>>.0),
+      Err(@String) -> 0 - 2
+    },
+    Err(@String) -> 0 - 1
+  }
+}
+"""
+        assert _run(src) == 1  # table intact — still one row
