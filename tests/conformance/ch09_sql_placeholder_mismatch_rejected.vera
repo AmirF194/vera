@@ -1,0 +1,13 @@
+-- Chapter 9, Section 9.5.7 — SQL placeholder arity (#309).
+-- Features: db_effect, sql_provenance, check_error.
+--
+-- The SQL is literal (so no E207), but it has two ? placeholders while only one
+-- parameter is supplied.  When both the SQL and the params array are statically
+-- sized, that mismatch is a compile-time error (E208).
+public fn mismatched(-> @Result<Array<Array<Option<String>>>, String>)
+  requires(true)
+  ensures(true)
+  effects(<DB>)
+{
+  DB.query("SELECT * FROM u WHERE a = ? AND b = ?", [Some("x")])
+}

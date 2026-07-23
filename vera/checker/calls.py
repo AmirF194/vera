@@ -8,7 +8,10 @@ orchestration.
 from __future__ import annotations
 
 from vera import ast
+from vera.checker.sql import count_placeholders, resolve_literal_string
 from vera.environment import (
+    DB_SQL_OP_NAMES,
+    STRING,
     ConstructorInfo,
     FunctionInfo,
     OpInfo,
@@ -132,6 +135,51 @@ class CallsMixin:
         op_info = self.env.lookup_effect_op(name)
         if op_info:
             self._effect_ops_used.add(op_info.parent_effect)
+            # #1148: a BARE (unqualified) op call is codegen-routable only for
+            # the built-in State/Exn ops get/put/throw (which route to host
+            # cells / a host tag even unhandled) or when the effect is handled by
+            # an enclosing `handle` block (rewritten to the clause).  Every other
+            # bare op — IO / DB / Http / Inference / Random and user effects —
+            # fails `vera compile` with a confusing "Function '<op>' is not
+            # defined".  Reject it at check time (E217, the safe direction of a
+            # check<->codegen disagreement).
+            #
+            # The carve-out keys on BOTH the effect name AND the op name, not the
+            # effect name alone: codegen bare-routes only get/put (State) and
+            # throw (Exn) — not an arbitrary op of an effect that merely happens
+            # to be named State/Exn.  Keying on the effect name alone let a user
+            # `effect State<T> { op sneak(...) }` / `effect Exn<E> { op boom }`
+            # shadow's bare op pass check and then hard-fail compile (#1147
+            # adversarial workflow), the exact desync E217 exists to close.
+            bare_routable_builtin = (op_info.parent_effect, op_info.name) in (
+                ("State", "get"), ("State", "put"), ("Exn", "throw"),
+            )
+            if (
+                not bare_routable_builtin
+                and op_info.parent_effect not in self._handled_effects
+            ):
+                self._error(
+                    node,
+                    f"Effect operation '{name}' cannot be called bare here; it "
+                    f"must be called qualified as "
+                    f"'{op_info.parent_effect}.{name}(...)' or performed inside "
+                    f"an enclosing 'handle[{op_info.parent_effect}]' block.",
+                    rationale=(
+                        "A bare (unqualified) op call is lowered to a handler "
+                        "clause of an enclosing 'handle' block; with no such "
+                        "block in scope, only the built-in State/Exn ops "
+                        "(get/put/throw) have a bare host route, so any other "
+                        "bare op call has no code to emit and fails compilation."
+                    ),
+                    fix=(
+                        f"Write '{op_info.parent_effect}.{name}(...)' — a host "
+                        "effect routes by qualifier — or perform the op inside a "
+                        f"'handle[{op_info.parent_effect}] {{ ... }} in {{ ... }}'"
+                        " block."
+                    ),
+                    spec_ref='Chapter 7, Section 7.4 "Performing Effects"',
+                    error_code="E217",
+                )
             return self._check_op_call(op_info, args, node)
 
         # Maybe it's an ability operation
@@ -723,7 +771,139 @@ class CallsMixin:
                     error_code="E204",
                 )
 
+        # #309: for a DB SQL op (``DB.query`` / ``DB.execute``), the SQL (first)
+        # argument must be literal-provenance (E207), use only anonymous ``?``
+        # placeholders (E209), and match a statically-sized params array (E208).
+        # ``is_db_sql_op`` matches on ``parent_effect == "DB"`` + the op name —
+        # the SAME axis codegen routes to the host database on — NOT built-in
+        # OpInfo identity, so a user ``effect DB { ... }`` shadow that DECLARES
+        # ``query`` is gated here.  A shadow that does NOT declare ``query``
+        # fails op resolution and never reaches this point; that spelling is
+        # gated in ``_check_qualified_call`` instead (Cortex #1147 Finding 1),
+        # because codegen routes it to the host regardless.
+        #
+        # The gate runs on the codegen routing axis ALONE — it does NOT also
+        # require the arg's static type to be ``String``.  Codegen marshals the
+        # first arg to the sqlite host by qualifier name whatever its type, so an
+        # ``is_subtype(arg, String)`` guard was a soundness hole (#1147
+        # adversarial workflow): a runtime SQL string laundered through a generic
+        # ``@T`` slot has arg type ``TypeVar`` (SEVERE — attacker SQL executed),
+        # and a user ``effect DB`` shadow with a non-``String`` param (``Int`` /
+        # ``Array``) type-checks clean yet still reaches the host (a check-clean
+        # program emitting invalid WASM).  The provenance walker is
+        # conservative-reject, so it correctly rejects a slot / non-literal arg of
+        # ANY type.  The one thing we skip is pure E204 cascade: a call whose
+        # DECLARED first param is exactly ``String`` already rejected a concrete
+        # non-``String`` arg with E204, so a second E207 there is noise.  A
+        # ``TypeVar`` param (generic ``DB<T>``) or a user non-``String`` param
+        # does NOT fire E204, so those still gate.
+        if (
+            self.env.is_db_sql_op(op_info) and args
+            and arg_types and arg_types[0] is not None
+            and not isinstance(arg_types[0], UnknownType)
+        ):
+            arg0 = arg_types[0]
+            param0 = param_types[0] if param_types else None
+            param_is_string = (
+                param0 is not None
+                and is_subtype(param0, STRING)
+                and is_subtype(STRING, param0)
+            )
+            e204_cascade = param_is_string and not is_subtype(arg0, STRING)
+            if not e204_cascade:
+                self._check_sql_provenance(op_info.name, args, node)
+
         return return_type
+
+    def _check_sql_provenance(
+        self, op_name: str, args: tuple[ast.Expr, ...], node: ast.Node,
+    ) -> None:
+        """#309 — reject a non-literal SQL string (E207); numbered/named
+        placeholders Vera does not support (E209); and a placeholder/param
+        arity mismatch when both are statically sized (E208).
+
+        ``op_name`` is the operation spelling (``query`` / ``execute``) used only
+        in diagnostics — a string, not an ``OpInfo``, so the unresolved-spelling
+        path (``_check_qualified_call``, Cortex #1147 Finding 1) can gate a
+        ``DB.<op>`` call that codegen routes to the host even though a user
+        ``effect DB`` never declared the op."""
+        if not args:
+            return
+        sql = resolve_literal_string(args[0], self.env)
+        if sql is None:
+            self._error(
+                args[0],
+                f"The SQL argument to '{op_name}' must be a string "
+                "literal or a concatenation of literals, not a runtime-derived "
+                "value.",
+                rationale=(
+                    "A SQL string assembled from a runtime value — a slot, a "
+                    "function result, or a \\(expr) interpolation — is the SQL "
+                    "injection vector.  Vera makes it a compile-time error: the "
+                    "query text is fixed at compile time and all runtime data "
+                    "flows through the ? placeholders and the params array."
+                ),
+                fix=(
+                    "Put the runtime value in the params array and reference "
+                    "it with a ? placeholder, e.g. "
+                    'DB.query("SELECT ... WHERE x = ?", [Some(value)]).'
+                ),
+                spec_ref='Chapter 9, Section 9.5.7 "DB"',
+                error_code="E207",
+            )
+            return
+
+        # SQL is literal.  ``count_placeholders`` returns None when the SQL uses
+        # a numbered (``?NNN``) or named (``:name`` / ``@name`` / ``$name``)
+        # placeholder.  Vera's params argument is a POSITIONAL ``Array``, so only
+        # anonymous ``?`` has a well-defined binding; the others fail against a
+        # positional sequence at run time.  Reject them at compile time (E209)
+        # for one canonical placeholder form, rather than defer to a runtime
+        # error.
+        want = count_placeholders(sql)
+        if want is None:
+            self._error(
+                node,
+                f"The SQL passed to '{op_name}' uses a numbered (?NNN) or named "
+                "(:name / @name / $name) placeholder; Vera supports only "
+                "anonymous '?' placeholders.",
+                rationale=(
+                    "Parameters bind positionally through the "
+                    "Array<Option<String>> params argument, so only anonymous "
+                    "'?' placeholders have a well-defined binding; numbered and "
+                    "named forms fail against a positional sequence at run time."
+                ),
+                fix=(
+                    "Use anonymous '?' placeholders in order, e.g. "
+                    'DB.query("SELECT ... WHERE a = ? AND b = ?", '
+                    "[Some(a), Some(b)])."
+                ),
+                spec_ref='Chapter 9, Section 9.5.7 "DB"',
+                error_code="E209",
+            )
+            return
+
+        # Anonymous ? only: arity-check against a statically-sized params array.
+        # A dynamically-sized params slot defers the count to the sqlite3 host.
+        if len(args) >= 2 and isinstance(args[1], ast.ArrayLit):
+            got = len(args[1].elements)
+            if want != got:
+                self._error(
+                    node,
+                    f"The SQL has {want} '?' placeholder(s) but "
+                    f"{got} parameter(s) were supplied to '{op_name}'.",
+                    rationale=(
+                        "Each ? placeholder binds one positional parameter, so "
+                        "the number of placeholders must equal the length of "
+                        "the params array; a mismatch fails at run time."
+                    ),
+                    fix=(
+                        f"Supply exactly {want} parameter(s) to match the "
+                        f"{want} placeholder(s), or adjust the SQL's ? count."
+                    ),
+                    spec_ref='Chapter 9, Section 9.5.7 "DB"',
+                    error_code="E208",
+                )
 
     def _effect_type_mapping(self, effect_name: str) -> dict[str, Type]:
         """Get the type argument mapping for an effect from the current
@@ -1228,6 +1408,20 @@ class CallsMixin:
         if op_info:
             self._effect_ops_used.add(op_info.parent_effect)
             return self._check_op_call(op_info, expr.args, expr)
+
+        # #309 (Cortex #1147 Finding 1): op resolution failed, but codegen
+        # routes a ``DB.query`` / ``DB.execute`` SPELLING to the host database
+        # (``$vera.db_<op>``) by qualifier NAME regardless of resolution — e.g. a
+        # user ``effect DB`` that declares only some other op.  So the
+        # literal-provenance gate MUST fire on the spelling here too, or a
+        # runtime SQL string reaches the host ungated.  (A resolved DB SQL op is
+        # gated in ``_check_op_call``; this covers the unresolved spelling.)
+        if (
+            expr.qualifier == "DB"
+            and expr.name in DB_SQL_OP_NAMES
+            and expr.args
+        ):
+            self._check_sql_provenance(expr.name, tuple(expr.args), expr)
 
         # Try as module-qualified function
         self._error(

@@ -145,3 +145,61 @@ class TestTransitiveArtifactContent:
             f"per-module `direct` flags were not re-derived from alib's own "
             f"imports (blib must be a DIRECT import of alib for its sub-check)"
         )
+
+
+# A library whose SQL is a runtime slot — E207 when checked standalone.  Cortex
+# #1147 Finding 2: this body is compiled into the flat WASM module, so its E207
+# must fail the codegen-path check; dropping it let the injection through the
+# import door.
+_SQL_LIB = """\
+public fn run(@String -> @Result<Array<Array<Option<String>>>, String>)
+  requires(true) ensures(true) effects(<DB>)
+{ DB.query(@String.0, []) }
+"""
+
+_SQL_MAIN = """\
+import sqllib(run);
+public fn main(-> @Result<Array<Array<Option<String>>>, String>)
+  requires(true) ensures(true) effects(<DB>)
+{ run("SELECT 1") }
+"""
+
+
+class TestImportedBodyDiagnostics1147:
+    """Cortex #1147 Finding 2: an imported module body compiled into the flat
+    WASM module must have its OWN check errors surfaced on the codegen path.
+    The fix is not E207-specific — any imported-body error fails the compile —
+    but the injection it closes is a library whose non-literal SQL (E207) slid
+    through the import door and compiled to a live ``$vera.db_query`` call."""
+
+    def test_imported_body_e207_surfaces_on_codegen_path(self, tmp_path) -> None:
+        program, source, main_path, resolved = _resolve(
+            tmp_path, {"sqllib.vera": _SQL_LIB, "main.vera": _SQL_MAIN},
+            "main.vera",
+        )
+        diags, _arts = typecheck_with_artifacts(
+            program, source, file=str(main_path), resolved_modules=resolved,
+            collect_module_artifacts=True,
+        )
+        errs = [d for d in diags if d.severity == "error"]
+        assert any(d.error_code == "E207" for d in errs), (
+            "the imported library body's E207 must surface on the codegen "
+            f"(compile) path; got {[(d.error_code, d.severity) for d in diags]}"
+        )
+
+    def test_codegen_path_unchanged_for_clean_import(self, tmp_path) -> None:
+        # A literal-SQL library imports clean: the propagation surfaces only
+        # errors, never a spurious diagnostic on a well-formed body.
+        clean_lib = _SQL_LIB.replace("DB.query(@String.0, [])",
+                                     'DB.query("SELECT 1", [])')
+        program, source, main_path, resolved = _resolve(
+            tmp_path, {"sqllib.vera": clean_lib, "main.vera": _SQL_MAIN},
+            "main.vera",
+        )
+        diags, _arts = typecheck_with_artifacts(
+            program, source, file=str(main_path), resolved_modules=resolved,
+            collect_module_artifacts=True,
+        )
+        assert not [d for d in diags if d.severity == "error"], (
+            f"clean import must not gain errors; got {[d.description for d in diags]}"
+        )

@@ -1,0 +1,18 @@
+-- Chapter 7, Section 7.4 — bare effect-op call routing (#1148).
+-- Features: effects, effect_op, check_error.
+--
+-- A bare (unqualified) effect-op call is codegen-routable only for the built-in
+-- State/Exn ops (get/put/throw) or when handled by an enclosing handle block.
+-- A bare IO.print with no enclosing handler has no host route, so the checker
+-- rejects it (E217); call it qualified as IO.print(...) instead.
+effect IO {
+  op print(String -> Unit);
+}
+
+public fn greet(-> @Unit)
+  requires(true)
+  ensures(true)
+  effects(<IO>)
+{
+  print("hi")
+}

@@ -608,7 +608,14 @@ class ControlFlowMixin:
             self._handler_body_state_tnames.append(state_tname_outer)
             pushed_state_hint = True
 
+        # #1148: mark this effect handled while the body is checked, so a bare
+        # op call to it in the body is accepted (codegen rewrites it to the
+        # handler clause).  A bare op call to a non-State/Exn effect NOT in this
+        # stack is E217 (the bare-call path in calls.py), because codegen cannot
+        # route it to the host.
+        self._handled_effects.append(effect_inst.name)
         body_type = self._synth_expr(expr.body)
+        self._handled_effects.pop()
 
         if pushed_state_hint:
             self._handler_body_state_tnames.pop()

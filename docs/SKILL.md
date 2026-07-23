@@ -1655,6 +1655,8 @@ public fn insert_and_count(-> @Int)
 
 A query result is `Array<Array<Option<String>>>` — rows of cells, each cell `Some(text)` or `None` for SQL `NULL`. `NULL` and `""` stay distinct; read a `NOT NULL` column with `option_unwrap_or(cell, "")`. Both operations return `Result`, so a failed statement is the `Err(String)` arm, never a trap.
 
+**Keep the SQL literal.** The query string must be a literal (or a `string_concat` / `let` chain of literals). A SQL string built from a runtime value — a call result, a parameter, or a `\(expr)` interpolation of one — is a **compile-time error** (`E207`): that is the injection vector. (An interpolation or concatenation whose parts are all literals stays literal, so it is accepted.) Pass every runtime value through a `?` placeholder and the params array — `DB.query("SELECT * FROM users WHERE id = ?", [Some(@String.0)])`, never `DB.query(string_concat("... id = ", @String.0), [])`. A `?`-placeholder/parameter count mismatch is `E208` when both are statically known.
+
 The connection is chosen by `VERA_DB_URL` (default `sqlite::memory:`, or `sqlite:///path/to/file.db`). In v1 the effect is SQLite-only, single-connection, and un-mockable (`handle[DB]` awaits #372). The browser runtime returns `Err` for every `DB` operation, and `vera compile --target wasi-p2` rejects `<DB>`.
 
 ### Effect handlers
@@ -2372,7 +2374,7 @@ public fn main(@Unit -> @Unit)
 
 ## Conformance Suite
 
-The `tests/conformance/` directory contains 164 small programs — most self-contained, with the Chapter 8 module-system programs and a few cross-module Chapter 7 and 9 programs importing companion `_lib.vera` / `_mid.vera` modules — that validate every language feature against the spec — often one program per feature, though some features (slot references, match, contracts) span several. These are the best minimal working examples of Vera syntax and semantics.
+The `tests/conformance/` directory contains 168 small programs — most self-contained, with the Chapter 8 module-system programs and a few cross-module Chapter 7 and 9 programs importing companion `_lib.vera` / `_mid.vera` modules — that validate every language feature against the spec — often one program per feature, though some features (slot references, match, contracts) span several. These are the best minimal working examples of Vera syntax and semantics.
 
 Each program is organized by spec chapter (`ch01_int_literals.vera`, `ch04_match_basic.vera`, `ch07_state_handler.vera`, etc.) and the `manifest.json` file maps features to programs. When you need to see how a specific construct works, check the conformance program before reading the spec.
 
