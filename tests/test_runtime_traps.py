@@ -2759,3 +2759,118 @@ class TestRuntimePackageImportHygiene421:
                 f"cold `import vera.runtime.{mod}` failed (circular import "
                 f"via vera.codegen?):\n{result.stderr}"
             )
+
+
+def _read_wasm_string_via_caller(ptr: int, length: int) -> str:
+    """Invoke the production ``_read_wasm_string`` with a live ``Caller``.
+
+    ``_read_wasm_string`` needs a mid-call ``wasmtime.Caller`` (it reads
+    ``caller["memory"]``), which only exists inside a host trampoline — so a
+    guest ``run`` calls a void host ``probe`` that forwards the given
+    ``(ptr, length)`` to the real reader over a fresh 1-page (65536-byte)
+    memory.  Returns the decoded string, or propagates the reader's
+    ``wasmtime.WasmtimeError`` (the #1145 out-of-bounds guard) out through the
+    ``run`` call, exactly as it would reach ``execute()`` in production.
+    """
+    import wasmtime
+
+    from vera.runtime.heap import _read_wasm_string
+
+    wat = (
+        "(module\n"
+        '  (import "probe" "go" (func $go))\n'
+        '  (memory (export "memory") 1)\n'
+        '  (func (export "run") call $go)\n'
+        ")\n"
+    )
+    engine = wasmtime.Engine()
+    store = wasmtime.Store(engine)
+    linker = wasmtime.Linker(engine)
+    captured: dict[str, str] = {}
+
+    def go(caller: wasmtime.Caller) -> None:
+        captured["result"] = _read_wasm_string(caller, ptr, length)
+
+    linker.define_func(
+        "probe", "go", wasmtime.FuncType([], []), go, access_caller=True,
+    )
+    module = wasmtime.Module(engine, wat)
+    instance = linker.instantiate(store, module)
+    run_export = instance.exports(store)["run"]
+    assert isinstance(run_export, wasmtime.Func)
+    run_export(store)  # may raise WasmtimeError from `go` (the OOB guard)
+    return captured["result"]
+
+
+class TestReadWasmStringBoundsCheck1145:
+    """``_read_wasm_string`` bounds-checks ``(ptr, len)`` before the raw
+    ``ctypes`` slice (#1145).
+
+    The slice ``bytes(buf[ptr:ptr + length])`` does no bounds checking of its
+    own, so a guest-controlled out-of-range pair (any codegen bug, or a
+    program that computes a bad ``(ptr, len)``) read past the WASM memory into
+    wasmtime's guard page and killed the host with ``SIGBUS`` — a hard process
+    death, *before* the ``safe_utf8_decode`` contract (#589 / #592) is ever
+    reached.  The fix raises a ``wasmtime.WasmtimeError`` carrying the
+    ``out of bounds memory access`` reason, so ``execute()`` classifies it as a
+    clean ``out_of_bounds`` trap (backtrace + Fix) identical to a native guest
+    OOB.  This is the trampoline-symmetric mirror of the ``_read_string_export``
+    OOB→``None`` coverage above (a post-run fallback returns ``None``; a live
+    trampoline has no ``None`` to return, so it traps).
+
+    The pre-fix failure is a ``SIGBUS`` that would abort the whole pytest
+    process, so the RED baseline is proven **out-of-process** (running the OOB
+    read against pre-fix ``heap.py`` dies with ``Bus error: 10``, rc 138);
+    these tests assert the fixed clean-raise behaviour, which is portable.
+    """
+
+    def test_out_of_bounds_ptr_raises_not_sigbus(self) -> None:
+        import wasmtime
+
+        # 1 page = 65536 bytes; offset 100000 is well past the end.
+        with pytest.raises(
+            wasmtime.WasmtimeError, match="out of bounds memory access",
+        ):
+            _read_wasm_string_via_caller(100_000, 10)
+
+    def test_ptr_plus_len_overrunning_the_end_raises(self) -> None:
+        import wasmtime
+
+        # ptr is in range but ptr+len runs past the end — the case a naive
+        # `ptr < size` check (without `ptr + len <= size`) would miss.
+        with pytest.raises(wasmtime.WasmtimeError, match="out of bounds"):
+            _read_wasm_string_via_caller(65_530, 100)
+
+    def test_negative_length_raises(self) -> None:
+        import wasmtime
+
+        # A length reinterpreted from a negative i32 must not slice with a
+        # Python negative index (`buf[0:-1]`), which would silently read the
+        # wrong region rather than the intended (empty/short) string.
+        with pytest.raises(wasmtime.WasmtimeError, match="out of bounds"):
+            _read_wasm_string_via_caller(0, -1)
+
+    def test_read_up_to_the_exact_end_is_in_bounds(self) -> None:
+        # ptr + length == mem_size is the last VALID read; a `>=` off-by-one
+        # in the guard would wrongly reject it.  The trailing page is
+        # zero-filled, so five NUL bytes decode to five U+0000 chars.
+        assert _read_wasm_string_via_caller(65_536 - 5, 5) == "\x00" * 5
+
+    def test_empty_read_is_in_bounds(self) -> None:
+        # A zero-length read anywhere in range is trivially valid → "".
+        assert _read_wasm_string_via_caller(0, 0) == ""
+
+    def test_oob_reason_classifies_as_out_of_bounds_kind(self) -> None:
+        import wasmtime
+
+        # execute() routes the raised WasmtimeError through _classify_trap;
+        # the reason must yield the `out_of_bounds` kind and a non-empty Fix
+        # paragraph, so the program sees a clean trap — not a raw traceback.
+        try:
+            _read_wasm_string_via_caller(100_000, 10)
+        except wasmtime.WasmtimeError as exc:
+            kind, _desc, fix = _classify_trap(exc, [], None)
+            assert kind == "out_of_bounds"
+            assert fix
+        else:  # pragma: no cover - the guard must fire
+            pytest.fail("expected an out-of-bounds WasmtimeError")
