@@ -31,10 +31,13 @@ def _slice_and_decode(
     ``Caller`` mid-call, or the ``Store`` post-run) and route the slice through
     :func:`safe_utf8_decode`, so a corrupt region surfaces as U+FFFD rather than
     a ``UnicodeDecodeError`` escaping the trampoline (#589 / #592).  The decode
-    is the only shared concern; ``(ptr, length)`` validation is the caller's:
-    :func:`_read_string_export` bounds-checks and rejects a negative ``length``
-    before calling, while :func:`_read_wasm_string` passes ``ptr``/``length``
-    straight through (after asserting the memory type).
+    is the only shared concern; the raw ``ctypes`` slice does **no** bounds
+    checking of its own, so each caller MUST validate ``(ptr, length)`` before
+    calling (#1145): :func:`_read_string_export` returns ``None`` on an
+    out-of-bounds or negative pair (a post-run fallback to the raw pointer),
+    while :func:`_read_wasm_string` raises a ``wasmtime.WasmtimeError`` (a live
+    trampoline has no ``None`` to return — the guest gets a clean
+    ``out_of_bounds`` trap).
     """
     buf = memory.data_ptr(context)
     return safe_utf8_decode(bytes(buf[ptr:ptr + length]))
@@ -44,16 +47,34 @@ def _read_wasm_string(
 ) -> str:
     """Read a UTF-8 string from WASM memory.
 
-    Uses ``errors="replace"`` so that a corrupt (ptr, len) pair from
-    an upstream codegen bug surfaces as U+FFFD replacement characters
-    rather than a raw ``UnicodeDecodeError`` escaping through
-    wasmtime's trampoline (#589).  Path / env-var / file-content
-    consumers downstream may then surface their own "file not found"
-    / "value not set" errors when the replacement chars don't match
-    anything, which is a strict improvement over a Python traceback.
+    Bounds-checks ``(ptr, length)`` against the live memory size before the
+    slice (#1145).  The read goes through a raw ``ctypes`` pointer
+    (:func:`_slice_and_decode`), which does no bounds checking of its own, so an
+    out-of-range pair reads past the memory region into wasmtime's guard page
+    and kills the host process with ``SIGBUS`` — and because the crash happens
+    inside ``bytes(buf[...])``, *before* decoding, the :func:`safe_utf8_decode`
+    contract (#589 / #592) does not cover it.  A negative or out-of-bounds pair
+    — from an upstream codegen bug or a program that computes a bad
+    ``(ptr, len)`` — instead raises a ``wasmtime.WasmtimeError`` carrying the
+    ``out of bounds memory access`` reason, which ``execute()`` classifies as a
+    clean ``out_of_bounds`` trap (with backtrace + Fix) exactly like a native
+    guest OOB, rather than taking the host down.
+
+    A corrupt but *in-bounds* region still decodes via
+    :func:`safe_utf8_decode` (``errors="replace"`` → U+FFFD) rather than a raw
+    ``UnicodeDecodeError`` escaping the trampoline; downstream path / env-var /
+    file-content consumers then surface their own "not found" errors when the
+    replacement chars match nothing — a strict improvement over a traceback.
     """
     memory = caller["memory"]
     assert isinstance(memory, wasmtime.Memory)  # noqa: S101
+    mem_size = memory.data_len(caller)
+    if length < 0 or ptr < 0 or ptr + length > mem_size:
+        raise wasmtime.WasmtimeError(
+            "out of bounds memory access: host string read of "
+            f"{length} byte(s) at offset {ptr} exceeds WASM memory "
+            f"size {mem_size}"
+        )
     return _slice_and_decode(memory, caller, ptr, length)
 
 def _read_string_export(
