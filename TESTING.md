@@ -218,11 +218,11 @@ Each conformance program declares the deepest pipeline stage it must pass:
 | `verify` | Type-checks and all contracts verified by Z3 | 13 |
 | `run` | Compiles to WASM and executes correctly | 132 |
 
-Almost all programs are at the `run` level — they compile and execute, producing correct results. Twenty-one programs (`ch02_generic_over_unit_rejected`, `ch02_map_unit_value_rejected`, `ch03_typed_holes`, `ch04_let_unit_rejected`, `ch05_apply_fn_arity`, `ch05_where_helper_outer_slot_rejected`, `ch07_cross_module_contracts_lib`, `ch07_handler_state_body_scope_rejected`, `ch07_state_unit_op_param_read_rejected`, `ch08_circular_import`, `ch08_cross_module_generic_lib`, `ch08_transitive_module_import_base`, `ch08_visibility_private`, `ch08_xmod_widen_lib`, `ch09_builtin_redefinition`, `ch09_eq_non_derivable_rejected`, `ch09_http`, `ch09_inference`, `ch09_ord_adt_rejected`, `ch09_sql_injection_rejected`, `ch09_sql_placeholder_mismatch_rejected`) are at the `check` level. Fourteen of them — `ch02_generic_over_unit_rejected`, `ch02_map_unit_value_rejected`, `ch04_let_unit_rejected`, `ch05_apply_fn_arity`, `ch05_where_helper_outer_slot_rejected`, `ch07_handler_state_body_scope_rejected`, `ch07_state_unit_op_param_read_rejected`, `ch08_circular_import`, `ch08_visibility_private`, `ch09_builtin_redefinition`, `ch09_ord_adt_rejected`, `ch09_eq_non_derivable_rejected`, `ch09_sql_injection_rejected`, and `ch09_sql_placeholder_mismatch_rejected` — are **negative tests** that assert a specific diagnostic (E206, E135, E183, E201, E130, E130, E182, E011, E150, E151, E242, E243, E207, and E208 respectively) via the manifest's `expected_error` field; `ch09_http` and `ch09_inference` are environment-gated (network / API key). Thirteen programs (`ch03_slot_let_chains`, `ch03_slot_noncommutative`, `ch04_nested_option_ctor`, `ch04_primitive_obligations`, `ch05_apply_fn_typing`, `ch06_adt_sort_disambiguation`, `ch07_cross_module_contracts`, `ch07_io_read_char`, `ch07_io_sleep`, `ch07_random_effect`, `ch08_transitive_module_import_mid`, `ch09_http_server`, `ch09_math_builtins`) are at the `verify` level, using Z3-provable contracts.
+Almost all programs are at the `run` level — they compile and execute, producing correct results. Twenty-three programs (`ch02_generic_over_unit_rejected`, `ch02_map_unit_value_rejected`, `ch03_typed_holes`, `ch04_let_unit_rejected`, `ch05_apply_fn_arity`, `ch05_where_helper_outer_slot_rejected`, `ch07_cross_module_contracts_lib`, `ch07_handler_state_body_scope_rejected`, `ch07_state_unit_op_param_read_rejected`, `ch07_bare_effect_op_rejected`, `ch08_circular_import`, `ch08_cross_module_generic_lib`, `ch08_transitive_module_import_base`, `ch08_visibility_private`, `ch08_xmod_widen_lib`, `ch09_builtin_redefinition`, `ch09_eq_non_derivable_rejected`, `ch09_http`, `ch09_inference`, `ch09_ord_adt_rejected`, `ch09_sql_injection_rejected`, `ch09_sql_placeholder_mismatch_rejected`, `ch09_sql_numbered_placeholder_rejected`) are at the `check` level. Sixteen of them — `ch02_generic_over_unit_rejected`, `ch02_map_unit_value_rejected`, `ch04_let_unit_rejected`, `ch05_apply_fn_arity`, `ch05_where_helper_outer_slot_rejected`, `ch07_handler_state_body_scope_rejected`, `ch07_state_unit_op_param_read_rejected`, `ch07_bare_effect_op_rejected`, `ch08_circular_import`, `ch08_visibility_private`, `ch09_builtin_redefinition`, `ch09_ord_adt_rejected`, `ch09_eq_non_derivable_rejected`, `ch09_sql_injection_rejected`, `ch09_sql_placeholder_mismatch_rejected`, and `ch09_sql_numbered_placeholder_rejected` — are **negative tests** that assert a specific diagnostic (E206, E135, E183, E201, E130, E130, E182, E217, E011, E150, E151, E242, E243, E207, E208, and E209 respectively) via the manifest's `expected_error` field; `ch09_http` and `ch09_inference` are environment-gated (network / API key). Thirteen programs (`ch03_slot_let_chains`, `ch03_slot_noncommutative`, `ch04_nested_option_ctor`, `ch04_primitive_obligations`, `ch05_apply_fn_typing`, `ch06_adt_sort_disambiguation`, `ch07_cross_module_contracts`, `ch07_io_read_char`, `ch07_io_sleep`, `ch07_random_effect`, `ch08_transitive_module_import_mid`, `ch09_http_server`, `ch09_math_builtins`) are at the `verify` level, using Z3-provable contracts.
 
 ### Skipped tests
 
-`pytest tests/ -v` skips 55 conformance-stage tests across the two categories below (the suite's remaining skips are platform- or tool-gated and documented beside the tests that declare them):
+`pytest tests/ -v` skips 59 conformance-stage tests across the two categories below (the suite's remaining skips are platform- or tool-gated and documented beside the tests that declare them):
 
 **Level-limited skips** — the conformance framework only runs tests up to the declared level; stages beyond that level are automatically skipped. These are expected and correct.
 
@@ -256,6 +256,8 @@ Almost all programs are at the `run` level — they compile and execute, produci
 | `test_run[ch07_random_effect]` | `ch07_random_effect.vera` | `verify` | `run` | `verify`-level programs don't get a `run` test |
 | `test_verify[ch07_state_unit_op_param_read_rejected]` | `ch07_state_unit_op_param_read_rejected.vera` | `check` | `verify` | `check`-level negative test (`expected_error: E182`): verify stage not run |
 | `test_run[ch07_state_unit_op_param_read_rejected]` | `ch07_state_unit_op_param_read_rejected.vera` | `check` | `run` | `check`-level negative test: no `run` stage |
+| `test_verify[ch07_bare_effect_op_rejected]` | `ch07_bare_effect_op_rejected.vera` | `check` | `verify` | `check`-level negative test (`expected_error: E217`): verify stage not run |
+| `test_run[ch07_bare_effect_op_rejected]` | `ch07_bare_effect_op_rejected.vera` | `check` | `run` | `check`-level negative test: no `run` stage |
 | `test_verify[ch08_circular_import]` | `ch08_circular_import.vera` | `check` | `verify` | `check`-level negative test (`expected_error: E011`): verify stage not run |
 | `test_run[ch08_circular_import]` | `ch08_circular_import.vera` | `check` | `run` | `check`-level negative test: no `run` stage |
 | `test_verify[ch08_cross_module_generic_lib]` | `ch08_cross_module_generic_lib.vera` | `check` | `verify` | `check`-level library module: verify stage not run |
@@ -279,6 +281,8 @@ Almost all programs are at the `run` level — they compile and execute, produci
 | `test_run[ch09_sql_injection_rejected]` | `ch09_sql_injection_rejected.vera` | `check` | `run` | `check`-level negative test: no `run` stage |
 | `test_verify[ch09_sql_placeholder_mismatch_rejected]` | `ch09_sql_placeholder_mismatch_rejected.vera` | `check` | `verify` | `check`-level negative test (`expected_error: E208`): verify stage not run |
 | `test_run[ch09_sql_placeholder_mismatch_rejected]` | `ch09_sql_placeholder_mismatch_rejected.vera` | `check` | `run` | `check`-level negative test: no `run` stage |
+| `test_verify[ch09_sql_numbered_placeholder_rejected]` | `ch09_sql_numbered_placeholder_rejected.vera` | `check` | `verify` | `check`-level negative test (`expected_error: E209`): verify stage not run |
+| `test_run[ch09_sql_numbered_placeholder_rejected]` | `ch09_sql_numbered_placeholder_rejected.vera` | `check` | `run` | `check`-level negative test: no `run` stage |
 
 **Environment-gated skips** — these programs require network access or a live API key that is not available in CI. They pass `vera check` (type-checking) but cannot be executed.
 
@@ -333,7 +337,7 @@ The manifest is the machine-readable feature inventory — agents can query it t
 ### Running the conformance suite
 
 ```bash
-# Via pytest (parametrized — 815 tests)
+# Via pytest (parametrized — 840 tests)
 pytest tests/test_conformance.py -v
 
 # Via standalone script (used in CI and pre-commit)
