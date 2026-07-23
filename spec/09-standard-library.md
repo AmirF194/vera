@@ -633,6 +633,8 @@ public fn seed_and_count(-> @Int)
 
 Parameters travel the same shape one level down: the `Array<Option<String>>` second argument binds positionally to the `?` placeholders — `Some(v)` for a value, `None` for `NULL`.  All values cross the host boundary as UTF-8 strings; a non-text SQLite column is rendered to its text form on the way out.
 
+**SQL literal provenance (injection prevention).**  The SQL argument of `query` / `execute` must be *literal-provenance*: a string literal, a `string_concat` of literals, or a `let` chain of those.  A SQL string assembled from a runtime value — a slot, a function result, or a `\(expr)` interpolation — is the SQL injection vector, so Vera rejects it at **compile time** (`E207`).  Runtime data reaches the query only through the `?` placeholders and the params array.  The guarantee is a deterministic type error, not an SMT obligation — it needs no solver and holds even inside handled code where solver-based claims cannot reach.  When both the SQL and the params array are statically sized, a placeholder/parameter count mismatch is also a compile-time error (`E208`); a dynamically-sized params array defers that arity check to the driver at run time.
+
 - **Failure is a value.**  Both operations return `Result<_, String>`; a driver error is the `Err(msg)` arm, never a trap, so a database call is checked like any other `Result`.
 - **Connection.**  `VERA_DB_URL` selects the database — `sqlite::memory:` by default, or `sqlite:///path/to/file.db` for a file.  One connection is used per program run.
 - **Portability.**  Native only: the browser runtime returns `Err` for every `DB` operation (documented divergence, §12), and `vera compile --target wasi-p2` rejects a program that uses `<DB>`.

@@ -2299,6 +2299,34 @@
     ]
   },
   {
+    "id": "ch09_sql_injection_rejected",
+    "file": "ch09_sql_injection_rejected.vera",
+    "chapter": 9,
+    "title": "Non-literal SQL argument is a checker error (SQL injection prevention)",
+    "level": "check",
+    "spec_ref": "Section 9.5.7",
+    "expected_error": "E207",
+    "features": [
+      "db_effect",
+      "sql_provenance",
+      "check_error"
+    ]
+  },
+  {
+    "id": "ch09_sql_placeholder_mismatch_rejected",
+    "file": "ch09_sql_placeholder_mismatch_rejected.vera",
+    "chapter": 9,
+    "title": "SQL placeholder / parameter count mismatch is a checker error",
+    "level": "check",
+    "spec_ref": "Section 9.5.7",
+    "expected_error": "E208",
+    "features": [
+      "db_effect",
+      "sql_provenance",
+      "check_error"
+    ]
+  },
+  {
     "id": "ch09_host_store_gc_reachability",
     "file": "ch09_host_store_gc_reachability.vera",
     "chapter": 9,

@@ -8,6 +8,7 @@ orchestration.
 from __future__ import annotations
 
 from vera import ast
+from vera.checker.sql import count_placeholders, resolve_literal_string
 from vera.environment import (
     ConstructorInfo,
     FunctionInfo,
@@ -723,7 +724,74 @@ class CallsMixin:
                     error_code="E204",
                 )
 
+        # #309: for a built-in DB SQL op, the SQL (first) argument must be
+        # literal-provenance, and the ? placeholder count must match a
+        # statically-sized params array.  Keyed on OpInfo identity, so a user
+        # ``effect DB`` look-alike is never gated.  Skipped when the SQL arg did
+        # not type-check as the op's String param — that is already an E204, so
+        # a cascading E207 would just be noise.
+        if (
+            self.env.is_db_sql_op(op_info) and args
+            and arg_types and arg_types[0] is not None
+            and not isinstance(arg_types[0], UnknownType)
+            and param_types and is_subtype(arg_types[0], param_types[0])
+        ):
+            self._check_sql_provenance(op_info, args, node)
+
         return return_type
+
+    def _check_sql_provenance(
+        self, op_info: OpInfo, args: tuple[ast.Expr, ...], node: ast.Node,
+    ) -> None:
+        """#309 — reject a non-literal SQL string (E207), and a placeholder /
+        param arity mismatch when both are statically sized (E208)."""
+        sql = resolve_literal_string(args[0], self.env)
+        if sql is None:
+            self._error(
+                args[0],
+                f"The SQL argument to '{op_info.name}' must be a string "
+                "literal or a concatenation of literals, not a runtime-derived "
+                "value.",
+                rationale=(
+                    "A SQL string assembled from a runtime value — a slot, a "
+                    "function result, or a \\(expr) interpolation — is the SQL "
+                    "injection vector.  Vera makes it a compile-time error: the "
+                    "query text is fixed at compile time and all runtime data "
+                    "flows through the ? placeholders and the params array."
+                ),
+                fix=(
+                    "Put the runtime value in the params array and reference "
+                    "it with a ? placeholder, e.g. "
+                    'DB.query("SELECT ... WHERE x = ?", [Some(value)]).'
+                ),
+                spec_ref='Chapter 9, Section 9.5.7 "DB"',
+                error_code="E207",
+            )
+            return
+
+        # SQL is literal: check ?-placeholder / param arity when the params
+        # array is itself a literal (statically sized).  A dynamically-sized
+        # params slot defers the check to the sqlite3 host at run time.
+        if len(args) >= 2 and isinstance(args[1], ast.ArrayLit):
+            want = count_placeholders(sql)
+            got = len(args[1].elements)
+            if want != got:
+                self._error(
+                    node,
+                    f"The SQL has {want} '?' placeholder(s) but "
+                    f"{got} parameter(s) were supplied to '{op_info.name}'.",
+                    rationale=(
+                        "Each ? placeholder binds one positional parameter, so "
+                        "the number of placeholders must equal the length of "
+                        "the params array; a mismatch fails at run time."
+                    ),
+                    fix=(
+                        f"Supply exactly {want} parameter(s) to match the "
+                        f"{want} placeholder(s), or adjust the SQL's ? count."
+                    ),
+                    spec_ref='Chapter 9, Section 9.5.7 "DB"',
+                    error_code="E208",
+                )
 
     def _effect_type_mapping(self, effect_name: str) -> dict[str, Type]:
         """Get the type argument mapping for an effect from the current

@@ -9,6 +9,7 @@ quantifiers, and old/new contract expressions.
 from __future__ import annotations
 
 from vera import ast
+from vera.checker.sql import resolve_literal_string
 from vera.types import (
     BOOL,
     BYTE,
@@ -1019,7 +1020,13 @@ class ExpressionsMixin:
             )
 
         tname = self._type_expr_to_slot_name(stmt.type_expr)
-        self.env.bind(tname, declared_type, "let")
+        # #309: resolve the value's literal provenance in THIS scope, before
+        # ``bind`` shifts slot indices, and record it on the binding.  A later
+        # slot reference then reads a value resolved where it was written — the
+        # De Bruijn-safe way to follow a ``let`` chain of literals into the SQL
+        # provenance gate.  Returns None for any non-literal value.
+        lit = resolve_literal_string(stmt.value, self.env)
+        self.env.bind(tname, declared_type, "let", literal_str=lit)
 
     def _check_let_destruct(self, stmt: ast.LetDestruct) -> None:
         """Type-check a destructuring let."""

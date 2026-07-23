@@ -121,6 +121,12 @@ class Binding:
     type_name: str       # canonical name for slot matching
     resolved_type: Type  # fully resolved semantic type
     source: str          # "param", "let", "match", "handler", "destruct"
+    # #309: the compile-time value of this binding IFF it is a String of
+    # literal provenance (a literal, a string_concat of literals, or a let of
+    # those), else None.  Computed eagerly when the binding is created — in its
+    # own scope — so the SQL literal-provenance gate can follow a let chain
+    # through slot references without re-walking a De Bruijn-shifted environment.
+    literal_str: str | None = None
 
 
 # =====================================================================
@@ -2010,19 +2016,39 @@ class TypeEnv:
         """Restore a scope stack saved by :meth:`isolate_scopes`."""
         self._scopes = saved
 
-    def bind(self, type_name: str, resolved_type: Type, source: str) -> None:
-        """Add a binding to the current (innermost) scope."""
-        self._scopes[-1].append(Binding(type_name, resolved_type, source))
+    def bind(self, type_name: str, resolved_type: Type, source: str,
+             literal_str: str | None = None) -> None:
+        """Add a binding to the current (innermost) scope.
+
+        ``literal_str`` (#309) is the binding's compile-time literal value when
+        it is a String of literal provenance, else None; defaulted so callers
+        that do not track provenance are unaffected.
+        """
+        self._scopes[-1].append(
+            Binding(type_name, resolved_type, source, literal_str))
 
     # -----------------------------------------------------------------
     # Slot reference resolution (De Bruijn counting)
     # -----------------------------------------------------------------
 
     def resolve_slot(self, type_name: str, index: int) -> Type | None:
-        """Resolve @T.n by counting bindings whose canonical type_name matches.
+        """Resolve @T.n to its type by counting bindings whose canonical
+        type_name matches.  Returns the n-th match's resolved type, or None if
+        fewer than n+1 bindings exist.
+        """
+        binding = self.resolve_slot_binding(type_name, index)
+        return binding.resolved_type if binding is not None else None
 
-        Walks scopes innermost-to-outermost.  Returns the resolved type of
-        the n-th match, or None if fewer than n+1 bindings exist.
+    def resolve_slot_binding(
+        self, type_name: str, index: int,
+    ) -> Binding | None:
+        """Resolve @T.n to its :class:`Binding`.
+
+        Walks scopes innermost-to-outermost and bindings most-recent-first,
+        returning the n-th match, or None if fewer than n+1 exist.  Single-
+        sources the De Bruijn counting that :meth:`resolve_slot` (type only)
+        and the #309 literal-provenance gate (needs ``Binding.literal_str``)
+        both consume.
         """
         count = 0
         # Walk scopes from innermost to outermost
@@ -2031,7 +2057,7 @@ class TypeEnv:
             for binding in reversed(scope):
                 if binding.type_name == type_name:
                     if count == index:
-                        return binding.resolved_type
+                        return binding
                     count += 1
         return None
 

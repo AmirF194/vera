@@ -564,6 +564,8 @@ ERROR_CODES: dict[str, str] = {
     "E204": "Effect operation argument type mismatch",
     "E205": "Conflicting type argument inference",
     "E206": "Generic type parameter instantiated at Unit",
+    "E207": "Non-literal SQL argument",
+    "E208": "SQL placeholder count mismatch",
     "E210": "Unknown constructor",
     "E211": "Constructor is nullary",
     "E212": "Constructor wrong field count",

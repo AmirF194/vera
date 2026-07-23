@@ -1,0 +1,14 @@
+-- Chapter 9, Section 9.5.7 — SQL literal-provenance (#309).
+-- Features: db_effect, sql_provenance, check_error.
+--
+-- A DB SQL op whose query string is a runtime value — here the @String
+-- parameter — is the SQL injection vector, so Vera rejects it at COMPILE time
+-- (E207).  The safe form keeps the SQL literal and passes runtime data through
+-- the ? placeholders and the params array.
+public fn unsafe(@String -> @Result<Array<Array<Option<String>>>, String>)
+  requires(true)
+  ensures(true)
+  effects(<DB>)
+{
+  DB.query(@String.0, [])
+}
