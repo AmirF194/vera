@@ -724,12 +724,16 @@ class CallsMixin:
                     error_code="E204",
                 )
 
-        # #309: for a built-in DB SQL op, the SQL (first) argument must be
-        # literal-provenance, and the ? placeholder count must match a
-        # statically-sized params array.  Keyed on OpInfo identity, so a user
-        # ``effect DB`` look-alike is never gated.  Skipped when the SQL arg did
-        # not type-check as the op's String param — that is already an E204, so
-        # a cascading E207 would just be noise.
+        # #309: for a DB SQL op (``DB.query`` / ``DB.execute``), the SQL (first)
+        # argument must be literal-provenance, and the ? placeholder count must
+        # match a statically-sized params array.  ``is_db_sql_op`` matches on
+        # ``parent_effect == "DB"`` + the op name — the SAME axis codegen routes
+        # to the host database on — NOT built-in OpInfo identity.  So a user
+        # ``effect DB { ... }`` shadow is INTENTIONALLY gated too: it still
+        # reaches the host, so it must not bypass the literal-provenance (E207)
+        # or placeholder/params (E208) checks.  Skipped when the SQL arg did not
+        # type-check as the op's String param — that is already an E204, so a
+        # cascading E207 would just be noise.
         if (
             self.env.is_db_sql_op(op_info) and args
             and arg_types and arg_types[0] is not None

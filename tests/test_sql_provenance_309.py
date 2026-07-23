@@ -267,7 +267,8 @@ class TestCountPlaceholdersMatchesSqlite309:
 
 class TestSqlGateScoping309:
     """The gate fires only where it should — not on a mistyped SQL arg, and not
-    on a user ``effect DB`` look-alike (identity keying)."""
+    on an unrelated effect's own ``query`` op (a different ``parent_effect``,
+    routed to the user's handler rather than the host database)."""
 
     def test_non_string_sql_arg_does_not_cascade_e207(self) -> None:
         # A non-String SQL arg is E204 (type mismatch); the provenance gate is
