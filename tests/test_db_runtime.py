@@ -13,17 +13,23 @@ hermetic ``sqlite::memory:`` default.
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 
 import pytest
 
+from vera.codegen import execute
 from vera.runtime.db import _db_execute, _db_query, _open_connection
 from vera.runtime.heap import _read_i32, _read_wasm_string
 
-from tests.codegen_helpers import _run
+from tests.codegen_helpers import _compile_ok, _run
 
 # Reuse the S2 InstanceCaller harness + the row-grid decoder (helpers, not
 # tests — the ``test_``-prefix collection rule leaves them alone).
 from tests.test_db_marshalling import _decode_result_ok_rows, _gc_caller
+
+# Repo-relative example + committed fixture, resolved from this file's location
+# so the test is cwd-independent.
+_EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
 
 
 def _decode_result_ok_i64(caller, adt_ptr: int) -> int:
@@ -257,3 +263,37 @@ public fn main(-> @Int)
 }
 """
         assert _run(src) == 1  # table intact — still one row
+
+
+class TestDbOnDiskExample229:
+    """``examples/sqlitedb.vera`` reads the committed on-disk
+    ``examples/sqlitedb.sqlite`` fixture.  ``scripts/check_examples`` only
+    type-checks + verifies examples (it never runs them), and this one is
+    written to exit 0 either way — the on-disk read *and* the graceful
+    in-memory ``Err`` arm — so without this test the on-disk read path, the
+    whole point of the example, would never execute in CI.  Running the actual
+    example file against the committed fixture pins the rendered city table
+    (including the nullable-country ``NULL`` rendering) and doubles as a smoke
+    test that the committed ``.sqlite`` is intact."""
+
+    def test_reads_committed_fixture_and_prints_city_table(
+        self, monkeypatch,
+    ) -> None:
+        sqlite_path = _EXAMPLES / "sqlitedb.sqlite"
+        assert sqlite_path.is_file(), sqlite_path
+        # POSIX form + ``sqlite:///`` prefix so the URL is portable on Windows
+        # (backslashes would break the path); ``_open_connection`` strips the
+        # prefix back to the absolute filesystem path.
+        monkeypatch.setenv("VERA_DB_URL", f"sqlite:///{sqlite_path.as_posix()}")
+        source = (_EXAMPLES / "sqlitedb.vera").read_text(encoding="utf-8")
+        result = execute(_compile_ok(source))
+        # ``main`` returns the row count on the Ok arm — four cities in the fixture.
+        assert result.value == 4
+        out = result.stdout
+        assert "read 4 cities from the on-disk database:" in out
+        # Every city renders; the nullable country column shows NULL for
+        # 'Atlantis' (a None cell) — distinct from an empty string.
+        assert "Atlantis | NULL" in out
+        assert "London | UK" in out
+        assert "Paris | France" in out
+        assert "Tokyo | Japan" in out

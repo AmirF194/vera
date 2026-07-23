@@ -343,7 +343,7 @@ private fn sum(@List<Int> -> @Int)
         assert result.summary.tier1_verified == 8
 
     def test_overall_tier_counts(self) -> None:
-        """All examples together: 353 T1 / 105 T3 / 458 total (current).
+        """All examples together: 357 T1 / 105 T3 / 462 total (current).
 
         Counts move when examples are added or their contracts become
         more / less verifiable.  Trajectory:
@@ -616,9 +616,14 @@ private fn sum(@List<Int> -> @Int)
         # `requires(true)`/`ensures(true)` pair (2 requires + 2 ensures) that
         # all discharge statically at Tier 1: +4 T1, +0 T3, +4 total:
         # 349/105/454 -> 353/105/458.
-        assert t1 == 353, f"Expected 353 T1, got {t1}"
+        #
+        # #229: `examples/sqlitedb.vera` (the on-disk `<DB>` demo) likewise
+        # adds two functions -- `format_row` and `main` -- with trivial
+        # `requires(true)`/`ensures(true)` pairs (2 requires + 2 ensures), all
+        # Tier 1: +4 T1, +0 T3, +4 total: 353/105/458 -> 357/105/462.
+        assert t1 == 357, f"Expected 357 T1, got {t1}"
         assert t3 == 105, f"Expected 105 T3, got {t3}"
-        assert total == 458, f"Expected 458 total, got {total}"
+        assert total == 462, f"Expected 462 total, got {total}"
         assert t3u == 0, f"Expected 0 tier3_unguarded, got {t3u}"
 
 

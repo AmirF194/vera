@@ -39,6 +39,7 @@ from vera.runtime.heap import (
     _alloc_result_ok_rows,
     _read_i32,
     _read_wasm_array_of_options_of_string,
+    _write_i32,
 )
 
 # A pure, allocation-performing program: it exports ``$alloc`` and the GC
@@ -125,6 +126,49 @@ class TestOptionStringArrayRoundTrip:
             wasmtime.WasmtimeError, match="out of bounds memory access",
         ):
             _read_wasm_array_of_options_of_string(caller, 10_000_000, 4)
+
+    def test_negative_count_raises_not_silently_empty(self) -> None:
+        # A negative count (a guest i32 whose high bit is set) must raise, not
+        # silently return [] through range(negative).  Pins the `count < 0`
+        # guard: without it the loop simply never runs and the malformed input
+        # is swallowed.
+        caller = _gc_caller()
+        with pytest.raises(wasmtime.WasmtimeError, match="negative count"):
+            _read_wasm_array_of_options_of_string(caller, 0, -1)
+
+    def test_element_pointer_out_of_bounds_raises_not_sigbus(self) -> None:
+        # The outer pointer array is in bounds, but a per-element `opt_ptr` is
+        # itself guest-controlled and points past memory.  Reading its tag
+        # through the unchecked `_read_i32` would SIGBUS — the #1145 class one
+        # level deeper than the outer-array guard.  A valid 1-element array has
+        # its sole element pointer clobbered with an out-of-range value.
+        caller = _gc_caller()
+        backing, count = _alloc_array_of_options_of_string(caller, ["x"])
+        _write_i32(caller, backing, 10_000_000)   # clobber element[0] -> OOB
+        with pytest.raises(
+            wasmtime.WasmtimeError, match="out of bounds memory access",
+        ):
+            _read_wasm_array_of_options_of_string(caller, backing, count)
+
+    def test_some_cell_straddling_memory_end_raises(self) -> None:
+        # An `opt_ptr` whose tag is readable (in bounds) but whose full 12-byte
+        # Some(String) layout (tag + str_ptr + str_len) runs off the end of
+        # memory must raise before the +4 / +8 field reads reach `_read_i32`.
+        caller = _gc_caller()
+        # Allocate first: `_call_alloc` can grow linear memory, so read
+        # `mem_size` only after the backing is placed, or `straddle` lands
+        # inside a since-grown region and no longer straddles the end.
+        backing, count = _alloc_array_of_options_of_string(caller, ["x"])
+        memory = caller["memory"]
+        assert isinstance(memory, wasmtime.Memory)
+        mem_size = memory.data_len(caller)
+        straddle = mem_size - 8            # tag read OK (+4); +12 overruns
+        _write_i32(caller, straddle, 1)    # tag = 1 -> Some(String) path
+        _write_i32(caller, backing, straddle)
+        with pytest.raises(
+            wasmtime.WasmtimeError, match="out of bounds memory access",
+        ):
+            _read_wasm_array_of_options_of_string(caller, backing, count)
 
 
 class TestResultOkRowsRoundTrip:

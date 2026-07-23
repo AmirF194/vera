@@ -83,7 +83,7 @@ Contracts are mandatory — every function must declare `requires(...)`, \
 `ensures(...)`, and `effects(...)`. The Z3 SMT solver verifies contracts \
 statically where possible; remaining contracts become runtime assertions. \
 All side effects (IO, Http, HttpServer, State, Exceptions, Async, Inference, \
-DB, Random) are tracked in the type system via algebraic effects.
+DB, Random, Diverge) are tracked in the type system via algebraic effects.
 
 Current version: {version}. The reference compiler is written in Python. \
 Install the `veralang` distribution from PyPI or use `pip install -e ".[dev]"` from \
@@ -130,7 +130,7 @@ closures, generics, and mutual recursion.
 - [Chapter 6: Contracts]({RAW}/spec/06-contracts.md): Preconditions, \
 postconditions, termination measures, and quantifiers.
 - [Chapter 7: Effects]({RAW}/spec/07-effects.md): Algebraic effects, \
-handlers, IO, Http, HttpServer, State, Exceptions, Async, Inference, and Random.
+handlers, IO, Http, HttpServer, State, Exceptions, Async, Inference, DB, Random, and Diverge.
 - [Chapter 8: Modules]({RAW}/spec/08-modules.md): Module system, imports, \
 and visibility.
 - [Chapter 9: Standard Library]({RAW}/spec/09-standard-library.md): All \

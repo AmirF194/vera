@@ -1127,29 +1127,44 @@ def _read_wasm_array_of_options_of_string(
     null pair pointer and is never dereferenced).  No allocation happens here,
     so no GC rooting is needed.
 
-    The ``(ptr, count)`` pointer-array range is bounds-checked before the walk
-    (#1145 class): each ``_read_i32(ptr + i*4)`` goes through a raw ``ctypes``
-    slice with no bounds checking, so a guest-controlled out-of-range pair
-    would read past the memory region into wasmtime's guard page and kill the
-    host with ``SIGBUS``.  An out-of-range pair instead raises a clean
-    ``out_of_bounds`` trap, matching a native guest OOB.  (The inner
-    ``opt_ptr`` field reads remain a separate hardening surface; the ``Some``
-    payload's string read is already guarded by :func:`_read_wasm_string`.)
+    Every guest-controlled offset is bounds-checked before it reaches
+    :func:`_read_i32`, whose raw ``ctypes`` slice does no bounds checking of its
+    own — an out-of-range read runs past the memory region into wasmtime's guard
+    page and kills the host with ``SIGBUS`` (#1145 class).  Three offsets are
+    guest-controlled and each is validated: the outer ``(ptr, count)``
+    pointer-array range, every per-element ``opt_ptr`` before its tag is read,
+    and the full 12-byte ``Some(String)`` cell before its ``str_ptr`` /
+    ``str_len`` fields are read.  Any out-of-range offset — or a negative
+    ``count`` — raises a clean ``out_of_bounds`` trap, matching a native guest
+    OOB; the ``Some`` payload's bytes are then read through the already-guarded
+    :func:`_read_wasm_string`.
     """
-    if count > 0:
-        memory = caller["memory"]
-        assert isinstance(memory, wasmtime.Memory)  # noqa: S101
-        mem_size = memory.data_len(caller)
-        if ptr < 0 or ptr + count * 4 > mem_size:
+    if count < 0:
+        raise wasmtime.WasmtimeError(
+            "out of bounds memory access: DB parameter array has "
+            f"negative count {count}"
+        )
+    if count == 0:
+        return []
+    memory = caller["memory"]
+    assert isinstance(memory, wasmtime.Memory)  # noqa: S101
+    mem_size = memory.data_len(caller)
+
+    def _require_in_bounds(offset: int, nbytes: int, what: str) -> None:
+        if offset < 0 or offset + nbytes > mem_size:
             raise wasmtime.WasmtimeError(
-                "out of bounds memory access: DB parameter array of "
-                f"{count} pointer(s) at offset {ptr} exceeds WASM memory "
-                f"size {mem_size}"
+                f"out of bounds memory access: DB parameter {what} at offset "
+                f"{offset} ({nbytes} byte(s)) exceeds WASM memory size "
+                f"{mem_size}"
             )
+
+    _require_in_bounds(ptr, count * 4, f"array of {count} pointer(s)")
     out: list[str | None] = []
     for i in range(count):
         opt_ptr = _read_i32(caller, ptr + i * 4)
+        _require_in_bounds(opt_ptr, 4, "Option tag")
         if _read_i32(caller, opt_ptr) == 1:       # Some(String) — tag 1
+            _require_in_bounds(opt_ptr, 12, "Some(String) cell")
             s_ptr = _read_i32(caller, opt_ptr + 4)
             s_len = _read_i32(caller, opt_ptr + 8)
             out.append(_read_wasm_string(caller, s_ptr, s_len))

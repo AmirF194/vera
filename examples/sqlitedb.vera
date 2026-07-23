@@ -1,0 +1,43 @@
+-- Reading a real on-disk SQLite database file with the <DB> effect.
+--
+-- database.vera seeds an in-memory database; this one reads the committed
+-- examples/sqlitedb.sqlite file instead. Point VERA_DB_URL at the file to run:
+--
+--   export VERA_DB_URL=sqlite:///examples/sqlitedb.sqlite
+--   vera run examples/sqlitedb.vera
+--
+-- Run without VERA_DB_URL and it uses the in-memory default, where the `cities`
+-- table does not exist — so it takes the Err arm and prints how to point at the
+-- file. On success it prints one line per city and returns the row count.
+
+-- Render one result row as "cell | cell | ...", turning each nullable cell into
+-- text. A SQL NULL comes back as a None cell, which option_unwrap_or renders as
+-- the literal "NULL" — distinct from an empty string. The country column is
+-- nullable, so 'Atlantis' (NULL country) prints as "Atlantis | NULL".
+private fn format_row(@Array<Option<String>> -> @String)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  string_join(array_map(@Array<Option<String>>.0, fn(@Option<String> -> @String) effects(pure) { option_unwrap_or(@Option<String>.0, "NULL") }), " | ")
+}
+
+public fn main(-> @Int)
+  requires(true)
+  ensures(true)
+  effects(<DB, IO>)
+{
+  let @Array<Option<String>> = [];
+  match DB.query("SELECT name, country FROM cities ORDER BY name", @Array<Option<String>>.0) {
+    Ok(@Array<Array<Option<String>>>) -> {
+      let @Int = array_length(@Array<Array<Option<String>>>.0);
+      IO.print(string_concat("read ", string_concat(int_to_string(@Int.0), " cities from the on-disk database:\n")));
+      IO.print(string_join(array_map(@Array<Array<Option<String>>>.0, fn(@Array<Option<String>> -> @String) effects(pure) { format_row(@Array<Option<String>>.0) }), "\n"));
+      @Int.0
+    },
+    Err(@String) -> {
+      IO.print(string_concat("no cities table — run with VERA_DB_URL=sqlite:///examples/sqlitedb.sqlite: ", @String.0));
+      0 - 1
+    }
+  }
+}
