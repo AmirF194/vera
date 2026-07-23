@@ -759,6 +759,14 @@ public fn main(-> @Unit)
 }
 """
 
+DB_MAIN = """\
+public fn main(-> @Result<Int, String>)
+  requires(true) ensures(true) effects(<DB>)
+{
+  DB.execute("CREATE TABLE t (x)", [])
+}
+"""
+
 
 def _write_vera(tmp_path: Path, source: str) -> str:
     f = tmp_path / "prog.vera"
@@ -820,6 +828,22 @@ class TestCliCompileWasiP2:
         envelope = _json.loads(capsys.readouterr().out)
         assert envelope["ok"] is False
         assert "http" in envelope["diagnostics"][0]["description"]
+
+    def test_db_family_is_rejected(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # #229 — the <DB> effect is host-backed (sqlite3); wasi-p2 has no
+        # database host, so a DB program is rejected with the family diagnostic
+        # (naming `db`), never a silent fallback or a broken artifact.
+        from vera.cli import cmd_compile
+
+        src = _write_vera(tmp_path, DB_MAIN)
+        rc = cmd_compile(src, target="wasi-p2")
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "db" in err.lower()
+        assert "wasi-p2" in err
+        assert not (tmp_path / "prog.wasm").exists()
 
 
 class TestCliRunWasiP2:

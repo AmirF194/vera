@@ -2770,6 +2770,35 @@ function buildImportObject(module, moduleBytes) {
     };
   }
 
+  // ── DB host imports (#229) ─────────────────────────────────────
+  // SQL execution needs a database driver and credentials that cannot
+  // live safely in client-side JavaScript.  Both ops return a
+  // Result<_, String>, so a deliberate Err (12-byte tag=1 layout, shared
+  // by both Ok payload shapes) is a valid value on either — mirroring the
+  // Inference stub above.
+
+  if (needed.has("db_query")) {
+    imports.vera.db_query = (sqlPtr, sqlLen, paramsPtr, paramsCount) => {
+      return allocResultErrString(
+        "The DB effect cannot run in the browser directly. " +
+        "Database access requires a driver and credentials that would be " +
+        "exposed in client-side JavaScript. To use DB in a browser application, " +
+        "run the query on a server-side endpoint and call it with the Http effect instead."
+      );
+    };
+  }
+
+  if (needed.has("db_execute")) {
+    imports.vera.db_execute = (sqlPtr, sqlLen, paramsPtr, paramsCount) => {
+      return allocResultErrString(
+        "The DB effect cannot run in the browser directly. " +
+        "Database access requires a driver and credentials that would be " +
+        "exposed in client-side JavaScript. To use DB in a browser application, " +
+        "run the statement on a server-side endpoint and call it with the Http effect instead."
+      );
+    };
+  }
+
   // ── Random host imports (#465) ─────────────────────────────────
   // All three back onto Math.random() — fast, non-cryptographic,
   // adequate for games and simulations.  No determinism / seeding

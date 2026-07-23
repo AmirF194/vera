@@ -529,6 +529,7 @@ _DROPS: dict[str, tuple[str, str, str]] = {
 _UNSUPPORTED_FAMILIES: tuple[tuple[str, str], ...] = (
     ("http", "http_ops_used"),
     ("inference", "inference_ops_used"),
+    ("db", "db_ops_used"),
     ("md", "md_ops_used"),
     ("regex", "regex_ops_used"),
     ("map", "map_ops_used"),
