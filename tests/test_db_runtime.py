@@ -276,17 +276,19 @@ class TestDbOnDiskExample229:
     (including the nullable-country ``NULL`` rendering) and doubles as a smoke
     test that the committed ``.sqlite`` is intact."""
 
-    def test_reads_committed_fixture_and_prints_city_table(
-        self, monkeypatch,
-    ) -> None:
+    def test_reads_committed_fixture_and_prints_city_table(self) -> None:
         sqlite_path = _EXAMPLES / "sqlitedb.sqlite"
         assert sqlite_path.is_file(), sqlite_path
         # POSIX form + ``sqlite:///`` prefix so the URL is portable on Windows
         # (backslashes would break the path); ``_open_connection`` strips the
-        # prefix back to the absolute filesystem path.
-        monkeypatch.setenv("VERA_DB_URL", f"sqlite:///{sqlite_path.as_posix()}")
+        # prefix back to the absolute filesystem path.  Thread the URL through
+        # ``execute(env_vars=...)`` rather than mutating ``os.environ`` — the
+        # explicit-dict form the ``_open_connection`` unit tests use.
         source = (_EXAMPLES / "sqlitedb.vera").read_text(encoding="utf-8")
-        result = execute(_compile_ok(source))
+        result = execute(
+            _compile_ok(source),
+            env_vars={"VERA_DB_URL": f"sqlite:///{sqlite_path.as_posix()}"},
+        )
         # ``main`` returns the row count on the Ok arm — four cities in the fixture.
         assert result.value == 4
         out = result.stdout
