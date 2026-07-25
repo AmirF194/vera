@@ -539,7 +539,7 @@ A 60-problem benchmark across 5 difficulty tiers — pure arithmetic, strings an
 
 Frontier models now write Vera **as well as they write the languages they were trained on, and in a good many cases better**. Against Python, Vera wins outright for four of the nine models and draws level with three more. Nine months ago the delta chart was almost entirely red, and the worst case had a model solving seventeen percentage points fewer problems in Vera than in Python.
 
-Mandatory contracts and typed slot references appear to provide enough structure to compensate for zero training data. Still early days — single run per model, no pass@k, and with 36 output-gradeable problems one problem is worth 2.8 percentage points, so most of the gaps above are one or two problems wide. Results from [VeraBench v0.0.16]({REPO}-bench/releases/tag/v0.0.16) against [Vera v0.1.7]({REPO}/releases/tag/v0.1.7). Inspired by [HumanEval](https://github.com/openai/human-eval), [MBPP](https://github.com/google-research/google-research/tree/master/mbpp), and [DafnyBench](https://github.com/sun-wendy/DafnyBench).
+Mandatory contracts and typed slot references appear to provide enough structure to compensate for zero training data. Still early days — single run per model, no pass@k, and with 36 output-gradeable problems one problem is worth 2.8 percentage points, so most of the gaps above are one or two problems wide. Results from [VeraBench v0.0.16]({REPO}-bench#results) against [Vera v0.1.7]({REPO}/releases/tag/v0.1.7). Inspired by [HumanEval](https://github.com/openai/human-eval), [MBPP](https://github.com/google-research/google-research/tree/master/mbpp), and [DafnyBench](https://github.com/sun-wendy/DafnyBench).
 
 Full source and data: [{REPO}-bench]({REPO}-bench).
 
