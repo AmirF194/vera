@@ -143,7 +143,11 @@ Every score is marked against the other two in its row: **bold** where it is the
 
 Frontier models now write Vera **as well as they write the languages they were trained on, and in a good many cases better**. Vera wins outright for four of the nine models, draws with three and loses two.
 
-Mandatory contracts and typed slot references appear to provide enough structure to compensate for zero training data. Still early days. The benchmark is just a single run per model, no pass@k, and with 36 output-gradeable problems one problem is worth just under three percentage points, so most of the gaps above are only one or two problems wide. However it looks like language design can, at least sometimes, outweigh sheer volume of training data. Which, if you're in the business of generating code at any scale, is a reasonably interesting thing to be true. Results from [VeraBench v0.0.16](https://github.com/aallan/vera-bench#results) against [Vera v0.1.7](https://github.com/aallan/vera/releases/tag/v0.1.7). Inspired by [HumanEval](https://github.com/openai/human-eval), [MBPP](https://github.com/google-research/google-research/tree/master/mbpp), and [DafnyBench](https://github.com/sun-wendy/DafnyBench).
+Mandatory contracts and typed slot references appear to provide enough structure to compensate for zero training data.
+
+Still early days. The benchmark is just a single run per model, no pass@k, and with 36 output-gradeable problems one problem is worth just under three percentage points, so most of the gaps above are only one or two problems wide. However it looks like language design can, at least sometimes, outweigh sheer volume of training data. Which, if you're in the business of generating code at any scale, is a reasonably interesting thing to be true.
+
+Results from [VeraBench v0.0.16](https://github.com/aallan/vera-bench#results) against [Vera v0.1.7](https://github.com/aallan/vera/releases/tag/v0.1.7). Inspired by [HumanEval](https://github.com/openai/human-eval), [MBPP](https://github.com/google-research/google-research/tree/master/mbpp), and [DafnyBench](https://github.com/sun-wendy/DafnyBench).
 
 Full source and data: [https://github.com/aallan/vera-bench](https://github.com/aallan/vera-bench).
 
