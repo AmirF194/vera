@@ -539,7 +539,11 @@ A 60-problem benchmark across 5 difficulty tiers — pure arithmetic, strings an
 
 Every score is marked against the other two in its row: **bold** where it is the sole highest, _italic_ where it is not the highest, unmarked where it ties for highest.
 
-Frontier models now write Vera **as well as they write the languages they were trained on, and in a good many cases better**. Against Python, Vera wins outright for four of the nine models and draws level with three more. Nine months ago the delta chart was almost entirely red, and the worst case had a model solving seventeen percentage points fewer problems in Vera than in Python.
+Vera wins outright for four of the nine models, draws with three and loses two.
+
+The first run hands the model a full specification, meaning the type signature and its contracts, and asks only for the body. That tests whether it can write Vera. The second gives it the problem described in English and nothing more, so it has to infer the types, author the contracts, and then write code that satisfies them. That tests whether it understands Vera well enough to specify a problem in it.
+
+The distance between them measures what it costs a model to design a specification rather than fill one in, and for most of the field that runs to six or eight points. Two models close the gap completely, but Claude Opus 5 is the only one that closes it at 100%. It writes the contracts as reliably as it satisfies them.
 
 Mandatory contracts and typed slot references appear to provide enough structure to compensate for zero training data. Still early days — single run per model, no pass@k, and with 36 output-gradeable problems one problem is worth 2.8 percentage points, so most of the gaps above are one or two problems wide. Results from [VeraBench v0.0.16]({REPO}-bench#results) against [Vera v0.1.7]({REPO}/releases/tag/v0.1.7). Inspired by [HumanEval](https://github.com/openai/human-eval), [MBPP](https://github.com/google-research/google-research/tree/master/mbpp), and [DafnyBench](https://github.com/sun-wendy/DafnyBench).
 

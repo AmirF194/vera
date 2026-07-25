@@ -486,7 +486,11 @@
             </tbody>
           </table>
 
-          <p class="bench-caveat">Frontier models now write Vera <strong style="color:var(--ink-900)">as well as they write the languages they were trained on, and in a good many cases better</strong>. Against Python, Vera wins outright for four of the nine models and draws level with three more. Nine months ago the chart below was almost entirely red, and the worst case had a model solving seventeen percentage points fewer problems in Vera than in Python. Every green bar on it was earned from a single document in the prompt, by a model that had never seen the language before.</p>
+          <p class="bench-caveat">Vera wins outright for four of the nine models, draws with three and loses two.</p>
+
+          <p class="bench-caveat" style="margin-top:.75rem">The first run hands the model a full specification, meaning the type signature and its contracts, and asks only for the body. That tests whether it can write Vera. The second gives it the problem described in English and nothing more, so it has to infer the types, author the contracts, and then write code that satisfies them. That tests whether it understands Vera well enough to specify a problem in it.</p>
+
+          <p class="bench-caveat" style="margin-top:.75rem">The distance between them measures what it costs a model to design a specification rather than fill one in, and for most of the field that runs to six or eight points. Two models close the gap completely, but Claude Opus 5 is the only one that closes it at 100%. It writes the contracts as reliably as it satisfies them.</p>
 
           <a href="https://github.com/aallan/vera-bench"><img src="verabench-delta-chart.png" alt="Does Vera beat Python / TypeScript?" class="bench-chart" loading="lazy" width="2689" height="1302"></a>
 
