@@ -141,7 +141,9 @@ A 60-problem benchmark across 5 difficulty tiers — pure arithmetic, strings an
 
 Every score is marked against the other two in its row: **bold** where it is the sole highest, _italic_ where it is not the highest, unmarked where it ties for highest.
 
-Vera wins outright for four of the nine models, draws with three and loses two.
+Frontier models now write Vera **as well as they write the languages they were trained on, and in a good many cases better**. Vera wins outright for four of the nine models, draws with three and loses two.
+
+Each model runs the Vera problems twice, because there are two questions worth asking.
 
 The first run hands the model a full specification, meaning the type signature and its contracts, and asks only for the body. That tests whether it can write Vera. The second gives it the problem described in English and nothing more, so it has to infer the types, author the contracts, and then write code that satisfies them. That tests whether it understands Vera well enough to specify a problem in it.
 

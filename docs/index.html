@@ -486,7 +486,9 @@
             </tbody>
           </table>
 
-          <p class="bench-caveat">Vera wins outright for four of the nine models, draws with three and loses two.</p>
+          <p class="bench-caveat">Frontier models now write Vera <strong style="color:var(--ink-900)">as well as they write the languages they were trained on, and in a good many cases better</strong>. Vera wins outright for four of the nine models, draws with three and loses two.</p>
+
+          <p class="bench-caveat" style="margin-top:.75rem">Each model runs the Vera problems twice, because there are two questions worth asking.</p>
 
           <p class="bench-caveat" style="margin-top:.75rem">The first run hands the model a full specification, meaning the type signature and its contracts, and asks only for the body. That tests whether it can write Vera. The second gives it the problem described in English and nothing more, so it has to infer the types, author the contracts, and then write code that satisfies them. That tests whether it understands Vera well enough to specify a problem in it.</p>
 
