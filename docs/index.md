@@ -123,22 +123,27 @@ Parse errors, type errors, effect mismatches, verification failures, and contrac
 
 ## VeraBench
 
-**Kimi K2.5 writes 100% correct Vera — beating its own 86% on Python and 91% on TypeScript.**
+**Seven of nine frontier models write 100% correct Vera — a language none of them has ever been trained on.**
 
-A 50-problem benchmark across 5 difficulty tiers — pure arithmetic, ADTs, recursion, closures, multi-function effect propagation. Six models, three providers, four modes each. The numbers below are run-correct rates.
+A 60-problem benchmark across 5 difficulty tiers — pure arithmetic, strings and arrays, ADTs and exhaustive matching, recursion with termination proofs, multi-function effect propagation. Nine models, three providers, four modes each. The numbers below are **% solved**: the model wrote code, it compiled, it ran, and the output matched. A refusal, a compile failure, a crash and a wrong answer all count alike as not solved.
 
-| Model | Mode | Vera | Python | TypeScript |
+| Model | Tier | Vera | Python | TypeScript |
 |---|---|---|---|---|
-| Kimi K2.5 | flagship | **100%** | 86% | 91% |
-| GPT-4.1 | flagship | 91% | 96% | 96% |
-| Claude Opus 4 | flagship | 88% | 96% | 96% |
-| Kimi K2 Turbo | sonnet | **83%** | 88% | 79% |
-| Claude Sonnet 4 | sonnet | 79% | 96% | 88% |
-| GPT-4o | sonnet | 78% | 93% | 83% |
+| Claude Fable 5 | ceiling | **100%** | 94% | 92% |
+| GPT-5.6 Sol (pro) | ceiling | 100% | 97% | 100% |
+| Claude Opus 5 | flagship | **100%** | 94% | 94% |
+| Claude Opus 4.8 | flagship | 94% | 100% | 100% |
+| GPT-5.6 Sol | flagship | 100% | 97% | 100% |
+| Kimi K3 | flagship | 100% | 100% | 100% |
+| Claude Sonnet 5 | workhorse | 97% | 100% | 100% |
+| GPT-5.6 Terra | workhorse | 100% | 100% | 100% |
+| Kimi K2.6 | workhorse | 100% | 100% | 100% |
 
-In our latest results **Kimi K2.5 writes perfect Vera code** — 100% run_correct, beating both Python (86%) and TypeScript (91%); Kimi K2 Turbo also writes better Vera than TypeScript. In the previous [v0.0.4](https://github.com/aallan/vera-bench/releases/tag/v0.0.4) benchmark Claude Sonnet 4 wrote Vera better than TypeScript (83% vs 79%); the latest v0.0.7 re-run flipped that result, illustrating the variance inherent in single-run evaluation and model non-determinism.
+Frontier models now write Vera **as well as they write the languages they were trained on, and in a good many cases better**. Against Python, Vera wins outright for four of the nine models and draws level with three more. Nine months ago the delta chart was almost entirely red, and the worst case had a model solving seventeen percentage points fewer problems in Vera than in Python.
 
-Mandatory contracts and typed slot references appear to provide enough structure to compensate for zero training data. Still early days — 50 problems, single run per model. Stable rates will require pass@k evaluation with multiple trials. Results from [VeraBench v0.0.7](https://github.com/aallan/vera-bench/releases/tag/v0.0.7) against [Vera v0.0.108](https://github.com/aallan/vera/releases/tag/v0.0.108). Inspired by [HumanEval](https://github.com/openai/human-eval), [MBPP](https://github.com/google-research/google-research/tree/master/mbpp), and [DafnyBench](https://github.com/sun-wendy/DafnyBench).
+The sharpest evidence that the design choices are doing the work is Vera against Aver, a second language that is also absent from every training set and also learned from a single document in the prompt — so familiarity cannot explain a difference between them. What separates them is that Aver has ordinary variable names where Vera has typed slot references. Vera scores higher on all five models that ran both.
+
+Mandatory contracts and typed slot references appear to provide enough structure to compensate for zero training data. Still early days — single run per model, no pass@k, and with 36 output-gradeable problems one problem is worth 2.8 percentage points, so most of the gaps above are one or two problems wide. Results from [VeraBench v0.0.16](https://github.com/aallan/vera-bench/releases/tag/v0.0.16) against [Vera v0.1.7](https://github.com/aallan/vera/releases/tag/v0.1.7). Inspired by [HumanEval](https://github.com/openai/human-eval), [MBPP](https://github.com/google-research/google-research/tree/master/mbpp), and [DafnyBench](https://github.com/sun-wendy/DafnyBench).
 
 Full source and data: [https://github.com/aallan/vera-bench](https://github.com/aallan/vera-bench).
 
