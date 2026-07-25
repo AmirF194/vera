@@ -530,12 +530,14 @@ A 60-problem benchmark across 5 difficulty tiers — pure arithmetic, strings an
 | Claude Fable 5 | ceiling | **100%** | 94% | 92% |
 | GPT-5.6 Sol (pro) | ceiling | 100% | 97% | 100% |
 | Claude Opus 5 | flagship | **100%** | 94% | 94% |
-| Claude Opus 4.8 | flagship | 94% | 100% | 100% |
+| Claude Opus 4.8 | flagship | _94%_ | 100% | 100% |
 | GPT-5.6 Sol | flagship | 100% | 97% | 100% |
 | Kimi K3 | flagship | 100% | 100% | 100% |
-| Claude Sonnet 5 | workhorse | 97% | 100% | 100% |
+| Claude Sonnet 5 | workhorse | _97%_ | 100% | 100% |
 | GPT-5.6 Terra | workhorse | 100% | 100% | 100% |
 | Kimi K2.6 | workhorse | 100% | 100% | 100% |
+
+The Vera column is marked against the other two scores in its row: **bold** where Vera beat both, _italic_ where Vera is behind at least one, unmarked where it ties either way.
 
 Frontier models now write Vera **as well as they write the languages they were trained on, and in a good many cases better**. Against Python, Vera wins outright for four of the nine models and draws level with three more. Nine months ago the delta chart was almost entirely red, and the worst case had a model solving seventeen percentage points fewer problems in Vera than in Python.
 

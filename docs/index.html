@@ -140,7 +140,7 @@
     .bench-table tbody tr:last-child td{border-bottom:0}
     .bench-table .lang{font-family:var(--sans);font-weight:500;color:var(--ink-900);font-size:.88rem}
     .bench-table .win{color:#1A7F45;font-weight:600}
-    .bench-table .flip{color:#C0392B;font-weight:500}
+    .bench-table .loss{color:#C0392B;font-weight:500}
     .bench-table .tag{font-family:var(--mono);font-size:.62rem;color:var(--ink-300);margin-left:.35rem;text-transform:uppercase;letter-spacing:.05em}
     .bench-table tr.sep td{border-top:2px solid var(--rule-hi)}
     .bench-chart{margin:2rem 0 1rem;display:block}
@@ -424,60 +424,65 @@
             <thead>
               <tr><th>Model</th><th>Vera</th><th>Python</th><th>TypeScript</th></tr>
             </thead>
+            <!-- Colour marks the Vera cell only, against that row's other two scores:
+                 .win  (green) Vera beat both.
+                 .loss (red)   Vera behind at least one.
+                 unmarked      everything else, which is a tie either way.
+                 Python and TypeScript cells are never coloured. -->
             <tbody>
               <tr>
                 <td class="lang">Claude Fable 5 <span class="tag">ceiling</span></td>
                 <td class="win">100%</td>
-                <td class="flip">94%</td>
-                <td class="flip">92%</td>
+                <td>94%</td>
+                <td>92%</td>
               </tr>
               <tr>
                 <td class="lang">GPT-5.6 Sol (pro) <span class="tag">ceiling</span></td>
-                <td class="">100%</td>
-                <td class="flip">97%</td>
-                <td class="">100%</td>
+                <td>100%</td>
+                <td>97%</td>
+                <td>100%</td>
               </tr>
               <tr class="sep">
                 <td class="lang">Claude Opus 5 <span class="tag">flagship</span></td>
                 <td class="win">100%</td>
-                <td class="flip">94%</td>
-                <td class="flip">94%</td>
+                <td>94%</td>
+                <td>94%</td>
               </tr>
               <tr>
                 <td class="lang">Claude Opus 4.8 <span class="tag">flagship</span></td>
-                <td class="">94%</td>
-                <td class="">100%</td>
-                <td class="">100%</td>
+                <td class="loss">94%</td>
+                <td>100%</td>
+                <td>100%</td>
               </tr>
               <tr>
                 <td class="lang">GPT-5.6 Sol <span class="tag">flagship</span></td>
-                <td class="">100%</td>
-                <td class="flip">97%</td>
-                <td class="">100%</td>
+                <td>100%</td>
+                <td>97%</td>
+                <td>100%</td>
               </tr>
               <tr>
                 <td class="lang">Kimi K3 <span class="tag">flagship</span></td>
-                <td class="">100%</td>
-                <td class="">100%</td>
-                <td class="">100%</td>
+                <td>100%</td>
+                <td>100%</td>
+                <td>100%</td>
               </tr>
               <tr class="sep">
                 <td class="lang">Claude Sonnet 5 <span class="tag">workhorse</span></td>
-                <td class="">97%</td>
-                <td class="">100%</td>
-                <td class="">100%</td>
+                <td class="loss">97%</td>
+                <td>100%</td>
+                <td>100%</td>
               </tr>
               <tr>
                 <td class="lang">GPT-5.6 Terra <span class="tag">workhorse</span></td>
-                <td class="">100%</td>
-                <td class="">100%</td>
-                <td class="">100%</td>
+                <td>100%</td>
+                <td>100%</td>
+                <td>100%</td>
               </tr>
               <tr>
                 <td class="lang">Kimi K2.6 <span class="tag">workhorse</span></td>
-                <td class="">100%</td>
-                <td class="">100%</td>
-                <td class="">100%</td>
+                <td>100%</td>
+                <td>100%</td>
+                <td>100%</td>
               </tr>
             </tbody>
           </table>
