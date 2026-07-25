@@ -424,29 +424,28 @@
             <thead>
               <tr><th>Model</th><th>Vera</th><th>Python</th><th>TypeScript</th></tr>
             </thead>
-            <!-- Colour marks the Vera cell only, against that row's other two scores:
-                 .win  (green) Vera beat both.
-                 .loss (red)   Vera behind at least one.
-                 unmarked      everything else, which is a tie either way.
-                 Python and TypeScript cells are never coloured. -->
+            <!-- Every score is marked against the other two in its row:
+                 .win  (green) sole highest.
+                 .loss (red)   not the highest.
+                 unmarked      tied for highest. -->
             <tbody>
               <tr>
                 <td class="lang">Claude Fable 5 <span class="tag">ceiling</span></td>
                 <td class="win">100%</td>
-                <td>94%</td>
-                <td>92%</td>
+                <td class="loss">94%</td>
+                <td class="loss">92%</td>
               </tr>
               <tr>
                 <td class="lang">GPT-5.6 Sol (pro) <span class="tag">ceiling</span></td>
                 <td>100%</td>
-                <td>97%</td>
+                <td class="loss">97%</td>
                 <td>100%</td>
               </tr>
               <tr class="sep">
                 <td class="lang">Claude Opus 5 <span class="tag">flagship</span></td>
                 <td class="win">100%</td>
-                <td>94%</td>
-                <td>94%</td>
+                <td class="loss">94%</td>
+                <td class="loss">94%</td>
               </tr>
               <tr>
                 <td class="lang">Claude Opus 4.8 <span class="tag">flagship</span></td>
@@ -457,7 +456,7 @@
               <tr>
                 <td class="lang">GPT-5.6 Sol <span class="tag">flagship</span></td>
                 <td>100%</td>
-                <td>97%</td>
+                <td class="loss">97%</td>
                 <td>100%</td>
               </tr>
               <tr>
