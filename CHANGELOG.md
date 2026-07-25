@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Documentation
+
+- **The VeraBench results are refreshed to [v0.0.16](https://github.com/aallan/vera-bench/releases/tag/v0.0.16)** across the website, README, FAQ, and `DE_BRUIJN.md`. The published figures still described the v0.0.7 sweep: six models, 50 problems, Kimi K2.5 as the headline, and `run_correct` as the metric. The lineup is now nine models across three providers over 60 problems, and the metric is **% solved** (pass@1) — `run_correct` was measured only over attempts that compiled, so a model that refused or failed to compile shrank its own denominator and scored *higher* for answering less; under % solved a refusal, a compile failure, a crash and a wrong answer all count alike. Seven of the nine models now write 100% correct Vera, and against Python Vera wins outright for four of the nine and draws with three more. The site section gains the Vera-against-Aver comparison — two languages absent from every training set, differing chiefly in that Aver has variable names and Vera does not — and a regenerated delta chart on a transparent background. `DE_BRUIJN.md` no longer states slot ordering as the *current* dominant failure mode (a v0.0.7-era finding frontier models have largely closed) and cites the Aver comparison instead, which tests its thesis directly.
+
 ## [0.1.7] - 2026-07-24
 
 ### Fixed
