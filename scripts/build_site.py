@@ -488,6 +488,18 @@ public fn research_topic(@String -> @Result<String, String>)
 
 Effects compose. `<Http, Inference>` is the row — both must be permitted. `Inference` auto-detects the provider (Anthropic, OpenAI, Moonshot, Mistral) from whichever API key is set. Postconditions can constrain model output; Z3 cannot know what a model will return at compile time, so these become runtime assertions that trap on violation.
 
+```vera
+public fn find_user(@String -> @Result<Array<Array<Option<String>>>, String>)
+  requires(string_length(@String.0) > 0)
+  ensures(true)
+  effects(<DB>)
+{{
+  DB.query("SELECT name, email FROM users WHERE name = ?", [Some(@String.0)])
+}}
+```
+
+SQL injection won't compile. The query string must be a *literal* — every runtime value flows through a `?` placeholder and the params array. Assemble the query from `@String.0` instead and the compiler answers with `[E207]`: string-assembly is the injection vector, the placeholder rewrite is the fix. A provenance rule in the type checker — deterministic, no solver, nothing to configure, and no way to run the injectable form. A SQL `NULL` comes back as a `None` cell, and reading a cell goes through `Option` — code that ignores the `NULL` case does not type-check. [examples/sqlitedb.vera]({REPO}/blob/main/examples/sqlitedb.vera).
+
 When you get it wrong, every error is an instruction for the model that wrote the code:
 
 ```

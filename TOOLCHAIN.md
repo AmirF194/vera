@@ -185,6 +185,14 @@ wasi:http in wasmtime-py); the error says so and points here.
 
 Under `wasmtime serve`, handler `IO.print` output is line-buffered by the host: a print with no trailing newline is held until the next newline (and lost on shutdown if none arrives), so terminate each log line with `\n`. The native `vera serve` driver below does not buffer this way.
 
+```bash
+vera run db_program.vera                                              # <DB> against in-memory SQLite (empty per run)
+VERA_DB_URL=sqlite:///examples/sqlitedb.sqlite \
+  vera run examples/sqlitedb.vera                                     # ...or an on-disk SQLite file
+```
+
+A program with `effects(<DB>)` connects to the database named by `VERA_DB_URL` — unset, that's a hermetic in-memory SQLite database, so `vera run` and `vera test` work with no setup. The SQL string must be a literal (`E207` otherwise) with runtime values passed through `?` placeholders; see [`ENVIRONMENT.md`](ENVIRONMENT.md) and spec §9.5.7.
+
 ---
 
 ## Recipe: serve verified HTTP handlers

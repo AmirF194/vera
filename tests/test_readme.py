@@ -71,9 +71,9 @@ class TestReadmeCodeSamples:
         """README should have the expected number of Vera code blocks."""
         blocks = _vera_blocks()
         # Currently: safe_divide (intro), safe_divide (contracts section),
-        # research_topic (effects section).
+        # research_topic (effects section), find_user (SQL-injection section).
         # The error display block uses a plain ``` fence (not ```vera) by design.
         # Remaining examples live in EXAMPLES.md.
-        assert len(blocks) == 3, (
-            f"Expected 3 Vera blocks in README.md, found {len(blocks)}"
+        assert len(blocks) == 4, (
+            f"Expected 4 Vera blocks in README.md, found {len(blocks)}"
         )
