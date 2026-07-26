@@ -11,9 +11,9 @@ This is the single source of truth for Vera's testing infrastructure, coverage d
 | **Conformance programs** | 168 programs across 9 spec chapters, validating every language feature |
 | **Example programs** | 42, all validated through `vera check` + `vera verify` |
 | **Spec code blocks** | 189 parseable blocks from 14 spec chapters: 92 parse, 86 type-check, 85 verify (the rest carry inline `vera:skip` annotations, #538) |
-| **README code blocks** | 3 Vera blocks (3 validated, 0 annotated) |
-| **FAQ code blocks** | 1 Vera block in FAQ.md (0 validated, 1 annotated snippet) |
-| **HTML code blocks** | 4 Vera blocks in docs/index.html (4 validated: parse + check + verify) |
+| **README code blocks** | 4 Vera blocks (4 validated, 0 annotated) |
+| **FAQ code blocks** | 2 Vera blocks in FAQ.md (1 validated, 1 annotated snippet) |
+| **HTML code blocks** | 5 Vera blocks in docs/index.html (5 validated: parse + check + verify) |
 | **Contract verification** | 357 of 462 obligations (77.3%) across the 42 examples verified statically (Tier 1) — the denominator grew with the auto-synthesised primitive-op obligations of the soundness campaign |
 | **CI matrix** | 13 combinations (Python 3.11/3.12/3.13 × ubuntu-latest/macos-15/macos-26/windows-latest, plus an advisory ubuntu-24.04-arm × 3.12 cell) + browser parity (Node.js 22) + wheel-availability preflight |
 
@@ -171,7 +171,7 @@ python scripts/check_wheel_availability.py           # pre-flight: every runtime
 | `test_checker_apply_fn.py` | 18 | 454 | #854 — `apply_fn` as a checker special form: zero-warning pins (API + CLI `--json` + closures.vera), E201 arity / E202 type / non-function-first-arg errors, E122/E125 effect-row enforcement for applied fn values, E151 redefinition rejection, variadic two-param application, prelude combinator regression pins |
 | `test_prelude_diagnostics.py` | 8 | 271 | #851 — prelude combinator skip-warnings: unreferenced-prelude E602/E604 suppression (zero-warning minimal compile, API + CLI `--json`), `<prelude>` origin attribution for referenced-but-skipped combinators (text + `to_dict`), transitive reference scan, and user-fn warning locations pinned unchanged |
 | `test_readme.py` | 2 | 79 | README code sample parsing |
-| `test_html.py` | 4 | 164 | HTML landing page code samples: parse, check, verify (vera:skip-annotation aware, #538) |
+| `test_html.py` | 4 | 166 | HTML landing page code samples: parse, check, verify (vera:skip-annotation aware, #538) |
 | `test_float64_fp.py` | 10 | 260 | #797 — `@Float64` contracts via Z3's IEEE-754 FloatingPoint sort: unsound relational / reflexive contracts (rounding at 2^53, `NaN`, `Inf`) flip from proved to violated/Tier-3, NaN-guarded contracts still verify at Tier 1, `==`/`!=` use IEEE `fpEQ`/`fpNEQ` (incl. `+0.0 == -0.0`), `%` matches codegen truncated remainder (not `fp.rem`; NaN-by-zero + large-magnitude edges), and `float_is_nan` / `float_is_infinite` / `nan()` / `infinity()` translate to FP predicates / constants. Also guards mixed `@Float64`/`@Int` ordering as a clean E142 (not a Z3 crash) |
 | `test_float64_builtins_807.py` | 81 | 491 | #807 — Tier-1 modeling of the modelable `@Float64` builtins. `float_clamp` modeled unconditionally as faithful WASM `f64.min(f64.max(v,lo),hi)` (the NaN-propagation soundness guard distinguishes it from a naive `z3.fpMin`/`fpMax`); `int_to_float` / `float_to_int` concrete-gated (symbolic args defer to Tier 3 — Z3's symbolic FP↔Real reasoning returns spurious counterexamples); `float_to_int` domain obligation (E529) for concrete NaN/Inf/out-of-range args. Verify-vs-run differentials confirm each model agrees with wasmtime bit-for-bit (±0, ±inf, NaN, ties, lo>hi, the 2^53 rounding boundary, i64 max, and the trap cases) |
 | `test_build_site.py` | 25 | 341 | Site-asset tooling — `_abs_links` rewriting (relative links, fenced-block immunity incl. inline backticks and tilde fences, http/https/fragment pass-through, Vera effect syntax not mis-parsed), `build_site` `<lastmod>` stability (preserve/refresh keyed on URL-structure change), `check_site_assets` sitemap staleness (missing / date-only-clean / structural-stale), and the #538 leak guard (vera:skip fence annotations stripped from generated `docs/SKILL.md` / `docs/llms-full.txt`, with a non-vacuous precondition that the source carries annotations) |

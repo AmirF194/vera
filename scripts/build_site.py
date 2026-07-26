@@ -488,6 +488,18 @@ public fn research_topic(@String -> @Result<String, String>)
 
 Effects compose. `<Http, Inference>` is the row — both must be permitted. `Inference` auto-detects the provider (Anthropic, OpenAI, Moonshot, Mistral) from whichever API key is set. Postconditions can constrain model output; Z3 cannot know what a model will return at compile time, so these become runtime assertions that trap on violation.
 
+```vera
+public fn find_user(@String -> @Result<Array<Array<Option<String>>>, String>)
+  requires(string_length(@String.0) > 0)
+  ensures(true)
+  effects(<DB>)
+{{
+  DB.query("SELECT name, email FROM users WHERE name = ?", [Some(@String.0)])
+}}
+```
+
+SQL injection won't compile. The query string must be a *literal* — every runtime value flows through a `?` placeholder and the params array. Assemble the query from `@String.0` instead and the compiler answers with `[E207]`: string-assembly is the injection vector, the placeholder rewrite is the fix. A provenance rule in the type checker — deterministic, no solver, nothing to configure, and no way to run the injectable form. A SQL `NULL` comes back as a `None` cell, and reading a cell goes through `Option` — code that ignores the `NULL` case does not type-check. [examples/sqlitedb.vera]({REPO}/blob/main/examples/sqlitedb.vera).
+
 When you get it wrong, every error is an instruction for the model that wrote the code:
 
 ```
@@ -521,22 +533,31 @@ Parse errors, type errors, effect mismatches, verification failures, and contrac
 
 ## VeraBench
 
-**Kimi K2.5 writes 100% correct Vera — beating its own 86% on Python and 91% on TypeScript.**
+**Seven of nine frontier models write 100% correct Vera — a language none of them has ever been trained on.**
 
-A 50-problem benchmark across 5 difficulty tiers — pure arithmetic, ADTs, recursion, closures, multi-function effect propagation. Six models, three providers, four modes each. The numbers below are run-correct rates.
+A 60-problem benchmark across 5 difficulty tiers — pure arithmetic, strings and arrays, ADTs and exhaustive matching, recursion with termination proofs, multi-function effect propagation. Nine models, three providers, four modes each. The numbers below are **% solved**: the model wrote code, it compiled, it ran, and the output matched. A refusal, a compile failure, a crash and a wrong answer all count alike as not solved.
 
-| Model | Mode | Vera | Python | TypeScript |
+| Model | Tier | Vera | Python | TypeScript |
 |---|---|---|---|---|
-| Kimi K2.5 | flagship | **100%** | 86% | 91% |
-| GPT-4.1 | flagship | 91% | 96% | 96% |
-| Claude Opus 4 | flagship | 88% | 96% | 96% |
-| Kimi K2 Turbo | sonnet | **83%** | 88% | 79% |
-| Claude Sonnet 4 | sonnet | 79% | 96% | 88% |
-| GPT-4o | sonnet | 78% | 93% | 83% |
+| Claude Fable 5 | ceiling | **100%** | _94%_ | _92%_ |
+| GPT-5.6 Sol (pro) | ceiling | 100% | _97%_ | 100% |
+| Claude Opus 5 | flagship | **100%** | _94%_ | _94%_ |
+| Claude Opus 4.8 | flagship | _94%_ | 100% | 100% |
+| GPT-5.6 Sol | flagship | 100% | _97%_ | 100% |
+| Kimi K3 | flagship | 100% | 100% | 100% |
+| Claude Sonnet 5 | workhorse | _97%_ | 100% | 100% |
+| GPT-5.6 Terra | workhorse | 100% | 100% | 100% |
+| Kimi K2.6 | workhorse | 100% | 100% | 100% |
 
-In our latest results **Kimi K2.5 writes perfect Vera code** — 100% run_correct, beating both Python (86%) and TypeScript (91%); Kimi K2 Turbo also writes better Vera than TypeScript. In the previous [v0.0.4]({REPO}-bench/releases/tag/v0.0.4) benchmark Claude Sonnet 4 wrote Vera better than TypeScript (83% vs 79%); the latest v0.0.7 re-run flipped that result, illustrating the variance inherent in single-run evaluation and model non-determinism.
+Every score is marked against the other two in its row: **bold** where it is the sole highest, _italic_ where it is not the highest, unmarked where it ties for highest.
 
-Mandatory contracts and typed slot references appear to provide enough structure to compensate for zero training data. Still early days — 50 problems, single run per model. Stable rates will require pass@k evaluation with multiple trials. Results from [VeraBench v0.0.7]({REPO}-bench/releases/tag/v0.0.7) against [Vera v0.0.108]({REPO}/releases/tag/v0.0.108). Inspired by [HumanEval](https://github.com/openai/human-eval), [MBPP](https://github.com/google-research/google-research/tree/master/mbpp), and [DafnyBench](https://github.com/sun-wendy/DafnyBench).
+Frontier models now write Vera **as well as they write the languages they were trained on, and in a good many cases better**. Vera wins outright for four of the nine models, draws with three and loses two.
+
+Mandatory contracts and typed slot references appear to provide enough structure to compensate for zero training data.
+
+Still early days. The benchmark is just a single run per model, no pass@k, and with 36 output-gradeable problems one problem is worth just under three percentage points, so most of the gaps above are only one or two problems wide. However it looks like language design can, at least sometimes, outweigh sheer volume of training data. Which, if you're in the business of generating code at any scale, is a reasonably interesting thing to be true.
+
+Results from [VeraBench v0.0.16]({REPO}-bench#results) against [Vera v0.1.7]({REPO}/releases/tag/v0.1.7). Inspired by [HumanEval](https://github.com/openai/human-eval), [MBPP](https://github.com/google-research/google-research/tree/master/mbpp), and [DafnyBench](https://github.com/sun-wendy/DafnyBench).
 
 Full source and data: [{REPO}-bench]({REPO}-bench).
 

@@ -32,7 +32,7 @@ See the **[FAQ](FAQ.md)** for deeper questions about the design — why no varia
 
 ## What Vera looks like
 
-Three examples that show what makes Vera different. For the full tour — contracts, refinement types, ADTs, effects, exception handling, recursion, Markdown, JSON, HTML, HTTP, LLM inference — see **[EXAMPLES.md](EXAMPLES.md)**.
+Four examples that show what makes Vera different. For the full tour — contracts, refinement types, ADTs, effects, exception handling, recursion, Markdown, JSON, HTML, HTTP, SQL, LLM inference — see **[EXAMPLES.md](EXAMPLES.md)**.
 
 ### Contracts the compiler proves
 
@@ -71,6 +71,22 @@ public fn research_topic(@String -> @Result<String, String>)
 ```
 
 Six lines of logic. The signature carries all the ceremony — parameter types, contracts, effect declarations — so the body reads like a pipeline. Run a real example with `VERA_ANTHROPIC_API_KEY=sk-ant-... vera run` [`examples/inference.vera`](examples/inference.vera).  See [`ENVIRONMENT.md`](ENVIRONMENT.md) for all `VERA_*` environment variables (provider keys, runtime knobs, debug flags).
+
+### SQL injection won't compile
+
+The `<DB>` effect accepts only a **literal** SQL string. Runtime data reaches the database exclusively through `?` placeholders and the params array — a query assembled from a runtime value is a compile-time error (`E207`), not a lint, a taint warning, or a runtime scan. The check is provenance-based and lives in the type checker, so it is deterministic: no solver, no configuration, no way to run the injectable form.
+
+```vera
+public fn find_user(@String -> @Result<Array<Array<Option<String>>>, String>)
+  requires(string_length(@String.0) > 0)
+  ensures(true)
+  effects(<DB>)
+{
+  DB.query("SELECT name, email FROM users WHERE name = ?", [Some(@String.0)])
+}
+```
+
+Replace the placeholder with `string_concat("SELECT ... WHERE name = '", @String.0)` and compilation fails with `E207`, an explanation that string-assembly is the injection vector, and the placeholder rewrite as the fix. Rows come back as `Array<Array<Option<String>>>` — a SQL `NULL` is a `None` cell, and reading a cell goes through `Option`, so code that ignores the `NULL` case does not type-check. Try it: [`examples/sqlitedb.vera`](examples/sqlitedb.vera).
 
 ### Errors are instructions
 
@@ -252,7 +268,7 @@ The reference compiler — parser, AST, type checker, contract verifier (Z3), WA
 
 **Key features delivered:** [typed De Bruijn indices](DE_BRUIJN.md) (`@T.n`), mandatory contracts, algebraic effects (IO, Http, HttpServer, State, Exceptions, Async, Inference, DB, Random, Diverge), refinement types, constrained generics (Eq, Ord, Hash, Show), algebraic data types, pattern matching, modules, 164 built-in functions (strings, arrays, maps, sets, decimals, math, JSON, HTML, Markdown, regex, base64, URL), contract-driven testing, canonical formatter, browser runtime, three-tier verification design (Z3 static and runtime fallback shipped; the Z3-guided tier is specified, not yet implemented), a [language server](LSP_SERVER.md) with warm incremental verification and agent-facing proof-delta methods, and contract-verified HTTP handlers served natively (`vera serve`) or as wasi:http components for stock `wasmtime serve` (`--target wasi-p2 --world server`).
 
-**What's next:** the path from "working language" to "the language agents actually use" — see **[ROADMAP.md](ROADMAP.md)** for the four strategic milestones. The flagship goal is a verified MCP tool server where contracts guarantee tool schemas at compile time. **[VeraBench](https://github.com/aallan/vera-bench)** — a 50-problem benchmark across 5 difficulty tiers — now covers 6 models across 3 providers (v0.0.7). The headline result: Kimi K2.5 achieves 100% run_correct on Vera, beating both Python (86%) and TypeScript (91%). Three models beat TypeScript on Vera; the flagship tier averages 93% Vera vs 93% Python — essentially parity. These are single-run results with high variance — see the [full report](https://github.com/aallan/vera-bench) for details.
+**What's next:** the path from "working language" to "the language agents actually use" — see **[ROADMAP.md](ROADMAP.md)** for the four strategic milestones. The flagship goal is a verified MCP tool server where contracts guarantee tool schemas at compile time. **[VeraBench](https://github.com/aallan/vera-bench)** — a 60-problem benchmark across 5 difficulty tiers — now covers 9 models across 3 providers (v0.0.16). The headline result: seven of the nine write 100% correct Vera, a language none of them was trained on. Against Python, Vera wins outright for four of the nine models, draws with three and loses two. The metric is **% solved** (pass@1): a refusal, a compile failure, a crash and a wrong answer all count alike as not solved. These are single-run results over the 36 output-gradeable problems, where one problem is worth 2.8 percentage points — see the [full report](https://github.com/aallan/vera-bench) for details.
 
 Known bugs and open issues are tracked on the **[issue tracker](https://github.com/aallan/vera/issues)**. See **[KNOWN_ISSUES.md](KNOWN_ISSUES.md)** for a consolidated list.
 

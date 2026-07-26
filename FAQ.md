@@ -50,6 +50,24 @@ This layer does cover actual correctness properties, not just interface compatib
 So: provably correct relative to stated requirements, yes. Provably correct relative to unstated intent, no — but the auditable surface is deliberately as small as possible. The human reviews contracts, not implementations.
 
 
+## Is SQL injection really a compile-time error?
+
+Yes — and it is a type-checker guarantee, not a lint or a solver result. The SQL argument of `DB.query` / `DB.execute` must have **literal provenance**: a string literal, or a `string_concat` / interpolation / `let` chain whose parts are all themselves literals. A query assembled from any runtime value — a parameter, a call result, a `\(expr)` interpolation of one — is rejected at compile time with `E207`. Runtime data reaches the database only through `?` placeholders and the params array:
+
+```vera
+public fn find_user(@String -> @Result<Array<Array<Option<String>>>, String>)
+  requires(string_length(@String.0) > 0)
+  ensures(true)
+  effects(<DB>)
+{
+  DB.query("SELECT name, email FROM users WHERE name = ?", [Some(@String.0)])
+}
+```
+
+Swap the placeholder for `string_concat("SELECT ... WHERE name = '", @String.0)` and the program does not compile. Because the check is provenance-based and runs in the type checker, it is deterministic — no solver, no tiers, no timeouts — and it holds everywhere, including inside handled code where solver-based claims weaken. A `?`-placeholder/params count mismatch is a second compile-time error (`E208`) when the params array is written literally — a runtime-sized params array defers the arity check to the driver — and numbered or named placeholder styles are rejected in favour of the one positional form (`E209`).
+
+The guarantee is exactly as wide as the query path: every string that reaches the database goes through `DB.query`/`DB.execute`, and there is no other string-to-SQL route in the language. What it does *not* cover is semantic misuse of a fixed query (a literal `DELETE FROM users`), and in v1 the effect is SQLite-only and un-mockable (`handle[DB]` is [#372](https://github.com/aallan/vera/issues/372); further backends are [#1143](https://github.com/aallan/vera/issues/1143)).
+
 ## Does the compiler prove division-by-zero, out-of-bounds indexing, etc. can't happen?
 
 It does — the verifier auto-synthesises a proof obligation at every primitive operation whose well-definedness depends on operand values, and discharges it from the surrounding preconditions and path conditions.  **Integer** division and modulo by zero carry a `b != 0` obligation (E526) — float division is exempt, since `f64.div` by zero yields inf or NaN rather than trapping; array indexing carries a `0 <= i < array_length(arr)` obligation (E527); `@Nat` subtraction underflow and `@Int` → `@Nat` narrowing carry `>=` / `>= 0` obligations (E502 / E503).  A function that declares `requires(@Int.1 != 0)` and performs `@Int.0 / @Int.1` is statically proven non-trapping; a function that declares `requires(true)` and performs `@Int.1 / @Int.0` is now a **compile error** (E526), not a silent runtime trap.  (An operation inside a closure, quantifier, or handler body is not yet walked by the verifier, so it stays runtime-guarded — loud at runtime, never a silent wrong value — rather than statically obligated; that coverage is tracked in [#779](https://github.com/aallan/vera/issues/779).)
@@ -163,7 +181,11 @@ HTTP, JSON, and Markdown are now built-in, which supports the primary agent work
 
 ## Is there evidence this actually works?
 
-Vera-specific benchmark data is now available across multiple models. **[VeraBench](https://github.com/aallan/vera-bench)** — a 50-problem benchmark across 5 difficulty tiers — covers 6 models across 3 providers (v0.0.7). The headline result: Kimi K2.5 achieves 100% run_correct on Vera, beating both Python (86%) and TypeScript (91%). Three models beat TypeScript on Vera; the flagship tier averages 93% Vera run_correct vs 93% Python — essentially parity. These are single-run results with high variance; the dominant failure mode is De Bruijn slot ordering (`@T.n` index ordering errors). Stable rates will require pass@k evaluation with multiple trials — see the [full report](https://github.com/aallan/vera-bench) for details.
+Vera-specific benchmark data is now available across multiple models. **[VeraBench](https://github.com/aallan/vera-bench)** — a 60-problem benchmark across 5 difficulty tiers — covers 9 models across 3 providers (v0.0.16). The headline result: seven of the nine write 100% correct Vera, a language none of them was trained on. Against Python, Vera wins outright for four of the nine models, draws with three and loses two. The metric is **% solved** (pass@1): a refusal, a compile failure, a crash and a wrong answer all count alike as not solved, so a model cannot score higher by answering less.
+
+The sharpest evidence that the design choices are doing the work is Vera against [Aver](https://averlang.dev), a second language that is also absent from every training set and also learned from a single document in the prompt — so familiarity cannot explain a difference between them. What separates them is that Aver has ordinary variable names where Vera has typed slot references. Vera scores higher on all five models that ran both. The two languages differ in more than one respect, so this isolates the variable better than the Python comparison without isolating it completely.
+
+These caveats matter: single run per model, no pass@k, and the headline is measured over the 36 problems that can be output-graded, where one problem is worth 2.8 percentage points — so most of the gaps are one or two problems wide. Stable rates will require pass@k evaluation with multiple trials — see the [full report](https://github.com/aallan/vera-bench) for details.
 
 The broader literature is also encouraging. The type-constrained decoding paper (Mündler, He, Wang et al., "Type-Constrained Code Generation with Language Models", PLDI 2025, [ACM DL](https://dl.acm.org/doi/10.1145/3729274)) found that enforcing type constraints during LLM code generation cut compilation errors by more than half and improved functional correctness by 3.5–4.5%. Syntax constraints alone provided limited improvement — it was the *type* constraints that made the difference. The same paper found that 94% of LLM-generated compilation errors are type-check failures — exactly the class of error that a strong static type system catches at compile time.
 
@@ -221,14 +243,14 @@ The reference compiler is under active development. The current release includes
 
 - A seven-stage pipeline: parse, transform, resolve, typecheck, verify, compile, execute
 - A 14-chapter formal specification
-- 8,444 tests, including a 168-program conformance suite
+- 8,538 tests, including a 168-program conformance suite
 - 42 working example programs
 - 164 built-in functions covering strings, arrays, math, parsing, and data types
 - Four built-in abilities (Eq, Ord, Hash, Show) with constrained generics and ADT auto-derivation
 - Full IO operations (print, read_line, read_char, read_file, write_file, args, exit, get_env, sleep, time, stderr)
 - Algebraic data types, pattern matching, closures, generics with monomorphisation
 - Algebraic effect handlers with resume and state
-- Built-in `<Http>`, `<HttpServer>`, `<Inference>`, `<State>`, `<IO>`, `<Async>`, `<Random>`, `<Diverge>`, and `Exn<T>` (typed exception) effects
+- Built-in `<Http>`, `<HttpServer>`, `<Inference>`, `<DB>`, `<State>`, `<IO>`, `<Async>`, `<Random>`, `<Diverge>`, and `Exn<T>` (typed exception) effects
 - `<Inference>` dispatches to Anthropic, OpenAI, Kimi (Moonshot), or Mistral via env vars
 - Collection types: `Map<K,V>`, `Set<T>`, `Array<T>`, `Decimal`, `Json`, `HtmlNode`, `Markdown`
 - String interpolation with auto-conversion for primitive types

@@ -22,7 +22,7 @@ Technical decisions, rationale, and prior art. For the design philosophy and FAQ
 | References | [`@T.n` typed De Bruijn indices](DE_BRUIJN.md) | Eliminates naming coherence errors; indices are locally determinable from types alone |
 | Contracts | Mandatory `requires`/`ensures`/`effects` on all functions | Programs must be checkable; contracts are the machine-verifiable specification |
 | Verification | Z3 static (Tier 1) → runtime fallback (Tier 3); Tier 2 (Z3-guided) is specified but not yet implemented | Maximises static guarantees; degrades gracefully where SMT is undecidable |
-| Effects | Algebraic, row-polymorphic (`IO`, `Http`, `HttpServer`, `State`, `Async`, `Inference`, `Random`, `Diverge`, plus the parameterised exception effect `Exn<T>` — all reported by `vera effects --json`) | All state and side effects explicit; effects are typed, trackable, and handleable |
+| Effects | Algebraic, row-polymorphic (`IO`, `Http`, `HttpServer`, `State`, `Async`, `Inference`, `DB`, `Random`, `Diverge`, plus the parameterised exception effect `Exn<T>` — all reported by `vera effects --json`) | All state and side effects explicit; effects are typed, trackable, and handleable |
 | Error handling | `Result<T,E>` ADTs for expected errors; `Exn<T>` algebraic effect for exceptions | Errors are values; `match` enforces handling every case; `Exn<T>` is handleable like any other effect |
 | Inference | `Inference.complete` as an algebraic effect | LLM calls are typed, contract-verifiable, mockable via `handle[Inference]`, and explicit in signatures |
 | Data types | Algebraic data types + exhaustive `match` | No classes, no inheritance; compiler enforces every case is handled |
@@ -83,6 +83,7 @@ Built-in effects:
 | `Random` | `random_int`, `random_float`, `random_bool` | Host randomness; rejection-sampled for unbiased ranges |
 | `Diverge` | — (marker) | Declares potential non-termination |
 | `Inference` | `complete` | LLM calls; `String → Result<String, String>`; provider selected by env var |
+| `DB` | `query`, `execute` | SQL against SQLite (chosen by `VERA_DB_URL`); the SQL argument must be literal-provenance (`E207`) with runtime values through `?` placeholders; rows are `Array<Array<Option<String>>>` (SQL `NULL` = `None`) |
 
 User-defined effects follow the same pattern. Effects compose in rows: `effects(<IO, Http>)`, `effects(<Inference, IO>)`.
 
