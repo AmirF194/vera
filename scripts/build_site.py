@@ -498,7 +498,7 @@ public fn find_user(@String -> @Result<Array<Array<Option<String>>>, String>)
 }}
 ```
 
-SQL injection won't compile. The query string must be a *literal* — every runtime value flows through a `?` placeholder and the params array. Assemble the query from `@String.0` instead and the compiler answers with `[E207]`: string-assembly is the injection vector, the placeholder rewrite is the fix. A provenance rule in the type checker — deterministic, no solver, nothing to configure, and no way to run the injectable form. A SQL `NULL` comes back as a `None` cell, so unhandled NULL is a compile error too.
+SQL injection won't compile. The query string must be a *literal* — every runtime value flows through a `?` placeholder and the params array. Assemble the query from `@String.0` instead and the compiler answers with `[E207]`: string-assembly is the injection vector, the placeholder rewrite is the fix. A provenance rule in the type checker — deterministic, no solver, nothing to configure, and no way to run the injectable form. A SQL `NULL` comes back as a `None` cell, and reading a cell goes through `Option` — code that ignores the `NULL` case does not type-check.
 
 When you get it wrong, every error is an instruction for the model that wrote the code:
 

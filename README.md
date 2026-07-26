@@ -86,7 +86,7 @@ public fn find_user(@String -> @Result<Array<Array<Option<String>>>, String>)
 }
 ```
 
-Replace the placeholder with `string_concat("SELECT ... WHERE name = '", @String.0)` and compilation fails with `E207`, an explanation that string-assembly is the injection vector, and the placeholder rewrite as the fix. Rows come back as `Array<Array<Option<String>>>` — a SQL `NULL` is a `None` cell, so unhandled NULL is a compile error too. Try it: [`examples/sqlitedb.vera`](examples/sqlitedb.vera).
+Replace the placeholder with `string_concat("SELECT ... WHERE name = '", @String.0)` and compilation fails with `E207`, an explanation that string-assembly is the injection vector, and the placeholder rewrite as the fix. Rows come back as `Array<Array<Option<String>>>` — a SQL `NULL` is a `None` cell, and reading a cell goes through `Option`, so code that ignores the `NULL` case does not type-check. Try it: [`examples/sqlitedb.vera`](examples/sqlitedb.vera).
 
 ### Errors are instructions
 

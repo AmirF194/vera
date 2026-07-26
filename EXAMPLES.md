@@ -364,7 +364,7 @@ private fn classify_sentiment(@String -> @Result<String, String>)
 
 ## SQL — injection is a compile-time error
 
-The `<DB>` effect runs SQL against a relational database (SQLite in v1, chosen by `VERA_DB_URL`; in-memory by default). The query string must be a **literal** — runtime values reach the database only through `?` placeholders and the params array. Rows come back as `Array<Array<Option<String>>>`: a SQL `NULL` is a `None` cell, distinct from an empty string, and the `match` makes both paths explicit.
+The `<DB>` effect runs SQL against a relational database (SQLite in v1, chosen by `VERA_DB_URL`; in-memory by default). The query string must be a **literal** — runtime values reach the database only through `?` placeholders and the params array. Rows come back as `Array<Array<Option<String>>>`: a SQL `NULL` is a `None` cell, distinct from an empty string, and reading a cell goes through `Option` — the `NULL` case must be matched or explicitly defaulted (`option_unwrap_or`) before the text can be used.
 
 ```vera
 public fn find_user(@String -> @Result<Array<Array<Option<String>>>, String>)

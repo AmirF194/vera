@@ -384,7 +384,7 @@
 }</pre>
         </div>
         <aside class="aside">
-          <strong>SQL injection won&rsquo;t compile.</strong> The query string must be a <em>literal</em> &mdash; every runtime value flows through a <code>?</code> placeholder and the params array. Assemble the query from <code>@String.0</code> instead and the compiler answers with <code>[E207]</code>: string-assembly is the injection vector, the placeholder rewrite is the fix. A provenance rule in the type checker &mdash; deterministic, no solver, nothing to configure, and no way to run the injectable form. A SQL <code>NULL</code> comes back as a <code>None</code> cell, so unhandled NULL is a compile error too.
+          <strong>SQL injection won&rsquo;t compile.</strong> The query string must be a <em>literal</em> &mdash; every runtime value flows through a <code>?</code> placeholder and the params array. Assemble the query from <code>@String.0</code> instead and the compiler answers with <code>[E207]</code>: string-assembly is the injection vector, the placeholder rewrite is the fix. A provenance rule in the type checker &mdash; deterministic, no solver, nothing to configure, and no way to run the injectable form. A SQL <code>NULL</code> comes back as a <code>None</code> cell, and reading a cell goes through <code>Option</code> &mdash; code that ignores the <code>NULL</code> case does not type-check.
         </aside>
       </div>
 
