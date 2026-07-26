@@ -74,7 +74,7 @@ Six lines of logic. The signature carries all the ceremony — parameter types, 
 
 ### SQL injection won't compile
 
-The `<DB>` effect accepts only a **literal** SQL string. Runtime data reaches the database exclusively through `?` placeholders and the params array — a query assembled from a runtime value is a compile-time error (`E207`), not a lint, a taint warning, or a runtime scan. The check is provenance-based and lives in the type checker, so it is deterministic: no solver, no configuration, no way to run the injectable form.
+Nearly every SQL injection starts the same way: a query assembled from a value that came from outside the program. Vera makes that unwriteable. The SQL argument of `DB.query` / `DB.execute` has to be a literal, so the query text is fixed when the program compiles, and outside data can only reach the database through the `?` placeholders.
 
 ```vera
 public fn find_user(@String -> @Result<Array<Array<Option<String>>>, String>)
@@ -86,7 +86,7 @@ public fn find_user(@String -> @Result<Array<Array<Option<String>>>, String>)
 }
 ```
 
-Replace the placeholder with `string_concat("SELECT ... WHERE name = '", @String.0)` and compilation fails with `E207`, an explanation that string-assembly is the injection vector, and the placeholder rewrite as the fix. Rows come back as `Array<Array<Option<String>>>` — a SQL `NULL` is a `None` cell, and reading a cell goes through `Option`, so code that ignores the `NULL` case does not type-check. Try it: [`examples/sqlitedb.vera`](examples/sqlitedb.vera).
+Build the string instead — `string_concat("SELECT ... WHERE name = '", @String.0)` — and the program does not compile. `E207` names string-assembly as the injection vector and gives the placeholder rewrite as the fix. This is not a lint you configure, a taint analysis you run, or a scanner you remember to point at the code: it is a rule about where a string came from, enforced by the type checker, so the injectable form has no path to a running program. Try it: [`examples/sqlitedb.vera`](examples/sqlitedb.vera).
 
 ### Errors are instructions
 

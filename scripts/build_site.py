@@ -498,7 +498,7 @@ public fn find_user(@String -> @Result<Array<Array<Option<String>>>, String>)
 }}
 ```
 
-SQL injection won't compile. The query string must be a *literal* — every runtime value flows through a `?` placeholder and the params array. Assemble the query from `@String.0` instead and the compiler answers with `[E207]`: string-assembly is the injection vector, the placeholder rewrite is the fix. A provenance rule in the type checker — deterministic, no solver, nothing to configure, and no way to run the injectable form. A SQL `NULL` comes back as a `None` cell, and reading a cell goes through `Option` — code that ignores the `NULL` case does not type-check. [examples/sqlitedb.vera]({REPO}/blob/main/examples/sqlitedb.vera).
+SQL injection won't compile. Nearly every SQL injection starts the same way — a query assembled from a value that came from outside the program. Vera makes that unwriteable. The SQL argument has to be a literal, so the query text is fixed when the program compiles and outside data can only arrive through the `?` placeholders. Build the string with `string_concat` instead and the answer is `[E207]`: not a warning, not a lint you can silence, but a type error you cannot configure away. [examples/sqlitedb.vera]({REPO}/blob/main/examples/sqlitedb.vera).
 
 When you get it wrong, every error is an instruction for the model that wrote the code:
 

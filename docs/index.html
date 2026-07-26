@@ -384,7 +384,7 @@
 }</pre>
         </div>
         <aside class="aside">
-          <strong>SQL injection won&rsquo;t compile.</strong> The query string must be a <em>literal</em> &mdash; every runtime value flows through a <code>?</code> placeholder and the params array. Assemble the query from <code>@String.0</code> instead and the compiler answers with <code>[E207]</code>: string-assembly is the injection vector, the placeholder rewrite is the fix. A provenance rule in the type checker &mdash; deterministic, no solver, nothing to configure, and no way to run the injectable form. A SQL <code>NULL</code> comes back as a <code>None</code> cell, and reading a cell goes through <code>Option</code> &mdash; code that ignores the <code>NULL</code> case does not type-check. <a href="https://github.com/aallan/vera/blob/main/examples/sqlitedb.vera">examples/sqlitedb.vera</a>.
+          <strong>SQL injection won&rsquo;t compile.</strong> Nearly every SQL injection starts the same way &mdash; a query assembled from a value that came from outside the program. Vera makes that unwriteable. The SQL argument has to be a literal, so the query text is fixed when the program compiles and outside data can only arrive through the <code>?</code> placeholders. Build the string with <code>string_concat</code> instead and the answer is <code>[E207]</code>: not a warning, not a lint you can silence, but a type error you cannot configure away. <a href="https://github.com/aallan/vera/blob/main/examples/sqlitedb.vera">examples/sqlitedb.vera</a>.
         </aside>
       </div>
 
