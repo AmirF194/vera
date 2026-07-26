@@ -143,7 +143,7 @@ The `verify --json` output includes a verification summary:
 5. `Inference.complete(@String.0)` returns `Result<String, String>`; requires `VERA_ANTHROPIC_API_KEY`, `VERA_OPENAI_API_KEY`, `VERA_MOONSHOT_API_KEY` (Kimi), or `VERA_MISTRAL_API_KEY` to run; provider auto-detected from whichever key is set.  See [`ENVIRONMENT.md`](ENVIRONMENT.md) for the full env-var reference, including `VERA_INFERENCE_PROVIDER` / `VERA_INFERENCE_MODEL` overrides
 6. Recursive functions need a `decreases()` clause
 7. Match expressions must be exhaustive
-8. `DB.query` / `DB.execute` (effect `<DB>`) take a **literal** SQL string — a query assembled from a runtime value is a compile-time error (`E207`). Every runtime value goes through a `?` placeholder and the `Array<Option<String>>` params array (`DB.query("SELECT ... WHERE id = ?", [Some(@String.0)])`); a placeholder/params count mismatch is `E208`. The connection comes from `VERA_DB_URL` (default: in-memory SQLite) — see [`ENVIRONMENT.md`](ENVIRONMENT.md)
+8. `DB.query` / `DB.execute` (effect `<DB>`) take a **literal** SQL string — a query assembled from a runtime value is a compile-time error (`E207`). Every runtime value goes through a `?` placeholder and the `Array<Option<String>>` params array (`DB.query("SELECT ... WHERE id = ?", [Some(@String.0)])`); a placeholder/params count mismatch with a literal params array is `E208`. The connection comes from `VERA_DB_URL` (default: in-memory SQLite) — see [`ENVIRONMENT.md`](ENVIRONMENT.md)
 
 ## For agents working on the compiler
 

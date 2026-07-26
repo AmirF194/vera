@@ -64,7 +64,7 @@ public fn find_user(@String -> @Result<Array<Array<Option<String>>>, String>)
 }
 ```
 
-Swap the placeholder for `string_concat("SELECT ... WHERE name = '", @String.0)` and the program does not compile. Because the check is provenance-based and runs in the type checker, it is deterministic — no solver, no tiers, no timeouts — and it holds everywhere, including inside handled code where solver-based claims weaken. A `?`-placeholder/params count mismatch is a second compile-time error (`E208`), and numbered or named placeholder styles are rejected in favour of the one positional form (`E209`).
+Swap the placeholder for `string_concat("SELECT ... WHERE name = '", @String.0)` and the program does not compile. Because the check is provenance-based and runs in the type checker, it is deterministic — no solver, no tiers, no timeouts — and it holds everywhere, including inside handled code where solver-based claims weaken. A `?`-placeholder/params count mismatch is a second compile-time error (`E208`) when the params array is written literally — a runtime-sized params array defers the arity check to the driver — and numbered or named placeholder styles are rejected in favour of the one positional form (`E209`).
 
 The guarantee is exactly as wide as the query path: every string that reaches the database goes through `DB.query`/`DB.execute`, and there is no other string-to-SQL route in the language. What it does *not* cover is semantic misuse of a fixed query (a literal `DELETE FROM users`), and in v1 the effect is SQLite-only and un-mockable (`handle[DB]` is [#372](https://github.com/aallan/vera/issues/372); further backends are [#1143](https://github.com/aallan/vera/issues/1143)).
 
@@ -243,14 +243,14 @@ The reference compiler is under active development. The current release includes
 
 - A seven-stage pipeline: parse, transform, resolve, typecheck, verify, compile, execute
 - A 14-chapter formal specification
-- 8,444 tests, including a 168-program conformance suite
+- 8,538 tests, including a 168-program conformance suite
 - 42 working example programs
 - 164 built-in functions covering strings, arrays, math, parsing, and data types
 - Four built-in abilities (Eq, Ord, Hash, Show) with constrained generics and ADT auto-derivation
 - Full IO operations (print, read_line, read_char, read_file, write_file, args, exit, get_env, sleep, time, stderr)
 - Algebraic data types, pattern matching, closures, generics with monomorphisation
 - Algebraic effect handlers with resume and state
-- Built-in `<Http>`, `<HttpServer>`, `<Inference>`, `<State>`, `<IO>`, `<Async>`, `<Random>`, `<Diverge>`, and `Exn<T>` (typed exception) effects
+- Built-in `<Http>`, `<HttpServer>`, `<Inference>`, `<DB>`, `<State>`, `<IO>`, `<Async>`, `<Random>`, `<Diverge>`, and `Exn<T>` (typed exception) effects
 - `<Inference>` dispatches to Anthropic, OpenAI, Kimi (Moonshot), or Mistral via env vars
 - Collection types: `Map<K,V>`, `Set<T>`, `Array<T>`, `Decimal`, `Json`, `HtmlNode`, `Markdown`
 - String interpolation with auto-conversion for primitive types

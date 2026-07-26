@@ -11,9 +11,9 @@ This is the single source of truth for Vera's testing infrastructure, coverage d
 | **Conformance programs** | 168 programs across 9 spec chapters, validating every language feature |
 | **Example programs** | 42, all validated through `vera check` + `vera verify` |
 | **Spec code blocks** | 189 parseable blocks from 14 spec chapters: 92 parse, 86 type-check, 85 verify (the rest carry inline `vera:skip` annotations, #538) |
-| **README code blocks** | 3 Vera blocks (3 validated, 0 annotated) |
-| **FAQ code blocks** | 1 Vera block in FAQ.md (0 validated, 1 annotated snippet) |
-| **HTML code blocks** | 4 Vera blocks in docs/index.html (4 validated: parse + check + verify) |
+| **README code blocks** | 4 Vera blocks (4 validated, 0 annotated) |
+| **FAQ code blocks** | 2 Vera blocks in FAQ.md (1 validated, 1 annotated snippet) |
+| **HTML code blocks** | 5 Vera blocks in docs/index.html (5 validated: parse + check + verify) |
 | **Contract verification** | 357 of 462 obligations (77.3%) across the 42 examples verified statically (Tier 1) — the denominator grew with the auto-synthesised primitive-op obligations of the soundness campaign |
 | **CI matrix** | 13 combinations (Python 3.11/3.12/3.13 × ubuntu-latest/macos-15/macos-26/windows-latest, plus an advisory ubuntu-24.04-arm × 3.12 cell) + browser parity (Node.js 22) + wheel-availability preflight |
 
