@@ -10,6 +10,7 @@ Vera reads a small set of `VERA_*` environment variables.  This document is the 
 | [`VERA_MISTRAL_API_KEY`](#inference-provider-keys) | Mistral provider key for the `Inference` effect | runtime | as above |
 | [`VERA_INFERENCE_PROVIDER`](#explicit-provider--model-overrides) | Force a specific provider rather than auto-detecting from the keys present | runtime | optional |
 | [`VERA_INFERENCE_MODEL`](#explicit-provider--model-overrides) | Override the provider's default model | runtime | optional |
+| [`VERA_DB_URL`](#vera_db_url) | Database connection for the `DB` effect | runtime | optional (defaults to `sqlite::memory:`) |
 | [`VERA_JS_COVERAGE`](#vera_js_coverage) | Opt-in V8 coverage during browser-parity tests | dev / CI | optional |
 | [`VERA_EAGER_GC`](#vera_eager_gc) | Force `$gc_collect` on every allocation — debugging knob for GC-rooting bugs | compile-time (dev) | optional |
 
@@ -37,6 +38,19 @@ The same export works for `examples/inference.vera` from `README.md`.
 - **`VERA_INFERENCE_MODEL`** — set to a provider-specific model identifier to override the default model.  Each provider has its own default; consult the provider's docs for valid model strings.
 
 Both are optional.  When unset, the runtime uses auto-detection and the provider's default model.
+
+## `VERA_DB_URL`
+
+Chooses the database the `DB` effect connects to at runtime (`DB.query` / `DB.execute`; spec [§9.5.7](spec/09-standard-library.md)).
+
+- **Unset** — an in-memory SQLite database (`sqlite::memory:`), created empty per run. Hermetic: nothing touches disk, so `vera test` and examples run without configuration.
+- **`sqlite:///path/to/file.db`** — an on-disk SQLite file, e.g.:
+
+  ```bash
+  VERA_DB_URL=sqlite:///examples/sqlitedb.sqlite vera run examples/sqlitedb.vera
+  ```
+
+Phase: runtime (the connection is opened lazily by the first `DB` operation and shared for the rest of the run). In v1 the effect is SQLite-only and single-connection; a value that isn't one of the in-memory spellings or a `sqlite://` URL is treated as a SQLite file path, and an unopenable URL surfaces as the operation's `Err` result rather than a crash. Further backends are [#1143](https://github.com/aallan/vera/issues/1143). The browser runtime returns `Err` for every `DB` operation regardless of this variable, and the `wasi-p2` target rejects `<DB>` programs at compile time.
 
 ## `VERA_JS_COVERAGE`
 

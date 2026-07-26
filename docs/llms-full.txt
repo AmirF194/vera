@@ -132,7 +132,7 @@ Until those land, terminal Vera programs (animation via `IO.sleep` + cursor cont
 
 ### WASI Preview 2 compilation (experimental)
 
-`vera compile --target wasi-p2` emits a binary WebAssembly *component* that runs under any stock wasip2 host with no Vera bindings — `wasmtime run file.wasm` just works.  The target covers the **IO and Random host families only**; a program using any other family (Http, Map, Set, Decimal, Json, Html, Md, Regex, Math, Inference, State, Async) is rejected with a diagnostic naming the family.  `vera run --target wasi-p2 file.vera` executes the component under the built-in wasip2 host with the usual output/trap reporting.  Divergences inherent to WASI 0.2 (exit codes collapse to 0/1; no structured trap frames) are documented in [spec chapter 13](https://github.com/aallan/vera/blob/main/spec/13-wasi.md).  `--world server` packages a `handle(Request -> Response)` program (the `<HttpServer>` effect) as a `wasi:http/incoming-handler` component that stock `wasmtime serve` runs — headers work via in-guest String maps; stdin/filesystem/env ops are rejected in that world (spec §13.7).
+`vera compile --target wasi-p2` emits a binary WebAssembly *component* that runs under any stock wasip2 host with no Vera bindings — `wasmtime run file.wasm` just works.  The target covers the **IO and Random host families only**; a program using any other family (Http, Map, Set, Decimal, Json, Html, Md, Regex, Math, Inference, State, Async, DB) is rejected with a diagnostic naming the family.  `vera run --target wasi-p2 file.vera` executes the component under the built-in wasip2 host with the usual output/trap reporting.  Divergences inherent to WASI 0.2 (exit codes collapse to 0/1; no structured trap frames) are documented in [spec chapter 13](https://github.com/aallan/vera/blob/main/spec/13-wasi.md).  `--world server` packages a `handle(Request -> Response)` program (the `<HttpServer>` effect) as a `wasi:http/incoming-handler` component that stock `wasmtime serve` runs — headers work via in-guest String maps; stdin/filesystem/env ops are rejected in that world (spec §13.7).
 
 To run the WASM directly in Node.js:
 
@@ -2593,6 +2593,7 @@ The `verify --json` output includes a verification summary:
 5. `Inference.complete(@String.0)` returns `Result<String, String>`; requires `VERA_ANTHROPIC_API_KEY`, `VERA_OPENAI_API_KEY`, `VERA_MOONSHOT_API_KEY` (Kimi), or `VERA_MISTRAL_API_KEY` to run; provider auto-detected from whichever key is set.  See [`ENVIRONMENT.md`](https://github.com/aallan/vera/blob/main/ENVIRONMENT.md) for the full env-var reference, including `VERA_INFERENCE_PROVIDER` / `VERA_INFERENCE_MODEL` overrides
 6. Recursive functions need a `decreases()` clause
 7. Match expressions must be exhaustive
+8. `DB.query` / `DB.execute` (effect `<DB>`) take a **literal** SQL string — a query assembled from a runtime value is a compile-time error (`E207`). Every runtime value goes through a `?` placeholder and the `Array<Option<String>>` params array (`DB.query("SELECT ... WHERE id = ?", [Some(@String.0)])`); a placeholder/params count mismatch is `E208`. The connection comes from `VERA_DB_URL` (default: in-memory SQLite) — see [`ENVIRONMENT.md`](https://github.com/aallan/vera/blob/main/ENVIRONMENT.md)
 
 ## For agents working on the compiler
 
@@ -2960,6 +2961,24 @@ This layer does cover actual correctness properties, not just interface compatib
 
 So: provably correct relative to stated requirements, yes. Provably correct relative to unstated intent, no — but the auditable surface is deliberately as small as possible. The human reviews contracts, not implementations.
 
+
+## Is SQL injection really a compile-time error?
+
+Yes — and it is a type-checker guarantee, not a lint or a solver result. The SQL argument of `DB.query` / `DB.execute` must have **literal provenance**: a string literal, or a `string_concat` / interpolation / `let` chain whose parts are all themselves literals. A query assembled from any runtime value — a parameter, a call result, a `\(expr)` interpolation of one — is rejected at compile time with `E207`. Runtime data reaches the database only through `?` placeholders and the params array:
+
+```vera
+public fn find_user(@String -> @Result<Array<Array<Option<String>>>, String>)
+  requires(string_length(@String.0) > 0)
+  ensures(true)
+  effects(<DB>)
+{
+  DB.query("SELECT name, email FROM users WHERE name = ?", [Some(@String.0)])
+}
+```
+
+Swap the placeholder for `string_concat("SELECT ... WHERE name = '", @String.0)` and the program does not compile. Because the check is provenance-based and runs in the type checker, it is deterministic — no solver, no tiers, no timeouts — and it holds everywhere, including inside handled code where solver-based claims weaken. A `?`-placeholder/params count mismatch is a second compile-time error (`E208`), and numbered or named placeholder styles are rejected in favour of the one positional form (`E209`).
+
+The guarantee is exactly as wide as the query path: every string that reaches the database goes through `DB.query`/`DB.execute`, and there is no other string-to-SQL route in the language. What it does *not* cover is semantic misuse of a fixed query (a literal `DELETE FROM users`), and in v1 the effect is SQLite-only and un-mockable (`handle[DB]` is [#372](https://github.com/aallan/vera/issues/372); further backends are [#1143](https://github.com/aallan/vera/issues/1143)).
 
 ## Does the compiler prove division-by-zero, out-of-bounds indexing, etc. can't happen?
 

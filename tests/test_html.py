@@ -156,9 +156,11 @@ class TestHtmlCodeSamples:
     def test_vera_block_count(self) -> None:
         """docs/index.html should have the expected number of Vera code blocks."""
         blocks = _extract_vera_blocks()
-        # Currently: safe_divide, fizzbuzz, classify_sentiment, research_topic
+        # Currently: safe_divide, fizzbuzz, classify_sentiment, research_topic,
+        # find_user (the SQL-injection showcase sample).
         # (Count reduced from 5 to 4 in the redesign — safe_classify was folded
-        # into the classify_sentiment sample.)
-        assert len(blocks) == 4, (
-            f"Expected 4 Vera blocks in docs/index.html, found {len(blocks)}"
+        # into the classify_sentiment sample — then back to 5 when the DB/SQL
+        # sample joined the showcase.)
+        assert len(blocks) == 5, (
+            f"Expected 5 Vera blocks in docs/index.html, found {len(blocks)}"
         )

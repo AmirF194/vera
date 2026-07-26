@@ -2,7 +2,8 @@
 
 Vera is a programming language designed for large language models to write. It
 has mandatory contracts, algebraic effects, typed slot references instead of
-variable names, and a compiler that emits WebAssembly.
+variable names, and a compiler that emits WebAssembly. Contracts are verified
+statically with Z3 where possible, and SQL injection is a compile-time error.
 
 Full documentation, examples, and the language specification are available at
 [veralang.dev](https://veralang.dev) and in the

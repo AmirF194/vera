@@ -362,6 +362,36 @@ private fn classify_sentiment(@String -> @Result<String, String>)
 
 > [`examples/inference.vera`](examples/inference.vera) — run with `VERA_ANTHROPIC_API_KEY=sk-ant-... vera run examples/inference.vera`
 
+## SQL — injection is a compile-time error
+
+The `<DB>` effect runs SQL against a relational database (SQLite in v1, chosen by `VERA_DB_URL`; in-memory by default). The query string must be a **literal** — runtime values reach the database only through `?` placeholders and the params array. Rows come back as `Array<Array<Option<String>>>`: a SQL `NULL` is a `None` cell, distinct from an empty string, and the `match` makes both paths explicit.
+
+```vera
+public fn find_user(@String -> @Result<Array<Array<Option<String>>>, String>)
+  requires(string_length(@String.0) > 0)
+  ensures(true)
+  effects(<DB>)
+{
+  DB.query("SELECT name, email FROM users WHERE name = ?", [Some(@String.0)])
+}
+```
+
+Building the query from the parameter instead — `DB.query(string_concat("SELECT ... WHERE name = '", @String.0), [])` — does not compile:
+
+```text
+[E207] Error at main.vera, line 6, column 12:
+
+  The SQL argument to 'query' must be a string literal or a concatenation of
+  literals, not a runtime-derived value.
+
+  A SQL string assembled from a runtime value — a slot, a function result, or
+  a \(expr) interpolation — is the SQL injection vector.  Vera makes it a
+  compile-time error: the query text is fixed at compile time and all runtime
+  data flows through the ? placeholders and the params array.
+```
+
+> [`examples/sqlitedb.vera`](examples/sqlitedb.vera) — run with `VERA_DB_URL=sqlite:///examples/sqlitedb.sqlite vera run examples/sqlitedb.vera`
+
 ## Conway's Game of Life — putting it all together
 
 A real Vera program: 80×22 grid, three classic patterns interacting, recursive `run_loop` driven by `<IO>` for animation timing.  Three things worth noticing.

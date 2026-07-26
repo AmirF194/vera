@@ -375,6 +375,21 @@
 
       <div class="sample">
         <div class="code">
+<pre><span class="kw">public</span> <span class="kw">fn</span> find_user(<span class="sl">@String</span> -> <span class="sl">@Result&lt;Array&lt;Array&lt;Option&lt;String&gt;&gt;&gt;, String&gt;</span>)
+  <span class="ct">requires</span>(string_length(<span class="sl">@String.0</span>) > <span class="num">0</span>)
+  <span class="ct">ensures</span>(<span class="num">true</span>)
+  <span class="ct">effects</span>(&lt;DB&gt;)
+{
+  DB.query(<span class="str">"SELECT name, email FROM users WHERE name = ?"</span>, [Some(<span class="sl">@String.0</span>)])
+}</pre>
+        </div>
+        <aside class="aside">
+          <strong>SQL injection won&rsquo;t compile.</strong> The query string must be a <em>literal</em> &mdash; every runtime value flows through a <code>?</code> placeholder and the params array. Assemble the query from <code>@String.0</code> instead and the compiler answers with <code>[E207]</code>: string-assembly is the injection vector, the placeholder rewrite is the fix. A provenance rule in the type checker &mdash; deterministic, no solver, nothing to configure, and no way to run the injectable form. A SQL <code>NULL</code> comes back as a <code>None</code> cell, so unhandled NULL is a compile error too.
+        </aside>
+      </div>
+
+      <div class="sample">
+        <div class="code">
 <pre><span class="err-head">[E001] Error at main.vera, line 14, column 1:</span>
 
     <span class="err-code">{</span>

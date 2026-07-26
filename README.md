@@ -32,7 +32,7 @@ See the **[FAQ](FAQ.md)** for deeper questions about the design — why no varia
 
 ## What Vera looks like
 
-Three examples that show what makes Vera different. For the full tour — contracts, refinement types, ADTs, effects, exception handling, recursion, Markdown, JSON, HTML, HTTP, LLM inference — see **[EXAMPLES.md](EXAMPLES.md)**.
+Four examples that show what makes Vera different. For the full tour — contracts, refinement types, ADTs, effects, exception handling, recursion, Markdown, JSON, HTML, HTTP, SQL, LLM inference — see **[EXAMPLES.md](EXAMPLES.md)**.
 
 ### Contracts the compiler proves
 
@@ -71,6 +71,22 @@ public fn research_topic(@String -> @Result<String, String>)
 ```
 
 Six lines of logic. The signature carries all the ceremony — parameter types, contracts, effect declarations — so the body reads like a pipeline. Run a real example with `VERA_ANTHROPIC_API_KEY=sk-ant-... vera run` [`examples/inference.vera`](examples/inference.vera).  See [`ENVIRONMENT.md`](ENVIRONMENT.md) for all `VERA_*` environment variables (provider keys, runtime knobs, debug flags).
+
+### SQL injection won't compile
+
+The `<DB>` effect accepts only a **literal** SQL string. Runtime data reaches the database exclusively through `?` placeholders and the params array — a query assembled from a runtime value is a compile-time error (`E207`), not a lint, a taint warning, or a runtime scan. The check is provenance-based and lives in the type checker, so it is deterministic: no solver, no configuration, no way to run the injectable form.
+
+```vera
+public fn find_user(@String -> @Result<Array<Array<Option<String>>>, String>)
+  requires(string_length(@String.0) > 0)
+  ensures(true)
+  effects(<DB>)
+{
+  DB.query("SELECT name, email FROM users WHERE name = ?", [Some(@String.0)])
+}
+```
+
+Replace the placeholder with `string_concat("SELECT ... WHERE name = '", @String.0)` and compilation fails with `E207`, an explanation that string-assembly is the injection vector, and the placeholder rewrite as the fix. Rows come back as `Array<Array<Option<String>>>` — a SQL `NULL` is a `None` cell, so unhandled NULL is a compile error too. Try it: [`examples/sqlitedb.vera`](examples/sqlitedb.vera).
 
 ### Errors are instructions
 

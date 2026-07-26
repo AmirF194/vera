@@ -50,6 +50,24 @@ This layer does cover actual correctness properties, not just interface compatib
 So: provably correct relative to stated requirements, yes. Provably correct relative to unstated intent, no — but the auditable surface is deliberately as small as possible. The human reviews contracts, not implementations.
 
 
+## Is SQL injection really a compile-time error?
+
+Yes — and it is a type-checker guarantee, not a lint or a solver result. The SQL argument of `DB.query` / `DB.execute` must have **literal provenance**: a string literal, or a `string_concat` / interpolation / `let` chain whose parts are all themselves literals. A query assembled from any runtime value — a parameter, a call result, a `\(expr)` interpolation of one — is rejected at compile time with `E207`. Runtime data reaches the database only through `?` placeholders and the params array:
+
+```vera
+public fn find_user(@String -> @Result<Array<Array<Option<String>>>, String>)
+  requires(string_length(@String.0) > 0)
+  ensures(true)
+  effects(<DB>)
+{
+  DB.query("SELECT name, email FROM users WHERE name = ?", [Some(@String.0)])
+}
+```
+
+Swap the placeholder for `string_concat("SELECT ... WHERE name = '", @String.0)` and the program does not compile. Because the check is provenance-based and runs in the type checker, it is deterministic — no solver, no tiers, no timeouts — and it holds everywhere, including inside handled code where solver-based claims weaken. A `?`-placeholder/params count mismatch is a second compile-time error (`E208`), and numbered or named placeholder styles are rejected in favour of the one positional form (`E209`).
+
+The guarantee is exactly as wide as the query path: every string that reaches the database goes through `DB.query`/`DB.execute`, and there is no other string-to-SQL route in the language. What it does *not* cover is semantic misuse of a fixed query (a literal `DELETE FROM users`), and in v1 the effect is SQLite-only and un-mockable (`handle[DB]` is [#372](https://github.com/aallan/vera/issues/372); further backends are [#1143](https://github.com/aallan/vera/issues/1143)).
+
 ## Does the compiler prove division-by-zero, out-of-bounds indexing, etc. can't happen?
 
 It does — the verifier auto-synthesises a proof obligation at every primitive operation whose well-definedness depends on operand values, and discharges it from the surrounding preconditions and path conditions.  **Integer** division and modulo by zero carry a `b != 0` obligation (E526) — float division is exempt, since `f64.div` by zero yields inf or NaN rather than trapping; array indexing carries a `0 <= i < array_length(arr)` obligation (E527); `@Nat` subtraction underflow and `@Int` → `@Nat` narrowing carry `>=` / `>= 0` obligations (E502 / E503).  A function that declares `requires(@Int.1 != 0)` and performs `@Int.0 / @Int.1` is statically proven non-trapping; a function that declares `requires(true)` and performs `@Int.1 / @Int.0` is now a **compile error** (E526), not a silent runtime trap.  (An operation inside a closure, quantifier, or handler body is not yet walked by the verifier, so it stays runtime-guarded — loud at runtime, never a silent wrong value — rather than statically obligated; that coverage is tracked in [#779](https://github.com/aallan/vera/issues/779).)
