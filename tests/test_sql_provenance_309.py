@@ -242,6 +242,21 @@ class TestSqlPlaceholderCount309:
             "E208",
         )
 
+    def test_execute_let_bound_mismatch_rejected(self) -> None:
+        # The arity check is op-agnostic — ``op_name`` reaches only the message
+        # text — but the two entry points are worth pinning once, so hooking
+        # only ``query`` cannot leak.  One case, not a mirror of the whole
+        # query set: the remaining shapes would exercise byte-identical logic.
+        src = """
+public fn run(-> @Result<Int, String>)
+  requires(true) ensures(true) effects(<DB>)
+{
+  let @Array<Option<String>> = [Some("x")];
+  DB.execute("INSERT INTO t (a, b) VALUES (?, ?)", @Array<Option<String>>.0)
+}
+"""
+        _check_code(src, "E208")
+
     def test_let_bound_runtime_array_still_defers(self) -> None:
         # A ``let`` whose value is NOT an array literal has no statically known
         # length, so the count still defers to the driver.  This is the
