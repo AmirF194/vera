@@ -255,7 +255,7 @@ vera run examples/hello_world.vera
 vera compile --target browser examples/hello_world.vera
 ```
 
-Editor support: [TextMate `.tmbundle`](https://github.com/aallan/vera/tree/main/editors/textmate), [VS Code extension](https://github.com/aallan/vera/tree/main/editors/vscode).
+Editor support: [TextMate `.tmbundle`](https://github.com/aallan/vera/tree/main/editors/textmate), [Vera Language for VS Code](https://marketplace.visualstudio.com/items?itemName=veralang.vera-language) (`code --install-extension veralang.vera-language`; [source](https://github.com/aallan/vera/tree/main/editors/vscode)).
 
 ## For Agents
 

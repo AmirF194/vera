@@ -1,9 +1,23 @@
 # Changelog
 
+## 0.2.1
+
+Security fix.
+
+- `brace-expansion` 5.0.7 → 5.0.8, closing
+  [GHSA-mh99-v99m-4gvg](https://github.com/advisories/GHSA-mh99-v99m-4gvg)
+  — a high-severity denial of service where an unbounded expansion
+  length crashes the process out of memory. It is a runtime dependency,
+  not build tooling: `vscode-languageclient` → `minimatch` →
+  `brace-expansion`, and the esbuild bundle externalises only `vscode`,
+  so it ships inside `dist/extension.js`. 0.2.0 carries the vulnerable
+  version; upgrade to 0.2.1.
+
 ## 0.2.0
 
 Language server integration.
 
+- First release on the VS Code Marketplace
 - Bundles the extension runtime instead of shipping raw `node_modules`
 - The extension now starts Vera's language server (`vera lsp`) for
   `.vera` files: proof-aware diagnostics with verification-tier hints,
