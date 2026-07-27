@@ -6,15 +6,17 @@ files, pre-commit hooks, CI jobs) and pytest-collection counts (total tests,
 per-file test counts and line counts) against the numbers written in
 TESTING.md, CONTRIBUTING.md, CLAUDE.md, README.md, SKILL.md, AGENTS.md,
 FAQ.md, and ROADMAP.md.  Also checks the KNOWN_ISSUES.md "Refactoring
-needed" line counts (±10% tolerance) and the HISTORY.md version-row
-format (one issue link max, no " — " separator per row).
+needed" line counts (±10% tolerance), the HISTORY.md version-row format
+(one issue link max, no " — " separator per row), the vera/README.md
+module map (#1150), and the project facts hardcoded on the landing page
+(#528).
 
 Intentionally excludes CHANGELOG.md: its counts are historical records
 (e.g. "64 programs, was 63") that are frozen snapshots of the project state
 at each release. Validating them would cause false positives on every new
 conformance addition, because the old entries are supposed to stay unchanged.
 
-Runs in under 1 second — fast enough for a pre-commit hook.
+Runs in a couple of seconds — fast enough for a pre-commit hook.
 """
 
 import json
@@ -99,6 +101,243 @@ def check_history_row_format(history_text: str) -> list[str]:
                 f"HISTORY.md line {lineno}: version row contains {dashes}"
                 f" ' — ' separators (max 1 — the bold lead-in dash;"
                 f" multi-clause rows belong in CHANGELOG.md)"
+            )
+    return errors
+
+
+_NUMBER_WORDS = {
+    1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six",
+    7: "seven", 8: "eight", 9: "nine", 10: "ten", 11: "eleven",
+    12: "twelve", 13: "thirteen", 14: "fourteen", 15: "fifteen",
+}
+
+# The page calls the `Exn` effect "Exceptions" in prose.
+_HOMEPAGE_EFFECT_ALIASES = {"Exn": "Exceptions"}
+
+
+def check_homepage_facts(
+    html: str, root: Path, live_conformance: int, live_examples: int
+) -> list[str]:
+    """Gate the project facts hardcoded in docs/index.html (#528).
+
+    The landing page states counts in prose — built-ins, effects, spec
+    chapters, conformance programs, examples — that drift silently as the
+    codebase moves.  Two were already stale before anyone noticed ("six
+    algebraic effects" when there were seven; a 77-program suite when there
+    were 80).
+
+    Gating rather than templating, per the issue: the HTML stays
+    hand-edited, which is the convention for this file.
+
+    A pattern that matches *nothing* is an error in its own right — a
+    reworded sentence would otherwise silently switch its check off, which
+    is the failure mode the gate exists to prevent.  Effects are checked as
+    a count *and* a membership list, since the historical drift was a name
+    missing from the list rather than a wrong total.  The version string is
+    deliberately not checked here: `scripts/check_version_sync.py` already
+    owns docs/index.html for that.
+    """
+    from vera.environment import TypeEnv
+    from vera.introspect import effects_payload
+
+    errors: list[str] = []
+    effects = [i for i in effects_payload()["items"] if i.get("kind") != "ability"]
+    effect_names = {
+        _HOMEPAGE_EFFECT_ALIASES.get(str(i["name"]), str(i["name"])) for i in effects
+    }
+
+    numeric: list[tuple[str, str, int]] = [
+        ("built-in functions", r"(\d+) built-in functions", len(TypeEnv().functions)),
+        ("spec chapters", r"(\d+)-chapter specification", len(list((root / "spec").glob("*.md")))),
+        ("conformance programs", r"(\d+)-program conformance suite", live_conformance),
+        ("worked examples", r"(\d+) worked examples", live_examples),
+    ]
+    for label, pattern, live in numeric:
+        found = re.search(pattern, html)
+        if found is None:
+            errors.append(
+                f"docs/index.html: no '{label}' claim matched /{pattern}/ —"
+                f" the sentence moved or was reworded, so it is no longer gated"
+            )
+        elif int(found.group(1)) != live:
+            errors.append(
+                f"docs/index.html {label}: page says {found.group(1)},"
+                f" live is {live}"
+            )
+
+    # Effects: the count is spelled as a word in the status paragraph, and the
+    # names are enumerated TWICE — there and again in the reference card, which
+    # is a second hand-maintained mirror of the same fact.  Both are checked;
+    # the historical drift (#526) was a name missing from a list, not a wrong
+    # total, so a count-only check would not have caught it.
+    spelled = re.search(r"(\w+) algebraic effects \(([^)]*)\)", html)
+    if spelled is None:
+        errors.append(
+            "docs/index.html: no 'N algebraic effects (…)' claim found —"
+            " the sentence moved or was reworded, so it is no longer gated"
+        )
+    else:
+        want_word = _NUMBER_WORDS.get(len(effect_names), str(len(effect_names)))
+        if spelled.group(1) != want_word:
+            errors.append(
+                f"docs/index.html effects count: page says"
+                f" '{spelled.group(1)}', live is '{want_word}'"
+                f" ({len(effect_names)})"
+            )
+
+    card = re.search(
+        r'>Algebraic effects</div><div class="desc">([^&<]*)', html
+    )
+    lists: list[tuple[str, str]] = []
+    if spelled is not None:
+        lists.append(("status paragraph", spelled.group(2)))
+    if card is not None:
+        lists.append(("reference card", card.group(1)))
+    else:
+        errors.append(
+            "docs/index.html: no 'Algebraic effects' reference card found —"
+            " the card moved or was reworded, so it is no longer gated"
+        )
+    for where, raw in lists:
+        listed = {n.strip() for n in raw.split(",") if n.strip()}
+        if listed != effect_names:
+            missing = sorted(effect_names - listed)
+            extra = sorted(listed - effect_names)
+            errors.append(
+                f"docs/index.html effects list ({where}) drifted —"
+                f" missing: {missing or 'none'}; not a live effect: {extra or 'none'}"
+            )
+    return errors
+
+
+_MODULE_MAP_ROW = re.compile(
+    r"^\| `(?P<label>[^`]+)`(?P<suffix>[^|]*)\| (?P<lines>[\d,]+) \|", re.M
+)
+
+
+def _line_count(path: Path) -> int | None:
+    try:
+        return len(path.read_text(encoding="utf-8").splitlines())
+    except OSError:
+        return None
+
+
+def check_module_map(readme_text: str, root: Path) -> list[str]:
+    """Check the vera/README.md "Module Map" table against the source tree.
+
+    Two independent assertions, because they fail differently (#1150):
+
+    * **Counts** — each row's cited line count against the file on disk,
+      with the same ±10% band `check_refactoring_counts` uses.  The
+      numbers exist to convey relative scale when navigating the
+      compiler, so exact pinning would tax every PR that touches a
+      compiler file with a doc edit; a band still catches the drift that
+      makes the table misleading (`checker/calls.py` had reached 155%).
+    * **Coverage** — every module on disk has a row.  This is exact, and
+      it is the half a count check cannot do: `checker/sql.py` (#309) and
+      `runtime/db.py` (#229) shipped without rows, so there was no cited
+      number to be wrong.
+
+    A `pkg/` row aggregates that package's ``*.py``.  A row suffixed
+    ``×N`` (the per-effect host-binding families) aggregates every
+    ``*.py`` in the current package that no other row names, and pins N
+    to how many that is — so adding an effect family trips the gate.
+    """
+    errors: list[str] = []
+    section = re.search(r"## Module Map\n(.*?)(?=\n## |\Z)", readme_text, re.DOTALL)
+    if section is None:
+        return ["vera/README.md: no '## Module Map' section found"]
+
+    body = section.group(1)
+    table_rows = [
+        line
+        for line in body.splitlines()
+        if line.startswith("| ") and not line.startswith(("|---", "| Module"))
+    ]
+    parsed = list(_MODULE_MAP_ROW.finditer(body))
+    if len(parsed) != len(table_rows):
+        errors.append(
+            f"vera/README.md module map: {len(table_rows) - len(parsed)} row(s)"
+            f" did not parse — every row must be `| \\`name\\` | count | ...`"
+        )
+
+    named: set[Path] = set()          # files a row names, for the coverage pass
+    deferred: list[tuple[str, str, int, str]] = []  # ×N rows: label, suffix, cited, pkg
+    package = ""
+
+    for match in parsed:
+        label = match.group("label")
+        cited = int(match.group("lines").replace(",", ""))
+        stem = label.strip(" ├└│─")
+        is_child = label != label.lstrip(" ├└│")
+
+        if stem.endswith("/"):
+            package = stem.rstrip("/")
+            directory = root / "vera" / package
+            if not directory.is_dir():
+                errors.append(
+                    f"vera/README.md module map: package `{stem}` does not exist"
+                )
+                continue
+            live = sum(_line_count(f) or 0 for f in directory.glob("*.py"))
+        elif "×" in match.group("suffix"):
+            deferred.append((label, match.group("suffix"), cited, package))
+            continue
+        else:
+            path = root / "vera" / (package if is_child else "") / stem
+            live = _line_count(path)  # type: ignore[assignment]
+            if live is None:
+                errors.append(
+                    f"vera/README.md module map: `{stem}` cites {cited:,} lines"
+                    f" but the file does not exist"
+                )
+                continue
+            named.add(path.resolve())
+
+        if live and abs(cited - live) / live > 0.10:
+            errors.append(
+                f"vera/README.md module map: `{stem}` cites {cited:,} lines,"
+                f" measured {live:,} (>10% drift)"
+            )
+
+    # ``×N`` rows stand for the files no other row named, so they can only
+    # be resolved once every explicit row has been collected.
+    for label, suffix, cited, pkg in deferred:
+        directory = root / "vera" / pkg
+        rest = sorted(
+            f
+            for f in directory.glob("*.py")
+            if f.name != "__init__.py" and f.resolve() not in named
+        )
+        named.update(f.resolve() for f in rest)
+        shown = f"{label.strip()}{suffix.strip()}"
+
+        declared = re.search(r"×(\d+)", suffix)
+        if declared is None:
+            errors.append(
+                f"vera/README.md module map: `{shown}` has no ×N multiplicity"
+            )
+        elif int(declared.group(1)) != len(rest):
+            errors.append(
+                f"vera/README.md module map: `{shown}` declares"
+                f" ×{declared.group(1)} but {pkg}/ has {len(rest)} such"
+                f" module(s): {', '.join(f.name for f in rest)}"
+            )
+
+        live = sum(_line_count(f) or 0 for f in rest)
+        if live and abs(cited - live) / live > 0.10:
+            errors.append(
+                f"vera/README.md module map: `{shown}` cites {cited:,}"
+                f" lines, measured {live:,} (>10% drift)"
+            )
+
+    # Coverage: exact, no tolerance.
+    for source in sorted((root / "vera").rglob("*.py")):
+        if source.name == "__init__.py" or "__pycache__" in source.parts:
+            continue
+        if source.resolve() not in named:
+            errors.append(
+                f"vera/README.md module map: {source.relative_to(root)} has no row"
             )
     return errors
 
@@ -658,6 +897,22 @@ def main() -> int:
 
     history_md = (root / "HISTORY.md").read_text(encoding="utf-8")
     errors.extend(check_history_row_format(history_md))
+
+    # ------------------------------------------------------------------
+    # 17. Check the vera/README.md module map against the source tree
+    # ------------------------------------------------------------------
+
+    vera_readme_md = (root / "vera/README.md").read_text(encoding="utf-8")
+    errors.extend(check_module_map(vera_readme_md, root))
+
+    # ------------------------------------------------------------------
+    # 18. Check the hardcoded project facts on the landing page
+    # ------------------------------------------------------------------
+
+    index_html = (root / "docs/index.html").read_text(encoding="utf-8")
+    errors.extend(
+        check_homepage_facts(index_html, root, live_conformance, live_examples)
+    )
 
     # ------------------------------------------------------------------
     # Report
