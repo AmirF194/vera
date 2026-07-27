@@ -27,6 +27,8 @@ Constants:
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import tempfile
 from pathlib import Path
 
@@ -407,11 +409,11 @@ class TestMulRoundTripDifferential798:
     ``codegen-traps(a*b) <=> (a*b outside the i64 / u64 range)``.
     """
 
-    _BOUNDARIES_SIGNED = [
+    _BOUNDARIES_SIGNED: ClassVar[list[int]] = [
         0, 1, -1, 2, -2, I64_MAX, I64_MIN, I64_MAX - 1, I64_MIN + 1,
         2**31, -(2**31), 2**32, -(2**32), 2**62, -(2**62),
     ]
-    _BOUNDARIES_UNSIGNED = [
+    _BOUNDARIES_UNSIGNED: ClassVar[list[int]] = [
         0, 1, 2, 3, U64_MAX, U64_MAX - 1, 2**32, 2**32 - 1, 2**63, 2**63 - 1,
         2**31, 2**16,
     ]

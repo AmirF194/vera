@@ -8,6 +8,8 @@ quantifiers, and old/new contract expressions.
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 from vera import ast
 from vera.checker.sql import resolve_array_len, resolve_literal_string
 from vera.types import (
@@ -277,7 +279,7 @@ class ExpressionsMixin:
     # -----------------------------------------------------------------
 
     # Types that have a corresponding *_to_string builtin.
-    _TO_STRING_TYPES: dict[str, str] = {
+    _TO_STRING_TYPES: ClassVar[dict[str, str]] = {
         "Int": "to_string",
         "Nat": "nat_to_string",
         "Bool": "bool_to_string",

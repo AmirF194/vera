@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 from vera import ast
 from vera.skip import AdtEqNotDerivableError, CodegenInvariantError
 from vera.slots import slot_ref_name, type_expr_slot_name
@@ -263,7 +265,7 @@ class OperatorsMixin:
     # -----------------------------------------------------------------
 
     # Arithmetic over Byte (i32): division / remainder are UNSIGNED (0..255).
-    _ARITH_OPS_I32_BYTE: dict[ast.BinOp, str] = {
+    _ARITH_OPS_I32_BYTE: ClassVar[dict[ast.BinOp, str]] = {
         ast.BinOp.ADD: "i32.add",
         ast.BinOp.SUB: "i32.sub",
         ast.BinOp.MUL: "i32.mul",
@@ -1467,7 +1469,7 @@ class OperatorsMixin:
     # -----------------------------------------------------------------
 
     # Type -> to_string builtin dispatch (must match checker's map)
-    _INTERP_TO_STRING: dict[str, str] = {
+    _INTERP_TO_STRING: ClassVar[dict[str, str]] = {
         "Int": "to_string",
         "Nat": "nat_to_string",
         "Bool": "bool_to_string",

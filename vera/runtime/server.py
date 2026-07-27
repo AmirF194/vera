@@ -134,12 +134,12 @@ def make_server(
             self.wfile.write(data)
 
         # Same handler for every method the stdlib dispatches by name.
-        do_GET = _serve  # noqa: N815 (stdlib API names)
-        do_POST = _serve  # noqa: N815
-        do_PUT = _serve  # noqa: N815
-        do_DELETE = _serve  # noqa: N815
-        do_PATCH = _serve  # noqa: N815
-        do_HEAD = _serve  # noqa: N815
+        do_GET = _serve
+        do_POST = _serve
+        do_PUT = _serve
+        do_DELETE = _serve
+        do_PATCH = _serve
+        do_HEAD = _serve
 
         def log_message(self, fmt: str, *args: object) -> None:
             # One concise access-log line to the server console.

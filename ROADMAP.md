@@ -12,7 +12,7 @@ Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verificati
 
 ## Where we are
 
-8,566 tests, 169 conformance programs, 42 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
+8,568 tests, 169 conformance programs, 42 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
 
 ## Stage 19 — The verification completeness sprint
 
@@ -46,7 +46,6 @@ Exit criterion: each listed drift class has a generator or a gate, and a release
 | [#954](https://github.com/aallan/vera/issues/954) | Single-source the `E001` example — generate all five doc mirrors from `vera/errors.py` instead of guarding hand-copies. |
 | [#683](https://github.com/aallan/vera/issues/683) | Align spec EBNF and Lark grammar rule names, with a check script to hold the alignment. |
 | [#653](https://github.com/aallan/vera/issues/653) | Spec audit for §0.2 / §0.3 design-principle violations — the spec held to its own principles. |
-| [#528](https://github.com/aallan/vera/issues/528) | Gate the hand-edited numbers on the veralang.dev homepage against live counts (the Stage 18 landing-page audit found this class live). |
 | [#540](https://github.com/aallan/vera/issues/540) | lychee + markdownlint MD051 cross-doc anchor validation. |
 
 ## Stage 21 — The effect hardening sprint
@@ -147,14 +146,14 @@ Beyond the staged sprints — grouped by arc, each pulled forward by its trigger
 
 **Standard library long tail** — [#367](https://github.com/aallan/vera/issues/367) Markdown extractors, [#368](https://github.com/aallan/vera/issues/368) HTML accessors, [#507](https://github.com/aallan/vera/issues/507) ability-dispatched array operations, [#509](https://github.com/aallan/vera/issues/509) Unicode-aware string built-ins phase 2, [#1143](https://github.com/aallan/vera/issues/1143) `<DB>` effect phases 2–3 — named columns (via Map), typed rows (via JSON), and further backends.
 
-**Compiler internals** — [#672](https://github.com/aallan/vera/issues/672) canonical WAT formatter, [#745](https://github.com/aallan/vera/issues/745) narrow the wrap-table / Phase 2c emission to `decimal_ops_used` only, [#739](https://github.com/aallan/vera/issues/739) typed `Protocol` interfaces for the mixin mypy carve-outs, [#1150](https://github.com/aallan/vera/issues/1150) auto-generate or drop the `vera/README.md` module-map line counts (drifted and ungated).
+**Compiler internals** — [#672](https://github.com/aallan/vera/issues/672) canonical WAT formatter, [#745](https://github.com/aallan/vera/issues/745) narrow the wrap-table / Phase 2c emission to `decimal_ops_used` only, [#739](https://github.com/aallan/vera/issues/739) typed `Protocol` interfaces for the mixin mypy carve-outs.
 
 ## Ongoing threads
 
 Not stage-gated; advanced alongside whatever stage is active.
 
 - **VeraBench** ([vera-bench](https://github.com/aallan/vera-bench)) — the suite is its own thread; the compiler-side pass@k re-run is staged as Stage 23's measurement ([#225](https://github.com/aallan/vera/issues/225)).
-- **CI, process, and tooling** — [#386](https://github.com/aallan/vera/issues/386) Hypothesis round-trip properties (bookmark), [#712](https://github.com/aallan/vera/issues/712) Codecov → Harness migration watch, [#753](https://github.com/aallan/vera/issues/753) pygls / Python 3.16 watch, [#1126](https://github.com/aallan/vera/issues/1126) z3-solver 5.0 bake period, then re-run the obligation differential, [#1103](https://github.com/aallan/vera/issues/1103) migrate GitHub Pages off legacy branch-deploy to a self-owned Actions workflow, [#1156](https://github.com/aallan/vera/issues/1156) gate the editor grammars against `vera effects --json` (vscode and textmate are four effects behind; no grammar knows the abilities), [#1106](https://github.com/aallan/vera/issues/1106) VS Code Marketplace publication (blocked on Microsoft support), [#1157](https://github.com/aallan/vera/issues/1157) populate or drop the always-null `since` field in `vera errors --json`.
+- **CI, process, and tooling** — [#386](https://github.com/aallan/vera/issues/386) Hypothesis round-trip properties (bookmark), [#712](https://github.com/aallan/vera/issues/712) Codecov → Harness migration watch, [#753](https://github.com/aallan/vera/issues/753) pygls / Python 3.16 watch, [#1126](https://github.com/aallan/vera/issues/1126) z3-solver 5.0 bake period, then re-run the obligation differential, [#1103](https://github.com/aallan/vera/issues/1103) migrate GitHub Pages off legacy branch-deploy to a self-owned Actions workflow, [#1156](https://github.com/aallan/vera/issues/1156) gate the editor grammars against `vera effects --json` (vscode and textmate are four effects behind; no grammar knows the abilities).
 
 ## Not doing now
 

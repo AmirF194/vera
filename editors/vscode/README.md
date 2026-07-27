@@ -72,6 +72,20 @@ The **Vera: Restart Language Server** command restarts the server
 
 ## Installation
 
+### VS Code Marketplace
+
+Install **Vera Language** from the
+[VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=veralang.vera-language),
+from the Extensions view in VS Code, or from the command line:
+
+```bash
+code --install-extension veralang.vera-language
+```
+
+Syntax highlighting works immediately. For diagnostics, hover,
+go-to-definition, and typed-hole completion, install the language server as
+described in [Requirements](#requirements).
+
 ### From source
 
 **Fresh clone:**

@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 # The doc gates' inline <!-- vera:skip-... --> fence annotations (#538) are
 # repo-tooling metadata: strip them from every generated site asset.
-from doc_annotations import strip_annotations  # noqa: E402  (scripts/ is not a package)
+from doc_annotations import strip_annotations
 
 ROOT = Path(__file__).resolve().parent.parent
 DOCS = ROOT / "docs"
@@ -653,7 +653,7 @@ vera run examples/hello_world.vera
 vera compile --target browser examples/hello_world.vera
 ```
 
-Editor support: [TextMate `.tmbundle`]({REPO}/tree/main/editors/textmate), [VS Code extension]({REPO}/tree/main/editors/vscode).
+Editor support: [TextMate `.tmbundle`]({REPO}/tree/main/editors/textmate), [Vera Language for VS Code](https://marketplace.visualstudio.com/items?itemName=veralang.vera-language) (`code --install-extension veralang.vera-language`; [source]({REPO}/tree/main/editors/vscode)).
 
 ## For Agents
 

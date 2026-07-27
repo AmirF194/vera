@@ -27,6 +27,8 @@ corruption).  The ABI mirrors the existing ``_alloc_*`` family:
 """
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pytest
 import wasmtime
 
@@ -87,7 +89,7 @@ def _decode_result_ok_rows(
 class TestOptionStringArrayRoundTrip:
     """Inbound reader ∘ outbound allocator for ``Array<Option<String>>``."""
 
-    CASES = [
+    CASES: ClassVar[list[list[str | None]]] = [
         [],
         [None],
         ["alpha"],
@@ -174,7 +176,7 @@ class TestOptionStringArrayRoundTrip:
 class TestResultOkRowsRoundTrip:
     """``_alloc_result_ok_rows`` — the ``DB.query`` result grid."""
 
-    CASES = [
+    CASES: ClassVar[list[list[list[str | None]]]] = [
         [],
         [[]],
         [["only"]],
@@ -216,7 +218,7 @@ class TestResultOkRowsRoundTrip:
 class TestResultOkI64RoundTrip:
     """``_alloc_result_ok_i64`` — the ``DB.execute`` affected-row count."""
 
-    CASES = [0, 1, 42, -1, 9223372036854775807, -9223372036854775808]
+    CASES: ClassVar[list[int]] = [0, 1, 42, -1, 9223372036854775807, -9223372036854775808]
 
     @pytest.mark.parametrize("value", CASES)
     def test_round_trip(self, value: int) -> None:

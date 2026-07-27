@@ -449,6 +449,7 @@ def main() -> int:
         encoding="utf-8",
         cwd=str(root),
         timeout=30,
+        check=False,
     )
     if result.returncode != 0:
         print(

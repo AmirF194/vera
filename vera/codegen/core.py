@@ -1182,7 +1182,7 @@ class CodeGenerator(
         # Convert WAT to WASM binary
         try:
             wasm_bytes = wasmtime.wat2wasm(wat)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — a backend failure becomes a codegen diagnostic
             self.diagnostics.append(Diagnostic(  # diag-fields-exempt: internal wat2wasm backend failure; a code-generation bug, not a user error, so no source-level fix or spec section applies.
                 description=f"WAT compilation failed: {exc}",
                 location=SourceLocation(file=self.file),

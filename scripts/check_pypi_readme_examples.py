@@ -17,8 +17,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from check_html_examples import try_check, try_verify  # noqa: E402  (scripts/ is not a package)
-from doc_annotations import evaluate_block, scan_markdown  # noqa: E402
+from check_html_examples import try_check, try_verify
+from doc_annotations import evaluate_block, scan_markdown
 
 
 def try_parse(content: str) -> str | None:
@@ -28,7 +28,7 @@ def try_parse(content: str) -> str | None:
     try:
         parse(content, file="<pypi-readme>")
         return None
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — a failing doc example is reported, not raised
         return str(exc).split("\n")[0][:200]
 
 

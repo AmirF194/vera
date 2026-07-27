@@ -185,7 +185,7 @@ def register_inference(
                     provider, prompt, model, api_key,
                 )
                 return _alloc_result_ok_string(caller, completion)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — host boundary; any failure becomes Result.Err
                 return _alloc_result_err_string(caller, str(exc))
 
         linker.define_func(

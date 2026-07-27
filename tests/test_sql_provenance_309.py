@@ -19,6 +19,8 @@ still routes to the host), but never an unrelated effect's own ``query`` op.
 """
 from __future__ import annotations
 
+from typing import ClassVar
+
 import sqlite3
 
 import pytest
@@ -450,7 +452,7 @@ class TestCountPlaceholdersMatchesSqlite309:
     for them and the gate defers — see ``test_named_and_numbered_params_defer``.)
     """
 
-    CASES = [
+    CASES: ClassVar[list[str]] = [
         "",                            # 0 — empty statement binds nothing
         "SELECT 1",                    # 0
         "SELECT ?",                    # 1
@@ -483,7 +485,7 @@ class TestCountPlaceholdersMatchesSqlite309:
     # Named (:name / @name / $name) and numbered (?NNN) placeholders: the
     # positional count is not the bound-parameter count, so count_placeholders
     # returns None and the gate defers the arity check to the sqlite3 host.
-    DEFER_CASES = [
+    DEFER_CASES: ClassVar[list[str]] = [
         "SELECT ?1, ?1",               # numbered, one bound param
         "SELECT ?5",                   # numbered
         "SELECT :a AND :b",            # named, two bound params, zero ?
@@ -504,7 +506,7 @@ class TestCountPlaceholdersMatchesSqlite309:
     # `count_placeholders` returned an int instead of None, the gate emitted no
     # E209 (or a wrong E208), and a query sqlite binds by name passed `check`
     # then failed at run time.  Each of these IS a named parameter to sqlite3.
-    HIGH_BYTE_NAMED = [
+    HIGH_BYTE_NAMED: ClassVar[list[str]] = [
         "SELECT :€x",       # named, first name-char is € (U+20AC, non-ASCII)
         "SELECT :£x",       # named, first name-char is £ (U+00A3, a symbol)
         "SELECT ?, :€x",    # anonymous ? MIXED with a high-byte named param

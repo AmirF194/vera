@@ -25,6 +25,8 @@ differential must stay green for it too.
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pytest
 import wasmtime
 
@@ -265,7 +267,7 @@ public fn c2(@Nat -> @Int)
 
 
 class TestTwoLibrariesBothWiden:
-    _FILES = {"alib.vera": _ALIB, "blib.vera": _BLIB, "main.vera": _TWO_LIB_MAIN}
+    _FILES: ClassVar[dict[str, str]] = {"alib.vera": _ALIB, "blib.vera": _BLIB, "main.vera": _TWO_LIB_MAIN}
 
     def test_both_libraries_promise_tier3(self) -> None:
         # Each library's standalone verify promises a Tier-3 widen.

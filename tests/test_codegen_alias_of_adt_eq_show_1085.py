@@ -958,7 +958,7 @@ def _run_checked(source: str, fn: str | None = None) -> int:
     from vera.parser import parse_file
     from vera.transform import transform
 
-    f = tempfile.NamedTemporaryFile(
+    f = tempfile.NamedTemporaryFile(  # noqa: SIM115 — Windows fixture; closed + unlinked below
         mode="w", suffix=".vera", delete=False, encoding="utf-8"
     )
     try:

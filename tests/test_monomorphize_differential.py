@@ -1710,6 +1710,7 @@ def test_mono_emission_order_is_deterministic(tmp_path: Path) -> None:
             capture_output=True, text=True, encoding="utf-8",
             env={**os.environ, "PYTHONHASHSEED": seed},
             timeout=120,  # bound each child: a mono hang fails fast here, not at the CI timeout
+            check=False,
         )
         assert proc.returncode == 0, proc.stderr
         outputs.add(proc.stdout)

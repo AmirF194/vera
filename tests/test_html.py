@@ -86,7 +86,7 @@ def _try_parse(content: str) -> str | None:
     try:
         parse(content, file="<html>")
         return None
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — a failing doc example is reported, not raised
         return str(exc).split("\n")[0][:200]
 
 
@@ -96,7 +96,7 @@ def _run_cli(content: str, command: str, timeout: int) -> str | None:
     # handle blocks the subprocess from reading it.  Closing the handle
     # before the subprocess runs (and unlinking after) is portable; on
     # Unix `delete=True` worked because Unix allows concurrent handles.
-    f = tempfile.NamedTemporaryFile(
+    f = tempfile.NamedTemporaryFile(  # noqa: SIM115 — Windows fixture; closed + unlinked below
         mode="w",
         suffix=".vera",
         delete=False,
@@ -112,6 +112,7 @@ def _run_cli(content: str, command: str, timeout: int) -> str | None:
             encoding="utf-8",
             cwd=str(ROOT),
             timeout=timeout,
+            check=False,
         )
         if "OK:" in result.stdout:
             return None

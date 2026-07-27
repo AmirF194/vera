@@ -139,6 +139,7 @@ class TestMainErrors:
             capture_output=True,
             text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0
         data = json.loads(result.stdout)
@@ -151,6 +152,7 @@ class TestMainErrors:
             capture_output=True,
             text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0
         assert "E526" in result.stdout
@@ -177,6 +179,7 @@ class TestMainBuiltins:
             capture_output=True,
             text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0
         data = json.loads(result.stdout)
@@ -212,6 +215,7 @@ class TestMainEffects:
             capture_output=True,
             text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0
         data = json.loads(result.stdout)
@@ -1047,6 +1051,7 @@ class TestMain:
             [sys.executable, "-m", "vera.cli"],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 1
         assert "Usage:" in result.stderr
@@ -1056,6 +1061,7 @@ class TestMain:
             [sys.executable, "-m", "vera.cli", "check"],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 1
         assert "Usage:" in result.stderr
@@ -1065,6 +1071,7 @@ class TestMain:
             [sys.executable, "-m", "vera.cli", "bogus", "file.vera"],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 1
         assert "Unknown command" in result.stderr
@@ -1074,6 +1081,7 @@ class TestMain:
             [sys.executable, "-m", "vera.cli", "parse", INCREMENT],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0
         assert len(result.stdout) > 0
@@ -1083,6 +1091,7 @@ class TestMain:
             [sys.executable, "-m", "vera.cli", "check", INCREMENT],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0
         assert "OK:" in result.stdout
@@ -1092,6 +1101,7 @@ class TestMain:
             [sys.executable, "-m", "vera.cli", "typecheck", INCREMENT],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0
         assert "OK:" in result.stdout
@@ -1101,6 +1111,7 @@ class TestMain:
             [sys.executable, "-m", "vera.cli", "verify", INCREMENT],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0
         assert "OK:" in result.stdout
@@ -1111,6 +1122,7 @@ class TestMain:
             [sys.executable, "-m", "vera.cli", "ast", INCREMENT],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0
 
@@ -1119,6 +1131,7 @@ class TestMain:
             [sys.executable, "-m", "vera.cli", "ast", "--json", INCREMENT],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0
         parsed = json.loads(result.stdout)
@@ -1129,6 +1142,7 @@ class TestMain:
             [sys.executable, "-m", "vera.cli", "check", "--json", INCREMENT],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0
         parsed = json.loads(result.stdout)
@@ -1139,6 +1153,7 @@ class TestMain:
             [sys.executable, "-m", "vera.cli", "verify", "--json", INCREMENT],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0
         parsed = json.loads(result.stdout)
@@ -1150,6 +1165,7 @@ class TestMain:
             [sys.executable, "-m", "vera.cli", "compile", "--wat", HELLO_WORLD],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0
         assert "(module" in result.stdout
@@ -1160,6 +1176,7 @@ class TestMain:
             [sys.executable, "-m", "vera.cli", "compile", "--json", HELLO_WORLD],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0
         parsed = json.loads(result.stdout)
@@ -1171,6 +1188,7 @@ class TestMain:
             [sys.executable, "-m", "vera.cli", "run", HELLO_WORLD],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0
         assert "Hello, World!" in result.stdout
@@ -1181,6 +1199,7 @@ class TestMain:
              "--fn", "factorial", "--", "5"],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0
         assert "120" in result.stdout
@@ -1190,6 +1209,7 @@ class TestMain:
             [sys.executable, "-m", "vera.cli", "run", "--json", HELLO_WORLD],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0
         parsed = json.loads(result.stdout)
@@ -1203,6 +1223,7 @@ class TestMain:
              "--fn", "factorial", "--", "5"],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0
         parsed = json.loads(result.stdout)
@@ -1217,6 +1238,7 @@ class TestMain:
              "-o", str(out_path), HELLO_WORLD],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0
         assert out_path.exists()
@@ -1230,6 +1252,7 @@ class TestMain:
              "--wat", "/nonexistent/file.vera"],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 1
         assert "file not found" in result.stderr
@@ -1240,6 +1263,7 @@ class TestMain:
             [sys.executable, "-m", "vera.cli", "run", "/nonexistent/file.vera"],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 1
         assert "file not found" in result.stderr
@@ -1251,6 +1275,7 @@ class TestMain:
              "--json", "/nonexistent/file.vera"],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 1
         parsed = json.loads(result.stdout)
@@ -1263,6 +1288,7 @@ class TestMain:
              "--json", "/nonexistent/file.vera"],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 1
         parsed = json.loads(result.stdout)
@@ -1382,6 +1408,7 @@ public fn id(@Int -> @Int)
              "run", path, "--fn", "id", "--", "abc"],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 1
         assert "not valid for parameter type" in result.stderr
@@ -1404,6 +1431,7 @@ public fn double(@Float64 -> @Float64)
              "run", path, "--fn", "double", "--", "3.5"],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0, result.stderr
         assert "7.0" in result.stdout
@@ -1426,6 +1454,7 @@ public fn greet(@String -> @Unit)
              "run", path, "--fn", "greet", "--", "Hello"],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0, result.stderr
         assert "Hello" in result.stdout
@@ -1448,6 +1477,7 @@ public fn identity(@Bool -> @Bool)
              "run", path, "--fn", "identity", "--", "true"],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0, result.stderr
         assert "1" in result.stdout or "true" in result.stdout.lower()
@@ -1470,6 +1500,7 @@ public fn id(@Int -> @Int)
              "run", "--json", path, "--fn", "id", "--", "xyz"],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 1
         data = json.loads(result.stdout)
@@ -1614,6 +1645,7 @@ private fn helper(-> @Unit) requires(true) ensures(true) effects(pure) { () }
             [sys.executable, "-m", "vera.cli", "check", str(main_file)],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0
         assert "OK:" in result.stdout
@@ -1632,6 +1664,7 @@ private fn main(-> @Unit) requires(true) ensures(true) effects(pure) { () }
             [sys.executable, "-m", "vera.cli", "check", str(main_file)],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 1
         assert "Cannot resolve import" in result.stderr
@@ -1651,6 +1684,7 @@ private fn main(-> @Unit) requires(true) ensures(true) effects(pure) { () }
              str(main_file)],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 1
         data = json.loads(result.stdout)
@@ -1682,6 +1716,7 @@ private fn main(@Int -> @Int)
             [sys.executable, "-m", "vera.cli", "check", str(main_file)],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0, result.stderr
         assert "OK" in result.stdout
@@ -1805,6 +1840,7 @@ class TestCmdFmtMain:
             [sys.executable, "-m", "vera.cli", "fmt", INCREMENT],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0
         assert "fn increment" in result.stdout
@@ -1816,6 +1852,7 @@ class TestCmdFmtMain:
             [sys.executable, "-m", "vera.cli", "fmt", "--check", str(path)],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0
         assert "OK:" in result.stdout
@@ -1827,6 +1864,7 @@ class TestCmdFmtMain:
             [sys.executable, "-m", "vera.cli", "fmt", "--check", str(path)],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 1
         assert "Would reformat" in result.stderr
@@ -1838,6 +1876,7 @@ class TestCmdFmtMain:
             [sys.executable, "-m", "vera.cli", "fmt", "--write", str(path)],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0
         assert "Formatted:" in result.stdout
@@ -1848,6 +1887,7 @@ class TestCmdFmtMain:
             [sys.executable, "-m", "vera.cli", "fmt", "/nonexistent/file.vera"],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 1
         assert "file not found" in result.stderr
@@ -2169,6 +2209,7 @@ class TestCmdTestMain:
             [sys.executable, "-m", "vera.cli", "test", SAFE_DIVIDE],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0
         assert "Testing:" in result.stdout
@@ -2178,6 +2219,7 @@ class TestCmdTestMain:
             [sys.executable, "-m", "vera.cli", "test", "--json", SAFE_DIVIDE],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0
         data = json.loads(result.stdout)
@@ -2206,6 +2248,7 @@ public fn main(@Unit -> @Int)
             [sys.executable, "-m", "vera.cli", "test", "--json", str(prog)],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 1
         data = json.loads(result.stdout)
@@ -2217,6 +2260,7 @@ public fn main(@Unit -> @Int)
             [sys.executable, "-m", "vera.cli", "test", "--trials", "5", SAFE_DIVIDE],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0
 
@@ -2225,6 +2269,7 @@ public fn main(@Unit -> @Int)
             [sys.executable, "-m", "vera.cli", "test", "--fn", "safe_divide", SAFE_DIVIDE],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0
 
@@ -2246,6 +2291,7 @@ public fn main(-> @Unit)
             [sys.executable, "-m", "vera.cli", "run", str(prog)],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 42
 
@@ -2265,6 +2311,7 @@ public fn main(-> @Unit)
             capture_output=True, text=True,
             encoding="utf-8",
             input="hello from stdin\n",
+            check=False,
         )
         assert result.returncode == 0
         assert "hello from stdin" in result.stdout
@@ -2291,6 +2338,7 @@ public fn main(@Unit -> @Unit)
             [sys.executable, "-m", "vera.cli", "run", str(prog)],
             capture_output=True, text=True, encoding="utf-8",
             input="X",
+            check=False,
         )
         assert result.returncode == 0
         assert result.stdout.rstrip() == "got: X"
@@ -2318,6 +2366,7 @@ public fn main(@Unit -> @Unit)
             [sys.executable, "-m", "vera.cli", "run", str(prog)],
             capture_output=True, text=True, encoding="utf-8",
             input="",
+            check=False,
         )
         assert result.returncode == 0
         assert result.stdout.rstrip() == "EOF"
@@ -2346,6 +2395,7 @@ public fn main(@Unit -> @Unit)
             [sys.executable, "-m", "vera.cli", "run", str(prog)],
             capture_output=True, text=True, encoding="utf-8",
             input="é",  # 2-byte UTF-8 sequence
+            check=False,
         )
         assert result.returncode == 0
         assert result.stdout.rstrip() == "é"
@@ -2740,6 +2790,7 @@ class TestCmdFmtSubprocess:
             [sys.executable, "-m", "vera.cli", "fmt", str(path)],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 1
         assert len(result.stderr) > 0
@@ -2760,6 +2811,7 @@ class TestMainArgParsing:
              "--trials", "abc", SAFE_DIVIDE],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 1
         assert "Invalid --trials value" in result.stderr
@@ -2771,6 +2823,7 @@ class TestMainArgParsing:
              "--json", "--trials", "abc", SAFE_DIVIDE],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 1
         data = json.loads(result.stdout)
@@ -2784,6 +2837,7 @@ class TestMainArgParsing:
              "--target", "invalid", HELLO_WORLD],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 1
         assert "Invalid --target value" in result.stderr
@@ -2795,6 +2849,7 @@ class TestMainArgParsing:
              "--json", "--target", "invalid", HELLO_WORLD],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 1
         data = json.loads(result.stdout)
@@ -2809,6 +2864,7 @@ class TestMainArgParsing:
              "--target", "browser", "-o", str(out_dir), HELLO_WORLD],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0
         assert "Browser bundle:" in result.stdout
@@ -2821,6 +2877,7 @@ class TestMainArgParsing:
              HELLO_WORLD, "--", "notanarg"],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 1
         # Argument count mismatch: main takes 0 args
@@ -2833,6 +2890,7 @@ class TestMainArgParsing:
              "--json", HELLO_WORLD, "--", "notanarg"],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 1
         data = json.loads(result.stdout)
@@ -2846,6 +2904,7 @@ class TestMainArgParsing:
              "--trials", "5", SAFE_DIVIDE],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0
 
@@ -2856,6 +2915,7 @@ class TestMainArgParsing:
              "--fn", "safe_divide", SAFE_DIVIDE],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0
 
@@ -2865,6 +2925,7 @@ class TestMainArgParsing:
             [sys.executable, "-m", "vera.cli", "compile", "--wat"],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 1
         assert "Usage:" in result.stderr
@@ -2877,6 +2938,7 @@ class TestMainArgParsing:
              "-o", str(out_path), HELLO_WORLD],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0
         assert out_path.exists()
@@ -3345,6 +3407,7 @@ public fn main(-> @Int)
             capture_output=True,
             text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0, result.stderr
         assert "OK" in result.stdout
@@ -3357,6 +3420,7 @@ public fn main(-> @Int)
             capture_output=True,
             text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0, result.stderr
         assert "42" in result.stdout
@@ -3369,6 +3433,7 @@ public fn main(-> @Int)
             capture_output=True,
             text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0, result.stderr
         assert "verified" in result.stdout.lower(), result.stdout
@@ -3381,6 +3446,7 @@ public fn main(-> @Int)
             capture_output=True,
             text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0, result.stderr
         assert "(module" in result.stdout
@@ -3394,6 +3460,7 @@ public fn main(-> @Int)
             text=True,
             encoding="utf-8",
             cwd=tmp_path,
+            check=False,
         )
         assert result.returncode == 0, result.stderr
         out_path = tmp_path / "stdin.wasm"
@@ -3432,6 +3499,7 @@ public fn main(-> @Int)
             text=True,
             encoding="utf-8",
             cwd=tmp_path,
+            check=False,
         )
         assert result.returncode == 0, result.stderr
 
@@ -3592,6 +3660,7 @@ class TestCmdVersion:
                 [sys.executable, "-m", "vera.cli", flag],
                 capture_output=True, text=True,
                 encoding="utf-8",
+                check=False,
             )
             assert result.returncode == 0
             assert result.stdout.startswith("vera ")
@@ -3689,6 +3758,7 @@ class TestMainQuiet:
             [sys.executable, "-m", "vera.cli", "check", "--quiet", str(f)],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0
         assert result.stdout == ""
@@ -3701,6 +3771,7 @@ class TestMainQuiet:
             [sys.executable, "-m", "vera.cli", "check", "--quiet", str(f)],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 1
         assert result.stderr != ""
@@ -3713,6 +3784,7 @@ class TestMainQuiet:
             [sys.executable, "-m", "vera.cli", "verify", "--quiet", str(f)],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0
         assert result.stdout == ""
@@ -3758,6 +3830,7 @@ class TestExplainSlots:
             [sys.executable, "-m", "vera.cli", "check", "--explain-slots", str(f)],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0
         out = result.stdout
@@ -3773,6 +3846,7 @@ class TestExplainSlots:
             [sys.executable, "-m", "vera.cli", "check", "--explain-slots", str(f)],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0
         out = result.stdout
@@ -3787,6 +3861,7 @@ class TestExplainSlots:
             [sys.executable, "-m", "vera.cli", "check", "--explain-slots", str(f)],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0
         out = result.stdout
@@ -3801,6 +3876,7 @@ class TestExplainSlots:
             [sys.executable, "-m", "vera.cli", "check", "--explain-slots", "--json", str(f)],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0
         parsed = json.loads(result.stdout)
@@ -3820,6 +3896,7 @@ class TestExplainSlots:
             [sys.executable, "-m", "vera.cli", "check", "--explain-slots", str(f)],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 1
         assert "Slot environments" not in result.stdout
@@ -3832,6 +3909,7 @@ class TestExplainSlots:
             [sys.executable, "-m", "vera.cli", "check", "--explain-slots", "--json", str(f)],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 1
         parsed = json.loads(result.stdout)
@@ -3845,6 +3923,7 @@ class TestExplainSlots:
             [sys.executable, "-m", "vera.cli", "check", "--explain-slots", "--json", str(missing)],
             capture_output=True, text=True,
             encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 1
         parsed = json.loads(result.stdout)
@@ -4093,6 +4172,7 @@ class TestNatIntWideningCliThreading820:
             [sys.executable, "-m", "vera.cli", "run", path,
              "--fn", "ae", "--", str(self._U64_MAX)],
             capture_output=True, text=True, encoding="utf-8",
+            check=False,
         )
         # Nulling cmd_run's expr_target_types drops the element guard: this run
         # returns -1 with exit 0 instead of trapping.
@@ -4107,6 +4187,7 @@ class TestNatIntWideningCliThreading820:
             [sys.executable, "-m", "vera.cli", "run", path,
              "--fn", "ae", "--", "42"],
             capture_output=True, text=True, encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0, result.stderr
         assert "42" in result.stdout
@@ -4121,6 +4202,7 @@ class TestNatIntWideningCliThreading820:
         result = subprocess.run(
             [sys.executable, "-m", "vera.cli", "compile", "--wat", path],
             capture_output=True, text=True, encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0, result.stderr
         body = self._wat_function(result.stdout, "ae")
@@ -4134,6 +4216,7 @@ class TestNatIntWideningCliThreading820:
         result = subprocess.run(
             [sys.executable, "-m", "vera.cli", "compile", "--wat", path],
             capture_output=True, text=True, encoding="utf-8",
+            check=False,
         )
         assert result.returncode == 0, result.stderr
         assert "i64.lt_s" not in self._wat_function(result.stdout, "ae")
@@ -4150,6 +4233,7 @@ class TestNatIntWideningCliThreading820:
         result = subprocess.run(
             [sys.executable, "-m", "vera.cli", "verify", "--json", path],
             capture_output=True, text=True, encoding="utf-8",
+            check=False,
         )
         parsed = json.loads(result.stdout)
         coerce = [o for o in parsed["obligations"]

@@ -931,7 +931,7 @@ def _run_trials(
                     fn_name=fn_name, args=arg_dict,
                     status="error", message=msg,
                 ))
-        except Exception as e:  # pragma: no cover — WASM traps, stack overflow, etc.
+        except Exception as e:  # pragma: no cover — WASM traps, stack overflow, etc.  # noqa: BLE001
             exc_name = type(e).__name__
             if exc_name in ("Trap", "WasmtimeError"):
                 msg = str(e)

@@ -5,6 +5,9 @@ Split from tests/test_codegen.py (#419). Shared helpers live in tests/codegen_he
 from __future__ import annotations
 
 import re
+from unittest import mock
+
+import pytest
 
 from tests.codegen_helpers import (
     _IO_PRELUDE,
@@ -1273,3 +1276,51 @@ public fn main(-> @Unit)
         # silently returned None on the refinement, leading to wrong
         # element size in the array_map loop.
         assert _run_io(source, fn="main") == "x"
+
+
+# =====================================================================
+# Interpolation parse-failure width (PR #1162 review)
+# =====================================================================
+
+
+class TestInterpolationParseFailureWidth:
+    """`_parse_interp_expr` converts syntax errors, not every failure.
+
+    The catch around the synthesized wrapper's parse used to be a blind
+    `except Exception`, so a compiler bug anywhere inside `parse` was
+    reported to the user as "Invalid expression in string interpolation"
+    — blaming their source for something it did not cause.  `parse`
+    funnels every genuine syntax failure through `ParseError`, so that is
+    the only thing worth converting.
+    """
+
+    def test_syntax_error_becomes_an_interpolation_diagnostic(self) -> None:
+        from vera.errors import TransformError
+        from vera.transform import _parse_interp_expr
+
+        with pytest.raises(TransformError) as excinfo:
+            _parse_interp_expr("1 +", None)
+        assert "string interpolation" in str(excinfo.value)
+
+    def test_a_non_parse_failure_propagates_unconverted(self) -> None:
+        """The distinguishing case: only this separates the two widths.
+
+        A blind `except Exception` swallows the injected error and
+        reports an interpolation diagnostic instead, so this test fails
+        against the previous code and passes against the narrowed catch.
+        """
+        from vera.errors import TransformError
+        from vera.transform import _parse_interp_expr
+
+        sentinel = RuntimeError("compiler bug, not the user's source")
+
+        def _boom(_source: str, file: str | None = None) -> None:
+            raise sentinel
+
+        # `_parse` is bound by a function-local import, so the patch has
+        # to land on the source module rather than on `vera.transform`.
+        with mock.patch("vera.parser.parse", _boom):
+            with pytest.raises(RuntimeError) as excinfo:
+                _parse_interp_expr("1 + 1", None)
+        assert excinfo.value is sentinel
+        assert not isinstance(excinfo.value, TransformError)

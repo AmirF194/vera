@@ -1849,7 +1849,7 @@ public fn main(@Unit -> @Bool)
         log: list[str] = []
 
         class Handler(http.server.BaseHTTPRequestHandler):
-            def do_GET(self) -> None:  # noqa: N802 (stdlib API name)
+            def do_GET(self) -> None:
                 log.append(self.path)
                 if self.path == "/a":
                     ok = arrived_b.wait(timeout=3.0)
@@ -1909,7 +1909,7 @@ public fn main(@Unit -> @Unit)
         body = b"OK-PAYLOAD-843"
 
         class Handler(http.server.BaseHTTPRequestHandler):
-            def do_GET(self) -> None:  # noqa: N802 (stdlib API name)
+            def do_GET(self) -> None:
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
@@ -2013,7 +2013,7 @@ public fn run(@String -> @Result<String, String>)
         body = b"OK-PAYLOAD-1109-LET"
 
         class Handler(http.server.BaseHTTPRequestHandler):
-            def do_GET(self) -> None:  # noqa: N802 (stdlib API name)
+            def do_GET(self) -> None:
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
@@ -2056,7 +2056,7 @@ public fn main(@Unit -> @Unit)
         body = b"OK-PAYLOAD-1109-FN"
 
         class Handler(http.server.BaseHTTPRequestHandler):
-            def do_GET(self) -> None:  # noqa: N802 (stdlib API name)
+            def do_GET(self) -> None:
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
@@ -2123,7 +2123,7 @@ public fn fetch(@String -> @R)
         body = b"OK-PAYLOAD-1109-PAYLOAD"
 
         class Handler(http.server.BaseHTTPRequestHandler):
-            def do_GET(self) -> None:  # noqa: N802 (stdlib API name)
+            def do_GET(self) -> None:
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
@@ -2196,7 +2196,7 @@ public fn run(@String -> @Result<String, String>)
         log: list[str] = []
 
         class Handler(http.server.BaseHTTPRequestHandler):
-            def do_GET(self) -> None:  # noqa: N802 (stdlib API name)
+            def do_GET(self) -> None:
                 log.append(self.path)
                 if self.path == "/a":
                     ok = arrived_b.wait(timeout=3.0)
@@ -2517,6 +2517,7 @@ public fn keep(@Unit -> @Unit)
             proc = subprocess.run(
                 [sys.executable, "-m", "vera.cli", *cmd, str(p)],
                 capture_output=True, text=True, encoding="utf-8", timeout=120,
+                check=False,
             )
             assert proc.returncode == 0, (
                 f"vera {cmd[0]} failed: {proc.stdout}\n{proc.stderr}"

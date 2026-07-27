@@ -257,7 +257,8 @@ def _fetch_registry(index: str) -> dict[str, Any] | None:
     url = INDEX_JSON_URLS[index]
     request = Request(url, headers={"User-Agent": "vera-release-verifier/1"})
     try:
-        with urlopen(request, timeout=30) as response:  # noqa: S310 - fixed URLs
+        # The URLs come from INDEX_JSON_URLS, not from input.
+        with urlopen(request, timeout=30) as response:
             data = json.load(response)
     except HTTPError as exc:
         if exc.code == 404:

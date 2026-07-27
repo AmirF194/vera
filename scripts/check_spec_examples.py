@@ -44,7 +44,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from doc_annotations import (  # noqa: E402  (scripts/ is not a package)
+from doc_annotations import (
     evaluate_block,
     scan_markdown,
 )
@@ -57,7 +57,7 @@ def try_parse(content: str) -> str | None:
     try:
         parse(content, file="<spec>")
         return None
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — a failing doc example is reported, not raised
         # Return just the first line of the error
         return str(exc).split("\n")[0][:200]
 
@@ -79,7 +79,7 @@ def try_check(content: str) -> str | None:
         if errors:
             return errors[0].description[:200]
         return None
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — a failing doc example is reported, not raised
         return str(exc).split("\n")[0][:200]
 
 
@@ -104,7 +104,7 @@ def try_verify(content: str) -> str | None:
         if errs:
             return errs[0].description[:200]
         return None
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — a failing doc example is reported, not raised
         return str(exc).split("\n")[0][:200]
 
 

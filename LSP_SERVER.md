@@ -54,8 +54,10 @@ and exits; every other `vera` command works without it.
 
 ### Wiring up an editor
 
-- **VS Code** — the [bundled extension](editors/vscode/) starts the
-  server automatically for `.vera` files, finding the binary via the
+- **VS Code** — install [Vera Language from the VS Code
+  Marketplace](https://marketplace.visualstudio.com/items?itemName=veralang.vera-language)
+  (or see the [extension source](https://github.com/aallan/vera/tree/main/editors/vscode)).
+  It starts the server automatically for `.vera` files, finding the binary via the
   `vera.lsp.path` setting, then a workspace-local venv
   (`.venv/bin/vera`, or `.venv\Scripts\vera.exe` on Windows — so a
   from-source clone needs no configuration on either platform), then

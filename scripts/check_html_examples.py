@@ -29,7 +29,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from doc_annotations import (  # noqa: E402  (scripts/ is not a package)
+from doc_annotations import (
     evaluate_block,
     scan_html,
 )
@@ -59,7 +59,7 @@ def try_parse(content: str) -> str | None:
     try:
         parse(content, file="<html>")
         return None
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — a failing doc example is reported, not raised
         return str(exc).split("\n")[0][:200]
 
 
@@ -68,7 +68,7 @@ def try_check(content: str, root: Path) -> str | None:
     # `delete=False` + manual close/unlink: on Windows a held-open temp
     # file can't be reopened by the subprocess (see TESTING.md's Test
     # Fixture Conventions and the matching pattern in tests/test_html.py).
-    f = tempfile.NamedTemporaryFile(
+    f = tempfile.NamedTemporaryFile(  # noqa: SIM115 — Windows fixture; closed + unlinked below
         mode="w", suffix=".vera", delete=False, encoding="utf-8"
     )
     try:
@@ -81,6 +81,7 @@ def try_check(content: str, root: Path) -> str | None:
             encoding="utf-8",
             cwd=str(root),
             timeout=30,
+            check=False,
         )
         if "OK:" in result.stdout:
             return None
@@ -94,7 +95,7 @@ def try_check(content: str, root: Path) -> str | None:
 def try_verify(content: str, root: Path) -> str | None:
     """Try to verify contracts. Returns error message or None."""
     # See try_check above for the delete=False rationale (Windows-portable).
-    f = tempfile.NamedTemporaryFile(
+    f = tempfile.NamedTemporaryFile(  # noqa: SIM115 — Windows fixture; closed + unlinked below
         mode="w", suffix=".vera", delete=False, encoding="utf-8"
     )
     try:
@@ -107,6 +108,7 @@ def try_verify(content: str, root: Path) -> str | None:
             encoding="utf-8",
             cwd=str(root),
             timeout=60,
+            check=False,
         )
         if "OK:" in result.stdout:
             return None
