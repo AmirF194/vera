@@ -473,6 +473,7 @@ Stages 19 and 20 run dual-threaded: community PRs against the single-source spri
 | v0.1.5 | 17 Jul | **The third burndown and the first PyPI release** — 29 bug-labelled issues fixed across the checker, codegen, and diagnostics, published to PyPI as `veralang` ([#737](https://github.com/aallan/vera/issues/737)). |
 | v0.1.6 | 20 Jul | **The comment system** — block comments nest, malformed ones get their own `E02x` diagnostics, annotation labels reach the AST, and `vera fmt` stops deleting comments it had silently dropped since the formatter was written ([#1112](https://github.com/aallan/vera/issues/1112)). |
 | v0.1.7 | 24 Jul | **SQL injection won't compile** — the built-in `<DB>` effect and a literal-provenance checker that makes SQL injection a compile-time error ([#309](https://github.com/aallan/vera/issues/309): `E207`/`E208`/`E209`), plus the bare-effect-op routing check (`E217`) and a Float64 rounding-assertion CI-flake fix. |
+| v0.1.8 | 27 Jul | **Editors and toolchain hygiene** — the VS Code extension reaches the Marketplace, Vim and Neovim gain a package, the ruff rule set is declared rather than inherited with five defect-class rules adopted, and the SQL checker's `E208` follows a `let` chain as `E207` already did ([#1106](https://github.com/aallan/vera/issues/1106)). |
 
 ---
 
