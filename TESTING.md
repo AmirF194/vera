@@ -758,7 +758,7 @@ Every push is checked by 32 configured hooks across two stages: 30 are configure
 | `pytest tests/ -q` | Run full test suite |
 | `check_conformance.py` | All 169 conformance entries hold at their declared level — positives pass; negatives fail `check` with their `expected_error` E-code |
 | `check_examples.py` | All 42 examples pass `vera check` + `vera verify` |
-| `check_corpus_canonical.py` | All 216 `examples/` + `tests/conformance/` programs (recursive) are in canonical form (`vera fmt`) |
+| `check_corpus_canonical.py` | All 217 `examples/` + `tests/conformance/` programs (recursive) are in canonical form (`vera fmt`) |
 | `check_examples_readme.py` | `vera run` commands in `examples/README.md` reference existing files and exported functions |
 | `check_readme_examples.py` | README code blocks parse correctly |
 | `check_examples_doc.py` | EXAMPLES.md code blocks parse correctly |
