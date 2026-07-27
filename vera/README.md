@@ -83,7 +83,7 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `  registration.py` | 456 | | Pass 1 forward declarations, ability registration | |
 | `  expressions.py` | 1,335 | | Expression synthesis (bidirectional), operators, statements | |
 | `  eq_ability.py` | 199 | | Eq ability derivation checks | |
-| `  sql.py` | 219 | | SQL literal-provenance resolution + placeholder counting (#309) | `resolve_literal_string()`, `count_placeholders()` |
+| `  sql.py` | 308 | | SQL literal-provenance resolution + placeholder counting (#309) | `resolve_literal_string()`, `count_placeholders()` |
 | `  calls.py` | 1,556 | | Function/constructor/module/ability calls | |
 | `  control.py` | 627 | | If/match, patterns, effect handlers | |
 | `resolver.py` | 332 | Resolve | Module path resolution, parse cache | `ModuleResolver` |

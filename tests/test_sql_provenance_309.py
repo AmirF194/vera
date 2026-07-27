@@ -188,6 +188,54 @@ class TestSqlPlaceholderCount309:
         _check_ok(_db_fn(
             '  DB.query("SELECT \'?\' AS q FROM u WHERE a = ?", [Some("x")])'))
 
+    def test_let_bound_array_literal_mismatch_rejected(self) -> None:
+        # #1160 — the params array is written literally but bound through a
+        # ``let``.  It is exactly as statically sized as the inline form, so it
+        # gets the same E208.  E207 already follows ``let`` chains; before
+        # #1160 E208 looked only at the call-site syntax and let this through.
+        _check_code(
+            _db_fn(
+                '  let @Array<Option<String>> = [Some("x")];\n'
+                '  DB.query("SELECT * FROM u WHERE a = ? AND b = ?", '
+                '@Array<Option<String>>.0)'
+            ),
+            "E208",
+        )
+
+    def test_let_bound_array_literal_match_accepted(self) -> None:
+        # The positive control for the case above: resolving the length through
+        # the ``let`` must accept a program whose counts agree, not merely
+        # reject more.  Without this, a resolver that returned a wrong length
+        # would still look "fixed".
+        _check_ok(_db_fn(
+            '  let @Array<Option<String>> = [Some("x")];\n'
+            '  DB.query("SELECT * FROM u WHERE a = ?", '
+            '@Array<Option<String>>.0)'))
+
+    def test_let_chain_of_array_literals_resolves(self) -> None:
+        # A chain: the second ``let`` re-binds the first slot.  The length must
+        # follow to the innermost binding, the array-side analogue of the
+        # literal-string let chain.
+        _check_code(
+            _db_fn(
+                '  let @Array<Option<String>> = [Some("x"), Some("y")];\n'
+                '  let @Array<Option<String>> = [Some("z")];\n'
+                '  DB.query("SELECT * FROM u WHERE a = ? AND b = ?", '
+                '@Array<Option<String>>.0)'
+            ),
+            "E208",
+        )
+
+    def test_let_bound_runtime_array_still_defers(self) -> None:
+        # A ``let`` whose value is NOT an array literal has no statically known
+        # length, so the count still defers to the driver.  This is the
+        # conservative direction: resolution failure must never invent a length.
+        _check_ok(_db_fn(
+            '  let @Array<Option<String>> = @Array<Option<String>>.0;\n'
+            '  DB.query("SELECT * FROM u WHERE a = ? AND b = ?", '
+            '@Array<Option<String>>.0)',
+            param="@Array<Option<String>>"))
+
     def test_dynamic_params_defers_count_to_runtime(self) -> None:
         # A literal SQL (no E207) with a dynamically-sized params slot: the
         # count is not statically decidable, so NO E208 — sqlite3 enforces it

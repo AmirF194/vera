@@ -133,6 +133,15 @@ class Binding:
     # test ``is None``, never truthiness, or the empty literal misroutes.
     literal_str: str | None = None
 
+    # #1160: the binding's compile-time array length when its value is an array
+    # literal, else None.  The array-side analogue of ``literal_str``, computed
+    # eagerly at the same moment and for the same reason — so the E208 arity
+    # check can follow a ``let`` chain without re-walking a De Bruijn-shifted
+    # environment.  Only ``let`` bindings carry it.  ``None`` means "length not
+    # statically known", which defers the count to the driver; a length is never
+    # invented, so resolution failure can only under-report, never false-reject.
+    array_len: int | None = None
+
 
 # =====================================================================
 # Type environment
@@ -2021,15 +2030,18 @@ class TypeEnv:
         self._scopes = saved
 
     def bind(self, type_name: str, resolved_type: Type, source: str,
-             literal_str: str | None = None) -> None:
+             literal_str: str | None = None,
+             array_len: int | None = None) -> None:
         """Add a binding to the current (innermost) scope.
 
         ``literal_str`` (#309) is the binding's compile-time literal value when
-        it is a String of literal provenance, else None; defaulted so callers
-        that do not track provenance are unaffected.
+        it is a String of literal provenance, else None; ``array_len`` (#1160)
+        is its compile-time length when the value is an array literal, else
+        None.  Both are defaulted so callers that do not track provenance are
+        unaffected.
         """
         self._scopes[-1].append(
-            Binding(type_name, resolved_type, source, literal_str))
+            Binding(type_name, resolved_type, source, literal_str, array_len))
 
     # -----------------------------------------------------------------
     # Slot reference resolution (De Bruijn counting)

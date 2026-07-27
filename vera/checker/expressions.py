@@ -9,7 +9,7 @@ quantifiers, and old/new contract expressions.
 from __future__ import annotations
 
 from vera import ast
-from vera.checker.sql import resolve_literal_string
+from vera.checker.sql import resolve_array_len, resolve_literal_string
 from vera.types import (
     BOOL,
     BYTE,
@@ -1025,8 +1025,12 @@ class ExpressionsMixin:
         # slot reference then reads a value resolved where it was written — the
         # De Bruijn-safe way to follow a ``let`` chain of literals into the SQL
         # provenance gate.  Returns None for any non-literal value.
+        # #1160 resolves the array length the same way and for the same reason,
+        # so the E208 arity check follows a let chain as the E207 gate does.
         lit = resolve_literal_string(stmt.value, self.env)
-        self.env.bind(tname, declared_type, "let", literal_str=lit)
+        alen = resolve_array_len(stmt.value, self.env)
+        self.env.bind(tname, declared_type, "let", literal_str=lit,
+                      array_len=alen)
 
     def _check_let_destruct(self, stmt: ast.LetDestruct) -> None:
         """Type-check a destructuring let."""

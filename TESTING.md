@@ -6,9 +6,9 @@ This is the single source of truth for Vera's testing infrastructure, coverage d
 
 | Metric | Value |
 |--------|-------|
-| **Tests** | 8,539 across 131 files (~106,000 lines of test code; 8,424 passed + 26 stress, 88 skipped) |
+| **Tests** | 8,549 across 131 files (~106,000 lines of test code; 8,424 passed + 26 stress, 88 skipped) |
 | **Compiler code coverage** | 95% Python, 61% JavaScript — 91% combined (CI minimum: 80%) |
-| **Conformance programs** | 168 programs across 9 spec chapters, validating every language feature |
+| **Conformance programs** | 169 programs across 9 spec chapters, validating every language feature |
 | **Example programs** | 42, all validated through `vera check` + `vera verify` |
 | **Spec code blocks** | 189 parseable blocks from 14 spec chapters: 92 parse, 86 type-check, 85 verify (the rest carry inline `vera:skip` annotations, #538) |
 | **README code blocks** | 4 Vera blocks (4 validated, 0 annotated) |
@@ -39,7 +39,7 @@ VERA_EAGER_GC=1 pytest tests/test_codegen_closures.py::TestClosureReturnShadowPu
 mypy vera/                                           # strict mode
 
 # Validation scripts
-python scripts/check_conformance.py                  # conformance suite (168 programs, see manifest.json)
+python scripts/check_conformance.py                  # conformance suite (169 programs, see manifest.json)
 python scripts/check_examples.py                     # 42 example programs
 python scripts/check_spec_examples.py                # spec code blocks
 python scripts/check_readme_examples.py              # README code blocks
@@ -65,7 +65,7 @@ python scripts/check_wheel_availability.py           # pre-flight: every runtime
 | `test_db_effect.py` | 9 | 134 | #229 — the built-in `<DB>` effect: `DB.query` / `DB.execute` type-check under `effects(<DB>)` (E122 without it; E204 on a non-`String` SQL argument), plus `is_db_sql_op` — the predicate the #309 gate keys on — gating any `DB.query`/`DB.execute` by `parent_effect == "DB"` + op name (the same axis codegen routes to the host on), so a user `effect DB` shadow IS gated (it still reaches the host) while an unrelated effect's `query` is not; a checker↔codegen differential pins the gated set to the built-in DB ops |
 | `test_db_marshalling.py` | 35 | 232 | #229 — the `<DB>` marshalling helpers: `Array<Option<String>>` params (inbound reader), `Array<Array<Option<String>>>` query grids (`_alloc_result_ok_rows`) and `Result<Int>` row-counts, round-tripped through an `InstanceCaller` over a real compiled module — each case run normally AND under `VERA_EAGER_GC=1` (every `$alloc` fires `$gc_collect`), the large-grid case forcing free-block reuse; mutation-validated (dropping a shadow-stack root corrupts the read-back / SIGBUSes the swept-pointer read) |
 | `test_db_runtime.py` | 21 | 301 | #229 — the `<DB>` host binding (`vera/runtime/db.py`) on stdlib `sqlite3`: create/insert/select round-trips against `:memory:`, NULL cells → `None`, the affected-row count (incl. the `-1` DDL sentinel), a BLOB cell UTF-8-decoded with replacement, the `Err`-not-crash error path, an unopenable `VERA_DB_URL` deferred to an `Err` (not a host crash), and injection-safety (a malicious param binds as a literal, table intact); plus `_open_connection`'s `VERA_DB_URL` surface (memory + file URLs, in-memory default) and `register_db`'s bind/no-op paths |
-| `test_sql_provenance_309.py` | 58 | 525 | #309 — the SQL literal-provenance gate (SQL injection as a compile-time error): non-literal SQL rejected `E207` (bare param slot, function result, `\(expr)` interpolation, `string_concat` with a runtime operand, let-bound runtime value, `if`-expression), literal / concat-of-literals / let-chain-with-shadowing / empty-string accepted, placeholder/param arity `E208` with quote- and comment-aware counting (named/numbered placeholders are rejected outright, `E209`), the `count_placeholders`↔sqlite3 differential (exact count accepted, one too many rejected), and gate scoping — a user `effect DB` shadow IS gated (it still routes to the host), an unrelated effect's `query` is not, and no `E207` cascade onto a mistyped SQL arg |
+| `test_sql_provenance_309.py` | 62 | 573 | #309 — the SQL literal-provenance gate (SQL injection as a compile-time error): non-literal SQL rejected `E207` (bare param slot, function result, `\(expr)` interpolation, `string_concat` with a runtime operand, let-bound runtime value, `if`-expression), literal / concat-of-literals / let-chain-with-shadowing / empty-string accepted, placeholder/param arity `E208` with quote- and comment-aware counting (named/numbered placeholders are rejected outright, `E209`), the `count_placeholders`↔sqlite3 differential (exact count accepted, one too many rejected), and gate scoping — a user `effect DB` shadow IS gated (it still routes to the host), an unrelated effect's `query` is not, and no `E207` cascade onto a mistyped SQL arg |
 | `test_checker_modules.py` | 45 | 975 | Module-call diagnostics, cross-module typing, visibility enforcement, builtin redefinition, parsed module calls (#420 split) |
 | `test_checker_errors.py` | 56 | 866 | Error codes, resolution-coverage diagnostics, contracts, error accumulation (#420 split); cyclic type aliases incl. #1059 self-reference through a type argument (`Future<F>`, mutual `Future<B>`/`Future<A>`, `Array<L>`) rejected E132 |
 | `test_checker_builtins_collections.py` | 97 | 848 | Map / Set / Decimal / Json / Html / Http / Inference built-in type-checking (#420 split) |
@@ -148,7 +148,7 @@ python scripts/check_wheel_availability.py           # pre-flight: every runtime
 | `test_string_length_soundness.py` | 15 | 278 | #802 — string_length code-point vs UTF-8 byte soundness: a non-literal `string_length` defers to Tier 3 (the issue's `"é"` probe no longer proves `== 1` at Tier 1), a string-literal length is modeled at its exact UTF-8 byte count (`== 2` for `"é"`), and the boolean predicates `string_contains` / `string_starts_with` / `string_ends_with` stay Tier 1 (sound under UTF-8 self-synchronization), while a predicate over an astral (> U+2FFFF) or lone-surrogate literal defers to Tier 3 (z3.StringVal cannot model those code points) |
 | `test_errors.py` | 62 | 657 | Error code registry, diagnostic formatting, serialisation, SourceLocation, and error display sync — the canonical `E001` diagnostic must match each of its mirrors: `README.md`, `docs/index.html`, `spec/00-introduction.md`, `AGENTS.md`'s example `--json` block, and the hardcoded example in `scripts/build_site.py` that generates `docs/index.md` (#829; `AGENTS.md`'s ellipsis-truncated description/rationale are prefix-compared, its `error_code`/`spec_ref`/`fix` exactly) |
 | `test_eq_contract_874.py` | 11 |      378 | `eq`/`compare` ability ops in contract position: codegen canonicalization + verifier Tier-1 discharge/counterexample, where-fn contracts, compare Ordering-sort materialization, shadowing guard (#874) |
-| `test_formatter.py` | 462 | 3,676 | Comment extraction, interior comment positioning, expression/declaration formatting, match arm block bodies, §1.8 rule 2 in value position (a `let`-bound `match`/`if` expands exactly as one in statement position, and a comment above an arm inside a statement's value stays on that arm), blank-line preservation (§1.8 rule 13 — gaps between statements, before a block result and around a comment, collapsed to one and never invented), idempotency, parenthesization, spec rules, ability declarations |
+| `test_formatter.py` | 463 | 3,676 | Comment extraction, interior comment positioning, expression/declaration formatting, match arm block bodies, §1.8 rule 2 in value position (a `let`-bound `match`/`if` expands exactly as one in statement position, and a comment above an arm inside a statement's value stays on that arm), blank-line preservation (§1.8 rule 13 — gaps between statements, before a block result and around a comment, collapsed to one and never invented), idempotency, parenthesization, spec rules, ability declarations |
 | `test_cli.py` | 265 | 4,158 | CLI commands (check, verify, compile, run, serve, test, fmt, version, quiet), subprocess integration, JSON error paths (including the `verify --json` `obligations` array and its summary-reproducibility pin, #967), runtime traps, arg validation, multi-file resolution, IO exit codes, --explain-slots, `builtins`/`effects`/`errors` introspection dispatch, and a USAGE-completeness guard (every dispatched `cmd_<name>` handler has a help row) |
 | `test_introspect.py` | 39 | 220 | `vera builtins/effects/errors --json` registry introspection (#539): the `{schema, items}` envelope, count-equals-registry differential per registry, error-phase derivation, effect/ability `kind` tagging, the parameterised `Exn<T>` effect, and best-effort `since` attribution with full-coverage guards |
 | `test_resolver.py` | 20 | 602 | Module resolution, path lookup, parse caching, circular import detection, the E011/E012/E013 diagnostic contract, internal-error isolation (a compiler bug is not masked as E013), and the transitive-closure return of `resolve_imports` (#890 — a diamond yields each reachable module once, direct imports tagged `direct`, the transitive one not) |
@@ -166,7 +166,7 @@ python scripts/check_wheel_availability.py           # pre-flight: every runtime
 | `test_markdown.py` | 59 | 393 | Markdown parser: block/inline parsing, rendering, round-trips, edge cases |
 | `test_lsp.py` | 94 | 1211 | LSP transport + coordinate layer (#222 Phase C) and language features (#222 Phase D): parametrized code-point↔UTF-16 goldens incl. astral-plane fixtures and surrogate-pair snapping, Span (1-based, exclusive-end) and SourceLocation (0-based col) → LSP Range conversions, point→token-range widening, DocumentStore open/change/close + index invalidation, an in-process handler-drive test, and one stdio end-to-end round-trip against the real `vera lsp` subprocess (initialize → didOpen → shutdown → exit) pinning serverInfo + textDocumentSync capabilities; plus the Phase D feature suite — parse-error single-diagnostic path, type-error verification short-circuit, tier=3 in E520 diagnostic data, per-function tier Hint synthesis (and its suppression for functions with violated obligations), smallest-enclosing-span hover, De Bruijn slot goto (most-recent-parameter jump, out-of-range None, off-slot None), and typed-hole completion (inside/after hole, away-from-hole None); plus the Phase E speculativeEdit suite — identical-text all-unchanged, breaking edit surfaces newly_undischarged (violated nat_sub) with canonical state untouched, strengthening edit surfaces newly_discharged, parse/type errors report ok:false, deleted functions report removed, proof_delta purity; plus the Phase F1 proposeEdit suite — the apply gate (clean and strengthening edits apply, breaking and non-compiling edits refuse), force overriding both gates with the delta still reported, wiring against a structural fake server (apply round-trip with exact full-document replacement range, refuse touches no canonical state, unopened-URI clamp sentinel), and full-document-range goldens (trailing-newline virtual line, UTF-16 end column); plus the Phase F2 strengthenContract suite — splice goldens (first-clause-only replacement with byte-identical remainder, ensures variant, unknown-fn None), the call-site audit pin (tightened precondition refused with newly_undischarged call_pre items, canonical state untouched), provable-ensures strengthening applies, and the three splice-target refusal paths (no analysis, unparseable document, unknown function); plus the Phase F3 addEffect suite — transitive-caller closure goldens (diamond in declaration order, leaf, unknown-fn None, recursion appears once), effect-row rewrite goldens (pure to singleton set, source-preserving append, already-present None, base-name identity blocking State<Int> next to State<Bool>), diamond propagation applying one multi-site candidate with the bystander untouched, mixed append/replace rows with already-satisfied callers skipped, the fully-satisfied no-op shape, and the two refusal paths; plus the #728 instruction-contract suite — the LSP message carries description, rationale, and the Fix: paragraph (also pinning single E501 emission at the LSP surface), and a bare diagnostic maps to the description alone |
 | `test_browser.py` | 138 | 3,097 | Browser parity: Python/wasmtime vs Node.js/JS-runtime output equivalence across IO, State, contracts, Markdown, Regex, and all compilable examples |
-| `test_conformance.py` | 840 | 124 | Parametrized conformance suite: parse, check, verify, run, format idempotency across 168 programs |
+| `test_conformance.py` | 845 | 124 | Parametrized conformance suite: parse, check, verify, run, format idempotency across 169 programs |
 | `test_prelude.py` | 24 | 422 | Prelude injection: Option/Result/array operation detection, combinator shadowing, type aliases, end-to-end compilation |
 | `test_checker_apply_fn.py` | 18 | 454 | #854 — `apply_fn` as a checker special form: zero-warning pins (API + CLI `--json` + closures.vera), E201 arity / E202 type / non-function-first-arg errors, E122/E125 effect-row enforcement for applied fn values, E151 redefinition rejection, variadic two-param application, prelude combinator regression pins |
 | `test_prelude_diagnostics.py` | 8 | 271 | #851 — prelude combinator skip-warnings: unreferenced-prelude E602/E604 suppression (zero-warning minimal compile, API + CLI `--json`), `<prelude>` origin attribution for referenced-but-skipped combinators (text + `to_dict`), transitive reference scan, and user-fn warning locations pinned unchanged |
@@ -189,7 +189,7 @@ python scripts/check_wheel_availability.py           # pre-flight: every runtime
 
 ## Conformance Suite
 
-The conformance suite is a collection of 168 small, focused programs in `tests/conformance/` that systematically validate every language feature against the spec. Most programs are self-contained; the module-focused Chapter 8 cases use `import` statements where needed, and `ch07_cross_module_contracts.vera` still depends on `ch07_cross_module_contracts_lib.vera`. Each program tests one feature or a small group of related features.
+The conformance suite is a collection of 169 small, focused programs in `tests/conformance/` that systematically validate every language feature against the spec. Most programs are self-contained; the module-focused Chapter 8 cases use `import` statements where needed, and `ch07_cross_module_contracts.vera` still depends on `ch07_cross_module_contracts_lib.vera`. Each program tests one feature or a small group of related features.
 
 Simon Willison [argues](https://simonwillison.net/tags/conformance-suites/) that conformance suites are a "huge unlock" for language projects — they transform development from trust-based to verification-based. The conformance suite serves as the definitive specification artifact that any implementation (or agent) can validate against.
 
@@ -214,7 +214,7 @@ Each conformance program declares the deepest pipeline stage it must pass:
 | Level | What it validates | Count |
 |-------|-------------------|------:|
 | `parse` | Source text is syntactically valid | 0 |
-| `check` | Parses and type-checks cleanly | 23 |
+| `check` | Parses and type-checks cleanly | 24 |
 | `verify` | Type-checks and all contracts verified by Z3 | 13 |
 | `run` | Compiles to WASM and executes correctly | 132 |
 
@@ -303,7 +303,7 @@ tests/conformance/
 ├── ch01_int_literals.vera     # Chapter 1: Integer literals
 ├── ch01_float_literals.vera   # Chapter 1: Float64 literals
 ├── ch01_string_escapes.vera   # Chapter 1: String escape sequences
-├── ...                        # 168 programs total, organized by spec chapter
+├── ...                        # 169 programs total, organized by spec chapter
 ├── ch07_state_handler.vera    # Chapter 7: State<T> effect handler
 ├── ch07_exn_handler.vera      # Chapter 7: Exn<E> effect handler
 ├── ch09_numeric_builtins.vera # Chapter 9: Numeric built-in functions
@@ -651,7 +651,7 @@ Twenty-two scripts in `scripts/` validate cross-cutting concerns beyond unit tes
 
 | Script | What it validates |
 |--------|-------------------|
-| `check_conformance.py` | All 168 conformance entries hold at their declared level (parse/check/verify/run) — positives pass; the negatives fail `check` with their `expected_error` E-code |
+| `check_conformance.py` | All 169 conformance entries hold at their declared level (parse/check/verify/run) — positives pass; the negatives fail `check` with their `expected_error` E-code |
 | `check_examples.py` | All 42 `.vera` examples pass `vera check` + `vera verify` |
 | `check_corpus_canonical.py` | All 216 corpus programs (recursive over `examples/` + `tests/conformance/`) are in canonical form under `vera fmt` |
 | `check_examples_readme.py` | Every `vera run` command in examples/README.md references an existing file and exported function |
@@ -754,7 +754,7 @@ Every push is checked by 32 configured hooks across two stages: 30 are configure
 | `ruff check .` | Lint Python with ruff (default `F` + `E` rules) |
 | `mypy vera/` | Type-check compiler in strict mode |
 | `pytest tests/ -q` | Run full test suite |
-| `check_conformance.py` | All 168 conformance entries hold at their declared level — positives pass; negatives fail `check` with their `expected_error` E-code |
+| `check_conformance.py` | All 169 conformance entries hold at their declared level — positives pass; negatives fail `check` with their `expected_error` E-code |
 | `check_examples.py` | All 42 examples pass `vera check` + `vera verify` |
 | `check_corpus_canonical.py` | All 216 `examples/` + `tests/conformance/` programs (recursive) are in canonical form (`vera fmt`) |
 | `check_examples_readme.py` | `vera run` commands in `examples/README.md` reference existing files and exported functions |

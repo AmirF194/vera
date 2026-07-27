@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`E208` now follows a `let` chain, as `E207` already did** ([#1160](https://github.com/aallan/vera/issues/1160)). The SQL placeholder/parameter arity check only looked at the syntax *at the call site*, so moving a params array into a `let` for readability silently dropped a compile-time check — identical array, identical static size, only an indirection differs:
+
+  ```vera
+  DB.query("... a = ? AND b = ?", [Some(@String.0)])        -- E208
+  let @Array<Option<String>> = [Some(@String.0)];
+  DB.query("... a = ? AND b = ?", @Array<Option<String>>.0)  -- accepted
+  ```
+
+  `Binding` gains an eager `array_len` alongside `literal_str`, computed at the same moment and for the same reason — in the value's own scope, before `bind()` shifts slot indices — and a new `resolve_array_len` in `vera/checker/sql.py` reads it. A completeness fix, not a soundness one: the mismatch already failed at run time as `Result.Err`, so the change only converts a runtime failure into a compile-time one. Every unresolvable shape still returns `None` and defers to the driver; the resolver deliberately does *not* fold `array_concat` or any other builtin, since each extra shape is another way to compute a wrong length. This makes spec §9.5.7 ("statically sized"), SKILL.md ("statically known") and AGENTS.md ("a literal params array") true as written. Both resolvers now look slots up through `vera/slots.py::slot_ref_name` rather than the bare `type_name`, which is the *base* name for a parameterised type — `@Array<Option<String>>` is `"Array"`, matching no binding, so a bare lookup silently resolved to `None`. Conformance `ch09_sql_placeholder_let_mismatch_rejected`.
+
 ### Documentation
 
 - **The landing page's project facts are gated against the live codebase** ([#528](https://github.com/aallan/vera/issues/528)). `docs/index.html` states counts in prose — built-in functions, algebraic effects, spec chapters, conformance programs, worked examples — that drift silently as the codebase moves; two were stale before anyone noticed ("six algebraic effects" when there were seven, a 77-program suite when there were 80). `scripts/check_doc_counts.py` now checks each against its live source, and the page stays hand-edited rather than becoming a template, which is the convention for that file. Effects are checked as a count *and* a membership list, in **both** places the page enumerates them — the status paragraph and the reference card, a second hand-maintained mirror that had no gate at all. That matters because the historical drift was a name missing from a list rather than a wrong total, which a count-only check cannot see. A pattern matching nothing is itself an error, so a reworded sentence fails loudly instead of silently switching its own check off. The version string is left to `scripts/check_version_sync.py`, which already owns this file for it.

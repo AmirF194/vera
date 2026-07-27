@@ -2341,6 +2341,20 @@
     ]
   },
   {
+    "id": "ch09_sql_placeholder_let_mismatch_rejected",
+    "file": "ch09_sql_placeholder_let_mismatch_rejected.vera",
+    "chapter": 9,
+    "title": "SQL placeholder / parameter count mismatch through a let binding is a checker error",
+    "level": "check",
+    "spec_ref": "Section 9.5.7",
+    "expected_error": "E208",
+    "features": [
+      "db_effect",
+      "sql_provenance",
+      "check_error"
+    ]
+  },
+  {
     "id": "ch09_sql_numbered_placeholder_rejected",
     "file": "ch09_sql_numbered_placeholder_rejected.vera",
     "chapter": 9,

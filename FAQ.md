@@ -70,7 +70,7 @@ Swap the placeholder for `string_concat("SELECT ... WHERE name = '", @String.0)`
 
 That is worth separating from the protections you are probably used to. It is not a lint, so there is no configuration to get right and no suppression comment to add. It is not a scanner run over a build, so it cannot be skipped or fall behind the code. And it is not a solver result, so it does not weaken where the solver does: Vera's contract verification has tiers and can fall back to runtime checks, but this check has neither. It asks one question about where a string came from, answers it in the type checker, and gives the same answer inside handled code and generic code as anywhere else.
 
-Two smaller errors sit alongside it. A `?`-placeholder/parameter count mismatch is `E208` when the params array is written out at the call site — anything else defers that arity check to the driver — and numbered or named placeholder styles are rejected in favour of the single positional form (`E209`).
+Two smaller errors sit alongside it. A `?`-placeholder/parameter count mismatch is `E208` when the params array is written literally — a runtime-sized array defers that arity check to the driver — and numbered or named placeholder styles are rejected in favour of the single positional form (`E209`).
 
 The guarantee is exactly as wide as the query path, and no wider. Every string that reaches the database goes through `DB.query` / `DB.execute`, and the language has no other string-to-SQL route, so there is no back door to leave open. What it does not catch is a fixed query that is simply wrong: a literal `DELETE FROM users` compiles happily, because nothing in it came from outside. And in v1 the effect is SQLite-only and un-mockable (`handle[DB]` is tracked with the other host effects in [#372](https://github.com/aallan/vera/issues/372); further backends are [#1143](https://github.com/aallan/vera/issues/1143)).
 
@@ -206,7 +206,7 @@ None of this is Vera-specific, but it validates the design choices. The thesis i
 
 This is a real concern. LLMs are trained on trillions of tokens of Python, TypeScript, and JavaScript. A MojoBench study (NAACL 2025) found that even fine-tuned models achieved only 30–35% improvement over base models on Mojo code generation, illustrating the cold-start problem for new languages.
 
-Vera's approach has three parts. First, the agent-facing documentation (SKILL.md) is designed to be dropped into a model's context window, so the model works from the language specification rather than training data recall. Second, Vera's syntax is deliberately simple and regular — fewer constructs, each with exactly one canonical form — which reduces the surface area a model needs to learn. Third, the conformance test suite (168 programs covering every language feature) gives models concrete examples to learn from and conform to. Simon Willison's December 2025 JustHTML write-up illustrates the same point in practice: an LLM-assisted implementation, guided by the html5lib conformance suite, conformed to the HTML parsing spec by running against its tests — a comprehensive test suite is a strong scaffold for a model implementing to a specification.
+Vera's approach has three parts. First, the agent-facing documentation (SKILL.md) is designed to be dropped into a model's context window, so the model works from the language specification rather than training data recall. Second, Vera's syntax is deliberately simple and regular — fewer constructs, each with exactly one canonical form — which reduces the surface area a model needs to learn. Third, the conformance test suite (169 programs covering every language feature) gives models concrete examples to learn from and conform to. Simon Willison's December 2025 JustHTML write-up illustrates the same point in practice: an LLM-assisted implementation, guided by the html5lib conformance suite, conformed to the HTML parsing spec by running against its tests — a comprehensive test suite is a strong scaffold for a model implementing to a specification.
 
 
 ## How does Vera compare to Dafny / Lean / Koka / F*?
@@ -249,7 +249,7 @@ The reference compiler is under active development. The current release includes
 
 - A seven-stage pipeline: parse, transform, resolve, typecheck, verify, compile, execute
 - A 14-chapter formal specification
-- 8,538 tests, including a 168-program conformance suite
+- 8,538 tests, including a 169-program conformance suite
 - 42 working example programs
 - 164 built-in functions covering strings, arrays, math, parsing, and data types
 - Four built-in abilities (Eq, Ord, Hash, Show) with constrained generics and ADT auto-derivation

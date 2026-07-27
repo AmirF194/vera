@@ -34,6 +34,7 @@ differential ``tests/test_sql_provenance_309.py`` against sqlite3 itself.
 from __future__ import annotations
 
 from vera import ast
+from vera.slots import slot_ref_name
 
 # ``TypeEnv`` is imported lazily inside the function signature via TYPE_CHECKING
 # to avoid a runtime import cycle (environment -> checker -> sql -> environment).
@@ -118,10 +119,97 @@ def resolve_literal_string(expr: ast.Expr, env: TypeEnv) -> str | None:
         return None
 
     if isinstance(expr, ast.SlotRef):
-        binding = env.resolve_slot_binding(expr.type_name, expr.index)
+        # ``slot_ref_name`` rather than the bare ``type_name``: identical for
+        # ``String`` (no type arguments), but keeps both resolvers on the one
+        # canonical renderer so a parameterised type cannot silently miss.
+        name = slot_ref_name(expr)
+        if name is None:
+            return None
+        binding = env.resolve_slot_binding(name, expr.index)
         return binding.literal_str if binding is not None else None
 
     # Every other Expr subclass: not literal-provenance (see WALKER_COVERAGE).
+    return None
+
+
+def resolve_array_len(expr: ast.Expr, env: TypeEnv) -> int | None:
+    """Return ``expr``'s compile-time length iff it is a literal array (#1160).
+
+    The array-side counterpart of :func:`resolve_literal_string`, used by the
+    E208 arity check.  Returns the element count for an array literal written
+    inline, or for a slot whose binding carries an eager ``array_len`` — so a
+    params array moved into a ``let`` for readability is checked exactly as the
+    inline form is.  Returns ``None`` for anything else, which defers the count
+    to the sqlite3 host at run time.
+
+    ``None`` is the conservative answer in the *opposite* direction from
+    :func:`resolve_literal_string`.  There, ``None`` means "reject": a
+    non-resolving SQL string is the injection vector.  Here ``None`` means
+    "don't check": E208 is a completeness diagnostic, not a soundness one — a
+    real mismatch still fails at run time as ``Result.Err``.  So a missed shape
+    costs a compile-time error that could have been raised, never a wrongly
+    rejected program.  Do not "fix" a miss by guessing a length.
+
+    Deliberately narrower than the string resolver: it does *not* fold
+    ``array_concat`` or any other builtin.  Nobody assembles a params array
+    from concatenated literals, and each extra shape is another way to compute
+    a wrong length and false-reject a valid program.
+
+    # WALKER_COVERAGE: (#597 — every Expr subclass has a disposition; a new
+    # subclass added to vera/ast.py trips check_walker_coverage.py until it is
+    # given one here.  The default disposition is None = "length not statically
+    # known", which can only UNDER-report: a missed shape costs an E208 that
+    # could have been raised, never a wrongly rejected program.)
+    #
+    #   ArrayLit           → Handled: the element count.
+    #   SlotRef            → Handled: the binding's eager array_len (or None).
+    #   FnCall             → None: a builtin/user call result has no static
+    #                        length.  Deliberately NOT folding array_concat &
+    #                        co — see the note above on wrong lengths.
+    #   QualifiedCall      → None: an effect-op result is a runtime value.
+    #   ModuleCall         → None: likewise, across a module boundary.
+    #   IndexExpr          → None: an indexed element, not the array itself.
+    #   IfExpr             → None: conservative — even two same-length arms
+    #                        defer in v1 (safe; extendable later).
+    #   MatchExpr          → None: conservative, as IfExpr.
+    #   Block              → None: conservative — a block result is not walked.
+    #   HandleExpr         → None: a handled expression is a runtime result.
+    #   BinaryExpr         → None: no operator yields an Array (a `|>` pipe is
+    #                        also a BinaryExpr, i.e. a runtime call result).
+    #   UnaryExpr          → None: no Array-producing unary operator exists.
+    #   ConstructorCall    → None: an ADT value, not a bare Array.
+    #   NullaryConstructor → None: likewise.
+    #   AnonFn             → None: a closure is not an Array.
+    #   StringLit          → None: not an Array.
+    #   InterpolatedString → None: not an Array.
+    #   IntLit             → None: not an Array.
+    #   FloatLit           → None: not an Array.
+    #   BoolLit            → None: not an Array.
+    #   UnitLit            → None: not an Array.
+    #   HoleExpr           → None: cannot occur post-typecheck; defer anyway.
+    #   ResultRef          → None: @T.result is a runtime value.
+    #   OldExpr            → None: contract-only; cannot occur in op-arg pos.
+    #   NewExpr            → None: contract-only.
+    #   AssertExpr         → None: yields Unit.
+    #   AssumeExpr         → None: yields Unit.
+    #   ForallExpr         → None: Bool, contract-only.
+    #   ExistsExpr         → None: Bool, contract-only.
+    """
+    if isinstance(expr, ast.ArrayLit):
+        return len(expr.elements)
+
+    if isinstance(expr, ast.SlotRef):
+        # Look the slot up under its CANONICAL name.  ``expr.type_name`` is the
+        # BASE name only — for ``@Array<Option<String>>.0`` it is ``"Array"``,
+        # which matches no binding, so a bare ``type_name`` lookup silently
+        # resolves to None and the check quietly does nothing.  ``slot_ref_name``
+        # is the same renderer the checker keys bindings with.
+        name = slot_ref_name(expr)
+        if name is None:
+            return None
+        binding = env.resolve_slot_binding(name, expr.index)
+        return binding.array_len if binding is not None else None
+
     return None
 
 
