@@ -166,6 +166,56 @@ public fn run(@String -> @Result<Int, String>)
         _check_code(src, "E207")
 
 
+class TestBindingProvenanceInvariant1164:
+    """Only ``let`` bindings may carry provenance (#1164).
+
+    Not bookkeeping — for ``literal_str`` it is the E207 gate itself.  A
+    ``param`` binding that acquired a ``literal_str`` would make
+    ``DB.execute(@String.0, [])`` type-check clean, i.e. accept the textbook
+    injection.  The invariant was a comment plus discipline at one call site
+    until #1164; it is now enforced at construction, which also covers
+    ``vera/checker/control.py``'s direct ``Binding(...)`` that bypasses
+    ``TypeEnv.bind``.
+    """
+
+    def test_param_binding_rejects_literal_str(self) -> None:
+        from vera.environment import Binding
+        from vera.types import STRING
+        with pytest.raises(ValueError, match="literal_str"):
+            Binding("String", STRING, "param", literal_str="SELECT 1")
+
+    def test_param_binding_rejects_array_len(self) -> None:
+        from vera.environment import Binding
+        from vera.types import STRING
+        with pytest.raises(ValueError, match="array_len"):
+            Binding("Array<Option<String>>", STRING, "param", array_len=2)
+
+    @pytest.mark.parametrize("source", ["match", "handler", "destruct",
+                                        "refinement"])
+    def test_every_non_let_source_rejects_provenance(self, source: str) -> None:
+        # Every binding source the checker actually uses, not just `param` —
+        # a future source added without provenance handling should trip here.
+        from vera.environment import Binding
+        from vera.types import STRING
+        with pytest.raises(ValueError):
+            Binding("String", STRING, source, literal_str="x")
+
+    def test_let_binding_accepts_provenance(self) -> None:
+        # The positive control: the guard must not reject the one source that
+        # legitimately carries provenance, including the "" / 0 edge values
+        # that a truthiness-based guard would wrongly drop.
+        from vera.environment import Binding
+        from vera.types import STRING
+        assert Binding("String", STRING, "let", literal_str="").literal_str == ""
+        assert Binding("Array<Option<String>>", STRING, "let",
+                       array_len=0).array_len == 0
+
+    def test_non_let_binding_without_provenance_is_fine(self) -> None:
+        from vera.environment import Binding
+        from vera.types import STRING
+        assert Binding("String", STRING, "param").literal_str is None
+
+
 class TestSqlPlaceholderCount309:
     """E208 — placeholder/param count mismatch when both are statically sized."""
 

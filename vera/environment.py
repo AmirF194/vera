@@ -143,6 +143,32 @@ class Binding:
     # invented, so resolution failure can only under-report, never false-reject.
     array_len: int | None = None
 
+    def __post_init__(self) -> None:
+        """Reject provenance on a binding that cannot legitimately carry it.
+
+        For ``literal_str`` this is the E207 gate itself, not bookkeeping: a
+        ``param`` binding that acquired one would make
+        ``DB.execute(@String.0, [])`` type-check clean — the textbook
+        injection, accepted.  Probed during the #1163 review.
+
+        Enforced here rather than in :meth:`TypeEnv.bind` because
+        ``vera/checker/control.py`` constructs a ``Binding`` directly for
+        match patterns, bypassing ``bind`` entirely.  ``ValueError`` rather
+        than ``assert``: a load-bearing guard must survive ``-O``, and the
+        ``ruff --select S`` CI lint rejects asserts used this way.
+        """
+        if self.source == "let":
+            return
+        for field_name in ("literal_str", "array_len"):
+            if getattr(self, field_name) is not None:
+                raise ValueError(
+                    f"Binding(source={self.source!r}) carries {field_name}; "
+                    f"only 'let' bindings have compile-time provenance "
+                    f"(#309 / #1160). A non-let binding is a runtime value, "
+                    f"and treating one as literal would defeat the E207 "
+                    f"SQL-injection gate."
+                )
+
 
 # =====================================================================
 # Type environment

@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Only `let` bindings can carry compile-time provenance, enforced rather than documented** ([#1164](https://github.com/aallan/vera/issues/1164)). `Binding.literal_str` (#309) and `array_len` (#1160) are populated solely for `let` bindings; that was a comment plus discipline at one call site. For `literal_str` it is the `E207` gate itself — probed by bypassing it and giving `param` bindings a literal value, after which `DB.execute(@String.0, [])` type-checks clean, i.e. the textbook injection is accepted. A `__post_init__` guard now rejects provenance on any non-`let` source, placed on the dataclass rather than in `TypeEnv.bind` because `vera/checker/control.py` constructs a `Binding` directly for match patterns and bypasses `bind` entirely. `ValueError`, not `assert`: a load-bearing guard must survive `-O`, and the `ruff --select S` lint rejects asserts used this way. Covered for every binding source the checker uses, with positive controls for the `""` and `0` edge values a truthiness-based guard would wrongly reject.
+
 - **`E208` now follows a `let` chain, as `E207` already did** ([#1160](https://github.com/aallan/vera/issues/1160)). The SQL placeholder/parameter arity check only looked at the syntax *at the call site*, so moving a params array into a `let` for readability silently dropped a compile-time check — identical array, identical static size, only an indirection differs:
 
   ```vera
