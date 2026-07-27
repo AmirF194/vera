@@ -6,15 +6,17 @@ files, pre-commit hooks, CI jobs) and pytest-collection counts (total tests,
 per-file test counts and line counts) against the numbers written in
 TESTING.md, CONTRIBUTING.md, CLAUDE.md, README.md, SKILL.md, AGENTS.md,
 FAQ.md, and ROADMAP.md.  Also checks the KNOWN_ISSUES.md "Refactoring
-needed" line counts (±10% tolerance) and the HISTORY.md version-row
-format (one issue link max, no " — " separator per row).
+needed" line counts (±10% tolerance), the HISTORY.md version-row format
+(one issue link max, no " — " separator per row), the vera/README.md
+module map (#1150), and the project facts hardcoded on the landing page
+(#528).
 
 Intentionally excludes CHANGELOG.md: its counts are historical records
 (e.g. "64 programs, was 63") that are frozen snapshots of the project state
 at each release. Validating them would cause false positives on every new
 conformance addition, because the old entries are supposed to stay unchanged.
 
-Runs in under 1 second — fast enough for a pre-commit hook.
+Runs in a couple of seconds — fast enough for a pre-commit hook.
 """
 
 import json
@@ -99,6 +101,111 @@ def check_history_row_format(history_text: str) -> list[str]:
                 f"HISTORY.md line {lineno}: version row contains {dashes}"
                 f" ' — ' separators (max 1 — the bold lead-in dash;"
                 f" multi-clause rows belong in CHANGELOG.md)"
+            )
+    return errors
+
+
+_NUMBER_WORDS = {
+    1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six",
+    7: "seven", 8: "eight", 9: "nine", 10: "ten", 11: "eleven",
+    12: "twelve", 13: "thirteen", 14: "fourteen", 15: "fifteen",
+}
+
+# The page calls the `Exn` effect "Exceptions" in prose.
+_HOMEPAGE_EFFECT_ALIASES = {"Exn": "Exceptions"}
+
+
+def check_homepage_facts(
+    html: str, root: Path, live_conformance: int, live_examples: int
+) -> list[str]:
+    """Gate the project facts hardcoded in docs/index.html (#528).
+
+    The landing page states counts in prose — built-ins, effects, spec
+    chapters, conformance programs, examples — that drift silently as the
+    codebase moves.  Two were already stale before anyone noticed ("six
+    algebraic effects" when there were seven; a 77-program suite when there
+    were 80).
+
+    Gating rather than templating, per the issue: the HTML stays
+    hand-edited, which is the convention for this file.
+
+    A pattern that matches *nothing* is an error in its own right — a
+    reworded sentence would otherwise silently switch its check off, which
+    is the failure mode the gate exists to prevent.  Effects are checked as
+    a count *and* a membership list, since the historical drift was a name
+    missing from the list rather than a wrong total.  The version string is
+    deliberately not checked here: `scripts/check_version_sync.py` already
+    owns docs/index.html for that.
+    """
+    from vera.environment import TypeEnv
+    from vera.introspect import effects_payload
+
+    errors: list[str] = []
+    effects = [i for i in effects_payload()["items"] if i.get("kind") != "ability"]
+    effect_names = {
+        _HOMEPAGE_EFFECT_ALIASES.get(str(i["name"]), str(i["name"])) for i in effects
+    }
+
+    numeric: list[tuple[str, str, int]] = [
+        ("built-in functions", r"(\d+) built-in functions", len(TypeEnv().functions)),
+        ("spec chapters", r"(\d+)-chapter specification", len(list((root / "spec").glob("*.md")))),
+        ("conformance programs", r"(\d+)-program conformance suite", live_conformance),
+        ("worked examples", r"(\d+) worked examples", live_examples),
+    ]
+    for label, pattern, live in numeric:
+        found = re.search(pattern, html)
+        if found is None:
+            errors.append(
+                f"docs/index.html: no '{label}' claim matched /{pattern}/ —"
+                f" the sentence moved or was reworded, so it is no longer gated"
+            )
+        elif int(found.group(1)) != live:
+            errors.append(
+                f"docs/index.html {label}: page says {found.group(1)},"
+                f" live is {live}"
+            )
+
+    # Effects: the count is spelled as a word in the status paragraph, and the
+    # names are enumerated TWICE — there and again in the reference card, which
+    # is a second hand-maintained mirror of the same fact.  Both are checked;
+    # the historical drift (#526) was a name missing from a list, not a wrong
+    # total, so a count-only check would not have caught it.
+    spelled = re.search(r"(\w+) algebraic effects \(([^)]*)\)", html)
+    if spelled is None:
+        errors.append(
+            "docs/index.html: no 'N algebraic effects (…)' claim found —"
+            " the sentence moved or was reworded, so it is no longer gated"
+        )
+    else:
+        want_word = _NUMBER_WORDS.get(len(effect_names), str(len(effect_names)))
+        if spelled.group(1) != want_word:
+            errors.append(
+                f"docs/index.html effects count: page says"
+                f" '{spelled.group(1)}', live is '{want_word}'"
+                f" ({len(effect_names)})"
+            )
+
+    card = re.search(
+        r'>Algebraic effects</div><div class="desc">([^&<]*)', html
+    )
+    lists: list[tuple[str, str]] = []
+    if spelled is not None:
+        lists.append(("status paragraph", spelled.group(2)))
+    if card is not None:
+        lists.append(("reference card", card.group(1)))
+    else:
+        errors.append(
+            "docs/index.html: no 'Algebraic effects' reference card found —"
+            " the card moved or was reworded, so it is no longer gated"
+        )
+    for where, raw in lists:
+        listed = {n.strip() for n in raw.split(",") if n.strip()}
+        if listed != effect_names:
+            missing = sorted(effect_names - listed)
+            extra = sorted(listed - effect_names)
+            errors.append(
+                f"docs/index.html effects list ({where}) drifted —"
+                f" missing: {missing or 'none'}; not a live effect: {extra or 'none'}"
             )
     return errors
 
@@ -797,6 +904,15 @@ def main() -> int:
 
     vera_readme_md = (root / "vera/README.md").read_text(encoding="utf-8")
     errors.extend(check_module_map(vera_readme_md, root))
+
+    # ------------------------------------------------------------------
+    # 18. Check the hardcoded project facts on the landing page
+    # ------------------------------------------------------------------
+
+    index_html = (root / "docs/index.html").read_text(encoding="utf-8")
+    errors.extend(
+        check_homepage_facts(index_html, root, live_conformance, live_examples)
+    )
 
     # ------------------------------------------------------------------
     # Report
