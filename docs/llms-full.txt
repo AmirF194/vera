@@ -2966,7 +2966,7 @@ So: provably correct relative to stated requirements, yes. Provably correct rela
 
 Yes. Nearly every SQL injection starts the same way: a query assembled from a value that came from outside the program. Vera makes that unwriteable.
 
-The SQL argument of `DB.query` / `DB.execute` must have **literal provenance**. It can be a string literal, or a `string_concat`, an interpolation, or a `let` chain — but every part of that chain has to trace back to a literal. A query built from a parameter, a call result, or a `\(expr)` interpolation of one is rejected at compile time with `E207`. Data from outside the program reaches the database only through the `?` placeholders:
+The SQL argument of `DB.query` / `DB.execute` must have **literal provenance**. It can be a string literal, or a `string_concat`, an interpolation, or a `let` chain — but every part of that chain has to trace back to a literal. A query built from a parameter, a call result, or a `\(expr)` interpolation of one is rejected at compile time with `E207`. Data from outside the program reaches the database only through the `?` placeholders and the params array:
 
 ```vera
 public fn find_user(@String -> @Result<Array<Array<Option<String>>>, String>)
@@ -2982,9 +2982,9 @@ Swap the placeholder for `string_concat("SELECT ... WHERE name = '", @String.0)`
 
 That is worth separating from the protections you are probably used to. It is not a lint, so there is no configuration to get right and no suppression comment to add. It is not a scanner run over a build, so it cannot be skipped or fall behind the code. And it is not a solver result, so it does not weaken where the solver does: Vera's contract verification has tiers and can fall back to runtime checks, but this check has neither. It asks one question about where a string came from, answers it in the type checker, and gives the same answer inside handled code and generic code as anywhere else.
 
-Two smaller errors sit alongside it. A `?`-placeholder/parameter count mismatch is `E208` when the params array is written literally — a runtime-sized array defers that arity check to the driver — and numbered or named placeholder styles are rejected in favour of the single positional form (`E209`).
+Two smaller errors sit alongside it. A `?`-placeholder/parameter count mismatch is `E208` when the params array is written out at the call site — anything else defers that arity check to the driver — and numbered or named placeholder styles are rejected in favour of the single positional form (`E209`).
 
-The guarantee is exactly as wide as the query path, and no wider. Every string that reaches the database goes through `DB.query` / `DB.execute`, and the language has no other string-to-SQL route, so there is no back door to leave open. What it does not catch is a fixed query that is simply wrong: a literal `DELETE FROM users` compiles happily, because nothing in it came from outside. And in v1 the effect is SQLite-only and un-mockable (`handle[DB]` is [#372](https://github.com/aallan/vera/issues/372); further backends are [#1143](https://github.com/aallan/vera/issues/1143)).
+The guarantee is exactly as wide as the query path, and no wider. Every string that reaches the database goes through `DB.query` / `DB.execute`, and the language has no other string-to-SQL route, so there is no back door to leave open. What it does not catch is a fixed query that is simply wrong: a literal `DELETE FROM users` compiles happily, because nothing in it came from outside. And in v1 the effect is SQLite-only and un-mockable (`handle[DB]` is tracked with the other host effects in [#372](https://github.com/aallan/vera/issues/372); further backends are [#1143](https://github.com/aallan/vera/issues/1143)).
 
 ## Does the compiler prove division-by-zero, out-of-bounds indexing, etc. can't happen?
 

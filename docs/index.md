@@ -100,7 +100,7 @@ public fn find_user(@String -> @Result<Array<Array<Option<String>>>, String>)
 }
 ```
 
-SQL injection won't compile. Nearly every SQL injection starts the same way — a query assembled from a value that came from outside the program. Vera makes that unwriteable. The SQL text has to be written into the source, so the query is fixed when the program compiles and outside data can only arrive through the `?` placeholders. Build the query out of the parameter with `string_concat` instead and the answer is `[E207]`: not a warning, not a lint you can silence, but a type error you cannot configure away. [examples/sqlitedb.vera](https://github.com/aallan/vera/blob/main/examples/sqlitedb.vera).
+SQL injection won't compile. Nearly every SQL injection starts the same way — a query assembled from a value that came from outside the program. Vera makes that unwriteable. The SQL text has to be written into the source, so the query is fixed when the program compiles and outside data can only arrive through the `?` placeholders. Build the query out of the parameter with `string_concat` instead and the answer is `[E207]`: not a warning, not a lint you can silence, but a type error you cannot configure away. [examples/database.vera](https://github.com/aallan/vera/blob/main/examples/database.vera).
 
 When you get it wrong, every error is an instruction for the model that wrote the code:
 
