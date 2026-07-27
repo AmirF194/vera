@@ -16,13 +16,25 @@ syntax sync fromstart
 syntax match veraInteger '\<\d\+\>'
 syntax match veraFloat '\<\d\+\.\d\+\%([eE][+-]\=\d\+\)\=\>'
 
+" Type-argument list, nested to three levels: <Int>, <Option<Int>>,
+" <String, Array<Option<Int>>>. Vim patterns do not recurse, so the depth
+" is spelled out, and three covers what Vera writes in practice. Beyond
+" that the slot match simply does not reach the closing brackets and the
+" veraGenericArgs region below picks them up instead — measured on
+" @Map<A, Map<B, Map<C, Option<D>>>>, where every bracket is still
+" highlighted, as a generic bracket rather than as part of the slot.
+let s:angles = '<\%([^<>]\|<\%([^<>]\|<[^<>]*>\)*>\)*>'
+
 " Slot references: @Type.index, @Type.result, and @Type bindings. The
 " lookahead also accepts "->", "=", and a bare ">" so a slot type is still
 " recognized before a signature's return arrow ("(@Color -> @Bool)"), a let
 " binding ("let @List<Int> = ..."), and the close of a tuple destructure
 " ("Tuple<@String, @Int>").
-syntax match veraSlotRef '@[A-Z][A-Za-z0-9_]*\%(<[^>]*>\)*\.\%(result\|\d\+\)'
-syntax match veraSlotBinding '@[A-Z][A-Za-z0-9_]*\%(<[^>]*>\)*\ze\s*\%([,)\]}=>]\|->\)'
+execute 'syntax match veraSlotRef ' .
+      \ string('@[A-Z][A-Za-z0-9_]*\%(' . s:angles . '\)*\.\%(result\|\d\+\)')
+execute 'syntax match veraSlotBinding ' .
+      \ string('@[A-Z][A-Za-z0-9_]*\%(' . s:angles .
+      \        '\)*\ze\s*\%([,)\]}=>]\|->\)')
 
 " Keywords
 syntax keyword veraStorageModifier public private
@@ -46,7 +58,10 @@ syntax match veraHole '\%(\w\|?\)\@<!?\%(\w\|?\)\@!'
 syntax keyword veraPrimitiveType Bool Int Nat Float64 Byte String Unit Never
 syntax keyword veraCompositeType Array Option Map Set Tuple Result Decimal Json Future Fn Ordering
 syntax keyword veraAdtType MdBlock MdInline UrlParts HtmlNode Request Response
-syntax keyword veraEffectType IO State Exn Http HttpServer Async Diverge Inference Random
+" All ten effects in `vera effects --json`. The four abilities it also
+" lists (Eq, Hash, Ord, Show) are absent from every editor grammar and are
+" tracked with the wider drift in #1156.
+syntax keyword veraEffectType IO State Exn Http HttpServer Async Diverge Inference Random DB
 
 " Fallback: any bare capitalized identifier is at minimum a type reference.
 " This covers type variables like the T in "data List<T>" and user type names
@@ -100,7 +115,26 @@ syntax match veraOpPipe '|>'
 
 " Generic argument brackets: List<T>, Array<Option<A>>, and bare effect sets
 " like effects(<IO, Async>).
-syntax match veraGenericBracket '\%(\w\|(\)\@<=[<>]'
+"
+" A region rather than a per-character match, because only a region nests.
+" The previous one-character lookbehind ('\%(\w\|(\)\@<=[<>]') got both
+" ends of this wrong: in Map<String, Array<Option<Int>>> the two outer
+" closers follow a '>' rather than a word character, so they fell through
+" to veraOpComparison and highlighted as operators; and in an unspaced
+" comparison like requires(x<y) the '<' does follow a word character, so
+" it was claimed as a bracket. Anchoring the start on a capitalised
+" identifier fixes the second — Vera type names are capitalised (spec
+" §2), operands in a comparison are slots or lowercase — and letting the
+" region contain itself fixes the first.
+syntax region veraGenericArgs matchgroup=veraGenericBracket
+      \ start='\%(\<[A-Z][A-Za-z0-9_]*\)\@<=<'
+      \ end='>' oneline contains=TOP
+
+" Bare effect set: the '<' opens immediately after '(', with no type name
+" in front of it, so it needs its own start pattern.
+syntax region veraEffectSet matchgroup=veraGenericBracket
+      \ start='(\@<=<'
+      \ end='>' oneline contains=TOP
 
 syntax match veraTerminator ';'
 

@@ -57,6 +57,5 @@ Vim has shipped an unrelated `vera` filetype since 2005 -- the Synopsys **Vera**
 
 [p]: https://github.com/tpope/vim-pathogen
 [vp]: https://github.com/junegunn/vim-plug
-[d]: https://github.com/Shougo/dein.vim
 [vim8pack]: https://vimhelp.org/repeat.txt.html#packages
 [oldsyn]: https://github.com/vim/vim/blob/master/runtime/syntax/vera.vim
