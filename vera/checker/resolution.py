@@ -303,6 +303,21 @@ class ResolutionMixin:
         resolved = tuple(self._resolve_type(a) for a in type_args)
         return canonical_type_name(type_name, resolved)
 
+    def _slot_ref_key(self, ref: ast.SlotRef) -> str:
+        """Binding-table key for a ``SlotRef``, keyed as ``bind()`` keys it.
+
+        The #309 / #1160 provenance resolvers in :mod:`vera.checker.sql` need
+        to look bindings up, and must do it with the CHECKER's renderer, not
+        the syntactic one in :mod:`vera.slots`.  Binding keys resolve their
+        type arguments (``_type_expr_to_slot_name`` → ``canonical_type_name``
+        over resolved args), so a syntactic render of ``@Array<Option<Txt>>``
+        where ``type Txt = String`` yields ``Array<Option<Txt>>`` and matches
+        the ``Array<Option<String>>`` key not at all.  A miss reads as "not
+        statically known", so the check would silently do nothing — the exact
+        failure #1160 fixed one level up.
+        """
+        return self._slot_type_name(ref.type_name, ref.type_args)
+
     # -----------------------------------------------------------------
     # Type inference helpers
     # -----------------------------------------------------------------

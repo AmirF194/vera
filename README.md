@@ -74,7 +74,7 @@ Six lines of logic. The signature carries all the ceremony — parameter types, 
 
 ### SQL injection won't compile
 
-The `<DB>` effect accepts only a **literal** SQL string. Runtime data reaches the database exclusively through `?` placeholders and the params array — a query assembled from a runtime value is a compile-time error (`E207`), not a lint, a taint warning, or a runtime scan. The check is provenance-based and lives in the type checker, so it is deterministic: no solver, no configuration, no way to run the injectable form.
+Nearly every SQL injection starts the same way: a query assembled from a value that came from outside the program. Vera makes that unwriteable. The SQL text of `DB.query` / `DB.execute` has to be written into the source, so the query is fixed when the program compiles, and outside data can only reach the database through the `?` placeholders and the params array.
 
 ```vera
 public fn find_user(@String -> @Result<Array<Array<Option<String>>>, String>)
@@ -86,7 +86,7 @@ public fn find_user(@String -> @Result<Array<Array<Option<String>>>, String>)
 }
 ```
 
-Replace the placeholder with `string_concat("SELECT ... WHERE name = '", @String.0)` and compilation fails with `E207`, an explanation that string-assembly is the injection vector, and the placeholder rewrite as the fix. Rows come back as `Array<Array<Option<String>>>` — a SQL `NULL` is a `None` cell, and reading a cell goes through `Option`, so code that ignores the `NULL` case does not type-check. Try it: [`examples/sqlitedb.vera`](examples/sqlitedb.vera).
+Build the query out of the parameter instead — `string_concat("SELECT ... WHERE name = '", @String.0)` — and the program does not compile. `E207` names string-assembly as the injection vector and gives the placeholder rewrite as the fix. This is not a lint you configure, a taint analysis you run, or a scanner you remember to point at the code: it is a rule about where a string came from, enforced by the type checker, so the injectable form has no path to a running program. Try it: [`examples/database.vera`](examples/database.vera).
 
 ### Errors are instructions
 
@@ -262,7 +262,7 @@ cp /path/to/vera/SKILL.md ~/.claude/skills/vera-language/SKILL.md
 
 ## Project status
 
-Vera is in **active development** at v0.1.7: 2,000+ commits, 204 releases, 8,538 tests, 95% code coverage, 168 conformance programs, 42 examples, and a 14-chapter specification. Known bugs and limitations are tracked in **[KNOWN_ISSUES.md](KNOWN_ISSUES.md)**. See **[HISTORY.md](HISTORY.md)** for how the compiler was built.
+Vera is in **active development** at v0.1.7: 2,000+ commits, 204 releases, 8,566 tests, 95% code coverage, 169 conformance programs, 42 examples, and a 14-chapter specification. Known bugs and limitations are tracked in **[KNOWN_ISSUES.md](KNOWN_ISSUES.md)**. See **[HISTORY.md](HISTORY.md)** for how the compiler was built.
 
 The reference compiler — parser, AST, type checker, contract verifier (Z3), WASM code generator, module system, browser runtime, and runtime contract insertion — is working. The language specification is in draft across [14 chapters](spec/).
 

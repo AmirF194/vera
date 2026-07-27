@@ -8,9 +8,11 @@ that can drift from the compiler. See #539 (and the doc-consolidation brief,
 #528) for the motivation: "the compiler becomes the source of truth for its own
 internals."
 
-The ``since`` (version-introduced) field is present on every item for
-forward-compatibility; it is populated best-effort in a later layer and is
-``None`` where the introduction version is not attributable.
+The ``since`` (version-introduced) field is present on every item, resolved
+against :mod:`vera._since`. It is complete for diagnostic codes (#1157) —
+``ERROR_CODES`` is a closed enumeration, so every code carries a version — and
+best-effort for built-ins, effects, and abilities, where an unattributed name
+reports ``None``.
 """
 
 from __future__ import annotations

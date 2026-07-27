@@ -100,7 +100,7 @@ public fn find_user(@String -> @Result<Array<Array<Option<String>>>, String>)
 }
 ```
 
-SQL injection won't compile. The query string must be a *literal* — every runtime value flows through a `?` placeholder and the params array. Assemble the query from `@String.0` instead and the compiler answers with `[E207]`: string-assembly is the injection vector, the placeholder rewrite is the fix. A provenance rule in the type checker — deterministic, no solver, nothing to configure, and no way to run the injectable form. A SQL `NULL` comes back as a `None` cell, and reading a cell goes through `Option` — code that ignores the `NULL` case does not type-check. [examples/sqlitedb.vera](https://github.com/aallan/vera/blob/main/examples/sqlitedb.vera).
+SQL injection won't compile. Nearly every SQL injection starts the same way — a query assembled from a value that came from outside the program. Vera makes that unwriteable. The SQL text has to be written into the source, so the query is fixed when the program compiles and outside data can only reach the database through the `?` placeholders and the params array. Build the query out of the parameter with `string_concat` instead and the answer is `[E207]`: not a warning, not a lint you can silence, but a type error you cannot configure away. [examples/database.vera](https://github.com/aallan/vera/blob/main/examples/database.vera).
 
 When you get it wrong, every error is an instruction for the model that wrote the code:
 
@@ -277,7 +277,7 @@ For other models: point them at [`SKILL.md`](https://veralang.dev/SKILL.md) via 
 
 ## Status
 
-Vera is under [active development](https://raw.githubusercontent.com/aallan/vera/main/ROADMAP.md). A complete compiler with 164 built-in functions, ten algebraic effects (IO, Http, HttpServer, State, Exceptions, Async, Inference, DB, Random, Diverge), contract-driven testing via [Z3](https://www.microsoft.com/en-us/research/project/z3-3/), and a 14-chapter specification. A 168-program conformance suite and 42 worked examples are validated against the spec on every pull request. All of it is developed openly on [GitHub](https://github.com/aallan/vera) and released under the MIT licence.
+Vera is under [active development](https://raw.githubusercontent.com/aallan/vera/main/ROADMAP.md). A complete compiler with 164 built-in functions, ten algebraic effects (IO, Http, HttpServer, State, Exceptions, Async, Inference, DB, Random, Diverge), contract-driven testing via [Z3](https://www.microsoft.com/en-us/research/project/z3-3/), and a 14-chapter specification. A 169-program conformance suite and 42 worked examples are validated against the spec on every pull request. All of it is developed openly on [GitHub](https://github.com/aallan/vera) and released under the MIT licence.
 
 ## Links
 

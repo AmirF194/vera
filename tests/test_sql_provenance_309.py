@@ -166,6 +166,56 @@ public fn run(@String -> @Result<Int, String>)
         _check_code(src, "E207")
 
 
+class TestBindingProvenanceInvariant1164:
+    """Only ``let`` bindings may carry provenance (#1164).
+
+    Not bookkeeping — for ``literal_str`` it is the E207 gate itself.  A
+    ``param`` binding that acquired a ``literal_str`` would make
+    ``DB.execute(@String.0, [])`` type-check clean, i.e. accept the textbook
+    injection.  The invariant was a comment plus discipline at one call site
+    until #1164; it is now enforced at construction, which also covers
+    ``vera/checker/control.py``'s direct ``Binding(...)`` that bypasses
+    ``TypeEnv.bind``.
+    """
+
+    def test_param_binding_rejects_literal_str(self) -> None:
+        from vera.environment import Binding
+        from vera.types import STRING
+        with pytest.raises(ValueError, match="literal_str"):
+            Binding("String", STRING, "param", literal_str="SELECT 1")
+
+    def test_param_binding_rejects_array_len(self) -> None:
+        from vera.environment import Binding
+        from vera.types import STRING
+        with pytest.raises(ValueError, match="array_len"):
+            Binding("Array<Option<String>>", STRING, "param", array_len=2)
+
+    @pytest.mark.parametrize("source", ["match", "handler", "destruct",
+                                        "refinement"])
+    def test_every_non_let_source_rejects_provenance(self, source: str) -> None:
+        # Every binding source the checker actually uses, not just `param` —
+        # a future source added without provenance handling should trip here.
+        from vera.environment import Binding
+        from vera.types import STRING
+        with pytest.raises(ValueError):
+            Binding("String", STRING, source, literal_str="x")
+
+    def test_let_binding_accepts_provenance(self) -> None:
+        # The positive control: the guard must not reject the one source that
+        # legitimately carries provenance, including the "" / 0 edge values
+        # that a truthiness-based guard would wrongly drop.
+        from vera.environment import Binding
+        from vera.types import STRING
+        assert Binding("String", STRING, "let", literal_str="").literal_str == ""
+        assert Binding("Array<Option<String>>", STRING, "let",
+                       array_len=0).array_len == 0
+
+    def test_non_let_binding_without_provenance_is_fine(self) -> None:
+        from vera.environment import Binding
+        from vera.types import STRING
+        assert Binding("String", STRING, "param").literal_str is None
+
+
 class TestSqlPlaceholderCount309:
     """E208 — placeholder/param count mismatch when both are statically sized."""
 
@@ -187,6 +237,175 @@ class TestSqlPlaceholderCount309:
         # E208.
         _check_ok(_db_fn(
             '  DB.query("SELECT \'?\' AS q FROM u WHERE a = ?", [Some("x")])'))
+
+    def test_let_bound_array_literal_mismatch_rejected(self) -> None:
+        # #1160 — the params array is written literally but bound through a
+        # ``let``.  It is exactly as statically sized as the inline form, so it
+        # gets the same E208.  E207 already follows ``let`` chains; before
+        # #1160 E208 looked only at the call-site syntax and let this through.
+        _check_code(
+            _db_fn(
+                '  let @Array<Option<String>> = [Some("x")];\n'
+                '  DB.query("SELECT * FROM u WHERE a = ? AND b = ?", '
+                '@Array<Option<String>>.0)'
+            ),
+            "E208",
+        )
+
+    def test_let_bound_array_literal_match_accepted(self) -> None:
+        # The positive control for the case above: resolving the length through
+        # the ``let`` must accept a program whose counts agree, not merely
+        # reject more.  Without this, a resolver that returned a wrong length
+        # would still look "fixed".
+        _check_ok(_db_fn(
+            '  let @Array<Option<String>> = [Some("x")];\n'
+            '  DB.query("SELECT * FROM u WHERE a = ?", '
+            '@Array<Option<String>>.0)'))
+
+    def test_let_shadowing_resolves_innermost_length(self) -> None:
+        # Shadowing: the second ``let`` binds a NEW literal of a different
+        # length.  Resolution must take the innermost binding (1), not the
+        # outer one (2) — with two placeholders the outer length would wrongly
+        # pass and the inner one correctly fails.
+        _check_code(
+            _db_fn(
+                '  let @Array<Option<String>> = [Some("x"), Some("y")];\n'
+                '  let @Array<Option<String>> = [Some("z")];\n'
+                '  DB.query("SELECT * FROM u WHERE a = ? AND b = ?", '
+                '@Array<Option<String>>.0)'
+            ),
+            "E208",
+        )
+
+    def test_let_chain_propagates_length(self) -> None:
+        # A genuine chain: the second ``let`` binds the FIRST SLOT, not a fresh
+        # literal, so the length has to propagate slot → slot.  Shadowing
+        # (above) only exercises one-level lookup; this is the case that fails
+        # if ``array_len`` is recorded but not read back through a slot value.
+        _check_code(
+            _db_fn(
+                '  let @Array<Option<String>> = [Some("x"), Some("y")];\n'
+                '  let @Array<Option<String>> = @Array<Option<String>>.0;\n'
+                '  DB.query("SELECT * FROM u WHERE a = ?", '
+                '@Array<Option<String>>.0)'
+            ),
+            "E208",
+        )
+
+    def test_execute_let_bound_mismatch_rejected(self) -> None:
+        # The arity check is op-agnostic — ``op_name`` reaches only the message
+        # text — but the two entry points are worth pinning once, so hooking
+        # only ``query`` cannot leak.  One case, not a mirror of the whole
+        # query set: the remaining shapes would exercise byte-identical logic.
+        src = """
+public fn run(-> @Result<Int, String>)
+  requires(true) ensures(true) effects(<DB>)
+{
+  let @Array<Option<String>> = [Some("x")];
+  DB.execute("INSERT INTO t (a, b) VALUES (?, ?)", @Array<Option<String>>.0)
+}
+"""
+        _check_code(src, "E208")
+
+    def test_alias_in_type_argument_still_checked(self) -> None:
+        """A type alias *inside a type argument* must not disable the check.
+
+        The checker keys bindings by the alias-RESOLVED name
+        (`_type_expr_to_slot_name` -> `canonical_type_name` over resolved
+        args), so a lookup that renders the surface syntax finds nothing,
+        returns None, and defers — silently.  That is the #1160 bug class one
+        level down, and it type-checks completely clean, so no other
+        diagnostic hints at it.  Both resolvers therefore use the checker's
+        own renderer rather than the syntactic one in `vera/slots.py`.
+        """
+        src = """
+type Txt = String;
+
+public fn run(-> @Result<Array<Array<Option<String>>>, String>)
+  requires(true) ensures(true) effects(<DB>)
+{
+  let @Array<Option<Txt>> = [Some("x")];
+  DB.query("SELECT * FROM u WHERE a = ? AND b = ?", @Array<Option<Txt>>.0)
+}
+"""
+        _check_code(src, "E208")
+
+    def test_alias_at_top_level_still_checked(self) -> None:
+        # The control for the case above: an alias in OUTER position always
+        # worked, because both renderers return the bare name unchanged.  It
+        # is here so a regression in the alias fix cannot be mistaken for
+        # "aliases were never supported".
+        src = """
+type Params = Array<Option<String>>;
+
+public fn run(-> @Result<Array<Array<Option<String>>>, String>)
+  requires(true) ensures(true) effects(<DB>)
+{
+  let @Params = [Some("x")];
+  DB.query("SELECT * FROM u WHERE a = ? AND b = ?", @Params.0)
+}
+"""
+        _check_code(src, "E208")
+
+    def test_empty_params_inline_mismatch_rejected(self) -> None:
+        # `0` is a valid length, so the arity check must test `is not None`,
+        # never truthiness.  Under `if got:` this program is accepted and
+        # nothing else in the suite notices — the array-side counterpart of
+        # `test_let_bound_empty_string_accepted`, which exists for exactly
+        # this hazard on `literal_str`.
+        _check_code(_db_fn('  DB.query("SELECT * FROM u WHERE a = ?", [])'),
+                    "E208")
+
+    def test_empty_params_let_bound_mismatch_rejected(self) -> None:
+        # The same, through the let path — which is newly reachable: a
+        # let-bound `[]` records array_len=0 rather than None.
+        _check_code(
+            _db_fn('  let @Array<Option<String>> = [];\n'
+                   '  DB.query("SELECT * FROM u WHERE a = ?", '
+                   '@Array<Option<String>>.0)'),
+            "E208",
+        )
+
+    def test_empty_params_let_bound_match_accepted(self) -> None:
+        # Zero placeholders against a zero-length array agree, so this must
+        # be accepted — the positive half, without which a resolver that
+        # always reported a mismatch would still look correct.
+        _check_ok(_db_fn(
+            '  let @Array<Option<String>> = [];\n'
+            '  DB.query("SELECT * FROM u", @Array<Option<String>>.0)'))
+
+    def test_unequal_if_arms_defer(self) -> None:
+        # A regression lock, not a feature test.  `IfExpr` is deliberately not
+        # folded: the arms here have DIFFERENT lengths, so folding either one
+        # would false-reject this valid program.  The docstring warns against
+        # "completing the symmetry" with the string resolver; this is the
+        # executable form of that warning.
+        _check_ok(_db_fn(
+            '  let @Array<Option<String>> = if @Bool.0 then '
+            '{ [Some("x")] } else { [Some("x"), Some("y")] };\n'
+            '  DB.query("SELECT * FROM u WHERE a = ?", '
+            '@Array<Option<String>>.0)',
+            param="@Bool"))
+
+    def test_array_concat_defers(self) -> None:
+        # The other regression lock: `string_concat` IS folded by the string
+        # resolver, so the tempting "symmetry" is to fold `array_concat` here.
+        # Deferring is correct; this pins it.
+        _check_ok(_db_fn(
+            '  let @Array<Option<String>> = '
+            'array_concat([Some("x")], [Some("y")]);\n'
+            '  DB.query("SELECT * FROM u WHERE a = ?", '
+            '@Array<Option<String>>.0)'))
+
+    def test_let_bound_runtime_array_still_defers(self) -> None:
+        # A ``let`` whose value is NOT an array literal has no statically known
+        # length, so the count still defers to the driver.  This is the
+        # conservative direction: resolution failure must never invent a length.
+        _check_ok(_db_fn(
+            '  let @Array<Option<String>> = @Array<Option<String>>.0;\n'
+            '  DB.query("SELECT * FROM u WHERE a = ? AND b = ?", '
+            '@Array<Option<String>>.0)',
+            param="@Array<Option<String>>"))
 
     def test_dynamic_params_defers_count_to_runtime(self) -> None:
         # A literal SQL (no E207) with a dynamically-sized params slot: the
