@@ -1511,7 +1511,7 @@ class TestShadowGuardPushBound791:
         sp_global = caller["gc_sp"]
         assert isinstance(sp_global, wasmtime.Global)
         sp_global.set_value(caller, self._STACK_LIMIT - headroom)
-        with _ShadowGuard(caller) as guard:  # noqa: SIM117
+        with _ShadowGuard(caller) as guard:
             with pytest.raises(
                 RuntimeError, match="host shadow-stack overflow",
             ):
@@ -1553,7 +1553,7 @@ class TestShadowGuardPushBound791:
         sp_global = caller["gc_sp"]
         assert isinstance(sp_global, wasmtime.Global)
         sp_global.set_value(caller, self._STACK_LIMIT)
-        with _ShadowGuard(caller) as guard:  # noqa: SIM117
+        with _ShadowGuard(caller) as guard:
             with pytest.raises(
                 RuntimeError, match="host shadow-stack overflow",
             ):
@@ -1569,7 +1569,7 @@ class TestShadowGuardPushBound791:
         sp_global = caller["gc_sp"]
         assert isinstance(sp_global, wasmtime.Global)
         sp_global.set_value(caller, -8)
-        with _ShadowGuard(caller) as guard:  # noqa: SIM117
+        with _ShadowGuard(caller) as guard:
             with pytest.raises(
                 RuntimeError, match="host shadow-stack overflow",
             ):

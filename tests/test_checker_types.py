@@ -1409,6 +1409,7 @@ private fn main(@Unit -> @Int)
             capture_output=True,
             text=True,
             encoding="utf-8",
+            check=False,
         )
         combined = result.stdout + result.stderr
         assert result.returncode == 1, \

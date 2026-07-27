@@ -27,6 +27,8 @@ the guarded differential (it replaces the honest pin that documented the gap):
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import wasmtime
 
 from vera.checker import typecheck_with_artifacts
@@ -227,7 +229,7 @@ class TestShadowedGenericWidenDifferential:
     """The shadowed door: ``lib::wrap`` reaches the module generic's ``mod$…``
     clone, which needs the module table exactly like the unshadowed twin."""
 
-    _FILES = {"lib.vera": _GENERIC_LIB_ARRAY, "main.vera": _SHADOWED_MAIN}
+    _FILES: ClassVar[dict[str, str]] = {"lib.vera": _GENERIC_LIB_ARRAY, "main.vera": _SHADOWED_MAIN}
 
     def test_shadowed_generic_clone_traps_at_u64_max(self, tmp_path) -> None:
         result = _compile_main(tmp_path, self._FILES, "main.vera")
@@ -249,7 +251,7 @@ class TestHoistedHelperWidenDifferential:
     """The widen site inside the imported generic's where-helper: the
     per-clone hoisted copy (#904) must inherit the clone's module origin."""
 
-    _FILES = {"lib.vera": _GENERIC_LIB_HELPER_WIDEN, "main.vera": _GENERIC_MAIN}
+    _FILES: ClassVar[dict[str, str]] = {"lib.vera": _GENERIC_LIB_HELPER_WIDEN, "main.vera": _GENERIC_MAIN}
 
     def test_hoisted_helper_promises_tier3(self) -> None:
         assert _lib_tier3_count(
@@ -296,7 +298,7 @@ public fn callOuter(@Nat -> @Int)
   requires(true) ensures(true) effects(pure)
 { outer(true, @Nat.0) }
 """
-    _FILES = {"lib.vera": _LIB, "main.vera": _MAIN}
+    _FILES: ClassVar[dict[str, str]] = {"lib.vera": _LIB, "main.vera": _MAIN}
 
     def test_transitive_clone_traps_at_u64_max(self, tmp_path) -> None:
         result = _compile_main(tmp_path, self._FILES, "main.vera")
@@ -320,7 +322,7 @@ class TestShadowedTransitiveGenericWiden:
     exercised nowhere else — the main-worklist transitive shapes above
     resolve their inner clones on the main worklist instead."""
 
-    _FILES = {
+    _FILES: ClassVar[dict[str, str]] = {
         "lib.vera": """\
 public forall<T> fn inner(@T, @Nat -> @Int)
   requires(true) ensures(true) effects(pure)
@@ -360,7 +362,7 @@ class TestCrossModuleTransitiveGenericWiden:
     the leaf): the transitive clone must read the ORIGINATING module's table
     (lib_inner's), not the importer's nor the intermediate's."""
 
-    _FILES = {
+    _FILES: ClassVar[dict[str, str]] = {
         "lib_inner.vera": """\
 public forall<T> fn deepwiden(@T, @Nat -> @Int)
   requires(true) ensures(true) effects(pure)

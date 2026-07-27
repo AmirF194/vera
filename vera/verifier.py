@@ -5469,7 +5469,7 @@ class ContractVerifier:
         try:
             sort = scrut_term.sort()  # type: ignore[attr-defined]
             idx = smt._find_ctor_index(sort, pattern.name)
-        except Exception:  # pragma: no cover — non-datatype scrutinee
+        except Exception:  # pragma: no cover — non-datatype scrutinee  # noqa: BLE001
             return []
         if idx is None:
             return []
@@ -5517,7 +5517,7 @@ class ContractVerifier:
         try:
             sort = scrut_term.sort()  # type: ignore[attr-defined]
             idx = smt._find_ctor_index(sort, pattern.name)
-        except Exception:  # pragma: no cover — non-datatype scrutinee
+        except Exception:  # pragma: no cover — non-datatype scrutinee  # noqa: BLE001
             return
         if idx is None:
             return
@@ -5616,7 +5616,7 @@ class ContractVerifier:
             try:
                 sort = scrutinee_z3.sort()  # type: ignore[attr-defined]
                 idx = smt._find_ctor_index(sort, pattern.name)
-            except Exception:  # pragma: no cover — non-datatype scrutinee
+            except Exception:  # pragma: no cover — non-datatype scrutinee  # noqa: BLE001
                 sort = idx = None
         for i, (sub_pat, field_ty) in enumerate(
                 zip(pattern.sub_patterns, field_types)):
@@ -5780,7 +5780,7 @@ class ContractVerifier:
             try:
                 sort = rhs_z3.sort()
                 idx = smt._find_ctor_index(sort, stmt.constructor)
-            except Exception:  # pragma: no cover — non-datatype RHS
+            except Exception:  # pragma: no cover — non-datatype RHS  # noqa: BLE001
                 sort = idx = None
         if sort is None or idx is None:
             # The SMT layer can't project this source (e.g. an if-expression

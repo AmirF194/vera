@@ -506,6 +506,7 @@ def _run_script(repo: Path, **env_overrides: str) -> subprocess.CompletedProcess
         capture_output=True,
         text=True,
         encoding="utf-8",
+        check=False,
     )
 
 

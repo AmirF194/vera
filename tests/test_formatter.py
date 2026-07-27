@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import os
 from pathlib import Path
 from textwrap import dedent
@@ -1781,7 +1783,7 @@ class TestCommentInvariants:
     function on each pass violates only the second.
     """
 
-    ALL = {
+    ALL: ClassVar[dict[str, str]] = {
         **{k: _wrap(v) for k, v in _COMMENT_SHAPES.items() if v is not None},
         **_WHOLE_FILE_SHAPES,
     }

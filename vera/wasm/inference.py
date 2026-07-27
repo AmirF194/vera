@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 from vera import ast
 from vera.monomorphize import (
     _BUILTIN_PARAMETERIZED_RETURNS,
@@ -54,7 +56,7 @@ class InferenceMixin:
     # -----------------------------------------------------------------
 
     # Arithmetic: i64 ops (default for Int/Nat)
-    _ARITH_OPS: dict[ast.BinOp, str] = {
+    _ARITH_OPS: ClassVar[dict[ast.BinOp, str]] = {
         ast.BinOp.ADD: "i64.add",
         ast.BinOp.SUB: "i64.sub",
         ast.BinOp.MUL: "i64.mul",
@@ -63,7 +65,7 @@ class InferenceMixin:
     }
 
     # Arithmetic: f64 ops (Float64)
-    _ARITH_OPS_F64: dict[ast.BinOp, str] = {
+    _ARITH_OPS_F64: ClassVar[dict[ast.BinOp, str]] = {
         ast.BinOp.ADD: "f64.add",
         ast.BinOp.SUB: "f64.sub",
         ast.BinOp.MUL: "f64.mul",
@@ -72,7 +74,7 @@ class InferenceMixin:
     }
 
     # Comparison: i64 → i32 (default)
-    _CMP_OPS: dict[ast.BinOp, str] = {
+    _CMP_OPS: ClassVar[dict[ast.BinOp, str]] = {
         ast.BinOp.EQ: "i64.eq",
         ast.BinOp.NEQ: "i64.ne",
         ast.BinOp.LT: "i64.lt_s",
@@ -82,7 +84,7 @@ class InferenceMixin:
     }
 
     # Comparison: f64 → i32 (Float64)
-    _CMP_OPS_F64: dict[ast.BinOp, str] = {
+    _CMP_OPS_F64: ClassVar[dict[ast.BinOp, str]] = {
         ast.BinOp.EQ: "f64.eq",
         ast.BinOp.NEQ: "f64.ne",
         ast.BinOp.LT: "f64.lt",
@@ -252,7 +254,7 @@ class InferenceMixin:
             return self._type_name_to_wasm(name) if name else None
         return None
 
-    _IO_WASM_TYPES: dict[str, str | None] = {
+    _IO_WASM_TYPES: ClassVar[dict[str, str | None]] = {
         "print": None,
         "read_line": "i32_pair",
         "read_file": "i32",

@@ -99,6 +99,7 @@ class TestCheckStatesFailsLoud:
             encoding="utf-8",
             env=env,
             timeout=120,
+            check=False,
         )
         assert result.returncode == 1
         # Windows: a capture pipe read by a crippled-PATH subprocess can

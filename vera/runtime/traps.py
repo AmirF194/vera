@@ -242,7 +242,7 @@ def _resolve_trap_frames(
         # pathological inputs (a frames attribute that isn't
         # iterable) so this stays robust.
         iter_frames = list(raw_frames)  # type: ignore[call-overload]
-    except Exception:  # pragma: no cover — defensive
+    except Exception:  # pragma: no cover — defensive  # noqa: BLE001
         return []
 
     for frame in iter_frames:

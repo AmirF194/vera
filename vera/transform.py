@@ -92,7 +92,13 @@ from vera.ast import (
     _WhereFns,
     _WithClause,
 )
-from vera.errors import Diagnostic, SourceLocation, TransformError, VeraError
+from vera.errors import (
+    Diagnostic,
+    ParseError,
+    SourceLocation,
+    TransformError,
+    VeraError,
+)
 
 
 def _span_from_meta(meta: Any) -> Span | None:
@@ -397,7 +403,13 @@ def _parse_interp_expr(
     )
     try:
         tree = _parse(wrapper)
-    except Exception:
+    except ParseError:
+        # Only a *syntax* failure means the user's interpolation is at
+        # fault.  `parse` funnels every such failure — the grammar's own
+        # `LarkError` and the malformed-comment diagnostics — through
+        # `ParseError`, so anything else reaching here is a compiler bug
+        # and must surface as itself rather than be reported back to the
+        # user as an invalid interpolation.
         raise _interp_error(
             f"Invalid expression in string interpolation: "
             f"\\({source})", meta)

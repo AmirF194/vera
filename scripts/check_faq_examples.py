@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from doc_annotations import (  # noqa: E402  (scripts/ is not a package)
+from doc_annotations import (
     run_parse_only_gate,
 )
 

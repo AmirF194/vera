@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 # The doc gates' inline <!-- vera:skip-... --> fence annotations (#538) are
 # repo-tooling metadata: strip them from every generated site asset.
-from doc_annotations import strip_annotations  # noqa: E402  (scripts/ is not a package)
+from doc_annotations import strip_annotations
 
 ROOT = Path(__file__).resolve().parent.parent
 DOCS = ROOT / "docs"

@@ -1904,7 +1904,7 @@ def _check_postconditions(
     tail = "This is a formatter bug; the input file was not modified."
     try:
         second = _format_once(output)
-    except Exception as exc:  # noqa: BLE001 - converted, not swallowed
+    except Exception as exc:  # converted, not swallowed — re-raised below
         raise FormatterPostconditionError(
             f"formatter postcondition violated for {label}: the "
             f"formatted output does not re-parse ({exc}).  {tail}"
