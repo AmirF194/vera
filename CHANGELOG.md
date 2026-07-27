@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-07-27
+
 ### Added
 
 - **Vim and Neovim support** ([#1155](https://github.com/aallan/vera/pull/1155), contributed by [@chromy](https://github.com/chromy)). A Vim 8+/Neovim package under `editors/vim-veralang/` — `ftdetect`, `ftplugin` and `syntax` — ported from the VS Code TextMate grammar. It registers the filetype as **`veralang`**, not `vera`: Vim has shipped an unrelated `vera` filetype since 2005 for the Synopsys hardware verification language, and because `$VIMRUNTIME` precedes `pack/*/start` in `runtimepath`, claiming that name would let the built-in syntax set `b:current_syntax` first and this plugin's own files would then exit silently through their own guard. It is the most current of the three editor integrations: it knows all ten effects in `vera effects --json`, where the VS Code and TextMate grammars are four behind. The remaining drift — those two grammars, and the `Eq`/`Hash`/`Ord`/`Show` abilities that no grammar knows — is tracked in [#1156](https://github.com/aallan/vera/issues/1156).
@@ -3137,7 +3139,8 @@ Small docs sweep — closes six aging documentation issues in one PR.  No code c
 - Grammar: handler body simplified to avoid LALR reduce/reduce conflict
 - `pyproject.toml`: corrected build backend, package discovery, PEP 639 compliance
 
-[Unreleased]: https://github.com/aallan/vera/compare/v0.1.7...HEAD
+[Unreleased]: https://github.com/aallan/vera/compare/v0.1.8...HEAD
+[0.1.8]: https://github.com/aallan/vera/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/aallan/vera/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/aallan/vera/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/aallan/vera/compare/v0.1.4...v0.1.5
