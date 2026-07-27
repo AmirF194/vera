@@ -212,15 +212,31 @@ class TestSqlPlaceholderCount309:
             '  DB.query("SELECT * FROM u WHERE a = ?", '
             '@Array<Option<String>>.0)'))
 
-    def test_let_chain_of_array_literals_resolves(self) -> None:
-        # A chain: the second ``let`` re-binds the first slot.  The length must
-        # follow to the innermost binding, the array-side analogue of the
-        # literal-string let chain.
+    def test_let_shadowing_resolves_innermost_length(self) -> None:
+        # Shadowing: the second ``let`` binds a NEW literal of a different
+        # length.  Resolution must take the innermost binding (1), not the
+        # outer one (2) — with one placeholder the outer length would wrongly
+        # pass and the inner one correctly fails.
         _check_code(
             _db_fn(
                 '  let @Array<Option<String>> = [Some("x"), Some("y")];\n'
                 '  let @Array<Option<String>> = [Some("z")];\n'
                 '  DB.query("SELECT * FROM u WHERE a = ? AND b = ?", '
+                '@Array<Option<String>>.0)'
+            ),
+            "E208",
+        )
+
+    def test_let_chain_propagates_length(self) -> None:
+        # A genuine chain: the second ``let`` binds the FIRST SLOT, not a fresh
+        # literal, so the length has to propagate slot → slot.  Shadowing
+        # (above) only exercises one-level lookup; this is the case that fails
+        # if ``array_len`` is recorded but not read back through a slot value.
+        _check_code(
+            _db_fn(
+                '  let @Array<Option<String>> = [Some("x"), Some("y")];\n'
+                '  let @Array<Option<String>> = @Array<Option<String>>.0;\n'
+                '  DB.query("SELECT * FROM u WHERE a = ?", '
                 '@Array<Option<String>>.0)'
             ),
             "E208",
