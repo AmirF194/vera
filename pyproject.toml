@@ -106,6 +106,30 @@ include = ["vera*"]
 requires = ["setuptools>=83.0.0"]
 build-backend = "setuptools.build_meta"
 
+[tool.ruff.lint]
+# Declare the rule set explicitly rather than inheriting ruff's default.
+#
+# With no `[tool.ruff]` section the project's lint policy was "whatever ruff
+# ships as its default", so a ruff release could redefine the project's
+# standards without review -- which is exactly what 0.16.0 did: it replaced
+# the default selection wholesale (isort, pylint, simplify, blind-except,
+# pyupgrade, pyi, perflint, pie, tryceratops, datetimez, refurb), taking a
+# clean tree to 802 errors.  The `<0.16` cap was suppressing that symptom.
+#
+# These four families are ruff's pre-0.16 default, verified byte-identical
+# against seeded violations under both 0.15.21 and 0.16.0 -- so this pins
+# today's behaviour rather than narrowing it, and a ruff upgrade is now a
+# tool change instead of a policy change.
+#
+# The CI security step passes `--select S` on the command line, which
+# overrides this list for that run; `scripts/` and `tests/` are covered by
+# the same selection as `vera/`.
+#
+# Adopting the higher-signal rules 0.16 turned on (BLE001, RUF012, SIM115,
+# RUF100, PLW1510) is deliberate follow-up work, not a side effect of a
+# version bump.
+select = ["E4", "E7", "E9", "F"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # Stress tests (#596) are skipped from the default per-PR pytest
