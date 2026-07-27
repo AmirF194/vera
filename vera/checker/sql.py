@@ -34,17 +34,28 @@ differential ``tests/test_sql_provenance_309.py`` against sqlite3 itself.
 from __future__ import annotations
 
 from vera import ast
-from vera.slots import slot_ref_name
 
 # ``TypeEnv`` is imported lazily inside the function signature via TYPE_CHECKING
 # to avoid a runtime import cycle (environment -> checker -> sql -> environment).
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from vera.environment import TypeEnv
 
+# How to render a ``SlotRef`` into the key its binding was stored under.
+# Passed in rather than imported, because the CHECKER's renderer is the only
+# correct one here: ``TypeEnv.bind`` is keyed via ``_type_expr_to_slot_name``,
+# which RESOLVES type arguments, so ``@Array<Option<Txt>>`` with
+# ``type Txt = String`` is stored as ``Array<Option<String>>``.  The syntactic
+# renderer in :mod:`vera.slots` returns the surface form and would miss — and a
+# miss reads as "not statically known", i.e. silence.  Callers pass
+# ``ResolutionMixin._slot_ref_key``.
+SlotKey = Callable[[ast.SlotRef], str]
 
-def resolve_literal_string(expr: ast.Expr, env: TypeEnv) -> str | None:
+
+def resolve_literal_string(expr: ast.Expr, env: TypeEnv,
+                           slot_key: SlotKey) -> str | None:
     """Return the compile-time value of ``expr`` iff it is literal-provenance.
 
     Returns the resolved ``str`` for a string literal, an interpolation whose
@@ -74,7 +85,8 @@ def resolve_literal_string(expr: ast.Expr, env: TypeEnv) -> str | None:
     #   FloatLit           → None: not a String.
     #   BoolLit            → None: not a String.
     #   UnitLit            → None: not a String.
-    #   HoleExpr           → None: cannot occur post-typecheck; reject anyway.
+    #   HoleExpr           → None: a typed hole DOES reach here (the resolvers
+#                        run during typechecking, not after) — reject.
     #   ResultRef          → None: @T.result is a runtime value.
     #   ConstructorCall    → None: a constructor value is not a bare String.
     #   NullaryConstructor → None: likewise (None / a nullary ctor).
@@ -103,7 +115,7 @@ def resolve_literal_string(expr: ast.Expr, env: TypeEnv) -> str | None:
             if isinstance(part, str):
                 out.append(part)
                 continue
-            sub = resolve_literal_string(part, env)
+            sub = resolve_literal_string(part, env, slot_key)
             if sub is None:
                 return None
             out.append(sub)
@@ -111,28 +123,23 @@ def resolve_literal_string(expr: ast.Expr, env: TypeEnv) -> str | None:
 
     if isinstance(expr, ast.FnCall):
         if expr.name == "string_concat" and len(expr.args) == 2:
-            left = resolve_literal_string(expr.args[0], env)
-            right = resolve_literal_string(expr.args[1], env)
+            left = resolve_literal_string(expr.args[0], env, slot_key)
+            right = resolve_literal_string(expr.args[1], env, slot_key)
             if left is None or right is None:
                 return None
             return left + right
         return None
 
     if isinstance(expr, ast.SlotRef):
-        # ``slot_ref_name`` rather than the bare ``type_name``: identical for
-        # ``String`` (no type arguments), but keeps both resolvers on the one
-        # canonical renderer so a parameterised type cannot silently miss.
-        name = slot_ref_name(expr)
-        if name is None:
-            return None
-        binding = env.resolve_slot_binding(name, expr.index)
+        binding = env.resolve_slot_binding(slot_key(expr), expr.index)
         return binding.literal_str if binding is not None else None
 
     # Every other Expr subclass: not literal-provenance (see WALKER_COVERAGE).
     return None
 
 
-def resolve_array_len(expr: ast.Expr, env: TypeEnv) -> int | None:
+def resolve_array_len(expr: ast.Expr, env: TypeEnv,
+                      slot_key: SlotKey) -> int | None:
     """Return ``expr``'s compile-time length iff it is a literal array (#1160).
 
     The array-side counterpart of :func:`resolve_literal_string`, used by the
@@ -151,9 +158,10 @@ def resolve_array_len(expr: ast.Expr, env: TypeEnv) -> int | None:
     rejected program.  Do not "fix" a miss by guessing a length.
 
     Deliberately narrower than the string resolver: it does *not* fold
-    ``array_concat`` or any other builtin.  Nobody assembles a params array
-    from concatenated literals, and each extra shape is another way to compute
-    a wrong length and false-reject a valid program.
+    ``array_concat`` or any other builtin.  Each extra shape folded here is
+    another way to compute a WRONG length and false-reject a valid program —
+    the one outcome this check must never produce.  ``test_array_concat_defers``
+    and ``test_unequal_if_arms_defer`` pin that.
 
     # WALKER_COVERAGE: (#597 — every Expr subclass has a disposition; a new
     # subclass added to vera/ast.py trips check_walker_coverage.py until it is
@@ -186,7 +194,8 @@ def resolve_array_len(expr: ast.Expr, env: TypeEnv) -> int | None:
     #   FloatLit           → None: not an Array.
     #   BoolLit            → None: not an Array.
     #   UnitLit            → None: not an Array.
-    #   HoleExpr           → None: cannot occur post-typecheck; defer anyway.
+    #   HoleExpr           → None: a typed hole DOES reach here (the resolvers
+#                        run during typechecking, not after) — defer.
     #   ResultRef          → None: @T.result is a runtime value.
     #   OldExpr            → None: contract-only; cannot occur in op-arg pos.
     #   NewExpr            → None: contract-only.
@@ -199,15 +208,7 @@ def resolve_array_len(expr: ast.Expr, env: TypeEnv) -> int | None:
         return len(expr.elements)
 
     if isinstance(expr, ast.SlotRef):
-        # Look the slot up under its CANONICAL name.  ``expr.type_name`` is the
-        # BASE name only — for ``@Array<Option<String>>.0`` it is ``"Array"``,
-        # which matches no binding, so a bare ``type_name`` lookup silently
-        # resolves to None and the check quietly does nothing.  ``slot_ref_name``
-        # is the same renderer the checker keys bindings with.
-        name = slot_ref_name(expr)
-        if name is None:
-            return None
-        binding = env.resolve_slot_binding(name, expr.index)
+        binding = env.resolve_slot_binding(slot_key(expr), expr.index)
         return binding.array_len if binding is not None else None
 
     return None

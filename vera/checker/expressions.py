@@ -1027,8 +1027,9 @@ class ExpressionsMixin:
         # provenance gate.  Returns None for any non-literal value.
         # #1160 resolves the array length the same way and for the same reason,
         # so the E208 arity check follows a let chain as the E207 gate does.
-        lit = resolve_literal_string(stmt.value, self.env)
-        alen = resolve_array_len(stmt.value, self.env)
+        lit = resolve_literal_string(stmt.value, self.env,
+                                     self._slot_ref_key)
+        alen = resolve_array_len(stmt.value, self.env, self._slot_ref_key)
         self.env.bind(tname, declared_type, "let", literal_str=lit,
                       array_len=alen)
 

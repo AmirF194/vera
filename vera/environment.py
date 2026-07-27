@@ -120,7 +120,8 @@ class Binding:
     """
     type_name: str       # canonical name for slot matching
     resolved_type: Type  # fully resolved semantic type
-    source: str          # "param", "let", "match", "handler", "destruct"
+    source: str          # "param", "let", "match", "handler",
+                         # "destruct", "refinement"
     # #309: the compile-time value of this binding IFF it is a String of
     # literal provenance (a literal, a string_concat of literals, or a let of
     # those), else None.  Computed eagerly when the binding is created — in its

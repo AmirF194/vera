@@ -70,7 +70,7 @@ Swap the placeholder for `string_concat("SELECT ... WHERE name = '", @String.0)`
 
 That is worth separating from the protections you are probably used to. It is not a lint, so there is no configuration to get right and no suppression comment to add. It is not a scanner run over a build, so it cannot be skipped or fall behind the code. And it is not a solver result, so it does not weaken where the solver does: Vera's contract verification has tiers and can fall back to runtime checks, but this check has neither. It asks one question about where a string came from, answers it in the type checker, and gives the same answer inside handled code and generic code as anywhere else.
 
-Two smaller errors sit alongside it. A `?`-placeholder/parameter count mismatch is `E208` when the params array is written literally — a runtime-sized array defers that arity check to the driver — and numbered or named placeholder styles are rejected in favour of the single positional form (`E209`).
+Two smaller errors sit alongside it. A `?`-placeholder/parameter count mismatch is `E208` when the params array's length is statically known — written out at the call site, or reached through a `let` — while anything else defers that arity check to the driver — and numbered or named placeholder styles are rejected in favour of the single positional form (`E209`).
 
 The guarantee is exactly as wide as the query path, and no wider. Every string that reaches the database goes through `DB.query` / `DB.execute`, and the language has no other string-to-SQL route, so there is no back door to leave open. What it does not catch is a fixed query that is simply wrong: a literal `DELETE FROM users` compiles happily, because nothing in it came from outside. And in v1 the effect is SQLite-only and un-mockable (`handle[DB]` is tracked with the other host effects in [#372](https://github.com/aallan/vera/issues/372); further backends are [#1143](https://github.com/aallan/vera/issues/1143)).
 
@@ -249,7 +249,7 @@ The reference compiler is under active development. The current release includes
 
 - A seven-stage pipeline: parse, transform, resolve, typecheck, verify, compile, execute
 - A 14-chapter formal specification
-- 8,538 tests, including a 169-program conformance suite
+- 8,558 tests, including a 169-program conformance suite
 - 42 working example programs
 - 164 built-in functions covering strings, arrays, math, parsing, and data types
 - Four built-in abilities (Eq, Ord, Hash, Show) with constrained generics and ADT auto-derivation

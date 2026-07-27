@@ -215,7 +215,7 @@ class TestSqlPlaceholderCount309:
     def test_let_shadowing_resolves_innermost_length(self) -> None:
         # Shadowing: the second ``let`` binds a NEW literal of a different
         # length.  Resolution must take the innermost binding (1), not the
-        # outer one (2) — with one placeholder the outer length would wrongly
+        # outer one (2) — with two placeholders the outer length would wrongly
         # pass and the inner one correctly fails.
         _check_code(
             _db_fn(
@@ -256,6 +256,96 @@ public fn run(-> @Result<Int, String>)
 }
 """
         _check_code(src, "E208")
+
+    def test_alias_in_type_argument_still_checked(self) -> None:
+        """A type alias *inside a type argument* must not disable the check.
+
+        The checker keys bindings by the alias-RESOLVED name
+        (`_type_expr_to_slot_name` -> `canonical_type_name` over resolved
+        args), so a lookup that renders the surface syntax finds nothing,
+        returns None, and defers — silently.  That is the #1160 bug class one
+        level down, and it type-checks completely clean, so no other
+        diagnostic hints at it.  Both resolvers therefore use the checker's
+        own renderer rather than the syntactic one in `vera/slots.py`.
+        """
+        src = """
+type Txt = String;
+
+public fn run(-> @Result<Array<Array<Option<String>>>, String>)
+  requires(true) ensures(true) effects(<DB>)
+{
+  let @Array<Option<Txt>> = [Some("x")];
+  DB.query("SELECT * FROM u WHERE a = ? AND b = ?", @Array<Option<Txt>>.0)
+}
+"""
+        _check_code(src, "E208")
+
+    def test_alias_at_top_level_still_checked(self) -> None:
+        # The control for the case above: an alias in OUTER position always
+        # worked, because both renderers return the bare name unchanged.  It
+        # is here so a regression in the alias fix cannot be mistaken for
+        # "aliases were never supported".
+        src = """
+type Params = Array<Option<String>>;
+
+public fn run(-> @Result<Array<Array<Option<String>>>, String>)
+  requires(true) ensures(true) effects(<DB>)
+{
+  let @Params = [Some("x")];
+  DB.query("SELECT * FROM u WHERE a = ? AND b = ?", @Params.0)
+}
+"""
+        _check_code(src, "E208")
+
+    def test_empty_params_inline_mismatch_rejected(self) -> None:
+        # `0` is a valid length, so the arity check must test `is not None`,
+        # never truthiness.  Under `if got:` this program is accepted and
+        # nothing else in the suite notices — the array-side counterpart of
+        # `test_let_bound_empty_string_accepted`, which exists for exactly
+        # this hazard on `literal_str`.
+        _check_code(_db_fn('  DB.query("SELECT * FROM u WHERE a = ?", [])'),
+                    "E208")
+
+    def test_empty_params_let_bound_mismatch_rejected(self) -> None:
+        # The same, through the let path — which is newly reachable: a
+        # let-bound `[]` records array_len=0 rather than None.
+        _check_code(
+            _db_fn('  let @Array<Option<String>> = [];\n'
+                   '  DB.query("SELECT * FROM u WHERE a = ?", '
+                   '@Array<Option<String>>.0)'),
+            "E208",
+        )
+
+    def test_empty_params_let_bound_match_accepted(self) -> None:
+        # Zero placeholders against a zero-length array agree, so this must
+        # be accepted — the positive half, without which a resolver that
+        # always reported a mismatch would still look correct.
+        _check_ok(_db_fn(
+            '  let @Array<Option<String>> = [];\n'
+            '  DB.query("SELECT * FROM u", @Array<Option<String>>.0)'))
+
+    def test_unequal_if_arms_defer(self) -> None:
+        # A regression lock, not a feature test.  `IfExpr` is deliberately not
+        # folded: the arms here have DIFFERENT lengths, so folding either one
+        # would false-reject this valid program.  The docstring warns against
+        # "completing the symmetry" with the string resolver; this is the
+        # executable form of that warning.
+        _check_ok(_db_fn(
+            '  let @Array<Option<String>> = if @Bool.0 then '
+            '{ [Some("x")] } else { [Some("x"), Some("y")] };\n'
+            '  DB.query("SELECT * FROM u WHERE a = ?", '
+            '@Array<Option<String>>.0)',
+            param="@Bool"))
+
+    def test_array_concat_defers(self) -> None:
+        # The other regression lock: `string_concat` IS folded by the string
+        # resolver, so the tempting "symmetry" is to fold `array_concat` here.
+        # Deferring is correct; this pins it.
+        _check_ok(_db_fn(
+            '  let @Array<Option<String>> = '
+            'array_concat([Some("x")], [Some("y")]);\n'
+            '  DB.query("SELECT * FROM u WHERE a = ?", '
+            '@Array<Option<String>>.0)'))
 
     def test_let_bound_runtime_array_still_defers(self) -> None:
         # A ``let`` whose value is NOT an array literal has no statically known

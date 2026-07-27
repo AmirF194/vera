@@ -833,7 +833,7 @@ class CallsMixin:
         ``effect DB`` never declared the op."""
         if not args:
             return
-        sql = resolve_literal_string(args[0], self.env)
+        sql = resolve_literal_string(args[0], self.env, self._slot_ref_key)
         if sql is None:
             self._error(
                 args[0],
@@ -892,7 +892,8 @@ class CallsMixin:
         # array written literally is checked whether it is inline at the call
         # site or bound to a slot first.  It returns None when the length is not
         # statically known, deferring the count to the sqlite3 host.
-        got = resolve_array_len(args[1], self.env) if len(args) >= 2 else None
+        got = (resolve_array_len(args[1], self.env, self._slot_ref_key)
+               if len(args) >= 2 else None)
         if got is not None:
             if want != got:
                 self._error(
