@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Vim and Neovim support** ([#1155](https://github.com/aallan/vera/pull/1155), contributed by [@chromy](https://github.com/chromy)). A Vim 8+/Neovim package under `editors/vim-veralang/` — `ftdetect`, `ftplugin` and `syntax` — ported from the VS Code TextMate grammar. It registers the filetype as **`veralang`**, not `vera`: Vim has shipped an unrelated `vera` filetype since 2005 for the Synopsys hardware verification language, and because `$VIMRUNTIME` precedes `pack/*/start` in `runtimepath`, claiming that name would let the built-in syntax set `b:current_syntax` first and this plugin's own files would then exit silently through their own guard. It is the most current of the three editor integrations: it knows all ten effects in `vera effects --json`, where the VS Code and TextMate grammars are four behind. The remaining drift — those two grammars, and the `Eq`/`Hash`/`Ord`/`Show` abilities that no grammar knows — is tracked in [#1156](https://github.com/aallan/vera/issues/1156).
+
 ### Changed
 
 - **The ruff rule set is declared explicitly instead of inherited, and five of the rules 0.16 turned on are adopted** ([#1166](https://github.com/aallan/vera/issues/1166)). The project had no `[tool.ruff]` section, so its lint policy was whatever ruff shipped as the default — meaning any ruff release could redefine the project's standards without review. 0.16.0 did exactly that, replacing the default selection wholesale (isort, pylint, simplify, blind-except, pyupgrade, pyi, perflint, pie, tryceratops, datetimez, refurb) and taking a clean tree to 805 errors across 36 rules; the `<0.16` version cap had been suppressing the symptom. `E4`/`E7`/`E9`/`F` are ruff's pre-0.16 default, verified byte-identical against seeded violations under both 0.15.21 and 0.16.0, so declaring them preserves today's behaviour rather than narrowing it. A ruff upgrade is now a tool change rather than a policy change, and the version range widens to `<0.17`.

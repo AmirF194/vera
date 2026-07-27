@@ -653,7 +653,7 @@ vera run examples/hello_world.vera
 vera compile --target browser examples/hello_world.vera
 ```
 
-Editor support: [TextMate `.tmbundle`]({REPO}/tree/main/editors/textmate), [Vera Language for VS Code](https://marketplace.visualstudio.com/items?itemName=veralang.vera-language) (`code --install-extension veralang.vera-language`; [source]({REPO}/tree/main/editors/vscode)).
+Editor support: [Vera Language for VS Code](https://marketplace.visualstudio.com/items?itemName=veralang.vera-language) (`code --install-extension veralang.vera-language`; [source]({REPO}/tree/main/editors/vscode)), a [Vim package]({REPO}/tree/main/editors/vim-veralang) for Vim 8+ and Neovim, and a [TextMate `.tmbundle`]({REPO}/tree/main/editors/textmate) for Sublime Text and other TextMate-grammar editors.
 
 ## For Agents
 

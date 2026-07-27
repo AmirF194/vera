@@ -15,3 +15,9 @@ A `.tmbundle` providing syntax highlighting for `.vera` files in TextMate 2.
 See [`textmate/`](textmate/) for installation instructions.
 
 The `.tmLanguage` grammar is also compatible with Sublime Text and other editors that consume TextMate grammars.
+
+## Vim
+
+A Vim package (`ftdetect`/`ftplugin`/`syntax`) ported from the VS Code TextMate grammar, for Vim 8+ and Neovim.
+
+See [`vim-veralang/`](vim-veralang/) for installation instructions.

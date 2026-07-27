@@ -231,6 +231,7 @@ vera errors --json                       # list the diagnostic error-code regist
 Vera ships a [language server](LSP_SERVER.md) (`vera lsp`, via the optional `[lsp]` extra) that keeps a warm incremental Z3 session between keystrokes — diagnostics, proofs, hover, slot go-to-definition, and typed-hole completion at editor latency, plus custom proof-delta methods for coding agents. See **[LSP_SERVER.md](LSP_SERVER.md)** for setup and the full protocol surface.
 
 - **[VS Code extension](https://marketplace.visualstudio.com/items?itemName=veralang.vera-language)** — install from the Marketplace with `code --install-extension veralang.vera-language`; starts the language server automatically, plus syntax highlighting and language configuration ([source](editors/vscode/))
+- **[Vim package](editors/vim-veralang/)** — syntax highlighting for Vim 8+ and Neovim, installed as a native package or through a plugin manager (the filetype is `veralang`, not `vera`, which Vim has used for an unrelated language since 2005)
 - **[TextMate bundle](editors/textmate/)** — syntax highlighting for Sublime Text and other TextMate-grammar editors (any editor with a generic LSP client can use `vera lsp` directly)
 
 ## For agents
@@ -312,7 +313,7 @@ vera/
 │   ├── lsp/                       #   Language server (see LSP_SERVER.md)
 │   └── cli.py                     #   Command-line interface
 ├── docs/                          # GitHub Pages site (veralang.dev)
-├── editors/                       # VS Code extension (LSP client + grammar) + TextMate bundle
+├── editors/                       # VS Code extension (LSP client + grammar), Vim package, TextMate bundle
 ├── examples/                      # 42 example Vera programs
 ├── tests/                         # Test suite (see TESTING.md)
 └── scripts/                       # CI and validation scripts
