@@ -149,6 +149,7 @@ def check_issue_states(issue_numbers: set[int]) -> dict[int, str]:
                 text=True,
                 encoding="utf-8",
                 timeout=10,
+                check=False,
             )
             if result.returncode == 0:
                 states[num] = result.stdout.strip()

@@ -21,6 +21,7 @@ def main() -> int:
             capture_output=True,
             text=True,
             encoding="utf-8",
+            check=False,
         )
         if "OK:" not in result.stdout:
             failed.append(("check", f))
@@ -35,6 +36,7 @@ def main() -> int:
             capture_output=True,
             text=True,
             encoding="utf-8",
+            check=False,
         )
         if "OK:" not in result.stdout:
             failed.append(("verify", f))

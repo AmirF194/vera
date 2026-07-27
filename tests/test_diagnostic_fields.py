@@ -29,6 +29,8 @@ The script lives at `scripts/check_diagnostic_fields.py`.
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import importlib.util
 import sys
 from pathlib import Path
@@ -1278,7 +1280,7 @@ class TestSpecRefValidity:
 # =====================================================================
 
 class TestErrorCodeRegistration:
-    REG = {"E130", "E216", "W001"}
+    REG: ClassVar[set[str]] = {"E130", "E216", "W001"}
 
     def test_unregistered_literal_flagged(self, mod: object) -> None:
         src = "self._error(node, 'd', error_code='E999')\n"

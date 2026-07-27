@@ -46,9 +46,10 @@ def _node_supports_exnref() -> bool:
         proc = subprocess.run(
             [NODE, "--experimental-wasm-exnref", "-e", "0"],
             capture_output=True, timeout=5,
+            check=False,
         )
         return proc.returncode == 0
-    except Exception:
+    except Exception:  # noqa: BLE001 — any failure means the node feature is unavailable
         return False
 
 _HAS_EXNREF = _node_supports_exnref()
@@ -176,6 +177,7 @@ def _run_node(
         text=True,
         encoding="utf-8",
         timeout=60,  # Windows runner Node startup variance + cold V8 exnref codegen — see #694
+        check=False,
     )
     if proc.returncode != 0:
         raise RuntimeError(
@@ -1851,7 +1853,7 @@ class TestBrowserContracts:
         py_error: str | None = None
         try:
             _run_python(result, fn_name="safe_divide", args=[0, 5])
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — the error is the assertion subject, whatever its type
             py_error = str(exc)
 
         node_result = _run_node(wasm_path, fn="safe_divide", fn_args=["0", "5"])
@@ -1882,7 +1884,7 @@ class TestBrowserContracts:
         py_error: str | None = None
         try:
             _run_python(result, fn_name="add", args=[9223372036854775807, 1])
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — the error is the assertion subject, whatever its type
             py_error = str(exc)
 
         node_result = _run_node(
@@ -2112,6 +2114,7 @@ class TestBrowserEmit:
             text=True,
             encoding="utf-8",
             timeout=60,  # Windows runner Node startup variance + cold V8 exnref codegen — see #694
+            check=False,
         )
         assert proc.returncode == 0, f"stderr: {proc.stderr}"
         assert (out_dir / "module.wasm").exists()

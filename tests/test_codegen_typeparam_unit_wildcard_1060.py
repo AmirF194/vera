@@ -699,9 +699,9 @@ def _compile_with_module(
     from vera.resolver import ResolvedModule
     from vera.transform import transform as _transform
 
-    mod_f = tempfile.NamedTemporaryFile(
+    mod_f = tempfile.NamedTemporaryFile(  # noqa: SIM115 — Windows fixture; closed + unlinked below
         mode="w", suffix=".vera", delete=False, encoding="utf-8")
-    main_f = tempfile.NamedTemporaryFile(
+    main_f = tempfile.NamedTemporaryFile(  # noqa: SIM115 — Windows fixture; closed + unlinked below
         mode="w", suffix=".vera", delete=False, encoding="utf-8")
     try:
         with mod_f:

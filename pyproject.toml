@@ -116,19 +116,42 @@ build-backend = "setuptools.build_meta"
 # pyupgrade, pyi, perflint, pie, tryceratops, datetimez, refurb), taking a
 # clean tree to 802 errors.  The `<0.16` cap was suppressing that symptom.
 #
-# These four families are ruff's pre-0.16 default, verified byte-identical
-# against seeded violations under both 0.15.21 and 0.16.0 -- so this pins
-# today's behaviour rather than narrowing it, and a ruff upgrade is now a
-# tool change instead of a policy change.
+# `E4`, `E7`, `E9` and `F` are ruff's pre-0.16 default, verified
+# byte-identical against seeded violations under both 0.15.21 and 0.16.0 --
+# so they pin today's behaviour rather than narrowing it, and a ruff upgrade
+# is now a tool change instead of a policy change.
 #
-# The CI security step passes `--select S` on the command line, which
-# overrides this list for that run; `scripts/` and `tests/` are covered by
-# the same selection as `vera/`.
+# The five that follow are adopted from what 0.16 turned on, each because it
+# names a defect class this project already treats as real.  Every other rule
+# in the new default is style or modernisation -- `I001` import ordering
+# chief among them, which has no basis here while the project does not run
+# `ruff format`.  #1166 records what was left and why.
 #
-# Adopting the higher-signal rules 0.16 turned on (BLE001, RUF012, SIM115,
-# RUF100, PLW1510) is deliberate follow-up work, not a side effect of a
-# version bump.
-select = ["E4", "E7", "E9", "F"]
+#   BLE001   a blind `except Exception` must say why its width is correct
+#   PLW1510  `subprocess.run` must state whether a non-zero exit is an error
+#   RUF012   a mutable class attribute is shared state; say so with ClassVar
+#   RUF100   a `noqa` aimed at nothing masks the next real violation
+#   SIM115   an unclosed file handle, which the Windows cells feel first
+#
+# `S` is here because RUF100 has to see the same rules CI does.  The security
+# gate runs `ruff check --select S vera/`, and a command-line `--select`
+# replaces this list rather than extending it -- so without `S` declared,
+# RUF100 would read `vera/`'s 57 security suppressions as aimed at nothing
+# and strip them, and the next CI run would fail on the assertions they
+# cover.  Declaring it keeps one source of truth: `ruff check .` now
+# reproduces that gate instead of depending on how CI spells its arguments.
+select = [
+    "E4", "E7", "E9", "F", "S",
+    "BLE001", "PLW1510", "RUF012", "RUF100", "SIM115",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# `S` is a production-code policy.  `tests/` is 8,527 violations of it,
+# almost all `S101` (a test's assertions *are* the test), and `scripts/`
+# carries a further 19 that no gate has ever enforced.  Neither directory was
+# in the security gate's scope, so neither is in it now.
+"tests/**" = ["S"]
+"scripts/**" = ["S"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

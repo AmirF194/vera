@@ -7,6 +7,8 @@ and effect handlers (State<T>, Exn<E>).
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 from dataclasses import fields, is_dataclass
 
 from vera import ast
@@ -22,7 +24,7 @@ from vera.wasm.helpers import (
 )
 
 
-class _ShowHashUnsupported(Exception):  # noqa: N818
+class _ShowHashUnsupported(Exception):
     """Internal signal: a field is not showable/hashable here (#911).
 
     Raised mid-traversal from a nested field render/fold and caught by the
@@ -40,7 +42,7 @@ class CallsHandlersMixin:
     # -----------------------------------------------------------------
 
     # Dispatch map: Vera type → to_string builtin name
-    _SHOW_DISPATCH: dict[str, str] = {
+    _SHOW_DISPATCH: ClassVar[dict[str, str]] = {
         "Int": "to_string",
         "Nat": "nat_to_string",
         "Bool": "bool_to_string",

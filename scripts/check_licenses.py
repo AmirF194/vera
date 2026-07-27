@@ -62,6 +62,7 @@ def main() -> int:
             text=True,
             encoding="utf-8",
             timeout=30,
+            check=False,
         )
     except FileNotFoundError:
         print(

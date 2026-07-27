@@ -141,6 +141,7 @@ class TestApplyFnClean:
             [sys.executable, "-m", "vera.cli", "check", "--json",
              str(vera_file)],
             capture_output=True, text=True, encoding="utf-8",
+            check=False,
         )
         assert proc.returncode == 0, proc.stderr
         payload = json.loads(proc.stdout)

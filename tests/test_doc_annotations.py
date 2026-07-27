@@ -52,7 +52,7 @@ def _try_parse(content: str) -> str | None:
     try:
         parse(content, file="<test>")
         return None
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — a failing doc example is reported, not raised
         return str(exc).split("\n")[0][:200]
 
 

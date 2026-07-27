@@ -219,6 +219,7 @@ def test_verify_json_always_emits_json(tmp_path: Path) -> None:
     proc = subprocess.run(
         [sys.executable, "-m", "vera.cli", "verify", "--json", str(src)],
         capture_output=True, text=True, encoding="utf-8",
+        check=False,
     )
     # Whatever the verdict, stdout must be parseable JSON (no traceback).
     assert "Traceback" not in proc.stderr, proc.stderr

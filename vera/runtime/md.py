@@ -55,7 +55,7 @@ def register_md(linker: wasmtime.Linker) -> None:
         # _ShadowGuard usage outside).
         try:
             doc = _md_parse(text)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — host boundary; any failure becomes Result.Err
             return _alloc_result_err_string(caller, str(exc))
         # #692: same shadow-stack-rooting concern as
         # ``host_html_parse`` / ``host_json_parse``.

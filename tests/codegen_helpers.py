@@ -41,7 +41,7 @@ def _compile(source: str) -> CompileResult:
     # so the temp file is unlinked even when the write itself raises.
     import tempfile
 
-    f = tempfile.NamedTemporaryFile(
+    f = tempfile.NamedTemporaryFile(  # noqa: SIM115 — Windows fixture; closed + unlinked below
         mode="w", suffix=".vera", delete=False, encoding="utf-8"
     )
     try:
@@ -164,7 +164,7 @@ def _compile_with_generator(source: str) -> tuple[CompileResult, CodeGenerator]:
     """Compile and return both result and CodeGenerator for metadata inspection."""
     import tempfile
 
-    f = tempfile.NamedTemporaryFile(
+    f = tempfile.NamedTemporaryFile(  # noqa: SIM115 — Windows fixture; closed + unlinked below
         mode="w", suffix=".vera", delete=False, encoding="utf-8"
     )
     try:

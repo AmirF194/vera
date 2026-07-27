@@ -2560,7 +2560,7 @@ public fn main(@Unit -> @Unit)
         release = threading.Event()
 
         class Handler(http.server.BaseHTTPRequestHandler):
-            def do_GET(self) -> None:  # noqa: N802 (stdlib API name)
+            def do_GET(self) -> None:
                 arrived.set()
                 release.wait(timeout=10.0)
                 body = b"late"
@@ -2754,6 +2754,7 @@ class TestRuntimePackageImportHygiene421:
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
+                check=False,
             )
             assert result.returncode == 0, (
                 f"cold `import vera.runtime.{mod}` failed (circular import "

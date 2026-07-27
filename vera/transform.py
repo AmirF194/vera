@@ -397,7 +397,7 @@ def _parse_interp_expr(
     )
     try:
         tree = _parse(wrapper)
-    except Exception:
+    except Exception:  # noqa: BLE001 — any parse failure is an interpolation error
         raise _interp_error(
             f"Invalid expression in string interpolation: "
             f"\\({source})", meta)

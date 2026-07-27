@@ -112,6 +112,7 @@ def check_one(dep: str, platform_tag: str, python_version: str) -> tuple[bool, s
             # outage) from blocking CI for hours.
             result = subprocess.run(
                 cmd, capture_output=True, text=True, encoding="utf-8", timeout=60,
+                check=False,
             )
         except subprocess.TimeoutExpired:
             return False, f"pip download timed out after 60s for {dep}"

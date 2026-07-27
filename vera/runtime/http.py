@@ -68,7 +68,7 @@ def fetch_get(url: str) -> tuple[bool, str]:
             # cleanly UTF-8".
             body = resp.read().decode("utf-8", errors="replace")
         return (True, body)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — host boundary; any failure becomes Result.Err
         return (False, str(exc))
 
 
@@ -102,7 +102,7 @@ def fetch_post(url: str, body: str) -> tuple[bool, str]:
                 "utf-8", errors="replace",
             )
         return (True, response_body)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — host boundary; any failure becomes Result.Err
         return (False, str(exc))
 
 

@@ -120,6 +120,7 @@ def _extract_skips(
             text=True,
             encoding="utf-8",
             timeout=60,
+            check=False,
         )
     except subprocess.TimeoutExpired:
         return [(

@@ -611,7 +611,7 @@ public fn main(-> @Unit)
         # platform (text mode writes \r\n on Windows, which turned
         # this into an accidental CRLF test — see the dedicated CRLF
         # test below for that case).
-        handle = tempfile.NamedTemporaryFile(
+        handle = tempfile.NamedTemporaryFile(  # noqa: SIM115 — Windows fixture; closed + unlinked below
             mode="wb", suffix=".txt", delete=False,
         )
         try:
@@ -638,7 +638,7 @@ public fn main(-> @Unit)
   IO.print(nat_to_string(string_length(@String.0)))
 }
 """)
-        handle = tempfile.NamedTemporaryFile(
+        handle = tempfile.NamedTemporaryFile(  # noqa: SIM115 — Windows fixture; closed + unlinked below
             mode="wb", suffix=".txt", delete=False,
         )
         try:
@@ -668,7 +668,7 @@ public fn main(-> @Unit)
   IO.print(string_concat("|line:", @String.0))
 }
 """)
-        handle = tempfile.NamedTemporaryFile(
+        handle = tempfile.NamedTemporaryFile(  # noqa: SIM115 — Windows fixture; closed + unlinked below
             mode="w", suffix=".txt", delete=False, encoding="utf-8",
         )
         try:
@@ -1319,7 +1319,7 @@ public fn main(-> @Unit)
   IO.print(nat_to_string(string_length(@String.0)))
 }
 """)
-        handle = tempfile.NamedTemporaryFile(
+        handle = tempfile.NamedTemporaryFile(  # noqa: SIM115 — Windows fixture; closed + unlinked below
             mode="wb", suffix=".txt", delete=False,
         )
         try:
@@ -1339,7 +1339,7 @@ public fn main(-> @Unit)
   IO.print(nat_to_string(string_length(@String.0)))
 }
 """)
-        handle = tempfile.NamedTemporaryFile(
+        handle = tempfile.NamedTemporaryFile(  # noqa: SIM115 — Windows fixture; closed + unlinked below
             mode="wb", suffix=".txt", delete=False,
         )
         try:

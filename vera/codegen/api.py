@@ -435,7 +435,7 @@ def execute(
         try:
             contents = Path(path).read_text(encoding="utf-8")
             return _alloc_result_ok_string(caller, contents)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — host boundary; any failure becomes Result.Err
             return _alloc_result_err_string(caller, str(exc))
 
     read_file_type = wasmtime.FuncType(
@@ -459,7 +459,7 @@ def execute(
         try:
             Path(path).write_text(data, encoding="utf-8")
             return _alloc_result_ok_unit(caller)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — host boundary; any failure becomes Result.Err
             return _alloc_result_err_string(caller, str(exc))
 
     write_file_type = wasmtime.FuncType(
@@ -616,7 +616,7 @@ def execute(
         # that maps it to exit code 130 (#599).
         try:
             fd = sys.stdin.fileno()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — host boundary; any failure becomes Result.Err
             return _alloc_result_err_string(
                 caller, f"stdin.fileno() failed: {exc}",
             )
@@ -632,7 +632,7 @@ def execute(
         if not os.isatty(fd):
             try:
                 ch = sys.stdin.read(1)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — host boundary; any failure becomes Result.Err
                 return _alloc_result_err_string(
                     caller, f"stdin.read failed: {exc}",
                 )
@@ -652,7 +652,7 @@ def execute(
                 )
             try:
                 ch = msvcrt.getwch()  # type: ignore[attr-defined]
-            except Exception as exc:  # pragma: no cover — Windows-only
+            except Exception as exc:  # pragma: no cover — Windows-only  # noqa: BLE001
                 return _alloc_result_err_string(
                     caller, f"getwch failed: {exc}",
                 )
@@ -676,7 +676,7 @@ def execute(
         # "raw-mode read failed" would mislead a debugger.
         try:
             old = termios.tcgetattr(fd)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — host boundary; any failure becomes Result.Err
             return _alloc_result_err_string(
                 caller, f"tcgetattr failed: {exc}",
             )
@@ -714,9 +714,9 @@ def execute(
                 # reaches `execute()`'s exit-130 handler (#599).
                 try:
                     termios.tcsetattr(fd, termios.TCSADRAIN, old)
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 — host boundary; any failure becomes Result.Err
                     restore_exc = exc
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — host boundary; any failure becomes Result.Err
             # Read (or setcbreak) failed.  Prefer the read error
             # over any restore_exc — restore failure is less
             # actionable than the original problem.  `Exception`
