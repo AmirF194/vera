@@ -8,8 +8,8 @@ TESTING.md, CONTRIBUTING.md, CLAUDE.md, README.md, SKILL.md, AGENTS.md,
 FAQ.md, and ROADMAP.md.  Also checks the KNOWN_ISSUES.md "Refactoring
 needed" line counts (±10% tolerance), the HISTORY.md version-row format
 (one issue link max, no " — " separator per row), the vera/README.md
-module map (#1150), and the project facts hardcoded on the landing page
-(#528).
+module map (#1150), the project facts hardcoded on the landing page
+(#528), and the cited corpus-program count.
 
 Intentionally excludes CHANGELOG.md: its counts are historical records
 (e.g. "64 programs, was 63") that are frozen snapshots of the project state
@@ -101,6 +101,44 @@ def check_history_row_format(history_text: str) -> list[str]:
                 f"HISTORY.md line {lineno}: version row contains {dashes}"
                 f" ' — ' separators (max 1 — the bold lead-in dash;"
                 f" multi-clause rows belong in CHANGELOG.md)"
+            )
+    return errors
+
+
+def check_corpus_count(root: Path) -> list[str]:
+    """Gate the cited corpus-program count wherever TESTING.md states it.
+
+    The corpus is every ``*.vera`` under ``examples/`` and
+    ``tests/conformance/`` **recursively** — the set
+    ``scripts/check_corpus_canonical.py`` sweeps.  It is not derivable from
+    the conformance and example counts this script already checks: those are
+    top-level ``glob``s, while the corpus includes the imported modules under
+    ``examples/vera/`` and ``tests/conformance/vera/``.
+
+    Ungated, this number went stale the moment a conformance fixture landed
+    (#1160), and a phrasing-specific ``grep`` missed one of the two rows that
+    cite it — the two are worded differently ("All N corpus programs" vs
+    "All N ``examples/`` + ..."), so the pattern here keys on the script name
+    that anchors both rows, not on the prose around the number.
+    """
+    errors: list[str] = []
+    live = sum(
+        len(list((root / d).rglob("*.vera")))
+        for d in ("examples", "tests/conformance")
+    )
+    testing = (root / "TESTING.md").read_text(encoding="utf-8")
+    rows = re.findall(
+        r"`check_corpus_canonical\.py`[^|\n]*\|[^|\n]*?All (\d+)\b", testing
+    )
+    if not rows:
+        errors.append(
+            "TESTING.md: no `check_corpus_canonical.py` row states a corpus"
+            " count — the rows moved or were reworded, so they are no longer gated"
+        )
+    for cited in rows:
+        if int(cited) != live:
+            errors.append(
+                f"TESTING.md corpus count: doc says {cited}, live is {live}"
             )
     return errors
 
@@ -913,6 +951,12 @@ def main() -> int:
     errors.extend(
         check_homepage_facts(index_html, root, live_conformance, live_examples)
     )
+
+    # ------------------------------------------------------------------
+    # 19. Check the cited corpus-program count (#1160 review)
+    # ------------------------------------------------------------------
+
+    errors.extend(check_corpus_count(root))
 
     # ------------------------------------------------------------------
     # Report

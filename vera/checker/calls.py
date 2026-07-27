@@ -8,7 +8,11 @@ orchestration.
 from __future__ import annotations
 
 from vera import ast
-from vera.checker.sql import count_placeholders, resolve_literal_string
+from vera.checker.sql import (
+    count_placeholders,
+    resolve_array_len,
+    resolve_literal_string,
+)
 from vera.environment import (
     DB_SQL_OP_NAMES,
     STRING,
@@ -829,7 +833,7 @@ class CallsMixin:
         ``effect DB`` never declared the op."""
         if not args:
             return
-        sql = resolve_literal_string(args[0], self.env)
+        sql = resolve_literal_string(args[0], self.env, self._slot_ref_key)
         if sql is None:
             self._error(
                 args[0],
@@ -884,9 +888,13 @@ class CallsMixin:
             return
 
         # Anonymous ? only: arity-check against a statically-sized params array.
-        # A dynamically-sized params slot defers the count to the sqlite3 host.
-        if len(args) >= 2 and isinstance(args[1], ast.ArrayLit):
-            got = len(args[1].elements)
+        # ``resolve_array_len`` follows a ``let`` chain (#1160), so a params
+        # array written literally is checked whether it is inline at the call
+        # site or bound to a slot first.  It returns None when the length is not
+        # statically known, deferring the count to the sqlite3 host.
+        got = (resolve_array_len(args[1], self.env, self._slot_ref_key)
+               if len(args) >= 2 else None)
+        if got is not None:
             if want != got:
                 self._error(
                     node,

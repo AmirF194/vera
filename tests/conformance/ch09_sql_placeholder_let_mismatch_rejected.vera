@@ -1,0 +1,16 @@
+-- Chapter 9, Section 9.5.7 — SQL placeholder arity through a let (#1160).
+-- Features: db_effect, sql_provenance, check_error.
+--
+-- The params array is written literally, but bound to a slot before the call
+-- rather than passed inline.  It is exactly as statically sized either way, so
+-- the placeholder/parameter mismatch is the same compile-time error (E208).
+-- The literal-provenance gate already followed let chains for the SQL string;
+-- the arity check follows them for the params array.
+public fn mismatched_via_let(-> @Result<Array<Array<Option<String>>>, String>)
+  requires(true)
+  ensures(true)
+  effects(<DB>)
+{
+  let @Array<Option<String>> = [Some("x")];
+  DB.query("SELECT * FROM u WHERE a = ? AND b = ?", @Array<Option<String>>.0)
+}
