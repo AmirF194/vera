@@ -158,12 +158,13 @@ def count_placeholders(sql: str) -> int | None:
     Returns ``None`` when the SQL uses a NON-anonymous placeholder syntax —
     numbered (``?NNN``) or named (``:name`` / ``@name`` / ``$name``) — because
     the plain positional count no longer equals the number of bound parameters
-    (``?1 ... ?1`` binds one; ``:a AND :b`` binds two with zero ``?``).  The
-    caller then DEFERS the arity check to the sqlite3 host at run time rather
-    than emit a spurious E208.  Vera's params API is positional-only, so such
-    SQL fails at run time regardless; deferring keeps the static check sound
-    (it never false-rejects).  The ``?``-only agreement with sqlite3 is pinned
-    by the differential in ``tests/test_sql_provenance_309.py``.
+    (``?1 ... ?1`` binds one; ``:a AND :b`` binds two with zero ``?``).  There
+    is no arity to check in that case, and the caller does not try: Vera's
+    params API is positional-only, so :mod:`vera.checker.calls` rejects the SQL
+    outright with E209 rather than reaching the E208 comparison.  ``None`` is
+    therefore "not countable", not "allowed through" — no such program reaches
+    run time.  The ``?``-only agreement with sqlite3 is pinned by the
+    differential in ``tests/test_sql_provenance_309.py``.
     """
     count = 0
     quote: str | None = None      # active string/identifier delimiter, else None

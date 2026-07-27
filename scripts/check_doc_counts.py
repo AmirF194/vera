@@ -103,6 +103,138 @@ def check_history_row_format(history_text: str) -> list[str]:
     return errors
 
 
+_MODULE_MAP_ROW = re.compile(
+    r"^\| `(?P<label>[^`]+)`(?P<suffix>[^|]*)\| (?P<lines>[\d,]+) \|", re.M
+)
+
+
+def _line_count(path: Path) -> int | None:
+    try:
+        return len(path.read_text(encoding="utf-8").splitlines())
+    except OSError:
+        return None
+
+
+def check_module_map(readme_text: str, root: Path) -> list[str]:
+    """Check the vera/README.md "Module Map" table against the source tree.
+
+    Two independent assertions, because they fail differently (#1150):
+
+    * **Counts** — each row's cited line count against the file on disk,
+      with the same ±10% band `check_refactoring_counts` uses.  The
+      numbers exist to convey relative scale when navigating the
+      compiler, so exact pinning would tax every PR that touches a
+      compiler file with a doc edit; a band still catches the drift that
+      makes the table misleading (`checker/calls.py` had reached 155%).
+    * **Coverage** — every module on disk has a row.  This is exact, and
+      it is the half a count check cannot do: `checker/sql.py` (#309) and
+      `runtime/db.py` (#229) shipped without rows, so there was no cited
+      number to be wrong.
+
+    A `pkg/` row aggregates that package's ``*.py``.  A row suffixed
+    ``×N`` (the per-effect host-binding families) aggregates every
+    ``*.py`` in the current package that no other row names, and pins N
+    to how many that is — so adding an effect family trips the gate.
+    """
+    errors: list[str] = []
+    section = re.search(r"## Module Map\n(.*?)(?=\n## |\Z)", readme_text, re.DOTALL)
+    if section is None:
+        return ["vera/README.md: no '## Module Map' section found"]
+
+    body = section.group(1)
+    table_rows = [
+        line
+        for line in body.splitlines()
+        if line.startswith("| ") and not line.startswith(("|---", "| Module"))
+    ]
+    parsed = list(_MODULE_MAP_ROW.finditer(body))
+    if len(parsed) != len(table_rows):
+        errors.append(
+            f"vera/README.md module map: {len(table_rows) - len(parsed)} row(s)"
+            f" did not parse — every row must be `| \\`name\\` | count | ...`"
+        )
+
+    named: set[Path] = set()          # files a row names, for the coverage pass
+    deferred: list[tuple[str, str, int, str]] = []  # ×N rows: label, suffix, cited, pkg
+    package = ""
+
+    for match in parsed:
+        label = match.group("label")
+        cited = int(match.group("lines").replace(",", ""))
+        stem = label.strip(" ├└│─")
+        is_child = label != label.lstrip(" ├└│")
+
+        if stem.endswith("/"):
+            package = stem.rstrip("/")
+            directory = root / "vera" / package
+            if not directory.is_dir():
+                errors.append(
+                    f"vera/README.md module map: package `{stem}` does not exist"
+                )
+                continue
+            live = sum(_line_count(f) or 0 for f in directory.glob("*.py"))
+        elif "×" in match.group("suffix"):
+            deferred.append((label, match.group("suffix"), cited, package))
+            continue
+        else:
+            path = root / "vera" / (package if is_child else "") / stem
+            live = _line_count(path)  # type: ignore[assignment]
+            if live is None:
+                errors.append(
+                    f"vera/README.md module map: `{stem}` cites {cited:,} lines"
+                    f" but the file does not exist"
+                )
+                continue
+            named.add(path.resolve())
+
+        if live and abs(cited - live) / live > 0.10:
+            errors.append(
+                f"vera/README.md module map: `{stem}` cites {cited:,} lines,"
+                f" measured {live:,} (>10% drift)"
+            )
+
+    # ``×N`` rows stand for the files no other row named, so they can only
+    # be resolved once every explicit row has been collected.
+    for label, suffix, cited, pkg in deferred:
+        directory = root / "vera" / pkg
+        rest = sorted(
+            f
+            for f in directory.glob("*.py")
+            if f.name != "__init__.py" and f.resolve() not in named
+        )
+        named.update(f.resolve() for f in rest)
+        shown = f"{label.strip()}{suffix.strip()}"
+
+        declared = re.search(r"×(\d+)", suffix)
+        if declared is None:
+            errors.append(
+                f"vera/README.md module map: `{shown}` has no ×N multiplicity"
+            )
+        elif int(declared.group(1)) != len(rest):
+            errors.append(
+                f"vera/README.md module map: `{shown}` declares"
+                f" ×{declared.group(1)} but {pkg}/ has {len(rest)} such"
+                f" module(s): {', '.join(f.name for f in rest)}"
+            )
+
+        live = sum(_line_count(f) or 0 for f in rest)
+        if live and abs(cited - live) / live > 0.10:
+            errors.append(
+                f"vera/README.md module map: `{shown}` cites {cited:,}"
+                f" lines, measured {live:,} (>10% drift)"
+            )
+
+    # Coverage: exact, no tolerance.
+    for source in sorted((root / "vera").rglob("*.py")):
+        if source.name == "__init__.py" or "__pycache__" in source.parts:
+            continue
+        if source.resolve() not in named:
+            errors.append(
+                f"vera/README.md module map: {source.relative_to(root)} has no row"
+            )
+    return errors
+
+
 def main() -> int:
     root = Path(__file__).resolve().parent.parent
     errors: list[str] = []
@@ -658,6 +790,13 @@ def main() -> int:
 
     history_md = (root / "HISTORY.md").read_text(encoding="utf-8")
     errors.extend(check_history_row_format(history_md))
+
+    # ------------------------------------------------------------------
+    # 17. Check the vera/README.md module map against the source tree
+    # ------------------------------------------------------------------
+
+    vera_readme_md = (root / "vera/README.md").read_text(encoding="utf-8")
+    errors.extend(check_module_map(vera_readme_md, root))
 
     # ------------------------------------------------------------------
     # Report

@@ -67,86 +67,95 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 
 | Module | Lines | Stage | Purpose | Key API |
 |--------|------:|-------|---------|---------|
-| `grammar.lark` | 343 | Parse | LALR(1) grammar definition | *(consumed by Lark)* |
-| `parser.py` | 153 | Parse | Lark frontend, error diagnosis | `parse()`, `parse_file()` |
+| `grammar.lark` | 344 | Parse | LALR(1) grammar definition | *(consumed by Lark)* |
+| `parser.py` | 191 | Parse | Lark frontend, error diagnosis | `parse()`, `parse_file()` |
+| `lexical.py` | 297 | Parse | Shared lexical scanning (comment spans, blanking) | `scan_comments()`, `blank_block_comments()` |
 | `transform.py` | 1,560 | Transform | Lark tree → AST transformer | `transform()` |
 | `ast.py` | 895 | Transform | Frozen dataclass AST nodes, source formatting | `Program`, `Node`, `Expr`, `format_expr` |
-| `types.py` | 533 | Type check | Semantic type representation | `Type`, `is_subtype()` |
-| `environment.py` | 2,002 | Type check | Type environment, scope stacks, ability registry, all built-in registrations | `TypeEnv`, `AbilityInfo` |
-| `checker/` | 4,745 | Type check | Two-pass type checker (mixin package) | `typecheck()` |
-| `  core.py` | 395 | | TypeChecker class, orchestration, contracts, constraint validation | |
-| `  resolution.py` | 217 | | AST TypeExpr → semantic Type, inference | |
-| `  modules.py` | 153 | | Cross-module registration (C7b/C7c) | |
-| `  registration.py` | 376 | | Pass 1 forward declarations, ability registration | |
-| `  expressions.py` | 624 | | Expression synthesis (bidirectional), operators, statements | |
+| `types.py` | 662 | Type check | Semantic type representation | `Type`, `is_subtype()` |
+| `prelude.py` | 927 | Type check | Standard prelude — built-in ADT and combinator injection | `inject_prelude()`, `overridable_builtin_names()` |
+| `slots.py` | 162 | Type check | Slot reference table for `vera check --explain-slots` | `slot_table()`, `slot_ref_name()` |
+| `environment.py` | 2,167 | Type check | Type environment, scope stacks, ability registry, all built-in registrations | `TypeEnv`, `AbilityInfo` |
+| `checker/` | 5,948 | Type check | Two-pass type checker (mixin package) | `typecheck()` |
+| `  core.py` | 952 | | TypeChecker class, orchestration, contracts, constraint validation | |
+| `  resolution.py` | 419 | | AST TypeExpr → semantic Type, inference | |
+| `  modules.py` | 180 | | Cross-module registration (C7b/C7c) | |
+| `  registration.py` | 456 | | Pass 1 forward declarations, ability registration | |
+| `  expressions.py` | 1,335 | | Expression synthesis (bidirectional), operators, statements | |
 | `  eq_ability.py` | 199 | | Eq ability derivation checks | |
-| `  calls.py` | 610 | | Function/constructor/module/ability calls | |
-| `  control.py` | 508 | | If/match, patterns, effect handlers | |
+| `  sql.py` | 219 | | SQL literal-provenance resolution + placeholder counting (#309) | `resolve_literal_string()`, `count_placeholders()` |
+| `  calls.py` | 1,556 | | Function/constructor/module/ability calls | |
+| `  control.py` | 627 | | If/match, patterns, effect handlers | |
 | `resolver.py` | 332 | Resolve | Module path resolution, parse cache | `ModuleResolver` |
-| `smt.py` | 2,809 | Verify | Z3 translation layer | `SmtContext`, `SlotEnv` |
-| `verifier.py` | 6,582 | Verify | Contract verification | `verify()` |
-| `wasm/` | 23,463 | Compile | WASM translation layer (package) | `WasmContext`, `WasmSlotEnv`, `StringPool` |
-| ` ├ context.py` | 829 | | Composed WasmContext, expression dispatcher, block translation | |
-| ` ├ helpers.py` | 421 | | WasmSlotEnv, StringPool, type mapping, array element helpers | |
-| ` ├ inference.py` | 1,747 | | Type inference, slot/type utilities, operator tables | |
-| ` ├ operators.py` | 1,581 | | Binary/unary operators, if, quantifiers, assert/assume, old/new | |
-| ` ├ calls.py` | 847 | | Core dispatcher for `_translate_call` / `_translate_qualified_call`, generic resolution, shared element-type inference (domain mixins below) | |
-| ` ├ calls_arrays.py` | 2,535 | | `array_length` / `append` / `range` / `concat` / `slice` / `map` / `filter` / `fold` / `mapi` / `reverse` / `find` / `any` / `all` / `flatten` / `sort_by` | |
-| ` ├ calls_containers.py` | 1,127 | | Map, Set, Decimal (opaque-handle types) | |
+| `monomorphize.py` | 2,347 | Resolve | Shared generic instantiation discovery + AST substitution (verifier and codegen) | `substitute_type_vars()`, `resolve_type_alias()` |
+| `smt.py` | 2,877 | Verify | Z3 translation layer | `SmtContext`, `SlotEnv` |
+| `verifier.py` | 7,321 | Verify | Contract verification | `verify()` |
+| `wasm/` | 25,941 | Compile | WASM translation layer (package) | `WasmContext`, `WasmSlotEnv`, `StringPool` |
+| ` ├ context.py` | 1,089 | | Composed WasmContext, expression dispatcher, block translation | |
+| ` ├ helpers.py` | 463 | | WasmSlotEnv, StringPool, type mapping, array element helpers | |
+| ` ├ inference.py` | 2,480 | | Type inference, slot/type utilities, operator tables | |
+| ` ├ operators.py` | 2,803 | | Binary/unary operators, if, quantifiers, assert/assume, old/new | |
+| ` ├ calls.py` | 1,146 | | Core dispatcher for `_translate_call` / `_translate_qualified_call`, generic resolution, shared element-type inference (domain mixins below) | |
+| ` ├ calls_arrays.py` | 2,694 | | `array_length` / `append` / `range` / `concat` / `slice` / `map` / `filter` / `fold` / `mapi` / `reverse` / `find` / `any` / `all` / `flatten` / `sort_by` | |
+| ` ├ calls_containers.py` | 1,304 | | Map, Set, Decimal (opaque-handle types) | |
 | ` ├ calls_encoding.py` | 2,210 | | Base64 and URL encoding/decoding/parsing | |
-| ` ├ calls_handlers.py` | 406 | | Show/Hash ability dispatch, `handle[State<T>]` and `handle[Exn<E>]` | |
-| ` ├ calls_markup.py` | 396 | | JSON, HTML, Markdown, Regex, async/await (#841: fused concurrent lowering for `async(Http.get/post)`, identity otherwise) | |
-| ` ├ async_fusion.py` | 218 | | #841 fusion predicates — the single source of truth shared by the `_scan_io_ops` import pre-scan and the `WasmContext` async/await lowering | `fused_async_target()`, `await_needs_check()`, `compute_future_ret_fns()` |
+| ` ├ calls_handlers.py` | 1,818 | | Show/Hash ability dispatch, `handle[State<T>]` and `handle[Exn<E>]` | |
+| ` ├ calls_markup.py` | 400 | | JSON, HTML, Markdown, Regex, async/await (#841: fused concurrent lowering for `async(Http.get/post)`, identity otherwise) | |
+| ` ├ async_fusion.py` | 435 | | #841 fusion predicates — the single source of truth shared by the `_scan_io_ops` import pre-scan and the `WasmContext` async/await lowering | `fused_async_target()`, `await_needs_check()`, `compute_future_ret_fns()` |
 | ` ├ calls_math.py` | 635 | | `abs`, `min`, `max`, `floor`, `ceil`, `round`, `sqrt`, `pow`, Float64 predicates, numeric conversions | |
 | ` ├ calls_parsing.py` | 1,035 | | `parse_nat` / `parse_int` / `parse_bool` / `parse_float64` state machines | |
-| ` ├ calls_strings.py` | 4,067 | | All string ops (length, concat, slice, search, transform, split, join, chars/lines/words, reverse, trim_start/end, pad_start/end, char_to_upper/lower, classifiers) + to-string conversions; `_translate_strip` delegates to the trim helper to keep the whitespace predicate consistent | |
-| ` ├ closures.py` | 516 | | Closures, anonymous functions, free variable analysis | |
-| ` ├ data.py` | 969 | | Constructors, match expressions (incl. nested patterns), arrays, indexing | |
+| ` ├ calls_strings.py` | 4,185 | | All string ops (length, concat, slice, search, transform, split, join, chars/lines/words, reverse, trim_start/end, pad_start/end, char_to_upper/lower, classifiers) + to-string conversions; `_translate_strip` delegates to the trim helper to keep the whitespace predicate consistent | |
+| ` ├ closures.py` | 551 | | Closures, anonymous functions, free variable analysis | |
+| ` ├ data.py` | 1,510 | | Constructors, match expressions (incl. nested patterns), arrays, indexing | |
 | ` ├ markdown.py` | 651 | | WASM memory marshalling for MdInline/MdBlock ADTs | |
 | ` ├ json_serde.py` | 265 | | WASM memory marshalling for Json ADT | |
 | ` └ html_serde.py` | 261 | | WASM memory marshalling for HtmlNode ADT | |
 | `markdown.py` | 651 | Compile | Python Markdown parser/renderer (§9.7.3 subset) | `parse_markdown()`, `render_markdown()`, `has_heading()`, `has_code_block()`, `extract_code_blocks()` |
-| `obligations/` | 729 | Verify | Reified proof obligations + warm incremental session (#222 A/B) | `ProofObligation`, `VerificationSession` |
-| `  core.py` | 109 | | ProofObligation record: identity (content_key) + discharge outcome | |
+| `obligations/` | 714 | Verify | Reified proof obligations + warm incremental session (#222 A/B) | `ProofObligation`, `VerificationSession` |
+| `  core.py` | 164 | | ProofObligation record: identity (content_key) + discharge outcome | |
 | `  cache.py` | 219 | | Invalidation keys (structural/callee/context hashes), DischargeCache | |
-| `  session.py` | 252 | | Warm-Z3 daemon: per-function replay vs re-verify in declaration order | |
+| `  session.py` | 274 | | Warm-Z3 daemon: per-function replay vs re-verify in declaration order | |
 | `lsp/` | 1,397 | Serve | Language Server Protocol over stdio (#222 C/D/E/F) | `create_server()`, `vera lsp` |
 | `  convert.py` | 144 | | Span/SourceLocation/LSP coordinate conversions, UTF-16 transcoding | |
 | `  documents.py` | 69 | | URI-keyed document store, full-text sync | |
-| `  features.py` | 292 | | Diagnostics + tier hints, hover, slot goto, hole completion | |
+| `  features.py` | 300 | | Diagnostics + tier hints, hover, slot goto, hole completion | |
 | `  extensions.py` | 146 | | vera/speculativeEdit proof-delta | |
-| `  server.py` | 169 | | pygls wiring, single-session serialisation | |
-| `codegen/` | 14,608 | Compile | Codegen orchestrator (mixin package) | `compile()`, `execute()` |
-| `  api.py` | 1,306 | | Public API, dataclasses, `compile()`/`execute()` orchestration, core IO host bindings (#421) | |
-| `  memory.py` | 77 | | Compile-time ADT layout helpers (`ConstructorLayout`, alignment) (#421) | |
-| `  core.py` | 1,354 | | CodeGenerator class, orchestration, ability op rewriting (Pass 1.6) | |
-| `  modules.py` | 620 | | Cross-module registration + call detection (C7e) | |
-| `  registration.py` | 457 | | Pass 1 forward declarations, ADT layout | |
-| `  monomorphize.py` | 1,132 | | Generic instantiation, type inference, ability constraint checking (Pass 1.5) | |
-| `  functions.py` | 687 | | Function body compilation, GC prologue/epilogue (Pass 2) | |
+| `  server.py` | 287 | | pygls wiring, single-session serialisation | |
+| `  workflows.py` | 442 | | Skill-layer workflows: enforced edit sequences (#222 F) | |
+| `codegen/` | 15,855 | Compile | Codegen orchestrator (mixin package) | `compile()`, `execute()` |
+| `  api.py` | 1,341 | | Public API, dataclasses, `compile()`/`execute()` orchestration, core IO host bindings (#421) | |
+| `  memory.py` | 105 | | Compile-time ADT layout helpers (`ConstructorLayout`, alignment) (#421) | |
+| `  core.py` | 1,960 | | CodeGenerator class, orchestration, ability op rewriting (Pass 1.6) | |
+| `  modules.py` | 897 | | Cross-module registration + call detection (C7e) | |
+| `  registration.py` | 479 | | Pass 1 forward declarations, ADT layout | |
+| `  monomorphize.py` | 1,369 | | Generic instantiation, type inference, ability constraint checking (Pass 1.5) | |
+| `  functions.py` | 1,073 | | Function body compilation, GC prologue/epilogue (Pass 2) | |
 | `  tail_position.py` | 106 | | Tail-position analysis for the function body compiler | |
-| `  closures.py` | 622 | | Closure lifting, GC instrumentation | |
-| `  contracts.py` | 768 | | Runtime pre/postconditions, old state snapshots | |
-| `  assembly.py` | 1,406 | | WAT module assembly, `$alloc`, `$gc_collect` | |
-| `  compilability.py` | 529 | | Compilability checks, state handler scanning | |
-| `  wasi.py` | 4,819 | | WASI Preview 2 component/adapter emitter — `--target wasi-p2` / `--world server` (#237, #853) | |
-| `runtime/` | 4,426 | Execute | wasmtime host layer (#421): traps + per-effect host-binding families | `register_*()`, `WasmTrapError` |
+| `  closures.py` | 876 | | Closure lifting, GC instrumentation | |
+| `  contracts.py` | 810 | | Runtime pre/postconditions, old state snapshots | |
+| `  assembly.py` | 1,447 | | WAT module assembly, `$alloc`, `$gc_collect` | |
+| `  compilability.py` | 545 | | Compilability checks, state handler scanning | |
+| `  wasi.py` | 4,820 | | WASI Preview 2 component/adapter emitter — `--target wasi-p2` / `--world server` (#237, #853) | |
+| `runtime/` | 4,784 | Execute | wasmtime host layer (#421): traps + per-effect host-binding families | `register_*()`, `WasmTrapError` |
 | `  traps.py` | 493 | | `WasmTrapError`, `_classify_trap`, source-backtrace resolution | |
-| `  heap.py` | 1,197 | | WASM memory marshalling primitives, ADT/Option/Array/bucket codecs, `_ShadowGuard`, shared collection helpers | |
+| `  heap.py` | 1,376 | | WASM memory marshalling primitives, ADT/Option/Array/bucket codecs, `_ShadowGuard`, shared collection helpers | |
 | `  collections.py` | 16 | | `_VAL_WASM_TYPES` value-type dispatch table (shared by Map/Set) | |
 | `  text.py` | 34 | | `safe_utf8_decode` — the single lossy-decode site (#592) | |
-| `  <effect>.py` ×13 | 2,207 | | one `register_<effect>(linker, …)` per family: random, math, md, json, regex, html, map, set, decimal, http, async_http (#841 fused-async: worker-thread submit + blocking await + kind-4 cancel/evict decref), inference, state | |
+| `  <effect>.py` ×14 | 2,480 | | one `register_<effect>(linker, …)` per family: random, math, md, json, regex, html, map, set, decimal, http, async_http (#841 fused-async: worker-thread submit + blocking await + kind-4 cancel/evict decref), inference, state, db | |
 | `  wasi_host.py` | 213 | | Built-in `wasi-p2` runner via `add_wasip2` — `vera run --target wasi-p2` (#237, #853) | |
 | `  server.py` | 150 | | `vera serve` HTTP driver for `handle(Request -> Response)` (#305) | |
-| `tester.py` | 956 | Test | Z3-guided input generation, WASM execution, tier classification | `test()` |
+| `tester.py` | 992 | Test | Z3-guided input generation, WASM execution, tier classification | `test()` |
 | `formatter.py` | 1,951 | Format | Canonical code formatter | `format_source()` |
-| `errors.py` | 582 | All | Diagnostic class, error hierarchy, error code registry | `Diagnostic`, `VeraError`, `ERROR_CODES` |
+| `errors.py` | 653 | All | Diagnostic class, error hierarchy, error code registry | `Diagnostic`, `VeraError`, `ERROR_CODES` |
+| `skip.py` | 217 | All | Codegen-internal control-flow exceptions behind structured skip diagnostics (#626) | `CodegenSkip`, `CodegenInvariantError` |
+| `introspect.py` | 129 | All | Payloads for `vera builtins` / `effects` / `errors --json` | `builtins_payload()`, `effects_payload()`, `errors_payload()` |
+| `_since.py` | 204 | All | Best-effort `since` version attribution for built-ins, effects, abilities | |
 | `browser/` | 138 | Execute | Browser runtime for compiled WASM (package) | `emit_browser_bundle()` |
 | ` ├ emit.py` | 137 | | Browser bundle emission (wasm + runtime + html) | `emit_browser_bundle()` |
-| ` ├ runtime.mjs` | 2,750 | | Self-contained JS runtime: IO, State, Http, Inference, contracts, Markdown, Json, Html | |
+| ` ├ runtime.mjs` | 3,303 | | Self-contained JS runtime: IO, State, Http, Inference, contracts, Markdown, Json, Html | |
 | ` └ harness.mjs` | 106 | | Node.js test harness for parity testing | |
-| `cli.py` | 1,705 | All | CLI commands | `main()` |
-| `registration.py` | 95 | Type check | Shared function registration | `register_fn()` |
+| `cli.py` | 1,780 | All | CLI commands | `main()` |
+| `registration.py` | 126 | Type check | Shared function registration | `register_fn()` |
 
 Total: ~72,000 lines of Python + 343 lines of grammar + 3,378 lines of JavaScript.
 

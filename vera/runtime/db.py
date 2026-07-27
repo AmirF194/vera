@@ -13,9 +13,10 @@ array (``Array<Option<String>>``) and returning a ``Result``:
 
 Parameters are bound through ``?`` placeholders (``sqlite3`` parameterisation), so
 a parameter value is never interpreted as SQL — the runtime defence against
-injection.  A forthcoming checker gate (#309) will additionally require the SQL
-string itself to be a compile-time literal, making injection a *compile-time*
-error; until it lands, the runtime parameterisation is the guarantee in force.
+injection.  The checker gate :mod:`vera.checker.sql` (#309) additionally requires
+the SQL string itself to have literal provenance, so injection is a *compile-time*
+error (E207) and this host never sees an assembled query; the runtime
+parameterisation is the second layer under it.
 Phase 1 is stringly-typed: a parameter binds as TEXT / NULL and a returned cell
 is stringified — a numeric column via ``str()``, a BLOB via UTF-8 decode with
 replacement, and SQL ``NULL`` as ``None``.
