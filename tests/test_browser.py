@@ -22,6 +22,7 @@ from typing import Any
 import pytest
 
 from vera.codegen import compile as codegen_compile, execute
+from vera.codegen.api import WasmTrapError
 from vera.checker import typecheck
 from vera.parser import parse_file
 from vera.resolver import ModuleResolver
@@ -1851,15 +1852,19 @@ class TestBrowserContracts:
         # @Int.1 is the first (leftmost) arg.  safe_divide(0, 5) makes
         # @Int.1 = 0, violating the precondition.
         py_error: str | None = None
+        py_kind: str | None = None
         try:
             _run_python(result, fn_name="safe_divide", args=[0, 5])
-        except Exception as exc:  # noqa: BLE001 — the error is the assertion subject, whatever its type
+        except WasmTrapError as exc:
             py_error = str(exc)
+            py_kind = exc.kind
 
         node_result = _run_node(wasm_path, fn="safe_divide", fn_args=["0", "5"])
 
-        # Both should have errors (contract violation)
+        # Both should have errors (contract violation).  The kind is pinned
+        # so an unrelated Python-side trap cannot pass for parity.
         assert py_error is not None, "Python should report contract error"
+        assert py_kind == "contract_violation", py_kind
         assert node_result["error"] is not None, "Node should report contract error"
 
     def test_overflow_trap_parity(self, tmp_path: Path) -> None:
@@ -1882,16 +1887,19 @@ class TestBrowserContracts:
 
         # i64.MAX + 1 overflows i64 → both runtimes must trap.
         py_error: str | None = None
+        py_kind: str | None = None
         try:
             _run_python(result, fn_name="add", args=[9223372036854775807, 1])
-        except Exception as exc:  # noqa: BLE001 — the error is the assertion subject, whatever its type
+        except WasmTrapError as exc:
             py_error = str(exc)
+            py_kind = exc.kind
 
         node_result = _run_node(
             wasm_path, fn="add", fn_args=["9223372036854775807", "1"],
         )
 
         assert py_error is not None, "Python should trap on overflow"
+        assert py_kind == "overflow", py_kind
         assert "overflow" in py_error.lower(), py_error
         # Node must instantiate (overflow_trap import provided) and surface the
         # overflow as an error, not a silent wrap.

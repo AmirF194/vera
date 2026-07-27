@@ -23,7 +23,10 @@ def main() -> int:
             encoding="utf-8",
             check=False,
         )
-        if "OK:" not in result.stdout:
+        # Both signals, not either: the `OK:` sentinel catches a silently
+        # reworded success message that a zero exit would let through, and
+        # the exit code catches a failure that still printed one.
+        if result.returncode != 0 or "OK:" not in result.stdout:
             failed.append(("check", f))
             print(f"FAIL (check): {f}", file=sys.stderr)
             if result.stderr:
@@ -38,7 +41,7 @@ def main() -> int:
             encoding="utf-8",
             check=False,
         )
-        if "OK:" not in result.stdout:
+        if result.returncode != 0 or "OK:" not in result.stdout:
             failed.append(("verify", f))
             print(f"FAIL (verify): {f}", file=sys.stderr)
             if result.stderr:

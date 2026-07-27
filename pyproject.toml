@@ -114,7 +114,8 @@ build-backend = "setuptools.build_meta"
 # standards without review -- which is exactly what 0.16.0 did: it replaced
 # the default selection wholesale (isort, pylint, simplify, blind-except,
 # pyupgrade, pyi, perflint, pie, tryceratops, datetimez, refurb), taking a
-# clean tree to 802 errors.  The `<0.16` cap was suppressing that symptom.
+# clean tree to 805 errors across 36 rules.  The `<0.16` cap was suppressing
+# that symptom.
 #
 # `E4`, `E7`, `E9` and `F` are ruff's pre-0.16 default, verified
 # byte-identical against seeded violations under both 0.15.21 and 0.16.0 --
