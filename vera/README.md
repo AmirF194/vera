@@ -149,7 +149,7 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `errors.py` | 653 | All | Diagnostic class, error hierarchy, error code registry | `Diagnostic`, `VeraError`, `ERROR_CODES` |
 | `skip.py` | 217 | All | Codegen-internal control-flow exceptions behind structured skip diagnostics (#626) | `CodegenSkip`, `CodegenInvariantError` |
 | `introspect.py` | 129 | All | Payloads for `vera builtins` / `effects` / `errors --json` | `builtins_payload()`, `effects_payload()`, `errors_payload()` |
-| `_since.py` | 204 | All | Best-effort `since` version attribution for built-ins, effects, abilities | |
+| `_since.py` | 364 | All | Best-effort `since` version attribution for built-ins, effects, abilities | |
 | `browser/` | 138 | Execute | Browser runtime for compiled WASM (package) | `emit_browser_bundle()` |
 | ` ├ emit.py` | 137 | | Browser bundle emission (wasm + runtime + html) | `emit_browser_bundle()` |
 | ` ├ runtime.mjs` | 3,303 | | Self-contained JS runtime: IO, State, Http, Inference, contracts, Markdown, Json, Html | |

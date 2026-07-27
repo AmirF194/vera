@@ -6,7 +6,7 @@ This is the single source of truth for Vera's testing infrastructure, coverage d
 
 | Metric | Value |
 |--------|-------|
-| **Tests** | 8,538 across 131 files (~106,000 lines of test code; 8,424 passed + 26 stress, 88 skipped) |
+| **Tests** | 8,539 across 131 files (~106,000 lines of test code; 8,424 passed + 26 stress, 88 skipped) |
 | **Compiler code coverage** | 95% Python, 61% JavaScript — 91% combined (CI minimum: 80%) |
 | **Conformance programs** | 168 programs across 9 spec chapters, validating every language feature |
 | **Example programs** | 42, all validated through `vera check` + `vera verify` |
@@ -150,7 +150,7 @@ python scripts/check_wheel_availability.py           # pre-flight: every runtime
 | `test_eq_contract_874.py` | 11 |      378 | `eq`/`compare` ability ops in contract position: codegen canonicalization + verifier Tier-1 discharge/counterexample, where-fn contracts, compare Ordering-sort materialization, shadowing guard (#874) |
 | `test_formatter.py` | 462 | 3,676 | Comment extraction, interior comment positioning, expression/declaration formatting, match arm block bodies, §1.8 rule 2 in value position (a `let`-bound `match`/`if` expands exactly as one in statement position, and a comment above an arm inside a statement's value stays on that arm), blank-line preservation (§1.8 rule 13 — gaps between statements, before a block result and around a comment, collapsed to one and never invented), idempotency, parenthesization, spec rules, ability declarations |
 | `test_cli.py` | 265 | 4,158 | CLI commands (check, verify, compile, run, serve, test, fmt, version, quiet), subprocess integration, JSON error paths (including the `verify --json` `obligations` array and its summary-reproducibility pin, #967), runtime traps, arg validation, multi-file resolution, IO exit codes, --explain-slots, `builtins`/`effects`/`errors` introspection dispatch, and a USAGE-completeness guard (every dispatched `cmd_<name>` handler has a help row) |
-| `test_introspect.py` | 38 | 192 | `vera builtins/effects/errors --json` registry introspection (#539): the `{schema, items}` envelope, count-equals-registry differential per registry, error-phase derivation, effect/ability `kind` tagging, the parameterised `Exn<T>` effect, and best-effort `since` attribution with full-coverage guards |
+| `test_introspect.py` | 39 | 220 | `vera builtins/effects/errors --json` registry introspection (#539): the `{schema, items}` envelope, count-equals-registry differential per registry, error-phase derivation, effect/ability `kind` tagging, the parameterised `Exn<T>` effect, and best-effort `since` attribution with full-coverage guards |
 | `test_resolver.py` | 20 | 602 | Module resolution, path lookup, parse caching, circular import detection, the E011/E012/E013 diagnostic contract, internal-error isolation (a compiler bug is not masked as E013), and the transitive-closure return of `resolve_imports` (#890 — a diamond yields each reachable module once, direct imports tagged `direct`, the transitive one not) |
 | `test_types.py` | 82 | 443 | Type operations: subtyping, effect subtyping, equality, substitution, pretty-printing (including leaked-placeholder rendering to `?`, #1069), canonical names |
 | `test_wasm.py` | 29 | 502 | WASM internals: StringPool, WasmSlotEnv, translation edge cases via full pipeline; plus the fused-await payload-alias canonicalizer cycle-guard pins (`TestCanonicalizeTypeExprAliases`) |

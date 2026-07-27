@@ -65,10 +65,32 @@ class TestErrorsPayload:
     def test_every_item_has_since_key(self) -> None:
         assert all("since" in i for i in errors_payload()["items"])
 
-    def test_since_unattributed(self) -> None:
-        # Diagnostic codes aren't version-attributed (high effort, low value) -> null.
+    def test_since_attribution(self) -> None:
+        """Codes are attributed to the release that first shipped them (#1157).
+
+        The three pinned here are cross-checked against HISTORY.md's own
+        record of what each release contained, which is an independent
+        source from the tag scan that produced the table: v0.1.7 shipped
+        `E207`-`E209` with #309, and v0.1.6 the `E02x` comment diagnostics.
+        `E001` dates to v0.0.43, the release that introduced error codes at
+        all — no `error_code=` call site exists before it.
+        """
         by_code = {i["code"]: i for i in errors_payload()["items"]}
-        assert by_code["E001"]["since"] is None
+        assert by_code["E001"]["since"] == "0.0.43"
+        assert by_code["E020"]["since"] == "0.1.6"
+        assert by_code["E207"]["since"] == "0.1.7"
+
+    def test_since_covers_every_code(self) -> None:
+        """Every diagnostic code is attributed in vera/_since.py (#1157).
+
+        `ERROR_CODES` is a closed enumeration, so unlike the built-in table
+        this can be complete rather than best-effort — a new code added
+        without a `since` entry fails here.  A code introduced before its
+        release is tagged has no tag to be found by the scan, so it takes
+        the upcoming version by hand, as built-ins already do.
+        """
+        missing = sorted(i["code"] for i in errors_payload()["items"] if i["since"] is None)
+        assert missing == [], f"codes missing a `since` in vera/_since.py: {missing}"
 
     def test_error_phase_fallback(self) -> None:
         # No E4xx/E8xx codes exist today, so the registry never hits the fallback;
@@ -118,10 +140,16 @@ class TestBuiltinsPayload:
         assert missing == [], f"built-ins missing a `since` in vera/_since.py: {missing}"
 
     def test_since_no_orphan_keys(self) -> None:
-        """Every SINCE key is a live registry name (error codes excepted — SINCE
-        omits them) — catches an entry orphaned by a rename or removal."""
+        """Every SINCE key is a live registry name or diagnostic code —
+        catches an entry orphaned by a rename or removal."""
         env = TypeEnv()
-        live = set(env.functions) | set(env.effects) | set(env.abilities) | {"Exn"}
+        live = (
+            set(env.functions)
+            | set(env.effects)
+            | set(env.abilities)
+            | set(ERROR_CODES)
+            | {"Exn"}
+        )
         orphans = sorted(k for k in SINCE if k not in live)
         assert orphans == [], orphans
 
