@@ -28,6 +28,11 @@ extra:
 python -m pip install "veralang[lsp]"
 ```
 
+VS Code users can pair that server with
+[Vera Language from the VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=veralang.vera-language);
+the extension supplies syntax highlighting and starts `vera lsp`
+automatically.
+
 The distribution is named `veralang`, but the installed command remains
 `vera`, and Python code still imports it as `import vera`. **Do not run `pip install vera`**: that name belongs to an unrelated
 ERAV citizen-science project on PyPI. The wheel ships the compiler and the
