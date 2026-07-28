@@ -135,31 +135,35 @@ Parse errors, type errors, effect mismatches, verification failures, and contrac
 
 ## VeraBench
 
-**Seven of nine frontier models write 100% correct Vera — a language none of them has ever been trained on.**
+**Six of nine frontier models write 100% correct Vera — a language none of them has ever seen before.**
 
-A 60-problem benchmark across 5 difficulty tiers — pure arithmetic, strings and arrays, ADTs and exhaustive matching, recursion with termination proofs, multi-function effect propagation. Nine models, three providers, four modes each. The numbers below are **% solved**: the model wrote code, it compiled, it ran, and the output matched. A refusal, a compile failure, a crash and a wrong answer all count alike as not solved.
+A 60-problem benchmark across 5 difficulty tiers — pure arithmetic, strings and arrays, ADTs and exhaustive matching, recursion with termination proofs, multi-function effect propagation. Nine models, three providers, four modes each: Vera written against a full specification, Vera written from a plain English description with the model authoring its own contracts, and the same problems in Python and TypeScript. The table below shows three of the four, and reports **% solved**: the model wrote code, it compiled, it ran, and the output matched. A refusal, a compile failure, a crash and a wrong answer all count alike as not solved.
 
 | Model | Tier | Vera | Python | TypeScript |
 |---|---|---|---|---|
-| Claude Fable 5 | ceiling | **100%** | _94%_ | _92%_ |
-| GPT-5.6 Sol (pro) | ceiling | 100% | _97%_ | 100% |
-| Claude Opus 5 | flagship | **100%** | _94%_ | _94%_ |
-| Claude Opus 4.8 | flagship | _94%_ | 100% | 100% |
-| GPT-5.6 Sol | flagship | 100% | _97%_ | 100% |
+| Claude Fable 5 | ceiling | **100%** | _97%_ | _97%_ |
+| GPT-5.6 Sol (pro) | ceiling | 100% | _95%_ | 100% |
+| Claude Opus 5 | flagship | 100% | _95%_ | 100% |
+| Claude Opus 4.8 | flagship | _93%_ | _98%_ | **100%** |
+| GPT-5.6 Sol | flagship | _98%_ | _95%_ | **100%** |
 | Kimi K3 | flagship | 100% | 100% | 100% |
-| Claude Sonnet 5 | workhorse | _97%_ | 100% | 100% |
-| GPT-5.6 Terra | workhorse | 100% | 100% | 100% |
-| Kimi K2.6 | workhorse | 100% | 100% | 100% |
+| Claude Sonnet 5 | workhorse | _97%_ | _98%_ | **100%** |
+| GPT-5.6 Terra | workhorse | 100% | _95%_ | 100% |
+| Kimi K2.6 | workhorse | 100% | _97%_ | 100% |
 
 Every score is marked against the other two in its row: **bold** where it is the sole highest, _italic_ where it is not the highest, unmarked where it ties for highest.
 
-Frontier models now write Vera **as well as they write the languages they were trained on, and in a good many cases better**. Vera wins outright for four of the nine models, draws with three and loses two.
+Frontier models now write Vera **as well as they write the languages they were trained on**. Vera has the highest score, or level with it, for six of the nine models.
 
-Mandatory contracts and typed slot references appear to provide enough structure to compensate for zero training data.
+Mandatory contracts and typed slot references appear to provide enough structure to compensate for zero training data. Every successful program came from a single skill file in context, written by a model that had never seen the language before.
 
-Still early days. The benchmark is just a single run per model, no pass@k, and with 36 output-gradeable problems one problem is worth just under three percentage points, so most of the gaps above are only one or two problems wide. However it looks like language design can, at least sometimes, outweigh sheer volume of training data. Which, if you're in the business of generating code at any scale, is a reasonably interesting thing to be true.
+The difference between the Python and TypeScript results is probably not random. Python is dynamically typed, so a type error surfaces when the code runs; TypeScript is statically typed and rejects the same error before anything runs. Vera sits with TypeScript but goes further, making `requires`, `ensures` and `effects` mandatory on every function and replacing variable names with typed slot references. Sort the three languages by how much they constrain the model rather than by how much of them it has read, and the ordering stops looking accidental: the two languages that constrain the model finish ahead of the one that doesn't.
 
-Results from [VeraBench v0.0.16](https://github.com/aallan/vera-bench#results) against [Vera v0.1.7](https://github.com/aallan/vera/releases/tag/v0.1.7). Inspired by [HumanEval](https://github.com/openai/human-eval), [MBPP](https://github.com/google-research/google-research/tree/master/mbpp), and [DafnyBench](https://github.com/sun-wendy/DafnyBench).
+TypeScript earns its results due to its inclusion in model training data. Vera earns very nearly the same results without that. Whatever familiarity is buying TypeScript, the additional constraints Vera provides appear to be supplying by other means.
+
+It's still early days. The benchmark is just a single run per model, no pass@k; and with just sixty problems each problem is worth just under two percentage points, so most of the gaps above are only one or two problems wide. However, it looks like language design can, at least sometimes, outweigh sheer volume of training data. Which, if you're in the business of generating code at any scale, is a reasonably interesting thing to be true.
+
+Results from [VeraBench v0.0.18](https://github.com/aallan/vera-bench#results) against [Vera v0.1.8](https://github.com/aallan/vera/releases/tag/v0.1.8). Inspired by [HumanEval](https://github.com/openai/human-eval), [MBPP](https://github.com/google-research/google-research/tree/master/mbpp), and [DafnyBench](https://github.com/sun-wendy/DafnyBench).
 
 Full source and data: [https://github.com/aallan/vera-bench](https://github.com/aallan/vera-bench).
 
