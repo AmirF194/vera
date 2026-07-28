@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Documentation
+
+- **The VeraBench section carries the v0.0.18 sweep** ([#1169](https://github.com/aallan/vera/pull/1169)), the first in which all 60 problems are graded — v0.0.17 took the gradeable set from 36 to 46 and v0.0.18 closed it. One problem is now worth 1.7 percentage points rather than 2.8. Six of the nine models solve every Vera problem, and Vera is highest or level with it for six of the nine. Measured against [Vera v0.1.8](https://github.com/aallan/vera/releases/tag/v0.1.8). The section also gains the reading the wider gradeable set supports: Python is dynamically typed and TypeScript is not, Vera sits with TypeScript and goes further, and sorting the three by how much they constrain the model rather than by how much of them it has read puts the two constraining languages ahead — TypeScript with training data behind it, Vera without.
+
+  Every figure was cross-checked cell by cell against [vera-bench#120](https://github.com/aallan/vera-bench/pull/120), the pending results rewrite in the benchmark repo; all 27 published cells agree, as do both headline counts. The landing page's numbers and the benchmark repo's are the same measurement, not two independent transcriptions of it.
+
+  Propagated to every surface that carries the figures, which the HTML edit alone does not reach: `build_index_md()` in `scripts/build_site.py` — the generator that *is* `docs/index.md`, since that file is not derived from the HTML — plus `README.md` and `FAQ.md`, then `docs/index.md` and `docs/llms-full.txt` regenerated. This is the drift class [#1154](https://github.com/aallan/vera/issues/1154) describes: `check_site_assets.py` regenerates from the same function it compares against, so a stale generator validates as up to date and only a reader notices.
+
 ## [0.1.8] - 2026-07-27
 
 ### Added
