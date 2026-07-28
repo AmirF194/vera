@@ -416,13 +416,13 @@
     </div>
   </section>
 
-  <!-- VeraBench — lifted, with headline stat -->
+ <!-- VeraBench — lifted, with headline stat -->
   <section class="verabench">
     <div class="col col-wide">
       <div class="eyebrow"><span class="slot">@section.03</span> · empirical evidence</div>
       <h2>VeraBench</h2>
       <div class="bench-masthead">
-        <p class="bench-stat">Six of nine frontier models write <b>100% correct</b> Vera &mdash; a language none of them has ever been trained on.</p>
+        <p class="bench-stat">Six of nine frontier models write <b>100% correct</b> Vera &mdash; a language none of them has ever seen before.</p>
         <img src="vera-bench-meerkat-only.png" alt="VeraBench meerkat" class="bench-meerkat" width="542" height="640" loading="lazy">
       </div>
 
@@ -495,17 +495,17 @@
             </tbody>
           </table>
 
-          <p class="bench-caveat">Frontier models now write Vera <strong style="color:var(--ink-900)">as well as they write the languages they were trained on</strong>. Vera is the highest score, or level with it, for six of the nine models; TypeScript reaches 100% for six, which leaves very little room at the top for anything to win by.</p>
+          <p class="bench-caveat">Frontier models now write Vera <strong style="color:var(--ink-900)">as well as they write the languages they were trained on</strong>. Vera has the highest score, or level with it, for six of the nine models.</p>
 
-          <p class="bench-caveat" style="margin-top:.75rem">Mandatory contracts and typed slot references appear to provide enough structure to compensate for zero training data. Every green bar below was earned from a single document in the prompt, by a model that had never seen the language before.</p>
+          <p class="bench-caveat" style="margin-top:.75rem">Mandatory contracts and typed slot references appear to provide enough structure to compensate for zero training data. Every successful program came from a single skill file in context, written by a model that had never seen the language before.</p>
 
           <a href="https://github.com/aallan/vera-bench"><img src="verabench-delta-chart.png" alt="Does Vera beat Python / TypeScript?" class="bench-chart" loading="lazy" width="2689" height="1302"></a>
 
-          <p class="bench-caveat">Python and TypeScript differ in exactly the way that matters here. Python is dynamically typed, so a type error surfaces when the code runs; TypeScript is statically typed and rejects the same error before anything runs. Vera sits on the TypeScript side of that line and goes further, making <code>requires</code>, <code>ensures</code> and <code>effects</code> mandatory on every function and replacing variable names with typed slot references. Sort the three by how much they constrain the model rather than by how much of them it has read, and the ordering stops looking accidental: the two languages that check before running finish ahead of the one that checks while running.</p>
+          <p class="bench-caveat">The difference we see between the Python and Typescript results is not random. Python is dynamically typed, so a type error surfaces when the code runs; TypeScript is statically typed and rejects the same error before anything runs. Vera sits with TypeScript but goes further, making <code>requires</code>, <code>ensures</code> and <code>effects</code> mandatory on every function and replacing variable names with typed slot references. Sort the three languages by how much they constrain the model rather than by how much of them it has read, and the ordering stops looking accidental: the two languages that constrain the model finish ahead of the one that doesn't.</p>
 
-          <p class="bench-caveat" style="margin-top:.75rem">TypeScript earns its score with an enormous amount of the language in every training set. Vera earns very nearly the same score with none of it, from a single document in the prompt. Whatever familiarity is buying TypeScript, the constraints appear to be supplying by other means &mdash; and among the three languages here that <em>no</em> model has been trained on, the most constrained one scores highest.</p>
+          <p class="bench-caveat" style="margin-top:.75rem">TypeScript earns its results due to its inclusion in model training data. Vera earns very nearly the same results without that. Whatever familiarity is buying TypeScript, the additional constraints Vera provides appear to be supplying by other means.</p>
 
-          <p class="bench-caveat">Still early days. The benchmark is just a single run per model, no pass@k, and with all 60 problems now output-graded one problem is worth 1.7 percentage points, so most of the gaps above are only one or two problems wide. However it looks like language design can, at least sometimes, outweigh sheer volume of training data. Which, if you're in the business of generating code at any scale, is a reasonably interesting thing to be true.</p>
+          <p class="bench-caveat">It's still early days. The benchmark is just a single run per model, no pass@k; and with just sixty problems each problem is worth just under two percentage points, so most of the gaps above are only one or two problems wide. However, it looks like language design can, at least sometimes, outweigh sheer volume of training data. Which, if you're in the business of generating code at any scale, is a reasonably interesting thing to be true.</p>
           <p class="bench-caveat" style="margin-top:.75rem">Results from <a href="https://github.com/aallan/vera-bench#results">VeraBench v0.0.18</a> against <a href="https://github.com/aallan/vera/releases/tag/v0.1.8">Vera v0.1.8</a>. Inspired by <a href="https://github.com/openai/human-eval">HumanEval</a>, <a href="https://github.com/google-research/google-research/tree/master/mbpp">MBPP</a>, and <a href="https://github.com/sun-wendy/DafnyBench">DafnyBench</a>.</p>
           <p style="margin-top:1.25rem"><a href="https://github.com/aallan/vera-bench" class="btn btn-primary"><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>vera-bench</a></p>
       </div>
