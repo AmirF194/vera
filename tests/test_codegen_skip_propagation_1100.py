@@ -216,6 +216,49 @@ public fn ok(-> @Int) requires(true) ensures(true) effects(pure) {
         assert result.exports == ["ok"]
         assert execute(result, fn_name="ok").value == 41
 
+    def test_mono_mangled_caller_drops_with_e620(self) -> None:
+        """A GENERIC caller instantiated at a concrete type: the
+        mono-mangled clone is what actually calls the skipped helper in
+        the emitted module, so the propagation's WAT-symbol matching
+        must drop the CLONE (and its transitive callers) with an E620
+        naming the skipped root — the mangled-name path, not just bare
+        top-level names (PR review)."""
+        source = _SKIPPED_HELPER + """\
+private forall<T> fn relay(@T -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  tally()
+}
+
+public fn main(-> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  relay("x")
+}
+
+public fn ok(-> @Int) requires(true) ensures(true) effects(pure) {
+  41
+}
+"""
+        result = _compile(source)
+        _assert_no_raw_wat_error(result)
+        assert "main" not in result.exports, (
+            "main reaches tally through the relay clone and must drop"
+        )
+        e620 = _e620s(result)
+        assert any(
+            "relay" in d.description and "'tally'" in d.description
+            for d in e620
+        ), (
+            "the mono-mangled clone must carry an E620 naming the "
+            f"skipped root, got: {[d.description for d in e620]}"
+        )
+        assert execute(result, fn_name="ok").value == 41
+
     def test_closure_calling_skipped_helper(self) -> None:
         """A lifted closure whose body calls the skipped helper: the
         dangling ``call`` lives in the CLOSURE's WAT (the parent only
