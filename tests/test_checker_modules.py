@@ -1010,8 +1010,13 @@ public fn main(-> @Unit)
 """
         prog = parse_to_ast(source)
         diags = typecheck(prog, source=source, resolved_modules=[mod])
+        # Exactly E152, not merely "E152 among others": the module's own
+        # divergent `IO.print(a, b)` call must NOT cascade a second diagnostic
+        # into the importer.  Only E151/E152 are harvested from the module's
+        # isolated check, so a cascade here would mean the rejected block had
+        # been registered after all.
         codes = [d.error_code for d in diags if d.severity == "error"]
-        assert "E152" in codes, [
+        assert codes == ["E152"], [
             (d.error_code, d.description) for d in diags
         ]
 

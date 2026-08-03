@@ -325,7 +325,7 @@ The `IO` effect is built-in and provides eleven operations for interacting with 
 |-----------|-----------|-------------|
 | `print` | `String -> Unit` | Write a UTF-8 string to stdout |
 | `read_line` | `Unit -> String` | Read a line from stdin |
-| `read_char` | `Unit -> Result<String, String>` | Read one character from stdin (raw mode on TTY); `Err("EOF")` when stdin closes |
+| `read_char` | `Unit -> Result<String, String>` | Read one character from stdin — cbreak mode on a Unix TTY, where Ctrl-D gives `Err("EOF")`; redirected input reads one character from the stdin stream and gives `Err("EOF")` at end of input |
 | `read_file` | `String -> Result<String, String>` | Read entire file as UTF-8 |
 | `write_file` | `String, String -> Result<Unit, String>` | Write string to file |
 | `args` | `Unit -> Array<String>` | Get command-line arguments |

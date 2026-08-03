@@ -1392,7 +1392,7 @@ The IO effect is built-in — no declaration is needed. It provides eleven opera
 |-----------|-----------|-------------|
 | `IO.print` | `String -> Unit` | Print a string to stdout (no implicit newline; flushes per call) |
 | `IO.read_line` | `Unit -> String` | Read a line from stdin |
-| `IO.read_char` | `Unit -> Result<String, String>` | Read one character from stdin (raw mode on TTY).  Returns `Err("EOF")` when stdin closes.  Browser target not yet supported — depends on JSPI ([#609](https://github.com/aallan/vera/issues/609)) for suspend/resume. |
+| `IO.read_char` | `Unit -> Result<String, String>` | Read one character from stdin — cbreak mode on a Unix TTY, where Ctrl-D gives `Err("EOF")`; redirected input reads one character from the stdin stream and gives `Err("EOF")` at end of input.  Browser target not yet supported — depends on JSPI ([#609](https://github.com/aallan/vera/issues/609)) for suspend/resume. |
 | `IO.read_file` | `String -> Result<String, String>` | Read file contents |
 | `IO.write_file` | `String, String -> Result<Unit, String>` | Write string to file |
 | `IO.args` | `Unit -> Array<String>` | Get command-line arguments |

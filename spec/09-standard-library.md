@@ -326,7 +326,7 @@ The `IO` effect has no type parameters. All IO operations are invoked as qualifi
 |-----------|-----------|-------------|
 | `print` | `String -> Unit` | Write a UTF-8 string to stdout |
 | `read_line` | `Unit -> String` | Read one line from stdin (trailing newline stripped) |
-| `read_char` | `Unit -> Result<String, String>` | Read one character from stdin (raw mode on TTY); `Err("EOF")` when stdin closes |
+| `read_char` | `Unit -> Result<String, String>` | Read one character from stdin — cbreak mode on a Unix TTY, where Ctrl-D gives `Err("EOF")`; redirected input reads one character from the stdin stream and gives `Err("EOF")` at end of input |
 | `read_file` | `String -> Result<String, String>` | Read file contents; returns `Ok(contents)` or `Err(message)` |
 | `write_file` | `String, String -> Result<Unit, String>` | Write string to file; returns `Ok(())` or `Err(message)` |
 | `args` | `Unit -> Array<String>` | Command-line arguments |
