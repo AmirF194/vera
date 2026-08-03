@@ -315,6 +315,8 @@ This function always performs `IO` (for the logging), plus whatever effects `E` 
 
 ## 7.7 Built-in Effects
 
+A built-in effect is one the compiler registers: every effect in this section, and those documented in Chapter 9, Section 9.5. Its operations are in scope for any function whose effect row names it, and no declaration brings them there — so a user `effect <Name> { ... }` block redeclaring a built-in name is a compile error (`E152`), whatever operations the block lists. The rule is stated once here for the whole set rather than repeated per effect; `vera effects --json` enumerates the registered names, and Chapter 9, Section 9.5.1 gives the rationale. A marker effect with no operations (`Diverge`, `HttpServer`, `Async`) is covered by the same rule: having nothing to declare does not make the block legal.
+
 **Design note.** An alternative implementation targeting memory-constrained environments may wish to introduce an `Alloc` marker effect to distinguish allocating from non-allocating functions. The reference implementation omits this because WASM's managed linear memory makes allocation-tracking uninformative at the type level — nearly every non-trivial function allocates, so the effect would carry little signal.
 
 ### 7.7.1 `IO`

@@ -6,9 +6,9 @@ This is the single source of truth for Vera's testing infrastructure, coverage d
 
 | Metric | Value |
 |--------|-------|
-| **Tests** | 8,630 across 132 files (~106,000 lines of test code; 8,512 passed + 26 stress, 92 skipped) |
+| **Tests** | 8,665 across 132 files (~106,000 lines of test code; 8,545 passed + 26 stress, 94 skipped) |
 | **Compiler code coverage** | 95% Python, 61% JavaScript — 91% combined (CI minimum: 80%) |
-| **Conformance programs** | 170 programs across 9 spec chapters, validating every language feature |
+| **Conformance programs** | 171 programs across 9 spec chapters, validating every language feature |
 | **Example programs** | 42, all validated through `vera check` + `vera verify` |
 | **Spec code blocks** | 189 parseable blocks from 14 spec chapters: 92 parse, 86 type-check, 85 verify (the rest carry inline `vera:skip` annotations, #538) |
 | **README code blocks** | 4 Vera blocks (4 validated, 0 annotated) |
@@ -39,7 +39,7 @@ VERA_EAGER_GC=1 pytest tests/test_codegen_closures.py::TestClosureReturnShadowPu
 mypy vera/                                           # strict mode
 
 # Validation scripts
-python scripts/check_conformance.py                  # conformance suite (170 programs, see manifest.json)
+python scripts/check_conformance.py                  # conformance suite (171 programs, see manifest.json)
 python scripts/check_examples.py                     # 42 example programs
 python scripts/check_spec_examples.py                # spec code blocks
 python scripts/check_readme_examples.py              # README code blocks
@@ -55,12 +55,12 @@ python scripts/check_wheel_availability.py           # pre-flight: every runtime
 
 | File | Tests | Lines | What it covers |
 |------|------:|------:|----------------|
-| `test_parser.py` | 148 | 1177 | Grammar rules, operator precedence, parse errors |
+| `test_parser.py` | 170 | 1370 | Grammar rules, operator precedence, parse errors |
 | `test_ast.py` | 135 | 1,125 | AST transformation, node structure, serialisation, string escape sequences, ability declarations |
 | `test_checker_types.py` | 209 | 3064 | Primitive types, literals, binary/unary ops, generics, constructors, refinement types, arrays, tuples, zero-size container rejection (E135 for Map/Set — #1075), return/match-arm types, the fresh-ctor-var family (a bare `None` adopting the expected type at return/`let`/match #971, nested ctor fields #979, comparison operands #981, and call/op/init arguments #993 — with cross-ADT and `None == None` guardrail rejections), byte-arithmetic + integer-literal-range rejection (#420 split), the #898 cross-argument type-argument merge (`eq2(MkErr(5), MkOk("x"))` fully determines `Res<String, Int>` and type-checks; a per-parameter conflict `eq2(MkOk("x"), MkOk(5))` is a clear E205; a determined-non-Eq type still type-checks), the #900/#939 generic-over-zero-size rejection (E206 fires only when the `forall<T>` READS `@T` and `T` erases to no WASM local — bare `Unit` OR a transparent `Future<Unit>` (#939) — in the body (direct return, match scrutinee, nested `let`/`if`) OR in a `requires`/`ensures` clause (#939); a `@T`-unread generic like `firstInt`/`ignore`, a boxed `Option<Unit>`, a `Future<Int>`, and the built-in `async(IO.print(...))` over Unit all stay accepted), and the #945 array-of-zero-size rejection (`Array<Unit>` / a bare `[()]` is E135 at both the type-resolution and array-literal gates — emitted exactly once, the literal gate defers to the annotation when both apply (including a refined `{ @Array<Unit> \| p }` annotation, whose `RefinedType` the guard strips via `base_type`), and a zero-size `Array` param reports E135 once via the general exact-duplicate diagnostic dedup (PR #938); `Array<Int>` stays accepted) |
 | `test_checker_int_nat.py` | 8 | 153 | #755 — mixed `Int <op> Nat` arithmetic joins to the formal LUB `Int` (not `Nat`); direct `expr_types` observation that `@Int.0 - 2`, `@Int.0 + @Nat.0`, `@Int.0 * @Nat.0`, `@Int.0 / @Nat.0`, and `@Int.0 % @Nat.0` synthesise `Int` (the DIV/MOD pins kill a per-operator `numeric_join` bypass nothing else in the suite catches), with `Nat`/`Nat` → `Nat` and `Int`/`Int` → `Int` guards against over-correction |
 | `test_checker_patterns.py` | 59 | 932 | Pattern matching, match-arm typing, exhaustiveness, pattern/match coverage, bidirectional inference, typed holes (#420 split) |
-| `test_checker_functions.py` | 79 | 987 | Function signatures, slot references, result refs, calls, control flow, higher-order, where-blocks (incl. #969 closed-scope isolation over bodies + contract clauses, nested-where hint targeting, handler-vs-where hint ordering), expression diagnostics, IO operations, string interpolation (#420 split) |
+| `test_checker_functions.py` | 86 | 1103 | Function signatures, slot references, result refs, calls, control flow, higher-order, where-blocks (incl. #969 closed-scope isolation over bodies + contract clauses, nested-where hint targeting, handler-vs-where hint ordering), expression diagnostics, IO operations, string interpolation (#420 split) |
 | `test_checker_effects.py` | 85 | 1,333 | Effect declarations, abilities, effect subtyping, async effect, handler typing (#420 split), and the #1149 built-in-effect redeclaration gate (E152: divergent and faithful `effect IO`, codegen-only `Exn<E>`, a registry-parametrised sweep, and a differential pinning the gate's name set to what `vera effects --json` publishes) |
 | `test_db_effect.py` | 9 | 136 | #229 — the built-in `<DB>` effect: `DB.query` / `DB.execute` type-check under `effects(<DB>)` (E122 without it; E204 on a non-`String` SQL argument), plus `is_db_sql_op` — the predicate the #309 gate keys on — gating any `DB.query`/`DB.execute` by `parent_effect == "DB"` + op name (the same axis codegen routes to the host on), so a user `effect DB` shadow's op IS gated (it would still reach the host) while an unrelated effect's `query` is not — the shadow is itself rejected at its declaration since #1149 (E152), so this predicate is defence in depth; a checker↔codegen differential pins the gated set to the built-in DB ops |
 | `test_db_marshalling.py` | 35 | 234 | #229 — the `<DB>` marshalling helpers: `Array<Option<String>>` params (inbound reader), `Array<Array<Option<String>>>` query grids (`_alloc_result_ok_rows`) and `Result<Int>` row-counts, round-tripped through an `InstanceCaller` over a real compiled module — each case run normally AND under `VERA_EAGER_GC=1` (every `$alloc` fires `$gc_collect`), the large-grid case forcing free-block reuse; mutation-validated (dropping a shadow-stack root corrupts the read-back / SIGBUSes the swept-pointer read) |
@@ -149,7 +149,7 @@ python scripts/check_wheel_availability.py           # pre-flight: every runtime
 | `test_string_length_soundness.py` | 15 | 278 | #802 — string_length code-point vs UTF-8 byte soundness: a non-literal `string_length` defers to Tier 3 (the issue's `"é"` probe no longer proves `== 1` at Tier 1), a string-literal length is modeled at its exact UTF-8 byte count (`== 2` for `"é"`), and the boolean predicates `string_contains` / `string_starts_with` / `string_ends_with` stay Tier 1 (sound under UTF-8 self-synchronization), while a predicate over an astral (> U+2FFFF) or lone-surrogate literal defers to Tier 3 (z3.StringVal cannot model those code points) |
 | `test_errors.py` | 62 | 657 | Error code registry, diagnostic formatting, serialisation, SourceLocation, and error display sync — the canonical `E001` diagnostic must match each of its mirrors: `README.md`, `docs/index.html`, `spec/00-introduction.md`, `AGENTS.md`'s example `--json` block, and the hardcoded example in `scripts/build_site.py` that generates `docs/index.md` (#829; `AGENTS.md`'s ellipsis-truncated description/rationale are prefix-compared, its `error_code`/`spec_ref`/`fix` exactly) |
 | `test_eq_contract_874.py` | 13 | 430 | `eq`/`compare` ability ops in contract position: codegen canonicalization + verifier Tier-1 discharge/counterexample, where-fn contracts, compare Ordering-sort materialization, shadowing guard (#874) |
-| `test_formatter.py` | 465 | 3,638 | Comment extraction, interior comment positioning, expression/declaration formatting, match arm block bodies, §1.8 rule 2 in value position (a `let`-bound `match`/`if` expands exactly as one in statement position, and a comment above an arm inside a statement's value stays on that arm), blank-line preservation (§1.8 rule 13 — gaps between statements, before a block result and around a comment, collapsed to one and never invented), idempotency, parenthesization, spec rules, ability declarations |
+| `test_formatter.py` | 466 | 3,638 | Comment extraction, interior comment positioning, expression/declaration formatting, match arm block bodies, §1.8 rule 2 in value position (a `let`-bound `match`/`if` expands exactly as one in statement position, and a comment above an arm inside a statement's value stays on that arm), blank-line preservation (§1.8 rule 13 — gaps between statements, before a block result and around a comment, collapsed to one and never invented), idempotency, parenthesization, spec rules, ability declarations |
 | `test_cli.py` | 266 | 4,275 | CLI commands (check, verify, compile, run, serve, test, fmt, version, quiet), subprocess integration, JSON error paths (including the `verify --json` `obligations` array and its summary-reproducibility pin, #967), runtime traps, arg validation, multi-file resolution, IO exit codes, --explain-slots, `builtins`/`effects`/`errors` introspection dispatch, and a USAGE-completeness guard (every dispatched `cmd_<name>` handler has a help row) |
 | `test_introspect.py` | 39 | 221 | `vera builtins/effects/errors --json` registry introspection (#539): the `{schema, items}` envelope, count-equals-registry differential per registry, error-phase derivation, effect/ability `kind` tagging, the parameterised `Exn<E>` effect, and best-effort `since` attribution with full-coverage guards |
 | `test_resolver.py` | 20 | 602 | Module resolution, path lookup, parse caching, circular import detection, the E011/E012/E013 diagnostic contract, internal-error isolation (a compiler bug is not masked as E013), and the transitive-closure return of `resolve_imports` (#890 — a diamond yields each reachable module once, direct imports tagged `direct`, the transitive one not) |
@@ -167,7 +167,7 @@ python scripts/check_wheel_availability.py           # pre-flight: every runtime
 | `test_markdown.py` | 59 | 393 | Markdown parser: block/inline parsing, rendering, round-trips, edge cases |
 | `test_lsp.py` | 94 | 1211 | LSP transport + coordinate layer (#222 Phase C) and language features (#222 Phase D): parametrized code-point↔UTF-16 goldens incl. astral-plane fixtures and surrogate-pair snapping, Span (1-based, exclusive-end) and SourceLocation (0-based col) → LSP Range conversions, point→token-range widening, DocumentStore open/change/close + index invalidation, an in-process handler-drive test, and one stdio end-to-end round-trip against the real `vera lsp` subprocess (initialize → didOpen → shutdown → exit) pinning serverInfo + textDocumentSync capabilities; plus the Phase D feature suite — parse-error single-diagnostic path, type-error verification short-circuit, tier=3 in E520 diagnostic data, per-function tier Hint synthesis (and its suppression for functions with violated obligations), smallest-enclosing-span hover, De Bruijn slot goto (most-recent-parameter jump, out-of-range None, off-slot None), and typed-hole completion (inside/after hole, away-from-hole None); plus the Phase E speculativeEdit suite — identical-text all-unchanged, breaking edit surfaces newly_undischarged (violated nat_sub) with canonical state untouched, strengthening edit surfaces newly_discharged, parse/type errors report ok:false, deleted functions report removed, proof_delta purity; plus the Phase F1 proposeEdit suite — the apply gate (clean and strengthening edits apply, breaking and non-compiling edits refuse), force overriding both gates with the delta still reported, wiring against a structural fake server (apply round-trip with exact full-document replacement range, refuse touches no canonical state, unopened-URI clamp sentinel), and full-document-range goldens (trailing-newline virtual line, UTF-16 end column); plus the Phase F2 strengthenContract suite — splice goldens (first-clause-only replacement with byte-identical remainder, ensures variant, unknown-fn None), the call-site audit pin (tightened precondition refused with newly_undischarged call_pre items, canonical state untouched), provable-ensures strengthening applies, and the three splice-target refusal paths (no analysis, unparseable document, unknown function); plus the Phase F3 addEffect suite — transitive-caller closure goldens (diamond in declaration order, leaf, unknown-fn None, recursion appears once), effect-row rewrite goldens (pure to singleton set, source-preserving append, already-present None, base-name identity blocking State<Int> next to State<Bool>), diamond propagation applying one multi-site candidate with the bystander untouched, mixed append/replace rows with already-satisfied callers skipped, the fully-satisfied no-op shape, and the two refusal paths; plus the #728 instruction-contract suite — the LSP message carries description, rationale, and the Fix: paragraph (also pinning single E501 emission at the LSP surface), and a bare diagnostic maps to the description alone |
 | `test_browser.py` | 138 | 3,068 | Browser parity: Python/wasmtime vs Node.js/JS-runtime output equivalence across IO, State, contracts, Markdown, Regex, and all compilable examples |
-| `test_conformance.py` | 850 | 125 | Parametrized conformance suite: parse, check, verify, run, format idempotency across 170 programs |
+| `test_conformance.py` | 855 | 125 | Parametrized conformance suite: parse, check, verify, run, format idempotency across 171 programs |
 | `test_prelude.py` | 24 | 422 | Prelude injection: Option/Result/array operation detection, combinator shadowing, type aliases, end-to-end compilation |
 | `test_checker_apply_fn.py` | 18 | 455 | #854 — `apply_fn` as a checker special form: zero-warning pins (API + CLI `--json` + closures.vera), E201 arity / E202 type / non-function-first-arg errors, E122/E125 effect-row enforcement for applied fn values, E151 redefinition rejection, variadic two-param application, prelude combinator regression pins |
 | `test_prelude_diagnostics.py` | 8 | 271 | #851 — prelude combinator skip-warnings: unreferenced-prelude E602/E604 suppression (zero-warning minimal compile, API + CLI `--json`), `<prelude>` origin attribution for referenced-but-skipped combinators (text + `to_dict`), transitive reference scan, and user-fn warning locations pinned unchanged |
@@ -190,7 +190,7 @@ python scripts/check_wheel_availability.py           # pre-flight: every runtime
 
 ## Conformance Suite
 
-The conformance suite is a collection of 170 small, focused programs in `tests/conformance/` that systematically validate every language feature against the spec. Most programs are self-contained; the module-focused Chapter 8 cases use `import` statements where needed, and `ch07_cross_module_contracts.vera` still depends on `ch07_cross_module_contracts_lib.vera`. Each program tests one feature or a small group of related features.
+The conformance suite is a collection of 171 small, focused programs in `tests/conformance/` that systematically validate every language feature against the spec. Most programs are self-contained; the module-focused Chapter 8 cases use `import` statements where needed, and `ch07_cross_module_contracts.vera` still depends on `ch07_cross_module_contracts_lib.vera`. Each program tests one feature or a small group of related features.
 
 Simon Willison [argues](https://simonwillison.net/tags/conformance-suites/) that conformance suites are a "huge unlock" for language projects — they transform development from trust-based to verification-based. The conformance suite serves as the definitive specification artifact that any implementation (or agent) can validate against.
 
@@ -215,7 +215,7 @@ Each conformance program declares the deepest pipeline stage it must pass:
 | Level | What it validates | Count |
 |-------|-------------------|------:|
 | `parse` | Source text is syntactically valid | 0 |
-| `check` | Parses and type-checks cleanly | 25 |
+| `check` | Parses and type-checks cleanly | 26 |
 | `verify` | Type-checks and all contracts verified by Z3 | 13 |
 | `run` | Compiles to WASM and executes correctly | 132 |
 
@@ -308,7 +308,7 @@ tests/conformance/
 ├── ch01_int_literals.vera     # Chapter 1: Integer literals
 ├── ch01_float_literals.vera   # Chapter 1: Float64 literals
 ├── ch01_string_escapes.vera   # Chapter 1: String escape sequences
-├── ...                        # 170 programs total, organized by spec chapter
+├── ...                        # 171 programs total, organized by spec chapter
 ├── ch07_state_handler.vera    # Chapter 7: State<T> effect handler
 ├── ch07_exn_handler.vera      # Chapter 7: Exn<E> effect handler
 ├── ch09_numeric_builtins.vera # Chapter 9: Numeric built-in functions
@@ -656,9 +656,9 @@ Twenty-two scripts in `scripts/` validate cross-cutting concerns beyond unit tes
 
 | Script | What it validates |
 |--------|-------------------|
-| `check_conformance.py` | All 170 conformance entries hold at their declared level (parse/check/verify/run) — positives pass; the negatives fail `check` with their `expected_error` E-code |
+| `check_conformance.py` | All 171 conformance entries hold at their declared level (parse/check/verify/run) — positives pass; the negatives fail `check` with their `expected_error` E-code |
 | `check_examples.py` | All 42 `.vera` examples pass `vera check` + `vera verify` |
-| `check_corpus_canonical.py` | All 218 corpus programs (recursive over `examples/` + `tests/conformance/`) are in canonical form under `vera fmt` |
+| `check_corpus_canonical.py` | All 219 corpus programs (recursive over `examples/` + `tests/conformance/`) are in canonical form under `vera fmt` |
 | `check_examples_readme.py` | Every `vera run` command in examples/README.md references an existing file and exported function |
 | `check_spec_examples.py` | 189 parseable code blocks from spec chapters: parse, type-check, and verify |
 | `check_readme_examples.py` | All Vera code blocks in README.md parse correctly |
@@ -759,9 +759,9 @@ Every push is checked by 32 configured hooks across two stages: 30 are configure
 | `ruff check .` | Lint Python with ruff (default `F` + `E` rules) |
 | `mypy vera/` | Type-check compiler in strict mode |
 | `pytest tests/ -q` | Run full test suite |
-| `check_conformance.py` | All 170 conformance entries hold at their declared level — positives pass; negatives fail `check` with their `expected_error` E-code |
+| `check_conformance.py` | All 171 conformance entries hold at their declared level — positives pass; negatives fail `check` with their `expected_error` E-code |
 | `check_examples.py` | All 42 examples pass `vera check` + `vera verify` |
-| `check_corpus_canonical.py` | All 218 `examples/` + `tests/conformance/` programs (recursive) are in canonical form (`vera fmt`) |
+| `check_corpus_canonical.py` | All 219 `examples/` + `tests/conformance/` programs (recursive) are in canonical form (`vera fmt`) |
 | `check_examples_readme.py` | `vera run` commands in `examples/README.md` reference existing files and exported functions |
 | `check_readme_examples.py` | README code blocks parse correctly |
 | `check_examples_doc.py` | EXAMPLES.md code blocks parse correctly |

@@ -338,7 +338,7 @@ The `IO` effect has no type parameters. All IO operations are invoked as qualifi
 
 The `IO` effect is registered as a built-in: the operations above are in scope for any function whose effect row names `IO`, and no declaration brings them there. An `effect IO { ... }` block in a program is a compile error (`E152`) — the same one-canonical-form rule that forbids redefining a built-in function (`E151`, Section 9.6). The rule is name-keyed and unconditional: a block whose operation signatures agree with the built-in is rejected too, because it is a second textual spelling of the same program (Chapter 0, Section 0.2, design goal 3). It also cannot be honoured — code generation lowers every qualified `IO.op(...)` call to the fixed host import selected by the qualifier and never reads the declaration, so a block whose signatures diverge from the built-in would compile to structurally invalid WebAssembly.
 
-The same rule holds for every built-in effect (Chapter 7, Section 7.7): `State<T>`, `Exn<E>`, `Http`, `Random`, `Inference`, `DB`, `Diverge`, `Async`, and `HttpServer`.
+The same rule holds for every built-in effect, marker effects included. Chapter 7, Section 7.7 states it once for the whole registered set rather than naming them here, so the rule cannot fall out of step with the registry as effects are added.
 
 ```
 private fn hello(-> @Unit)
