@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`scripts/check_site_assets.py` gates the facts `docs/index.html` and `docs/index.md` both state** ([#1154](https://github.com/aallan/vera/issues/1154)). The Markdown companion agents fetch via `rel="alternate"` and `llms.txt` is emitted by `build_index_md()` in `scripts/build_site.py`, which holds the landing page's substance as a hand-maintained f-string. The staleness check called that generator and compared the result against the committed file — the generator on both sides of the comparison — so a generator that missed an edit to the hand-designed HTML produced a committed asset stale in exactly the same way, and the gate passed. A v0.0.7-era benchmark section survived every intervening release that way.
+
+  `check_fact_coherence()` now extracts the load-bearing facts from each file independently and fails when they diverge: the VeraBench version and the Vera release it was measured against, the landing-page version badge, the problem/tier/model/provider counts, the headline perfect-Vera count, the nine-row results table (model name, tier and all three figures per row, plus each file's row count against its own stated model count), and the three editor names. An error names the fact, both values and both paths. A fact that cannot be located is itself a failure rather than a silent skip, so a reworded sentence cannot switch its own check off.
+
 ### Documentation
 
 - **The VeraBench section carries the v0.0.18 sweep** ([#1169](https://github.com/aallan/vera/pull/1169)), the first in which all 60 problems are graded — v0.0.17 took the gradeable set from 36 to 46 and v0.0.18 closed it. One problem is now worth 1.7 percentage points rather than 2.8. Six of the nine models solve every Vera problem, and Vera is highest or level with it for six of the nine. Measured against [Vera v0.1.8](https://github.com/aallan/vera/releases/tag/v0.1.8). The section also gains the reading the wider gradeable set supports: Python is dynamically typed and TypeScript is not, Vera sits with TypeScript and goes further, and sorting the three by how much they constrain the model rather than by how much of them it has read puts the two constraining languages ahead — TypeScript with training data behind it, Vera without.

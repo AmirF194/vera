@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 from datetime import date
 from pathlib import Path
 
@@ -339,3 +340,359 @@ def test_sitemap_stale_reason_structural_diff_is_stale(tmp_path):
     reason = _check.sitemap_stale_reason(tmp_path / "sitemap.xml", _SITEMAP)
     assert reason is not None
     assert "stale" in reason
+
+
+# ---------------------------------------------------------------------------
+# check_site_assets.check_fact_coherence — docs/index.html ↔ docs/index.md
+#
+# The staleness check above compares `build_index_md()` against the committed
+# `docs/index.md`, i.e. the generator against itself; it cannot see the HTML.
+# These tests drive the coherence gate that can (#1154).  Every case works on
+# tmp_path copies — the committed pair is never mutated.
+# ---------------------------------------------------------------------------
+
+_DOCS = Path(__file__).parent.parent / "docs"
+
+
+def _landing_pair(tmp_path):
+    """Copy the committed landing-page pair into tmp_path.
+
+    Returns ``(html_path, md_path)``.  Mutating a copy and re-running the
+    check is how each drift class below is proved to be caught.
+    """
+    html = tmp_path / "index.html"
+    md = tmp_path / "index.md"
+    html.write_text(
+        (_DOCS / "index.html").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    md.write_text((_DOCS / "index.md").read_text(encoding="utf-8"), encoding="utf-8")
+    return html, md
+
+
+def _edit(path, old, new):
+    """Replace a *unique* anchor in ``path``, asserting it occurs exactly once.
+
+    The uniqueness assertion is load-bearing: if the landing page is reworded
+    so an anchor no longer matches, the mutation would silently become a
+    no-op and the test would pass while proving nothing.
+    """
+    text = path.read_text(encoding="utf-8")
+    assert text.count(old) == 1, f"anchor not unique ({text.count(old)}x): {old!r}"
+    path.write_text(text.replace(old, new), encoding="utf-8")
+
+
+def _sub(path, pattern, replacement, flags=0):
+    """Regex-replace one occurrence in ``path``, asserting the edit landed."""
+    text = path.read_text(encoding="utf-8")
+    mutated, count = re.subn(pattern, replacement, text, count=1, flags=flags)
+    assert count == 1, f"pattern matched {count} times: {pattern!r}"
+    path.write_text(mutated, encoding="utf-8")
+
+
+def _joined(errors):
+    return "\n".join(errors)
+
+
+def test_fact_coherence_committed_pair_is_clean():
+    """The committed landing page and its Markdown companion agree today.
+
+    Runs against the real files, not copies — this is the assertion the CI
+    gate makes, and it must hold on a clean tree.
+    """
+    assert _check.check_fact_coherence(_DOCS / "index.html", _DOCS / "index.md") == []
+
+
+def test_fact_coherence_html_percentage_bump_is_caught(tmp_path):
+    """A single changed benchmark figure in the HTML names the model."""
+    html, md = _landing_pair(tmp_path)
+    _sub(
+        html,
+        r'(Claude Fable 5 <span class="tag">ceiling</span></td>\s*<td[^>]*>)100%',
+        r"\g<1>42%",
+    )
+    errors = _check.check_fact_coherence(html, md)
+    joined = _joined(errors)
+    assert errors, "a changed Vera figure must fail the gate"
+    assert "Claude Fable 5" in joined
+    assert "42%" in joined
+    assert "100%" in joined
+    assert str(html) in joined
+    assert str(md) in joined
+
+
+def test_fact_coherence_md_percentage_bump_is_caught(tmp_path):
+    """The mirror case: the Markdown side drifts instead."""
+    html, md = _landing_pair(tmp_path)
+    _edit(
+        md,
+        "| Claude Fable 5 | ceiling | **100%** |",
+        "| Claude Fable 5 | ceiling | **42%** |",
+    )
+    errors = _check.check_fact_coherence(html, md)
+    joined = _joined(errors)
+    assert errors, "a changed Vera figure must fail the gate"
+    assert "Claude Fable 5" in joined
+    assert "42%" in joined
+    assert str(html) in joined
+    assert str(md) in joined
+
+
+def test_fact_coherence_html_verabench_version_bump_is_caught(tmp_path):
+    """The exact class that bit in #1153: the benchmark version string."""
+    html, md = _landing_pair(tmp_path)
+    _sub(html, r"VeraBench v\d+\.\d+\.\d+", "VeraBench v9.9.9")
+    errors = _check.check_fact_coherence(html, md)
+    joined = _joined(errors)
+    assert errors, "a bumped VeraBench version must fail the gate"
+    assert "VeraBench version" in joined
+    assert "9.9.9" in joined
+    assert str(html) in joined
+    assert str(md) in joined
+
+
+def test_fact_coherence_md_tested_vera_version_bump_is_caught(tmp_path):
+    """The Vera release the sweep ran against is gated too."""
+    html, md = _landing_pair(tmp_path)
+    _sub(md, r"Vera v\d+\.\d+\.\d+\]", "Vera v9.9.9]")
+    errors = _check.check_fact_coherence(html, md)
+    joined = _joined(errors)
+    assert errors, "a bumped tested-Vera version must fail the gate"
+    assert "tested Vera version" in joined
+    assert "9.9.9" in joined
+
+
+def test_fact_coherence_version_badge_divergence_is_caught(tmp_path):
+    """The headline version badge vs the Markdown "Current version" line.
+
+    ``check_version_sync.py`` pins the HTML badge to pyproject.toml; nothing
+    pinned it to ``index.md``, which states the same version in its own shape.
+    """
+    html, md = _landing_pair(tmp_path)
+    _sub(md, r"\*\*Current version:\*\* \[\d+\.\d+\.\d+", "**Current version:** [9.9.9")
+    errors = _check.check_fact_coherence(html, md)
+    joined = _joined(errors)
+    assert errors, "a diverged version badge must fail the gate"
+    assert "version badge" in joined
+    assert str(html) in joined
+    assert str(md) in joined
+
+
+def test_fact_coherence_md_problem_count_bump_is_caught(tmp_path):
+    """The benchmark's problem count is a load-bearing fact."""
+    html, md = _landing_pair(tmp_path)
+    _sub(md, r"A \d+-problem benchmark", "A 61-problem benchmark")
+    errors = _check.check_fact_coherence(html, md)
+    joined = _joined(errors)
+    assert errors, "a changed problem count must fail the gate"
+    assert "problem count" in joined
+    assert "61" in joined
+
+
+def test_fact_coherence_html_model_count_bump_is_caught(tmp_path):
+    """A prose model count that no longer matches its own table, or the pair.
+
+    Bumping "Nine models" to "Ten models" in the HTML must trip both the
+    HTML↔MD comparison and the within-file rows-vs-prose cross-check.
+    """
+    html, md = _landing_pair(tmp_path)
+    _edit(html, "Nine models, three providers", "Ten models, three providers")
+    errors = _check.check_fact_coherence(html, md)
+    joined = _joined(errors)
+    assert errors, "a changed model count must fail the gate"
+    assert "model count" in joined
+    assert any("rows" in e for e in errors), (
+        f"prose count must be cross-checked against the table rows: {errors}"
+    )
+
+
+def test_fact_coherence_removed_html_table_row_is_caught(tmp_path):
+    """Dropping a model from the HTML table names the missing model."""
+    html, md = _landing_pair(tmp_path)
+    _sub(
+        html,
+        r'\s*<tr>\s*<td class="lang">Kimi K3 .*?</tr>',
+        "",
+        flags=re.DOTALL,
+    )
+    errors = _check.check_fact_coherence(html, md)
+    joined = _joined(errors)
+    assert errors, "a removed table row must fail the gate"
+    assert "Kimi K3" in joined
+    assert str(html) in joined
+    assert str(md) in joined
+
+
+def test_fact_coherence_removed_md_table_row_is_caught(tmp_path):
+    """The mirror case: the Markdown table loses a row."""
+    html, md = _landing_pair(tmp_path)
+    _sub(md, r"\n\| Kimi K3 \|[^\n]*", "")
+    errors = _check.check_fact_coherence(html, md)
+    joined = _joined(errors)
+    assert errors, "a removed table row must fail the gate"
+    assert "Kimi K3" in joined
+
+
+def test_fact_coherence_renamed_model_is_caught(tmp_path):
+    """A model renamed on one side only shows up in both directions."""
+    html, md = _landing_pair(tmp_path)
+    _edit(md, "| Kimi K3 |", "| Kimi K4 |")
+    errors = _check.check_fact_coherence(html, md)
+    joined = _joined(errors)
+    assert errors, "a renamed model must fail the gate"
+    assert "Kimi K3" in joined
+    assert "Kimi K4" in joined
+
+
+def test_fact_coherence_tier_change_is_caught(tmp_path):
+    """The per-model tier label is stated in both files, so it is gated."""
+    html, md = _landing_pair(tmp_path)
+    _edit(md, "| Kimi K3 | flagship |", "| Kimi K3 | workhorse |")
+    errors = _check.check_fact_coherence(html, md)
+    joined = _joined(errors)
+    assert errors, "a changed tier must fail the gate"
+    assert "Kimi K3" in joined
+    assert "workhorse" in joined
+
+
+def test_fact_coherence_dropped_editor_is_caught(tmp_path):
+    """Editor support: three names on the page, three in the Markdown."""
+    html, md = _landing_pair(tmp_path)
+    _edit(
+        md,
+        "a [Vim package](https://github.com/aallan/vera/tree/main/editors/"
+        "vim-veralang) for Vim 8+ and Neovim, and ",
+        "",
+    )
+    errors = _check.check_fact_coherence(html, md)
+    joined = _joined(errors)
+    assert errors, "an editor dropped from one side must fail the gate"
+    assert "editor support" in joined
+    assert "Vim" in joined
+    assert str(html) in joined
+    assert str(md) in joined
+
+
+# --- Extraction failure is gate failure ------------------------------------
+
+
+def test_fact_coherence_missing_html_table_is_extraction_failure(tmp_path):
+    """A restructured HTML table must fail loudly, not silently skip."""
+    html, md = _landing_pair(tmp_path)
+    _sub(html, r'<table class="bench-table">.*?</table>', "", flags=re.DOTALL)
+    errors = _check.check_fact_coherence(html, md)
+    joined = _joined(errors)
+    assert errors, "an unlocatable benchmark table must fail the gate"
+    assert "benchmark table" in joined
+    assert str(html) in joined
+
+
+def test_fact_coherence_missing_md_table_is_extraction_failure(tmp_path):
+    """The Markdown table header is the anchor; losing it fails the gate."""
+    html, md = _landing_pair(tmp_path)
+    _edit(md, "| Model | Tier | Vera | Python | TypeScript |", "")
+    errors = _check.check_fact_coherence(html, md)
+    joined = _joined(errors)
+    assert errors, "an unlocatable benchmark table must fail the gate"
+    assert "benchmark table" in joined
+    assert str(md) in joined
+
+
+def test_fact_coherence_missing_md_prose_fact_is_extraction_failure(tmp_path):
+    """Deleting the results caveat removes two facts; both must be named."""
+    html, md = _landing_pair(tmp_path)
+    _sub(md, r"Results from \[VeraBench[^\n]*\n", "")
+    errors = _check.check_fact_coherence(html, md)
+    joined = _joined(errors)
+    assert errors, "an unlocatable fact must fail the gate"
+    assert "VeraBench version" in joined
+    assert "tested Vera version" in joined
+    assert "not found" in joined
+    assert str(md) in joined
+
+
+def test_fact_coherence_missing_editor_claim_is_extraction_failure(tmp_path):
+    """No editor names at all in a file is an extraction failure, not a pass."""
+    html, md = _landing_pair(tmp_path)
+    _sub(md, r"Editor support: [^\n]*\n", "")
+    errors = _check.check_fact_coherence(html, md)
+    joined = _joined(errors)
+    assert errors, "an unlocatable editor claim must fail the gate"
+    assert "editor support" in joined
+    assert str(md) in joined
+
+
+def test_fact_coherence_missing_file_is_gate_failure(tmp_path):
+    """A missing half of the pair fails loudly rather than passing vacuously."""
+    html, md = _landing_pair(tmp_path)
+    md.unlink()
+    errors = _check.check_fact_coherence(html, md)
+    assert errors, "a missing companion file must fail the gate"
+    assert str(md) in _joined(errors)
+
+
+def test_fact_coherence_conflicting_values_within_one_file_is_caught(tmp_path):
+    """One file stating a fact twice, differently, is drift in its own right."""
+    html, md = _landing_pair(tmp_path)
+    _edit(
+        md,
+        "Full source and data:",
+        "Results from [VeraBench v9.9.9](https://github.com/aallan/vera-bench"
+        "#results).\n\nFull source and data:",
+    )
+    errors = _check.check_fact_coherence(html, md)
+    joined = _joined(errors)
+    assert errors, "conflicting values inside one file must fail the gate"
+    assert "VeraBench version" in joined
+    assert "9.9.9" in joined
+    assert str(md) in joined
+def _last_md_bench_row(md):
+    """Locate the final data row of the Markdown benchmark table.
+
+    Anchored on the same header regex the checker uses, so these tests
+    mutate the benchmark table specifically — never some other table the
+    companion may gain later.
+    """
+    lines = md.read_text(encoding="utf-8").splitlines()
+    start = next(
+        i for i, line in enumerate(lines) if _check._MD_BENCH_HEADER.match(line)
+    )
+    j = start + 1
+    while j < len(lines) and lines[j].startswith("|"):
+        j += 1
+    return lines, j - 1
+
+
+def test_fact_coherence_duplicate_md_model_row_is_caught(tmp_path):
+    """``_index_rows``: one file listing a model twice is its own failure.
+
+    The duplicate is dropped from the comparison, so without this branch a
+    doubled row would silently shadow whichever copy came second.
+    """
+    html, md = _landing_pair(tmp_path)
+    lines, last = _last_md_bench_row(md)
+    model = _check._text_of_md(lines[last].strip().strip("|").split("|")[0])
+    lines.insert(last + 1, lines[last])
+    md.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    errors = _check.check_fact_coherence(html, md)
+    joined = _joined(errors)
+    assert errors, "a duplicated model row must fail the gate"
+    assert "twice" in joined
+    assert model in joined
+    assert str(md) in joined
+
+
+def test_fact_coherence_md_row_cell_count_is_caught(tmp_path):
+    """``_bench_rows_md``: a row with the wrong cell count fails loudly.
+
+    A malformed row cannot be compared, and skipping it silently would
+    un-gate that model's figures — the same rule as a missing fact.
+    """
+    html, md = _landing_pair(tmp_path)
+    lines, last = _last_md_bench_row(md)
+    lines[last] = lines[last] + " 0% |"
+    md.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    errors = _check.check_fact_coherence(html, md)
+    joined = _joined(errors)
+    assert errors, "a malformed table row must fail the gate"
+    assert "cells" in joined
+    assert str(md) in joined

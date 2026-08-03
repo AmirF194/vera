@@ -112,6 +112,8 @@ The **commit-stage** hooks (30, each gated to relevant files) include:
 
 If you modify documentation sources (SKILL.md, AGENTS.md, FAQ.md, `vera/errors.py`, `vera/grammar.lark`, or `docs/index.html`), the `site-assets` hook will regenerate `docs/` files via `scripts/build_site.py`. The CI also runs `scripts/check_site_assets.py` to verify freshness.
 
+`docs/index.md` is a special case: it is not derived from `docs/index.html` but written out by `build_index_md()` in `scripts/build_site.py`, so an edit to the landing page's substance has to be made in both places. `check_site_assets.py` compares the load-bearing facts across the pair — benchmark version strings, problem and model counts, the results table, the editor names — and fails when they diverge or when one of them can no longer be located.
+
 ### Pre-push hook: CHANGELOG enforcement
 
 A separate `pre-push` hook runs once before each `git push` (not per-commit — which would be too noisy on feature branches). It verifies that any PR touching a non-exempt top-level path adds a new entry to `CHANGELOG.md`. The same check also runs in CI, so pushes without the local hook installed are still caught before merge.
