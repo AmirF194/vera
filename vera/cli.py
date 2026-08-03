@@ -47,7 +47,7 @@ from typing import cast
 
 from lark import Tree
 from vera.codegen.api import WasmTrapError
-from vera.errors import VeraError
+from vera.errors import Diagnostic, VeraError
 from vera.introspect import builtins_payload, effects_payload, errors_payload
 from vera.parser import parse
 from vera.transform import transform
@@ -352,6 +352,43 @@ def cmd_verify(path: str, as_json: bool = False, quiet: bool = False) -> int:
         return 1
 
 
+def _report_compile_failure(
+    path: str,
+    msg: str,
+    all_warnings: list[Diagnostic],
+    *,
+    as_json: bool,
+    extra: dict[str, object] | None = None,
+) -> int:
+    """Print one synthetic-diagnostic compile failure and return exit 1.
+
+    Shared by the refusal paths that reject AFTER a successful core
+    compile (zero exports, browser without ``main``, the wasi-p2 family
+    gate), so the JSON/text envelope exists in exactly one place.
+    Accumulated warnings are printed on both modes — these paths reject
+    after compilation succeeded, so the warnings must not be dropped
+    (#1004 review).  ``extra`` merges additional top-level keys into the
+    JSON payload between ``file`` and ``diagnostics`` (the zero-export
+    caller adds ``"exports": []``).
+    """
+    if as_json:
+        payload: dict[str, object] = {"ok": False, "file": path}
+        if extra:
+            payload.update(extra)
+        payload["diagnostics"] = [{
+            "severity": "error",
+            "description": msg,
+            "location": {"line": 0, "column": 0},
+        }]
+        payload["warnings"] = [w.to_dict() for w in all_warnings]
+        print(json.dumps(payload, indent=2))
+        return 1
+    for w in all_warnings:
+        print(f"warning: {w.format()}", file=sys.stderr)
+    print(f"Error: {msg}", file=sys.stderr)
+    return 1
+
+
 def cmd_compile(
     path: str,
     *,
@@ -491,23 +528,10 @@ def cmd_compile(
                 "diagnostic above; fix the reported construct to restore "
                 "the export."
             )
-            if as_json:
-                print(json.dumps({
-                    "ok": False,
-                    "file": path,
-                    "exports": [],
-                    "diagnostics": [{
-                        "severity": "error",
-                        "description": msg,
-                        "location": {"line": 0, "column": 0},
-                    }],
-                    "warnings": [w.to_dict() for w in all_warnings],
-                }, indent=2))
-                return 1
-            for w in all_warnings:
-                print(f"warning: {w.format()}", file=sys.stderr)
-            print(f"Error: {msg}", file=sys.stderr)
-            return 1
+            return _report_compile_failure(
+                path, msg, all_warnings, as_json=as_json,
+                extra={"exports": []},
+            )
 
         # #1183: the browser shell calls `main` unconditionally, so any
         # bundle without a `main` export is a page that fails at load —
@@ -528,22 +552,9 @@ def cmd_compile(
                 + "\n\nThe generated index.html calls main() on load, so "
                 "the bundle would fail in the browser."
             )
-            if as_json:
-                print(json.dumps({
-                    "ok": False,
-                    "file": path,
-                    "diagnostics": [{
-                        "severity": "error",
-                        "description": msg,
-                        "location": {"line": 0, "column": 0},
-                    }],
-                    "warnings": [w.to_dict() for w in all_warnings],
-                }, indent=2))
-                return 1
-            for w in all_warnings:
-                print(f"warning: {w.format()}", file=sys.stderr)
-            print(f"Error: {msg}", file=sys.stderr)
-            return 1
+            return _report_compile_failure(
+                path, msg, all_warnings, as_json=as_json,
+            )
 
         # --target wasi-p2 (#237): emit the component BEFORE any success
         # envelope — the emitter's family gate raises ValueError for host
@@ -557,26 +568,9 @@ def cmd_compile(
                 component_wat = emit_wasi_component(result, world=world)
             except ValueError as exc:
                 msg = f"--target wasi-p2: {exc}"
-                if as_json:
-                    print(json.dumps({
-                        "ok": False,
-                        "file": path,
-                        "diagnostics": [{
-                            "severity": "error",
-                            "description": msg,
-                            "location": {"line": 0, "column": 0},
-                        }],
-                        "warnings": [w.to_dict() for w in all_warnings],
-                    }, indent=2))
-                    return 1
-                # Print warnings on this error path too (#1004 review): the
-                # wasi-p2 family gate rejects AFTER a successful compile, so
-                # accumulated warnings must not be dropped in text mode —
-                # the third sibling of the type-error and codegen-error paths.
-                for w in all_warnings:
-                    print(f"warning: {w.format()}", file=sys.stderr)
-                print(f"Error: {msg}", file=sys.stderr)
-                return 1
+                return _report_compile_failure(
+                    path, msg, all_warnings, as_json=as_json,
+                )
 
         if as_json:
             result_dict = {

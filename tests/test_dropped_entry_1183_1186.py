@@ -381,6 +381,38 @@ class TestCompileZeroExports:
         assert "solo" in captured.err, "the exports must be named"
         assert not (out_dir / "index.html").exists()
 
+    def test_browser_refusal_json_reports_not_ok(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """`--json` agents get `ok: false` + the export name (PR #1190).
+
+        Pins the JSON envelope of the browser refusal through the shared
+        `_report_compile_failure` helper, so a future change to that
+        envelope is caught on this documented agent-facing path.
+        """
+        src = (
+            "public fn solo(-> @Int)\n"
+            "  requires(true)\n"
+            "  ensures(true)\n"
+            "  effects(pure)\n"
+            "{\n"
+            "  99\n"
+            "}\n"
+        )
+        path = _write(tmp_path, "nomain_json.vera", src)
+        out_dir = tmp_path / "bundle_nomain_json"
+        rc = cmd_compile(
+            path, target="browser", output=str(out_dir), as_json=True,
+        )
+        captured = capsys.readouterr()
+        assert rc != 0
+        data = json.loads(captured.out)
+        assert data["ok"] is False
+        assert "solo" in data["diagnostics"][0]["description"], (
+            "the JSON diagnostic must name what IS exported"
+        )
+        assert not (out_dir / "index.html").exists()
+
 
 # =====================================================================
 # #1186 — imported bodies locate in their own module
