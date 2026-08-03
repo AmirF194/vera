@@ -3109,3 +3109,343 @@ public fn main(@Unit -> @Int)
 { pub(7) }
 """, [mod], fn="main")
         assert val == 42
+
+
+# =====================================================================
+# #1111 — module-local type-alias namespaces
+# =====================================================================
+
+
+class TestModuleLocalAliasNamespaces:
+    """#1111: same-named type aliases in different modules stay module-local.
+
+    Spec §8.4.1: a type alias is module-local — not importable, so two
+    modules may legally reuse one alias name for different targets.
+    Codegen used to merge every module's aliases into a single flat
+    bare-name map (``setdefault``, first module won) and then let the
+    main file's own aliases overwrite unconditionally, so one module's
+    declarations resolved through another namespace's alias: wrong WASM
+    signatures, invalid modules, and an import-order-dependent victim.
+    """
+
+    _resolved = staticmethod(TestCrossModuleCodegen._resolved)
+    _compile_mod = staticmethod(TestCrossModuleCodegen._compile_mod)
+    _run_mod = staticmethod(TestCrossModuleCodegen._run_mod)
+
+    MOD_INT = """\
+type F = Int;
+
+public fn gc(@Unit -> @F)
+  requires(true) ensures(true) effects(pure)
+{ 42 }
+"""
+
+    MOD_STR = """\
+type F = String;
+
+public fn gd(@Unit -> @F)
+  requires(true) ensures(true) effects(pure)
+{ "hello" }
+"""
+
+    MAIN = """\
+import ca(gc);
+import da(gd);
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  let @Int = gc(());
+  let @String = gd(());
+  let @Nat = string_length(@String.0);
+  if @Nat.0 == 5 then { @Int.0 } else { 0 - 1 }
+}
+"""
+
+    def test_conflicting_module_aliases_run(self) -> None:
+        """The issue's repro: ``F = Int`` (ca) vs ``F = String`` (da).
+
+        Pre-fix ca's ``F`` won the merge, so ``gd`` was emitted
+        ``(result i64)`` against a String-returning body — an invalid
+        module at instantiation.  Correct: gc() == 42 and gd() is a
+        5-char String, so main returns 42 (else-arm -1 discriminates a
+        silently corrupted String value).
+        """
+        mods = [
+            self._resolved(("ca",), self.MOD_INT),
+            self._resolved(("da",), self.MOD_STR),
+        ]
+        assert self._run_mod(self.MAIN, mods, fn="main") == 42
+
+    def test_conflicting_module_aliases_run_flipped_order(self) -> None:
+        """Same program, module list reversed — pre-fix the corrupted
+        module flipped with processing order (da's ``F = String`` won and
+        ``gc`` broke instead)."""
+        mods = [
+            self._resolved(("da",), self.MOD_STR),
+            self._resolved(("ca",), self.MOD_INT),
+        ]
+        assert self._run_mod(self.MAIN, mods, fn="main") == 42
+
+    def test_module_fn_signatures_stay_module_typed(self) -> None:
+        """Emitted WAT signatures follow each module's OWN alias: gc's
+        ``F = Int`` is ``(result i64)``, gd's ``F = String`` is the
+        two-value String pair ``(result i32 i32)``."""
+        mods = [
+            self._resolved(("ca",), self.MOD_INT),
+            self._resolved(("da",), self.MOD_STR),
+        ]
+        result = self._compile_mod(self.MAIN, mods)
+        errors = [d for d in result.diagnostics if d.severity == "error"]
+        assert not errors, f"Unexpected errors: {[e.description for e in errors]}"
+        assert "(func $gc (result i64)" in result.wat
+        assert "(func $gd (result i32 i32)" in result.wat
+
+    def test_local_alias_never_leaks_into_module_body(self) -> None:
+        """A main-file ``type F = Bool`` must not re-type an imported
+        module's ``F = Int`` declarations (pre-fix the local registration
+        overwrote the flat map, so ``gc`` was emitted ``(result i32)``
+        against its harvested i64 signature)."""
+        mods = [self._resolved(("ca",), self.MOD_INT)]
+        val = self._run_mod("""\
+import ca(gc);
+
+type F = Bool;
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  let @F = true;
+  let @Int = gc(());
+  if @F.0 then { @Int.0 } else { 0 - 1 }
+}
+""", mods, fn="main")
+        assert val == 42
+
+    def test_generic_clones_use_defining_module_alias(self) -> None:
+        """Monomorphized clones of imported generics resolve alias-typed
+        params/returns against their DEFINING module's namespace: ga's
+        ``G = Int`` vs gb's ``G = String``."""
+        mods = [
+            self._resolved(("ga",), """\
+type G = Int;
+
+public forall<T> fn pick(@T, @G -> @G)
+  requires(true) ensures(true) effects(pure)
+{ @G.0 }
+"""),
+            self._resolved(("gb",), """\
+type G = String;
+
+public forall<T> fn wrap(@T, @G -> @G)
+  requires(true) ensures(true) effects(pure)
+{ @G.0 }
+"""),
+        ]
+        val = self._run_mod("""\
+import ga(pick);
+import gb(wrap);
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  let @Int = pick(true, 42);
+  let @String = wrap(1, "hey");
+  if string_length(@String.0) == 3 then { @Int.0 } else { 0 - 1 }
+}
+""", mods, fn="main")
+        assert val == 42
+
+    def test_single_module_alias_regression_guard(self) -> None:
+        """No-conflict baseline (green before AND after the fix): one
+        module using its own alias in param + return position keeps
+        working — guards the fix against dropping the working case."""
+        mods = [self._resolved(("ma",), """\
+type N = Int;
+
+public fn add1(@N -> @N)
+  requires(true) ensures(true) effects(pure)
+{ @N.0 + 1 }
+""")]
+        val = self._run_mod("""\
+import ma(add1);
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ add1(41) }
+""", mods, fn="main")
+        assert val == 42
+
+    def test_module_body_resolves_prelude_combinators(self) -> None:
+        """No-conflict baseline (green before AND after): a module body
+        using prelude combinators (whose signatures are spelled via
+        prelude-injected fn-type aliases like ``OptionMapFn``) keeps
+        working — guards the per-module effective map's prelude overlay."""
+        mods = [self._resolved(("mp",), """\
+public fn doubled(@Int -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  option_unwrap_or(
+    option_map(Some(@Int.0), fn(@Int -> @Int) effects(pure) { @Int.0 * 2 }),
+    0
+  )
+}
+""")]
+        val = self._run_mod("""\
+import mp(doubled);
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ doubled(20) }
+""", mods, fn="main")
+        assert val == 40
+
+    def test_alias_inside_harvested_return_type_is_canonical(self) -> None:
+        """A module return type with the alias in a NESTED position
+        (``-> @Array<F>``, ``F = Float64``) must reach main's element
+        inference already canonical (``Array<Float64>``).  Main indexes
+        the call DIRECTLY (no typed let-binding), so the element type
+        comes from the harvested return-type registry — a raw ``F``
+        there would resolve against main's namespace (where ``F`` is a
+        colliding ``String``) or fall to the i64 default; ``Float64``
+        elements make either wrong path loud (f64 vs i64 mismatch),
+        never a silent coincidence with the default."""
+        mods = [self._resolved(("na",), """\
+type F = Float64;
+
+public fn nums(@Unit -> @Array<F>)
+  requires(true) ensures(true) effects(pure)
+{ [1.5, 2.5, 3.5] }
+""")]
+        val = self._run_mod("""\
+import na(nums);
+
+type F = String;
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  if nums(())[1] == 2.5 then { 42 } else { 0 - 1 }
+}
+""", mods, fn="main")
+        assert val == 42
+
+
+    def test_shadowed_qualified_door_registry_entry_canonical(self) -> None:
+        """The mangled ``mod$…`` registry entry for a SHADOWED module fn
+        is canonicalized too — the qualified-door mirror of the bare-name
+        harvest (PR #1175 review).  The invariant is registry-level:
+        nothing enters ``_fn_ret_type_exprs`` carrying a module-local
+        alias name, because any consumer resolving it (the fused-await
+        classifier consumes exactly this bare-name registry) would do so
+        against the flat maps — the main file's namespace.  Asserted on
+        the stored expression directly; the end-to-end doors (await
+        fusion through a shadowed async fn) are heavyweight to stage and
+        the classifier reads precisely this entry."""
+        from vera import ast as vast
+
+        mods = [self._resolved(("na",), """\
+type F = Float64;
+
+public fn nums(@Unit -> @Array<F>)
+  requires(true) ensures(true) effects(pure)
+{ [1.5, 2.5, 3.5] }
+""")]
+        source = """\
+import na(nums);
+
+type F = String;
+
+public fn nums(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ 7 }
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ nums(()) * 6 }
+"""
+        import tempfile
+
+        from vera.codegen.core import CodeGenerator
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".vera", delete=False, encoding="utf-8"
+        ) as f:
+            f.write(source)
+            f.flush()
+            path = f.name
+        tree = parse_file(path)
+        prog = transform(tree)
+        gen = CodeGenerator(
+            source=source, file=path, resolved_modules=mods,
+        )
+        result = gen.compile_program(prog)
+        errors = [d for d in result.diagnostics if d.severity == "error"]
+        assert not errors, [e.description for e in errors]
+        mangled = [k for k in gen._fn_ret_type_exprs if k.startswith("mod$")]
+        assert mangled, (
+            f"expected a mod$ entry for the shadowed import, got keys: "
+            f"{sorted(gen._fn_ret_type_exprs)}"
+        )
+        te = gen._fn_ret_type_exprs[mangled[0]]
+        assert isinstance(te, vast.NamedType) and te.name == "Array"
+        assert te.type_args and isinstance(te.type_args[0], vast.NamedType)
+        assert te.type_args[0].name == "Float64", (
+            f"shadowed-door entry not canonical: Array<"
+            f"{te.type_args[0].name}> still carries the module-local "
+            f"alias name"
+        )
+
+    def test_parameterized_module_alias(self) -> None:
+        """A module's PARAMETERIZED alias (``type Boxed<T> = Option<T>``)
+        resolves through the per-module ``_type_alias_params`` capture —
+        both in the module's own signature and via the canonicalized
+        harvested return type consumed by main."""
+        mods = [self._resolved(("pa",), """\
+type Boxed<T> = Option<T>;
+
+public fn wrap2(@Int -> @Boxed<Int>)
+  requires(true) ensures(true) effects(pure)
+{ Some(@Int.0) }
+""")]
+        val = self._run_mod("""\
+import pa(wrap2);
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ option_unwrap_or(wrap2(41), 0) + 1 }
+""", mods, fn="main")
+        assert val == 42
+
+    def test_unit_aliased_generic_clone_statement_position(self) -> None:
+        """A module generic returning a Unit-ALIASED type (``-> @U``,
+        ``U = Unit``), called in block-statement position from main.
+
+        End-to-end regression for the void-classification edge (#584 ×
+        #1111): the clone must emit with NO result and the caller must
+        NOT emit a ``drop`` after it.  The statement-position void
+        decision currently resolves through the bare-name harvest
+        (``consume -> None``, computed under the module's own aliases in
+        ``temp``), so this pins the harvested-fallback path; the
+        registration-scope in Pass 1.5 additionally records the clone's
+        own entry truthfully (see the defence-in-depth note at that
+        site — its absence is masked by this very fallback, so no test
+        can currently distinguish it)."""
+        mods = [self._resolved(("gu",), """\
+type U = Unit;
+
+public forall<T> fn consume(@T -> @U)
+  requires(true) ensures(true) effects(pure)
+{ () }
+""")]
+        val = self._run_mod("""\
+import gu(consume);
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  consume(5);
+  42
+}
+""", mods, fn="main")
+        assert val == 42

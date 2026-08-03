@@ -6,10 +6,13 @@ call detection) of the code generation pipeline.
 
 from __future__ import annotations
 
+import contextlib
+from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
 from vera import ast
 from vera.errors import Diagnostic, SourceLocation
+from vera.monomorphize import canonicalize_type_aliases
 
 if TYPE_CHECKING:
     from vera.codegen.core import CodeGenerator
@@ -17,6 +20,46 @@ if TYPE_CHECKING:
 
 class CrossModuleMixin:
     """Methods for registering imported module declarations."""
+
+    @contextlib.contextmanager
+    def _module_alias_scope(
+        self, mod_path: tuple[str, ...] | None,
+    ) -> Iterator[None]:
+        """Resolve type aliases against *mod_path*'s own namespace (#1111).
+
+        Spec §8.4.1: a type alias is module-local — not importable, so two
+        modules may reuse one alias name for different targets, and the
+        main file's aliases must never re-type a module's declarations.
+        For the duration of the ``with`` block the flat
+        ``_type_aliases`` / ``_type_alias_params`` maps (main file +
+        non-shadowed prelude) are swapped for ``{prelude, **module_own}``
+        — the module's aliases overlaying the prelude's, mirroring how
+        the main file's own aliases overlay the prelude in the flat maps.
+        Every alias consumer downstream (signature derivation, contract
+        compilation, inference, closure lifting, compilability scans)
+        reads the instance fields mid-compile, so one swap here scopes
+        them all.  ``mod_path=None`` (a main-file declaration, or a mono
+        clone with no recorded origin) is a no-op.
+        """
+        if mod_path is None:
+            yield
+            return
+        gen: CodeGenerator = self  # type: ignore[assignment]
+        saved_aliases = gen._type_aliases
+        saved_params = gen._type_alias_params
+        gen._type_aliases = {
+            **gen._prelude_type_aliases,
+            **gen._module_type_aliases.get(mod_path, {}),
+        }
+        gen._type_alias_params = {
+            **gen._prelude_type_alias_params,
+            **gen._module_type_alias_params.get(mod_path, {}),
+        }
+        try:
+            yield
+        finally:
+            gen._type_aliases = saved_aliases
+            gen._type_alias_params = saved_params
 
     def _register_modules(self, program: ast.Program) -> None:
         """Register imported function signatures for cross-module codegen.
@@ -198,8 +241,24 @@ class CrossModuleMixin:
             # collision detection needed; if `fn_sigs` collision
             # detection above caught a name clash, the offending
             # decl was rejected before we reach this loop).
+            # #1111: canonicalize each harvested return type against the
+            # MODULE's own alias maps before it enters the shared
+            # registries.  Spec §8.4.1 makes aliases module-local, so an
+            # alias-spelled module return type (``-> @F``) stored raw
+            # would later be re-resolved against whatever namespace the
+            # consumer happens to hold (the main file's, or another
+            # module's) — the #1111 corruption.  Canonical entries carry
+            # no resolvable alias name, so every downstream consumer
+            # (the fused-await classifier, index-element extraction) is
+            # namespace-correct by construction.  A name the module's
+            # own maps cannot resolve (e.g. a prelude alias) is left
+            # as-is and falls back to the consumer-side resolution
+            # against the flat maps, which do hold the prelude's.
             for fn_name, ret_te in temp._fn_ret_type_exprs.items():
-                self._fn_ret_type_exprs.setdefault(fn_name, ret_te)
+                canonical_ret = canonicalize_type_aliases(
+                    ret_te, temp._type_aliases, temp._type_alias_params,
+                )
+                self._fn_ret_type_exprs.setdefault(fn_name, canonical_ret)
                 # #841 (PR #842 review round 2): also key by (module
                 # path, name) so a module-qualified await classifies by
                 # the RESOLVED target's return type.  The bare-name
@@ -208,7 +267,7 @@ class CrossModuleMixin:
                 # classified by a colliding local `grab`.
                 self._module_fn_ret_type_exprs[
                     (mod.path, fn_name)
-                ] = ret_te
+                ] = canonical_ret
 
             # Harvest per-parameter concrete-@Nat flags (#747, CR #756).
             # Without this an imported function `f(@Nat -> …)` loses its
@@ -324,9 +383,18 @@ class CrossModuleMixin:
                             transitive_contributed.add(adt_name)
                             transitive_contributed.update(layouts.keys())
 
-            # Harvest type aliases
-            for alias_name, alias_expr in temp._type_aliases.items():
-                self._type_aliases.setdefault(alias_name, alias_expr)
+            # Capture type aliases PER MODULE (#1111) — never into the
+            # flat maps.  Spec §8.4.1: a type alias is module-local, so
+            # two modules may reuse one name for different targets and
+            # neither the main file nor a sibling module may resolve
+            # through it.  ``_module_alias_scope`` installs this
+            # module's maps while its declarations compile / register;
+            # the old flat ``setdefault`` merge (first module won, local
+            # registration then overwrote) is exactly the #1111 bug.
+            self._module_type_aliases[mod.path] = dict(temp._type_aliases)
+            self._module_type_alias_params[mod.path] = dict(
+                temp._type_alias_params,
+            )
 
             # Collect ALL FnDecls from this module for compilation, and wire
             # up module-qualified-call resolution (#814 §8.5.3 + C2).
@@ -545,7 +613,18 @@ class CrossModuleMixin:
             mangled, temp._fn_byte_params.get(fn_name, ()))
         ret_te = temp._fn_ret_type_exprs.get(fn_name)
         if ret_te is not None:
-            self._fn_ret_type_exprs.setdefault(mangled, ret_te)
+            # #1111 (PR #1175 review): the shadowed door's mirror of the
+            # Pass-0 canonical harvest.  The mangled ``mod$…`` entry feeds
+            # the same shared registry, so a raw alias-spelled return type
+            # here would be re-resolved against the flat maps (the main
+            # file's aliases) by the qualified-call consumers — the exact
+            # corruption the bare-name path just closed.
+            self._fn_ret_type_exprs.setdefault(
+                mangled,
+                canonicalize_type_aliases(
+                    ret_te, temp._type_aliases, temp._type_alias_params,
+                ),
+            )
         if qualified_eligible:
             self._module_qualified_targets[(mod_path, fn_name)] = mangled
 

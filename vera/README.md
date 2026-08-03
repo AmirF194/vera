@@ -87,7 +87,7 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `  calls.py` | 1,556 | | Function/constructor/module/ability calls | |
 | `  control.py` | 627 | | If/match, patterns, effect handlers | |
 | `resolver.py` | 332 | Resolve | Module path resolution, parse cache | `ModuleResolver` |
-| `monomorphize.py` | 2,347 | Resolve | Shared generic instantiation discovery + AST substitution (verifier and codegen) | `substitute_type_vars()`, `resolve_type_alias()` |
+| `monomorphize.py` | 2,438 | Resolve | Shared generic instantiation discovery + AST substitution (verifier and codegen) | `substitute_type_vars()`, `resolve_type_alias()`, `canonicalize_type_aliases()` |
 | `smt.py` | 2,877 | Verify | Z3 translation layer | `SmtContext`, `SlotEnv` |
 | `verifier.py` | 7,321 | Verify | Contract verification | `verify()` |
 | `wasm/` | 25,941 | Compile | WASM translation layer (package) | `WasmContext`, `WasmSlotEnv`, `StringPool` |

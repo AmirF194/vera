@@ -228,6 +228,97 @@ def resolve_fn_type_alias(
     return resolved if isinstance(resolved, ast.FnType) else None
 
 
+def canonicalize_type_aliases(
+    te: ast.TypeExpr,
+    type_aliases: dict[str, ast.TypeExpr],
+    type_alias_params: dict[str, tuple[str, ...]],
+    _depth: int = 0,
+) -> ast.TypeExpr:
+    """Substitute every alias reference in *te* with its target, deeply (#1111).
+
+    :func:`resolve_type_alias` above follows the alias chain at the ROOT
+    of a type expression only — ``Array<F>`` is terminal there because
+    ``Array`` is no alias, so the element alias ``F`` survives.  This
+    walker rewrites nested positions too, producing an alias-free
+    ("canonical") expression: alias names are resolved with their
+    defining namespace's maps and the result carries no name that a
+    later consumer could re-resolve against the WRONG namespace.
+
+    That is exactly the module-harvest contract (#1111): spec §8.4.1 makes
+    type aliases module-local, so a module's return-type expressions are
+    canonicalized against the module's OWN alias maps at harvest time and
+    the shared registries (``_fn_ret_type_exprs`` /
+    ``_module_fn_ret_type_exprs``) stay namespace-free by construction.
+
+    Scope and deliberate limits:
+
+    - ``NamedType``: an alias name is substituted (binding its type args
+      to the alias's params, like :func:`resolve_type_alias`) and the
+      substitution re-walked; a non-alias name keeps its identity and
+      gets canonicalized type args.
+    - ``FnType``: params and return type are canonicalized; the effect
+      row is left verbatim.  The harvested-registry consumers (the
+      fused-await classifier and index-element extraction) never consult
+      effect-row type args, so a leftover alias name there is never
+      cross-namespace-resolved.
+    - ``RefinementType``: the base type is canonicalized, the predicate
+      kept verbatim — refinement predicates are only evaluated while
+      compiling the defining declaration, where the per-module alias
+      scope (``_module_alias_scope``) is active.
+    - Unknown / unhandled shapes return unchanged — conservative: the
+      pre-#1111 behaviour, never a wrong substitution.
+
+    The depth guard terminates a cyclic alias chain by returning the
+    expression as-is (defence-in-depth; the checker rejects circular
+    aliases upstream with ``[E132]``, #648 — same posture as
+    :func:`resolve_type_alias`'s ``seen`` guard).
+    """
+    if _depth > 64:
+        return te
+    if isinstance(te, ast.NamedType):
+        alias = type_aliases.get(te.name)
+        if alias is not None:
+            params = type_alias_params.get(te.name)
+            if params and te.type_args and len(params) == len(te.type_args):
+                alias = substitute_type_vars(
+                    alias, dict(zip(params, te.type_args)),
+                )
+            return canonicalize_type_aliases(
+                alias, type_aliases, type_alias_params, _depth + 1,
+            )
+        if te.type_args:
+            new_args = tuple(
+                canonicalize_type_aliases(
+                    a, type_aliases, type_alias_params, _depth + 1,
+                )
+                for a in te.type_args
+            )
+            if new_args != te.type_args:
+                return replace(te, type_args=new_args)
+        return te
+    if isinstance(te, ast.FnType):
+        new_params = tuple(
+            canonicalize_type_aliases(
+                p, type_aliases, type_alias_params, _depth + 1,
+            )
+            for p in te.params
+        )
+        new_ret = canonicalize_type_aliases(
+            te.return_type, type_aliases, type_alias_params, _depth + 1,
+        )
+        if new_params != te.params or new_ret is not te.return_type:
+            return replace(te, params=new_params, return_type=new_ret)
+        return te
+    if isinstance(te, ast.RefinementType):
+        new_base = canonicalize_type_aliases(
+            te.base_type, type_aliases, type_alias_params, _depth + 1,
+        )
+        if new_base is not te.base_type:
+            return replace(te, base_type=new_base)
+        return te
+    return te
+
+
 def substitute_type_param_names(name: str, mapping: dict[str, str]) -> str:
     """Substitute type-parameter NAMES inside a type-name *string* (#773).
 
