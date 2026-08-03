@@ -6,9 +6,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from vera import ast
 from vera.checker import typecheck
-from vera.errors import Diagnostic
+from vera.errors import Diagnostic, ParseError
 from vera.parser import parse_to_ast
 from vera.resolver import ResolvedModule
 
@@ -854,6 +856,278 @@ public fn json_get(@Unit -> @Int)
 { 0 }
 """)
         assert "E151" not in self._codes(errs), self._codes(errs)
+
+
+# =====================================================================
+# Reserved function names (E153) — #1181 one-canonical-form
+# =====================================================================
+
+
+class TestReservedFnName:
+    """A ``fn`` named ``old`` or ``new`` is rejected at its declaration
+    (E153, #1181).
+
+    The grammar reserves ``old(`` and ``new(`` in *expression* position for
+    the contract state forms — ``old_expr`` / ``new_expr`` in
+    ``vera/grammar.lark``, each of which demands an effect reference, not an
+    arbitrary expression.  So a *bare* ``old(5)`` can never parse as a call to
+    a user function — anywhere, including inside the declaring module — and
+    reaches ``[E030]``/``[E031]`` instead (#1173/#1180).  The one exception is
+    a module-qualified ``mod::old(...)``, which parses through the module-call
+    rule and previously DID call a module export named ``old``
+    (``test_module_qualified_call_route_is_deliberately_closed`` below pins
+    the shape).  The declaration used to be accepted anyway: a trap in every
+    unqualified position, half-usable cross-module only.  Rejecting it at the
+    declaration reserves the whole identifier — the sibling of E151 (built-in
+    functions) and E152 (built-in effects), and the same DESIGN.md "one
+    canonical form" / fail-loud rule.
+
+    **Why the set is exactly** ``{old, new}``.  Every candidate below was
+    probed by declaring ``private fn <name>(@Int -> @Int)`` and then calling
+    ``<name>(3)`` from ``main``:
+
+    * ``old``, ``new`` — declaration accepted, call rejected (E030 / E031).
+      Reserved here.
+    * ``resume``, ``throw``, ``with``, ``in``, ``effect``, ``op``, ``data``,
+      ``type``, ``import``, ``public``, ``private``, ``requires``,
+      ``ensures``, ``effects``, ``decreases``, ``where``, ``then``, ``else``,
+      ``pure``, ``invariant`` — declaration *and* call both accepted.  Not
+      reserved; nothing is wrong with them.
+    * ``assert``, ``assume``, ``forall``, ``exists``, ``handle``, ``match``,
+      ``if``, ``let``, ``fn``, ``true``, ``false`` — Lark's contextual lexer
+      re-lexes these keywords as ``LOWER_IDENT`` in declaration position, so
+      they declare fine, and a bare ``<name>(3)`` does not parse as a call
+      either.  They are deliberately **not** in the set: ``handle`` disproves
+      "uncallable from expression position" as a sufficient criterion on its
+      own, because ``public fn handle(@Request -> @Response)`` is the
+      ``vera serve`` entry point (spec §9.5.6, ``examples/http_server.vera``)
+      — invoked by the host, never from Vera source, and entirely legitimate.
+      Banning keywords as function names is a separate, broader rule that
+      would need its own carve-outs; #1181 is about the two names the
+      *contract state forms* reserve.
+    """
+
+    @staticmethod
+    def _codes(errs: list[Diagnostic]) -> list[str]:
+        return [e.error_code for e in errs]
+
+    def test_fn_named_old_is_E153(self) -> None:
+        errs = _errors("""
+public fn old(@Int -> @Int)
+  requires(true) ensures(@Int.result >= 0) effects(pure)
+{ 5 }
+""")
+        assert "E153" in self._codes(errs), self._codes(errs)
+        diag = next(e for e in errs if e.error_code == "E153")
+        # Names the identifier and the reason it can never be called.
+        assert "old" in diag.description
+        assert "reserved" in diag.description.lower()
+        # Instructional: states the rule, the why, and the fix.
+        assert diag.rationale and diag.fix and diag.spec_ref
+        assert "Chapter 5" in diag.spec_ref
+        # The fix is to rename, so it must say so.
+        assert "rename" in diag.fix.lower()
+
+    def test_fn_named_new_is_E153(self) -> None:
+        errs = _errors("""
+public fn new(@Int -> @Int)
+  requires(true) ensures(@Int.result >= 0) effects(pure)
+{ 5 }
+""")
+        assert "E153" in self._codes(errs), self._codes(errs)
+        diag = next(e for e in errs if e.error_code == "E153")
+        assert "new" in diag.description
+
+    def test_private_fn_named_old_is_E153(self) -> None:
+        """The gate is visibility-independent — a `private fn old` is just as
+        unreachable as a public one."""
+        errs = _errors("""
+private fn old(@Int -> @Int)
+  requires(true) ensures(@Int.result >= 0) effects(pure)
+{ 5 }
+""")
+        assert "E153" in self._codes(errs), self._codes(errs)
+
+    def test_generic_fn_named_new_is_E153(self) -> None:
+        """A generic ``forall<T>`` fn named after a reserved form is rejected
+        too — the grammar reservation is on the *call* spelling, which a type
+        parameter does not change."""
+        errs = _errors("""
+public forall<T> fn new(@T -> @T)
+  requires(true) ensures(true) effects(pure)
+{ @T.0 }
+""")
+        assert "E153" in self._codes(errs), self._codes(errs)
+
+    def test_where_helper_named_old_is_E153(self) -> None:
+        """A where-helper named ``old`` is rejected too.
+
+        Helpers are called in expression position exactly like top-level
+        functions, so ``old(...)`` inside the parent body hits the same
+        ``old_expr`` grammar rule — the helper is unreachable one scope
+        deeper.  Without this the gate would leave the identical dead
+        declaration legal in a ``where`` block.
+        """
+        errs = _errors("""
+public fn caller(@Int -> @Int)
+  requires(true) ensures(@Int.result >= 0) effects(pure)
+{ @Int.0 }
+where {
+  fn old(@Int -> @Int)
+    requires(true) ensures(true) effects(pure)
+  { 5 }
+}
+""")
+        assert "E153" in self._codes(errs), self._codes(errs)
+
+    def test_where_helper_named_new_is_E153(self) -> None:
+        errs = _errors("""
+public fn caller(@Int -> @Int)
+  requires(true) ensures(@Int.result >= 0) effects(pure)
+{ @Int.0 }
+where {
+  fn new(@Int -> @Int)
+    requires(true) ensures(true) effects(pure)
+  { 5 }
+}
+""")
+        assert "E153" in self._codes(errs), self._codes(errs)
+
+    def test_E153_is_the_only_diagnostic(self) -> None:
+        """The rejection must not cascade.
+
+        The rejected ``old`` is not registered, so nothing else in the
+        program may pick up a secondary error from its absence — the whole
+        report is the one E153 on the declaration.
+        """
+        errs = _errors("""
+public fn old(@Int -> @Int)
+  requires(true) ensures(@Int.result >= 0) effects(pure)
+{ 5 }
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ 0 }
+""")
+        codes = self._codes(errs)
+        assert "E153" in codes, codes
+        assert [c for c in codes if c != "E153"] == [], codes
+
+    def test_names_merely_containing_a_reserved_word_are_allowed(self) -> None:
+        """Prefix/suffix false-positive guard.
+
+        The reservation is on the whole identifier, not a substring: the
+        grammar only reserves the exact tokens ``old`` and ``new`` before a
+        ``(``.  ``older(3)`` and ``renew(3)`` parse as ordinary calls, so
+        those declarations must stay legal — a naive ``startswith`` /
+        ``in`` test would break every one of them.
+        """
+        for name in ("older", "renew", "news", "newton", "oldest", "newt"):
+            errs = _errors(f"""
+public fn {name}(@Int -> @Int)
+  requires(true) ensures(@Int.result >= 0) effects(pure)
+{{ 5 }}
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{{ {name}(3) }}
+""")
+            assert self._codes(errs) == [], (name, self._codes(errs))
+
+    def test_imported_module_fn_named_old_is_E153(self) -> None:
+        """An imported module declaring ``fn old`` is rejected in the importer.
+
+        Same surfacing mechanism as E151/E152: a module imported but never
+        checked standalone would otherwise carry the trapped declaration
+        silently.  Note the importer COULD previously call it — but only via
+        the qualified ``mod::old(...)`` route; the deliberate closure of that
+        route is pinned by
+        ``test_module_qualified_call_route_is_deliberately_closed`` below.
+        """
+        mod_src = (
+            "module stale;\n"
+            "public fn old(@Int -> @Int)\n"
+            "  requires(true) ensures(@Int.result >= 0) effects(pure)\n"
+            "{ 5 }\n"
+        )
+        mod = ResolvedModule(
+            path=("stale",),
+            file_path=Path("/fake/stale.vera"),
+            program=parse_to_ast(mod_src),
+            source=mod_src,
+        )
+        prog = parse_to_ast(
+            "import stale;\n"
+            "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ 0 }\n"
+        )
+        diags = typecheck(prog, source="", resolved_modules=[mod])
+        codes = [d.error_code for d in diags]
+        assert "E153" in codes, codes
+        # The harvested diagnostic carries the *module's* file path, as E151
+        # does, so `vera check --json` points at the real declaration.  Compare
+        # against str(mod.file_path) so the assertion holds on Windows too.
+        e153 = next(d for d in diags if d.error_code == "E153")
+        assert e153.location.file == str(mod.file_path), e153.location.file
+
+    def test_module_qualified_call_route_is_deliberately_closed(self) -> None:
+        """E153 fires even when a qualified call site proves reachability.
+
+        Adversarial-review finding on PR #1188: before the gate, this exact
+        program — module export named ``old``, importer calling it as
+        ``stale::old(5)`` — type-checked AND ran (``vera run`` printed 6).
+        The qualified route goes through the module-call rule, not the
+        reserved ``old_expr`` state form, so "no program could reach it" was
+        false for module exports.  The reservation is on the whole
+        identifier anyway (one-canonical-form, as E151/E152): a name that
+        is a trap in every unqualified position — its own module cannot
+        bare-call it — is refused outright rather than left half-usable.
+        This test pins that the previously-working shape now gets E153 at
+        the module declaration, i.e. the breakage is loud and located.
+        """
+        mod_src = (
+            "module stale;\n"
+            "public fn old(@Int -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ @Int.0 + 1 }\n"
+        )
+        mod = ResolvedModule(
+            path=("stale",),
+            file_path=Path("/fake/stale.vera"),
+            program=parse_to_ast(mod_src),
+            source=mod_src,
+        )
+        prog = parse_to_ast(
+            "import stale;\n"
+            "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ stale::old(5) }\n"
+        )
+        diags = typecheck(prog, source="", resolved_modules=[mod])
+        codes = [d.error_code for d in diags]
+        assert "E153" in codes, codes
+        e153 = next(d for d in diags if d.error_code == "E153")
+        assert e153.location.file == str(mod.file_path), e153.location.file
+
+    def test_effect_op_named_old_never_reaches_the_gate(self) -> None:
+        """Boundary pin: ``op old(...)`` is already refused by the grammar.
+
+        The gate covers ``fn`` declarations only.  It does not need to cover
+        effect operations, because ``op old(@Int -> @Int)`` is parsed as the
+        ``old_expr`` state form and fails at parse with ``[E030]`` — an
+        effect named-operation ``old`` cannot be written in the first place.
+        Pinning that here so a future grammar change that admits the ``op``
+        spelling shows up as a failure to widen the gate, rather than
+        silently reopening #1181 one construct across.
+        """
+        with pytest.raises(ParseError) as exc:
+            parse_to_ast("""
+effect Renamer {
+  op old(@Int -> @Int)
+}
+""")
+        assert exc.value.diagnostic.error_code == "E030"
 
 
 # =====================================================================

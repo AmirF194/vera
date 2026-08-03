@@ -63,6 +63,32 @@ def builtin_effect_names() -> frozenset[str]:
     return _registry_names()
 
 
+# Identifiers the grammar reserves in *expression* position, so a call to a
+# same-named function can never parse (E153, #1181).  ``old_expr`` and
+# ``new_expr`` in ``vera/grammar.lark`` claim ``"old" "("`` and ``"new" "("``
+# for the contract state forms, and each demands an *effect reference* as its
+# argument: ``old(5)`` is diagnosed as a malformed state reference
+# (``[E030]``/``[E031]``, #1173), never resolved as a call.  A *bare* call can
+# therefore never reach such a function — not from its own file, not from a
+# sibling in its own module, not from an importer.  One route did reach it:
+# a module-qualified ``mod::old(...)`` parses through the module-call rule,
+# not the state-form rule, so a module export named ``old`` was previously
+# callable cross-module (and only cross-module).  The reservation closes that
+# route deliberately: a name that is a trap in every unqualified position is
+# reserved outright rather than left half-usable, the same one-canonical-form
+# rule as E151/E152.
+#
+# The set is exactly the two contract state forms, and deliberately not every
+# keyword the contextual lexer lets through as a function name (``assert``,
+# ``assume``, ``forall``, ``exists``, ``handle``, ``match``, ``if``, ``let``,
+# ``fn``, ``true``, ``false``).  Being uncallable from expression position is
+# not on its own grounds for rejection: a function can be an *entry point* the
+# host invokes rather than Vera source — ``public fn handle(@Request ->
+# @Response)`` is the ``vera serve`` handler (spec §9.5.6).  Widening the rule
+# to keywords is a separate decision that needs its own carve-outs.
+_RESERVED_FN_NAMES = frozenset({"old", "new"})
+
+
 def _strip_rejected_where_fns(decl: ast.FnDecl) -> ast.FnDecl:
     """Return ``decl`` with any where-helper named after a built-in removed,
     recursively (#815).
@@ -106,6 +132,12 @@ class RegistrationMixin:
                     fix=f"private {kind} {name}(...) or public {kind} {name}(...)",
                     spec_ref='Chapter 8, Section 8.4 "Visibility"',
                 )
+            # #1181: a fn named after a contract state form (`old` / `new`)
+            # could never be called, because the grammar claims those spellings
+            # in expression position.  Checked before the E151 gate and without
+            # affecting its control flow, so the two rules stay independent.
+            if isinstance(tld.decl, ast.FnDecl):
+                self._check_reserved_fn_name(tld.decl)
             # #815: redefining a built-in is a one-canonical-form violation
             # (and a silent verifier↔runtime unsoundness for the
             # verifier-modelled built-ins).  Covers top-level and module
@@ -195,6 +227,49 @@ class RegistrationMixin:
         if nested_rejected:
             self._rejected_builtin_redefs.add(id(decl))
         return rejected
+
+    def _check_reserved_fn_name(self, decl: ast.FnDecl) -> None:
+        """Emit E153 if ``decl`` — or a nested where-helper — is named after a
+        contract state form (#1181).
+
+        Recurses into ``where_fns``: a helper is called in expression position
+        exactly like a top-level function, so a helper named ``old`` is
+        unreachable for the same reason, one scope deeper.
+
+        The rejected declaration is still registered, unlike E151's.  There is
+        no canonical built-in for the name to shadow here — nothing can resolve
+        to ``old`` at all — so leaving the entry in place costs nothing and
+        keeps this gate free of E151's skip bookkeeping.
+        """
+        if decl.name in _RESERVED_FN_NAMES:
+            n = decl.name
+            self._error(
+                decl,
+                f"Function name '{n}' is reserved.",
+                rationale=(
+                    f"'{n}' is a contract state form, not an ordinary "
+                    f"identifier: the grammar reads '{n}(' in expression "
+                    f"position as a reference to an effect's "
+                    f"{'pre' if n == 'old' else 'post'}-state, whose only "
+                    f"valid argument is an effect reference such as "
+                    f"'{n}(State<Int>)'. A call '{n}(...)' therefore never "
+                    f"resolves to a function, so this declaration could not "
+                    f"be reached from anywhere in the program — it is dead "
+                    f"code the compiler would otherwise accept in silence."
+                ),
+                fix=(
+                    f"Rename the function to an identifier that is not a "
+                    f"contract state form (e.g. '{n}_value' or "
+                    f"'{'previous' if n == 'old' else 'updated'}') and "
+                    f"update its call sites. Only the exact spellings 'old' "
+                    f"and 'new' are reserved — 'older' and 'renew' are "
+                    f"ordinary function names."
+                ),
+                spec_ref='Chapter 5, Section 5.2 "Function Declaration Syntax"',
+                error_code="E153",
+            )
+        for wfn in decl.where_fns or ():
+            self._check_reserved_fn_name(wfn)
 
     def _check_builtin_effect_redeclaration(
         self, decl: ast.EffectDecl,

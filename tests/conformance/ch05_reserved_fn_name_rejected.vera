@@ -1,0 +1,21 @@
+-- Conformance: a reserved function name is a checker error (Chapter 5, Section 5.2)
+-- Tests: E153 — a user fn named `old` or `new` is rejected at its declaration
+-- (#1181).  The grammar reserves `old(` and `new(` in expression position for
+-- the contract state forms, so a call `old(3)` parses as a state reference and
+-- fails with E030 — this function could never be reached.  Rejecting the
+-- declaration refuses the dead code at its source.
+public fn old(@Int -> @Int)
+  requires(true)
+  ensures(@Int.result >= 0)
+  effects(pure)
+{
+  5
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  0
+}
