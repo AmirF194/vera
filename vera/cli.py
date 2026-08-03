@@ -362,8 +362,12 @@ def cmd_compile(
     world: str = "cli",
 ) -> int:
     """Parse, type-check, and compile a .vera file to WebAssembly."""
+    from vera.ast import FnDecl
     from vera.checker import typecheck_with_artifacts
-    from vera.codegen import compile as codegen_compile
+    from vera.codegen import (
+        compile as codegen_compile,
+        dropped_entry_message,
+    )
     from vera.resolver import ModuleResolver
 
     # Pure flag validation — needs nothing from the program, so it
@@ -455,6 +459,81 @@ def cmd_compile(
                 print(f"warning: {w.format()}", file=sys.stderr)
             for e in errors:
                 print(e.format(), file=sys.stderr)
+            return 1
+
+        # #1183: a module that declares a public entry point and then
+        # exports nothing is a failed compile — the artifact cannot be
+        # called at all, and reporting "Compiled: out.wasm (0 functions
+        # exported)" over it is a green light on an unusable output.
+        #
+        # Gated on a public NON-GENERIC declaration existing, because two
+        # shapes export nothing by design and must stay successful: a file
+        # of private helpers, and a cross-module generic library (a
+        # `forall` template has no monomorphic body to export — its
+        # importers instantiate it).  The accumulated warnings — the
+        # [E602]/[E620] drops, when that is why the exports went away —
+        # travel with the failure.
+        entry_candidates = [
+            tld.decl.name
+            for tld in ast.declarations
+            if isinstance(tld.decl, FnDecl)
+            and tld.visibility == "public"
+            and not tld.decl.forall_vars
+        ]
+        if entry_candidates and not result.exports:
+            declared = "".join(f"  - {n}\n" for n in entry_candidates)
+            msg = (
+                "No exported functions — the compiled module has no entry "
+                "points.\n"
+                f"\nDeclared public functions:\n{declared}"
+                "\nA public function whose body (or a callee's body) could "
+                "not be compiled is dropped from the module with a "
+                "diagnostic above; fix the reported construct to restore "
+                "the export."
+            )
+            if as_json:
+                print(json.dumps({
+                    "ok": False,
+                    "file": path,
+                    "exports": [],
+                    "diagnostics": [{
+                        "severity": "error",
+                        "description": msg,
+                        "location": {"line": 0, "column": 0},
+                    }],
+                    "warnings": [w.to_dict() for w in all_warnings],
+                }, indent=2))
+                return 1
+            for w in all_warnings:
+                print(f"warning: {w.format()}", file=sys.stderr)
+            print(f"Error: {msg}", file=sys.stderr)
+            return 1
+
+        # #1183: the browser shell calls `main` unconditionally, so a
+        # bundle whose `main` was dropped is a page that fails at load.
+        # Refuse to write it, exactly as `vera run` refuses to run it.
+        if target == "browser" and "main" in result.dropped_fns:
+            msg = (
+                "--target browser: "
+                + dropped_entry_message("main", result, suggest_fn=False)
+                + "\n\nThe generated index.html calls main() on load, so "
+                "the bundle would fail in the browser."
+            )
+            if as_json:
+                print(json.dumps({
+                    "ok": False,
+                    "file": path,
+                    "diagnostics": [{
+                        "severity": "error",
+                        "description": msg,
+                        "location": {"line": 0, "column": 0},
+                    }],
+                    "warnings": [w.to_dict() for w in all_warnings],
+                }, indent=2))
+                return 1
+            for w in all_warnings:
+                print(f"warning: {w.format()}", file=sys.stderr)
+            print(f"Error: {msg}", file=sys.stderr)
             return 1
 
         # --target wasi-p2 (#237): emit the component BEFORE any success
@@ -705,7 +784,11 @@ def cmd_run(
         print(f"Error: {msg}", file=sys.stderr)
         return 1
     from vera.checker import typecheck_with_artifacts
-    from vera.codegen import compile as codegen_compile, execute
+    from vera.codegen import (
+        compile as codegen_compile,
+        dropped_entry_message,
+        execute,
+    )
     from vera.resolver import ModuleResolver
 
     try:
@@ -762,6 +845,60 @@ def cmd_run(
                 print(e.format(), file=sys.stderr)
             return 1
 
+        codegen_warnings = [
+            d for d in result.diagnostics if d.severity == "warning"
+        ]
+
+        # #1183: surface the skip/drop diagnostics on EVERY run that has
+        # them, not only when the drop happened to empty the export list.
+        # A program that still exports a sibling is exactly the case where
+        # the user is least likely to notice that something went missing,
+        # and a refused entry (below) needs the ROOT [E602]'s own wording,
+        # not just the location its [E620] quotes.  Printed to stderr, so
+        # the JSON envelope on stdout is unaffected; JSON consumers get
+        # the same content under the envelope's `warnings` key.
+        if codegen_warnings:
+            print("Compilation notes:", file=sys.stderr)
+            for w in codegen_warnings:
+                print(f"  - {w.description}", file=sys.stderr)
+
+        # #1183: refuse a DECLARED-but-dropped entry before anything else.
+        # This runs ahead of the no-exports branch below because "you wrote
+        # `main` and this construct is why it isn't there" is a strictly
+        # better answer than "no exported functions; try declaring one
+        # public" — which is actively misleading when `main` IS public.
+        requested_entry = fn_name
+        auto_selected_entry: str | None = None
+        if requested_entry is None and "main" not in result.exports:
+            if "main" in result.dropped_fns:
+                requested_entry = "main"
+            elif result.exports:
+                auto_selected_entry = result.exports[0]
+        if (
+            requested_entry is not None
+            and requested_entry not in result.exports
+            and requested_entry in result.dropped_fns
+        ):
+            msg = dropped_entry_message(requested_entry, result)
+            if as_json:
+                dropped_envelope: dict[str, object] = {
+                    "ok": False,
+                    "file": path,
+                    "diagnostics": [{
+                        "severity": "error",
+                        "description": msg,
+                        "location": {"line": 0, "column": 0},
+                    }],
+                }
+                if codegen_warnings:
+                    dropped_envelope["warnings"] = [
+                        w.to_dict() for w in codegen_warnings
+                    ]
+                print(json.dumps(dropped_envelope, indent=2))
+                return 1
+            print(f"Error: {msg}", file=sys.stderr)
+            return 1
+
         # Check for no-exports or private-fn-targeted cases
         if result.ok and not result.exports:
             # Build a summary of declared functions and their visibility
@@ -770,18 +907,11 @@ def cmd_run(
                 if isinstance(tld.decl, FnDecl):
                     vis = tld.visibility or "private"
                     fn_lines.append(f"  {vis} fn {tld.decl.name}")
-            warnings = [
-                d for d in result.diagnostics if d.severity == "warning"
-            ]
             msg = "No exported functions to call.\n"
             if fn_lines:
                 msg += "\nDeclared functions:\n"
                 msg += "\n".join(fn_lines)
                 msg += "\n"
-            if warnings:
-                msg += "\nCompilation notes:\n"
-                for w in warnings:
-                    msg += f"  - {w.description}\n"
             msg += (
                 "\nOnly public functions are exported as WASM entry points."
                 "\nTo make a function callable, declare it as public:\n"
@@ -794,7 +924,7 @@ def cmd_run(
                 "to validate without running."
             )
             if as_json:
-                print(json.dumps({
+                no_exports_envelope: dict[str, object] = {
                     "ok": False,
                     "file": path,
                     "diagnostics": [{
@@ -802,7 +932,12 @@ def cmd_run(
                         "description": msg,
                         "location": {"line": 0, "column": 0},
                     }],
-                }, indent=2))
+                }
+                if codegen_warnings:
+                    no_exports_envelope["warnings"] = [
+                        w.to_dict() for w in codegen_warnings
+                    ]
+                print(json.dumps(no_exports_envelope, indent=2))
                 return 1
             print(f"Error: {msg}", file=sys.stderr)
             return 1
@@ -844,6 +979,16 @@ def cmd_run(
                 return 1
             print(f"Error: {msg}", file=sys.stderr)
             return 1
+
+        # #1183: auto-selection survives only for the never-declared case
+        # (the single-function convenience), and announces itself so the
+        # choice is never invisible.
+        if auto_selected_entry is not None:
+            print(
+                f"Note: no 'main' declared — running public function "
+                f"'{auto_selected_entry}'.",
+                file=sys.stderr,
+            )
 
         # --target wasi-p2 (#237): execute as a component under the
         # built-in wasip2 host instead of the vera.* bindings.  The
@@ -940,6 +1085,14 @@ def cmd_run(
                 result_dict["stderr"] = exec_result.stderr
             if exec_result.exit_code is not None:
                 result_dict["exit_code"] = exec_result.exit_code
+            # #1183: the machine-readable half of the "Compilation notes"
+            # block — a JSON consumer must be able to see that functions
+            # were dropped from the module it just ran.  Present only when
+            # non-empty, so an ordinary run's envelope is unchanged.
+            if codegen_warnings:
+                result_dict["warnings"] = [
+                    w.to_dict() for w in codegen_warnings
+                ]
             print(json.dumps(result_dict, indent=2))
             return exec_result.exit_code if exec_result.exit_code else 0
 

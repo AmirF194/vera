@@ -769,33 +769,45 @@ class TestCmdCompile:
     ) -> None:
         """#1100: a skipped callee drops its caller cleanly at the CLI.
 
-        The compile succeeds (warnings only) — no raw wasmtime ``unknown
-        func`` text ever reaches the user — and both the root [E602] skip
-        and the caller's [E620] drop are printed, so the user can jump
-        from the dropped caller to the unsupported construct.
+        No raw wasmtime ``unknown func`` text ever reaches the user, and
+        both the root [E602] skip and the caller's [E620] drop are
+        printed, so the user can jump from the dropped caller to the
+        unsupported construct.
+
+        #1183 changed the EXIT CODE only: `main` was the file's only
+        public function, so dropping it leaves a module with no entry
+        point at all, and reporting that as a successful compile was a
+        green light over an unusable artifact.  The diagnostics — the
+        actual subject of this test — are unchanged.
         """
         path = _bad_vera(tmp_path, self._SKIP_WITH_CALLER)
         rc = cmd_compile(path, output=str(tmp_path / "out.wasm"))
-        assert rc == 0
+        assert rc == 1
         err = capsys.readouterr().err
         assert "unknown func" not in err
         assert "WAT compilation failed" not in err
         assert "[E602]" in err  # the root skip
         assert "[E620]" in err  # the caller drop, naming the root
+        assert "no entry points" in err
 
     def test_compile_skip_with_caller_json_warnings_1100(
         self,
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        """#1100 JSON leg: the success envelope carries E602 + E620."""
+        """#1100 JSON leg: the envelope carries E602 + E620.
+
+        #1183: `ok` is now False because the drop left the module with no
+        exported entry point (see the text-mode sibling above); the
+        warnings the test exists to pin are unaffected.
+        """
         path = _bad_vera(tmp_path, self._SKIP_WITH_CALLER)
         rc = cmd_compile(
             path, as_json=True, output=str(tmp_path / "out.wasm"),
         )
-        assert rc == 0
+        assert rc == 1
         data = json.loads(capsys.readouterr().out)
-        assert data["ok"] is True
+        assert data["ok"] is False
         codes = {w.get("error_code") for w in data["warnings"]}
         assert {"E602", "E620"} <= codes
 

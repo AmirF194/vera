@@ -24,6 +24,7 @@ from vera.smt import SlotEnv, SmtContext
 from vera.types import BOOL, BYTE, FLOAT64, INT, NAT, STRING, UNIT, ModuleArtifacts, PrimitiveType, RefinedType, Type, base_type
 
 if TYPE_CHECKING:
+    from vera.codegen import CompileResult
     from vera.resolver import ResolvedModule
 
 
@@ -321,13 +322,20 @@ class _TestEngine:
                 ))
                 continue
 
-            # Check if function is exported
-            if fn_name not in compile_result.exports:  # pragma: no cover — _get_targets filters private fns
+            # Not exported.  `_get_targets` already filtered out private
+            # declarations, so the live case here is #1186: a PUBLIC
+            # function that codegen DROPPED — its own `[E602]`-class skip,
+            # or the `[E620]` it earned by calling something skipped.
+            # Reporting that as "private" told the user to fix a
+            # visibility modifier that was already correct.
+            if fn_name not in compile_result.exports:
                 summary.skipped += 1
                 results.append(FunctionTestResult(
                     fn_name=fn_name,
                     category="skipped",
-                    reason="not exported (private)",
+                    reason=_not_exported_reason(
+                        fn_name, compile_result, self.file,
+                    ),
                     trials_run=0,
                     trials_passed=0,
                     trials_failed=0,
@@ -493,6 +501,31 @@ class _TestEngine:
                 ))
 
         return targets
+
+
+def _not_exported_reason(
+    fn_name: str, compile_result: CompileResult, file: str | None,
+) -> str:
+    """Why *fn_name* has no WASM export, for the skip line (#1186).
+
+    A codegen drop names the root diagnostic and where to find it — with
+    the file too when the root sits in an imported module, matching the
+    ``[E620]`` cross-file convention.  Everything else falls back to the
+    visibility explanation, the only other way a classified target can be
+    missing from the export list.
+    """
+    if fn_name not in compile_result.dropped_fns:
+        return "not exported (private)"
+    diag = compile_result.dropped_fns[fn_name]
+    if diag is None:  # pragma: no cover — every drop records its diagnostic
+        return "not exported (dropped by codegen)"
+    where = f"line {diag.location.line}, column {diag.location.column}"
+    if diag.location.file and diag.location.file != file:
+        where = f"{diag.location.file}, {where}"
+    return (
+        f"not exported (dropped by codegen — see the "
+        f"[{diag.error_code}] warning at {where})"
+    )
 
 
 # =====================================================================

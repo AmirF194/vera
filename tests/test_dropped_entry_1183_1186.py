@@ -1,0 +1,468 @@
+"""#1183 + #1186 — a dropped entry function must never be silently replaced.
+
+#1183: the #1100 skip propagation drops a check-/verify-clean function whose
+callee could not be compiled ([E602] root, [E620] caller drop).  When the
+DECLARED entry (``main``, or an explicit ``--fn``) was one of the dropped
+functions and any public sibling survived, ``execute()`` fell through to
+``result.exports[0]`` and ``vera run`` printed the SIBLING'S result with exit
+0 and empty stderr — a silent wrong answer, the one outcome the loud-skip
+design exists to prevent.  Post-fix the entry drop is a refusal; auto-selection
+survives only where no ``main`` was ever declared, and announces itself.
+
+#1186: the root ``[E602]`` for an IMPORTED function body carried the MAIN
+file's path with the MODULE's line/column, so the rendered source line quoted
+whatever happened to sit at that line in the importer.  It also kept the
+cross-file branch in ``_drop_dangling_callers`` permanently dark: the [E620]
+caller message compared ``root_diag.location.file`` against the main file and
+always matched, so the module context never reached the user.
+
+Fixtures use a ``Map<String, Array<Int>>`` value (an unsupported host-import
+shape) as the root [E602] trigger.  Every surviving sibling returns 4243 — a
+value no fallback, default, or error path produces — so "the sibling did not
+run" is decidable from the output alone.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from vera.checker import typecheck_with_artifacts
+from vera.cli import cmd_compile, cmd_run, cmd_test
+from vera.codegen import CompileResult
+from vera.codegen import compile as codegen_compile
+from vera.codegen import execute
+from vera.parser import parse_to_ast
+from vera.resolver import ModuleResolver
+
+# ---------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------
+
+# `main` calls a helper codegen cannot compile, so `main` is dropped;
+# `survivor` is outside the doomed subgraph and keeps its export.
+_MAIN_DROPPED_SIBLING_SURVIVES = """\
+private fn tally(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Map<String, Array<Int>> = map_insert(map_new(), "a", [1, 2]);
+  map_size(@Map<String, Array<Int>>.0)
+}
+
+public fn main(-> @Int) requires(true) ensures(true) effects(pure) {
+  tally()
+}
+
+public fn survivor(-> @Int) requires(true) ensures(true) effects(pure) {
+  4243
+}
+"""
+
+# No `main` anywhere: the single-public-export convenience path.
+_NO_MAIN_SINGLE_EXPORT = """\
+public fn only_one(-> @Int) requires(true) ensures(true) effects(pure) {
+  4243
+}
+"""
+
+# Every public function is dropped -> the module exports nothing.
+_ALL_EXPORTS_DROPPED = """\
+private fn tally(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Map<String, Array<Int>> = map_insert(map_new(), "a", [1, 2]);
+  map_size(@Map<String, Array<Int>>.0)
+}
+
+public fn main(-> @Int) requires(true) ensures(true) effects(pure) {
+  tally()
+}
+"""
+
+# A PUBLIC function with a Tier 3 contract whose body is dropped: reaches
+# the tester's export check (the trivial-contract filter would otherwise
+# short-circuit it).
+_TIER3_PUBLIC_DROPPED = """\
+public fn tally(@Int -> @Int) requires(@Int.0 > 0) ensures(@Int.0 >= 0) effects(pure) {
+  let @Map<String, Array<Int>> = map_insert(map_new(), "a", [1, 2]);
+  map_size(@Map<String, Array<Int>>.0) + @Int.0
+}
+"""
+
+# #1186: the unsupported construct lives in the imported module, the entry
+# in the importer.  `option_map` over a fn literal is not lowerable here,
+# so `helper` is [E602]-skipped in om.vera and `main` is [E620]-dropped in
+# appmain.vera.
+_MODULE_WITH_DROPPED_BODY = """\
+type OptionMapFn = fn(Int -> Int) effects(pure);
+
+public fn helper(@Int -> @Int) requires(true) ensures(true) effects(pure) {
+  option_unwrap_or(
+    option_map(Some(@Int.0), fn(@Int -> @Int) effects(pure) { @Int.0 * 2 }),
+    0
+  )
+}
+"""
+
+_MAIN_IMPORTING_DROPPED_BODY = """\
+import om(helper);
+
+public fn main(-> @Int) requires(true) ensures(true) effects(pure) {
+  helper(21)
+}
+"""
+
+
+def _write(tmp_path: Path, name: str, source: str) -> str:
+    path = tmp_path / name
+    path.write_text(source, encoding="utf-8")
+    return str(path)
+
+
+def _compile_files(
+    tmp_path: Path, files: dict[str, str], main_name: str,
+) -> CompileResult:
+    """Compile *main_name* with its siblings resolvable as modules."""
+    for name, src in files.items():
+        (tmp_path / name).write_text(src, encoding="utf-8")
+    main_path = tmp_path / main_name
+    source = files[main_name]
+    program = parse_to_ast(source)
+    resolver = ModuleResolver(_root=tmp_path)
+    resolved = resolver.resolve_imports(program, main_path)
+    assert not resolver.errors, (
+        f"module resolution errors: "
+        f"{[e.description for e in resolver.errors]}"
+    )
+    diags, arts = typecheck_with_artifacts(
+        program, source, file=str(main_path), resolved_modules=resolved,
+        collect_module_artifacts=True,
+    )
+    errors = [d for d in diags if d.severity == "error"]
+    assert not errors, f"typecheck errors: {[d.description for d in errors]}"
+    return codegen_compile(
+        program, source=source, file=str(main_path),
+        resolved_modules=resolved,
+        expr_semantic_types=arts.expr_semantic_types,
+        expr_target_types=arts.expr_target_types,
+        module_artifacts=arts.module_artifacts,
+    )
+
+
+# =====================================================================
+# #1183 — `vera run` refuses a dropped entry
+# =====================================================================
+
+
+class TestRunRefusesDroppedEntry:
+    """A DECLARED-but-dropped entry is an error, never a substitution."""
+
+    def test_dropped_main_never_runs_the_sibling(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The #1183 repro: exit nonzero, name `main`, never print 4243."""
+        path = _write(
+            tmp_path, "survivor.vera", _MAIN_DROPPED_SIBLING_SURVIVES,
+        )
+        rc = cmd_run(path)
+        captured = capsys.readouterr()
+        assert rc != 0, "a dropped entry must not exit 0"
+        assert "4243" not in captured.out, (
+            "the surviving sibling's body must never execute in place of "
+            f"the declared entry (stdout was {captured.out!r})"
+        )
+        assert "main" in captured.err
+        # The refusal must carry the ROOT reason, not just "not found".
+        assert "E620" in captured.err or "E602" in captured.err
+        # ...and the notes precede it, so the root [E602]'s own wording is
+        # visible, not only the location its [E620] quotes.
+        assert "Compilation notes" in captured.err
+        assert "tally" in captured.err
+
+    def test_explicit_fn_dropped_is_refused_with_root_reason(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """`--fn main` on a dropped `main` names why it is gone."""
+        path = _write(
+            tmp_path, "survivor.vera", _MAIN_DROPPED_SIBLING_SURVIVES,
+        )
+        rc = cmd_run(path, fn_name="main")
+        captured = capsys.readouterr()
+        assert rc != 0
+        assert "4243" not in captured.out
+        assert "main" in captured.err
+        assert "E620" in captured.err or "E602" in captured.err
+        assert "dropped" in captured.err.lower()
+
+    def test_dropped_entry_json_is_not_ok(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """JSON mode reports ok: false with the drop reason."""
+        path = _write(
+            tmp_path, "survivor.vera", _MAIN_DROPPED_SIBLING_SURVIVES,
+        )
+        rc = cmd_run(path, as_json=True)
+        out = capsys.readouterr().out
+        assert rc != 0
+        data = json.loads(out)
+        assert data["ok"] is False
+        assert "4243" not in json.dumps(data.get("value"))
+        assert any(
+            "main" in d["description"] for d in data["diagnostics"]
+        )
+        # The notes reach machine consumers under `warnings`, mirroring
+        # the stderr block text mode prints.
+        codes = {w.get("error_code") for w in data["warnings"]}
+        assert {"E602", "E620"} <= codes
+
+    def test_compilation_notes_shown_when_a_sibling_survives(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The notes block is no longer gated on an empty export list."""
+        path = _write(
+            tmp_path, "survivor.vera", _MAIN_DROPPED_SIBLING_SURVIVES,
+        )
+        cmd_run(path, fn_name="survivor")
+        captured = capsys.readouterr()
+        assert "Compilation notes" in captured.err, (
+            "E602/E620 diagnostics must surface even when exports survive"
+        )
+        # The sibling was explicitly requested, so it DOES run here.
+        assert "4243" in captured.out
+
+    def test_library_execute_refuses_silent_substitution(
+        self, tmp_path: Path,
+    ) -> None:
+        """``execute()`` itself must not fall through to exports[0]."""
+        result = _compile_files(
+            tmp_path,
+            {"survivor.vera": _MAIN_DROPPED_SIBLING_SURVIVES},
+            "survivor.vera",
+        )
+        assert "main" not in result.exports
+        assert "survivor" in result.exports
+        with pytest.raises(RuntimeError, match="main"):
+            execute(result)
+
+    def test_compile_result_records_dropped_entry(
+        self, tmp_path: Path,
+    ) -> None:
+        """The drop is reified on CompileResult, not re-derived by callers."""
+        result = _compile_files(
+            tmp_path,
+            {"survivor.vera": _MAIN_DROPPED_SIBLING_SURVIVES},
+            "survivor.vera",
+        )
+        assert "main" in result.dropped_fns
+        assert "survivor" not in result.dropped_fns
+        reason = result.dropped_fns["main"]
+        assert reason is not None
+        assert reason.error_code in {"E602", "E620"}
+
+
+# =====================================================================
+# #1183 — auto-selection survives only for the never-declared case
+# =====================================================================
+
+
+class TestAutoSelectionAnnouncesItself:
+    """No `main` declared: the convenience path stays, but says so."""
+
+    def test_single_public_export_auto_selected_with_note(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        path = _write(tmp_path, "single.vera", _NO_MAIN_SINGLE_EXPORT)
+        rc = cmd_run(path)
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert "4243" in captured.out, "the single export must still run"
+        assert "only_one" in captured.err, (
+            "an auto-selected entry must be named on stderr"
+        )
+
+    def test_note_is_one_line(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        path = _write(tmp_path, "single.vera", _NO_MAIN_SINGLE_EXPORT)
+        cmd_run(path)
+        err = capsys.readouterr().err.strip()
+        assert "only_one" in err, "the note itself must be present"
+        assert err.count("\n") == 0, f"note must be one line, got {err!r}"
+
+    def test_json_mode_reports_the_selected_function(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        path = _write(tmp_path, "single.vera", _NO_MAIN_SINGLE_EXPORT)
+        rc = cmd_run(path, as_json=True)
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["function"] == "only_one"
+
+
+# =====================================================================
+# #1183 — sibling surfaces: compile / browser bundle
+# =====================================================================
+
+
+class TestCompileZeroExports:
+    """A module with no callable entry point is a failed compile."""
+
+    def test_zero_exports_exits_nonzero_with_notes(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        path = _write(tmp_path, "allgone.vera", _ALL_EXPORTS_DROPPED)
+        rc = cmd_compile(path, output=str(tmp_path / "out.wasm"))
+        captured = capsys.readouterr()
+        assert rc != 0, "0 exported functions is not a successful compile"
+        assert "E602" in captured.err or "E620" in captured.err, (
+            "the drop diagnostics must be shown alongside the failure"
+        )
+
+    def test_zero_exports_json_is_not_ok(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        path = _write(tmp_path, "allgone.vera", _ALL_EXPORTS_DROPPED)
+        rc = cmd_compile(
+            path, as_json=True, output=str(tmp_path / "out.wasm"),
+        )
+        assert rc != 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["ok"] is False
+        assert data["diagnostics"], "the failure must carry a diagnostic"
+
+    def test_browser_bundle_refuses_dropped_main(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """index.html hardcodes call('main') — never emit it for a drop.
+
+        Deliberately uses the SURVIVING-sibling fixture: with a non-empty
+        export list the zero-exports check above cannot fire, so a pass
+        here can only come from the browser path's own refusal.
+        """
+        path = _write(
+            tmp_path, "survivor.vera", _MAIN_DROPPED_SIBLING_SURVIVES,
+        )
+        out_dir = tmp_path / "bundle"
+        rc = cmd_compile(path, target="browser", output=str(out_dir))
+        assert rc != 0
+        assert not (out_dir / "index.html").exists(), (
+            "a bundle whose entry does not exist must not be written"
+        )
+
+
+# =====================================================================
+# #1186 — imported bodies locate in their own module
+# =====================================================================
+
+
+class TestImportedDiagnosticLocation:
+    """The [E602] root of an imported body belongs to the module file."""
+
+    def test_root_e602_carries_the_module_path(self, tmp_path: Path) -> None:
+        result = _compile_files(
+            tmp_path,
+            {
+                "om.vera": _MODULE_WITH_DROPPED_BODY,
+                "appmain.vera": _MAIN_IMPORTING_DROPPED_BODY,
+            },
+            "appmain.vera",
+        )
+        roots = [d for d in result.diagnostics if d.error_code == "E602"]
+        assert roots, "expected the imported body to be skipped"
+        root = roots[0]
+        assert Path(root.location.file).name == "om.vera", (
+            f"imported [E602] must locate in its own module, got "
+            f"{root.location.file!r}"
+        )
+        # Module-local coordinates are retained, not remapped.
+        assert root.location.line == 5
+        assert root.location.column == 5
+
+    def test_root_e602_quotes_the_module_source_line(
+        self, tmp_path: Path,
+    ) -> None:
+        result = _compile_files(
+            tmp_path,
+            {
+                "om.vera": _MODULE_WITH_DROPPED_BODY,
+                "appmain.vera": _MAIN_IMPORTING_DROPPED_BODY,
+            },
+            "appmain.vera",
+        )
+        root = next(
+            d for d in result.diagnostics if d.error_code == "E602"
+        )
+        assert "option_map" in root.source_line, (
+            f"rendered source line came from the wrong file: "
+            f"{root.source_line!r}"
+        )
+
+    def test_e620_message_carries_the_cross_file_prefix(
+        self, tmp_path: Path,
+    ) -> None:
+        """The dark branch in ``_drop_dangling_callers`` must now fire."""
+        result = _compile_files(
+            tmp_path,
+            {
+                "om.vera": _MODULE_WITH_DROPPED_BODY,
+                "appmain.vera": _MAIN_IMPORTING_DROPPED_BODY,
+            },
+            "appmain.vera",
+        )
+        e620s = [d for d in result.diagnostics if d.error_code == "E620"]
+        assert e620s, "expected `main` to be dropped as a dangling caller"
+        msg = e620s[0].description
+        root = next(d for d in result.diagnostics if d.error_code == "E602")
+        # Derived from the root rather than rebuilt from tmp_path: macOS
+        # resolves /var -> /private/var, and the point being pinned is
+        # that the E620 quotes the ROOT's file, whatever spelling it has.
+        assert Path(root.location.file).name == "om.vera"
+        assert f"at {root.location.file}, line 5, column 5" in msg, (
+            f"E620 must name the module the root came from, got {msg!r}"
+        )
+
+    def test_same_file_drop_keeps_the_bare_location(
+        self, tmp_path: Path,
+    ) -> None:
+        """No regression: a main-file root has no file prefix."""
+        result = _compile_files(
+            tmp_path,
+            {"survivor.vera": _MAIN_DROPPED_SIBLING_SURVIVES},
+            "survivor.vera",
+        )
+        e620s = [d for d in result.diagnostics if d.error_code == "E620"]
+        assert e620s
+        assert "at line 2, column 3" in e620s[0].description
+
+
+# =====================================================================
+# #1186 — `vera test` names the real skip reason
+# =====================================================================
+
+
+class TestTesterSkipReason:
+    """A dropped PUBLIC function is not "private"."""
+
+    def test_dropped_public_fn_is_not_labelled_private(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        path = _write(tmp_path, "t3.vera", _TIER3_PUBLIC_DROPPED)
+        cmd_test(path)
+        out = capsys.readouterr().out
+        assert "tally" in out
+        assert "(private)" not in out, (
+            f"a public-but-dropped fn must not be called private: {out!r}"
+        )
+        assert "E602" in out
+        assert "dropped by codegen" in out
+
+    def test_dropped_public_fn_json_reason_names_the_root(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        path = _write(tmp_path, "t3.vera", _TIER3_PUBLIC_DROPPED)
+        cmd_test(path, as_json=True)
+        data = json.loads(capsys.readouterr().out)
+        entry = next(f for f in data["functions"] if f["name"] == "tally")
+        assert entry["category"] == "skipped"
+        assert "(private)" not in entry["reason"]
+        assert "[E602]" in entry["reason"]
+        # Same-file root: no redundant path prefix, matching [E620].
+        assert str(tmp_path) not in entry["reason"]

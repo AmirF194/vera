@@ -148,6 +148,15 @@ vera run file.vera --fn f -- 42    # call f with argument 42 (args after --)
 Everything after `--` is passed to the function, parsed by type (so `42` becomes
 an `@Int`). Use `--fn` to enter at a function other than `main`.
 
+The entry is never substituted. If the function you asked for — `main`, or a
+`--fn` name — was declared but dropped from the compiled output (an `[E602]`
+skip in it or in something it calls, propagating as `[E620]`), `vera run` exits
+nonzero and names the function and the root diagnostic rather than running a
+surviving sibling. Auto-selection applies only where no `main` was ever
+declared: the single public export runs, and a one-line `Note:` on stderr says
+which function was chosen. Any `[E602]`/`[E620]` diagnostic is printed under
+`Compilation notes:` on every run that has one, whether or not exports survived.
+
 ```bash
 vera compile file.vera                     # emit a .wasm binary
 vera compile -o out.wasm file.vera         # choose the output path
@@ -158,7 +167,11 @@ vera compile --target browser file.vera    # emit a browser bundle (wasm + JS + 
 `--wat` is the window into codegen: when a program runs wrong (not *verifies*
 wrong — *runs* wrong), the WAT is the ground truth of what was emitted.
 `--target browser` produces a self-contained bundle that runs the same WASM in
-the browser runtime.
+the browser runtime; it refuses to write the bundle when `main` was dropped,
+since the generated `index.html` calls `main()` on load. A compile that declares
+a public non-generic function and then exports nothing at all exits nonzero —
+the module has no entry point. A file of private helpers, or a cross-module
+generic library, still compiles successfully with no exports.
 
 ```bash
 vera compile --target wasi-p2 file.vera    # emit a WASI Preview 2 component (experimental)
