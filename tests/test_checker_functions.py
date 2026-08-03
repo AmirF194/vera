@@ -660,6 +660,122 @@ private fn f(@Int -> @Int)
 
 
 # =====================================================================
+# Contract state forms in the wrong clause (#1173)
+# =====================================================================
+
+class TestContractStateFormPlacement:
+    """`old()` / `new()` / `@T.result` in a clause that cannot host them.
+
+    All three are ensures-only.  The pre-existing diagnostics already
+    name the construct and the rule; these tests pin the caret and the
+    wording so the shape the issue asked for cannot silently regress
+    while the neighbouring parse diagnostic (E030/E031) is in place.
+    """
+
+    def test_old_in_requires_carets_the_construct(self) -> None:
+        errs = _check_err("""
+private fn tick(@Unit -> @Int)
+  requires(old(State<Int>) > 0)
+  ensures(true)
+  effects(<State<Int>>)
+{ get(()) }
+""", "old() is only valid")
+        old_errs = [e for e in errs if e.error_code == "E174"]
+        assert old_errs, [e.error_code for e in errs]
+        diag = old_errs[0]
+        assert diag.location.line == 3
+        assert diag.location.column == 12  # the `o` of `old`
+        assert "ensures()" in diag.description
+        # requires() observes the pre-state already — say so.
+        assert "requires()" in diag.rationale
+        assert "decreases()" in diag.rationale
+
+    def test_old_in_decreases_carets_the_construct(self) -> None:
+        errs = _check_err("""
+private fn down(@Nat -> @Nat)
+  requires(true)
+  ensures(true)
+  decreases(old(State<Int>))
+  effects(<State<Int>>)
+{ if @Nat.0 == 0 then { 0 } else { down(@Nat.0 - 1) } }
+""", "old() is only valid")
+        old_errs = [e for e in errs if e.error_code == "E174"]
+        assert old_errs, [e.error_code for e in errs]
+        assert old_errs[0].location.line == 5
+        assert old_errs[0].location.column == 13
+
+    def test_new_in_decreases_is_e175(self) -> None:
+        """new() in decreases() reports E175 with the caret on `new` — a
+        regression permitting new() only in decreases would pass the
+        requires-clause tests alone (PR review)."""
+        errs = _check_err("""
+private fn tick(@Nat -> @Nat)
+  requires(true)
+  ensures(true)
+  decreases(new(State<Nat>))
+  effects(<State<Nat>>)
+{ @Nat.0 }
+""", "new() is only valid")
+        new_errs = [e for e in errs if e.error_code == "E175"]
+        assert new_errs, [e.error_code for e in errs]
+        assert new_errs[0].location.column == 13
+
+    def test_new_in_requires_carets_the_construct(self) -> None:
+        errs = _check_err("""
+private fn tick(@Unit -> @Int)
+  requires(new(State<Int>) > 0)
+  ensures(true)
+  effects(<State<Int>>)
+{ get(()) }
+""", "new() is only valid")
+        new_errs = [e for e in errs if e.error_code == "E175"]
+        assert new_errs, [e.error_code for e in errs]
+        assert new_errs[0].location.line == 3
+        assert new_errs[0].location.column == 12
+
+    def test_result_ref_in_requires_carets_the_construct(self) -> None:
+        # The sibling construct.  Unlike old()/new() with an expression
+        # argument, `@T.result` is grammatical everywhere an expression
+        # is, so it always reached the checker and always had a dedicated
+        # diagnostic (E131) — no parse-level work was needed for it.
+        errs = _check_err("""
+private fn foo(@Int -> @Int)
+  requires(@Int.result > 0)
+  ensures(true)
+  effects(pure)
+{ @Int.0 }
+""", "@Int.result is only valid inside ensures")
+        res_errs = [e for e in errs if e.error_code == "E131"]
+        assert res_errs, [e.error_code for e in errs]
+        assert res_errs[0].location.line == 3
+        assert res_errs[0].location.column == 12
+
+    def test_result_ref_in_decreases_carets_the_construct(self) -> None:
+        errs = _check_err("""
+private fn down(@Nat -> @Nat)
+  requires(true)
+  ensures(true)
+  decreases(@Nat.result)
+  effects(pure)
+{ if @Nat.0 == 0 then { 0 } else { down(@Nat.0 - 1) } }
+""", "@Nat.result is only valid inside ensures")
+        res_errs = [e for e in errs if e.error_code == "E131"]
+        assert res_errs, [e.error_code for e in errs]
+        assert res_errs[0].location.line == 5
+        assert res_errs[0].location.column == 13
+
+    def test_old_in_ensures_still_accepted(self) -> None:
+        _check_ok("""
+private fn tick(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == old(State<Int>)
+    && new(State<Int>) == old(State<Int>) + 1)
+  effects(<State<Int>>)
+{ let @Int = get(()); put(@Int.0 + 1); @Int.0 }
+""")
+
+
+# =====================================================================
 # Coverage: control.py — if-expression branches
 # =====================================================================
 

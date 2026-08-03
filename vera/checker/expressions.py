@@ -49,6 +49,16 @@ _I64_MIN = -(2**63)
 _U64_MAX = 2**64 - 1
 
 
+# Shared E174/E175 fix text — one copy so the two diagnostics cannot
+# drift apart (PR #1180 review).
+_STATE_FORM_PLACEMENT_FIX = (
+    "Move the predicate into an ensures() clause. A precondition cannot "
+    "constrain effect state at all: contract predicates must be pure "
+    "(Section 7.9.1), and old()/new() are the only contract forms that "
+    "name state."
+)
+
+
 class ExpressionsMixin:
     """Mixin providing expression type synthesis and related methods."""
 
@@ -1303,9 +1313,12 @@ class ExpressionsMixin:
                 rationale=(
                     "old() snapshots effect state from before the call, which "
                     "is only meaningful in a postcondition that relates "
-                    "before- and after-states."
+                    "before- and after-states. A requires() or decreases() "
+                    "clause is itself evaluated before the body runs, so "
+                    "every expression in it already observes the pre-state "
+                    "and old() has nothing left to refer to."
                 ),
-                fix="Move the old() expression inside an ensures() clause.",
+                fix=_STATE_FORM_PLACEMENT_FIX,
                 spec_ref='Chapter 7, Section 7.9 "Effect-Contract Interaction"',
                 error_code="E174",
             )
@@ -1323,9 +1336,12 @@ class ExpressionsMixin:
                 rationale=(
                     "new() snapshots effect state from after the call, which "
                     "is only meaningful in a postcondition that relates "
-                    "before- and after-states."
+                    "before- and after-states. A requires() or decreases() "
+                    "clause is evaluated before the body runs, so the "
+                    "after-state new() names does not exist yet at that "
+                    "point."
                 ),
-                fix="Move the new() expression inside an ensures() clause.",
+                fix=_STATE_FORM_PLACEMENT_FIX,
                 spec_ref='Chapter 7, Section 7.9 "Effect-Contract Interaction"',
                 error_code="E175",
             )

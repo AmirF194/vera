@@ -1093,6 +1093,199 @@ class TestParseErrors:
 
 
 # =====================================================================
+# old() / new() argument diagnostics (#1173)
+# =====================================================================
+
+
+def _bump(clauses: str) -> str:
+    """A one-function program whose contract block is `clauses`."""
+    return (
+        "public fn bump(@Int -> @Int)\n"
+        f"{clauses}\n"
+        "  effects(pure)\n"
+        "{ @Int.0 + 1 }\n"
+    )
+
+
+class TestOldNewArgumentDiagnostic:
+    """`old(...)` / `new(...)` applied to an expression rather than an
+    effect reference (#1173, VeraBench VB-T5-009).
+
+    Vera's `old`/`new` take an *effect* reference — `old(State<Int>)`,
+    spec 7.9.2 — not a Dafny-style arbitrary expression.  A model that
+    reaches for `old(@Int.0)` used to get E005 "Unexpected @ ... Expected
+    UPPER_IDENT" with the caret on the argument, which names neither the
+    construct at fault nor the rule it breaks.
+    """
+
+    def test_old_slot_ref_reports_e030(self) -> None:
+        with pytest.raises(ParseError) as exc:
+            parse(_bump("  requires(old(@Int.0) > 0)\n  ensures(true)"))
+        assert exc.value.diagnostic.error_code == "E030"
+
+    def test_caret_lands_on_old_not_its_argument(self) -> None:
+        # The author's mistake is the `old(`, not the `@` two columns to
+        # its right that the parser happens to choke on.
+        with pytest.raises(ParseError) as exc:
+            parse(_bump("  requires(old(@Int.0) > 0)\n  ensures(true)"))
+        loc = exc.value.diagnostic.location
+        assert loc.line == 2
+        assert loc.column == 12  # the `o` of `old`, not the `@` at 16
+
+    def test_message_names_old_and_ensures(self) -> None:
+        with pytest.raises(ParseError) as exc:
+            parse(_bump("  requires(old(@Int.0) > 0)\n  ensures(true)"))
+        diag = exc.value.diagnostic
+        assert "old()" in diag.description
+        assert "ensures()" in diag.description
+        assert "effect reference" in diag.description
+        # The fix must show the form that actually works.
+        assert "State<Int>" in diag.fix
+
+    def test_diagnostic_carries_every_field(self) -> None:
+        with pytest.raises(ParseError) as exc:
+            parse(_bump("  requires(old(@Int.0) > 0)\n  ensures(true)"))
+        diag = exc.value.diagnostic
+        assert diag.error_code == "E030"
+        assert diag.description and diag.rationale and diag.fix
+        assert diag.spec_ref and diag.error_code
+        assert diag.source_line == "  requires(old(@Int.0) > 0)"
+
+    def test_rationale_explains_pre_state(self) -> None:
+        # requires()/decreases() are evaluated before the body runs, so
+        # they already observe the pre-state.
+        with pytest.raises(ParseError) as exc:
+            parse(_bump("  requires(old(@Int.0) > 0)\n  ensures(true)"))
+        rationale = exc.value.diagnostic.rationale
+        assert "requires()" in rationale
+        assert "decreases()" in rationale
+
+    def test_fires_inside_ensures_too(self) -> None:
+        # The argument is wrong wherever it appears — moving it into
+        # ensures() would not help, so the diagnostic must not be
+        # conditioned on the enclosing clause.
+        with pytest.raises(ParseError) as exc:
+            parse(_bump("  requires(true)\n  ensures(old(@Int.0) > 0)"))
+        assert exc.value.diagnostic.error_code == "E030"
+        assert exc.value.diagnostic.location.line == 3
+        assert exc.value.diagnostic.location.column == 11
+
+    def test_nested_in_a_larger_requires_expression(self) -> None:
+        with pytest.raises(ParseError) as exc:
+            parse(_bump("  requires(old(@Int.0) > 0 && true)\n  ensures(true)"))
+        assert exc.value.diagnostic.error_code == "E030"
+        assert exc.value.diagnostic.location.column == 12
+
+    def test_in_decreases_clause(self) -> None:
+        with pytest.raises(ParseError) as exc:
+            parse(_bump(
+                "  requires(true)\n  ensures(true)\n  decreases(old(@Int.0))"
+            ))
+        assert exc.value.diagnostic.error_code == "E030"
+        assert exc.value.diagnostic.location.line == 4
+        assert exc.value.diagnostic.location.column == 13
+
+    def test_arbitrary_expression_argument(self) -> None:
+        with pytest.raises(ParseError) as exc:
+            parse(_bump("  requires(old(@Int.0 + 1) > 0)\n  ensures(true)"))
+        assert exc.value.diagnostic.error_code == "E030"
+
+    def test_call_argument(self) -> None:
+        with pytest.raises(ParseError) as exc:
+            parse(_bump("  requires(old(helper(())) > 0)\n  ensures(true)"))
+        assert exc.value.diagnostic.error_code == "E030"
+
+    def test_result_ref_argument(self) -> None:
+        with pytest.raises(ParseError) as exc:
+            parse(_bump("  requires(true)\n  ensures(old(@Int.result) > 0)"))
+        assert exc.value.diagnostic.error_code == "E030"
+
+    def test_empty_argument(self) -> None:
+        with pytest.raises(ParseError) as exc:
+            parse(_bump("  requires(old() > 0)\n  ensures(true)"))
+        assert exc.value.diagnostic.error_code == "E030"
+
+    def test_whitespace_before_argument(self) -> None:
+        with pytest.raises(ParseError) as exc:
+            parse(_bump("  requires(old(  @Int.0) > 0)\n  ensures(true)"))
+        assert exc.value.diagnostic.error_code == "E030"
+        assert exc.value.diagnostic.location.column == 12
+
+    def test_whitespace_between_keyword_and_parenthesis(self) -> None:
+        with pytest.raises(ParseError) as exc:
+            parse(_bump("  requires(old (@Int.0) > 0)\n  ensures(true)"))
+        assert exc.value.diagnostic.error_code == "E030"
+        assert exc.value.diagnostic.location.column == 12
+
+    def test_argument_on_a_later_line(self) -> None:
+        with pytest.raises(ParseError) as exc:
+            parse(_bump("  requires(old(\n    @Int.0) > 0)\n  ensures(true)"))
+        diag = exc.value.diagnostic
+        assert diag.error_code == "E030"
+        # The caret follows `old` to line 2, not the argument on line 3.
+        assert diag.location.line == 2
+        assert diag.location.column == 12
+
+    def test_invalid_character_argument(self) -> None:
+        # `$` is not a Vera token at all, so Lark raises
+        # UnexpectedCharacters rather than UnexpectedToken; the
+        # diagnostic must be the same.
+        with pytest.raises(ParseError) as exc:
+            parse(_bump("  requires(old($x) > 0)\n  ensures(true)"))
+        assert exc.value.diagnostic.error_code == "E030"
+        assert exc.value.diagnostic.location.column == 12
+
+    def test_new_reports_e031(self) -> None:
+        with pytest.raises(ParseError) as exc:
+            parse(_bump("  requires(true)\n  ensures(new(@Int.0) > 0)"))
+        diag = exc.value.diagnostic
+        assert diag.error_code == "E031"
+        assert "new()" in diag.description
+        assert diag.location.column == 11
+
+    # --- the detector must not over-fire ---
+
+    def test_effect_reference_argument_still_parses(self) -> None:
+        parse(
+            "private fn tick(@Unit -> @Int)\n"
+            "  requires(true)\n"
+            "  ensures(@Int.result == old(State<Int>)"
+            " && new(State<Int>) == old(State<Int>) + 1)\n"
+            "  effects(<State<Int>>)\n"
+            "{ let @Int = get(()); put(@Int.0 + 1); @Int.0 }\n"
+        )
+
+    def test_unclosed_effect_reference_is_not_attributed_to_old(self) -> None:
+        # `State<Int>` parsed fine here; the failure is the missing `)`,
+        # several tokens later.  A scan that walked back to the nearest
+        # `(` would reach `old(` and blame it for someone else's typo, so
+        # the detector fires only at the argument's *first* token.
+        with pytest.raises(ParseError) as exc:
+            parse(_bump("  requires(old(State<Int> > 0)\n  ensures(true)"))
+        assert exc.value.diagnostic.error_code == "E005"
+
+    def test_unrelated_parse_error_still_reports_e005(self) -> None:
+        with pytest.raises(ParseError) as exc:
+            parse(_bump("  requires(@Int.0 > > 0)\n  ensures(true)"))
+        assert exc.value.diagnostic.error_code == "E005"
+
+    def test_identifier_ending_in_old_is_not_matched(self) -> None:
+        # `keep_old(` ends in the same four characters as `old(` — and
+        # the failure here IS on the first token of its argument list, so
+        # only the identifier-boundary check separates the two.
+        with pytest.raises(ParseError) as exc:
+            parse(_bump("  requires(keep_old(> 0) > 0)\n  ensures(true)"))
+        assert exc.value.diagnostic.error_code == "E005"
+
+    def test_keyword_without_its_parenthesis_is_not_matched(self) -> None:
+        # `old` with no argument list at all: there is no argument
+        # position to diagnose, so this stays a generic parse error.
+        with pytest.raises(ParseError) as exc:
+            parse(_bump("  requires(old > 0)\n  ensures(true)"))
+        assert exc.value.diagnostic.error_code == "E005"
+
+
+# =====================================================================
 # typecheck_file tests
 # =====================================================================
 

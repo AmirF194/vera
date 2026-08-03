@@ -1,0 +1,27 @@
+-- Conformance: old() outside an ensures clause is rejected (Chapter 7,
+-- Section 7.9.2).  Tests: E174 — a precondition naming old(State<Int>) must
+-- fail `check`.  requires() is itself evaluated before the body runs, so every
+-- expression in it already observes the pre-state and old() has nothing left
+-- to refer to; the same holds for decreases() (#1173).
+--
+-- The sibling case old(<expression>) — Dafny's form, which Vera does not have
+-- because old() names an EFFECT, not a value — is rejected one stage earlier,
+-- at parse, as E030.  It has no fixture here: a program that fails to parse
+-- cannot be formatted, and every corpus program must be canonical
+-- (scripts/check_corpus_canonical.py).  Its coverage lives in
+-- tests/test_parser.py::TestOldNewArgumentDiagnostic.
+public fn tick(@Unit -> @Int)
+  requires(old(State<Int>) > 0)
+  ensures(true)
+  effects(<State<Int>>)
+{
+  get(())
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  0
+}
