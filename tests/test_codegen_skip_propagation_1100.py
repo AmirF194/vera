@@ -234,6 +234,11 @@ public fn main(-> @Int) requires(true) ensures(true) effects(pure) {
 public fn ok(-> @Int) requires(true) ensures(true) effects(pure) {
   41
 }
+
+public fn later(-> @Int) requires(true) ensures(true) effects(pure) {
+  let @Array<Int> = array_map([1, 2, 3], fn(@Int -> @Int) effects(pure) { @Int.0 + 10 });
+  array_length(@Array<Int>.0) + 38
+}
 """
         result = _compile(source)
         _assert_no_raw_wat_error(result)
@@ -244,6 +249,14 @@ public fn ok(-> @Int) requires(true) ensures(true) effects(pure) {
         assert "closure" in e620[0].description
         assert "'tally'" in e620[0].description
         assert execute(result, fn_name="ok").value == 41
+        # PR review: the doomed closure is STUBBED, not removed, so a
+        # LATER function's closure keeps its own table slot and still
+        # dispatches through call_indirect.  With one closure in the
+        # fixture, removal-instead-of-stubbing satisfied every earlier
+        # assertion — this pins the index-preservation property the
+        # stub exists for (kills the drop-the-stub mutant on position,
+        # not just on the dangling-call property).
+        assert execute(result, fn_name="later").value == 41
 
     def test_no_callers_no_propagation(self) -> None:
         """Control (green pre- and post-fix): a skipped function with NO
