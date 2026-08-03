@@ -73,7 +73,7 @@ python scripts/check_doc_builtin_shadowing.py # Verify no doc example redefines 
 python scripts/check_diagnostic_fields.py # Verify every diagnostic carries rationale + spec_ref (+ fix for errors; warnings exempt) or a # diag-fields-exempt reason — waives missing/unresolvable fields only, never a factually wrong spec_ref/error_code (#682)
 python scripts/check_explicit_encoding.py # Verify every text-mode open()/read_text()/write_text() passes explicit encoding='utf-8' (#645)
 python scripts/build_site.py          # Regenerate AI-readable site assets (llms.txt, etc.)
-python scripts/check_site_assets.py   # Verify site assets are up-to-date
+python scripts/check_site_assets.py   # Verify site assets are up-to-date + docs/index.html ↔ docs/index.md state coherent facts (#1154)
 python scripts/check_version_sync.py  # Verify version consistency
 python scripts/check_doc_counts.py    # Verify documentation counts match codebase
 python scripts/check_licenses.py      # Verify all package licenses are MIT-compatible
