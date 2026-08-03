@@ -161,6 +161,7 @@ The tuple `(@Nat.1, @Nat.0)` decreases lexicographically on each recursive call.
 
 - Tail-call optimization is preserved for self-recursion: a self-recursive tail call keeps its `return_call`, with the hop checked at the call site (the arguments are captured, the measure evaluated over them and compared against the live chain state, and this activation's guard state closed out before the transfer), so guarded iteration runs at constant stack depth. A *mutually*-recursive tail call between two guarded functions lowers to a plain call instead — with the frame elided there is no placement of the state restore that both preserves the chain and unwinds it — so that corner is bounded by the native stack, which the measure itself bounds.
 - An ADT measure is runtime-checked only when its type's reachable field structure is fully concrete. A measure whose type is parameterized (`List<Int>`), or whose fields reach a parameterized type, is not yet runtime-ranked — the static tiers still apply, and the obligation remains disclosed as Tier 3.
+- A function whose effect row declares `Exn` receives no runtime guard: a thrown exception unwinds past the exit restores, and the stale chain state would make a later, unrelated call trap a terminating program. The static tiers still apply, and the obligation remains disclosed as Tier 3.
 
 ### 5.6.2 Mutual Recursion
 

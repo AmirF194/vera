@@ -874,7 +874,13 @@ class TypeChecker(
                 # cascading.
                 if ty is None:
                     continue
-                base = ty.base if isinstance(ty, RefinedType) else ty
+                # Unwrap refinement layers in a loop, not once: a
+                # refinement-over-refinement (`{ { @Int | P } | Q }`,
+                # the shape `_check_one_refinement_predicate` names) is
+                # still ordered by its underlying base.
+                base: Type = ty
+                while isinstance(base, RefinedType):
+                    base = base.base
                 if isinstance(base, UnknownType):
                     continue
                 well_founded = (

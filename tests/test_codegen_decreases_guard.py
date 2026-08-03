@@ -27,12 +27,10 @@ shape), post-fix they trap promptly.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
-
-import pytest
-import wasmtime
 
 from vera.codegen import CompileResult, compile, execute
 from vera.parser import parse_file
@@ -55,9 +53,12 @@ def _compile(source: str) -> CompileResult:
         f.flush()
         path = f.name
 
-    tree = parse_file(path)
-    prog = transform(tree)
-    return compile(prog, source=source, file=path)
+    try:
+        tree = parse_file(path)
+        prog = transform(tree)
+        return compile(prog, source=source, file=path)
+    finally:
+        Path(path).unlink(missing_ok=True)
 
 
 def _compile_ok(source: str) -> CompileResult:
@@ -72,16 +73,6 @@ def _run(source: str, fn: str | None = None, args: list[int] | None = None) -> i
     exec_result = execute(result, fn_name=fn, args=args)
     assert exec_result.value is not None, "Expected a return value"
     return exec_result.value
-
-
-def _run_trap_message(
-    source: str, fn: str | None = None, args: list[int] | None = None,
-) -> str:
-    """Compile, execute, assert a trap, and return its message text."""
-    result = _compile_ok(source)
-    with pytest.raises((wasmtime.WasmtimeError, wasmtime.Trap, RuntimeError)) as exc:
-        execute(result, fn_name=fn, args=args)
-    return str(exc.value)
 
 
 def _run_cli(tmp_path: Path, source: str, timeout: int = 30):
@@ -250,7 +241,7 @@ public fn main(@Unit -> @Int)
   ensures(true)
   effects(pure)
 {
-  lexy(5, 5)
+  lexy(5, 2)
 }
 """))
 
@@ -322,7 +313,7 @@ public fn main(@Unit -> @Int)
 """
         assert _run(source, fn="main") == 10
         result = _compile_ok(source)
-        assert "$dec_active_total" in result.wat, (
+        assert re.search(r"\$dec_active_total(?![A-Za-z0-9_])", result.wat), (
             "the termination guard must be emitted for every decreases fn"
         )
 
@@ -335,7 +326,10 @@ public fn main(@Unit -> @Int)
         A(2,0) → A(1,1)`` cycle — a non-terminating program whose
         Tier-3 measure was never checked.  This is the classical
         definition, which the lex measure ``(m, n)`` genuinely bounds;
-        the spec text is fixed in lockstep."""
+        the spec text is fixed in lockstep.  The entry is asymmetric
+        (``A(2, 1) == 5`` but ``A(1, 2) == 4``), so a permuted entry
+        or a swapped slot mapping changes the value — ``A(2, 2)``
+        would be blind to both."""
         source = """\
 private fn ackermann(@Nat, @Nat -> @Nat)
   requires(true)
@@ -359,12 +353,12 @@ public fn main(@Unit -> @Int)
   ensures(true)
   effects(pure)
 {
-  nat_to_int(ackermann(2, 2))
+  nat_to_int(ackermann(2, 1))
 }
 """
-        assert _run(source, fn="main") == 7
+        assert _run(source, fn="main") == 5
         result = _compile_ok(source)
-        assert "$dec_active_ackermann" in result.wat
+        assert re.search(r"\$dec_active_ackermann(?![A-Za-z0-9_])", result.wat)
 
     def test_sequential_sibling_calls_state_restored(self) -> None:
         """Two sequential calls with a LARGER second measure must both
@@ -396,6 +390,37 @@ public fn main(@Unit -> @Int)
 }
 """
         assert _run(source, fn="main") == 8
+
+    def test_lexicographic_first_component_order_runs(self) -> None:
+        """First component strictly decreases while the SECOND grows:
+        legal lexicographically, so this must run clean.  Under a
+        swapped component order the growing value is compared first and
+        the guard traps — the mirror that makes the component order
+        observable (the trap fixtures cannot distinguish it, since a
+        violated measure traps under either reading)."""
+        source = """\
+private fn hop(@Int, @Int -> @Int)
+  requires(true)
+  ensures(true)
+  decreases(@Int.1, @Int.0)
+  effects(pure)
+{
+  if @Int.1 <= 0 then {
+    @Int.0
+  } else {
+    hop(@Int.1 - 1, @Int.0 + 7)
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  hop(3, 1)
+}
+"""
+        assert _run(source, fn="main") == 22
 
     def test_adt_measure_terminating_runs(self) -> None:
         """A structurally shrinking ADT measure runs clean — the rank
@@ -454,8 +479,11 @@ class TestTier3GuardCorrespondence:
             f.write(source)
             f.flush()
             path = f.name
-        tree = parse_file(path)
-        prog = transform(tree)
+        try:
+            tree = parse_file(path)
+            prog = transform(tree)
+        finally:
+            Path(path).unlink(missing_ok=True)
         vr = verify(prog, source=source, file=path)
         tier3_decreases = [
             ob for ob in vr.obligations
@@ -466,7 +494,7 @@ class TestTier3GuardCorrespondence:
             f"(got obligations: {[(o.kind, o.status) for o in vr.obligations]})"
         )
         result = _compile_ok(source)
-        assert "$dec_active_spin" in result.wat, (
+        assert re.search(r"\$dec_active_spin(?![A-Za-z0-9_])", result.wat), (
             "tier3 decreases obligation with no emitted runtime guard — "
             "the E525 promise would be empty (#1172)"
         )
@@ -556,6 +584,182 @@ private fn d(@Array<Int> -> @Int)
 """)
         assert not errs, f"unexpected errors: {[e.description for e in errs]}"
 
+    def test_nested_refinement_measure_accepted(self) -> None:
+        """A refinement-over-refinement measure whose underlying base is
+        Int is well founded — the E127 check unwraps refinement layers
+        in a loop, not once (PR #1179 review)."""
+        errs = self._errors("""\
+type Pos = { @Int | @Int.0 > 0 };
+
+type SmallPos = { @Pos | @Pos.0 < 100 };
+
+private fn shrink(@SmallPos -> @Int)
+  requires(true)
+  ensures(true)
+  decreases(@SmallPos.0)
+  effects(pure)
+{
+  if @SmallPos.0 <= 1 then {
+    0
+  } else {
+    shrink(@SmallPos.0 - 1)
+  }
+}
+""")
+        assert not [e for e in errs if e.error_code == "E127"], (
+            f"nested refinement over Int must be well founded, got: "
+            f"{[(e.error_code, e.description) for e in errs]}"
+        )
+
+
+class TestReviewRegressions1179:
+    """Behavioral regressions from the PR #1179 review round, each
+    reproduced before the fix (see the PR thread for the probes)."""
+
+    def test_partial_rank_walk_rolls_back_nested_helpers(self) -> None:
+        """A mutually-recursive ADT pair where the OUTER walk fails after
+        a nested helper committed: pre-fix `$dec_size_B` survived with a
+        `call $dec_size_A` to a name the failed walk deleted, and
+        `wat2wasm` killed the whole compile (`unknown func`) on a
+        check-green program.  The walk must roll back every helper it
+        committed, degrade to no-guard, and leave the module valid."""
+        source = """\
+private data A {
+  MkA(B, Array<Int>)
+}
+
+private data B {
+  Leaf(Int),
+  Node(A)
+}
+
+private fn weigh(@A -> @Int)
+  requires(true)
+  ensures(true)
+  decreases(@A.0)
+  effects(pure)
+{
+  match @A.0 {
+    MkA(@B, @Array<Int>) -> 1
+  }
+}
+
+public fn main(-> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  weigh(MkA(Leaf(1), [1]))
+}
+"""
+        assert _run(source, fn="main") == 1
+        result = _compile_ok(source)
+        assert not re.search(r"\$dec_size_", result.wat), (
+            "a failed rank walk must roll back nested helpers, not "
+            "commit an orphan that dangles at wat2wasm"
+        )
+        assert not re.search(r"\$dec_active_weigh(?![A-Za-z0-9_])", result.wat)
+
+    def test_exn_throw_does_not_poison_guard_state(self) -> None:
+        """A guarded function that throws unwinds past the exit
+        restores; pre-fix the stale `$dec_active`/`$dec_prev` globals
+        made the NEXT fresh call compare against the aborted
+        activation's baseline and trap a terminating program.  An
+        Exn-declaring function therefore gets no runtime guard (the
+        static tier still discloses the obligation)."""
+        source = """\
+effect Exn<E> {
+  op throw(E -> Never);
+}
+
+private fn dig(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  decreases(@Int.0)
+  effects(<Exn<String>>)
+{
+  if @Int.0 <= 0 then {
+    throw("bottom")
+  } else {
+    dig(@Int.0 - 1)
+  }
+}
+
+private fn catch_dig(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[Exn<String>] {
+    throw(@String) -> { 0 - 1 }
+  } in {
+    dig(@Int.0)
+  }
+}
+
+public fn main(-> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Int = catch_dig(3);
+  let @Int = catch_dig(5);
+  @Int.0 + @Int.1
+}
+"""
+        assert _run(source, fn="main") == -2
+        result = _compile_ok(source)
+        assert not re.search(r"\$dec_active_dig(?![A-Za-z0-9_])", result.wat), (
+            "an Exn-declaring function must not carry a guard a throw "
+            "can leave poisoned"
+        )
+
+    def test_decreases_entry_skip_degrades_to_e602(self, monkeypatch) -> None:
+        """`_compile_decreases_entry` lowers a contract predicate, so it
+        sits inside the same degradation net as the pre/postcondition
+        paths: a `CodegenSkip` from a measure translation must surface
+        as the loud [E602] skip, never a raw traceback (the #922
+        invariant).  Forced here because today's builtin surface offers
+        no in-language Int-typed measure that skips."""
+        from vera.codegen.core import CodeGenerator
+        from vera.skip import CodegenSkip
+
+        def _boom(self, ctx, decl, env):
+            raise CodegenSkip(decl, "forced measure skip (test)")
+
+        monkeypatch.setattr(
+            CodeGenerator, "_compile_decreases_entry", _boom,
+        )
+        source = """\
+private fn total(@Nat -> @Nat)
+  requires(true)
+  ensures(true)
+  decreases(@Nat.0)
+  effects(pure)
+{
+  if @Nat.0 == 0 then {
+    0
+  } else {
+    total(@Nat.0 - 1)
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  0
+}
+"""
+        result = _compile(source)
+        assert result.wat, "compile must degrade, not die"
+        e602 = [d for d in result.diagnostics if d.error_code == "E602"]
+        assert any("total" in d.description for d in e602), (
+            "a skipped measure must surface the standard [E602] skip "
+            f"(got: {[(d.error_code, d.description) for d in result.diagnostics]})"
+        )
+
 
 class TestGenericAdtMeasure:
     def test_generic_adt_measure_runs_unguarded(self) -> None:
@@ -600,7 +804,9 @@ public fn main(@Unit -> @Int)
 """
         assert _run(source, fn="main") == 3
         result = _compile_ok(source)
-        assert "$dec_active_length" not in result.wat, (
+        assert not re.search(
+            r"\$dec_active_length(?![A-Za-z0-9_])", result.wat,
+        ), (
             "a parameterized ADT measure must not be guarded until "
             "per-instantiation rank helpers exist"
         )

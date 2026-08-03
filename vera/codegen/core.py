@@ -1150,7 +1150,11 @@ class CodeGenerator(
             if any(
                 isinstance(c, ast.Decreases) and c.exprs
                 for c in fdecl.contracts
-            ):
+            ) and not self._dec_declares_exn(fdecl):
+                # The Exn exclusion mirrors `_compile_decreases_entry`'s
+                # guard decline — the set must track functions that
+                # actually RECEIVE a guard, or the tail-call patch and
+                # the emitted entries desynchronize.
                 self._dec_guarded_names.add(emit_name)
             for wfn in fdecl.where_fns or ():
                 _dec_collect(wfn, wfn.name)

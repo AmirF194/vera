@@ -871,6 +871,17 @@ class ContractsMixin:
         )
         if contract is None:
             return [], [], None
+        # An Exn-declaring function gets no guard: a WASM `throw`
+        # unwinds past the trailing exit restores, leaving
+        # `$dec_active_<fn>` set and `$dec_prev_<fn>_<k>` holding the
+        # aborted activation's measure, so a later unrelated call would
+        # compare against that stale baseline and trap a terminating
+        # program.  The per-activation baseline lives in the callee's
+        # locals, so no handler-side restore can reconstruct it.  No
+        # guard rather than a leaky one — the static tier keeps the
+        # obligation disclosed (PR #1179 review).
+        if self._dec_declares_exn(decl):
+            return [], [], None
 
         name = decl.name
         comp_values: list[list[str]] = []
@@ -1122,6 +1133,21 @@ class ContractsMixin:
             return expr.type_name
         return None
 
+    @staticmethod
+    def _dec_declares_exn(decl: ast.FnDecl) -> bool:
+        """True when *decl*'s effect row names ``Exn`` (any payload).
+
+        Shared by `_compile_decreases_entry` (which declines the guard)
+        and core's ``_dec_collect`` pre-pass (so the tail-call
+        discipline never demotes a call into a function that has no
+        guard) — the two MUST agree or a `return_call` patch and the
+        emitted entry desynchronize.
+        """
+        return isinstance(decl.effect, ast.EffectSet) and any(
+            isinstance(eff, ast.EffectRef) and eff.name == "Exn"
+            for eff in decl.effect.effects
+        )
+
     def _dec_rank_helper(self, adt_name: str) -> str | None:
         """Emit (once) and name the structural-size helper for *adt_name*.
 
@@ -1141,6 +1167,14 @@ class ContractsMixin:
         layouts = self._adt_layouts.get(adt_name)
         if not layouts:
             return None
+        # Snapshot the accumulator: on failure EVERY helper this walk
+        # committed is rolled back, not just our own reservation.  A
+        # nested helper completed through the reservation short-circuit
+        # stores a real body that calls THIS name — keeping it after the
+        # reservation is deleted dangles `unknown func` at wat2wasm,
+        # killing the compile on a check-green program (the
+        # `_lift_pending_closures` rollback discipline; PR #1179 review).
+        snapshot = dict(self._dec_rank_helpers)
         # Reserve the name first so a recursive field type terminates.
         self._dec_rank_helpers[fn_name] = ""
 
@@ -1204,7 +1238,7 @@ class ContractsMixin:
             if not ok:
                 break
         if not ok:
-            del self._dec_rank_helpers[fn_name]
+            self._dec_rank_helpers = snapshot
             return None
         lines.append("    local.get $acc")
         lines.append("  )")

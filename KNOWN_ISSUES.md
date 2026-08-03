@@ -8,7 +8,6 @@ Defects in shipped compiler, runtime, or tooling behaviour — this table matche
 
 | Bug | Issue |
 |-----|-------|
-| The `[E525]` warning a Tier-3 `decreases` obligation emits says the termination metric "will be checked at runtime", but `decreases` has no runtime lowering — no measure guard exists anywhere in emission, so a non-terminating program passes `check`, passes `verify`, and hangs at `run`. The static tier is honest (the obligation stream reports `tier3`); the promised fallback is empty, unlike its `E521`–`E524` siblings whose `requires`/`ensures` fallbacks emit real assertions. The fix emits the guard (tracking the measure across recursive calls and trapping when it fails to decrease); until then no `decreases` metric that Z3 cannot prove is checked at all. | [#1172](https://github.com/aallan/vera/issues/1172) |
 | `ch05_closure_nat_return` (a run-level conformance program in the pre-commit + CI gate) trapped **once** in a full `check_conformance.py` run (`unreachable` in `main` — the sentinel `assert` or a GC shadow-stack guard) and has not reproduced in ~960 attempts across isolated, parallel, eager-GC, and hash-seed-swept executions; the emitted WAT is deterministic and correct. Suspected rare runtime/GC/wasmtime interaction, tracked so a future intermittent CI red resolves here instead of starting fresh. | [#996](https://github.com/aallan/vera/issues/996) |
 
 ## Limitations

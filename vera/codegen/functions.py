@@ -584,9 +584,30 @@ class FunctionCompilationMixin:
         # on the invariants requires() establishes (e.g. a division), and
         # spec §5.6.1(1) has the measure evaluated at entry over the
         # parameters, which the body cannot mutate.
-        dec_entry_instrs, dec_restore_instrs, dec_self_tail = (
-            self._compile_decreases_entry(ctx, decl, env)
-        )
+        try:
+            dec_entry_instrs, dec_restore_instrs, dec_self_tail = (
+                self._compile_decreases_entry(ctx, decl, env)
+            )
+        except (AdtEqNotDerivableError, CodegenSkip) as exc:
+            # The measure is a contract predicate: degrade through the
+            # same net as the pre/postcondition paths — a check-green
+            # program must never surface a raw traceback (#922).
+            self._emit_contract_predicate_degradation(ctx, exc, decl)
+            return None
+        except CodegenInvariantError as inv:
+            # Mirror the precondition net's #939 arm: one loud [E699].
+            self._harvest_interp_inference_failures(ctx)
+            self._error(
+                inv.node if inv.node is not None else decl,
+                f"Internal compiler error while compiling '{decl.name}': "
+                f"{inv.msg}",
+                rationale="This is a codegen invariant violation — the type "
+                "checker should have rejected the input before it reached "
+                "this point.  Please file a bug report with the offending "
+                "program.",
+                error_code="E699",
+            )
+            return None
         pre_instrs = pre_instrs + dec_entry_instrs
 
         # Snapshot old state for postcondition old() references
@@ -1134,9 +1155,15 @@ class FunctionCompilationMixin:
         # #1172: decreases-guard restores — every non-trap exit puts the
         # function's chain state back to what this activation saved, so a
         # finished call leaves no residue that would spuriously trap a
-        # sibling call.  Trap paths need no restore (the instance dies),
-        # and no `return_call` survives in a guarded function (the revert
-        # above), so this single exit point covers every live return.
+        # sibling call.  Trap paths need no restore (the instance dies).
+        # A `return_call` CAN survive in a guarded function — the
+        # self-recursive and unguarded-target tail sites keep TCO — but
+        # those sites carry their restores inline (the `dec_self_tail`
+        # prefix / `dec_restore_instrs` prepend), so together with this
+        # single fall-through exit every live return is covered.  An
+        # unwinding `throw` covers nothing, which is why an
+        # Exn-declaring function gets no guard at all (see
+        # `_compile_decreases_entry`).
         for instr in dec_restore_instrs:
             lines.append(f"    {instr}")
 
