@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import re
 from collections.abc import Iterator
 
 from vera import ast
@@ -16,6 +17,11 @@ from vera.environment import (
     TypeAliasInfo,
 )
 from vera.types import TypeVar
+
+# #1191: the prelude's generated-declaration namespace — "Vera" + an
+# uppercase letter or digit ("VeraOptionMapFn", "VeraA").  Anchored, so
+# ordinary words like "Veranda" never match.
+_RESERVED_TYPE_PREFIX_RE = re.compile(r"\AVera[A-Z0-9]")
 
 
 @functools.lru_cache(maxsize=1)
@@ -227,6 +233,57 @@ class RegistrationMixin:
         if nested_rejected:
             self._rejected_builtin_redefs.add(id(decl))
         return rejected
+
+    def _check_reserved_type_name(
+        self, decl: ast.TypeAliasDecl | ast.DataDecl,
+    ) -> None:
+        """Emit E154 for a user type/alias name in the prelude's namespace.
+
+        The prelude's combinators resolve their parameter types through
+        generated declarations spelled ``Vera`` + an uppercase letter
+        (``VeraOptionMapFn``; type parameters ``VeraA``/``VeraB``, #869).
+        ``inject_prelude`` skips any of its declarations whose name a user
+        program already spells, so a user ``type VeraOptionMapFn = Int;``
+        silently re-types the prelude's own signatures — the program stays
+        check-green and then fails WebAssembly validation at run, the
+        wrong-layer failure PR #1191 eliminates for the unprefixed names.
+        Reserving the prefix outright closes the class (spec §8.4.1); the
+        checker never sees the injected twins (injection is a codegen-side
+        transform, Pass 1.2), so every declaration reaching this gate is
+        user-authored.  Names merely *containing* ``Vera`` (``Veranda``,
+        ``MyVeraThing``) stay ordinary: the reservation is anchored at the
+        start and requires an uppercase or digit follower.
+        """
+        if not _RESERVED_TYPE_PREFIX_RE.match(decl.name):
+            return
+        kind = "alias" if isinstance(decl, ast.TypeAliasDecl) else "data type"
+        suggestion = decl.name.removeprefix("Vera")
+        if not suggestion[:1].isupper():
+            # A digit follower strips to an unparseable name (`Vera0Fn`
+            # -> `0Fn`); UPPER_IDENT needs a leading uppercase letter.
+            suggestion = f"My{decl.name}"
+        self._error(
+            decl,
+            f"{kind.capitalize()} name '{decl.name}' is reserved for the prelude.",
+            rationale=(
+                "Names beginning with 'Vera' followed by an uppercase "
+                "letter or digit are the prelude's internal namespace — "
+                "its combinators resolve through generated declarations "
+                "such as 'VeraOptionMapFn' and the type parameters "
+                "'VeraA'/'VeraB'. A user declaration under such a name "
+                "re-types those internals: the program still type-checks, "
+                "then fails WebAssembly validation when it runs. Vera "
+                "reserves the namespace outright so the mistake is "
+                "refused where it is written."
+            ),
+            fix=(
+                f"Rename the {kind} — any name not starting with 'Vera' "
+                f"plus an uppercase letter or digit works (for example "
+                f"'{suggestion}')."
+            ),
+            spec_ref='Chapter 8, Section 8.4.1 "Visibility Rules"',
+            error_code="E154",
+        )
 
     def _check_reserved_fn_name(self, decl: ast.FnDecl) -> None:
         """Emit E153 if ``decl`` — or a nested where-helper — is named after a
@@ -489,6 +546,7 @@ class RegistrationMixin:
         self, decl: ast.DataDecl, visibility: str | None = None,
     ) -> None:
         """Register an ADT and its constructors."""
+        self._check_reserved_type_name(decl)
         # Set up type params for resolving constructor field types
         saved_params = dict(self.env.type_params)
         if decl.type_params:
@@ -521,6 +579,7 @@ class RegistrationMixin:
 
     def _register_alias(self, decl: ast.TypeAliasDecl) -> None:
         """Register a type alias."""
+        self._check_reserved_type_name(decl)
         saved_params = dict(self.env.type_params)
         if decl.type_params:
             for tv in decl.type_params:

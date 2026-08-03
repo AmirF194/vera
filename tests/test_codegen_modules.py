@@ -7,6 +7,7 @@ via flattening.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 import wasmtime
@@ -3502,3 +3503,400 @@ public fn main(@Unit -> @Int)
 }
 """, mods, fn="main")
         assert val == 42
+
+
+# =====================================================================
+# #1184 — user aliases colliding with the prelude's fn-type aliases
+# =====================================================================
+
+
+class TestPreludeFnTypeAliasCollision:
+    """#1184: a user alias named after a prelude fn-type alias.
+
+    The prelude spells its closure-taking combinators' parameters
+    through type aliases (``option_map(@Option<VeraA>,
+    @OptionMapFn<VeraA, VeraB>)``) because a slot reference needs a type
+    *name*.  Those names used to live in the same namespace user code
+    writes into, so a user (or module) alias of the same name re-typed
+    the PRELUDE's declaration — the mirror image of the #1111 defect
+    that spec §8.4.1 forbids in the other direction (a main-file alias
+    must never re-type a module's declarations).
+
+    Pre-fix the two namespaces disagreed about it, and neither was
+    right:
+
+    * main file — the user's alias won the flat maps, so ``option_map``
+      was emitted with an ``Int``-typed (i64) closure parameter and the
+      call passed a funcref: ``vera run`` died at WASM validation.
+    * module — Pass-1.5 instantiation discovery ran under the flat maps
+      (prelude's fn type) and created ``option_map$Int_JInt``, while the
+      module body compiled under ``{prelude, **module_own}`` bound
+      ``VeraB`` to the phantom-var default and called
+      ``option_map$Int_JBool``.  Missing target ⇒ E602 ⇒ the function
+      was skipped, ``main`` was dropped, and ``check``/``verify``/
+      ``compile`` all reported success over EMPTY exports.
+
+    The fix gives the prelude's own combinators reserved ``Vera``-
+    prefixed spellings of those aliases (the #869 remedy, applied to the
+    alias names rather than the type-parameter names), so no user alias
+    can reach them from any scope.  The user-facing alias names stay
+    injected and stay the user's to shadow.
+    """
+
+    _resolved = staticmethod(TestCrossModuleCodegen._resolved)
+    _compile_mod = staticmethod(TestCrossModuleCodegen._compile_mod)
+    _run_mod = staticmethod(TestCrossModuleCodegen._run_mod)
+
+    # One combinator body per prelude fn-type alias.  Each triples its
+    # argument, so ``tripled(14)`` is 42 — a value that cannot coincide
+    # with any fallback on the broken paths (not ``Bool``, not 0, not
+    # the argument).
+    BODIES: ClassVar[dict[str, str]] = {
+        "OptionMapFn": """\
+public fn tripled(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  option_unwrap_or(
+    option_map(Some(@Int.0), fn(@Int -> @Int) effects(pure) { @Int.0 * 3 }),
+    0
+  )
+}
+""",
+        "OptionBindFn": """\
+public fn tripled(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  option_unwrap_or(
+    option_and_then(
+      Some(@Int.0),
+      fn(@Int -> @Option<Int>) effects(pure) { Some(@Int.0 * 3) }
+    ),
+    0
+  )
+}
+""",
+        "ResultMapFn": """\
+public fn tripled(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  result_unwrap_or(
+    result_map(wrap(@Int.0), fn(@Int -> @Int) effects(pure) { @Int.0 * 3 }),
+    0
+  )
+}
+
+private fn wrap(@Int -> @Result<Int, String>)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ Ok(@Int.0) }
+""",
+    }
+
+    IMPORTER = """\
+import mc(tripled);
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ tripled(14) }
+"""
+
+    MAIN_TAIL = """\
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ tripled(14) }
+"""
+
+    ALIASES = tuple(sorted(BODIES))
+
+    def _run_as_module(self, alias: str, decl: str) -> int:
+        """Run *alias*'s combinator body from an imported module."""
+        mods = [self._resolved(("mc",), decl + self.BODIES[alias])]
+        return self._run_mod(self.IMPORTER, mods, fn="main")
+
+    def _run_as_main(self, alias: str, decl: str) -> int:
+        """Run the same body declared in the main file."""
+        return self._run_mod(
+            decl + self.BODIES[alias] + "\n" + self.MAIN_TAIL,
+            [], fn="main",
+        )
+
+    @pytest.mark.parametrize("alias", ALIASES)
+    def test_module_alias_collision_keeps_combinator_working(
+        self, alias: str,
+    ) -> None:
+        """The issue's repro: a module declaring ``type <Alias> = Int;``
+        must not disable the combinator that alias names.
+
+        Pre-fix the module body called ``option_map$Int_JBool``, which
+        discovery never created: an E602 *warning* (never an error)
+        skipped ``tripled`` and dropped ``main``, so ``vera run`` exited
+        1 with "No exported functions to call" over a green
+        ``check``/``verify``/``compile``.  Through this harness the same
+        state surfaces one step earlier — with the only closure caller
+        skipped, the orphaned ``option_map$Int_JInt`` clone is emitted
+        against a function table nothing declares and wasmtime rejects
+        the module ("unknown table 0")."""
+        assert self._run_as_module(alias, f"type {alias} = Int;\n\n") == 42
+
+    @pytest.mark.parametrize("alias", ALIASES)
+    def test_main_file_alias_collision_keeps_combinator_working(
+        self, alias: str,
+    ) -> None:
+        """The same collision declared in the MAIN file.
+
+        Pre-fix the user's alias won the flat maps outright, so the
+        combinator clone was emitted with an ``Int`` (i64) parameter
+        where the call site passes a closure funcref — ``vera run``
+        trapped at WASM validation ("type mismatch: expected i64, found
+        i32") instead of returning a value."""
+        assert self._run_as_main(alias, f"type {alias} = Int;\n\n") == 42
+
+    @pytest.mark.parametrize("alias", ALIASES)
+    def test_module_and_main_namespaces_agree(self, alias: str) -> None:
+        """The invariant, stated as a differential.
+
+        One program, two namespaces: the collision must mean the same
+        thing whether the alias and the combinator call sit in an
+        imported module or in the main file.  Pre-fix they disagreed in
+        *kind* (silent empty exports vs a WASM validation trap), which
+        is what let the module side hide behind a green
+        ``check``/``verify``/``compile``.  Compared against the
+        no-collision baseline so the pair agreeing on a wrong value
+        cannot pass."""
+        decl = f"type {alias} = Int;\n\n"
+        baseline = self._run_as_main(alias, "")
+        assert baseline == self._run_as_module(alias, ""), (
+            "no-collision baseline already disagrees across namespaces"
+        )
+        assert self._run_as_main(alias, decl) == baseline
+        assert self._run_as_module(alias, decl) == baseline
+
+    @pytest.mark.parametrize("alias", ["OptionMapFn", "OptionBindFn"])
+    def test_shadowing_every_option_alias_at_once(self, alias: str) -> None:
+        """Both user-facing Option alias names taken in one program.
+
+        Distinct door from the single-alias tests: ``inject_prelude``
+        gates the user-facing alias block on the user having shadowed
+        *all* of a group's names, so shadowing one name still injects
+        the block (and its reserved twins with it) while shadowing both
+        skips it entirely.  The twins have to arrive with the
+        combinator bodies that need them, not with the block a user can
+        suppress.  ``ResultMapFn`` is a one-name group, so its own
+        parametrized cases already cross this threshold."""
+        decl = "type OptionMapFn = Int;\ntype OptionBindFn = String;\n\n"
+        assert self._run_as_main(alias, decl) == 42
+        assert self._run_as_module(alias, decl) == 42
+
+    @pytest.mark.parametrize("alias", ALIASES)
+    def test_colliding_alias_still_means_what_the_user_wrote(
+        self, alias: str,
+    ) -> None:
+        """Over-correction guard: the user's alias keeps ITS meaning.
+
+        Green before AND after — pinned because the obvious fix (give
+        the prelude's names precedence in every scope) would buy the
+        combinator back by silently re-typing the user's own alias,
+        which the checker would still read as ``Int``.  Both namespaces
+        must keep resolving ``@<Alias>.0`` as the user's ``Int``."""
+        body = f"""\
+type {alias} = Int;
+
+public fn tripled(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{{
+  let @{alias} = 7;
+  @{alias}.0 * 6
+}}
+"""
+        assert self._run_mod(
+            body + "\n" + """\
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ tripled(()) }
+""", [], fn="main") == 42
+        mods = [self._resolved(("mc",), body)]
+        assert self._run_mod("""\
+import mc(tripled);
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ tripled(()) }
+""", mods, fn="main") == 42
+
+    def test_module_local_fn_type_alias_still_module_local(self) -> None:
+        """Over-correction guard for #1111: a module-local alias naming a
+        *closure* type still resolves against its own namespace.
+
+        The shape closest to what #1184 changes — an fn-type alias used
+        as a higher-order parameter and reached through ``apply_fn`` —
+        and one #1111's own tests do not cover (theirs alias ``Int`` /
+        ``String`` / ``Unit`` / ``Option<T>`` / ``Array<Float64>``).  The
+        main file reuses the name for an unrelated non-fn type, so a fix
+        that flattened alias namespaces would resolve the module's
+        parameter through ``Int`` and mis-type the ``call_indirect``."""
+        mods = [self._resolved(("hof",), """\
+type Mapper = fn(Int -> Int) effects(pure);
+
+public fn apply_twice(@Int, @Mapper -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ apply_fn(@Mapper.0, apply_fn(@Mapper.0, @Int.0)) }
+
+public fn tripled(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ apply_twice(@Int.0, fn(@Int -> @Int) effects(pure) { @Int.0 + 7 }) }
+""")]
+        val = self._run_mod("""\
+import hof(tripled);
+
+type Mapper = String;
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Mapper = "unrelated";
+  if string_length(@Mapper.0) == 9 then { tripled(28) } else { 0 - 1 }
+}
+""", mods, fn="main")
+        assert val == 42
+
+    def test_module_alias_scope_keeps_alias_and_param_maps_paired(
+        self,
+    ) -> None:
+        """``_module_alias_scope`` must override BOTH alias maps together.
+
+        The scope merged ``_type_aliases`` and ``_type_alias_params``
+        independently, so a module alias shadowing a *parameterized*
+        prelude alias with a *non*-parameterized one paired the module's
+        target with the prelude's stale ``('VeraA', 'VeraB')`` param
+        list.  ``resolve_type_alias`` substitutes whenever
+        ``len(params) == len(type_args)``, so the stale pair is a live
+        wrong-substitution door for any consumer that reaches the name
+        with two type args — which is exactly how the prelude's own
+        ``@OptionMapFn<VeraA, VeraB>`` parameter used to resolve to the
+        module's ``Int``.  Asserted on the maps rather than end-to-end:
+        after the reserved-name fix no prelude declaration spells a
+        shadowable alias, so the pairing is defence-in-depth against the
+        next consumer that does."""
+        import tempfile
+
+        from vera.codegen.core import CodeGenerator
+
+        mods = [self._resolved(("mc",), """\
+type OptionMapFn = Int;
+
+public fn ident(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ @Int.0 }
+""")]
+        source = """\
+import mc(ident);
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ ident(42) }
+"""
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".vera", delete=False, encoding="utf-8"
+        ) as f:
+            f.write(source)
+            f.flush()
+            path = f.name
+        tree = parse_file(path)
+        prog = transform(tree)
+        gen = CodeGenerator(source=source, file=path, resolved_modules=mods)
+        result = gen.compile_program(prog)
+        errors = [d for d in result.diagnostics if d.severity == "error"]
+        assert not errors, [e.description for e in errors]
+
+        # The prelude's own entry is parameterized, so a stale param
+        # list is distinguishable from a correctly paired override.
+        assert gen._prelude_type_alias_params.get("OptionMapFn") == (
+            "VeraA", "VeraB",
+        ), "prelude alias params missing — test no longer probes the hole"
+
+        with gen._module_alias_scope(("mc",)):
+            assert isinstance(
+                gen._type_aliases["OptionMapFn"], ast.NamedType,
+            ) and gen._type_aliases["OptionMapFn"].name == "Int", (
+                "module alias lost its own target inside its scope"
+            )
+            assert "OptionMapFn" not in gen._type_alias_params, (
+                "module's non-parameterized alias is paired with the "
+                "prelude's stale param list"
+            )
+
+    def test_parameterized_module_alias_takes_its_own_params(self) -> None:
+        """A parameterized module alias pairs with ITS params (PR #1191 review).
+
+        The pairing invariant's other branch: `type OptionMapFn<A> =
+        Option<A>;` in a module must resolve at arity 1 inside that
+        module.  Dropping the `_type_alias_params.update(mod_params)`
+        overlay would leave the prelude's stale `("VeraA", "VeraB")`
+        paired with the module's target, and the arity-1 use below would
+        stop substituting — the differing arity makes the stale pairing
+        loud, end to end.
+        """
+        import tempfile
+
+        from vera.codegen.core import CodeGenerator
+
+        mods = [self._resolved(("palias",), """\
+type OptionMapFn<A> = Option<A>;
+
+public fn wrap(@Int -> @OptionMapFn<Int>)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ Some(@Int.0) }
+""")]
+        source = """\
+import palias(wrap);
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ option_unwrap_or(palias::wrap(41), 0) + 1 }
+"""
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".vera", delete=False, encoding="utf-8"
+        ) as f:
+            f.write(source)
+            f.flush()
+            path = f.name
+        tree = parse_file(path)
+        prog = transform(tree)
+        gen = CodeGenerator(source=source, file=path, resolved_modules=mods)
+        result = gen.compile_program(prog)
+        errors = [d for d in result.diagnostics if d.severity == "error"]
+        assert not errors, [e.description for e in errors]
+        assert "main" in result.exports
+        from vera.codegen import execute
+        assert execute(result).value == 42

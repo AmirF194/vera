@@ -40,6 +40,16 @@ class CrossModuleMixin:
         reads the instance fields mid-compile, so one swap here scopes
         them all.  ``mod_path=None`` (a main-file declaration, or a mono
         clone with no recorded origin) is a no-op.
+
+        The two maps are overlaid as a PAIR (#1184): a module alias
+        shadowing a *parameterized* prelude alias with a
+        *non*-parameterized one must not inherit the prelude's param
+        list.  Merging them independently left exactly that mispairing,
+        and ``resolve_type_alias`` substitutes whenever the arities
+        happen to line up — so the module's target would be
+        instantiated at the prelude's type parameters.  A name the
+        module defines therefore takes the module's params entry or
+        none at all.
         """
         if mod_path is None:
             yield
@@ -47,14 +57,15 @@ class CrossModuleMixin:
         gen: CodeGenerator = self  # type: ignore[assignment]
         saved_aliases = gen._type_aliases
         saved_params = gen._type_alias_params
-        gen._type_aliases = {
-            **gen._prelude_type_aliases,
-            **gen._module_type_aliases.get(mod_path, {}),
-        }
+        mod_aliases = gen._module_type_aliases.get(mod_path, {})
+        mod_params = gen._module_type_alias_params.get(mod_path, {})
+        gen._type_aliases = {**gen._prelude_type_aliases, **mod_aliases}
         gen._type_alias_params = {
-            **gen._prelude_type_alias_params,
-            **gen._module_type_alias_params.get(mod_path, {}),
+            name: params
+            for name, params in gen._prelude_type_alias_params.items()
+            if name not in mod_aliases
         }
+        gen._type_alias_params.update(mod_params)
         try:
             yield
         finally:

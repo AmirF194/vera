@@ -88,17 +88,17 @@ public fn tally(@Int -> @Int) requires(@Int.0 > 0) ensures(@Int.0 >= 0) effects(
 """
 
 # #1186: the unsupported construct lives in the imported module, the entry
-# in the importer.  `option_map` over a fn literal is not lowerable here,
-# so `helper` is [E602]-skipped in om.vera and `main` is [E620]-dropped in
-# appmain.vera.
+# in the importer.  The `Map<String, Array<Int>>` host-import shape (the
+# same trigger the sibling fixtures use) is not compilable, so `helper` is
+# [E602]-skipped in om.vera and `main` is [E620]-dropped in appmain.vera.
+# (The original trigger — `option_map` under a colliding `OptionMapFn`
+# alias — stopped BEING a trigger when #1184 fixed that collision, which
+# is the improvement it exists to deliver; the location tests only need
+# any imported [E602], so they use the stable trigger.)
 _MODULE_WITH_DROPPED_BODY = """\
-type OptionMapFn = fn(Int -> Int) effects(pure);
-
 public fn helper(@Int -> @Int) requires(true) ensures(true) effects(pure) {
-  option_unwrap_or(
-    option_map(Some(@Int.0), fn(@Int -> @Int) effects(pure) { @Int.0 * 2 }),
-    0
-  )
+  let @Map<String, Array<Int>> = map_insert(map_new(), "a", [1, 2]);
+  map_size(@Map<String, Array<Int>>.0) + @Int.0
 }
 """
 
@@ -466,8 +466,8 @@ class TestImportedDiagnosticLocation:
             f"{root.location.file!r}"
         )
         # Module-local coordinates are retained, not remapped.
-        assert root.location.line == 5
-        assert root.location.column == 5
+        assert root.location.line == 2
+        assert root.location.column == 34
 
     def test_root_e602_quotes_the_module_source_line(
         self, tmp_path: Path,
@@ -483,7 +483,7 @@ class TestImportedDiagnosticLocation:
         root = next(
             d for d in result.diagnostics if d.error_code == "E602"
         )
-        assert "option_map" in root.source_line, (
+        assert "map_insert" in root.source_line, (
             f"rendered source line came from the wrong file: "
             f"{root.source_line!r}"
         )
@@ -508,7 +508,7 @@ class TestImportedDiagnosticLocation:
         # resolves /var -> /private/var, and the point being pinned is
         # that the E620 quotes the ROOT's file, whatever spelling it has.
         assert Path(root.location.file).name == "om.vera"
-        assert f"at {root.location.file}, line 5, column 5" in msg, (
+        assert f"at {root.location.file}, line 2, column 34" in msg, (
             f"E620 must name the module the root came from, got {msg!r}"
         )
 

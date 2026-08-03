@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from vera import ast
 from vera.parser import parse
 from vera.transform import transform
@@ -298,6 +300,108 @@ class TestPreludeTypeAliases:
         assert "ArrayMapFn" in names
         assert "ArrayFilterFn" in names
         assert "ArrayFoldFn" in names
+
+
+class TestPreludeInternalAliases:
+    """#1184: the combinators resolve through reserved-name twins."""
+
+    def test_no_combinator_spells_a_user_facing_alias(self) -> None:
+        """The structural statement of the #1184 fix, as a drift guard.
+
+        A prelude combinator that reaches for a user-facing alias name
+        is re-typable by any user or module declaration of that name —
+        silently, and differently in the main-file and module
+        namespaces.  Every prelude body must spell its closure
+        parameters with the reserved ``Vera``-prefixed twin instead, so
+        adding a combinator that reaches for the public name fails
+        here rather than in someone's program.
+        """
+        from vera import prelude
+
+        public_names = {
+            name
+            for block in (
+                prelude._OPTION_TYPE_ALIASES,
+                prelude._RESULT_TYPE_ALIASES,
+                prelude._ARRAY_TYPE_ALIASES,
+            )
+            for name in re.findall(
+                r"^type\s+([A-Za-z_][A-Za-z0-9_]*)", block, re.MULTILINE,
+            )
+        }
+        assert public_names, "no prelude alias blocks found — guard is inert"
+        for block_name in (
+            "_OPTION_COMBINATORS", "_RESULT_COMBINATORS",
+            "_ARRAY_COMBINATORS", "_JSON_COMBINATORS", "_HTML_COMBINATORS",
+        ):
+            block = getattr(prelude, block_name)
+            for name in public_names:
+                assert not re.search(rf"\b{name}\b", block), (
+                    f"{block_name} resolves through the user-facing alias "
+                    f"{name!r}; use the reserved "
+                    f"{prelude._INTERNAL_ALIAS_PREFIX}{name} twin (#1184)"
+                )
+
+    def test_internal_twin_is_derived_from_the_public_declaration(
+        self,
+    ) -> None:
+        """The twin restates the public alias's body under a new name.
+
+        Only the declared name is rewritten — a body mentioning
+        ``Option`` or a ``Vera*`` type parameter must survive verbatim,
+        or the twin would alias a different type from the name the user
+        can still spell.
+        """
+        from vera.prelude import _internal_alias_decls
+
+        assert _internal_alias_decls(
+            "type OptionBindFn<VeraA, VeraB> = fn(VeraA -> Option<VeraB>)"
+            " effects(pure);\n"
+        ) == (
+            "type VeraOptionBindFn<VeraA, VeraB> = fn(VeraA -> Option<VeraB>)"
+            " effects(pure);\n"
+        )
+
+    def test_internal_twins_injected_even_when_user_shadows_the_alias(
+        self,
+    ) -> None:
+        """A user alias may take the public name; it must not take the twin.
+
+        This is the injection-side half of the fix: the user's
+        ``OptionMapFn`` shadows the public declaration (its right), and
+        ``option_map`` keeps a resolvable parameter type regardless.
+        """
+        prog = _make_program(
+            "type OptionMapFn = Int;\n"
+            "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ 0 }\n"
+        )
+        inject_prelude(prog)
+        aliases = {
+            tld.decl.name: tld.decl
+            for tld in prog.declarations
+            if isinstance(tld.decl, ast.TypeAliasDecl)
+        }
+        assert "VeraOptionMapFn" in aliases
+        assert "VeraOptionBindFn" in aliases
+        assert "VeraResultMapFn" in aliases
+        # The combinators spell the twins at arity 2, so the parsed
+        # declarations must carry the derived parameter list (PR #1191
+        # review): a twin arriving with type_params None would break
+        # resolution while presence checks stay green.
+        assert aliases["VeraOptionMapFn"].type_params == ("VeraA", "VeraB")
+        assert aliases["VeraOptionBindFn"].type_params == ("VeraA", "VeraB")
+        assert aliases["VeraResultMapFn"].type_params == ("VeraA", "VeraB")
+        # The user's own declaration is the only OptionMapFn left.
+        user_decls = [
+            tld.decl
+            for tld in prog.declarations
+            if isinstance(tld.decl, ast.TypeAliasDecl)
+            and tld.decl.name == "OptionMapFn"
+        ]
+        assert len(user_decls) == 1
+        assert user_decls[0].type_params is None
 
 
 class TestPreludeEndToEnd:

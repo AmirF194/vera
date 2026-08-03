@@ -863,6 +863,86 @@ public fn json_get(@Unit -> @Int)
 # =====================================================================
 
 
+class TestReservedTypePrefix:
+    """User type/alias names in the prelude's `Vera` namespace are E154.
+
+    PR #1191's spec sentence claims the prelude's internals "resolve
+    through reserved names no user declaration spells"; this gate is the
+    enforcing rail (CodeRabbit review finding).  `inject_prelude` skips
+    any of its generated declarations whose name the user program already
+    spells, so before the rail a `type VeraOptionMapFn = Int;` silently
+    re-typed the prelude's combinator signatures — check-green, then a
+    raw WebAssembly validation failure at run.  The reservation is
+    anchored: `Vera` + an uppercase letter or digit.  The checker never
+    sees the injected twins (injection is a codegen-side transform), so
+    the rail cannot fire on the prelude itself.
+    """
+
+    def _codes(self, source: str) -> list[str | None]:
+        diags = typecheck(parse_to_ast(source), source=source)
+        return [d.error_code for d in diags]
+
+    def test_alias_spelling_a_twin_is_E154(self) -> None:
+        codes = self._codes("type VeraOptionMapFn = Int;\n")
+        assert "E154" in codes, codes
+
+    def test_alias_with_any_reserved_shape_is_E154(self) -> None:
+        """The rule is the prefix shape, not a name list."""
+        codes = self._codes("type VeraZ = Int;\n")
+        assert "E154" in codes, codes
+
+    def test_data_decl_is_gated_too(self) -> None:
+        codes = self._codes("data VeraBox { MkVeraBox(Int) }\n")
+        assert "E154" in codes, codes
+
+    def test_digit_follower_is_E154_with_parseable_hint(self) -> None:
+        """The `[0-9]` half of the class (PR #1191 review), and the fix
+        hint must suggest a name that can parse — `Vera0Fn` strips to
+        `0Fn`, so the hint falls back to a `My`-prefixed form."""
+        diags = typecheck(parse_to_ast("type Vera0Fn = Int;\n"), source="")
+        e154 = [d for d in diags if d.error_code == "E154"]
+        assert e154, [d.error_code for d in diags]
+        assert "MyVera0Fn" in e154[0].fix, e154[0].fix
+
+    def test_underscore_follower_stays_legal(self) -> None:
+        """`Vera_thing` is outside the anchored class (PR #1191 review)."""
+        diags = typecheck(parse_to_ast("type Vera_thing = Int;\n"), source="")
+        assert "E154" not in [d.error_code for d in diags]
+
+    def test_ordinary_words_stay_legal(self) -> None:
+        """Anchoring: `Veranda` (lowercase follower) and containment."""
+        for src in (
+            "type Veranda = Int;\n",
+            "type Vera = Int;\n",
+            "type MyVeraThing = Int;\n",
+        ):
+            codes = self._codes(src)
+            assert "E154" not in codes, (src, codes)
+
+    def test_unprefixed_prelude_alias_shadow_stays_legal(self) -> None:
+        """PR #1191's core guarantee: shadowing `OptionMapFn` is fine."""
+        codes = self._codes("type OptionMapFn = Int;\n")
+        assert "E154" not in codes, codes
+
+    def test_module_declaration_surfaces_E154(self) -> None:
+        mod_src = "module vmod;\ntype VeraResultMapFn = Int;\n"
+        mod = ResolvedModule(
+            path=("vmod",),
+            file_path=Path("/fake/vmod.vera"),
+            program=parse_to_ast(mod_src),
+            source=mod_src,
+        )
+        prog = parse_to_ast(
+            "import vmod;\n"
+            "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ 0 }\n"
+        )
+        diags = typecheck(prog, source="", resolved_modules=[mod])
+        codes = [d.error_code for d in diags]
+        assert "E154" in codes, codes
+
+
 class TestReservedFnName:
     """A ``fn`` named ``old`` or ``new`` is rejected at its declaration
     (E153, #1181).
