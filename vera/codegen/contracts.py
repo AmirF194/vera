@@ -813,6 +813,46 @@ class ContractsMixin:
     # Runtime decreases guard (#1172)
     # -----------------------------------------------------------------
 
+    def _dec_translate_measure(
+        self,
+        ctx: WasmContext,
+        contract: ast.Decreases,
+        env: WasmSlotEnv,
+    ) -> list[list[str]] | None:
+        """Translate every measure component to value-producing WAT.
+
+        An i64 component passes through; an ADT component is ranked
+        through its structural-size helper.  Snapshots the rank-helper
+        accumulator up front and restores it on EVERY failure, so a
+        partial translation never leaves committed helpers with no
+        guard using them.  Shared by the entry check and the self-tail
+        site check — the single home for the translate/rank/rollback
+        discipline (PR #1179 review).
+        """
+        comp_values: list[list[str]] = []
+        helpers_snapshot = dict(self._dec_rank_helpers)
+        for expr in contract.exprs:
+            instrs = ctx.translate_expr(expr, env)
+            if instrs is None:
+                self._dec_rank_helpers = helpers_snapshot
+                return None
+            wt = ctx._infer_expr_wasm_type(expr)
+            if wt == "i64":
+                comp_values.append(instrs)
+                continue
+            # An i32 component is an ADT pointer (E127 rejects Bool/Byte
+            # measures at check time): rank it by structural size.
+            adt_name = self._dec_measure_adt_name(expr)
+            if adt_name is None:
+                self._dec_rank_helpers = helpers_snapshot
+                return None
+            size_fn = self._dec_rank_helper(adt_name)
+            if size_fn is None:
+                self._dec_rank_helpers = helpers_snapshot
+                return None
+            comp_values.append([*instrs, f"call {size_fn}"])
+        return comp_values
+
     def _compile_decreases_entry(
         self,
         ctx: WasmContext,
@@ -884,35 +924,10 @@ class ContractsMixin:
             return [], [], None
 
         name = decl.name
-        comp_values: list[list[str]] = []
-        # Snapshot the rank-helper accumulator for the whole component
-        # loop: when a LATER component fails, helpers committed for
-        # earlier components would be emitted with no guard using them.
-        # They are internally valid (each helper's own walk is atomic),
-        # so the escape is dead code rather than a dangling reference —
-        # rolled back anyway so "a helper exists iff a guard calls it"
-        # stays total (PR #1179 review).
-        helpers_snapshot = dict(self._dec_rank_helpers)
-        for expr in contract.exprs:
-            instrs = ctx.translate_expr(expr, env)
-            if instrs is None:
-                self._dec_rank_helpers = helpers_snapshot
-                return [], [], None
-            wt = ctx._infer_expr_wasm_type(expr)
-            if wt == "i64":
-                comp_values.append(instrs)
-                continue
-            # An i32 component is an ADT pointer (E127 rejects Bool/Byte
-            # measures at check time): rank it by structural size.
-            adt_name = self._dec_measure_adt_name(expr)
-            if adt_name is None:
-                self._dec_rank_helpers = helpers_snapshot
-                return [], [], None
-            size_fn = self._dec_rank_helper(adt_name)
-            if size_fn is None:
-                self._dec_rank_helpers = helpers_snapshot
-                return [], [], None
-            comp_values.append([*instrs, f"call {size_fn}"])
+        maybe_components = self._dec_translate_measure(ctx, contract, env)
+        if maybe_components is None:
+            return [], [], None
+        comp_values = maybe_components
 
         n = len(comp_values)
         saved_prev = [ctx.alloc_local("i64") for _ in range(n)]
@@ -1041,31 +1056,12 @@ class ContractsMixin:
             if slot:
                 capture_env = capture_env.push(slot, bind)
 
-        comp_values: list[list[str]] = []
-        # Same rollback discipline as the entry loop: helpers committed
-        # for earlier components must not outlive a later component's
-        # failure (in practice the entry loop already cached them, so
-        # this restore is a no-op — kept so the invariant is total, not
-        # incidental).
-        helpers_snapshot = dict(self._dec_rank_helpers)
-        for expr in contract.exprs:
-            instrs = ctx.translate_expr(expr, capture_env)
-            if instrs is None:
-                self._dec_rank_helpers = helpers_snapshot
-                return None
-            wt = ctx._infer_expr_wasm_type(expr)
-            if wt == "i64":
-                comp_values.append(instrs)
-                continue
-            adt_name = self._dec_measure_adt_name(expr)
-            if adt_name is None:
-                self._dec_rank_helpers = helpers_snapshot
-                return None
-            size_fn = self._dec_rank_helper(adt_name)
-            if size_fn is None:
-                self._dec_rank_helpers = helpers_snapshot
-                return None
-            comp_values.append([*instrs, f"call {size_fn}"])
+        maybe_components = self._dec_translate_measure(
+            ctx, contract, capture_env,
+        )
+        if maybe_components is None:
+            return None
+        comp_values = maybe_components
 
         n = len(comp_values)
         measured = [ctx.alloc_local("i64") for _ in range(n)]
