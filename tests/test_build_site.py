@@ -468,7 +468,7 @@ def test_fact_coherence_version_badge_divergence_is_caught(tmp_path):
     pinned it to ``index.md``, which states the same version in its own shape.
     """
     html, md = _landing_pair(tmp_path)
-    _edit(md, "**Current version:** [0.1", "**Current version:** [9.9")
+    _sub(md, r"\*\*Current version:\*\* \[\d+\.\d+\.\d+", "**Current version:** [9.9.9")
     errors = _check.check_fact_coherence(html, md)
     joined = _joined(errors)
     assert errors, "a diverged version badge must fail the gate"
@@ -644,4 +644,55 @@ def test_fact_coherence_conflicting_values_within_one_file_is_caught(tmp_path):
     assert errors, "conflicting values inside one file must fail the gate"
     assert "VeraBench version" in joined
     assert "9.9.9" in joined
+    assert str(md) in joined
+def _last_md_bench_row(md):
+    """Locate the final data row of the Markdown benchmark table.
+
+    Anchored on the same header regex the checker uses, so these tests
+    mutate the benchmark table specifically — never some other table the
+    companion may gain later.
+    """
+    lines = md.read_text(encoding="utf-8").splitlines()
+    start = next(
+        i for i, line in enumerate(lines) if _check._MD_BENCH_HEADER.match(line)
+    )
+    j = start + 1
+    while j < len(lines) and lines[j].startswith("|"):
+        j += 1
+    return lines, j - 1
+
+
+def test_fact_coherence_duplicate_md_model_row_is_caught(tmp_path):
+    """``_index_rows``: one file listing a model twice is its own failure.
+
+    The duplicate is dropped from the comparison, so without this branch a
+    doubled row would silently shadow whichever copy came second.
+    """
+    html, md = _landing_pair(tmp_path)
+    lines, last = _last_md_bench_row(md)
+    model = _check._text_of_md(lines[last].strip().strip("|").split("|")[0])
+    lines.insert(last + 1, lines[last])
+    md.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    errors = _check.check_fact_coherence(html, md)
+    joined = _joined(errors)
+    assert errors, "a duplicated model row must fail the gate"
+    assert "twice" in joined
+    assert model in joined
+    assert str(md) in joined
+
+
+def test_fact_coherence_md_row_cell_count_is_caught(tmp_path):
+    """``_bench_rows_md``: a row with the wrong cell count fails loudly.
+
+    A malformed row cannot be compared, and skipping it silently would
+    un-gate that model's figures — the same rule as a missing fact.
+    """
+    html, md = _landing_pair(tmp_path)
+    lines, last = _last_md_bench_row(md)
+    lines[last] = lines[last] + " 0% |"
+    md.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    errors = _check.check_fact_coherence(html, md)
+    joined = _joined(errors)
+    assert errors, "a malformed table row must fail the gate"
+    assert "cells" in joined
     assert str(md) in joined
