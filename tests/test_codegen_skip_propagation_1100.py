@@ -122,6 +122,12 @@ public fn main(-> @Int) requires(true) ensures(true) effects(pure) {
             _assert_no_raw_wat_error(result)
             assert "main" not in result.exports
             e620 = _e620s(result)
+            # Count before set-projection: a duplicated E620 for the same
+            # caller would vanish into the set (PR review).
+            assert len(e620) == 2, (
+                f"exactly one E620 per dropped caller in order {order}, "
+                f"got {[d.description for d in e620]}"
+            )
             dropped = {d.description.split("'")[1] for d in e620}
             assert dropped == {"mid", "main"}, (
                 f"both transitive callers must drop in order {order}, "
@@ -209,9 +215,15 @@ public fn ok(-> @Int) requires(true) ensures(true) effects(pure) {
 """
         result = _compile(source)
         _assert_no_raw_wat_error(result)
-        dropped = {d.description.split("'")[1] for d in _e620s(result)}
+        e620 = _e620s(result)
+        # Count before set-projection (PR review): the cycle must produce
+        # exactly one E620 per dropped caller, not re-emit on revisits.
+        assert len(e620) == 3, (
+            f"got {[d.description for d in e620]}"
+        )
+        dropped = {d.description.split("'")[1] for d in e620}
         assert dropped == {"ping", "pong", "main"}
-        for d in _e620s(result):
+        for d in e620:
             assert "'sunk'" in d.description
         assert result.exports == ["ok"]
         assert execute(result, fn_name="ok").value == 41
