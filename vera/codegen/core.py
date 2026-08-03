@@ -24,7 +24,7 @@ from vera import ast
 from vera.codegen.api import CompileResult
 from vera.codegen.memory import ConstructorLayout
 from vera.errors import Diagnostic, SourceLocation
-from vera.monomorphize import qualify_nested_generic_decls
+from vera.monomorphize import canonicalize_type_aliases, qualify_nested_generic_decls
 from vera.prelude import PRELUDE_FILE, mentioned_fn_names
 from vera.slots import type_expr_slot_name
 from vera.wasm import StringPool
@@ -831,10 +831,27 @@ class CodeGenerator(
             # harvested bare-name entry.  The scope keeps the registry
             # truthful rather than relying on every future consumer to
             # repeat those fallbacks.
-            with self._module_alias_scope(
-                self._mono_clone_origins.get(mdecl.name),
-            ):
+            origin_path = self._mono_clone_origins.get(mdecl.name)
+            with self._module_alias_scope(origin_path):
                 self._register_fn(mdecl)
+                if origin_path is not None:
+                    # #1111 (PR #1175 review): `_register_fn` just stored
+                    # the clone's RAW return-type expression under the
+                    # CLONE key in the shared bare-name registry — the
+                    # third door into `_fn_ret_type_exprs` after the
+                    # Pass-0 harvest and the shadowed `mod$…` mirror,
+                    # and a main-file consumer resolving the clone key
+                    # (index-element inference on a call to the clone,
+                    # the fused-await classifier) would do so against
+                    # the flat maps.  Canonicalize inside the scope,
+                    # where the flat maps ARE the defining module's.
+                    self._fn_ret_type_exprs[mdecl.name] = (
+                        canonicalize_type_aliases(
+                            self._fn_ret_type_exprs[mdecl.name],
+                            self._type_aliases,
+                            self._type_alias_params,
+                        )
+                    )
             # #516 Stage 2 — keep monomorphized prelude clones out of
             # `_fn_source_map`.  A clone like `option_unwrap_or$Int`
             # inherits the original generic FnDecl's span, which for a

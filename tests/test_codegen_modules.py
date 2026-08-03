@@ -3331,6 +3331,59 @@ public fn main(@Unit -> @Int)
         assert val == 42
 
 
+
+    def test_mono_clone_registry_entry_canonical(self) -> None:
+        """The CLONE key's entry in the shared bare-name registry is
+        canonicalized too — the third door after the Pass-0 harvest and
+        the shadowed ``mod$…`` mirror (PR #1175 review).  ``pick$Bool``
+        returns the module's ``G = Int``; the stored expression must be
+        the canonical ``Int``, not a raw ``G`` a main-file consumer
+        would re-resolve against the flat maps."""
+        from vera import ast as vast
+
+        mods = [self._resolved(("ga",), """\
+type G = Int;
+
+public forall<T> fn pick(@T, @G -> @G)
+  requires(true) ensures(true) effects(pure)
+{ @G.0 }
+""")]
+        source = """\
+import ga(pick);
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ pick(true, 42) }
+"""
+        import tempfile
+
+        from vera.codegen.core import CodeGenerator
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".vera", delete=False, encoding="utf-8"
+        ) as f:
+            f.write(source)
+            f.flush()
+            path = f.name
+        tree = parse_file(path)
+        prog = transform(tree)
+        gen = CodeGenerator(
+            source=source, file=path, resolved_modules=mods,
+        )
+        result = gen.compile_program(prog)
+        errors = [d for d in result.diagnostics if d.severity == "error"]
+        assert not errors, [e.description for e in errors]
+        clone_keys = [k for k in gen._fn_ret_type_exprs if "$" in k and k.startswith("pick")]
+        assert clone_keys, (
+            f"expected a pick clone key, got: "
+            f"{sorted(gen._fn_ret_type_exprs)}"
+        )
+        te = gen._fn_ret_type_exprs[clone_keys[0]]
+        assert isinstance(te, vast.NamedType) and te.name == "Int", (
+            f"clone-key entry not canonical: {te!r} still carries the "
+            f"module-local alias name"
+        )
+
     def test_shadowed_qualified_door_registry_entry_canonical(self) -> None:
         """The mangled ``mod$…`` registry entry for a SHADOWED module fn
         is canonicalized too — the qualified-door mirror of the bare-name
