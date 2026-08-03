@@ -250,11 +250,17 @@ public fn ok(-> @Int) requires(true) ensures(true) effects(pure) {
             "main reaches tally through the relay clone and must drop"
         )
         e620 = _e620s(result)
+        # Position, not presence: main's own E620 also contains both
+        # 'relay$String' and 'tally' ("main calls relay$String, which was
+        # dropped because tally was skipped"), so a substring test would
+        # pass with the clone's OWN diagnostic missing.  Anchor on the
+        # clone as the diagnostic's subject.
         assert any(
-            "relay" in d.description and "'tally'" in d.description
+            d.description.startswith("Function 'relay$String' ")
+            and "'tally'" in d.description
             for d in e620
         ), (
-            "the mono-mangled clone must carry an E620 naming the "
+            "the mono-mangled clone must carry its OWN E620 naming the "
             f"skipped root, got: {[d.description for d in e620]}"
         )
         assert execute(result, fn_name="ok").value == 41
