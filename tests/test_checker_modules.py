@@ -870,12 +870,17 @@ class TestReservedFnName:
     The grammar reserves ``old(`` and ``new(`` in *expression* position for
     the contract state forms — ``old_expr`` / ``new_expr`` in
     ``vera/grammar.lark``, each of which demands an effect reference, not an
-    arbitrary expression.  So ``old(5)`` can never parse as a call to a user
-    function: it reaches ``[E030]``/``[E031]`` instead (#1173/#1180).  The
-    declaration used to be accepted anyway, leaving a function no program
-    could ever reach.  Rejecting it at the declaration refuses the problem at
-    its source — the sibling of E151 (built-in functions) and E152 (built-in
-    effects), and the same DESIGN.md "one canonical form" / fail-loud rule.
+    arbitrary expression.  So a *bare* ``old(5)`` can never parse as a call to
+    a user function — anywhere, including inside the declaring module — and
+    reaches ``[E030]``/``[E031]`` instead (#1173/#1180).  The one exception is
+    a module-qualified ``mod::old(...)``, which parses through the module-call
+    rule and previously DID call a module export named ``old``
+    (``test_module_qualified_call_route_is_deliberately_closed`` below pins
+    the shape).  The declaration used to be accepted anyway: a trap in every
+    unqualified position, half-usable cross-module only.  Rejecting it at the
+    declaration reserves the whole identifier — the sibling of E151 (built-in
+    functions) and E152 (built-in effects), and the same DESIGN.md "one
+    canonical form" / fail-loud rule.
 
     **Why the set is exactly** ``{old, new}``.  Every candidate below was
     probed by declaring ``private fn <name>(@Int -> @Int)`` and then calling
@@ -1032,9 +1037,12 @@ public fn main(@Unit -> @Int)
     def test_imported_module_fn_named_old_is_E153(self) -> None:
         """An imported module declaring ``fn old`` is rejected in the importer.
 
-        Same reasoning as E151/E152 module surfacing: a module imported but
-        never checked standalone would otherwise carry the dead declaration
-        silently, and the importer could not call it either.
+        Same surfacing mechanism as E151/E152: a module imported but never
+        checked standalone would otherwise carry the trapped declaration
+        silently.  Note the importer COULD previously call it — but only via
+        the qualified ``mod::old(...)`` route; the deliberate closure of that
+        route is pinned by
+        ``test_module_qualified_call_route_is_deliberately_closed`` below.
         """
         mod_src = (
             "module stale;\n"
@@ -1060,6 +1068,45 @@ public fn main(@Unit -> @Int)
         # The harvested diagnostic carries the *module's* file path, as E151
         # does, so `vera check --json` points at the real declaration.  Compare
         # against str(mod.file_path) so the assertion holds on Windows too.
+        e153 = next(d for d in diags if d.error_code == "E153")
+        assert e153.location.file == str(mod.file_path), e153.location.file
+
+    def test_module_qualified_call_route_is_deliberately_closed(self) -> None:
+        """E153 fires even when a qualified call site proves reachability.
+
+        Adversarial-review finding on PR #1188: before the gate, this exact
+        program — module export named ``old``, importer calling it as
+        ``stale::old(5)`` — type-checked AND ran (``vera run`` printed 6).
+        The qualified route goes through the module-call rule, not the
+        reserved ``old_expr`` state form, so "no program could reach it" was
+        false for module exports.  The reservation is on the whole
+        identifier anyway (one-canonical-form, as E151/E152): a name that
+        is a trap in every unqualified position — its own module cannot
+        bare-call it — is refused outright rather than left half-usable.
+        This test pins that the previously-working shape now gets E153 at
+        the module declaration, i.e. the breakage is loud and located.
+        """
+        mod_src = (
+            "module stale;\n"
+            "public fn old(@Int -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ @Int.0 + 1 }\n"
+        )
+        mod = ResolvedModule(
+            path=("stale",),
+            file_path=Path("/fake/stale.vera"),
+            program=parse_to_ast(mod_src),
+            source=mod_src,
+        )
+        prog = parse_to_ast(
+            "import stale;\n"
+            "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ stale::old(5) }\n"
+        )
+        diags = typecheck(prog, source="", resolved_modules=[mod])
+        codes = [d.error_code for d in diags]
+        assert "E153" in codes, codes
         e153 = next(d for d in diags if d.error_code == "E153")
         assert e153.location.file == str(mod.file_path), e153.location.file
 

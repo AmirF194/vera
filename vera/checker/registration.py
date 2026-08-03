@@ -68,9 +68,15 @@ def builtin_effect_names() -> frozenset[str]:
 # ``new_expr`` in ``vera/grammar.lark`` claim ``"old" "("`` and ``"new" "("``
 # for the contract state forms, and each demands an *effect reference* as its
 # argument: ``old(5)`` is diagnosed as a malformed state reference
-# (``[E030]``/``[E031]``, #1173), never resolved as a call.  A function under
-# one of these names is therefore unreachable from any Vera program, which is
-# why the declaration itself is refused.
+# (``[E030]``/``[E031]``, #1173), never resolved as a call.  A *bare* call can
+# therefore never reach such a function — not from its own file, not from a
+# sibling in its own module, not from an importer.  One route did reach it:
+# a module-qualified ``mod::old(...)`` parses through the module-call rule,
+# not the state-form rule, so a module export named ``old`` was previously
+# callable cross-module (and only cross-module).  The reservation closes that
+# route deliberately: a name that is a trap in every unqualified position is
+# reserved outright rather than left half-usable, the same one-canonical-form
+# rule as E151/E152.
 #
 # The set is exactly the two contract state forms, and deliberately not every
 # keyword the contextual lexer lets through as a function name (``assert``,
