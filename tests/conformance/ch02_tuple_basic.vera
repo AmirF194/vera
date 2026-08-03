@@ -1,9 +1,5 @@
 -- Conformance: Tuple types (Chapter 2, Section 2.3.1)
 -- Tests: Tuple construction, match destructuring, LetDestruct, nested Tuple
-effect IO {
-  op print(String -> Unit);
-}
-
 private fn test_tuple_construct(@Unit -> @Int)
   requires(true)
   ensures(@Int.result == 30)

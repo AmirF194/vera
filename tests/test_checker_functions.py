@@ -806,10 +806,6 @@ private fn foo(@Bool -> @Int)
     def test_if_then_never_propagates(self) -> None:
         """If then-branch is Never, result is else-branch type (line 58)."""
         _check_ok("""
-effect Exn<E> {
-  op throw(E -> Never);
-}
-
 private fn checked(@Int -> @Int)
   requires(true) ensures(true) effects(<Exn<String>>)
 {
@@ -821,10 +817,6 @@ private fn checked(@Int -> @Int)
     def test_if_else_never_propagates(self) -> None:
         """If else-branch is Never, result is then-branch type (line 60)."""
         _check_ok("""
-effect Exn<E> {
-  op throw(E -> Never);
-}
-
 private fn checked(@Int -> @Int)
   requires(true) ensures(true) effects(<Exn<String>>)
 {
@@ -999,22 +991,33 @@ public fn main(-> @Unit)
 { IO.print("hello") }
 """, "Pure function")
 
-    def test_io_user_declared_override(self) -> None:
-        """User-declared effect IO should override built-in."""
-        # This declares only print — read_line should be unresolved (E220)
+    def test_io_user_declaration_rejected(self) -> None:
+        """A user `effect IO` block is rejected outright (E152, #1149).
+
+        It used to override the built-in, masking the operations it did not
+        list — this program warned that `read_line` was unresolved.  The
+        block is now an error and the built-in stays canonical, so
+        `IO.read_line` resolves and the only diagnostic is E152.
+        """
         diags = _check("""
 effect IO {
   op print(String -> Unit);
 }
 
-public fn main(-> @Unit)
+public fn main(-> @String)
   requires(true) ensures(true) effects(<IO>)
 { IO.read_line(()) }
 """)
-        warnings = [d for d in diags if d.severity == "warning"]
-        assert any("read_line" in w.description for w in warnings), \
-            f"Expected warning about read_line, got: " \
-            f"{[w.description for w in warnings]}"
+        assert [d.error_code for d in diags] == ["E152"], \
+            [(d.error_code, d.description) for d in diags]
+
+    def test_io_needs_no_declaration(self) -> None:
+        """Every built-in IO operation is in scope with no `effect IO` block."""
+        _check_clean("""
+public fn main(-> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{ IO.print(IO.read_line(())) }
+""")
 
 
 # =====================================================================

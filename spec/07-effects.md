@@ -16,21 +16,21 @@ The effect system is based on algebraic effects with row polymorphism, inspired 
 An effect is a named set of operations:
 
 ```
-effect State<T> {
-  op get(Unit -> T);
-  op put(T -> Unit);
+effect Store<T> {
+  op fetch(Unit -> T);
+  op stash(T -> Unit);
 }
 ```
 
 ```
-effect Exn<E> {
-  op throw(E -> Never);
+effect Fail<E> {
+  op abort(E -> Never);
 }
 ```
 
 ```
-effect IO {
-  op print(String -> Unit);
+effect Logger {
+  op log(String -> Unit);
 }
 ```
 
@@ -46,6 +46,7 @@ Rules:
 2. Effects may be parameterised by type variables.
 3. Each operation has a typed signature: parameter types and return type.
 4. Operations implicitly have access to the `resume` continuation (see Section 7.5).
+5. A declaration MUST NOT name a built-in effect (Section 7.7): `effect IO { ... }`, `effect Exn<E> { ... }`, `effect DB { ... }`, and every other built-in name are compile errors (`E152`). The built-in operations are in scope automatically for any function whose effect row names the effect.
 
 ## 7.3 Effect Rows
 
@@ -218,10 +219,6 @@ The result is `10`. The `handle` expression's type is the type of the handled bo
 **Exception handler:**
 
 ```
-effect Exn<E> {
-  op throw(E -> Never);
-}
-
 private fn parse_or_throw(@String -> @Int)
   requires(true)
   ensures(true)
@@ -318,6 +315,8 @@ This function always performs `IO` (for the logging), plus whatever effects `E` 
 
 ## 7.7 Built-in Effects
 
+A built-in effect is one the compiler registers: every effect in this section, and those documented in Chapter 9, Section 9.5. Its operations are in scope for any function whose effect row names it, and no declaration brings them there — so a user `effect <Name> { ... }` block redeclaring a built-in name is a compile error (`E152`), whatever operations the block lists. The rule is stated once here for the whole set rather than repeated per effect; `vera effects --json` enumerates the registered names, and Chapter 9, Section 9.5.1 gives the rationale. A marker effect with no operations (`Diverge`, `HttpServer`, `Async`) is covered by the same rule: having nothing to declare does not make the block legal.
+
 **Design note.** An alternative implementation targeting memory-constrained environments may wish to introduce an `Alloc` marker effect to distinguish allocating from non-allocating functions. The reference implementation omits this because WASM's managed linear memory makes allocation-tracking uninformative at the type level — nearly every non-trivial function allocates, so the effect would carry little signal.
 
 ### 7.7.1 `IO`
@@ -328,7 +327,7 @@ The `IO` effect is built-in and provides eleven operations for interacting with 
 |-----------|-----------|-------------|
 | `print` | `String -> Unit` | Write a UTF-8 string to stdout |
 | `read_line` | `Unit -> String` | Read a line from stdin |
-| `read_char` | `Unit -> Result<String, String>` | Read one character from stdin (raw mode on TTY); `Err("EOF")` when stdin closes |
+| `read_char` | `Unit -> Result<String, String>` | Read one character from stdin — cbreak mode on a Unix TTY, where Ctrl-D gives `Err("EOF")`; redirected input reads one character from the stdin stream and gives `Err("EOF")` at end of input |
 | `read_file` | `String -> Result<String, String>` | Read entire file as UTF-8 |
 | `write_file` | `String, String -> Result<Unit, String>` | Write string to file |
 | `args` | `Unit -> Array<String>` | Get command-line arguments |
@@ -338,36 +337,23 @@ The `IO` effect is built-in and provides eleven operations for interacting with 
 | `time` | `Unit -> Nat` | Current Unix time in milliseconds |
 | `stderr` | `String -> Unit` | Write a UTF-8 string to stderr |
 
-IO operations are handled by the runtime (see Chapter 12, Section 12.4.1). Programs do not need to declare `effect IO { ... }` — the operations are available automatically when `effects(<IO>)` is specified. See Chapter 9, Section 9.5.1 for detailed documentation and examples.
+IO operations are handled by the runtime (see Chapter 12, Section 12.4.1). `IO` is built-in — the operations are available automatically when `effects(<IO>)` is specified, and an `effect IO { ... }` declaration is a compile error (`E152`). See Chapter 9, Section 9.5.1 for detailed documentation and examples.
 
 ### 7.7.2 `Exn<E>`
 
-```
-effect Exn<E> {
-  op throw(E -> Never);
-}
-```
+Exception effect, parameterised by the thrown type.
 
-Exception effect. The `throw` operation never resumes (its return type is `Never`).
+| Operation | Signature | Description |
+|-----------|-----------|-------------|
+| `throw` | `E -> Never` | Abandon the computation with an error value; never resumes |
+
+Like `IO`, `Exn<E>` is built-in — no `effect Exn<E> { ... }` declaration is needed (and one is `E152`). Functions that throw declare the thrown type in their effect row: `effects(<Exn<String>>)`.
 
 ### 7.7.3 `Diverge`
-
-<!-- vera:skip-parse category="FRAGMENT" reason="effect Diverge {} — no operations" -->
-```
-effect Diverge {}
-```
 
 The `Diverge` effect has no operations. Declaring `effects(<Diverge>)` means the function may not terminate. Functions without `Diverge` in their effect row MUST be proven to terminate (via `decreases` clauses on recursion).
 
 ### 7.7.4 `Random`
-
-```
-effect Random {
-  op random_int(Int, Int -> Int);
-  op random_float(Unit -> Float64);
-  op random_bool(Unit -> Bool);
-}
-```
 
 The `Random` effect models non-deterministic value generation. Functions that draw random values must declare `effects(<Random>)`, making the non-determinism visible in the type signature so callers can audit which functions can produce different outputs across calls.
 
@@ -377,34 +363,17 @@ The `Random` effect models non-deterministic value generation. Functions that dr
 | `random_float` | `Unit -> Float64` | Uniform random in `[0.0, 1.0)` |
 | `random_bool` | `Unit -> Bool` | Coin flip |
 
-Like `IO`, `Random` is built-in — no `effect Random { ... }` declaration is needed. Random results are unconstrained in Z3 (no useful axioms beyond the explicit range bound on `random_int`); contracts that depend on specific random values fall to runtime checking. Operations are host-backed (see Chapter 12, Section 12.4.5). No determinism / seeding API is offered yet — handler-based seeding via `handle[Random]` is future work.
+Like `IO`, `Random` is built-in — no `effect Random { ... }` declaration is needed (and one is `E152`). Random results are unconstrained in Z3 (no useful axioms beyond the explicit range bound on `random_int`); contracts that depend on specific random values fall to runtime checking. Operations are host-backed (see Chapter 12, Section 12.4.5). No determinism / seeding API is offered yet — handler-based seeding via `handle[Random]` is future work.
 
 ### 7.7.5 `HttpServer`
-
-<!-- vera:skip-parse category="FRAGMENT" reason="effect HttpServer {} — no operations (#305)" -->
-```
-effect HttpServer {}
-```
 
 The `HttpServer` effect has no operations — it is a marker (#305, since v0.0.193).  Declaring `effects(<HttpServer>)` marks a function as an HTTP request handler: a **total**, contract-checked function `handle(Request -> Response)` (§9.5.6).  The accept loop lives in the host `vera serve` driver, not in the program, so handlers do not need `Diverge` — termination-checked request handling is a feature, and per-request effects (`State<T>`, `Exn<E>`) compose inside the handler's row as usual.
 
 ### 7.7.6 `Async`
 
-<!-- vera:skip-parse category="FRAGMENT" reason="effect Async {} — no operations" -->
-```
-effect Async {}
-```
-
 The `Async` effect has no operations — it is a marker. Declaring `effects(<Async>)` enables the built-in generic functions `async(expr)` and `await(future)`, making concurrency explicit and trackable in the effect row. See Chapter 9, Section 9.5.4 for the operation signatures, the `Future<T>` type, and the concurrency semantics (#841).
 
 ### 7.7.7 `DB`
-
-```
-effect DB {
-  op query(String, Array<Option<String>> -> Result<Array<Array<Option<String>>>, String>);
-  op execute(String, Array<Option<String>> -> Result<Int, String>);
-}
-```
 
 The `DB` effect executes SQL against a relational database (#229, since v0.1.7). Functions that read or write the database must declare `effects(<DB>)`, making database access visible in the type signature.
 
@@ -415,7 +384,7 @@ The `DB` effect executes SQL against a relational database (#229, since v0.1.7).
 
 The second argument is the **positional parameter list** — the values bound, in order, to the `?` placeholders in the SQL. Each parameter is an `Option<String>`: `Some(v)` binds a value, `None` binds SQL `NULL`. Passing data as parameters — rather than assembling it into the SQL text — is what keeps a value from being parsed as SQL, the standard defence against injection. See §9.5.7 for the row and parameter marshalling.
 
-Like `IO`, `DB` is built-in — no `effect DB { ... }` declaration is needed. Both operations return `Result`: a failed statement (malformed SQL, a constraint violation, an unreachable database) surfaces as `Err(String)`, never a trap, so every call site must `match` the failure arm. Operations are host-backed; the connection is chosen by the `VERA_DB_URL` environment variable, defaulting to an in-memory SQLite database (`sqlite::memory:`). In v1 the effect is un-mockable — `handle[DB]` awaits the user-handleable-host-effect machinery (#372) — and targets SQLite only. The browser runtime answers every `DB` operation with `Err` (a deliberate stub, §12), and the wasi-p2 target rejects `<DB>` at compile time.
+Like `IO`, `DB` is built-in — no `effect DB { ... }` declaration is needed (and one is `E152`). Both operations return `Result`: a failed statement (malformed SQL, a constraint violation, an unreachable database) surfaces as `Err(String)`, never a trap, so every call site must `match` the failure arm. Operations are host-backed; the connection is chosen by the `VERA_DB_URL` environment variable, defaulting to an in-memory SQLite database (`sqlite::memory:`). In v1 the effect is un-mockable — `handle[DB]` awaits the user-handleable-host-effect machinery (#372) — and targets SQLite only. The browser runtime answers every `DB` operation with `Err` (a deliberate stub, §12), and the wasi-p2 target rejects `<DB>` at compile time.
 
 ## 7.8 Effect Subtyping
 

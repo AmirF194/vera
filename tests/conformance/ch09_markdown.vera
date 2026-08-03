@@ -2,10 +2,6 @@
 -- Tests: md_parse, md_render, md_has_heading, md_has_code_block,
 --        md_extract_code_blocks, MdBlock, MdInline constructors.
 -- Level: run (requires WASM execution with host bindings)
-effect IO {
-  op print(String -> Unit);
-}
-
 public fn main(@Unit -> @Unit)
   requires(true)
   ensures(true)

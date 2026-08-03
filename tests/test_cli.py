@@ -193,9 +193,16 @@ class TestCmdEffects:
         assert rc == 0
         data = json.loads(capsys.readouterr().out)
         assert data["schema"] == "vera-effects/1"
-        from vera.introspect import _PARAMETERISED_EFFECTS
         env = TypeEnv()
-        assert len(data["items"]) == len(env.effects) + len(_PARAMETERISED_EFFECTS) + len(env.abilities)
+        # Identity, not just arity: pin the exact (name, kind) set against both
+        # registries.  A count-only assertion stays green if an effect is
+        # dropped and an ability added, or if a name is emitted under the wrong
+        # `kind` — and `kind` is what a consumer discriminates on.
+        expected = {(n, "effect") for n in env.effects} | {
+            (n, "ability") for n in env.abilities
+        }
+        assert {(i["name"], i["kind"]) for i in data["items"]} == expected
+        assert len(data["items"]) == len(expected)  # no duplicate rows
 
     def test_text_default(self, capsys: pytest.CaptureFixture[str]) -> None:
         rc = cmd_effects()

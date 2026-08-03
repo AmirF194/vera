@@ -1,9 +1,5 @@
 -- Conformance: Nested effect handler composition (Chapter 7)
 -- Tests: handle[Exn<Int>] inside handle[State<Int>], handle[State<Int>] inside handle[Exn<Int>], sequential handler scoping
-effect Exn<E> {
-  op throw(E -> Never);
-}
-
 -- State<Int> handler starting at 3, incremented twice: result = 5.
 private fn state_from_three(@Unit -> @Int)
   requires(true)

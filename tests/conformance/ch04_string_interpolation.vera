@@ -1,9 +1,5 @@
 -- Conformance: string interpolation (Chapter 4)
 -- Tests: interpolated strings, auto-conversion (Int, Bool, Nat, Float64)
-effect IO {
-  op print(String -> Unit);
-}
-
 public fn test_basic(@Unit -> @String)
   requires(true)
   ensures(true)

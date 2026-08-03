@@ -21,12 +21,9 @@ effect Logger<T> {
   op log(T -> Unit);
 }
 
--- Exn is partially builtin like State however it still needs to be
--- defined.
-effect Exn<E> {
-  -- Never is the type of an expression that never produces a value.
-  op throw(E -> Never);
-}
+-- Exn<E> is built-in like State<T>, so it is never declared. Its one
+-- operation is throw(E -> Never); Never is the type of an expression
+-- that never produces a value.
 
 -- Refinement types
 type PosInt = { @Int | @Int.0 > 0 };

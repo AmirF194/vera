@@ -8,7 +8,6 @@ import re
 
 
 from tests.codegen_helpers import (
-    _IO_PRELUDE,
     _compile_ok,
     _run,
     _run_io,
@@ -73,7 +72,7 @@ public fn main(@Unit -> @Unit)
         statement position, followed by a unit-literal.  Same shape,
         same fix.
         """
-        source = _IO_PRELUDE + """\
+        source = """\
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {

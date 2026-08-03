@@ -1,10 +1,6 @@
 -- Chapter 9: Regular Expression Matching (§9.6.15)
 -- Tests: regex_match, regex_find, regex_find_all, regex_replace
 -- Level: run (requires WASM execution with host bindings)
-effect IO {
-  op print(String -> Unit);
-}
-
 public fn main(@Unit -> @Unit)
   requires(true)
   ensures(true)

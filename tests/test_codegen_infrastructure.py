@@ -13,7 +13,6 @@ from vera.codegen import (
 from vera.codegen.api import WasmTrapError
 
 from tests.codegen_helpers import (
-    _IO_PRELUDE,
     _compile,
     _compile_example,
     _compile_ok,
@@ -172,7 +171,7 @@ class TestModuleAssembly:
 
     def test_io_has_import_and_memory(self) -> None:
         """IO functions import vera.print and declare memory."""
-        source = _IO_PRELUDE + """\
+        source = """\
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 { IO.print("hello") }

@@ -9,8 +9,10 @@ from tests.checker_helpers import (
     _check_clean,
     _check_err,
     _check_ok,
+    _errors,
     _warnings,
 )
+from vera.errors import Diagnostic
 
 
 # =====================================================================
@@ -1076,7 +1078,6 @@ class TestBareEffectOpRoutable1148:
 
     def test_bare_unhandled_host_op_rejected(self) -> None:
         _check_err("""
-effect IO { op print(String -> Unit); }
 public fn run(-> @Unit) requires(true) ensures(true) effects(<IO>)
 { print("hi") }
 """, "must be called qualified")
@@ -1090,7 +1091,6 @@ public fn run(-> @Unit) requires(true) ensures(true) effects(<Foo>)
 
     def test_qualified_host_op_accepted(self) -> None:
         _check_ok("""
-effect IO { op print(String -> Unit); }
 public fn run(-> @Unit) requires(true) ensures(true) effects(<IO>)
 { IO.print("hi") }
 """)
@@ -1121,31 +1121,213 @@ public fn boom(-> @Int)
 { throw("kaboom") }
 """)
 
-    def test_bare_op_on_state_named_shadow_rejected(self) -> None:
-        # #1147 adversarial workflow: the State/Exn carve-out keyed on the effect
-        # NAME only, but codegen bare-routes ONLY get/put (State) and throw
-        # (Exn) — not an arbitrary op of an effect that merely happens to be
-        # named State.  A user `effect State<T>` with a non-get/put op, called
-        # bare, passed check but hard-failed compile ("Function 'sneak' is not
-        # defined") — the exact check<->codegen disagreement E217 exists to
-        # close.  The carve-out now also requires the op NAME to be bare-routable.
-        _check_err("""
+    def test_state_named_shadow_rejected_at_source(self) -> None:
+        # #1147 adversarial workflow: the State/Exn carve-out keyed on the
+        # effect NAME only, but codegen bare-routes ONLY get/put (State) and
+        # throw (Exn) — not an arbitrary op of an effect that merely happens to
+        # be named State.  A user `effect State<T> { op sneak(...) }` called
+        # bare passed check and hard-failed compile; the carve-out was narrowed
+        # to key on the op NAME too, and #1149 then closed the shadow at its
+        # source — the redeclaration itself is E152.  The op-name keying stays
+        # in vera/checker/calls.py as defence in depth behind that gate.
+        errs = _errors("""
 effect State<T> {
   op sneak(Int -> Unit);
 }
 public fn f(@Unit -> @Int)
   requires(true) ensures(true) effects(<State<Int>>)
 { sneak(5); 0 }
-""", "must be called qualified")
+""")
+        assert "E152" in [e.error_code for e in errs], \
+            [(e.error_code, e.description) for e in errs]
 
-    def test_bare_op_on_exn_named_shadow_rejected(self) -> None:
-        # Sibling of the State case: a user `effect Exn<E>` with a non-throw op,
-        # called bare, must be E217 (codegen bare-routes only throw for Exn).
-        _check_err("""
+    def test_exn_named_shadow_rejected_at_source(self) -> None:
+        # Sibling of the State case: a user `effect Exn<E>` block is likewise
+        # rejected at its source (E152, #1149).
+        errs = _errors("""
 effect Exn<E> {
   op boom(Int -> Unit);
 }
 public fn f(@Unit -> @Int)
   requires(true) ensures(true) effects(<Exn<String>>)
 { boom(5); 0 }
-""", "must be called qualified")
+""")
+        assert "E152" in [e.error_code for e in errs], \
+            [(e.error_code, e.description) for e in errs]
+
+
+# =====================================================================
+# Built-in effect redeclaration (E152) — #1149 one-canonical-form
+# =====================================================================
+
+class TestBuiltinEffectRedeclaration1149:
+    """#1149: an ``effect <BuiltinName> { ... }`` block is rejected (E152).
+
+    A built-in host effect (``IO`` / ``DB`` / ``Http`` / ``State`` / ``Exn``
+    / ...) is registered by the compiler and lowered by codegen to a fixed
+    host import keyed on the *qualifier name*.  A user block redeclaring one
+    was honoured by the checker but ignored by codegen, so a **divergent**
+    redeclaration (wrong arity/types) passed both ``vera check`` and
+    ``vera compile`` and then trapped at ``vera run`` with structurally
+    invalid WASM.  Vera now forbids the block outright (spec §0.2 design
+    goal 3, one canonical form) — the operations are available automatically
+    with ``effects(<Name>)``.
+    """
+
+    @staticmethod
+    def _codes(diags: list[Diagnostic]) -> list[str]:
+        return [d.error_code or "" for d in diags]
+
+    def test_divergent_io_redeclaration_rejected(self) -> None:
+        """The #1149 repro: `print` declared with two params, not one.
+
+        Previously check-clean *and* compile-clean, then a WASM trap.
+        """
+        errs = _errors("""
+effect IO {
+  op print(String, String -> Unit);
+}
+public fn main(-> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{ IO.print("a", "b") }
+""")
+        assert "E152" in self._codes(errs), self._codes(errs)
+
+    def test_faithful_io_redeclaration_rejected(self) -> None:
+        """Strict: even a redeclaration that MATCHES the built-in is an error.
+
+        The rule is one canonical form, not signature agreement — a faithful
+        block is a second textual spelling of the same program.
+        """
+        errs = _errors("""
+effect IO {
+  op print(String -> Unit);
+}
+public fn main(-> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{ IO.print("hi") }
+""")
+        assert "E152" in self._codes(errs), self._codes(errs)
+
+    def test_partial_io_redeclaration_rejected(self) -> None:
+        """A block declaring an op the built-in does not have is still an error.
+
+        The rule is name-keyed: it does not compare operation sets, so a block
+        that only *adds* to the built-in is rejected like any other.  (An
+        entirely empty `effect IO {}` is unreachable — the grammar requires at
+        least one `op_decl`, so it is a parse error, not an E152.)
+        """
+        errs = _errors("""
+effect IO {
+  op shout(String -> Unit);
+}
+public fn main(-> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{ IO.print("hi") }
+""")
+        assert "E152" in self._codes(errs), self._codes(errs)
+
+    def test_exn_redeclaration_rejected(self) -> None:
+        """`Exn<E>` is gated like any other built-in effect.
+
+        It was recognised only by codegen (``handle[Exn<E>]``) and was absent
+        from ``TypeEnv.effects``, so the idiomatic
+        `effect Exn<E> { op throw(E -> Never); }` block was the only way to
+        bring `throw` and `handle` into scope.  #1149 registers it, which is
+        what makes forbidding the block possible: this pins that both halves
+        landed — the block is rejected, and (see
+        ``test_exn_needs_no_declaration``) the effect still works without it.
+        """
+        errs = _errors("""
+effect Exn<E> {
+  op throw(E -> Never);
+}
+public fn boom(-> @Int)
+  requires(true) ensures(true) effects(<Exn<String>>)
+{ throw("kaboom") }
+""")
+        assert "E152" in self._codes(errs), self._codes(errs)
+
+    def test_exn_needs_no_declaration(self) -> None:
+        """The other half of #1149's Exn change: `throw` and `handle[Exn<E>]`
+        are in scope with no `effect Exn<E>` block.
+
+        Without the registry entry this is `E330 Unknown effect 'Exn' in
+        handler` — so forbidding the block without registering the effect
+        would have made `Exn<E>` unusable.
+        """
+        _check_ok("""
+private fn safe_div(@Int, @Int -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[Exn<Int>] { throw(@Int) -> { 0 - 1 } } in {
+    if @Int.1 == 0 then { throw(0 - 1) } else { @Int.0 / @Int.1 }
+  }
+}
+""")
+
+    def test_user_named_effect_still_accepted(self) -> None:
+        """A non-built-in effect name is untouched — this gate is name-keyed."""
+        _check_ok("""
+effect Foo {
+  op bar(String -> Unit);
+}
+private fn use_foo(@String -> @Unit)
+  requires(true) ensures(true) effects(<Foo>)
+{ Foo.bar(@String.0) }
+""")
+
+    def test_builtin_stays_canonical_after_rejection(self) -> None:
+        """The rejected block is not registered, so the built-in stays in scope.
+
+        A divergent redeclaration must not cascade bogus arity errors onto the
+        call sites: E152 is the *only* diagnostic a faithful use produces.
+        """
+        errs = _errors("""
+effect IO {
+  op print(String, String -> Unit);
+}
+public fn main(-> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{ IO.print("hi") }
+""")
+        assert self._codes(errs) == ["E152"], self._codes(errs)
+
+    def test_every_builtin_effect_name_rejected(self) -> None:
+        """Every name the effect registry reports is gated — no hand-list.
+
+        Parametrised over the live registry so a future built-in effect is
+        covered the moment it is registered.
+        """
+        from vera.checker.registration import builtin_effect_names
+
+        for name in sorted(builtin_effect_names()):
+            errs = _errors(f"effect {name} {{\n  op noop(Unit -> Unit);\n}}\n")
+            assert "E152" in self._codes(errs), (name, self._codes(errs))
+
+    def test_gate_matches_the_published_effect_registry(self) -> None:
+        """Differential: the gate's name set == what ``vera effects`` publishes.
+
+        A unit test of the gate alone cannot catch the gate and the registry
+        drifting apart — run both sides and compare.
+        """
+        from vera.checker.registration import builtin_effect_names
+        from vera.introspect import effects_payload
+
+        items = effects_payload()["items"]
+        assert isinstance(items, list)
+        published = {
+            str(i["name"]) for i in items
+            if isinstance(i, dict) and i.get("kind") == "effect"
+        }
+        assert builtin_effect_names() == published
+
+    def test_diagnostic_carries_full_fields(self) -> None:
+        """E152 carries rationale/fix/spec_ref, and the fix names the remedy."""
+        errs = _errors("effect IO {\n  op print(String -> Unit);\n}\n")
+        diag = next(e for e in errs if e.error_code == "E152")
+        assert diag.rationale
+        assert diag.fix
+        assert diag.spec_ref
+        assert "delete" in diag.fix.lower()
+        assert "effects(<IO>)" in diag.fix

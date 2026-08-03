@@ -155,6 +155,8 @@ class CallsMixin:
             # `effect State<T> { op sneak(...) }` / `effect Exn<E> { op boom }`
             # shadow's bare op pass check and then hard-fail compile (#1147
             # adversarial workflow), the exact desync E217 exists to close.
+            # Such a shadow is itself rejected since #1149 (E152); the op-name
+            # keying stays as defence in depth behind that gate.
             bare_routable_builtin = (op_info.parent_effect, op_info.name) in (
                 ("State", "get"), ("State", "put"), ("Exn", "throw"),
             )
@@ -780,11 +782,19 @@ class CallsMixin:
         # placeholders (E209), and match a statically-sized params array (E208).
         # ``is_db_sql_op`` matches on ``parent_effect == "DB"`` + the op name —
         # the SAME axis codegen routes to the host database on — NOT built-in
-        # OpInfo identity, so a user ``effect DB { ... }`` shadow that DECLARES
-        # ``query`` is gated here.  A shadow that does NOT declare ``query``
-        # fails op resolution and never reaches this point; that spelling is
-        # gated in ``_check_qualified_call`` instead (Cortex #1147 Finding 1),
-        # because codegen routes it to the host regardless.
+        # OpInfo identity.
+        #
+        # Historically that distinction decided WHERE a user ``effect DB``
+        # shadow was caught: one declaring ``query`` was gated here, while one
+        # declaring only some other op failed op resolution and was gated by
+        # the spelling fallback in ``_check_qualified_call`` (Cortex #1147
+        # Finding 1).  Since #1149 no shadow enters the registry at all (E152),
+        # so every ``DB.query`` / ``DB.execute`` resolves against the built-in
+        # and arrives here; the fallback is retained only as defence in depth
+        # should the registry ever fail to resolve one.  The routing-axis key
+        # is likewise kept rather than narrowed to the built-in ``OpInfo``: the
+        # gate must cover exactly what codegen emits on its own terms, without
+        # depending on E152 to be complete.
         #
         # The gate runs on the codegen routing axis ALONE — it does NOT also
         # require the arg's static type to be ``String``.  Codegen marshals the
@@ -800,7 +810,10 @@ class CallsMixin:
         # DECLARED first param is exactly ``String`` already rejected a concrete
         # non-``String`` arg with E204, so a second E207 there is noise.  A
         # ``TypeVar`` param (generic ``DB<T>``) or a user non-``String`` param
-        # does NOT fire E204, so those still gate.
+        # does NOT fire E204, so those still gate.  (Both shadow shapes in that
+        # paragraph are the pre-#1149 world: the block is now E152, so a
+        # non-``String`` SQL argument is a plain E204 against the built-in's
+        # ``String`` parameter.)
         if (
             self.env.is_db_sql_op(op_info) and args
             and arg_types and arg_types[0] is not None
@@ -1424,6 +1437,12 @@ class CallsMixin:
         # literal-provenance gate MUST fire on the spelling here too, or a
         # runtime SQL string reaches the host ungated.  (A resolved DB SQL op is
         # gated in ``_check_op_call``; this covers the unresolved spelling.)
+        #
+        # Since #1149 no Vera source reaches this branch: a user ``effect DB``
+        # block is rejected (E152) and never registered, so ``DB.query`` /
+        # ``DB.execute`` always resolve against the built-in.  Kept as defence
+        # in depth — it holds whatever the registry does, and the gate must not
+        # depend on E152 to be complete.
         if (
             expr.qualifier == "DB"
             and expr.name in DB_SQL_OP_NAMES

@@ -1,0 +1,20 @@
+-- Conformance: redeclaring a built-in effect is a checker error
+-- (Chapter 9, Section 9.5).
+-- Tests: E152 — an `effect IO { ... }` block redeclaring a built-in host
+-- effect is rejected (#1149). Codegen lowers every qualified `IO.print(...)`
+-- to the fixed host import keyed on the qualifier, so a block whose signature
+-- diverges from the built-in (here `print` with two parameters instead of
+-- one) passed both `check` and `compile` and then trapped at `run` on
+-- structurally invalid WASM. The built-in operations need no declaration —
+-- `effects(<IO>)` makes them available.
+effect IO {
+  op print(String, String -> Unit);
+}
+
+public fn main(-> @Unit)
+  requires(true)
+  ensures(true)
+  effects(<IO>)
+{
+  IO.print("a", "b")
+}

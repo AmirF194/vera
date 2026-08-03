@@ -2405,6 +2405,20 @@
     ]
   },
   {
+    "id": "ch09_builtin_effect_redefinition_rejected",
+    "file": "ch09_builtin_effect_redefinition_rejected.vera",
+    "chapter": 9,
+    "title": "Redeclaring a built-in effect is a checker error",
+    "level": "check",
+    "spec_ref": "Section 9.5",
+    "expected_error": "E152",
+    "features": [
+      "builtin_effect_redefinition",
+      "effects",
+      "check_error"
+    ]
+  },
+  {
     "id": "ch09_builtin_redefinition",
     "file": "ch09_builtin_redefinition.vera",
     "chapter": 9,

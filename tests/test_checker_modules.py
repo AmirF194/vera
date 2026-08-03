@@ -973,3 +973,71 @@ private fn f(@Int -> @String)
         diags = typecheck(prog, source=source, resolved_modules=[mod])
         errors = [d for d in diags if d.severity == "error"]
         assert errors == [], [e.description for e in errors]
+
+
+# =====================================================================
+# Built-in effect redeclaration in a module (E152) — #1149
+# =====================================================================
+
+
+class TestModuleBuiltinEffectRedeclaration1149:
+    """A module redeclaring a built-in effect surfaces E152 into its importer.
+
+    Same reasoning as E151 for module functions (#815): the importer compiles
+    the module's bodies, and codegen routes every qualified ``IO.op(...)`` to
+    the fixed host import regardless of the declaration.  A module checked
+    only as a dependency would otherwise carry a divergent redeclaration
+    through to invalid WASM with no diagnostic anywhere.
+    """
+
+    MODULE_SRC = """\
+effect IO {
+  op print(String, String -> Unit);
+}
+
+public fn shout(@String -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{ IO.print(@String.0, "!") }
+"""
+
+    def test_module_effect_redeclaration_surfaces_to_importer(self) -> None:
+        mod = _resolved_module(("shouty",), self.MODULE_SRC)
+        source = """\
+import shouty(shout);
+public fn main(-> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{ shouty::shout("hi") }
+"""
+        prog = parse_to_ast(source)
+        diags = typecheck(prog, source=source, resolved_modules=[mod])
+        # Exactly E152, not merely "E152 among others": the module's own
+        # divergent `IO.print(a, b)` call must NOT cascade a second diagnostic
+        # into the importer.  Only E151/E152 are harvested from the module's
+        # isolated check, so a cascade here would mean the rejected block had
+        # been registered after all.
+        codes = [d.error_code for d in diags if d.severity == "error"]
+        assert codes == ["E152"], [
+            (d.error_code, d.description) for d in diags
+        ]
+
+    def test_module_user_effect_still_accepted(self) -> None:
+        """The negative control: a module's own effect name is untouched."""
+        mod = _resolved_module(("logger",), """\
+effect Logger {
+  op log(String -> Unit);
+}
+
+public fn shout(@String -> @Unit)
+  requires(true) ensures(true) effects(<Logger>)
+{ Logger.log(@String.0) }
+""")
+        source = """\
+import logger(shout);
+public fn main(-> @Unit)
+  requires(true) ensures(true) effects(<Logger>)
+{ logger::shout("hi") }
+"""
+        prog = parse_to_ast(source)
+        diags = typecheck(prog, source=source, resolved_modules=[mod])
+        errors = [d for d in diags if d.severity == "error"]
+        assert errors == [], [e.description for e in errors]

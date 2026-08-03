@@ -2,10 +2,6 @@
 -- Tests: unit_return, block_statement, effects
 -- Regression for issue #584: _is_void_expr did not recognise user @Unit fns,
 -- causing a stray `drop` in WAT that failed WASM validation.
-effect IO {
-  op print(String -> Unit);
-}
-
 -- Helper that performs an IO side-effect and returns Unit.
 private fn marker(@Unit -> @Unit)
   requires(true)

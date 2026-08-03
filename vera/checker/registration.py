@@ -42,6 +42,27 @@ def _builtin_reject_names() -> frozenset[str]:
             | {"apply_fn"}) - overridable_builtin_names()
 
 
+@functools.lru_cache(maxsize=1)
+def builtin_effect_names() -> frozenset[str]:
+    """Built-in effect names a user ``effect`` block must not redeclare (E152).
+
+    Read from the live effect registry (:func:`vera.introspect.
+    builtin_effect_names`), never a hand-list, so a future built-in effect is
+    gated the moment it is registered.  Cached: the registry is static.
+
+    Drives the #1149 "one canonical form" check for effects — the sibling of
+    E151 for built-in *functions*.  A built-in host effect is lowered by
+    codegen to a fixed host import keyed on the QUALIFIER name, ignoring any
+    user declaration, so a redeclaration whose operation signature diverges
+    from the built-in (``op print(String, String -> Unit)``) passed both
+    ``vera check`` and ``vera compile`` and then trapped at ``vera run`` on
+    structurally invalid WASM.
+    """
+    from vera.introspect import builtin_effect_names as _registry_names
+
+    return _registry_names()
+
+
 def _strip_rejected_where_fns(decl: ast.FnDecl) -> ast.FnDecl:
     """Return ``decl`` with any where-helper named after a built-in removed,
     recursively (#815).
@@ -95,6 +116,13 @@ class RegistrationMixin:
                 # canonical entry in ``env.functions`` (#815); leave the
                 # built-in in scope so later references resolve to it, not the
                 # invalid user definition.
+                continue
+            # #1149: the same one-canonical-form rule for effects.  Rejected
+            # blocks are likewise not registered, so the built-in stays in
+            # scope and the call sites resolve against it rather than
+            # cascading arity errors from the invalid declaration.
+            if (isinstance(tld.decl, ast.EffectDecl)
+                    and self._check_builtin_effect_redeclaration(tld.decl)):
                 continue
             self._register_decl(tld.decl, visibility=tld.visibility)
 
@@ -167,6 +195,50 @@ class RegistrationMixin:
         if nested_rejected:
             self._rejected_builtin_redefs.add(id(decl))
         return rejected
+
+    def _check_builtin_effect_redeclaration(
+        self, decl: ast.EffectDecl,
+    ) -> bool:
+        """Emit E152 if ``decl`` redeclares a built-in effect (#1149).
+
+        Returns ``True`` when rejected, so the caller can skip registering it
+        over the canonical entry in ``env.effects``.
+
+        The rule is name-keyed and unconditional — it does not compare the
+        declared operations against the built-in's.  Codegen routes a
+        qualified ``Effect.op(...)`` to the host import by QUALIFIER name and
+        never consults the declaration, so a divergent block miscompiles; and
+        a *faithful* block is still a second textual spelling of the same
+        program, which spec §0.2 design goal 3 (one canonical form) forbids.
+        """
+        if decl.name not in builtin_effect_names():
+            return False
+        en = decl.name
+        self._error(
+            decl,
+            f"Effect '{en}' redeclares a built-in effect.",
+            rationale=(
+                f"'{en}' is a built-in effect (spec §9.5) — its operations "
+                f"are always in scope for a function that declares "
+                f"'effects(<{en}>)', so this block is a second way to write "
+                f"a program the built-in already expresses, which Vera does "
+                f"not allow. It is also silently unsound: codegen lowers "
+                f"every qualified '{en}.op(...)' call to the fixed host "
+                f"import selected by the qualifier and never reads this "
+                f"declaration, so an operation signature that diverges from "
+                f"the built-in passes 'check' and 'compile' and then traps "
+                f"at 'run' on structurally invalid WASM."
+            ),
+            fix=(
+                f"Delete this 'effect {en}' block — the built-in operations "
+                f"are available automatically once a function declares "
+                f"'effects(<{en}>)'. If you intend a genuinely different "
+                f"effect, give it a distinct name (e.g. '{en}Custom')."
+            ),
+            spec_ref='Chapter 9, Section 9.5 "Built-in Effects"',
+            error_code="E152",
+        )
+        return True
 
     def _check_alias_cycles(self, program: ast.Program) -> None:
         """Detect cyclic type aliases and emit `[E132]`.

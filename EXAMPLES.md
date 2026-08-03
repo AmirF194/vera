@@ -111,10 +111,6 @@ public fn run_counter(@Unit -> @Int)
 The `Exn<E>` effect models exceptions with a typed error value. Unlike most languages, exceptions are explicit in the type signature and must be handled by the caller. The handler catches the thrown value and returns a fallback — `safe_div` is pure because the effect has been discharged.
 
 ```vera
-effect Exn<E> {
-  op throw(E -> Never);
-}
-
 private fn checked_div(@Int, @Int -> @Int)
   requires(true)
   ensures(true)
@@ -143,10 +139,6 @@ public fn safe_div(@Int, @Int -> @Int)
 `IO.print` is an effect operation. The `\(@Int.0)` syntax interpolates values into strings, auto-converting primitive types. `effects(<IO, Async>)` declares both IO and async effects — the compiler rejects any call to this function from a context that doesn't permit both.
 
 ```vera
-effect IO {
-  op print(String -> Unit);
-}
-
 private fn roundtrip(@Int -> @Int)
   requires(true)
   ensures(@Int.result == @Int.0)
@@ -196,10 +188,6 @@ Notice the separation of concerns: `fizzbuzz` is `effects(pure)` — the verifie
 The contract `requires(@Nat.0 <= @Nat.1)` on `loop` ensures the function is only called with valid bounds — and since the recursive call passes `@Nat.0 + 1` where `@Nat.0 < @Nat.1`, the precondition is maintained at every step.
 
 ```vera
-effect IO {
-  op print(String -> Unit);
-}
-
 public fn fizzbuzz(@Nat -> @String)
   requires(true)
   ensures(true)

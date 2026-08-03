@@ -1,9 +1,5 @@
 -- Conformance: IO effect (Chapter 7)
 -- Tests: IO.print, IO effect declaration and use
-effect IO {
-  op print(String -> Unit);
-}
-
 public fn main(@Unit -> @Unit)
   requires(true)
   ensures(true)

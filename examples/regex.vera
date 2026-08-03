@@ -3,10 +3,6 @@
 -- Demonstrates the four regex builtins: regex_match, regex_find,
 -- regex_find_all, regex_replace. All return Result types to handle
 -- invalid patterns safely.
-effect IO {
-  op print(String -> Unit);
-}
-
 public fn main(@Unit -> @Unit)
   requires(true)
   ensures(true)

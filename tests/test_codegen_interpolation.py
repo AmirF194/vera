@@ -10,7 +10,6 @@ from unittest import mock
 import pytest
 
 from tests.codegen_helpers import (
-    _IO_PRELUDE,
     _compile,
     _compile_ok,
     _run_io,
@@ -27,7 +26,7 @@ class TestStringInterpolation:
 
     def test_basic_string(self) -> None:
         """Interpolating a String value into a literal."""
-        source = _IO_PRELUDE + """\
+        source = """\
 public fn main(-> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -39,7 +38,7 @@ public fn main(-> @Unit)
 
     def test_int_convert(self) -> None:
         """Int expressions are auto-converted to String."""
-        source = _IO_PRELUDE + """\
+        source = """\
 public fn main(-> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -51,7 +50,7 @@ public fn main(-> @Unit)
 
     def test_bool_convert(self) -> None:
         """Bool expressions are auto-converted to String."""
-        source = _IO_PRELUDE + """\
+        source = """\
 public fn main(-> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -63,7 +62,7 @@ public fn main(-> @Unit)
 
     def test_multiple_parts(self) -> None:
         """Multiple interpolated expressions."""
-        source = _IO_PRELUDE + """\
+        source = """\
 public fn main(-> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -76,7 +75,7 @@ public fn main(-> @Unit)
 
     def test_only_expr(self) -> None:
         """Interpolation with only an expression, no literal text."""
-        source = _IO_PRELUDE + """\
+        source = """\
 public fn main(-> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -88,7 +87,7 @@ public fn main(-> @Unit)
 
     def test_empty_fragments(self) -> None:
         """Adjacent interpolations with no text between them."""
-        source = _IO_PRELUDE + """\
+        source = """\
 public fn main(-> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -101,7 +100,7 @@ public fn main(-> @Unit)
 
     def test_nat_convert(self) -> None:
         """Nat auto-conversion works."""
-        source = _IO_PRELUDE + """\
+        source = """\
 public fn main(-> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -113,7 +112,7 @@ public fn main(-> @Unit)
 
     def test_float_convert(self) -> None:
         """Float64 auto-conversion works."""
-        source = _IO_PRELUDE + """\
+        source = """\
 public fn main(-> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -126,7 +125,7 @@ public fn main(-> @Unit)
 
     def test_nested_fn_call(self) -> None:
         """Function call inside interpolation."""
-        source = _IO_PRELUDE + """\
+        source = """\
 public fn main(-> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -153,7 +152,7 @@ public fn main(-> @Unit)
         interpolation desugars to `string_concat(make_str(()), "\\n")`
         with both args correctly typed as i32_pair.
         """
-        source = _IO_PRELUDE + """\
+        source = """\
 private fn make(-> @String)
   requires(true) ensures(true) effects(pure)
 { "hello" }
@@ -172,7 +171,7 @@ public fn main(-> @Unit)
         String case but the index strips back to an `Int` element —
         exercises both halves of the inference path together.
         """
-        source = _IO_PRELUDE + """\
+        source = """\
 private fn make_arr(-> @Array<Int>)
   requires(true) ensures(true) effects(pure)
 { [10, 20, 30] }
@@ -201,7 +200,7 @@ public fn main(-> @Unit)
         which handles both `NamedType` (with alias resolution) and
         `RefinementType` (unwrap to base, then resolve).
         """
-        source = _IO_PRELUDE + """\
+        source = """\
 private fn make(-> @{ @String | string_length(@String.0) > 0 })
   requires(true) ensures(true) effects(pure)
 { "hello" }
@@ -230,7 +229,7 @@ public fn main(-> @Unit)
         Same change applied symmetrically to the IndexExpr-of-FnCall
         inference path.
         """
-        source = _IO_PRELUDE + """\
+        source = """\
 private fn make(-> @{ @{ @String | string_length(@String.0) > 0 } | string_length(@String.0) < 100 })
   requires(true) ensures(true) effects(pure)
 { "hello" }
@@ -271,7 +270,7 @@ public fn main(-> @Unit)
         FnCall path, applied symmetrically to the FnType-alias
         path.
         """
-        source = _IO_PRELUDE + """\
+        source = """\
 type Maker = fn(Unit -> { @{ @String | string_length(@String.0) > 0 } | string_length(@String.0) < 100 }) effects(pure);
 
 private fn make_maker(@Unit -> @Maker)
@@ -310,7 +309,7 @@ public fn main(-> @Unit)
         directly), but the same RefinementType-unwrap +
         `_format_named_type_canonical` shape applies.
         """
-        source = _IO_PRELUDE + """\
+        source = """\
 private fn helper(@Unit -> @String)
   requires(true) ensures(true) effects(pure)
 { "hello" }
@@ -358,7 +357,7 @@ public fn main(-> @Unit)
         test will continue to pin the trigger through that
         refactor.
         """
-        source = _IO_PRELUDE + """\
+        source = """\
 private fn helper(@Unit -> @String)
   requires(true) ensures(true) effects(pure)
 { "hello" }
@@ -395,7 +394,7 @@ public fn main(-> @Unit)
         done in `_resolve_i32_pair_ret_te` for the regular FnCall
         path.
         """
-        source = _IO_PRELUDE + """\
+        source = """\
 type Str = String;
 type Maker = fn(Unit -> Str) effects(pure);
 
@@ -419,7 +418,7 @@ public fn main(-> @Unit)
         behaviour so a future change to the alias-resolution path
         can't regress it silently.
         """
-        source = _IO_PRELUDE + """\
+        source = """\
 type Str = String;
 
 private fn make(-> @{ @Str | string_length(@Str.0) > 0 })
@@ -455,7 +454,7 @@ public fn main(-> @Unit)
         Fix: same RefinementType `while`-loop unwrap applied to
         `_infer_index_element_type_expr`'s FnCall branch.
         """
-        source = _IO_PRELUDE + """\
+        source = """\
 private fn make(-> @{ @{ @Array<Int> | array_length(@Array<Int>.0) > 0 } | array_length(@Array<Int>.0) < 100 })
   requires(true) ensures(true) effects(pure)
 { [10, 20, 30] }
@@ -488,7 +487,7 @@ public fn main(-> @Unit)
         branch `i32_pair` lookup added in `d78b4dc`, which now also
         canonicalises (currently latent — see code comment).
         """
-        source = _IO_PRELUDE + """\
+        source = """\
 type Str = String;
 
 private fn make(-> @Str)
@@ -525,7 +524,7 @@ public fn main(-> @Unit)
         regressions whose downstream output happens to look right by
         coincidence.
         """
-        source = _IO_PRELUDE + """\
+        source = """\
 private fn make(-> @String)
   requires(true) ensures(true) effects(pure)
 { "hello" }
@@ -583,7 +582,7 @@ public fn main(-> @Unit)
         prints a literal backslash-paren sequence and asserting the
         output preserves the literal characters.
         """
-        source = _IO_PRELUDE + """\
+        source = """\
 public fn main(-> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -635,7 +634,7 @@ class TestE615LoudInterpolationFallthrough630:
         emits [E615] and the function is skipped with [E602] before
         any invalid emission.
         """
-        source = _IO_PRELUDE + """\
+        source = """\
 public fn main(-> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -689,25 +688,22 @@ public fn main(-> @Unit)
         # The E615 has a source location attached pointing at the
         # offending interpolation segment.  Source layout:
         #
-        #     line 1: effect IO {
-        #     line 2:   op print(String -> Unit);
-        #     line 3: }
-        #     line 4: public fn main(-> @Unit)
-        #     line 5:   requires(true) ensures(true) effects(<IO>)
-        #     line 6: {
-        #     line 7:   let @Option<Int> = Some(42);
-        #     line 8:   IO.print("\(@Option<Int>.0)\n")
-        #     line 9: }
+        #     line 1: public fn main(-> @Unit)
+        #     line 2:   requires(true) ensures(true) effects(<IO>)
+        #     line 3: {
+        #     line 4:   let @Option<Int> = Some(42);
+        #     line 5:   IO.print("\(@Option<Int>.0)\n")
+        #     line 6: }
         #
-        # The SlotRef ``@Option<Int>.0`` starts at line 8, column 15
+        # The SlotRef ``@Option<Int>.0`` starts at line 5, column 15
         # (cols 1-2 indent, 3-4 ``IO``, 5 ``.``, 6-10 ``print``,
         # 11 ``(``, 12 ``"``, 13-14 ``\(``, 15 ``@``).  Pre-#634 the
-        # span landed on line 3 (the synthetic parse-wrapper's
-        # content line) because spans inside interpolated expressions
-        # were never remapped from wrapper coordinates back to
-        # original-source coordinates.  Closes #634.
-        assert e615[0].location.line == 8, (
-            f"E615 should point at the string literal on line 8 "
+        # span landed on the synthetic parse-wrapper's content line
+        # because spans inside interpolated expressions were never
+        # remapped from wrapper coordinates back to original-source
+        # coordinates.  Closes #634.
+        assert e615[0].location.line == 5, (
+            f"E615 should point at the string literal on line 5 "
             f"(post-#634 span remap); got line "
             f"{e615[0].location.line}"
         )
@@ -749,7 +745,7 @@ public fn main(-> @Unit)
         (silent-failure-hunter finding C1 + later CodeRabbit follow-up
         on PR #631.)
         """
-        source = _IO_PRELUDE + """\
+        source = """\
 public fn main(-> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -812,7 +808,7 @@ public fn main(-> @Unit)
         (comment-analyzer finding I4 + later CodeRabbit finding 2
         on PR #631.)
         """
-        source = _IO_PRELUDE + """\
+        source = """\
 public fn clean_before(-> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -879,7 +875,7 @@ public fn clean_after(-> @Unit)
         (test-analyzer finding C3 + later CodeRabbit follow-up on
         PR #631.)
         """
-        source = _IO_PRELUDE + """\
+        source = """\
 public fn main(-> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -924,7 +920,7 @@ public fn main(-> @Unit)
 
         (silent-failure-hunter finding H2 on PR #631.)
         """
-        source = _IO_PRELUDE + """\
+        source = """\
 public fn main(-> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -949,18 +945,17 @@ public fn main(-> @Unit)
         )
         # Per-segment span fidelity (#634).  Source layout:
         #
-        #     line 9:   IO.print("\(@Option<Int>.0) and \(@Result<Int, String>.0)\n")
+        #     line 6:   IO.print("\(@Option<Int>.0) and \(@Result<Int, String>.0)\n")
         #     cols ^^   ^^      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
         #     12 ".  13-14 \(.  15 @Option starts.
         #     35-36 \(.  37 @Result starts.
         #
-        # Both diagnostics must land on line 9; their columns must
+        # Both diagnostics must land on line 6; their columns must
         # differ and match the column of their respective SlotRef.
-        # Pre-#634 both would have landed on line 3 (the synthetic
-        # parse-wrapper's content line) with column 3 — the bug this
-        # test pins as fixed.
-        assert all(d.location.line == 9 for d in e615), (
-            f"Both E615s should point at line 9; got lines "
+        # Pre-#634 both would have landed on the synthetic parse-wrapper's
+        # content line with column 3 — the bug this test pins as fixed.
+        assert all(d.location.line == 6 for d in e615), (
+            f"Both E615s should point at line 6; got lines "
             f"{[d.location.line for d in e615]}"
         )
         cols = sorted(d.location.column for d in e615)
@@ -1003,7 +998,7 @@ public fn main(-> @Unit)
         (CodeRabbit finding 3 + code-reviewer finding I1 + later
         CodeRabbit findings 1 + 5 on PR #631.)
         """
-        source = _IO_PRELUDE + """\
+        source = """\
 type Box<T> = Array<T>;
 
 private fn make_box(@Unit -> @Box<Int>)
@@ -1039,7 +1034,7 @@ public fn main(-> @Unit)
         specific `[E616]` before the enclosing fn is dropped via
         `[E602]`.
         """
-        source = _IO_PRELUDE + """\
+        source = """\
 type Maker = fn(Int -> String) effects(pure);
 
 private fn make_mapper(@Unit -> @Maker)
@@ -1110,7 +1105,7 @@ public fn main(-> @Unit)
         substitutes parameterised-alias type params via
         `substitute_type_vars` before recursing.
         """
-        source = _IO_PRELUDE + """\
+        source = """\
 type Id<T> = T;
 
 private fn make_list(@Unit -> @Id<Array<Int>>)
@@ -1149,7 +1144,7 @@ public fn main(-> @Unit)
 
         (CodeRabbit finding 3, third review pass on PR #631.)
         """
-        source = _IO_PRELUDE + """\
+        source = """\
 type Inner = fn(Int -> Int) effects(pure);
 type Outer = fn(Int -> Inner) effects(pure);
 
@@ -1196,7 +1191,7 @@ public fn main(-> @Unit)
 
         (CodeRabbit finding 1, third review pass on PR #631.)
         """
-        source = _IO_PRELUDE + """\
+        source = """\
 public fn bad(-> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -1260,7 +1255,7 @@ public fn good(-> @Unit)
 
         (test-analyzer finding C2 on PR #631.)
         """
-        source = _IO_PRELUDE + """\
+        source = """\
 public fn main(-> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {

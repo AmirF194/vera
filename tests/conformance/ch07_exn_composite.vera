@@ -2,10 +2,6 @@
 -- Tests: handle[Exn<Option<Int>>] — the composite E is escaped for the WASM
 -- exception tag and the caught-payload @Option<Int> binding materializes under
 -- the full canonical slot name so @Option<Int>.0 resolves in the handler (#914).
-effect Exn<E> {
-  op throw(E -> Never);
-}
-
 public fn caught_composite(@Unit -> @Int)
   requires(true)
   ensures(true)

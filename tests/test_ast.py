@@ -332,10 +332,13 @@ class TestEffectDecls:
         assert decl.operations[1].name == "increment"
 
     def test_parameterized_effect(self):
+        # A user-named effect: redeclaring a built-in (`effect State<T>`) is
+        # E152 (#1149), and a fixture should stay a program the checker accepts
+        # even where the test itself only parses.
         prog = _ast("""
-        effect State<T> {
-          op get(Unit -> T);
-          op put(T -> Unit);
+        effect Store<T> {
+          op fetch(Unit -> T);
+          op stash(T -> Unit);
         }
         """)
         decl = prog.declarations[0].decl

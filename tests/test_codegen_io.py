@@ -11,7 +11,6 @@ from vera.codegen import (
 )
 
 from tests.codegen_helpers import (
-    _IO_PRELUDE,
     _compile_ok,
     _run_io,
 )
@@ -503,7 +502,7 @@ public fn main(-> @Unit)
 
     def test_alloc_not_exported_for_print_only(self) -> None:
         """WAT does not export $alloc when only IO.print is used."""
-        source = _IO_PRELUDE + """\
+        source = """\
 public fn main(-> @Unit)
   requires(true) ensures(true) effects(<IO>)
 { IO.print("hello") }
@@ -522,7 +521,6 @@ class TestMarkdown:
     md_has_code_block, md_extract_code_blocks."""
 
     _PREAMBLE = """
-effect IO { op print(String -> Unit); }
 """
 
     def test_md_parse_heading(self) -> None:
@@ -666,7 +664,6 @@ class TestRegex:
     regex_replace."""
 
     _PREAMBLE = """
-effect IO { op print(String -> Unit); }
 """
 
     # ---- regex_match ----

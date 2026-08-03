@@ -1940,10 +1940,6 @@ class TestBrowserMarkdown:
     def test_md_parse_render_roundtrip(self, tmp_path: Path) -> None:
         """md_parse then md_render should produce valid output in both runtimes."""
         source = '''\
-effect IO {
-  op print(String -> Unit);
-}
-
 public fn main(@Unit -> @Unit)
   requires(true)
   ensures(true)
@@ -1964,10 +1960,6 @@ public fn main(@Unit -> @Unit)
     def test_md_has_heading(self, tmp_path: Path) -> None:
         """md_has_heading correctly detects headings."""
         source = '''\
-effect IO {
-  op print(String -> Unit);
-}
-
 public fn main(@Unit -> @Unit)
   requires(true)
   ensures(true)
@@ -2001,10 +1993,6 @@ public fn main(@Unit -> @Unit)
     def test_md_has_code_block(self, tmp_path: Path) -> None:
         """md_has_code_block correctly detects code blocks."""
         source = '''\
-effect IO {
-  op print(String -> Unit);
-}
-
 public fn main(@Unit -> @Unit)
   requires(true)
   ensures(true)
@@ -2038,10 +2026,6 @@ public fn main(@Unit -> @Unit)
     def test_md_extract_code_blocks(self, tmp_path: Path) -> None:
         """md_extract_code_blocks returns code block contents."""
         source = '''\
-effect IO {
-  op print(String -> Unit);
-}
-
 public fn main(@Unit -> @Unit)
   requires(true)
   ensures(true)
@@ -2272,8 +2256,6 @@ class TestBrowserMapHostStoreGCReachability695:
         plus the ``allocMapWrapper`` JS rooting (#707 round 2 fix).
         """
         src = """
-effect IO { op print(String -> Unit); }
-
 private fn build_set(-> @Set<Json>)
   requires(true) ensures(true) effects(pure)
 {
@@ -2311,8 +2293,6 @@ public fn main(-> @Unit)
         ``readJson`` bit-31 mask fix (CR round 1 finding 2).
         """
         src = """
-effect IO { op print(String -> Unit); }
-
 public fn main(-> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -2348,8 +2328,6 @@ public fn main(-> @Unit)
         with EAGER_GC pressure on every alloc.
         """
         src = """
-effect IO { op print(String -> Unit); }
-
 private fn build_map(-> @Map<String, Json>)
   requires(true) ensures(true) effects(pure)
 {
@@ -2407,8 +2385,6 @@ class TestBrowserRound4Fixes743:
         struct alloc — 200 ``map_get`` calls on a ``Map<Int, String>``
         under eager GC each return the live string (pre-fix: 0)."""
         src = """
-effect IO { op print(String -> Unit); }
-
 public fn main(-> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -2437,8 +2413,6 @@ public fn main(-> @Unit)
         ``map_contains`` / native-Map ``map_get`` (pre-fix the
         ``decodeColumn`` ``===`` could not find NaN)."""
         src = """
-effect IO { op print(String -> Unit); }
-
 public fn main(-> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -2461,8 +2435,6 @@ public fn main(-> @Unit)
         """A NaN ``Float64`` Set element dedups and is found via the JS
         ``sameValueZero`` ``set_contains`` (parallel of the Map case)."""
         src = """
-effect IO { op print(String -> Unit); }
-
 public fn main(-> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -2485,8 +2457,6 @@ public fn main(-> @Unit)
         ``gcRooted(wrapHandle(3, h))``; 200x under eager GC the Decimal
         reads back as "3.14"."""
         src = """
-effect IO { op print(String -> Unit); }
-
 public fn main(-> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -2572,8 +2542,6 @@ class TestBrowserMdBuilderRooting744:
         list, thematic break, table, document) under eager GC and
         assert browser stdout matches the CLI byte-for-byte."""
         src = """
-effect IO { op print(String -> Unit); }
-
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -2599,8 +2567,6 @@ public fn main(@Unit -> @Unit)
         GC, then a full-tree read-back via ``md_extract_code_blocks``
         — the count is exact (pre-fix: corrupted tree / trap)."""
         src = """
-effect IO { op print(String -> Unit); }
-
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -2658,8 +2624,6 @@ class TestBrowserDecimalExact856:
     # ``d(s)`` parses a decimal string with a 0 fallback (all inputs are
     # valid, so the fallback is never taken); ``show`` renders it.
     _PRELUDE = """
-effect IO { op print(String -> Unit); }
-
 private fn d(@String -> @Decimal)
   requires(true) ensures(true) effects(pure)
 {
@@ -2976,8 +2940,6 @@ public fn main(@Unit -> @Unit)
         cross-target divergence (PR #877 CodeRabbit + panel; grammar
         unification per DESIGN.md: explicit over host-incidental)."""
         src = """
-effect IO { op print(String -> Unit); }
-
 private fn acc(@String -> @String)
   requires(true) ensures(true) effects(pure)
 {
@@ -3052,8 +3014,6 @@ public fn main(@Unit -> @Unit)
         "200.0", not "200" (PR #877 panel, from_float residual +
         blast-radius chain finding)."""
         src = """
-effect IO { op print(String -> Unit); }
-
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {

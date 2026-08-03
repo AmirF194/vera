@@ -274,7 +274,6 @@ public fn f(-> @Int) requires(true) ensures(true) effects(pure) {{
 
     def _io_prog(self, literal: str) -> str:
         return f"""
-effect IO {{ op print(String -> Unit); }}
 public fn f(@Unit -> @Unit) requires(true) ensures(true) effects(<IO>) {{
   IO.print(base64_encode("{literal}"));
   ()
@@ -316,7 +315,6 @@ private data Result<T, E> { Ok(T), Err(E) }
 
     def _ok_prog(self, literal: str) -> str:
         return self._PREAMBLE + f"""
-effect IO {{ op print(String -> Unit); }}
 public fn f(@Unit -> @Unit) requires(true) ensures(true) effects(<IO>) {{
   match base64_decode("{literal}") {{
     Ok(@String) -> IO.print(@String.0),
@@ -377,7 +375,6 @@ public fn f(-> @Int) requires(true) ensures(true) effects(pure) {{
     def test_roundtrip(self) -> None:
         """Encode then decode round-trips correctly."""
         src = self._PREAMBLE + """
-effect IO { op print(String -> Unit); }
 public fn f(@Unit -> @Unit) requires(true) ensures(true) effects(<IO>) {
   let @String = base64_encode("Hello, World!");
   match base64_decode(@String.0) {
@@ -394,7 +391,6 @@ class TestUrlEncode:
 
     def _io_prog(self, literal: str) -> str:
         return f"""
-effect IO {{ op print(String -> Unit); }}
 public fn f(@Unit -> @Unit) requires(true) ensures(true) effects(<IO>) {{
   IO.print(url_encode("{literal}"));
   ()
@@ -432,7 +428,6 @@ private data Result<T, E> { Ok(T), Err(E) }
 
     def _ok_prog(self, literal: str) -> str:
         return self._PREAMBLE + f"""
-effect IO {{ op print(String -> Unit); }}
 public fn f(@Unit -> @Unit) requires(true) ensures(true) effects(<IO>) {{
   match url_decode("{literal}") {{
     Ok(@String) -> IO.print(@String.0),
@@ -481,7 +476,6 @@ public fn f(-> @Int) requires(true) ensures(true) effects(pure) {{
     def test_roundtrip(self) -> None:
         """Encode then decode round-trips correctly."""
         src = self._PREAMBLE + """
-effect IO { op print(String -> Unit); }
 public fn f(@Unit -> @Unit) requires(true) ensures(true) effects(<IO>) {
   match url_decode(url_encode("Hello, World!")) {
     Ok(@String) -> IO.print(@String.0),
@@ -509,7 +503,6 @@ private data Result<T, E> { Ok(T), Err(E) }
         """
         slot = 4 - index
         return self._PREAMBLE + f"""
-effect IO {{ op print(String -> Unit); }}
 public fn f(@Unit -> @Unit) requires(true) ensures(true) effects(<IO>) {{
   match url_parse("{url}") {{
     Ok(@UrlParts) -> match @UrlParts.0 {{
@@ -533,7 +526,6 @@ public fn f(-> @Int) requires(true) ensures(true) effects(pure) {{
 
     def _join_prog(self, url: str) -> str:
         return self._PREAMBLE + f"""
-effect IO {{ op print(String -> Unit); }}
 public fn f(@Unit -> @Unit) requires(true) ensures(true) effects(<IO>) {{
   match url_parse("{url}") {{
     Ok(@UrlParts) -> IO.print(url_join(@UrlParts.0)),
@@ -634,7 +626,6 @@ private data UrlParts { UrlParts(String, String, String, String, String) }
 
     def test_all_components(self) -> None:
         src = self._PREAMBLE + """
-effect IO { op print(String -> Unit); }
 public fn f(@Unit -> @Unit) requires(true) ensures(true) effects(<IO>) {
   IO.print(url_join(UrlParts("https", "example.com", "/path", "q=1", "frag")))
 }
@@ -643,7 +634,6 @@ public fn f(@Unit -> @Unit) requires(true) ensures(true) effects(<IO>) {
 
     def test_scheme_authority_path(self) -> None:
         src = self._PREAMBLE + """
-effect IO { op print(String -> Unit); }
 public fn f(@Unit -> @Unit) requires(true) ensures(true) effects(<IO>) {
   IO.print(url_join(UrlParts("https", "example.com", "/path", "", "")))
 }
@@ -652,7 +642,6 @@ public fn f(@Unit -> @Unit) requires(true) ensures(true) effects(<IO>) {
 
     def test_with_query_no_fragment(self) -> None:
         src = self._PREAMBLE + """
-effect IO { op print(String -> Unit); }
 public fn f(@Unit -> @Unit) requires(true) ensures(true) effects(<IO>) {
   IO.print(url_join(UrlParts("https", "example.com", "/", "key=val", "")))
 }
@@ -661,7 +650,6 @@ public fn f(@Unit -> @Unit) requires(true) ensures(true) effects(<IO>) {
 
     def test_with_fragment_no_query(self) -> None:
         src = self._PREAMBLE + """
-effect IO { op print(String -> Unit); }
 public fn f(@Unit -> @Unit) requires(true) ensures(true) effects(<IO>) {
   IO.print(url_join(UrlParts("https", "example.com", "", "", "top")))
 }
@@ -670,7 +658,6 @@ public fn f(@Unit -> @Unit) requires(true) ensures(true) effects(<IO>) {
 
     def test_scheme_only(self) -> None:
         src = self._PREAMBLE + """
-effect IO { op print(String -> Unit); }
 public fn f(@Unit -> @Unit) requires(true) ensures(true) effects(<IO>) {
   IO.print(url_join(UrlParts("http", "", "", "", "")))
 }
@@ -679,7 +666,6 @@ public fn f(@Unit -> @Unit) requires(true) ensures(true) effects(<IO>) {
 
     def test_empty_parts(self) -> None:
         src = self._PREAMBLE + """
-effect IO { op print(String -> Unit); }
 public fn f(@Unit -> @Unit) requires(true) ensures(true) effects(<IO>) {
   IO.print(url_join(UrlParts("", "", "", "", "")))
 }
@@ -690,7 +676,6 @@ public fn f(@Unit -> @Unit) requires(true) ensures(true) effects(<IO>) {
 class TestToString:
     def test_positive(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -701,7 +686,6 @@ public fn main(@Unit -> @Unit)
 
     def test_zero(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -712,7 +696,6 @@ public fn main(@Unit -> @Unit)
 
     def test_large(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -723,7 +706,6 @@ public fn main(@Unit -> @Unit)
 
     def test_negative(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -749,7 +731,6 @@ public fn f(-> @Int) requires(true) ensures(true) effects(pure) {
 class TestStringStrip:
     def test_both_sides(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -760,7 +741,6 @@ public fn main(@Unit -> @Unit)
 
     def test_leading_only(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -771,7 +751,6 @@ public fn main(@Unit -> @Unit)
 
     def test_trailing_only(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -782,7 +761,6 @@ public fn main(@Unit -> @Unit)
 
     def test_no_whitespace(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -977,7 +955,6 @@ public fn f(-> @Int) requires(true) ensures(true) effects(pure) {
 class TestStringUpper:
     def test_basic(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -988,7 +965,6 @@ public fn main(@Unit -> @Unit)
 
     def test_mixed(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -999,7 +975,6 @@ public fn main(@Unit -> @Unit)
 
     def test_no_letters(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -1020,7 +995,6 @@ public fn f(-> @Int) requires(true) ensures(true) effects(pure) {
 class TestStringLower:
     def test_basic(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -1031,7 +1005,6 @@ public fn main(@Unit -> @Unit)
 
     def test_mixed(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -1042,7 +1015,6 @@ public fn main(@Unit -> @Unit)
 
     def test_no_letters(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -1063,7 +1035,6 @@ public fn f(-> @Int) requires(true) ensures(true) effects(pure) {
 class TestStringReplace:
     def test_basic(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -1074,7 +1045,6 @@ public fn main(@Unit -> @Unit)
 
     def test_not_found(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -1085,7 +1055,6 @@ public fn main(@Unit -> @Unit)
 
     def test_empty_needle(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -1096,7 +1065,6 @@ public fn main(@Unit -> @Unit)
 
     def test_multiple(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -1109,7 +1077,6 @@ public fn main(@Unit -> @Unit)
 class TestStringSplit:
     def test_basic(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -1120,7 +1087,6 @@ public fn main(@Unit -> @Unit)
 
     def test_no_delimiter(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -1149,7 +1115,6 @@ public fn f(-> @Int) requires(true) ensures(true) effects(pure) {
 class TestStringJoin:
     def test_basic(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -1160,7 +1125,6 @@ public fn main(@Unit -> @Unit)
 
     def test_single_element(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -1171,7 +1135,6 @@ public fn main(@Unit -> @Unit)
 
     def test_empty_separator(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -1182,7 +1145,6 @@ public fn main(@Unit -> @Unit)
 
     def test_roundtrip(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -1200,7 +1162,6 @@ public fn main(@Unit -> @Unit)
 class TestBoolToString:
     def test_true(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -1211,7 +1172,6 @@ public fn main(@Unit -> @Unit)
 
     def test_false(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -1224,7 +1184,6 @@ public fn main(@Unit -> @Unit)
 class TestNatToString:
     def test_basic(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -1235,7 +1194,6 @@ public fn main(@Unit -> @Unit)
 
     def test_zero(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -1248,7 +1206,6 @@ public fn main(@Unit -> @Unit)
 class TestByteToString:
     def test_letter_a(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn f(@Byte -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -1259,7 +1216,6 @@ public fn f(@Byte -> @Unit)
 
     def test_digit(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn f(@Byte -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -1272,7 +1228,6 @@ public fn f(@Byte -> @Unit)
 class TestIntToStringAlias:
     def test_same_as_to_string(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -1283,7 +1238,6 @@ public fn main(@Unit -> @Unit)
 
     def test_negative(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -1296,7 +1250,6 @@ public fn main(@Unit -> @Unit)
 class TestFloatToString:
     def test_pi(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -1307,7 +1260,6 @@ public fn main(@Unit -> @Unit)
 
     def test_zero(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -1318,7 +1270,6 @@ public fn main(@Unit -> @Unit)
 
     def test_negative(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -1329,7 +1280,6 @@ public fn main(@Unit -> @Unit)
 
     def test_integer_float(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -1347,7 +1297,6 @@ public fn main(@Unit -> @Unit)
     def test_nan(self) -> None:
         """nan() must render "nan", not trap on i64.trunc_f64_s."""
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -1359,7 +1308,6 @@ public fn main(@Unit -> @Unit)
     def test_positive_infinity(self) -> None:
         """infinity() must render "inf", not overflow."""
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -1371,7 +1319,6 @@ public fn main(@Unit -> @Unit)
     def test_negative_infinity(self) -> None:
         """A negated infinity must render "-inf" with the sign."""
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -1385,7 +1332,6 @@ public fn main(@Unit -> @Unit)
         render "-inf", not steer the user to integer preconditions
         via a misleading "Integer overflow" diagnostic (#857)."""
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {

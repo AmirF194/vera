@@ -1,9 +1,5 @@
 -- Conformance: Exn<String> effect handler (Chapter 7)
 -- Tests: Exn<String> throw, catch with String payload (pair type in WASM)
-effect Exn<E> {
-  op throw(E -> Never);
-}
-
 -- Throws if the input is empty, otherwise returns it uppercased.
 private fn safe_upper(@String -> @String)
   requires(true)

@@ -5,7 +5,6 @@ Split from tests/test_codegen.py (#419). Shared helpers live in tests/codegen_he
 from __future__ import annotations
 
 from tests.codegen_helpers import (
-    _IO_PRELUDE,
     _compile_ok,
     _run,
     _run_float,
@@ -123,7 +122,7 @@ public fn main(-> @Float64)
 
     def test_decimal_to_string_exact(self) -> None:
         """decimal_to_string renders the correct string."""
-        source = _IO_PRELUDE + """
+        source = """
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 { IO.print(decimal_to_string(decimal_from_int(42))) }

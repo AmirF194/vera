@@ -17,7 +17,6 @@ import pytest
 from vera.codegen.api import WasmTrapError
 
 from tests.codegen_helpers import (
-    _IO_PRELUDE,
     _compile,
     _compile_ok,
     _run,
@@ -518,9 +517,6 @@ public fn test(@Unit -> @Int)
     def test_exn_handler_compiles(self) -> None:
         """Exn<E> handler compiles to WASM using exception handling."""
         src = """\
-effect Exn<E> {
-  op throw(E -> Never);
-}
 private data Option<T> { None, Some(T) }
 public fn test(@Int -> @Option<Int>)
   requires(true) ensures(true) effects(pure)
@@ -611,9 +607,6 @@ class TestExnHandlers:
     def test_exn_throw_caught(self) -> None:
         """Body throws, handler catches and transforms the value."""
         src = """\
-effect Exn<E> {
-  op throw(E -> Never);
-}
 public fn test(@Unit -> @Int)
   requires(true) ensures(true) effects(pure)
 {
@@ -629,9 +622,6 @@ public fn test(@Unit -> @Int)
     def test_exn_no_throw(self) -> None:
         """Body completes normally, handler clause is not invoked."""
         src = """\
-effect Exn<E> {
-  op throw(E -> Never);
-}
 public fn test(@Unit -> @Int)
   requires(true) ensures(true) effects(pure)
 {
@@ -647,9 +637,6 @@ public fn test(@Unit -> @Int)
     def test_exn_cross_function(self) -> None:
         """Function with Exn effect throws, caller catches via handle."""
         src = """\
-effect Exn<E> {
-  op throw(E -> Never);
-}
 private fn risky(@Int -> @Int)
   requires(true) ensures(true) effects(<Exn<Int>>)
 {
@@ -670,9 +657,6 @@ public fn test(@Unit -> @Int)
     def test_exn_no_throw_cross_function(self) -> None:
         """Cross-function call that doesn't throw."""
         src = """\
-effect Exn<E> {
-  op throw(E -> Never);
-}
 private fn safe(@Int -> @Int)
   requires(true) ensures(true) effects(<Exn<Int>>)
 {
@@ -693,9 +677,6 @@ public fn test(@Unit -> @Int)
     def test_exn_qualified_throw_caught(self) -> None:
         """Exn.throw (qualified form) compiles and runs identically to bare throw."""
         src = """\
-effect Exn<E> {
-  op throw(E -> Never);
-}
 private fn require_non_negative(@Int -> @Int)
   requires(true) ensures(@Int.result >= 0) effects(<Exn<Int>>)
 {
@@ -716,9 +697,6 @@ public fn test(@Unit -> @Int)
     def test_exn_qualified_throw_no_throw(self) -> None:
         """Exn.throw (qualified form) — non-throwing path returns correct value."""
         src = """\
-effect Exn<E> {
-  op throw(E -> Never);
-}
 private fn require_non_negative(@Int -> @Int)
   requires(true) ensures(@Int.result >= 0) effects(<Exn<Int>>)
 {
@@ -757,9 +735,6 @@ public fn test(@Unit -> @Int)
     def test_exn_with_io(self) -> None:
         """Exn handler inside a function with IO effects."""
         src = """\
-effect Exn<E> {
-  op throw(E -> Never);
-}
 public fn test(@Unit -> @Int)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -779,9 +754,6 @@ public fn test(@Unit -> @Int)
     def test_exn_nested_inner_catches(self) -> None:
         """Nested handlers — inner catches, outer not triggered."""
         src = """\
-effect Exn<E> {
-  op throw(E -> Never);
-}
 public fn test(@Unit -> @Int)
   requires(true) ensures(true) effects(pure)
 {
@@ -801,9 +773,6 @@ public fn test(@Unit -> @Int)
     def test_exn_nat_type(self) -> None:
         """Exn<Nat> with Nat exception value."""
         src = """\
-effect Exn<E> {
-  op throw(E -> Never);
-}
 public fn test(@Unit -> @Nat)
   requires(true) ensures(true) effects(pure)
 {
@@ -819,9 +788,6 @@ public fn test(@Unit -> @Nat)
     def test_exn_string_throw_caught(self) -> None:
         """Exn<String> throw+catch: pair type (ptr, len) uses (param i32 i32) tag."""
         src = """\
-effect Exn<E> {
-  op throw(E -> Never);
-}
 public fn test(@Unit -> @Int)
   requires(true) ensures(true) effects(pure)
 {
@@ -837,9 +803,6 @@ public fn test(@Unit -> @Int)
     def test_exn_string_no_throw(self) -> None:
         """Exn<String> handler with non-throwing body: pair type locals allocated."""
         src = """\
-effect Exn<E> {
-  op throw(E -> Never);
-}
 public fn test(@Unit -> @Int)
   requires(true) ensures(true) effects(pure)
 {
@@ -855,9 +818,6 @@ public fn test(@Unit -> @Int)
     def test_exn_string_handler_returns_string(self) -> None:
         """Handler clause returns a String (result_wt == i32_pair → result i32 i32)."""
         src = """\
-effect Exn<E> {
-  op throw(E -> Never);
-}
 public fn test(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -881,9 +841,6 @@ public fn test(@Unit -> @Unit)
     def test_exn_string_empty_payload(self) -> None:
         """throw("") correctly passes a zero-length ptr/len pair through the tag."""
         src = """\
-effect Exn<E> {
-  op throw(E -> Never);
-}
 public fn test(@Unit -> @Int)
   requires(true) ensures(true) effects(pure)
 {
@@ -972,7 +929,7 @@ public fn main(-> @Int)
 
     def test_async_with_io(self) -> None:
         """effects(<IO, Async>) — composition with IO."""
-        source = _IO_PRELUDE + """\
+        source = """\
 public fn main(-> @Unit)
   requires(true) ensures(true) effects(<IO, Async>)
 {
@@ -2382,9 +2339,6 @@ public fn main(@Unit -> @Int)
         as an uncaught throw, traps at run exactly like the primitive
         `Exn<Int>` case."""
         src = """\
-effect Exn<E> {
-  op throw(E -> Never);
-}
 public fn main(@Unit -> @Int)
   requires(true) ensures(true) effects(<Exn<Tuple<Int, Int>>>)
 {
@@ -2409,9 +2363,6 @@ public fn main(@Unit -> @Int)
         `Option<Int>`, else `@Option<Int>.0` in the handler body
         resolves to no local (dangling @T.n, E699)."""
         src = """\
-effect Exn<E> {
-  op throw(E -> Never);
-}
 public fn main(@Unit -> @Int)
   requires(true) ensures(true) effects(pure)
 {
@@ -2441,9 +2392,6 @@ public fn main(@Unit -> @Int)
     def test_primitive_exn_int_still_works(self) -> None:
         """Pin: the common primitive `Exn<Int>` path is untouched."""
         src = """\
-effect Exn<E> {
-  op throw(E -> Never);
-}
 public fn main(@Unit -> @Int)
   requires(true) ensures(true) effects(pure)
 {
@@ -2583,9 +2531,6 @@ public fn main(@Unit -> @Int)
         would be a type-confusion (a `Tuple<Int, Int>` payload caught as a
         `Tuple<Bool, Bool>`)."""
         src = """\
-effect Exn<E> {
-  op throw(E -> Never);
-}
 private fn a(@Unit -> @Int)
   requires(true) ensures(true) effects(pure)
 {

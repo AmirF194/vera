@@ -1,8 +1,4 @@
 -- URL parsing and joining (RFC 3986)
-effect IO {
-  op print(String -> Unit);
-}
-
 public fn main(@Unit -> @Unit)
   requires(true)
   ensures(true)

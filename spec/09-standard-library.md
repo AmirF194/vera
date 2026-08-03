@@ -326,13 +326,19 @@ The `IO` effect has no type parameters. All IO operations are invoked as qualifi
 |-----------|-----------|-------------|
 | `print` | `String -> Unit` | Write a UTF-8 string to stdout |
 | `read_line` | `Unit -> String` | Read one line from stdin (trailing newline stripped) |
+| `read_char` | `Unit -> Result<String, String>` | Read one character from stdin — cbreak mode on a Unix TTY, where Ctrl-D gives `Err("EOF")`; redirected input reads one character from the stdin stream and gives `Err("EOF")` at end of input |
 | `read_file` | `String -> Result<String, String>` | Read file contents; returns `Ok(contents)` or `Err(message)` |
 | `write_file` | `String, String -> Result<Unit, String>` | Write string to file; returns `Ok(())` or `Err(message)` |
 | `args` | `Unit -> Array<String>` | Command-line arguments |
 | `exit` | `Int -> Never` | Terminate with exit code (never returns) |
 | `get_env` | `String -> Option<String>` | Look up environment variable; returns `Some(value)` or `None` |
+| `sleep` | `Nat -> Unit` | Pause execution for N milliseconds |
+| `time` | `Unit -> Nat` | Current Unix time in milliseconds |
+| `stderr` | `String -> Unit` | Write a UTF-8 string to stderr |
 
-The IO effect is registered as a built-in — programs do not need to declare `effect IO { ... }` to use these operations. If a program does declare its own `effect IO` block, the user declaration overrides the built-in (for backward compatibility, but only the explicitly declared operations are available).
+The `IO` effect is registered as a built-in: the operations above are in scope for any function whose effect row names `IO`, and no declaration brings them there. An `effect IO { ... }` block in a program is a compile error (`E152`) — the same one-canonical-form rule that forbids redefining a built-in function (`E151`, Section 9.6). The rule is name-keyed and unconditional: a block whose operation signatures agree with the built-in is rejected too, because it is a second textual spelling of the same program (Chapter 0, Section 0.2, design goal 3). It also cannot be honoured — code generation lowers every qualified `IO.op(...)` call to the fixed host import selected by the qualifier and never reads the declaration, so a block whose signatures diverge from the built-in would compile to structurally invalid WebAssembly.
+
+The same rule holds for every built-in effect, marker effects included. Chapter 7, Section 7.7 states it once for the whole registered set rather than naming them here, so the rule cannot fall out of step with the registry as effects are added.
 
 ```
 private fn hello(-> @Unit)
@@ -364,18 +370,12 @@ For the runtime implementation of IO operations, see Chapter 12, Section 12.4.1.
 
 ### 9.5.2 State\<T\>
 
-```
-effect State<T> {
-  op get(Unit -> T);
-  op put(T -> Unit);
-}
-```
+The `State<T>` effect provides mutable state operations. Functions that read or write state must declare the specific state type in their effect row: `effects(<State<Int>>)`. Like `IO`, `State<T>` is built-in — no `effect State<T> { ... }` declaration is needed (and one is `E152`).
 
-The `State<T>` effect provides mutable state operations. Functions that read or write state must declare the specific state type in their effect row: `effects(<State<Int>>)`.
-
-Operations:
-- `State<T>.get()` — reads the current state value. The `Unit` parameter is implicit.
-- `State<T>.put(@T)` — writes a new state value.
+| Operation | Signature | Description |
+|-----------|-----------|-------------|
+| `get` | `Unit -> T` | Reads the current state value; the `Unit` argument is written out, as `get(())` |
+| `put` | `T -> Unit` | Writes a new state value |
 
 Multiple independent state types can be used in the same function by declaring them in the effect row. State operations (`get`, `put`) are called without qualification — the type checker resolves which state cell is targeted from the types:
 
@@ -416,19 +416,14 @@ For the runtime implementation of `State<T>`, see Chapter 12, Section 12.4.2.
 
 > **Status: Implemented.** Tracked in [#57](https://github.com/aallan/vera/issues/57). `Http.get` and `Http.post` are fully compilable and execute via host imports (Python `urllib` / JavaScript `fetch`). Returns `Result<String, String>` — `Ok` with the response body, `Err` with the error message. New conformance test `ch09_http` (62 programs, was 61). New example `http.vera`.
 
-Network I/O is modelled as a built-in algebraic effect with two operations: `get` and `post`. Functions performing network access declare `effects(<Http>)`. The effect is built-in — no `effect Http { ... }` declaration is needed.
+Network I/O is modelled as a built-in algebraic effect with two operations: `get` and `post`. Functions performing network access declare `effects(<Http>)`. The effect is built-in — no `effect Http { ... }` declaration is needed (and one is `E152`).
 
 **Operations:**
 
-```
-effect Http {
-  op get(String -> Result<String, String>);
-  op post(String, String -> Result<String, String>);
-}
-```
-
-- `Http.get(url)` — performs an HTTP GET request. Returns `Ok(body)` on success, `Err(message)` on failure.
-- `Http.post(url, body)` — performs an HTTP POST request with the given body (sent as `application/json`). Returns `Ok(body)` on success, `Err(message)` on failure.
+| Operation | Signature | Description |
+|-----------|-----------|-------------|
+| `get` | `String -> Result<String, String>` | Performs an HTTP GET request; `Ok(body)` on success, `Err(message)` on failure |
+| `post` | `String, String -> Result<String, String>` | Performs an HTTP POST request with the given body (sent as `application/json`); `Ok(body)` on success, `Err(message)` on failure |
 
 This fits naturally with Vera's algebraic effect system and makes network I/O explicit and testable.
 
@@ -536,7 +531,7 @@ The `Inference` effect models LLM calls as algebraic effects, making them explic
 |-----------|-----------|-------------|
 | `Inference.complete` | `String -> Result<String, String>` | Send a prompt to the configured LLM provider; returns `Ok(completion)` or `Err(message)` |
 
-`Inference` is a built-in effect — no `effect Inference { ... }` declaration is needed in source files.
+`Inference` is a built-in effect — no `effect Inference { ... }` declaration is needed in source files (and one is `E152`).
 
 ```vera
 private fn classify(@String -> @Result<String, String>)
@@ -633,7 +628,7 @@ public fn seed_and_count(-> @Int)
 
 Parameters travel the same shape one level down: the `Array<Option<String>>` second argument binds positionally to the `?` placeholders — `Some(v)` for a value, `None` for `NULL`.  All values cross the host boundary as UTF-8 strings; a non-text SQLite column is rendered to its text form on the way out.
 
-**SQL literal provenance (injection prevention).**  The SQL argument of `query` / `execute` must be *literal-provenance*: a string literal, a `string_concat` of literals, or a `let` chain of those.  A SQL string that embeds a runtime value — a function result, a parameter, or a `\(expr)` interpolation of one — is the SQL injection vector, so Vera rejects it at **compile time** (`E207`); an interpolation, concatenation, or `let`-bound slot whose embedded expressions are themselves literals stays literal-provenance and is accepted.  Runtime data reaches the query only through the `?` placeholders and the params array.  The guarantee is a deterministic type error, not an SMT obligation — it needs no solver and holds even inside handled code where solver-based claims cannot reach.  When both the SQL and the params array are statically sized, a placeholder/parameter count mismatch is also a compile-time error (`E208`); a dynamically-sized params array defers that arity check to the driver at run time.  Only anonymous `?` placeholders are supported: because parameters bind positionally through the `Array<Option<String>>` argument, a numbered (`?NNN`) or named (`:name` / `@name` / `$name`) placeholder has no well-defined binding and is a compile-time error (`E209`).  The gate keys on the call reaching the host database — the `DB.query` / `DB.execute` spelling codegen routes to the host, whether that resolves to the built-in effect, a user-declared `effect DB` (declared or shadowing), or a generic `effect DB<T>` — so no runtime SQL slips through an unusual declaration; an imported library body carrying a non-literal query is rejected on the compile path as well.
+**SQL literal provenance (injection prevention).**  The SQL argument of `query` / `execute` must be *literal-provenance*: a string literal, a `string_concat` of literals, or a `let` chain of those.  A SQL string that embeds a runtime value — a function result, a parameter, or a `\(expr)` interpolation of one — is the SQL injection vector, so Vera rejects it at **compile time** (`E207`); an interpolation, concatenation, or `let`-bound slot whose embedded expressions are themselves literals stays literal-provenance and is accepted.  Runtime data reaches the query only through the `?` placeholders and the params array.  The guarantee is a deterministic type error, not an SMT obligation — it needs no solver and holds even inside handled code where solver-based claims cannot reach.  When both the SQL and the params array are statically sized, a placeholder/parameter count mismatch is also a compile-time error (`E208`); a dynamically-sized params array defers that arity check to the driver at run time.  Only anonymous `?` placeholders are supported: because parameters bind positionally through the `Array<Option<String>>` argument, a numbered (`?NNN`) or named (`:name` / `@name` / `$name`) placeholder has no well-defined binding and is a compile-time error (`E209`).  The gate keys on the call reaching the host database — the `DB.query` / `DB.execute` spelling codegen routes to the host — rather than on the identity of the resolved operation, so no runtime SQL slips through an unusual declaration; an imported library body carrying a non-literal query is rejected on the compile path as well. A program cannot redeclare `effect DB` at all (`E152`, Section 9.5.1), so that route is closed twice over.
 
 - **Failure is a value.**  Both operations return `Result<_, String>`; a driver error is the `Err(msg)` arm, never a trap, so a database call is checked like any other `Result`.
 - **Connection.**  `VERA_DB_URL` selects the database — `sqlite::memory:` by default, or `sqlite:///path/to/file.db` for a file.  One connection is used per program run.

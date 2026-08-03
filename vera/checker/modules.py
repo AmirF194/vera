@@ -58,8 +58,12 @@ class ModulesMixin:
             # checked standalone would let the redefinition through silently —
             # the importer's verifier reasons with the built-in's model while
             # the module's body runs (verify proves, run violates).
+            # #1149: E152 (a module redeclaring a built-in EFFECT) is surfaced
+            # on the same grounds — the block is invisible to codegen, which
+            # routes the qualified call to the host import regardless, so an
+            # unchecked module would miscompile the importer.
             self.errors.extend(
-                e for e in temp.errors if e.error_code == "E151"
+                e for e in temp.errors if e.error_code in ("E151", "E152")
             )
 
             # All module-declared names (exclude builtins)

@@ -17,7 +17,6 @@ from vera.parser import parse_file
 from vera.transform import transform
 
 from tests.codegen_helpers import (
-    _IO_PRELUDE,
     _assert_no_host_imports_for_inline_builtins,
     _compile_ok,
     _run,
@@ -28,7 +27,7 @@ from tests.codegen_helpers import (
 class TestStringLitIO:
     def test_hello_world(self) -> None:
         """First light: Hello, World!"""
-        source = _IO_PRELUDE + """\
+        source = """\
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 { IO.print("Hello, World!") }
@@ -36,7 +35,7 @@ public fn main(@Unit -> @Unit)
         assert _run_io(source, fn="main") == "Hello, World!"
 
     def test_empty_string(self) -> None:
-        source = _IO_PRELUDE + """\
+        source = """\
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 { IO.print("") }
@@ -44,7 +43,7 @@ public fn main(@Unit -> @Unit)
         assert _run_io(source, fn="main") == ""
 
     def test_multiple_prints(self) -> None:
-        source = _IO_PRELUDE + """\
+        source = """\
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -56,7 +55,7 @@ public fn main(@Unit -> @Unit)
 
     def test_string_dedup(self) -> None:
         """Identical strings should be deduplicated in the data section."""
-        source = _IO_PRELUDE + """\
+        source = """\
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -72,7 +71,7 @@ public fn main(@Unit -> @Unit)
 
     def test_special_characters(self) -> None:
         """Strings with punctuation and spaces."""
-        source = _IO_PRELUDE + """\
+        source = """\
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 { IO.print("Hello, World! 123 @#$") }
@@ -81,7 +80,7 @@ public fn main(@Unit -> @Unit)
 
     def test_io_with_pure_functions(self) -> None:
         """IO functions coexist with pure functions in the same module."""
-        source = _IO_PRELUDE + """\
+        source = """\
 public fn add(@Int, @Int -> @Int)
   requires(true) ensures(true) effects(pure)
 { @Int.1 + @Int.0 }
@@ -167,7 +166,7 @@ class TestStringEscapeE2E:
     """End-to-end tests: Vera escape sequences through compile + execute."""
 
     def test_newline_in_print(self) -> None:
-        source = _IO_PRELUDE + r'''
+        source = r'''
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 { IO.print("line1\nline2") }
@@ -175,7 +174,7 @@ public fn main(@Unit -> @Unit)
         assert _run_io(source, fn="main") == "line1\nline2"
 
     def test_tab_in_print(self) -> None:
-        source = _IO_PRELUDE + r'''
+        source = r'''
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 { IO.print("col1\tcol2") }
@@ -183,7 +182,7 @@ public fn main(@Unit -> @Unit)
         assert _run_io(source, fn="main") == "col1\tcol2"
 
     def test_backslash_roundtrip(self) -> None:
-        source = _IO_PRELUDE + r'''
+        source = r'''
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 { IO.print("a\\b") }
@@ -191,7 +190,7 @@ public fn main(@Unit -> @Unit)
         assert _run_io(source, fn="main") == "a\\b"
 
     def test_unicode_basic(self) -> None:
-        source = _IO_PRELUDE + r'''
+        source = r'''
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 { IO.print("\u{41}\u{42}\u{43}") }
@@ -514,7 +513,6 @@ public fn f(-> @Int) requires(true) ensures(true) effects(pure) {
 class TestStringConcat:
     def test_basic(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -525,7 +523,6 @@ public fn main(@Unit -> @Unit)
 
     def test_empty_left(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -536,7 +533,6 @@ public fn main(@Unit -> @Unit)
 
     def test_empty_right(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -547,7 +543,6 @@ public fn main(@Unit -> @Unit)
 
     def test_both_empty(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -568,7 +563,6 @@ public fn f(-> @Int) requires(true) ensures(true) effects(pure) {
 class TestStringSlice:
     def test_basic(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -579,7 +573,6 @@ public fn main(@Unit -> @Unit)
 
     def test_prefix(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -590,7 +583,6 @@ public fn main(@Unit -> @Unit)
 
     def test_empty_slice(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -609,7 +601,6 @@ public fn f(-> @Int) requires(true) ensures(true) effects(pure) {
 
     def test_slice_then_concat(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {

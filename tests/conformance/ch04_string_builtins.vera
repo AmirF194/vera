@@ -3,10 +3,6 @@
 -- Also covers #802: string_length counts UTF-8 bytes, and a string-literal
 -- length is modeled at its exact byte count (so a non-ASCII length both
 -- verifies at Tier 1 and runs).
-effect IO {
-  op print(String -> Unit);
-}
-
 public fn test_length(@Unit -> @Int)
   requires(true)
   ensures(@Int.result == 5)

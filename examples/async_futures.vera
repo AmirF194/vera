@@ -8,10 +8,6 @@
 -- async(Http.get/post(...)), instead runs concurrently on a host worker
 -- thread in the native runtime since v0.0.192 (#841) — see
 -- examples/async_http_fanout.vera for that fan-out pattern.
-effect IO {
-  op print(String -> Unit);
-}
-
 -- Create a future and immediately await it
 private fn roundtrip(@Int -> @Int)
   requires(true)

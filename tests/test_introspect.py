@@ -148,7 +148,6 @@ class TestBuiltinsPayload:
             | set(env.effects)
             | set(env.abilities)
             | set(ERROR_CODES)
-            | {"Exn"}
         )
         orphans = sorted(k for k in SINCE if k not in live)
         assert orphans == [], orphans
@@ -160,21 +159,23 @@ class TestEffectsPayload:
         assert p["schema"] == "vera-effects/1"
         assert isinstance(p["items"], list)
 
-    def test_count_registry_plus_parameterised(self) -> None:
-        """The registry effects + abilities, plus the parameterised Exn<T> (#539)."""
-        from vera.introspect import _PARAMETERISED_EFFECTS
-
+    def test_count_registry_effects_plus_abilities(self) -> None:
+        """Every item comes from a live registry: effects + abilities (#539)."""
         env = TypeEnv()
-        expected = len(env.effects) + len(_PARAMETERISED_EFFECTS) + len(env.abilities)
+        expected = len(env.effects) + len(env.abilities)
         assert len(effects_payload()["items"]) == expected
 
-    def test_parameterised_exn_effect(self) -> None:
-        """Exn<T> is special-cased (codegen-recognised via handle[Exn<E>], not in
-        env.effects) but surfaced for discoverability."""
+    def test_exn_effect(self) -> None:
+        """Exn<E> is a registry effect like any other (#1149).
+
+        It is lowered specially by ``handle[Exn<E>]`` in codegen rather than
+        by a host import, but it is registered in ``TypeEnv.effects`` so it is
+        in scope with no declaration — redeclaring it is E152.
+        """
         by_name = {i["name"]: i for i in effects_payload()["items"]}
         exn = by_name["Exn"]
         assert exn["kind"] == "effect"
-        assert exn["type_params"] == ["T"]
+        assert exn["type_params"] == ["E"]
         assert exn["ops"] == ["throw"]
         assert exn["since"] == "0.0.62"
 
@@ -214,7 +215,7 @@ class TestEffectsPayload:
         assert missing == [], f"effects/abilities missing a `since`: {missing}"
 
     def test_names_unique(self) -> None:
-        """No effect/ability is listed twice — guards the parameterised-effect
-        merge against a double-listing if Exn ever enters env.effects."""
+        """No effect/ability is listed twice — an effect and an ability must
+        never share a name, or `vera effects` would render two rows for it."""
         names = [i["name"] for i in effects_payload()["items"]]
         assert len(names) == len(set(names)), names

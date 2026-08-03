@@ -1,9 +1,5 @@
 -- Conformance: Async effect with Future<T> (Chapter 9)
 -- Tests: async, await, Future<T> type, Async effect
-effect IO {
-  op print(String -> Unit);
-}
-
 public fn test_async_int(@Unit -> @Int)
   requires(true)
   ensures(@Int.result == 42)

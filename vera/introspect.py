@@ -76,19 +76,18 @@ def builtins_payload() -> dict[str, object]:
     return {"schema": "vera-builtins/1", "items": items}
 
 
-# Exn<T> is a parameterised effect recognised specially by the compiler
-# (handle[Exn<E>] in codegen — see vera/wasm/calls_handlers.py), not a fixed
-# entry in TypeEnv().effects. It is listed here so `vera effects --json` surfaces
-# it for discoverability — the one effect not read from the live registry.
-_PARAMETERISED_EFFECTS: list[dict[str, object]] = [
-    {
-        "name": "Exn",
-        "kind": "effect",
-        "type_params": ["T"],
-        "ops": ["throw"],
-        "since": SINCE.get("Exn"),
-    },
-]
+def builtin_effect_names() -> frozenset[str]:
+    """Every built-in effect name, from the live registry (#1149).
+
+    Exactly the set :func:`effects_payload` reports under
+    ``kind == "effect"``.  Both read ``TypeEnv().effects``, so the set the
+    checker's E152 gate rejects cannot drift from the set ``vera effects``
+    publishes.  Abilities are excluded — they are a separate namespace with
+    their own ``ability`` keyword.
+    """
+    from vera.environment import TypeEnv
+
+    return frozenset(TypeEnv().effects)
 
 
 def effects_payload() -> dict[str, object]:
@@ -114,9 +113,6 @@ def effects_payload() -> dict[str, object]:
                 "since": SINCE.get(name),
             }
         )
-    # Skip any parameterised effect that has since become a real registry entry,
-    # so it can never be listed twice (none collide today — Exn is codegen-only).
-    items.extend(e for e in _PARAMETERISED_EFFECTS if e["name"] not in env.effects)
     for name in sorted(env.abilities):
         ability = env.abilities[name]
         items.append(

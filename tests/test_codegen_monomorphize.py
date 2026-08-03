@@ -2635,10 +2635,6 @@ class TestUserFnReturnTypeInArgPosition878:
     # Canonical issue repro, wired to IO so the run observably prints the
     # Decimal division — a value that CANNOT coincide with the Bool default.
     _REPRO_IO = """\
-effect IO {
-  op print(String -> Unit);
-}
-
 private fn d(@String -> @Decimal)
   requires(true) ensures(true) effects(pure)
 { option_unwrap_or(decimal_from_string(@String.0), decimal_from_int(0)) }
@@ -4105,10 +4101,6 @@ class TestMonomorphizerCompleteness769:
     """
 
     _IO = """\
-effect IO {
-  op print(String -> Unit);
-}
-
 """
 
     # -- gap 1: parameterized builtin return in generic-arg position --------
