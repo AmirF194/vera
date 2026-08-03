@@ -326,11 +326,15 @@ The `IO` effect has no type parameters. All IO operations are invoked as qualifi
 |-----------|-----------|-------------|
 | `print` | `String -> Unit` | Write a UTF-8 string to stdout |
 | `read_line` | `Unit -> String` | Read one line from stdin (trailing newline stripped) |
+| `read_char` | `Unit -> Result<String, String>` | Read one character from stdin (raw mode on TTY); `Err("EOF")` when stdin closes |
 | `read_file` | `String -> Result<String, String>` | Read file contents; returns `Ok(contents)` or `Err(message)` |
 | `write_file` | `String, String -> Result<Unit, String>` | Write string to file; returns `Ok(())` or `Err(message)` |
 | `args` | `Unit -> Array<String>` | Command-line arguments |
 | `exit` | `Int -> Never` | Terminate with exit code (never returns) |
 | `get_env` | `String -> Option<String>` | Look up environment variable; returns `Some(value)` or `None` |
+| `sleep` | `Nat -> Unit` | Pause execution for N milliseconds |
+| `time` | `Unit -> Nat` | Current Unix time in milliseconds |
+| `stderr` | `String -> Unit` | Write a UTF-8 string to stderr |
 
 The `IO` effect is registered as a built-in: the operations above are in scope for any function whose effect row names `IO`, and no declaration brings them there. An `effect IO { ... }` block in a program is a compile error (`E152`) — the same one-canonical-form rule that forbids redefining a built-in function (`E151`, Section 9.6). The rule is name-keyed and unconditional: a block whose operation signatures agree with the built-in is rejected too, because it is a second textual spelling of the same program (Chapter 0, Section 0.2, design goal 3). It also cannot be honoured — code generation lowers every qualified `IO.op(...)` call to the fixed host import selected by the qualifier and never reads the declaration, so a block whose signatures diverge from the built-in would compile to structurally invalid WebAssembly.
 
@@ -370,7 +374,7 @@ The `State<T>` effect provides mutable state operations. Functions that read or 
 
 | Operation | Signature | Description |
 |-----------|-----------|-------------|
-| `get` | `Unit -> T` | Reads the current state value; the `Unit` parameter is implicit |
+| `get` | `Unit -> T` | Reads the current state value; the `Unit` argument is written out, as `get(())` |
 | `put` | `T -> Unit` | Writes a new state value |
 
 Multiple independent state types can be used in the same function by declaring them in the effect row. State operations (`get`, `put`) are called without qualification — the type checker resolves which state cell is targeted from the types:

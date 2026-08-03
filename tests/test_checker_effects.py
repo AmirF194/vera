@@ -1228,11 +1228,15 @@ public fn main(-> @Unit)
         assert "E152" in self._codes(errs), self._codes(errs)
 
     def test_exn_redeclaration_rejected(self) -> None:
-        """`Exn<E>` is codegen-only (not a `TypeEnv.effects` row) — still gated.
+        """`Exn<E>` is gated like any other built-in effect.
 
-        Guards the registry union: keying the gate on ``TypeEnv().effects``
-        alone would let the idiomatic `effect Exn<E> { op throw(E -> Never); }`
-        block through.
+        It was recognised only by codegen (``handle[Exn<E>]``) and was absent
+        from ``TypeEnv.effects``, so the idiomatic
+        `effect Exn<E> { op throw(E -> Never); }` block was the only way to
+        bring `throw` and `handle` into scope.  #1149 registers it, which is
+        what makes forbidding the block possible: this pins that both halves
+        landed — the block is rejected, and (see
+        ``test_exn_needs_no_declaration``) the effect still works without it.
         """
         errs = _errors("""
 effect Exn<E> {
@@ -1243,6 +1247,24 @@ public fn boom(-> @Int)
 { throw("kaboom") }
 """)
         assert "E152" in self._codes(errs), self._codes(errs)
+
+    def test_exn_needs_no_declaration(self) -> None:
+        """The other half of #1149's Exn change: `throw` and `handle[Exn<E>]`
+        are in scope with no `effect Exn<E>` block.
+
+        Without the registry entry this is `E330 Unknown effect 'Exn' in
+        handler` — so forbidding the block without registering the effect
+        would have made `Exn<E>` unusable.
+        """
+        _check_ok("""
+private fn safe_div(@Int, @Int -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[Exn<Int>] { throw(@Int) -> { 0 - 1 } } in {
+    if @Int.1 == 0 then { throw(0 - 1) } else { @Int.0 / @Int.1 }
+  }
+}
+""")
 
     def test_user_named_effect_still_accepted(self) -> None:
         """A non-built-in effect name is untouched — this gate is name-keyed."""

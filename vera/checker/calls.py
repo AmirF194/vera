@@ -1432,6 +1432,12 @@ class CallsMixin:
         # literal-provenance gate MUST fire on the spelling here too, or a
         # runtime SQL string reaches the host ungated.  (A resolved DB SQL op is
         # gated in ``_check_op_call``; this covers the unresolved spelling.)
+        #
+        # Since #1149 no Vera source reaches this branch: a user ``effect DB``
+        # block is rejected (E152) and never registered, so ``DB.query`` /
+        # ``DB.execute`` always resolve against the built-in.  Kept as defence
+        # in depth — it holds whatever the registry does, and the gate must not
+        # depend on E152 to be complete.
         if (
             expr.qualifier == "DB"
             and expr.name in DB_SQL_OP_NAMES

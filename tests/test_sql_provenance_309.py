@@ -644,12 +644,23 @@ class TestDbEffectShadowGated309:
             "E152",
         )
 
-    def test_unresolved_db_query_spelling_still_gated(self) -> None:
-        # Cortex Finding 1: a user `effect DB` that does NOT declare `query`.
-        # Op resolution FAILS (E220 warning), so the resolved-op gate never runs
-        # — but codegen routes the `DB.query` SPELLING to `$vera.db_query`
-        # regardless, so a runtime SQL string still reaches the host.  The gate
-        # must fire on the spelling: E207.
+    # These two used to pin the unresolved-SPELLING fallback in
+    # ``_check_qualified_call`` (Cortex #1147 Finding 1): a user `effect DB`
+    # declaring some OTHER op made ``DB.query`` fail op resolution, yet codegen
+    # routed the spelling to ``$vera.db_query`` anyway, so the gate had to fire
+    # without a resolved ``OpInfo``.  Since #1149 the shadow is not registered,
+    # so ``DB.query`` resolves against the built-in and the RESOLVED-op gate in
+    # ``_check_op_call`` is what fires — verified by tracing which frame reaches
+    # ``_check_sql_provenance``.  With the built-in `DB` always registering
+    # `query`/`execute`, no Vera source can now make that lookup fail, so the
+    # fallback is unreachable from source and kept only as defence in depth;
+    # these tests are renamed to what they actually pin rather than left
+    # claiming coverage they no longer provide.
+
+    def test_shadow_declaring_other_op_still_gated_query(self) -> None:
+        # A user `effect DB` that does not declare `query` at all: E152 for the
+        # block, and the runtime SQL argument still draws E207 through the
+        # built-in's resolved op.
         _check_codes(
             "effect DB {\n  op ping(Unit -> Unit);\n}\n"
             "public fn run(@String -> "
@@ -659,7 +670,7 @@ class TestDbEffectShadowGated309:
             "E152", "E207",
         )
 
-    def test_unresolved_db_execute_spelling_still_gated(self) -> None:
+    def test_shadow_declaring_other_op_still_gated_execute(self) -> None:
         # Same for the write path (execute) — arbitrary DDL/DML otherwise.
         _check_codes(
             "effect DB {\n  op ping(Unit -> Unit);\n}\n"
