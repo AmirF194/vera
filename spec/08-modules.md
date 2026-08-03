@@ -341,7 +341,7 @@ The code generator uses a **flattening** strategy: imported function bodies are 
 
 ### 8.9.1 Compilation Process
 
-1. **Pass 0 — Module registration**: For each resolved module, register all function signatures, ADT layouts, and type aliases into the code generator's state. Imported names are injected via `setdefault` so local definitions shadow imports.
+1. **Pass 0 — Module registration**: For each resolved module, register all function signatures and ADT layouts into the code generator's state. Imported names are injected via `setdefault` so local definitions shadow imports. Type aliases are **not** merged into the shared state: an alias is module-local (§8.4.1), so each module's aliases are captured in a per-module namespace, and that module's declarations compile and register against `{prelude aliases, module's own aliases}` — never against the importing program's. Harvested return-type expressions are canonicalized (alias references substituted) against the defining module's namespace before entering the shared registries.
 
 2. **Pass 2.5 — Imported function compilation**: After compiling local functions (Pass 2), compile all imported function bodies — both public and private — as internal WASM functions. Private helpers must be compiled because imported public functions may call them.
 

@@ -24,7 +24,7 @@ from vera import ast
 from vera.codegen.api import CompileResult
 from vera.codegen.memory import ConstructorLayout
 from vera.errors import Diagnostic, SourceLocation
-from vera.monomorphize import qualify_nested_generic_decls
+from vera.monomorphize import canonicalize_type_aliases, qualify_nested_generic_decls
 from vera.prelude import PRELUDE_FILE, mentioned_fn_names
 from vera.slots import type_expr_slot_name
 from vera.wasm import StringPool
@@ -224,6 +224,25 @@ class CodeGenerator(
         # Type alias parameters: alias name -> param names
         # Needed for generic type alias resolution in closure codegen
         self._type_alias_params: dict[str, tuple[str, ...]] = {}
+        # #1111: per-module alias namespaces.  Spec §8.4.1 makes type
+        # aliases module-local (not importable), so each imported
+        # module's aliases are captured under its path here — NEVER
+        # merged into the flat maps above, which hold only the main
+        # file's (and the prelude's non-shadowed) aliases.  While a
+        # module-provenance declaration compiles / registers,
+        # `_module_alias_scope` swaps the flat maps for
+        # ``{prelude, **module_own}`` so every alias consumer resolves
+        # against the defining module's namespace.
+        self._module_type_aliases: dict[
+            tuple[str, ...], dict[str, ast.TypeExpr]] = {}
+        self._module_type_alias_params: dict[
+            tuple[str, ...], dict[str, tuple[str, ...]]] = {}
+        # #1111: the prelude's own alias definitions, captured
+        # unconditionally at injection (even when a main-file alias
+        # shadows the name in the flat map) — module namespaces overlay
+        # onto THESE, never onto the main file's aliases.
+        self._prelude_type_aliases: dict[str, ast.TypeExpr] = {}
+        self._prelude_type_alias_params: dict[str, tuple[str, ...]] = {}
 
         # Closure compilation state
         self._closure_table: list[str] = []  # lifted fn names for table
@@ -727,11 +746,28 @@ class CodeGenerator(
         # nodes to program.declarations; we register them here.
         existing_fns = set(self._fn_sigs.keys())
         existing_adts = set(self._adt_layouts.keys())
+        # #1111: identity snapshot of the pre-injection declaration list,
+        # so prelude-injected TypeAliasDecls can be captured by node
+        # identity below.  A name-based delta would miss a prelude alias
+        # whose name a main-file alias shadows — and module namespaces
+        # must overlay onto the PRELUDE's definition of that name, not
+        # the main file's.
+        pre_inject_ids = {id(tld) for tld in program.declarations}
         from vera.prelude import inject_prelude
         # #851 — keep the synthetic prelude buffer: injected decls'
         # spans index into it, and `_diag_location` quotes it (under
         # the `<prelude>` origin) for prelude-origin diagnostics.
         self._prelude_source = inject_prelude(program)
+        for tld in program.declarations:
+            if (
+                id(tld) not in pre_inject_ids
+                and isinstance(tld.decl, ast.TypeAliasDecl)
+            ):
+                self._prelude_type_aliases[tld.decl.name] = tld.decl.type_expr
+                if tld.decl.type_params:
+                    self._prelude_type_alias_params[tld.decl.name] = (
+                        tld.decl.type_params
+                    )
         for tld in program.declarations:
             decl = tld.decl
             if isinstance(decl, ast.FnDecl) and decl.name not in existing_fns:
@@ -782,7 +818,40 @@ class CodeGenerator(
         # Pass 1.5: monomorphize generic functions
         mono_decls = self._monomorphize(program)
         for mdecl in mono_decls:
-            self._register_fn(mdecl)
+            # #1111: a clone of an IMPORTED generic carries its module's
+            # alias-typed params/returns — register its WASM signature
+            # under the defining module's alias namespace (a local
+            # clone's origin is None and the scope is a no-op).
+            # Defence-in-depth: without the scope an alias-typed
+            # component registers as "unsupported" (probed: `@G -> @G`
+            # under `G = Int` records `(['i64'], 'unsupported')`), a
+            # falsehood today's consumers happen to mask — emission
+            # derives the true WAT signature under the Pass-2 scope, and
+            # `fn_ret_types` consumers fall back to the correctly
+            # harvested bare-name entry.  The scope keeps the registry
+            # truthful rather than relying on every future consumer to
+            # repeat those fallbacks.
+            origin_path = self._mono_clone_origins.get(mdecl.name)
+            with self._module_alias_scope(origin_path):
+                self._register_fn(mdecl)
+                if origin_path is not None:
+                    # #1111 (PR #1175 review): `_register_fn` just stored
+                    # the clone's RAW return-type expression under the
+                    # CLONE key in the shared bare-name registry — the
+                    # third door into `_fn_ret_type_exprs` after the
+                    # Pass-0 harvest and the shadowed `mod$…` mirror,
+                    # and a main-file consumer resolving the clone key
+                    # (index-element inference on a call to the clone,
+                    # the fused-await classifier) would do so against
+                    # the flat maps.  Canonicalize inside the scope,
+                    # where the flat maps ARE the defining module's.
+                    self._fn_ret_type_exprs[mdecl.name] = (
+                        canonicalize_type_aliases(
+                            self._fn_ret_type_exprs[mdecl.name],
+                            self._type_aliases,
+                            self._type_alias_params,
+                        )
+                    )
             # #516 Stage 2 — keep monomorphized prelude clones out of
             # `_fn_source_map`.  A clone like `option_unwrap_or$Int`
             # inherits the original generic FnDecl's span, which for a
@@ -922,14 +991,17 @@ class CodeGenerator(
             # A local generic's clone has no recorded origin and keeps the
             # main-file tables its template spans live in.
             origin = self._mono_clone_origins.get(mdecl.name)
-            fn_wat = self._compile_fn(
-                mdecl, export=is_public,
-                imported=origin is not None,
-                module_tables=(
-                    self._module_artifacts.get(origin)
-                    if origin is not None else None
-                ),
-            )
+            # #1111: the clone's alias references resolve against its
+            # defining module's namespace (no-op for a local clone).
+            with self._module_alias_scope(origin):
+                fn_wat = self._compile_fn(
+                    mdecl, export=is_public,
+                    imported=origin is not None,
+                    module_tables=(
+                        self._module_artifacts.get(origin)
+                        if origin is not None else None
+                    ),
+                )
             if fn_wat is not None:
                 functions_wat.append(fn_wat)
                 compiled_mono_bases.add(orig_name)
@@ -955,14 +1027,18 @@ class CodeGenerator(
             # intra-rename map so a bare sibling call inside this imported
             # body resolves to the module's version (its `mod$…` emission)
             # rather than a local shadow of that name.
-            fn_wat = self._compile_fn(
-                idecl, export=False,
-                module_renames=self._module_intra_renames.get(path, {}),
-                imported=True,  # #986: don't consult the main-file span tables
-                # #987: thread THIS module's own span-keyed tables so the
-                # imported body's @Nat -> @Int widening guard fires.
-                module_tables=self._module_artifacts.get(path),
-            )
+            # #1111: resolve type aliases against THIS module's own
+            # namespace (spec §8.4.1: aliases are module-local) — the flat
+            # maps hold only the main file's + prelude's aliases.
+            with self._module_alias_scope(path):
+                fn_wat = self._compile_fn(
+                    idecl, export=False,
+                    module_renames=self._module_intra_renames.get(path, {}),
+                    imported=True,  # #986: don't consult main-file span tables
+                    # #987: thread THIS module's own span-keyed tables so the
+                    # imported body's @Nat -> @Int widening guard fires.
+                    module_tables=self._module_artifacts.get(path),
+                )
             if fn_wat is not None:
                 functions_wat.append(fn_wat)
 
@@ -980,16 +1056,21 @@ class CodeGenerator(
             if mangled in imported_seen:
                 continue
             imported_seen.add(mangled)
-            fn_wat = self._compile_fn(
-                dataclasses.replace(idecl, name=mangled),
-                export=False,
-                module_renames=self._module_intra_renames.get(path, {}),
-                imported=True,  # #986: don't consult the main-file span tables
-                # #987: the ``mod$…`` rename only changes the WASM function name;
-                # the body's node spans are unchanged, so THIS module's table
-                # still keys them correctly and its widen guard fires.
-                module_tables=self._module_artifacts.get(path),
-            )
+            # #1111: same per-module alias namespace as Pass 2.5 — the
+            # ``mod$…`` rename does not change which module's aliases
+            # the body's type expressions belong to.
+            with self._module_alias_scope(path):
+                fn_wat = self._compile_fn(
+                    dataclasses.replace(idecl, name=mangled),
+                    export=False,
+                    module_renames=self._module_intra_renames.get(path, {}),
+                    imported=True,  # #986: don't consult main-file span tables
+                    # #987: the ``mod$…`` rename only changes the WASM
+                    # function name; the body's node spans are unchanged, so
+                    # THIS module's table still keys them correctly and its
+                    # widen guard fires.
+                    module_tables=self._module_artifacts.get(path),
+                )
             if fn_wat is not None:
                 functions_wat.append(fn_wat)
 
