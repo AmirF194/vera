@@ -1,0 +1,8 @@
+-- Conformance: a reserved prelude-namespace type name is a checker error (Chapter 8, Section 8.4.1)
+-- Tests: E154 — a user type or alias named `Vera` + an uppercase letter is
+-- rejected at its declaration (#1184 review).  The prelude's combinators
+-- resolve through generated declarations in that namespace
+-- (`VeraOptionMapFn`; type parameters `VeraA`/`VeraB`), and a user spelling
+-- re-types them: the program stays check-green and then fails WebAssembly
+-- validation at run.  Reserving the namespace refuses the trap at its source.
+type VeraOptionMapFn = Int;

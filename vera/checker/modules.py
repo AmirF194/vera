@@ -67,7 +67,7 @@ class ModulesMixin:
             # otherwise carry a declaration no importer could ever call.
             self.errors.extend(
                 e for e in temp.errors
-                if e.error_code in ("E151", "E152", "E153")
+                if e.error_code in ("E151", "E152", "E153", "E154")
             )
 
             # All module-declared names (exclude builtins)

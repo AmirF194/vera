@@ -112,6 +112,67 @@ type ArrayFilterFn<VeraT> = fn(VeraT -> Bool) effects(pure);
 type ArrayFoldFn<VeraT, VeraU> = fn(VeraU, VeraT -> VeraU) effects(pure);
 """
 
+
+# #1184 — the alias names above are USER-facing: they are injected into
+# the same namespace user code declares into, so a user (or an imported
+# module) may legally reuse one for an unrelated type, and doing so
+# shadows the prelude's definition exactly as it shadows a prelude ADT
+# or combinator.  The prelude's own combinators must therefore NOT
+# resolve their closure parameters through them — a shadowing alias
+# re-typed the PRELUDE's declaration, which is the mirror of the #1111
+# defect spec §8.4.1 forbids in the other direction (a main-file alias
+# must never re-type a module's declarations).  Worse, the two
+# namespaces disagreed about it: a main-file collision emitted an
+# ``Int``-typed closure parameter (WASM validation failure at ``vera
+# run``), while a module collision desynced Pass-1.5 discovery from the
+# module-scoped body and silently produced a program with NO exports
+# behind a green check / verify / compile.
+#
+# So the combinators below spell their parameters with reserved
+# ``Vera``-prefixed twins of these aliases, whose declarations are
+# derived from the blocks above rather than restated.  This is #869's
+# remedy — reserved names no ordinary
+# user declaration spells, keeping prelude internals invisible to user
+# namespace decisions (spec §0.2 principle 4; DESIGN.md principle 2) —
+# applied to the alias names rather than the type-PARAMETER names.
+# Deriving rather than restating them keeps the two spellings from
+# drifting: rename a public alias and its twin follows, while the
+# combinators' references to the old twin would fail to resolve loudly
+# on every Option/Result-using program.
+_INTERNAL_ALIAS_PREFIX = "Vera"
+
+
+def _internal_alias_decls(alias_src: str) -> str:
+    """Derive the reserved-name twin declarations of *alias_src* (#1184).
+
+    Each ``type Foo<...> = ...;`` line is restated as
+    ``type VeraFoo<...> = ...;`` — same body, a name in the reserved
+    prelude namespace.  Only the DECLARED name is rewritten; names
+    mentioned in the body (``Option``, the ``Vera*`` type parameters)
+    are untouched, so the twin aliases the same type as its public
+    counterpart.
+    """
+    return "".join(
+        re.sub(
+            r"^type\s+([A-Za-z_][A-Za-z0-9_]*)",
+            lambda m: f"type {_INTERNAL_ALIAS_PREFIX}{m.group(1)}",
+            line,
+        ) + "\n"
+        for line in alias_src.splitlines()
+        if line.strip()
+    )
+
+
+# Injected alongside the combinator blocks that reference them — always,
+# and independently of whether the user-facing block above is injected
+# (a user shadowing ``OptionMapFn`` still gets a working ``option_map``).
+_OPTION_INTERNAL_ALIASES = _internal_alias_decls(_OPTION_TYPE_ALIASES)
+_RESULT_INTERNAL_ALIASES = _internal_alias_decls(_RESULT_TYPE_ALIASES)
+# The array aliases get no twin: ``_ARRAY_COMBINATORS`` is empty, so no
+# prelude declaration resolves through them (array_map / array_filter /
+# array_fold are emitted as iterative WASM by codegen, #480).  A future
+# array combinator with a prelude body needs one added here.
+
 # Array higher-order operations.
 # array_map, array_filter, and array_fold are all emitted as iterative
 # WASM loops by codegen (#480) — none of them have prelude bodies now.
@@ -384,25 +445,25 @@ private forall<VeraT> fn option_unwrap_or(@Option<VeraT>, @VeraT -> @VeraT)
   }
 }
 
-private forall<VeraA, VeraB> fn option_map(@Option<VeraA>, @OptionMapFn<VeraA, VeraB> -> @Option<VeraB>)
+private forall<VeraA, VeraB> fn option_map(@Option<VeraA>, @VeraOptionMapFn<VeraA, VeraB> -> @Option<VeraB>)
   requires(true)
   ensures(true)
   effects(pure)
 {
   match @Option<VeraA>.0 {
     None -> None,
-    Some(@VeraA) -> Some(apply_fn(@OptionMapFn<VeraA, VeraB>.0, @VeraA.0))
+    Some(@VeraA) -> Some(apply_fn(@VeraOptionMapFn<VeraA, VeraB>.0, @VeraA.0))
   }
 }
 
-private forall<VeraA, VeraB> fn option_and_then(@Option<VeraA>, @OptionBindFn<VeraA, VeraB> -> @Option<VeraB>)
+private forall<VeraA, VeraB> fn option_and_then(@Option<VeraA>, @VeraOptionBindFn<VeraA, VeraB> -> @Option<VeraB>)
   requires(true)
   ensures(true)
   effects(pure)
 {
   match @Option<VeraA>.0 {
     None -> None,
-    Some(@VeraA) -> apply_fn(@OptionBindFn<VeraA, VeraB>.0, @VeraA.0)
+    Some(@VeraA) -> apply_fn(@VeraOptionBindFn<VeraA, VeraB>.0, @VeraA.0)
   }
 }
 """
@@ -419,13 +480,13 @@ private forall<VeraT, VeraE> fn result_unwrap_or(@Result<VeraT, VeraE>, @VeraT -
   }
 }
 
-private forall<VeraA, VeraB, VeraE> fn result_map(@Result<VeraA, VeraE>, @ResultMapFn<VeraA, VeraB> -> @Result<VeraB, VeraE>)
+private forall<VeraA, VeraB, VeraE> fn result_map(@Result<VeraA, VeraE>, @VeraResultMapFn<VeraA, VeraB> -> @Result<VeraB, VeraE>)
   requires(true)
   ensures(true)
   effects(pure)
 {
   match @Result<VeraA, VeraE>.0 {
-    Ok(@VeraA) -> Ok(apply_fn(@ResultMapFn<VeraA, VeraB>.0, @VeraA.0)),
+    Ok(@VeraA) -> Ok(apply_fn(@VeraResultMapFn<VeraA, VeraB>.0, @VeraA.0)),
     Err(@VeraE) -> Err(@VeraE.0)
   }
 }
@@ -573,7 +634,7 @@ def _user_defined_names(program: ast.Program) -> set[str]:
         if isinstance(decl, ast.FnDecl):
             names.add(decl.name)
         elif isinstance(decl, ast.TypeAliasDecl):
-            names.add(decl.name)  # pragma: no cover
+            names.add(decl.name)
     return names
 
 
@@ -762,6 +823,11 @@ def inject_prelude(program: ast.Program) -> str:
       ``ArrayFoldFn``) — always injected unless the user shadows the
       alias names, so user code can still spell closure types (e.g.
       ``fn foo(@ArrayMapFn<Int, String>)``).
+    - Reserved ``Vera``-prefixed twins of the alias names the injected
+      combinators themselves resolve through (#1184) — injected with
+      those combinator bodies, and never skipped, so a user or module
+      alias may take a user-facing alias name without re-typing the
+      prelude's own declarations.
     - Array combinator bodies — none currently.  All three
       (``array_map``, ``array_filter``, ``array_fold``) are emitted
       as iterative WASM by codegen (#480).  ``_ARRAY_COMBINATORS`` is
@@ -807,6 +873,12 @@ def inject_prelude(program: ast.Program) -> str:
         )
         if need_aliases and not option_alias_names.issubset(user_names):
             source_parts.append(_OPTION_TYPE_ALIASES)
+        # #1184: the reserved twins the combinators actually resolve
+        # through go in unconditionally with the bodies that need them
+        # — a user or module alias named ``OptionMapFn`` shadows the
+        # user-facing block above (that is its right), and must not
+        # take ``option_map`` down with it.
+        source_parts.append(_OPTION_INTERNAL_ALIASES)
         source_parts.append(_OPTION_COMBINATORS)
 
     if (inject_result_combinators
@@ -814,6 +886,7 @@ def inject_prelude(program: ast.Program) -> str:
         need_aliases = "result_map" not in user_names
         if need_aliases and not result_alias_names.issubset(user_names):
             source_parts.append(_RESULT_TYPE_ALIASES)
+        source_parts.append(_RESULT_INTERNAL_ALIASES)  # #1184, see above
         source_parts.append(_RESULT_COMBINATORS)
 
     # Array operations — always inject the aliases (no ADT
@@ -906,8 +979,12 @@ def inject_prelude(program: ast.Program) -> str:
             if decl.name in user_names:
                 continue  # User shadowed this function
         elif isinstance(decl, ast.TypeAliasDecl):
-            if decl.name in user_names:  # pragma: no cover
-                continue  # User shadowed this type alias
+            if decl.name in user_names:
+                # User shadowed this type alias.  Only the user-facing
+                # names are reachable here: the reserved twins the
+                # combinators resolve through are not spellable by an
+                # ordinary declaration (#1184).
+                continue
         new_decls.append(ast.TopLevelDecl(
             visibility="private",
             decl=decl,

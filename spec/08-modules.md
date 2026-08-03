@@ -106,7 +106,7 @@ private fn helper(@Int -> @Int)
 
 - `public` declarations are visible to any module that imports them.
 - `private` declarations are visible only within the module that defines them.
-- Type aliases (`type Foo = ...`), effect declarations (`effect E { ... }`), module declarations, and import statements do not take visibility modifiers. These declarations are **module-local** — they are not importable by other modules. If another module needs the same type alias or effect, it must declare its own copy.
+- Type aliases (`type Foo = ...`), effect declarations (`effect E { ... }`), module declarations, and import statements do not take visibility modifiers. These declarations are **module-local** — they are not importable by other modules. If another module needs the same type alias or effect, it must declare its own copy. An alias may reuse a name the prelude injects (`OptionMapFn`, `ArrayMapFn`, …), which shadows the prelude's definition within that module only and never re-types the prelude's own declarations — those resolve through reserved names no user declaration may spell: a type or alias whose name begins with `Vera` followed by an uppercase letter or digit is a compile error (**E154**), so the prelude's internal namespace cannot be re-typed.
 - Functions declared inside `where` blocks are always local to the parent function and do not take visibility modifiers.
 
 ### 8.4.2 Data Type Visibility
