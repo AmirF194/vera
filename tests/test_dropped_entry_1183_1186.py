@@ -413,6 +413,33 @@ class TestCompileZeroExports:
         )
         assert not (out_dir / "index.html").exists()
 
+    def test_browser_refusal_json_dropped_main(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """JSON mode for the DROPPED-main browser refusal (PR #1190 review).
+
+        Complements the never-declared JSON pin above by exercising the
+        `result.dropped_fns` arm: the diagnostic quotes the dropped entry,
+        and the warnings array preserves the [E602] root and the [E620]
+        drop, so a JSON consumer can reconstruct the chain.
+        """
+        path = _write(
+            tmp_path, "survivor_json.vera", _MAIN_DROPPED_SIBLING_SURVIVES,
+        )
+        out_dir = tmp_path / "bundle_dropped_json"
+        rc = cmd_compile(
+            path, target="browser", output=str(out_dir), as_json=True,
+        )
+        captured = capsys.readouterr()
+        assert rc != 0
+        data = json.loads(captured.out)
+        assert data["ok"] is False
+        assert "main" in data["diagnostics"][0]["description"]
+        codes = {w.get("error_code") for w in data["warnings"]}
+        assert "E602" in codes, codes
+        assert "E620" in codes, codes
+        assert not (out_dir / "index.html").exists()
+
 
 # =====================================================================
 # #1186 — imported bodies locate in their own module
