@@ -574,6 +574,42 @@ class FunctionCompilationMixin:
 
         pre_instrs = refine_guard_instrs + precond_instrs
 
+        # #1172: the runtime decreases guard.  The entry sequence saves
+        # this function's chain state, evaluates the measure components,
+        # traps (via $vera.contract_fail) when a live previous activation's
+        # measure fails to lexicographically decrease while staying
+        # non-negative, and records the new baseline; the restores are
+        # emitted at the function's exit (after the postconditions,
+        # below).  Placed after the preconditions: the measure may rely
+        # on the invariants requires() establishes (e.g. a division), and
+        # spec §5.6.1(1) has the measure evaluated at entry over the
+        # parameters, which the body cannot mutate.
+        try:
+            dec_entry_instrs, dec_restore_instrs, dec_self_tail = (
+                self._compile_decreases_entry(ctx, decl, env)
+            )
+        except (AdtEqNotDerivableError, CodegenSkip) as exc:
+            # The measure is a contract predicate: degrade through the
+            # same net as the pre/postcondition paths — a check-green
+            # program must never surface a raw traceback (#922).
+            self._emit_contract_predicate_degradation(ctx, exc, decl)
+            return None
+        except CodegenInvariantError as inv:
+            # Mirror the precondition net's #939 arm: one loud [E699].
+            self._harvest_interp_inference_failures(ctx)
+            self._error(
+                inv.node if inv.node is not None else decl,
+                f"Internal compiler error while compiling '{decl.name}': "
+                f"{inv.msg}",
+                rationale="This is a codegen invariant violation — the type "
+                "checker should have rejected the input before it reached "
+                "this point.  Please file a bug report with the offending "
+                "program.",
+                error_code="E699",
+            )
+            return None
+        pre_instrs = pre_instrs + dec_entry_instrs
+
         # Snapshot old state for postcondition old() references
         snapshot_instrs = self._snapshot_old_state(ctx, decl)
 
@@ -952,7 +988,65 @@ class FunctionCompilationMixin:
                 else instr
                 for instr in body_instrs
             ]
-        elif ctx.needs_alloc:
+        elif dec_restore_instrs:
+            # #1172: the decreases guard's tail-call discipline — TCO is
+            # PRESERVED for the dominant self-recursive case, which #517
+            # exists for (`decreases` is mandatory on pure recursion, so
+            # demoting guarded functions would have un-fixed the
+            # documented iteration idiom's 1M-depth property).  Per
+            # surviving ``return_call`` in this guarded function:
+            #   - self-recursive: prepend the site check + state restore
+            #     built by `_dec_self_tail_prefix` (capture args, verify
+            #     the hop decreases against the live chain globals, close
+            #     out this activation's state, re-push) and keep the
+            #     ``return_call`` — the chain rides the site checks;
+            #   - a DIFFERENT guarded target: demote to a plain ``call``
+            #     (the mutual-tail corner: with the frame elided, no
+            #     restore placement both preserves the chain and unwinds
+            #     it; the entry check then covers every hop, at
+            #     native-stack depth);
+            #   - an unguarded target: prepend the restores only (this
+            #     activation ends here; the callee never touches this
+            #     function's chain state).
+            # An untranslatable self-tail prefix demotes that site the
+            # same way — the check is never partially emitted.  The GC
+            # prepend below composes: it touches only ``$gc_sp``.
+            patched_dec: list[str] = []
+            for instr in body_instrs:
+                stripped = instr.lstrip()
+                if not stripped.startswith("return_call "):
+                    patched_dec.append(instr)
+                    continue
+                target = stripped.split()[1].lstrip("$")
+                ws = instr[: len(instr) - len(stripped)]
+                if target == decl.name:
+                    if dec_self_tail is not None:
+                        patched_dec.extend(
+                            ws + part for part in dec_self_tail)
+                        patched_dec.append(instr)
+                    else:
+                        patched_dec.append(
+                            instr.replace("return_call ", "call ", 1))
+                elif target in self._dec_guarded_names:
+                    patched_dec.append(
+                        instr.replace("return_call ", "call ", 1))
+                else:
+                    # PR #1179 review F2: an UNGUARDED tail target can
+                    # trampoline straight back into this function; the
+                    # old prepend-restores-then-transfer sequence zeroed
+                    # the chain first, so every re-entry re-baselined
+                    # and a constant measure looped forever.  Demote
+                    # like the mutual-tail case: plain-call semantics
+                    # keep the chain live across the callee, and the
+                    # single exit's restores run when the value returns.
+                    patched_dec.append(
+                        instr.replace("return_call ", "call ", 1))
+            body_instrs = patched_dec
+
+        if (
+            not (post_instrs or widen_guarded)
+            and ctx.needs_alloc
+        ):
             # #549: GC-aware TCO.  Prepend a ``$gc_sp`` restore
             # immediately before each ``return_call`` so the
             # callee's prologue saves a clean baseline rather than
@@ -1063,6 +1157,21 @@ class FunctionCompilationMixin:
 
         # Postcondition checks (after body, wraps result)
         for instr in post_instrs:
+            lines.append(f"    {instr}")
+
+        # #1172: decreases-guard restores — every non-trap exit puts the
+        # function's chain state back to what this activation saved, so a
+        # finished call leaves no residue that would spuriously trap a
+        # sibling call.  Trap paths need no restore (the instance dies).
+        # A `return_call` CAN survive in a guarded function — the
+        # self-recursive and unguarded-target tail sites keep TCO — but
+        # those sites carry their restores inline (the `dec_self_tail`
+        # prefix / `dec_restore_instrs` prepend), so together with this
+        # single fall-through exit every live return is covered.  An
+        # unwinding `throw` covers nothing, which is why an
+        # Exn-declaring function gets no guard at all (see
+        # `_compile_decreases_entry`).
+        for instr in dec_restore_instrs:
             lines.append(f"    {instr}")
 
         # GC epilogue: save result, restore gc_sp, push result, return

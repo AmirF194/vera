@@ -52,7 +52,7 @@ private fn build_and_sum(@Int -> @Int)
 private fn repeat(@Int, @Int -> @Int)
   requires(true)
   ensures(true)
-  decreases(@Int.0)
+  decreases(@Int.1)
   effects(pure)
 {
   match @Int.1 <= 0 {

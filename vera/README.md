@@ -132,7 +132,7 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `  functions.py` | 1,073 | | Function body compilation, GC prologue/epilogue (Pass 2) | |
 | `  tail_position.py` | 106 | | Tail-position analysis for the function body compiler | |
 | `  closures.py` | 876 | | Closure lifting, GC instrumentation | |
-| `  contracts.py` | 810 | | Runtime pre/postconditions, old state snapshots | |
+| `  contracts.py` | 1,262 | | Runtime pre/postconditions, old state snapshots, decreases termination guard (entry check-and-set, per-function chain state, ADT rank helpers, self-tail site checks) | |
 | `  assembly.py` | 1,447 | | WAT module assembly, `$alloc`, `$gc_collect` | |
 | `  compilability.py` | 545 | | Compilability checks, state handler scanning | |
 | `  wasi.py` | 4,820 | | WASI Preview 2 component/adapter emitter — `--target wasi-p2` / `--world server` (#237, #853) | |

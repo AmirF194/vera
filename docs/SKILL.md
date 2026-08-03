@@ -151,7 +151,6 @@ Every diagnostic has a stable error code grouped by compiler phase:
 - **W001** — Typed hole (`?`) — expected type and available bindings reported (warning, not error)
 - **E001–E007** — Parse errors (missing contracts, unexpected tokens)
 - **E020, E021, E023** — Malformed comments: unterminated `{-` (E020) or `/*` (E021), or a `/*` nested inside another (E023 — only `{- -}` nests). Each names the delimiter at fault and how to close it.
-- **E030, E031** — `old(...)` (E030) or `new(...)` (E031) applied to an expression. Both take an effect reference, as in `old(State<Int>)`; Vera has no `old(<expression>)` form.
 - **E010** — Transform errors (internal)
 - **E120–E176** — Type check: core + expressions (type mismatches, slot resolution, operators)
 - **E200–E233** — Type check: calls (unresolved functions, argument mismatches, module calls)
@@ -1284,6 +1283,8 @@ private fn factorial(@Nat -> @Nat)
 
 For nested recursion, use lexicographic ordering: `decreases(@Nat.0, @Nat.1)`.
 
+The measure must have a well-founded ordering — `Nat`, `Int`, a data type (ordered by structural size), or a lexicographic tuple of these; a `Float64`/`String`/`Bool` measure is rejected at check time (`E127`). A measure Z3 cannot prove is checked at run time: a recursive re-entry whose measure fails to strictly decrease (or goes negative) traps with a message naming the function, instead of looping forever. Self-recursive tail calls keep tail-call optimization (the hop is checked at the call site, so guarded iteration still runs at constant stack depth); only *mutually*-recursive tail calls between guarded functions fall back to plain calls. An ADT measure of a *parameterized* type (`List<Int>`) is not yet runtime-ranked, and a function declaring `Exn` gets no runtime guard (a throw would unwind past the state restores) — in both cases the obligation stays disclosed at the static tier.
+
 ### Workflow: writing contracts incrementally
 
 **Start with scaffolding, then strengthen.** A function with placeholder contracts type-checks
@@ -1410,8 +1411,6 @@ private fn increment(@Unit -> @Unit)
 ```
 
 In `ensures` clauses, `old(State<T>)` is the state before the call and `new(State<T>)` is the state after.
-
-Two rules go with them. Both take an **effect reference** — a stateful effect's name with its type arguments — never an expression: there is no `old(@Int.0)` form, because a slot holds one value for the whole call and only effect state changes across it (`[E030]`/`[E031]`). And both are valid **only inside `ensures`**; a `requires` or `decreases` clause is evaluated before the body runs, so it already observes the pre-state (`[E174]`/`[E175]`). `@T.result` is ensures-only for the same reason (`[E131]`).
 
 ### Exception effects
 
@@ -2369,7 +2368,7 @@ public fn main(@Unit -> @Unit)
 
 ## Conformance Suite
 
-The `tests/conformance/` directory contains 171 small programs — most self-contained, with the Chapter 8 module-system programs and a few cross-module Chapter 7 and 9 programs importing companion `_lib.vera` / `_mid.vera` modules — that validate every language feature against the spec — often one program per feature, though some features (slot references, match, contracts) span several. These are the best minimal working examples of Vera syntax and semantics.
+The `tests/conformance/` directory contains 173 small programs — most self-contained, with the Chapter 8 module-system programs and a few cross-module Chapter 7 and 9 programs importing companion `_lib.vera` / `_mid.vera` modules — that validate every language feature against the spec — often one program per feature, though some features (slot references, match, contracts) span several. These are the best minimal working examples of Vera syntax and semantics.
 
 Each program is organized by spec chapter (`ch01_int_literals.vera`, `ch04_match_basic.vera`, `ch07_state_handler.vera`, etc.) and the `manifest.json` file maps features to programs. When you need to see how a specific construct works, check the conformance program before reading the spec.
 
