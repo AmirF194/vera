@@ -239,8 +239,12 @@ class TestRunRefusesDroppedEntry:
         )
         assert "main" not in result.exports
         assert "survivor" in result.exports
-        with pytest.raises(RuntimeError, match="main"):
+        with pytest.raises(RuntimeError, match="main") as excinfo:
             execute(result)
+        # Exact type, not a subclass: WasmTrapError extends RuntimeError,
+        # so a runtime trap whose message mentions 'main' must not be able
+        # to satisfy this test in place of the refusal (PR #1190 review).
+        assert type(excinfo.value) is RuntimeError, type(excinfo.value)
 
     def test_compile_result_records_dropped_entry(
         self, tmp_path: Path,
@@ -346,6 +350,36 @@ class TestCompileZeroExports:
         assert not (out_dir / "index.html").exists(), (
             "a bundle whose entry does not exist must not be written"
         )
+
+    def test_browser_bundle_refuses_never_declared_main(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """No `main` declared at all: the bundle is equally unusable.
+
+        PR #1190 review finding: the dropped-main guard keyed on
+        ``dropped_fns``, so a file that never declared ``main`` (with
+        another public export) still emitted an index.html whose
+        ``call('main')`` fails at page load.  The guard keys on
+        ``"main" not in result.exports`` now — the never-declared and
+        dropped cases refuse alike, with case-accurate messages.
+        """
+        src = (
+            "public fn solo(-> @Int)\n"
+            "  requires(true)\n"
+            "  ensures(true)\n"
+            "  effects(pure)\n"
+            "{\n"
+            "  99\n"
+            "}\n"
+        )
+        path = _write(tmp_path, "nomain.vera", src)
+        out_dir = tmp_path / "bundle_nomain"
+        rc = cmd_compile(path, target="browser", output=str(out_dir))
+        captured = capsys.readouterr()
+        assert rc != 0, "a bundle that cannot call main() is not a success"
+        assert "no 'main' function is exported" in captured.err
+        assert "solo" in captured.err, "the exports must be named"
+        assert not (out_dir / "index.html").exists()
 
 
 # =====================================================================

@@ -509,13 +509,22 @@ def cmd_compile(
             print(f"Error: {msg}", file=sys.stderr)
             return 1
 
-        # #1183: the browser shell calls `main` unconditionally, so a
-        # bundle whose `main` was dropped is a page that fails at load.
+        # #1183: the browser shell calls `main` unconditionally, so any
+        # bundle without a `main` export is a page that fails at load —
+        # whether `main` was declared-and-dropped (quote the E620 chain)
+        # or never declared at all (PR #1190 review; say what IS exported).
         # Refuse to write it, exactly as `vera run` refuses to run it.
-        if target == "browser" and "main" in result.dropped_fns:
+        if target == "browser" and "main" not in result.exports:
+            if "main" in result.dropped_fns:
+                core = dropped_entry_message("main", result, suggest_fn=False)
+            else:
+                exports = ", ".join(result.exports) if result.exports else "(none)"
+                core = (
+                    "no 'main' function is exported, so there is nothing "
+                    f"for the page to call.  Exports: {exports}."
+                )
             msg = (
-                "--target browser: "
-                + dropped_entry_message("main", result, suggest_fn=False)
+                "--target browser: " + core
                 + "\n\nThe generated index.html calls main() on load, so "
                 "the bundle would fail in the browser."
             )
