@@ -16,6 +16,7 @@ each handle a specific concern:
 from __future__ import annotations
 
 import dataclasses
+import re
 from typing import TYPE_CHECKING
 
 import wasmtime
@@ -47,6 +48,19 @@ if TYPE_CHECKING:
     from vera.resolver import ResolvedModule
     from vera.types import ModuleArtifacts, SpanTypeTable, Type
     from vera.wasm.context import WasmContext
+
+
+# #1100: WAT-text scanning for the skip-propagation pass
+# (`_drop_dangling_callers`).  The emitted WAT is the exact symbol stream
+# wasmtime resolves, so scanning it needs no re-derivation of mono/module
+# renaming.  `_WAT_FN_NAME_RE` reads the defined symbol out of a
+# `  (func $name ...` emission; `_WAT_CALL_RE` collects every direct call
+# target (`call $f` / `return_call $f`).  `call_indirect` never matches
+# (`_` is a word character, and its operand is a `(type $sig)`, not a
+# function symbol); `throw $tag` references an exception tag, not a
+# function; `ref.func` is never emitted.
+_WAT_FN_NAME_RE = re.compile(r"\s*\(func \$([^\s()]+)")
+_WAT_CALL_RE = re.compile(r"\b(?:return_call|call)\s+\$([^\s()]+)")
 
 
 def _find_holes(program: ast.Program) -> list[ast.HoleExpr]:
@@ -249,6 +263,26 @@ class CodeGenerator(
         self._closure_sigs: dict[str, str] = {}  # sig_key -> WAT type decl
         self._closure_fns_wat: list[str] = []  # WAT for lifted closures
         self._needs_table: bool = False
+        # #1100: skip-propagation bookkeeping, populated by
+        # `_compile_fn_tracked` and consumed by `_drop_dangling_callers`
+        # just before module assembly.
+        #   _skipped_fn_roots: WAT symbol name of every function
+        #     `_compile_fn` DROPPED -> the diagnostic that explains the
+        #     drop (None when no E6xx diagnostic was emitted — a
+        #     defensive fallback, no known path).  Call sites emit
+        #     `call $name` for exactly these names, so any emitted body
+        #     referencing one would dangle at WAT assembly.
+        #   _fn_decl_by_wat_name: WAT symbol name -> FnDecl for every
+        #     compile attempt, so a dropped caller's [E620] warning can
+        #     point at the caller's own declaration.
+        #   _closure_parents: lifted-closure WAT name ($anon_N) -> the
+        #     top-level WAT symbol whose compile committed it.  A parent
+        #     references its closures only via a function-table INDEX
+        #     (never by `$anon_N` name), so the caller-drop scan needs
+        #     this explicit construction edge.
+        self._skipped_fn_roots: dict[str, Diagnostic | None] = {}
+        self._fn_decl_by_wat_name: dict[str, ast.FnDecl] = {}
+        self._closure_parents: dict[str, str] = {}
         # #773: generated structural-Eq helper functions, keyed by their
         # `$eq_<type>` name → WAT text.  Accumulated across every function /
         # closure body (merged from each WasmContext) and emitted once at
@@ -628,6 +662,227 @@ class CodeGenerator(
             )
 
     # -----------------------------------------------------------------
+    # Skip propagation (#1100)
+    # -----------------------------------------------------------------
+
+    def _compile_fn_tracked(
+        self, decl: ast.FnDecl, *, export: bool = True,
+        module_renames: dict[str, str] | None = None,
+        imported: bool = False,
+        module_tables: (
+            tuple[SpanTypeTable | None, SpanTypeTable | None] | None
+        ) = None,
+    ) -> str | None:
+        """`_compile_fn` plus the #1100 skip/closure bookkeeping.
+
+        Every Pass 2/2.5/2.6/mono compile goes through here so
+        `_drop_dangling_callers` can later see (a) which WAT symbol
+        names were DROPPED (a caller's `call $name` to one would fail
+        WAT assembly with a raw `unknown func`), with the diagnostic
+        that explains each drop, and (b) which lifted closures belong
+        to which parent (a parent holds only a table index, so the
+        construction edge is invisible to a WAT-text scan).
+        """
+        diags_before = len(self.diagnostics)
+        closures_before = len(self._closure_fns_wat)
+        self._fn_decl_by_wat_name[decl.name] = decl
+        fn_wat = self._compile_fn(
+            decl, export=export, module_renames=module_renames,
+            imported=imported, module_tables=module_tables,
+        )
+        if fn_wat is None:
+            # The LAST codegen diagnostic emitted during this compile is
+            # the one that explains the drop (a closure-level skip is
+            # followed by the parent-level drop warning, so "last" picks
+            # the function-level explanation).  Restricted to E6xx so an
+            # unrelated interleaved diagnostic can never be mistaken for
+            # the root cause.
+            root = next(
+                (
+                    d for d in reversed(self.diagnostics[diags_before:])
+                    if d.error_code.startswith("E6")
+                ),
+                None,
+            )
+            self._skipped_fn_roots[decl.name] = root
+        else:
+            for closure_wat in self._closure_fns_wat[closures_before:]:
+                match = _WAT_FN_NAME_RE.match(closure_wat)
+                if match:
+                    self._closure_parents[match.group(1)] = decl.name
+        return fn_wat
+
+    def _drop_dangling_callers(
+        self, functions_wat: list[str], exports: list[str],
+    ) -> list[str]:
+        """Drop every function whose (transitive) callee was skipped (#1100).
+
+        An `[E602]`-class skip removes a function from the emitted module,
+        but its callers' `call $f` / `return_call $f` instructions were
+        still emitted — so a check-clean program whose skipped construct
+        sits in a *called* helper failed WAT assembly with a raw wasmtime
+        ``unknown func: failed to find name $f`` instead of a
+        source-located diagnostic.  This pass runs after all function
+        compilation and prunes the whole unreachable caller subgraph, so
+        the module always assembles and every dropped caller carries its
+        own [E620] warning naming the ROOT skipped function and its skip
+        location (DESIGN.md principle 1: the diagnostic is an instruction
+        pointing at the construct to fix, not a WAT internals dump).
+
+        Mechanics: the scan works on the emitted WAT text — the exact
+        symbol stream wasmtime resolves — so mono-mangled (`f$Int`),
+        module-qualified (`mod$f`), and where-helper (`p$where$h`)
+        call targets are matched without re-deriving any renaming logic.
+        Lifted closures are nodes too: a closure body holding the only
+        `call $skipped` dooms its parent through the `_closure_parents`
+        construction edge, and the doomed closure's body is replaced by
+        an `unreachable` stub RATHER than removed — later closures'
+        `closure_id` ↔ table-index correspondence depends on every
+        earlier `(elem ...)` slot staying occupied.  The worklist reaches
+        a fixed point because `doomed` only grows and is bounded by the
+        node count, so call-graph cycles (mutual recursion) terminate.
+
+        Functions outside the doomed subgraph — including their exports —
+        are untouched.  Mutates *exports* in place; returns the pruned
+        *functions_wat*.
+        """
+        if not self._skipped_fn_roots:
+            return functions_wat
+
+        # Node tables: WAT symbol name -> referenced symbol names, in
+        # first-reference order (kept deterministic — diagnostics and
+        # drop order must not depend on set iteration).
+        top_names: list[str] = []       # functions_wat order
+        refs_by_name: dict[str, list[str]] = {}
+        closure_names: set[str] = set()
+        for fn_wat in functions_wat:
+            match = _WAT_FN_NAME_RE.match(fn_wat)
+            if match is None:  # pragma: no cover — every emission is a (func
+                continue
+            name = match.group(1)
+            top_names.append(name)
+            refs_by_name[name] = list(
+                dict.fromkeys(_WAT_CALL_RE.findall(fn_wat))
+            )
+        for closure_wat in self._closure_fns_wat:
+            match = _WAT_FN_NAME_RE.match(closure_wat)
+            if match is None:  # pragma: no cover — every lift is a (func
+                continue
+            name = match.group(1)
+            closure_names.add(name)
+            refs_by_name[name] = list(
+                dict.fromkeys(_WAT_CALL_RE.findall(closure_wat))
+            )
+        # The construction edge: a parent "references" each closure its
+        # compile committed (the WAT itself only carries the table index).
+        for anon_name, parent in self._closure_parents.items():
+            if parent in refs_by_name and anon_name not in refs_by_name[parent]:
+                refs_by_name[parent].append(anon_name)
+
+        # Fixed point: doomed maps each dropped symbol to the ROOT skip
+        # diagnostic; direct_cause remembers the reference that doomed it
+        # (for the "calls X, which was dropped because Y" wording).
+        doomed: dict[str, Diagnostic | None] = dict(self._skipped_fn_roots)
+        root_of: dict[str, str] = {
+            name: name for name in self._skipped_fn_roots
+        }
+        direct_cause: dict[str, str] = {}
+        changed = True
+        while changed:
+            changed = False
+            for name, refs in refs_by_name.items():
+                if name in doomed:
+                    continue
+                hit = next((r for r in refs if r in doomed), None)
+                if hit is None:
+                    continue
+                doomed[name] = doomed[hit]
+                root_of[name] = root_of[hit]
+                direct_cause[name] = hit
+                changed = True
+
+        dropped_tops = [n for n in top_names if n in direct_cause]
+        if not dropped_tops and not (closure_names & direct_cause.keys()):
+            return functions_wat
+
+        # Emit one [E620] per dropped top-level function, in emission
+        # order.  Closures carry no separate diagnostic — the parent's
+        # warning covers the drop (the closure is not a user-named unit).
+        for name in dropped_tops:
+            decl = self._fn_decl_by_wat_name.get(name)
+            if decl is None:  # pragma: no cover — tracked at every compile
+                continue
+            cause = direct_cause[name]
+            via_closure = cause in closure_names
+            if via_closure:
+                # A closure's own refs never include `$anon` names (those
+                # travel as table indices), so one hop lands on a real
+                # function symbol.
+                cause = direct_cause[cause]
+            root_name = root_of[name]
+            root_diag = doomed[name]
+            if root_diag is not None:
+                where = f"line {root_diag.location.line}, " \
+                    f"column {root_diag.location.column}"
+                if root_diag.location.file != self.file:
+                    where = f"{root_diag.location.file}, {where}"
+                root_part = (
+                    f"which was skipped by codegen (see the "
+                    f"[{root_diag.error_code}] warning at {where})"
+                )
+            else:
+                root_part = (
+                    "which could not be compiled (see the earlier "
+                    "diagnostics)"
+                )
+            if cause == root_name:
+                chain = f"function '{root_name}', {root_part}"
+            else:
+                chain = (
+                    f"function '{cause}', which was dropped because "
+                    f"function '{root_name}' was skipped"
+                    if root_diag is None else
+                    f"function '{cause}', which was dropped because "
+                    f"function '{root_name}' was skipped by codegen (see "
+                    f"the [{root_diag.error_code}] warning at {where})"
+                )
+            verb = (
+                "contains a closure that calls" if via_closure else "calls"
+            )
+            self._warning(
+                decl,
+                f"Function '{name}' {verb} {chain} — "
+                f"function dropped from the compiled output.",
+                rationale="The skipped function is absent from the "
+                "emitted WASM module, so this function's call to it "
+                "cannot be assembled — it is dropped with this "
+                "diagnostic instead of failing module assembly with a "
+                "raw WebAssembly error naming a missing symbol. Fix "
+                "the root cause at the referenced location to restore "
+                "this function and its callers.",
+                error_code="E620",
+            )
+
+        # Prune the doomed top-level functions and their exports; stub
+        # the doomed closure bodies in place (table slots must survive).
+        dropped_set = set(dropped_tops)
+        exports[:] = [e for e in exports if e not in dropped_set]
+        self._closure_fns_wat = [
+            (
+                f"  (func ${match.group(1)} unreachable)"
+                if (match := _WAT_FN_NAME_RE.match(closure_wat)) is not None
+                and match.group(1) in direct_cause
+                else closure_wat
+            )
+            for closure_wat in self._closure_fns_wat
+        ]
+        return [
+            fn_wat for fn_wat in functions_wat
+            if (m := _WAT_FN_NAME_RE.match(fn_wat)) is None
+            or m.group(1) not in dropped_set
+        ]
+
+    # -----------------------------------------------------------------
     # Compilation entry point
     # -----------------------------------------------------------------
 
@@ -926,7 +1181,7 @@ class CodeGenerator(
             decl = tld.decl
             if isinstance(decl, ast.FnDecl):
                 is_public = tld.visibility == "public"
-                fn_wat = self._compile_fn(decl, export=is_public)
+                fn_wat = self._compile_fn_tracked(decl, export=is_public)
                 if fn_wat is not None:
                     functions_wat.append(fn_wat)
                     if is_public:
@@ -943,7 +1198,7 @@ class CodeGenerator(
                     # already flattens nested helpers via
                     # `monomorphize._hoist_where_fns_under`.
                     for wfn in self._flatten_where_fns(decl):
-                        wfn_wat = self._compile_fn(wfn, export=False)
+                        wfn_wat = self._compile_fn_tracked(wfn, export=False)
                         if wfn_wat is not None:
                             # PR #1013 review: a fully-concrete (T-unused)
                             # generic helper TEMPLATE compiles — unlike a
@@ -994,7 +1249,7 @@ class CodeGenerator(
             # #1111: the clone's alias references resolve against its
             # defining module's namespace (no-op for a local clone).
             with self._module_alias_scope(origin):
-                fn_wat = self._compile_fn(
+                fn_wat = self._compile_fn_tracked(
                     mdecl, export=is_public,
                     imported=origin is not None,
                     module_tables=(
@@ -1031,7 +1286,7 @@ class CodeGenerator(
             # namespace (spec §8.4.1: aliases are module-local) — the flat
             # maps hold only the main file's + prelude's aliases.
             with self._module_alias_scope(path):
-                fn_wat = self._compile_fn(
+                fn_wat = self._compile_fn_tracked(
                     idecl, export=False,
                     module_renames=self._module_intra_renames.get(path, {}),
                     imported=True,  # #986: don't consult main-file span tables
@@ -1060,7 +1315,7 @@ class CodeGenerator(
             # ``mod$…`` rename does not change which module's aliases
             # the body's type expressions belong to.
             with self._module_alias_scope(path):
-                fn_wat = self._compile_fn(
+                fn_wat = self._compile_fn_tracked(
                     dataclasses.replace(idecl, name=mangled),
                     export=False,
                     module_renames=self._module_intra_renames.get(path, {}),
@@ -1247,6 +1502,14 @@ class CodeGenerator(
                         )
                     )
                 ]
+
+        # #1100: drop the (transitive) callers of every skipped function
+        # so no `call $skipped` survives into module assembly.  Runs after
+        # the template/prelude warning-suppression passes above (E620
+        # warnings name compiled non-template callers, so those filters
+        # must not see them) and before the export-driven alloc scan
+        # below (a dropped export must not force the allocator in).
+        functions_wat = self._drop_dangling_callers(functions_wat, exports)
 
         # If any exported function takes String/Array (i32_pair) params, ensure
         # the heap allocator is compiled in so CLI callers can allocate args.
