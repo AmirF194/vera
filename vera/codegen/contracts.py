@@ -885,9 +885,18 @@ class ContractsMixin:
 
         name = decl.name
         comp_values: list[list[str]] = []
+        # Snapshot the rank-helper accumulator for the whole component
+        # loop: when a LATER component fails, helpers committed for
+        # earlier components would be emitted with no guard using them.
+        # They are internally valid (each helper's own walk is atomic),
+        # so the escape is dead code rather than a dangling reference —
+        # rolled back anyway so "a helper exists iff a guard calls it"
+        # stays total (PR #1179 review).
+        helpers_snapshot = dict(self._dec_rank_helpers)
         for expr in contract.exprs:
             instrs = ctx.translate_expr(expr, env)
             if instrs is None:
+                self._dec_rank_helpers = helpers_snapshot
                 return [], [], None
             wt = ctx._infer_expr_wasm_type(expr)
             if wt == "i64":
@@ -897,9 +906,11 @@ class ContractsMixin:
             # measures at check time): rank it by structural size.
             adt_name = self._dec_measure_adt_name(expr)
             if adt_name is None:
+                self._dec_rank_helpers = helpers_snapshot
                 return [], [], None
             size_fn = self._dec_rank_helper(adt_name)
             if size_fn is None:
+                self._dec_rank_helpers = helpers_snapshot
                 return [], [], None
             comp_values.append([*instrs, f"call {size_fn}"])
 
@@ -1031,9 +1042,16 @@ class ContractsMixin:
                 capture_env = capture_env.push(slot, bind)
 
         comp_values: list[list[str]] = []
+        # Same rollback discipline as the entry loop: helpers committed
+        # for earlier components must not outlive a later component's
+        # failure (in practice the entry loop already cached them, so
+        # this restore is a no-op — kept so the invariant is total, not
+        # incidental).
+        helpers_snapshot = dict(self._dec_rank_helpers)
         for expr in contract.exprs:
             instrs = ctx.translate_expr(expr, capture_env)
             if instrs is None:
+                self._dec_rank_helpers = helpers_snapshot
                 return None
             wt = ctx._infer_expr_wasm_type(expr)
             if wt == "i64":
@@ -1041,9 +1059,11 @@ class ContractsMixin:
                 continue
             adt_name = self._dec_measure_adt_name(expr)
             if adt_name is None:
+                self._dec_rank_helpers = helpers_snapshot
                 return None
             size_fn = self._dec_rank_helper(adt_name)
             if size_fn is None:
+                self._dec_rank_helpers = helpers_snapshot
                 return None
             comp_values.append([*instrs, f"call {size_fn}"])
 

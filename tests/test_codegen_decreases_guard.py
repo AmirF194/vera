@@ -391,6 +391,44 @@ public fn main(@Unit -> @Int)
 """
         assert _run(source, fn="main") == 8
 
+    def test_guarded_self_tail_keeps_return_call(self) -> None:
+        """The #517 property, pinned in BOTH directions: the guarded
+        self-recursive tail site must retain ``return_call`` in the WAT
+        (position — the demotion path exists and must not become the
+        default), and a deep run must complete (behavior — plain-call
+        recursion at this depth exhausts the native stack, so finishing
+        IS the constant-stack proof).  Asymmetric roles: the counter
+        (`@Int.1`) decreases while the accumulator (`@Int.0`) grows, so
+        a slot-order swap guards the growing component and traps."""
+        source = """\
+private fn drain(@Int, @Int -> @Int)
+  requires(true)
+  ensures(true)
+  decreases(@Int.1)
+  effects(pure)
+{
+  if @Int.1 <= 0 then {
+    @Int.0
+  } else {
+    drain(@Int.1 - 1, @Int.0 + 2)
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  drain(300000, 0)
+}
+"""
+        result = _compile_ok(source)
+        assert re.search(r"return_call \$drain(?![A-Za-z0-9_])", result.wat), (
+            "the guarded self-tail site must keep return_call — the "
+            "site-check prefix exists precisely so TCO survives the guard"
+        )
+        assert _run(source, fn="main") == 600000
+
     def test_lexicographic_first_component_order_runs(self) -> None:
         """First component strictly decreases while the SECOND grows:
         legal lexicographically, so this must run clean.  Under a
