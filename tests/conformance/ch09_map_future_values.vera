@@ -4,10 +4,6 @@
 -- Future<T> is representation-transparent (#841): a Future<Int> IS an i64 and a
 -- Future<String> IS an i32_pair, so the Map/Set host tag must strip the transparent
 -- Future<...> wrapper to the payload rather than mis-tagging it as a single i32.
-effect IO {
-  op print(String -> Unit);
-}
-
 -- Round-trip a Future<Int> map value: insert, map_get, await the payload.
 public fn roundtrip_int(@Unit -> @Int)
   requires(true)

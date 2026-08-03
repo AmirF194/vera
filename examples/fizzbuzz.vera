@@ -1,7 +1,3 @@
-effect IO {
-  op print(String -> Unit);
-}
-
 public fn fizzbuzz(@Nat -> @String)
   requires(true)
   ensures(true)

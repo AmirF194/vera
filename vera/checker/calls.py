@@ -155,6 +155,8 @@ class CallsMixin:
             # `effect State<T> { op sneak(...) }` / `effect Exn<E> { op boom }`
             # shadow's bare op pass check and then hard-fail compile (#1147
             # adversarial workflow), the exact desync E217 exists to close.
+            # Such a shadow is itself rejected since #1149 (E152); the op-name
+            # keying stays as defence in depth behind that gate.
             bare_routable_builtin = (op_info.parent_effect, op_info.name) in (
                 ("State", "get"), ("State", "put"), ("Exn", "throw"),
             )
@@ -801,6 +803,12 @@ class CallsMixin:
         # non-``String`` arg with E204, so a second E207 there is noise.  A
         # ``TypeVar`` param (generic ``DB<T>``) or a user non-``String`` param
         # does NOT fire E204, so those still gate.
+        #
+        # Since #1149 a user ``effect DB`` block is itself rejected (E152), so
+        # the shadow shapes above no longer reach codegen at all.  This gate is
+        # deliberately kept keyed on the routing axis rather than narrowed to
+        # the built-in ``OpInfo``: it must hold on its own, independent of that
+        # rejection (defence in depth).
         if (
             self.env.is_db_sql_op(op_info) and args
             and arg_types and arg_types[0] is not None

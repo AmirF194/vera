@@ -3,10 +3,6 @@
 -- Demonstrates the typed Markdown ADTs (MdBlock, MdInline) and
 -- the five built-in functions: md_parse, md_render, md_has_heading,
 -- md_has_code_block, md_extract_code_blocks.
-effect IO {
-  op print(String -> Unit);
-}
-
 -- Parse a Markdown string and process the result.
 public fn main(@Unit -> @Unit)
   requires(true)

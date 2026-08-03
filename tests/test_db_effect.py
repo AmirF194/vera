@@ -78,10 +78,12 @@ class TestDbSqlOpGating309:
     any ``DB.query`` / ``DB.execute``, keyed on ``parent_effect == "DB"`` + op
     name (``DB_SQL_OP_NAMES``), the SAME axis ``wasm/calls.py`` routes on.  NOT
     built-in ``OpInfo`` identity: ``DB`` is a reserved host qualifier, so a user
-    ``effect DB { op query(...) }`` shadow (idiomatic — cf. every example's
-    ``effect IO``) constructs a *distinct* ``OpInfo`` that still reaches
-    ``conn.execute``.  An identity key left that shadow ungated — a silent
-    SQL-injection bypass (#309 review)."""
+    ``effect DB { op query(...) }`` shadow constructs a *distinct* ``OpInfo``
+    that still reaches ``conn.execute``.  An identity key left that shadow
+    ungated — a silent SQL-injection bypass (#309 review).  The shadow is now
+    also rejected at its declaration (E152, #1149); the op-name keying stays as
+    defence in depth, so the predicate is asserted here directly rather than
+    through a source program."""
 
     def test_builtin_sql_ops_are_gated(self) -> None:
         from vera.environment import TypeEnv

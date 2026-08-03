@@ -1053,8 +1053,6 @@ class TestClosureReturnShadowPushBalance:
         Pre-fix usually passed at small scale by coincidence; kept here
         to ensure the fix didn't break the common case."""
         src = """\
-effect IO { op print(String -> Unit); }
-
 private fn pick(@Bool -> @String)
   requires(true) ensures(true) effects(pure)
 {
@@ -1080,8 +1078,6 @@ public fn main(@Unit -> @Unit)
         of String content.  Post-fix, eager and non-eager outputs match.
         """
         src = """\
-effect IO { op print(String -> Unit); }
-
 private fn pick(@Bool -> @String)
   requires(true) ensures(true) effects(pure)
 {
@@ -1110,8 +1106,6 @@ public fn main(@Unit -> @Unit)
         below.  Pre-fix: same imbalance and corruption as array_map.
         """
         src = """\
-effect IO { op print(String -> Unit); }
-
 private fn pick(@Bool -> @String)
   requires(true) ensures(true) effects(pure)
 {
@@ -1140,8 +1134,6 @@ public fn main(@Unit -> @Unit)
         the canonical corruption signatures from the issue.
         """
         src = """\
-effect IO { op print(String -> Unit); }
-
 private fn render_cell(@Bool -> @String)
   requires(true) ensures(true) effects(pure)
 {
@@ -1214,8 +1206,6 @@ public fn main(@Unit -> @Unit)
         happens to produce correct output by coincidence at small scale.
         """
         src = """\
-effect IO { op print(String -> Unit); }
-
 private fn pick(@Bool -> @String)
   requires(true) ensures(true) effects(pure)
 {

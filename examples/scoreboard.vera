@@ -6,10 +6,6 @@
 -- direct-index spelling `array_sort_by(map_values(@Board.0), cmp)[0]` — the
 -- sorted values are indexed straight off the sort, no intermediate let
 -- binding.
-effect IO {
-  op print(String -> Unit);
-}
-
 type Board = Map<String, Int>;
 
 -- Build the scoreboard: four players and their scores.

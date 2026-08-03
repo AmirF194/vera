@@ -65,11 +65,9 @@ public fn test_put_get(@Unit -> @Int)
   }
 }
 
--- Exception effect — Exn<E> has one operation: throw(E -> Never)
--- The handler catches thrown values using WASM exception handling
-effect Exn<E> {
-  op throw(E -> Never);
-}
+-- Exception effect — Exn<E> is built-in and has one operation,
+-- throw(E -> Never), so it needs no declaration. The handler catches
+-- thrown values using WASM exception handling.
 
 -- A function that may throw an Int exception
 private fn checked_div(@Int, @Int -> @Int)

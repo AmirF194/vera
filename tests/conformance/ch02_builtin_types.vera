@@ -1,9 +1,5 @@
 -- Conformance: built-in types (Chapter 2)
 -- Tests: Int, Nat, Bool, String, Float64, Byte, Unit
-effect IO {
-  op print(String -> Unit);
-}
-
 public fn test_int(@Unit -> @Int)
   requires(true)
   ensures(@Int.result == 42)

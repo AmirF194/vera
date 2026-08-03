@@ -11,7 +11,6 @@ from vera.codegen import (
 )
 
 from tests.codegen_helpers import (
-    _IO_PRELUDE,
     _compile,
     _compile_ok,
     _compile_with_generator,
@@ -806,7 +805,7 @@ public fn f(-> @Int)
 
     def test_tuple_int_string(self) -> None:
         """Tuple(42, "hello") — mixed Int and String fields."""
-        source = _IO_PRELUDE + """\
+        source = """\
 public fn main(-> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -846,7 +845,7 @@ public fn f(-> @Int)
 
     def test_tuple_let_destruct_string(self) -> None:
         """LetDestruct Tuple with String field."""
-        source = _IO_PRELUDE + """\
+        source = """\
 public fn main(-> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -905,7 +904,7 @@ public fn f(-> @Int)
 
     def test_let_destruct_urlparts(self) -> None:
         """LetDestruct with UrlParts (5-field ADT, knock-on effect)."""
-        source = _IO_PRELUDE + """\
+        source = """\
 private data UrlParts { UrlParts(String, String, String, String, String) }
 
 public fn main(-> @Unit)
@@ -1006,7 +1005,7 @@ public fn f(-> @Int)
         UnitLit never exercises this; the earlier `_is_void_expr` detection
         also has to recognise the QualifiedCall (which `_infer_vera_type`
         reports as None)."""
-        source = _IO_PRELUDE + """\
+        source = """\
 private fn mkt(@Int -> @Tuple<Unit, Int>)
   requires(true) ensures(true) effects(<IO>)
 { Tuple(IO.print("side"), @Int.0) }
@@ -1335,7 +1334,6 @@ class TestAdtStringFields:
 
     def test_wrap_one_string(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 private data Wrap { Wrap(String) }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
@@ -1349,7 +1347,6 @@ public fn main(@Unit -> @Unit)
 
     def test_pair_two_strings(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 private data Pair { Pair(String, String) }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
@@ -1366,7 +1363,6 @@ public fn main(@Unit -> @Unit)
 
     def test_mixed_int_string(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 private data Mixed { Mixed(Int, String) }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
@@ -1383,7 +1379,6 @@ public fn main(@Unit -> @Unit)
 
     def test_multi_constructor_string(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 private data Either { Left(String), Right(String) }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
@@ -1402,7 +1397,6 @@ public fn main(@Unit -> @Unit)
 
     def test_five_string_fields(self) -> None:
         src = """
-effect IO { op print(String -> Unit); }
 private data Parts { Parts(String, String, String, String, String) }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)

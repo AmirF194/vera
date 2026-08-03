@@ -693,6 +693,7 @@ ERROR_CODES: dict[str, str] = {
     "E149": "Integer literal out of range for its target type",
     "E150": "Cannot import private declaration",
     "E151": "Function redefines a built-in",
+    "E152": "Effect redeclares a built-in effect",
     "E160": "Array index must be Int or Nat",
     "E161": "Cannot index non-array type",
     "E170": "Let binding type mismatch",

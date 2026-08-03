@@ -1007,7 +1007,6 @@ public fn main(@Unit -> @String)
         narrowed into `level` traps rather than passing a negative to the host
         import (review of #756; round-14 #757 fold-in)."""
         result = _compile_ok("""
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {

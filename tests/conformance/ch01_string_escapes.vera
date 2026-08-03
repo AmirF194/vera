@@ -1,9 +1,5 @@
 -- Conformance: string escape sequences (Chapter 1)
 -- Tests: \n, \t, \\, \", \r, \0, \u{XXXX}
-effect IO {
-  op print(String -> Unit);
-}
-
 public fn main(@Unit -> @Unit)
   requires(true)
   ensures(true)

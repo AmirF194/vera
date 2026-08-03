@@ -3194,8 +3194,6 @@ public fn test_none_some(@Unit -> @Bool)
     def test_string_neq(self) -> None:
         """String != comparison (line 100)."""
         source = """\
-effect IO { op print(String -> Unit); }
-
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -3211,8 +3209,6 @@ public fn main(@Unit -> @Unit)
     def test_string_neq_equal(self) -> None:
         """String != on equal strings returns false."""
         source = """\
-effect IO { op print(String -> Unit); }
-
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -3253,7 +3249,6 @@ class TestMarkdownCoverage:
     """
 
     _PREAMBLE = """
-effect IO { op print(String -> Unit); }
 """
 
     def test_md_render_emphasis(self) -> None:

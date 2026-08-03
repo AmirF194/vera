@@ -1,8 +1,4 @@
 -- URL percent-encoding and decoding
-effect IO {
-  op print(String -> Unit);
-}
-
 public fn main(@Unit -> @Unit)
   requires(true)
   ensures(true)

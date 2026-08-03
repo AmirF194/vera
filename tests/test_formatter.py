@@ -764,6 +764,22 @@ class TestFormatDeclarations:
             """,
         )
 
+    def test_effect_declaration_single_line_expands(self) -> None:
+        # A one-line `effect X { op ...; }` must expand to the canonical
+        # multi-line form.  Previously covered incidentally by the `effect IO`
+        # preambles of the match-arm fixtures, which #1149 removed (the block
+        # is now E152), so the expansion is pinned directly here.
+        _fmt_check(
+            """
+            effect Counter { op increment(Unit -> Unit); }
+            """,
+            """
+            effect Counter {
+              op increment(Unit -> Unit);
+            }
+            """,
+        )
+
     def test_ability_declaration(self) -> None:
         _fmt_check(
             """
@@ -1134,8 +1150,6 @@ class TestMatchBlockArms:
         """Block arm body with statements emits multi-line with braces."""
         _fmt_check(
             """
-            effect IO { op print(String -> Unit); }
-
             public fn f(@Int -> @Unit)
               requires(true)
               ensures(true)
@@ -1151,10 +1165,6 @@ class TestMatchBlockArms:
             }
             """,
             """
-            effect IO {
-              op print(String -> Unit);
-            }
-
             public fn f(@Int -> @Unit)
               requires(true)
               ensures(true)
@@ -1174,8 +1184,6 @@ class TestMatchBlockArms:
     def test_match_arm_block_body_idempotent(self) -> None:
         """Formatting a match with block arms twice gives identical output."""
         _fmt_roundtrip("""
-            effect IO { op print(String -> Unit); }
-
             public fn f(@Int -> @Unit)
               requires(true)
               ensures(true)
@@ -1197,8 +1205,6 @@ class TestMatchBlockArms:
         from vera.transform import transform
 
         src = _fmt("""
-            effect IO { op print(String -> Unit); }
-
             public fn f(@Int -> @Unit)
               requires(true)
               ensures(true)
@@ -1219,8 +1225,6 @@ class TestMatchBlockArms:
     def test_match_arm_mixed_simple_and_block(self) -> None:
         """Mix of simple and block arms: simple stays inline, block expands."""
         src = _fmt("""
-            effect IO { op print(String -> Unit); }
-
             private data Maybe { Nothing, Just(Int) }
 
             public fn f(@Maybe -> @Unit)
@@ -1245,8 +1249,6 @@ class TestMatchBlockArms:
     def test_match_arm_block_trailing_comma(self) -> None:
         """Non-final block arm gets comma after closing brace."""
         src = _fmt("""
-            effect IO { op print(String -> Unit); }
-
             public fn f(@Int -> @Unit)
               requires(true)
               ensures(true)
@@ -1266,8 +1268,6 @@ class TestMatchBlockArms:
     def test_match_arm_block_no_trailing_comma_final(self) -> None:
         """Final block arm has no comma after closing brace."""
         src = _fmt("""
-            effect IO { op print(String -> Unit); }
-
             public fn f(@Int -> @Unit)
               requires(true)
               ensures(true)
@@ -1335,8 +1335,6 @@ class TestMatchBlockArms:
         rides the closing brace.
         """
         src = _fmt("""
-            effect IO { op print(String -> Unit); }
-
             public fn f(@Int -> @Unit)
               requires(true)
               ensures(true)
@@ -1374,8 +1372,6 @@ class TestInteriorComments:
         """A comment before a let statement stays before it."""
         _fmt_check(
             """
-            effect IO { op print(String -> Unit); }
-
             public fn main(@Unit -> @Unit)
               requires(true) ensures(true) effects(<IO>)
             {
@@ -1385,10 +1381,6 @@ class TestInteriorComments:
             }
             """,
             """
-            effect IO {
-              op print(String -> Unit);
-            }
-
             public fn main(@Unit -> @Unit)
               requires(true)
               ensures(true)
@@ -1405,8 +1397,6 @@ class TestInteriorComments:
         """A comment before the result expression stays before it."""
         _fmt_check(
             """
-            effect IO { op print(String -> Unit); }
-
             public fn main(@Unit -> @Unit)
               requires(true) ensures(true) effects(<IO>)
             {
@@ -1416,10 +1406,6 @@ class TestInteriorComments:
             }
             """,
             """
-            effect IO {
-              op print(String -> Unit);
-            }
-
             public fn main(@Unit -> @Unit)
               requires(true)
               ensures(true)
@@ -1436,8 +1422,6 @@ class TestInteriorComments:
         """Multiple comments inside a body each stay before their statement."""
         _fmt_check(
             """
-            effect IO { op print(String -> Unit); }
-
             public fn main(@Unit -> @Unit)
               requires(true) ensures(true) effects(<IO>)
             {
@@ -1450,10 +1434,6 @@ class TestInteriorComments:
             }
             """,
             """
-            effect IO {
-              op print(String -> Unit);
-            }
-
             public fn main(@Unit -> @Unit)
               requires(true)
               ensures(true)
@@ -1473,8 +1453,6 @@ class TestInteriorComments:
         """Comments inside a match arm block body stay in position."""
         _fmt_check(
             """
-            effect IO { op print(String -> Unit); }
-
             public fn f(@Int -> @Unit)
               requires(true) ensures(true) effects(<IO>)
             {
@@ -1489,10 +1467,6 @@ class TestInteriorComments:
             }
             """,
             """
-            effect IO {
-              op print(String -> Unit);
-            }
-
             public fn f(@Int -> @Unit)
               requires(true)
               ensures(true)
@@ -1513,8 +1487,6 @@ class TestInteriorComments:
     def test_comment_not_moved_to_footer(self) -> None:
         """Interior comments must NOT appear after the closing brace."""
         src = _fmt("""
-            effect IO { op print(String -> Unit); }
-
             public fn main(@Unit -> @Unit)
               requires(true) ensures(true) effects(<IO>)
             {
@@ -1543,8 +1515,6 @@ class TestInteriorComments:
     def test_interior_comment_idempotent(self) -> None:
         """Formatting a program with interior comments is idempotent."""
         _fmt_roundtrip("""
-            effect IO { op print(String -> Unit); }
-
             public fn main(@Unit -> @Unit)
               requires(true) ensures(true) effects(<IO>)
             {
@@ -1561,8 +1531,6 @@ class TestInteriorComments:
         """Comments inside if/else branch blocks stay in position."""
         _fmt_check(
             """
-            effect IO { op print(String -> Unit); }
-
             public fn f(@Bool -> @Unit)
               requires(true) ensures(true) effects(<IO>)
             {
@@ -1576,10 +1544,6 @@ class TestInteriorComments:
             }
             """,
             """
-            effect IO {
-              op print(String -> Unit);
-            }
-
             public fn f(@Bool -> @Unit)
               requires(true)
               ensures(true)
@@ -1979,8 +1943,6 @@ class TestCanonicalFormGaps:
         unwrapped, the statement path did not.
         """
         out = _fmt("""
-            effect IO { op print(String -> Unit); }
-
             public fn f(@Int -> @Unit)
               requires(true)
               ensures(true)
@@ -2964,8 +2926,6 @@ class TestCanonicalFormGaps:
         change and is fixed by the same descent.
         """
         out = _fmt("""
-            effect IO { op print(String -> Unit); }
-
             public fn f(@Int -> @Unit)
               requires(true)
               ensures(true)

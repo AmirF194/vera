@@ -616,10 +616,6 @@ private fn foo(@Color -> @Int)
     def test_match_first_arm_never(self) -> None:
         """First arm is Never, second is concrete → use concrete (line 122-123)."""
         _check_ok("""
-effect Exn<E> {
-  op throw(E -> Never);
-}
-
 private fn foo(@Int -> @Int)
   requires(true) ensures(true) effects(<Exn<String>>)
 {

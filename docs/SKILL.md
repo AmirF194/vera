@@ -1228,6 +1228,8 @@ infinity()                         -- returns Float64 (positive infinity)
 
 `float_is_nan` and `float_is_infinite` test for IEEE 754 special values. `nan()` and `infinity()` construct them — use `0.0 - infinity()` for negative infinity. All four are Tier 3 (runtime-tested, not SMT-verifiable).
 
+**Redeclaring a built-in effect is an error (E152)**: an `effect IO { ... }` block — or `State<T>`, `Exn<E>`, `Http`, `Random`, `Inference`, `DB`, `Diverge`, `Async`, `HttpServer` — is rejected at `vera check`, whether or not its operation signatures match the built-in. The operations come with the effect row: write `effects(<IO>)` on the function and call `IO.print(...)`. Beyond one canonical form, the block cannot be honoured — code generation routes a qualified `IO.op(...)` to the fixed host import by qualifier name and never reads the declaration, so a divergent signature used to compile to invalid WebAssembly that trapped at `run`. Give a genuinely different effect a distinct name (e.g. `Logger`).
+
 **Redefining a built-in is an error (E151)**: a function whose name matches a built-in (e.g. `abs`, `array_length`, `clamp`, `to_string`) is rejected at `vera check`. Built-ins are always in scope as the single canonical definition, so a second one is both redundant (one canonical form) and — for the verifier-modelled built-ins — silently unsound: the verifier would reason with the built-in's model while codegen runs your body. Call the built-in directly (no import needed), or give your function a distinct name (e.g. `magnitude`) for genuinely different behaviour. The one exception is the prelude's Option/Result/Json/Html *combinators* (`option_map`, `option_and_then`, `option_unwrap_or`, `result_map`, `result_unwrap_or`, `json_*`, `html_attr`): these are ordinary Vera functions the prelude injects, so a same-named user definition soundly replaces them.
 
 Example:
@@ -1362,9 +1364,7 @@ The IO effect is built-in — no declaration is needed. It provides eleven opera
 | `IO.time` | `Unit -> Nat` | Current Unix time in milliseconds |
 | `IO.stderr` | `String -> Unit` | Print a string to stderr |
 
-If you declare `effect IO { op print(String -> Unit); }` explicitly, that overrides the built-in and only the declared operations are available. Most examples do this — declaring only `print` — because it follows the principle of least privilege: a program that only declares `op print` cannot accidentally perform file I/O or call `exit`.
-
-**Why IO works differently from State and Async:** IO has 11 operations and programs choose which ones they need. State and Async have fixed, minimal operation sets (State: `get`/`put`; Async: no operations, it is a marker effect), so there is nothing to restrict.
+Do **not** write an `effect IO { ... }` block: redeclaring a built-in effect is a compile error (`E152`), whether or not the signatures match the built-in. The same holds for `State<T>`, `Exn<E>`, `Http`, `Random`, `Inference`, `DB`, `Diverge`, `Async`, and `HttpServer`. Declaring `effects(<IO>)` on the function is all that is needed — the operations follow from the effect row, so there is exactly one way to write the program.
 
 **Output buffering and live writes.** Under `vera run` text mode, every `IO.print` call writes to `sys.stdout` and flushes immediately — animations, progress bars, REPLs, and any output using ANSI escape sequences (cursor home, clear screen) render in real time. The captured transcript is *also* preserved in memory so that if the program traps, every byte printed before the trap reaches `WasmTrapError.stdout` and the JSON envelope's `stdout` field. Under `vera run --json`, live mirroring is suppressed — the transcript lives only in the JSON envelope, because writing live to stdout would corrupt the envelope for downstream consumers parsing it. Programs do not need to call any "flush" operation; per-call flushing is the contract. Pre-v0.0.123 the whole transcript was buffered until program exit; that behaviour was correct for trap preservation and JSON consumers but made interactive output invisible.
 
@@ -1415,13 +1415,9 @@ Two rules go with them. Both take an **effect reference** — a stateful effect'
 
 ### Exception effects
 
-The `Exn<E>` effect models exceptions with error type `E`:
-
-```vera
-effect Exn<E> {
-  op throw(E -> Never);
-}
-```
+The `Exn<E>` effect models exceptions with error type `E`. It is built-in — no
+declaration is needed, and writing one is `E152`. Its single operation is
+`throw : E -> Never`, which never resumes.
 
 Throw exceptions using the qualified call syntax:
 
@@ -2329,10 +2325,6 @@ public fn length(@List<Int> -> @Nat)
 FizzBuzz with a recursive loop and IO effects. `fizzbuzz` is pure; `loop` and `main` have `effects(<IO>)`. Run with `vera run examples/fizzbuzz.vera`.
 
 ```vera
-effect IO {
-  op print(String -> Unit);
-}
-
 public fn fizzbuzz(@Nat -> @String)
   requires(true)
   ensures(true)

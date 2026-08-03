@@ -2040,7 +2040,6 @@ public fn g(-> @Int) requires(true) ensures(true) effects(<Async>) {
         """The natural shape (p12): a map of `async(IO.print(...))` tasks
         behind `type Task = Future<Unit>`."""
         src = """
-effect IO { op print(String -> Unit); }
 type Task = Future<Unit>;
 
 private fn spawn(@String -> @Task)
@@ -2203,10 +2202,6 @@ public fn f(-> @Int) requires(true) ensures(true) effects(pure) {
     def test_string_array_io(self) -> None:
         """Array<String> — print indexed element."""
         src = """
-effect IO {
-  op print(String -> Unit);
-}
-
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {

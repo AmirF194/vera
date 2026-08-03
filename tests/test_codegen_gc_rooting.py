@@ -552,7 +552,6 @@ class TestHostWalkerGCRooting692:
         Pre-#692-fix this trapped with ``Out-of-bounds memory
         access`` at ``0xfffffffd`` from inside ``$alloc``."""
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -572,7 +571,6 @@ public fn main(@Unit -> @Unit)
         the array alone produces ~16 KB of allocations on top of
         the input string."""
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -594,7 +592,6 @@ public fn main(@Unit -> @Unit)
         and a 16-byte JString wrapper, doubling the alloc count
         per element vs the JNumber test above."""
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -616,7 +613,6 @@ public fn main(@Unit -> @Unit)
         ``_write_inline_array`` / ``_write_block_array`` backing
         rooting."""
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -650,7 +646,6 @@ public fn main(@Unit -> @Unit)
         triggers GC during the walk while staying comfortable
         under the limit."""
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -677,7 +672,6 @@ public fn main(@Unit -> @Unit)
         conservative GC scan; a sub-walk's GC could free them.
         Per the pr-review-toolkit pr-test-analyzer review on #693."""
         src = """
-effect IO { op print(String -> Unit); }
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -747,8 +741,6 @@ class TestMapHostStoreGCReachability695:
         invisible to conservative scan), different container.
         """
         src = """
-effect IO { op print(String -> Unit); }
-
 private fn build_set(-> @Set<Json>)
   requires(true) ensures(true) effects(pure)
 {
@@ -801,8 +793,6 @@ public fn main(-> @Unit)
         bucket array is the sole truth.
         """
         src = """
-effect IO { op print(String -> Unit); }
-
 public fn main(-> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -850,8 +840,6 @@ public fn main(-> @Unit)
         wrapper path was tested for Set but not yet for Map.
         """
         src = """
-effect IO { op print(String -> Unit); }
-
 private fn build_map(-> @Map<String, Json>)
   requires(true) ensures(true) effects(pure)
 {
@@ -906,8 +894,6 @@ public fn main(-> @Unit)
         print ``0`` from a freed-block-misread.
         """
         src = """
-effect IO { op print(String -> Unit); }
-
 public fn main(-> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -949,8 +935,6 @@ public fn main(-> @Unit)
         and the assertion would observe ``0``.
         """
         src = """
-effect IO { op print(String -> Unit); }
-
 public fn main(-> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {

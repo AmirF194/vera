@@ -651,10 +651,6 @@ class TestObligationKinds:
         the nested call's requires(...) was never checked.
         """
         source = (
-            "effect IO {\n"
-            "  op print(String -> Unit);\n"
-            "}\n"
-            "\n"
             "private fn need_pos(@Nat -> @String)\n"
             "  requires(@Nat.0 >= 1)\n"
             "  ensures(true)\n"
@@ -687,9 +683,13 @@ class TestObligationKinds:
         the loop is degraded to `self.translate_expr(expr.args[0], env)`, so it
         cannot pin the iteration.  Two violating calls in one argument list must
         raise two independent `call_pre` obligations (#776).
+
+        The two-argument op is a *user* effect: a built-in one cannot be
+        redeclared (E152, #1149) and no built-in `IO` op takes two `String`s
+        and returns `Unit`.
         """
         source = (
-            "effect IO {\n"
+            "effect Audit {\n"
             "  op log(String, String -> Unit);\n"
             "}\n"
             "\n"
@@ -704,9 +704,9 @@ class TestObligationKinds:
             "public fn caller(@Nat, @Nat -> @Unit)\n"
             "  requires(true)\n"
             "  ensures(true)\n"
-            "  effects(<IO>)\n"
+            "  effects(<Audit>)\n"
             "{\n"
-            "  IO.log(need_pos(@Nat.1), need_pos(@Nat.0));\n"
+            "  Audit.log(need_pos(@Nat.1), need_pos(@Nat.0));\n"
             "  ()\n"
             "}\n"
         )

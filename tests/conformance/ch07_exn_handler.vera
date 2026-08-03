@@ -1,9 +1,5 @@
 -- Conformance: Exn<E> effect handler (Chapter 7)
 -- Tests: handle[Exn<E>], throw, exception catching
-effect Exn<E> {
-  op throw(E -> Never);
-}
-
 private fn checked_div(@Int, @Int -> @Int)
   requires(true)
   ensures(true)

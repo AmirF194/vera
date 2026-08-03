@@ -15,7 +15,10 @@ the runtime (sqlite3 raises, surfacing as ``Result.Err``).
 The gate keys on ``env.is_db_sql_op`` (``parent_effect == "DB"`` **and** the op
 name — the same axis codegen routes to the host database on), so it gates the
 built-in ``DB`` ops AND a user ``effect DB { op query(...) }`` shadow (which
-still routes to the host), but never an unrelated effect's own ``query`` op.
+would still route to the host), but never an unrelated effect's own ``query``
+op.  Since #1149 the shadow is separately rejected at its declaration (E152);
+the op-name keying stays as defence in depth, so the checker still gates
+exactly the set codegen emits without relying on that rejection.
 """
 from __future__ import annotations
 
@@ -35,6 +38,15 @@ def _check_code(source: str, code: str) -> None:
     errs = _check_err(source, "")  # collect all errors (empty substring)
     assert any(e.error_code == code for e in errs), (
         f"Expected an error with code {code}, got: "
+        f"{[(e.error_code, e.description) for e in errs]}"
+    )
+
+
+def _check_codes(source: str, *codes: str) -> None:
+    """Assert the source's error codes are exactly ``codes``, in order."""
+    errs = _check_err(source, "")  # collect all errors (empty substring)
+    assert [e.error_code for e in errs] == list(codes), (
+        f"Expected error codes {list(codes)}, got: "
         f"{[(e.error_code, e.description) for e in errs]}"
     )
 
@@ -563,23 +575,27 @@ public fn run(@String -> @String)
 
 
 class TestDbEffectShadowGated309:
-    """The gate MUST fire on a user-declared ``effect DB`` shadow, not only the
-    ambient built-in — because codegen routes *any* ``DB.query`` / ``DB.execute``
-    to the host database by qualifier **name** (``wasm/calls.py``), regardless of
-    whether the ``DB`` effect is the built-in or a user redefinition.
+    """Two independent layers reject a user-declared ``effect DB`` shadow.
 
-    The original #309 gate keyed on built-in ``OpInfo`` **identity**, which gated
-    a strict *subset* of what codegen sends to the database: a user
-    ``effect DB { op query(...) }`` type-checked clean, compiled to
+    **Layer 1 (#1149, E152).** The block itself is rejected: a built-in effect
+    may not be redeclared, so the shadow never enters the program at all.
+    Every source in this class therefore reports E152 first.
+
+    **Layer 2 (#309, E207) — defence in depth.** The literal-provenance gate
+    keys on the same axis codegen routes on (``env.is_db_sql_op``:
+    ``parent_effect == "DB"`` **and** a host-routed SQL op name), never on
+    built-in ``OpInfo`` **identity**.  Identity-keying gated a strict *subset*
+    of what codegen sends to the database: because codegen routes *any*
+    ``DB.query`` / ``DB.execute`` to the host by qualifier **name**
+    (``wasm/calls.py``), a shadow's op type-checked clean, compiled to
     ``call $vera.db_query``, and executed an attacker-controlled string — a
-    silent SQL-injection bypass of the flagship guarantee.  Declaring a host
-    effect is the *idiomatic* way to use it (every example declares ``effect IO
-    { ... }``), so this shadow is the common path, not an exotic one.
+    silent SQL-injection bypass of the flagship guarantee.
 
-    The fix keys the gate on the same axis codegen routes on — ``parent_effect
-    == "DB"`` and the op name is a host-routed SQL op — so the checker gates
-    *exactly* the set codegen emits (the CLAUDE.md cross-component invariant;
-    DESIGN.md principle 2, no implicit behaviour)."""
+    Layer 2 is what these tests pin: E207 still fires *alongside* E152
+    wherever the SQL argument is runtime-derived, so the gate does not depend
+    on layer 1 to hold (the CLAUDE.md cross-component invariant — the checker
+    gates exactly the set codegen emits; DESIGN.md principle 2, no implicit
+    behaviour)."""
 
     _SHADOW = (
         "effect DB {\n"
@@ -591,37 +607,41 @@ class TestDbEffectShadowGated309:
 
     def test_user_effect_db_shadow_query_still_gated(self) -> None:
         # The exact injection vector: a user redeclares `effect DB` and passes
-        # the runtime @String param straight to DB.query.  Must be E207 — this
-        # call compiles to `call $vera.db_query` and reaches conn.execute.
-        _check_code(
+        # the runtime @String param straight to DB.query.  E152 rejects the
+        # block; E207 fires independently because the call would compile to
+        # `call $vera.db_query` and reach conn.execute.
+        _check_codes(
             self._SHADOW
             + "public fn run(@String -> "
             "@Result<Array<Array<Option<String>>>, String>)\n"
             "  requires(true) ensures(true) effects(<DB>)\n"
             "{ DB.query(@String.0, []) }\n",
-            "E207",
+            "E152", "E207",
         )
 
     def test_user_effect_db_shadow_execute_still_gated(self) -> None:
         # The write path (execute) routes to the host identically, so a runtime
         # SQL string is arbitrary DDL/DML — must also be E207.
-        _check_code(
+        _check_codes(
             self._SHADOW
             + "public fn run(@String -> @Result<Int, String>)\n"
             "  requires(true) ensures(true) effects(<DB>)\n"
             "{ DB.execute(@String.0, []) }\n",
-            "E207",
+            "E152", "E207",
         )
 
-    def test_user_effect_db_shadow_literal_still_accepted(self) -> None:
-        # The gate rejects runtime-derived SQL, not the `effect DB` declaration
-        # itself: a literal query through the shadow is still accepted.
-        _check_ok(
+    def test_user_effect_db_shadow_literal_rejected_by_block_gate(self) -> None:
+        # A LITERAL query through the shadow: the provenance gate has nothing
+        # to say (a literal is literal-provenance), so the block gate is the
+        # only diagnostic — E152 alone, no E207.  This is the case that isolates
+        # layer 1 from layer 2: before #1149 this program checked clean.
+        _check_codes(
             self._SHADOW
             + "public fn run(-> "
             "@Result<Array<Array<Option<String>>>, String>)\n"
             "  requires(true) ensures(true) effects(<DB>)\n"
-            '{ DB.query("SELECT * FROM users", []) }\n'
+            '{ DB.query("SELECT * FROM users", []) }\n',
+            "E152",
         )
 
     def test_unresolved_db_query_spelling_still_gated(self) -> None:
@@ -630,23 +650,23 @@ class TestDbEffectShadowGated309:
         # — but codegen routes the `DB.query` SPELLING to `$vera.db_query`
         # regardless, so a runtime SQL string still reaches the host.  The gate
         # must fire on the spelling: E207.
-        _check_code(
+        _check_codes(
             "effect DB {\n  op ping(Unit -> Unit);\n}\n"
             "public fn run(@String -> "
             "@Result<Array<Array<Option<String>>>, String>)\n"
             "  requires(true) ensures(true) effects(<DB>)\n"
             "{ DB.query(@String.0, []) }\n",
-            "E207",
+            "E152", "E207",
         )
 
     def test_unresolved_db_execute_spelling_still_gated(self) -> None:
         # Same for the write path (execute) — arbitrary DDL/DML otherwise.
-        _check_code(
+        _check_codes(
             "effect DB {\n  op ping(Unit -> Unit);\n}\n"
             "public fn run(@String -> @Result<Int, String>)\n"
             "  requires(true) ensures(true) effects(<DB>)\n"
             "{ DB.execute(@String.0, []) }\n",
-            "E207",
+            "E152", "E207",
         )
 
     def test_generic_effect_db_unbound_arity_still_gated(self) -> None:
@@ -656,27 +676,31 @@ class TestDbEffectShadowGated309:
         # regardless, so the gate must too: it runs whenever the call is an
         # ``is_db_sql_op`` (parent_effect == "DB" + op name), independent of the
         # arg's static type — so a runtime @String param is E207.
-        _check_code(
+        _check_codes(
             "effect DB<T> {\n  op query(T, Array<Option<String>> -> "
             "Result<Array<Array<Option<String>>>, String>);\n}\n"
             "public fn run(@String -> "
             "@Result<Array<Array<Option<String>>>, String>)\n"
             "  requires(true) ensures(true) effects(<DB>)\n"
             "{ DB.query(@String.0, []) }\n",
-            "E207",
+            "E152", "E207",
         )
 
-    def test_typevar_laundered_sql_arg_still_gated(self) -> None:
+    def test_typevar_laundered_sql_arg_rejected(self) -> None:
         # #1147 adversarial workflow (SEVERE): the runtime SQL string is
         # laundered through a generic function parameter so its STATIC type at
         # the DB.query call site is a raw TypeVar (@T), not String.  The old
         # ``is_subtype(arg, String)`` guard was False for a TypeVar arg, so the
         # gate skipped — yet monomorphization binds T = String and codegen routes
         # to ``$vera.db_query``, executing attacker SQL (` OR '1'='1` tautologies
-        # ran; runtime `DROP TABLE` executed).  The `@T.0` slot argument is not
-        # literal-provenance, so the gate — now keyed on the codegen routing axis
-        # alone — must reject it (E207).
-        _check_code(
+        # ran; runtime `DROP TABLE` executed).
+        #
+        # The vector needs a `DB.query` whose first parameter is a TypeVar,
+        # which only a shadow can declare — so #1149 closes it at the source
+        # (E152).  With the shadow gone the call resolves against the built-in's
+        # `String` parameter and the `@T.0` argument is a plain type error
+        # (E204): the laundering never reaches the provenance gate at all.
+        _check_codes(
             "effect DB<T> {\n"
             "  op query(T, Array<Option<String>> -> "
             "Result<Array<Array<Option<String>>>, String>);\n"
@@ -691,19 +715,19 @@ class TestDbEffectShadowGated309:
             "@Result<Array<Array<Option<String>>>, String>)\n"
             "  requires(true) ensures(true) effects(<DB>)\n"
             "{ runq(@String.0) }\n",
-            "E207",
+            "E152", "E204",
         )
 
     def test_user_effect_db_shadow_nonstring_int_param_rejected(self) -> None:
         # #1147 adversarial workflow: a user `effect DB` shadow declares the SQL
         # op's first param as `Int` (not String).  `DB.query(42, ...)` then
-        # type-checks against the user's Int param (no E204) — but codegen still
-        # routes it to the host by qualifier name, marshalling the i64 where the
+        # type-checked against the user's Int param (no E204) — but codegen still
+        # routed it to the host by qualifier name, marshalling the i64 where the
         # host expects an (i32 ptr, i32 len), yielding INVALID WASM from a
-        # check-clean program.  The gate must run regardless of the declared
-        # param type (a non-String param does not fire the E204 that would make
-        # E207 a cascade), so the non-literal `42` is rejected (E207).
-        _check_code(
+        # check-clean program.  Only the shadow can widen the parameter that
+        # way, so #1149 rejects the block (E152) and the built-in's `String`
+        # parameter then makes the `42` a plain type error (E204).
+        _check_codes(
             "effect DB {\n"
             "  op query(Int, Array<Option<String>> -> "
             "Result<Array<Array<Option<String>>>, String>);\n"
@@ -717,16 +741,13 @@ class TestDbEffectShadowGated309:
             "    Ok(@Array<Array<Option<String>>>) -> 0\n"
             "  }\n"
             "}\n",
-            "E207",
+            "E152", "E204",
         )
 
     def test_user_effect_db_shadow_nonstring_array_param_rejected(self) -> None:
         # Sibling of the Int case: a user `effect DB` shadow whose SQL op takes
-        # an `Array<Option<String>>` first param.  A runtime array slot passes
-        # check against the user's declared param but reaches the SQL host
-        # ungated (its bytes marshalled as the SQL (ptr,len)).  The slot is not
-        # literal-provenance, so the gate must reject it (E207).
-        _check_code(
+        # an `Array<Option<String>>` first param.  Same two-layer outcome.
+        _check_codes(
             "effect DB {\n"
             "  op query(Array<Option<String>>, Array<Option<String>> -> "
             "Result<Array<Array<Option<String>>>, String>);\n"
@@ -742,5 +763,5 @@ class TestDbEffectShadowGated309:
             "    Ok(@Array<Array<Option<String>>>) -> 0\n"
             "  }\n"
             "}\n",
-            "E207",
+            "E152", "E204",
         )

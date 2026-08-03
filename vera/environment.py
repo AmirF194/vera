@@ -180,9 +180,11 @@ class Binding:
 # literal-provenance gate must check.  The gate keys on ``parent_effect == "DB"``
 # and membership here — the SAME axis codegen routes on — NOT on built-in OpInfo
 # identity, which would gate only the ambient built-in and miss a user
-# ``effect DB { op query(...) }`` shadow (the idiomatic way to declare a host
-# effect, cf. every example's ``effect IO``) that still reaches the host.  A
-# differential test pins this set against the built-in DB effect's declared ops.
+# ``effect DB { op query(...) }`` shadow that still reaches the host.  Such a
+# shadow is now separately rejected at its declaration (E152, #1149); the
+# name keying stays as defence in depth, so this predicate gates the codegen
+# set on its own.  A differential test pins this set against the built-in DB
+# effect's declared ops.
 DB_SQL_OP_NAMES: frozenset[str] = frozenset({"query", "execute"})
 
 
@@ -462,8 +464,23 @@ class TypeEnv:
             },
         )
 
+        # Exn<E> effect — `throw` abandons the computation (return type
+        # `Never`, so it never resumes).  Lowered by `handle[Exn<E>]` in
+        # vera/wasm/calls_handlers.py rather than by a host import, but
+        # registered here like every other built-in so it is in scope with no
+        # declaration: a program writes `effects(<Exn<String>>)` and calls
+        # `throw`.  Before #1149 it was codegen-only, so `handle[Exn<E>]`
+        # forced every user to write the `effect Exn<E> { op throw(E ->
+        # Never); }` block that E152 now rejects.
+        self.effects["Exn"] = EffectInfo(
+            name="Exn",
+            type_params=("E",),
+            operations={
+                "throw": OpInfo("throw", (TypeVar("E"),), NEVER, "Exn"),
+            },
+        )
+
         # IO effect — built-in operations for console, file, and process I/O.
-        # User-declared `effect IO { ... }` overrides this (backward compat).
         self.effects["IO"] = EffectInfo(
             name="IO",
             type_params=None,
@@ -607,11 +624,11 @@ class TypeEnv:
         # Host-backed and un-mockable like Http / Inference — `handle[DB]` is
         # #372's class (host effects aren't user-handleable) and is a stated
         # limitation.  `DB` is a reserved host qualifier: a user
-        # `effect DB { ... }` declaration — the idiomatic way to use a host
-        # effect (cf. every example's `effect IO`) — still routes to the host,
-        # so the #309 gate keys on `parent_effect == "DB"` + op name
-        # (`is_db_sql_op`), the SAME axis codegen routes on, NOT the built-in op
-        # identity, which would miss the shadow.
+        # `effect DB { ... }` declaration would still route to the host, so the
+        # #309 gate keys on `parent_effect == "DB"` + op name (`is_db_sql_op`),
+        # the SAME axis codegen routes on, NOT the built-in op identity, which
+        # would miss the shadow.  The shadow is also rejected outright at its
+        # declaration (E152, #1149); the gate stays as defence in depth.
         _option_string = AdtType("Option", (STRING,))
         _param_array = AdtType("Array", (_option_string,))
         _row_grid = AdtType("Array", (AdtType("Array", (_option_string,)),))
@@ -2189,11 +2206,12 @@ class TypeEnv:
 
         It deliberately does NOT key on built-in ``OpInfo`` identity: ``DB`` is a
         reserved host qualifier, so a user ``effect DB { op query(...) }``
-        declaration — the idiomatic way to use a host effect (cf. every
-        example's ``effect IO``) — constructs a *distinct* ``OpInfo`` that still
-        routes to the host.  An identity key gated only the ambient built-in and
-        let the shadow's runtime SQL reach ``conn.execute`` ungated — a silent
-        injection bypass (#309 review).  A non-``DB`` effect with an op merely
+        declaration constructs a *distinct* ``OpInfo`` that still routes to the
+        host.  An identity key gated only the ambient built-in and let the
+        shadow's runtime SQL reach ``conn.execute`` ungated — a silent
+        injection bypass (#309 review).  That shadow is separately rejected at
+        its declaration since #1149 (E152); the name keying stays as defence in
+        depth so this predicate does not depend on it.  A non-``DB`` effect with an op merely
         *named* ``query`` has a different ``parent_effect`` and is routed to the
         user's handler, not the host, so it is correctly not gated.
         """

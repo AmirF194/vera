@@ -1,8 +1,4 @@
 -- String operations and type-to-string conversions
-effect IO {
-  op print(String -> Unit);
-}
-
 public fn main(@Unit -> @Unit)
   requires(true)
   ensures(true)

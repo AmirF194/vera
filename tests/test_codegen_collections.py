@@ -14,7 +14,6 @@ if TYPE_CHECKING:
     from vera.wasm.context import WasmContext
 
 from tests.codegen_helpers import (
-    _IO_PRELUDE,
     _compile_ok,
     _run,
     _run_io,
@@ -772,7 +771,7 @@ public fn main(@Unit -> @Int)
         chars) would still fail.  `IO.print` + `_run_io` captures
         the rendered output for direct string comparison.
         """
-        source = _IO_PRELUDE + """\
+        source = """\
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
@@ -804,7 +803,7 @@ public fn main(@Unit -> @Unit)
         right length (e.g. `{"name": "BB"}` — also 14 chars)
         would still fail.
         """
-        source = _IO_PRELUDE + """\
+        source = """\
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
