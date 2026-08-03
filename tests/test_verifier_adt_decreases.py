@@ -731,3 +731,45 @@ public fn outer(@Nat -> @Nat)
         # 8 contract obligations + 2 @Nat.0 - 1 underflow obligations
         # (#520) — both discharged from `if @Nat.0 == 0` path condition.
         assert result.summary.tier1_verified == 10
+
+
+class TestWalkerBlindSpots1179:
+    """PR #1179 adversarial review F1: `_walk_for_calls` skipped
+    HandleExpr clauses and AnonFn bodies, so a measure-violating
+    recursive call hidden there did not block a Tier-1 proof — a
+    `verify`-green program then trapped at `run` on a terminating
+    execution.  These pin the obligations as NOT verified."""
+
+    @staticmethod
+    def _decreases_statuses(source: str):
+        import os
+        import tempfile
+        from vera.parser import parse_file
+        from vera.transform import transform
+        from vera.verifier import verify
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".vera", delete=False, encoding="utf-8"
+        ) as f:
+            f.write(source)
+            path = f.name
+        try:
+            prog = transform(parse_file(path))
+        finally:
+            os.unlink(path)
+        vr = verify(prog, source=source, file=path)
+        return [ob.status for ob in vr.obligations if ob.kind == "decreases"]
+
+    def test_handler_clause_recursive_call_not_verified(self) -> None:
+        statuses = self._decreases_statuses('-- P11: a handler clause re-enters the guarded function with a LARGER\n-- argument while an activation is live (terminating via the flag).\n-- Dynamic re-entry semantics say trap; the program terminates.\nprivate fn f(@Int, @Int -> @Int)\n  requires(@Int.1 >= 0)\n  ensures(true)\n  decreases(@Int.1)\n  effects(pure)\n{\n  if @Int.1 == 0 then {\n    0\n  } else {\n    if @Int.0 == 1 && @Int.1 == 2 then {\n      handle[State<Int>](@Int = 0) {\n        get(@Unit) -> { resume(f(9, 0) + @Int.0) },\n        put(@Int) -> { resume(()) }\n      } in {\n        get(())\n      }\n    } else {\n      f(@Int.1 - 1, @Int.0) + 1\n    }\n  }\n}\n\npublic fn main(@Unit -> @Int)\n  requires(true)\n  ensures(true)\n  effects(pure)\n{\n  f(3, 1)\n}\n')
+        assert statuses and all(s != "verified" for s in statuses), (
+            f"a recursive call inside a handle clause must block the "
+            f"Tier-1 proof, got {statuses}"
+        )
+
+    def test_closure_body_recursive_call_not_verified(self) -> None:
+        statuses = self._decreases_statuses('-- P16: recursive call hidden inside a closure body -- invisible to\n-- _walk_for_calls, so the decreases obligation verifies Tier 1, but the\n-- runtime guard sees the dynamic re-entry and traps.  Terminating.\nprivate fn f(@Int -> @Int)\n  requires(@Int.0 >= 0)\n  ensures(true)\n  decreases(@Int.0)\n  effects(pure)\n{\n  if @Int.0 == 0 then {\n    0\n  } else {\n    if @Int.0 >= 3 then {\n      7\n    } else {\n      if @Int.0 == 2 then {\n        f(@Int.0 - 1) + 10\n      } else {\n        nat_to_int(array_length(array_map([1], fn(@Int -> @Int) effects(pure) { f(@Int.0 + 3) }))) + 100\n      }\n    }\n  }\n}\n\npublic fn main(@Unit -> @Int)\n  requires(true)\n  ensures(true)\n  effects(pure)\n{\n  f(2)\n}\n')
+        assert statuses and all(s != "verified" for s in statuses), (
+            f"a recursive call inside a closure body must block the "
+            f"Tier-1 proof, got {statuses}"
+        )

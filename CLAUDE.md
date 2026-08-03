@@ -58,7 +58,7 @@ VERA_JS_COVERAGE=1 pytest tests/test_browser.py -v  # Browser tests with JS cove
 VERA_EAGER_GC=1 vera run file.vera  # Force GC on every alloc (see ENVIRONMENT.md, debug knob for #593-class GC-rooting bugs)
 mypy vera/                        # Type-check the compiler itself
 
-python scripts/check_conformance.py    # Verify all 171 conformance programs (positives pass their level; negatives fail with their expected_error E-code)
+python scripts/check_conformance.py    # Verify all 173 conformance programs (positives pass their level; negatives fail with their expected_error E-code)
 python scripts/check_examples.py      # Verify all 42 examples parse + check + verify
 python scripts/check_corpus_canonical.py # Verify all 217 corpus programs are in canonical form (vera fmt)
 python scripts/check_examples_readme.py # Verify vera run commands in examples/README.md
@@ -90,7 +90,7 @@ See [`TOOLCHAIN.md`](TOOLCHAIN.md) for the CLI cookbook — driving the toolchai
 - `vera/` — Reference compiler: grammar, parser, AST, transformer, type checker, verifier, codegen, CLI
 - `examples/` — 42 example Vera programs (all must pass `vera check` and `vera verify`)
 - `tests/` — Test suite (unit tests + conformance suite)
-- `tests/conformance/` — 171 conformance programs validating every language feature against the spec
+- `tests/conformance/` — 173 conformance programs validating every language feature against the spec
 - `scripts/` — CI and validation scripts
 
 ## Writing Vera code

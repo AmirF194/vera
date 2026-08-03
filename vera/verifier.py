@@ -2837,7 +2837,70 @@ class ContractVerifier:
                                      results, smt, arm_env)
             return
 
-        # Other expression types (literals, slot refs, etc.) — no calls
+        # PR #1179 review F1: these value-carrying nodes were silently
+        # skipped, so a recursive call inside them was invisible to
+        # `_verify_decreases` — a measure-violating call in a handler
+        # clause or a closure body rode a Tier-1 proof and the runtime
+        # guard then trapped a `verify`-green program.  Path conditions
+        # are NOT extended here (conservative: fewer assumptions can
+        # only make the proof harder, never wrongly easier).
+        if isinstance(expr, ast.HandleExpr):
+            if expr.state is not None:
+                self._walk_for_calls(group_names, expr.state.init_expr,
+                                     z3_path_conds, results, smt, slot_env)
+            self._walk_for_calls(group_names, expr.body, z3_path_conds,
+                                 results, smt, slot_env)
+            for clause in expr.clauses:
+                self._walk_for_calls(group_names, clause.body,
+                                     z3_path_conds, results, smt, slot_env)
+                if clause.state_update is not None:
+                    self._walk_for_calls(group_names, clause.state_update[1],
+                                         z3_path_conds, results, smt,
+                                         slot_env)
+            return
+
+        if isinstance(expr, ast.AnonFn):
+            # The closure's parameters shadow nothing the measure can
+            # reference soundly from here; walk the body with the
+            # enclosing env — a hit only ADDS a call site to prove.
+            self._walk_for_calls(group_names, expr.body, z3_path_conds,
+                                 results, smt, slot_env)
+            return
+
+        if isinstance(expr, (ast.ConstructorCall, ast.QualifiedCall,
+                             ast.ModuleCall)):
+            for arg in expr.args:
+                self._walk_for_calls(group_names, arg, z3_path_conds,
+                                     results, smt, slot_env)
+            return
+
+        if isinstance(expr, ast.IndexExpr):
+            self._walk_for_calls(group_names, expr.collection, z3_path_conds,
+                                 results, smt, slot_env)
+            self._walk_for_calls(group_names, expr.index, z3_path_conds,
+                                 results, smt, slot_env)
+            return
+
+        if isinstance(expr, ast.ArrayLit):
+            for el in expr.elements:
+                self._walk_for_calls(group_names, el, z3_path_conds,
+                                     results, smt, slot_env)
+            return
+
+        if isinstance(expr, ast.InterpolatedString):
+            for part in expr.parts:
+                if isinstance(part, ast.Expr):
+                    self._walk_for_calls(group_names, part, z3_path_conds,
+                                         results, smt, slot_env)
+            return
+
+        if isinstance(expr, (ast.AssertExpr, ast.AssumeExpr)):
+            self._walk_for_calls(group_names, expr.expr, z3_path_conds,
+                                 results, smt, slot_env)
+            return
+
+        # Other expression types (literals, slot refs, quantifiers) — no
+        # calls a body can reach.
         return
 
     # -----------------------------------------------------------------

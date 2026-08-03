@@ -1031,9 +1031,16 @@ class FunctionCompilationMixin:
                     patched_dec.append(
                         instr.replace("return_call ", "call ", 1))
                 else:
-                    patched_dec.extend(
-                        ws + part for part in dec_restore_instrs)
-                    patched_dec.append(instr)
+                    # PR #1179 review F2: an UNGUARDED tail target can
+                    # trampoline straight back into this function; the
+                    # old prepend-restores-then-transfer sequence zeroed
+                    # the chain first, so every re-entry re-baselined
+                    # and a constant measure looped forever.  Demote
+                    # like the mutual-tail case: plain-call semantics
+                    # keep the chain live across the callee, and the
+                    # single exit's restores run when the value returns.
+                    patched_dec.append(
+                        instr.replace("return_call ", "call ", 1))
             body_instrs = patched_dec
 
         if (

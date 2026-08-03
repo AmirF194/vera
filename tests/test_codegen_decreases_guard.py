@@ -245,6 +245,15 @@ public fn main(@Unit -> @Int)
 }
 """))
 
+    def test_unguarded_tail_trampoline_traps(self, tmp_path: Path) -> None:
+        """PR #1179 adversarial review F2: a guarded function tail-calling
+        an UNGUARDED trampoline that tail-calls back looped forever with
+        zero checks — the restore-then-return_call sequence zeroed the
+        chain before every re-entry.  The guarded→unguarded tail site is
+        now demoted like the mutual-tail case, so the constant measure
+        traps."""
+        _assert_termination_trap(_run_cli(tmp_path, '-- P1b: NON-terminating recursion routed through an unguarded tail\n-- trampoline.  spin tail-calls bounce (restores chain state, keeps\n-- return_call); bounce tail-calls spin; spin re-enters with active=0.\n-- Constant measure, infinite loop: does the guard ever fire?\nprivate fn spin(@Int -> @Int)\n  requires(@Int.0 >= 0)\n  ensures(true)\n  decreases(@Int.0)\n  effects(pure)\n{\n  if @Int.0 == 0 then {\n    0\n  } else {\n    bounce(@Int.0)\n  }\n}\n\nprivate fn bounce(@Int -> @Int)\n  requires(@Int.0 >= 0)\n  ensures(true)\n  effects(pure)\n{\n  spin(@Int.0)\n}\n\npublic fn main(@Unit -> @Int)\n  requires(true)\n  ensures(true)\n  effects(pure)\n{\n  spin(5)\n}\n'))
+
     def test_mutual_recursion_where_traps(self, tmp_path: Path) -> None:
         """Spec §5.6.2 mutual recursion via a `where` block: each member
         carries its own clause; a chain that never shrinks traps on a
