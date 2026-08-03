@@ -204,6 +204,8 @@ Generic (`forall<T>`) functions are compiled via monomorphization: for each conc
 
 Functions that fail any of these criteria are skipped with a diagnostic warning. This is analogous to the verifier's Tier 3 classification — the compiler degrades gracefully rather than failing.
 
+A skip propagates to callers: every function that calls a skipped function — directly, transitively, or from a lifted closure body — is itself dropped from the emitted module with an `[E620]` warning naming the root skipped function and its skip location, so the module always assembles (a call to an absent function can never reach WebAssembly validation) and exported functions outside the dropped call subgraph are unaffected.
+
 ### 11.4.2 Two-Pass Compilation
 
 The code generator uses a two-pass approach:
