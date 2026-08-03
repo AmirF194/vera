@@ -461,6 +461,10 @@ private fn increment_and_return(@Unit -> @Int)
 
 These are contract-only syntax forms that do not perform effects.
 
+The argument to `old` and `new` MUST be an *effect reference* — the name of a stateful effect together with its type arguments — and not an arbitrary expression. There is no `old(<expression>)` form. Vera has no mutable variables, so a parameter slot or a let binding holds one value for the whole call and has no separate before-value to name; effect state is the only thing a call can change.
+
+`old` and `new` MUST appear inside an `ensures` clause. A `requires` or `decreases` clause is evaluated before the body runs, so every expression in it already observes the pre-state, and the after-state that `new` names does not yet exist.
+
 ## 7.10 Effect Composition
 
 When a function calls other functions, the effects compose via row union:

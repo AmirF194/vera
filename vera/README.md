@@ -146,7 +146,7 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `  server.py` | 150 | | `vera serve` HTTP driver for `handle(Request -> Response)` (#305) | |
 | `tester.py` | 992 | Test | Z3-guided input generation, WASM execution, tier classification | `test()` |
 | `formatter.py` | 1,951 | Format | Canonical code formatter | `format_source()` |
-| `errors.py` | 653 | All | Diagnostic class, error hierarchy, error code registry | `Diagnostic`, `VeraError`, `ERROR_CODES` |
+| `errors.py` | 803 | All | Diagnostic class, error hierarchy, error code registry | `Diagnostic`, `VeraError`, `ERROR_CODES` |
 | `skip.py` | 217 | All | Codegen-internal control-flow exceptions behind structured skip diagnostics (#626) | `CodegenSkip`, `CodegenInvariantError` |
 | `introspect.py` | 129 | All | Payloads for `vera builtins` / `effects` / `errors --json` | `builtins_payload()`, `effects_payload()`, `errors_payload()` |
 | `_since.py` | 364 | All | Best-effort `since` version attribution for built-ins, effects, abilities | |
@@ -634,7 +634,7 @@ Memory is managed automatically. The allocator and garbage collector are impleme
 
 ## Error System
 
-**File:** `errors.py` (459 lines)
+**File:** `errors.py` (803 lines)
 
 ```
 VeraError (exception hierarchy)
@@ -722,13 +722,14 @@ Every diagnostic has a unique code grouped by compiler phase:
 | E009 | Transform: string escapes | `transform.py` |
 | E010 | Transform: unhandled rule | `transform.py` |
 | E020, E021, E023 | Parse: malformed comments (lexical) | `lexical.py` scan + `errors.py` factory |
+| E030, E031 | Parse: `old()`/`new()` applied to an expression | `errors.py` factory |
 | E1xx | Type check: core + expressions | `checker/core.py`, `checker/expressions.py` |
 | E2xx | Type check: calls | `checker/calls.py` |
 | E3xx | Type check: control flow | `checker/control.py` |
 | E5xx | Verification | `verifier.py` |
 | E6xx | Codegen | `codegen/` |
 
-The `ERROR_CODES` dict in `errors.py` maps every code to a short description (123 entries). Codes are stable across versions — they can be used for programmatic filtering, suppression, and documentation lookups. Formatted output shows the code in brackets: `[E130] Error at line 5, column 3:`.
+The `ERROR_CODES` dict in `errors.py` maps every code to a short description (147 entries). Codes are stable across versions — they can be used for programmatic filtering, suppression, and documentation lookups. Formatted output shows the code in brackets: `[E130] Error at line 5, column 3:`.
 
 ## Test Suite
 

@@ -45,6 +45,8 @@ public fn absolute_value(@Int -> @Nat)
 
 The special reference `@T.result` (where `T` is the return type) refers to the function's return value within `ensures` clauses.
 
+Postconditions on stateful functions also have `old(State<T>)` and `new(State<T>)`, which name an effect's state before and after the call. Both are specified in Chapter 7, Section 7.9.2. Like `@T.result`, both are valid only inside `ensures` clauses.
+
 ### 6.2.3 Invariants (`invariant`)
 
 > **Status: Not yet implemented.** The `invariant(...)` clause on `data` declarations is specified here but is not currently working in the reference compiler — every documented form fails with `[E130] no <DataName> bindings in scope`, because the slot environment for the invariant predicate is not yet wired up.  Tracked in [#686](https://github.com/aallan/vera/issues/686) (successor to the now-closed #560 — that earlier issue was about removing the broken spec examples; the feature implementation is the remaining work).  Until the implementation lands, refinement types (Chapter 2, Section 2.6) are the working alternative for expressing constraints on data values.

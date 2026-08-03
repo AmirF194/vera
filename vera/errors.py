@@ -356,6 +356,142 @@ def unexpected_token(
     )
 
 
+# `old` / `new` take an EFFECT reference (spec 7.9.2), so the grammar's
+# `old_expr: "old" "(" effect_ref ")"` rejects an expression argument at
+# parse time — several tokens to the right of the construct at fault.  A
+# model reaching for Dafny's `old(<expr>)` got E005 "Unexpected @ ...
+# Expected UPPER_IDENT" with the caret on its own argument (#1173,
+# VeraBench VB-T5-009): nothing named `old`, and "expected UPPER_IDENT"
+# described the parser's state rather than the misconception.
+#
+# Keyed by keyword; the value is (code, description, rationale, fix).
+_CONTRACT_STATE_ARGS: dict[str, tuple[str, str, str, str]] = {
+    "old": (
+        "E030",
+        "old() takes an effect reference, not an expression. Its only "
+        "valid argument is the name of a stateful effect, as in "
+        "old(State<Int>), and the call is only valid inside an ensures() "
+        "clause.",
+        "Vera has no mutable variables: a parameter slot or let binding "
+        "holds one value for the whole call, so there is no separate "
+        "before-value to ask for. Effect state is the only thing a call "
+        "can change, which is why old() names an effect rather than "
+        "wrapping an expression. The clause restriction follows from the "
+        "same reasoning — requires() and decreases() are evaluated before "
+        "the body runs, so every expression in them already observes the "
+        "pre-state and old() would have nothing left to refer to.",
+        "If you meant the value of a parameter, drop the wrapper — "
+        "requires(@Int.0 > 0) says that directly, and the same slot "
+        "reads identically in the postcondition. If you meant an "
+        "effect's state before the call, name the effect inside an "
+        "ensures() clause:\n"
+        "\n"
+        "  ensures(new(State<Int>) == old(State<Int>) + 1)",
+    ),
+    "new": (
+        "E031",
+        "new() takes an effect reference, not an expression. Its only "
+        "valid argument is the name of a stateful effect, as in "
+        "new(State<Int>), and the call is only valid inside an ensures() "
+        "clause.",
+        "Vera has no mutable variables: a parameter slot or let binding "
+        "holds one value for the whole call, so there is no separate "
+        "after-value to ask for. Effect state is the only thing a call "
+        "can change, which is why new() names an effect rather than "
+        "wrapping an expression. The clause restriction follows from the "
+        "same reasoning — requires() and decreases() are evaluated before "
+        "the body runs, so the after-state new() names does not exist "
+        "yet at that point.",
+        "If you meant the value of a parameter, drop the wrapper — "
+        "ensures(@Int.result > @Int.0) relates the return value to the "
+        "argument directly. If you meant an effect's state after the "
+        "call, name the effect inside an ensures() clause:\n"
+        "\n"
+        "  ensures(new(State<Int>) == old(State<Int>) + 1)",
+    ),
+}
+
+# Both keywords are three characters; the scan below relies on it.
+_CONTRACT_STATE_KEYWORD_LEN = 3
+
+
+def _line_column(source: str, offset: int) -> tuple[int, int]:
+    """Convert a 0-based source offset to a 1-based (line, column)."""
+    line = source.count("\n", 0, offset) + 1
+    line_start = source.rfind("\n", 0, offset) + 1
+    return line, offset - line_start + 1
+
+
+def _contract_state_arg_at_fault(
+    source: str, offset: int | None
+) -> tuple[str, int] | None:
+    """Is `offset` the first token of an `old(` / `new(` argument?
+
+    Returns `(keyword, keyword_offset)`, or None when the failure is
+    something else.  The scan is deliberately narrow: it fires only when
+    nothing but whitespace separates the failing token from an `old(` /
+    `new(` immediately to its left, which is exactly the position where
+    the grammar demands an effect reference.  A failure anywhere later in
+    the argument — `old(State<Int> > 0)`, whose real fault is the missing
+    `)` — leaves a parsed token in between and falls through to the
+    generic diagnostic rather than blaming the wrong construct.
+
+    `source` is the original text while the offset comes from the
+    comment-blanked copy `parse()` feeds the grammar. The two agree on
+    every offset (blanking preserves length), and they differ in content
+    only where a comment sits — so a comment wedged between `old` and its
+    argument stops the scan here and falls through to E005. That is the
+    conservative direction: a rarely written input keeps the old message
+    instead of risking a wrong one.
+    """
+    if offset is None or not 0 <= offset <= len(source):
+        return None
+    i = offset - 1
+    while i >= 0 and source[i] in " \t\r\n":
+        i -= 1
+    # A structural precondition, not a filter: everything below reads the
+    # keyword as the token *before* `i`, which is only meaningful once `i`
+    # is known to be the opening paren.  No input can prove it load-bearing
+    # on its own — after the `old` keyword the grammar accepts nothing but
+    # `(`, so the parser always fails on the very next token and `i` is
+    # always either that paren or the keyword's own last character, and the
+    # latter shifts the window off `old` anyway.  Keep it: dropping it would
+    # leave the arithmetic below asserting something it never checked.
+    if i < 0 or source[i] != "(":
+        return None
+    j = i - 1
+    while j >= 0 and source[j] in " \t\r\n":
+        j -= 1
+    end = j + 1
+    start = end - _CONTRACT_STATE_KEYWORD_LEN
+    if start < 0:
+        return None
+    keyword = source[start:end]
+    if keyword not in _CONTRACT_STATE_ARGS:
+        return None
+    # `keep_old(` ends in the same four characters but is a plain call.
+    if start > 0 and (source[start - 1].isalnum() or source[start - 1] == "_"):
+        return None
+    return keyword, start
+
+
+def contract_state_argument(
+    file: Optional[str], source: str, keyword: str, keyword_offset: int
+) -> Diagnostic:
+    """Diagnostic for `old(<expr>)` / `new(<expr>)` (#1173)."""
+    code, description, rationale, fix = _CONTRACT_STATE_ARGS[keyword]
+    line, column = _line_column(source, keyword_offset)
+    return Diagnostic(
+        description=description,
+        location=SourceLocation(file=file, line=line, column=column),
+        source_line=_get_source_line(source, line),
+        rationale=rationale,
+        fix=fix,
+        spec_ref='Chapter 7, Section 7.9.2 "State in Contracts"',
+        error_code=code,
+    )
+
+
 _COMMENT_PROBLEMS = {
     "unterminated_block": (
         "E020",
@@ -431,6 +567,17 @@ def diagnose_lark_error(
     to a generic diagnostic with the raw error info.
     """
     from lark.exceptions import UnexpectedCharacters, UnexpectedToken
+
+    # Pattern: old(<expr>) / new(<expr>) — a contract state form applied
+    # to an expression instead of an effect reference (#1173).  Checked
+    # before the token-shaped patterns below because the argument can be
+    # anything, including a character the lexer rejects outright
+    # (`old($x)` raises UnexpectedCharacters, not UnexpectedToken).
+    if isinstance(exc, (UnexpectedToken, UnexpectedCharacters)):
+        at_fault = _contract_state_arg_at_fault(source, exc.pos_in_stream)
+        if at_fault is not None:
+            keyword, keyword_offset = at_fault
+            return contract_state_argument(file, source, keyword, keyword_offset)
 
     if isinstance(exc, UnexpectedToken):
         line = exc.line
@@ -517,6 +664,9 @@ ERROR_CODES: dict[str, str] = {
     "E020": "Unterminated block comment",
     "E021": "Unterminated annotation comment",
     "E023": "Annotation comments do not nest",
+    # E03x — Contract constructs (parse)
+    "E030": "old() argument is not an effect reference",
+    "E031": "new() argument is not an effect reference",
     # E1xx — Type Checker: Core & Expressions
     "E120": "Data invariant not Bool",
     "E121": "Function body type mismatch",
