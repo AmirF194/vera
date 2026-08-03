@@ -515,6 +515,24 @@ class AssemblyMixin:
                 )
             parts.append(self._emit_gc_collect())
 
+        # #1172: per-guarded-function termination-measure state.  Each
+        # function with a `decreases` clause gets one i64 baseline global
+        # per lexicographic component plus an activation flag; the entry
+        # guard in `_compile_decreases_entry` checks and updates them,
+        # and every exit restores what the activation saved.  Emitted
+        # unconditionally of the GC machinery — a pure scalar-recursive
+        # function is guarded without needing an allocator.
+        for dec_fn, n_comps in sorted(self._dec_guard_fns.items()):
+            for k in range(n_comps):
+                parts.append(
+                    f"  (global $dec_prev_{dec_fn}_{k} "
+                    f"(mut i64) (i64.const 0))"
+                )
+            parts.append(
+                f"  (global $dec_active_{dec_fn} "
+                f"(mut i32) (i32.const 0))"
+            )
+
         # Export $alloc when host functions need to allocate WASM memory,
         # or when the heap allocator is compiled in (e.g. String params need
         # allocation for CLI argument passing)
@@ -561,6 +579,13 @@ class AssemblyMixin:
         # whole module; sorted for deterministic output.
         for _name, eq_wat in sorted(self._adt_eq_helpers.items()):
             parts.append(eq_wat)
+
+        # #1172: structural-size helpers for ADT decreases measures
+        # ($dec_size_<T>) — same dedupe-by-name/sorted discipline as the
+        # Eq helpers above.
+        for _name, size_wat in sorted(self._dec_rank_helpers.items()):
+            if size_wat:
+                parts.append(size_wat)
 
         # #924: generated recursive show/hash helper functions ($show_<type> /
         # $hash_<type>).  Deduped by name across the whole module; sorted for

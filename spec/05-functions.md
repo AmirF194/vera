@@ -132,7 +132,7 @@ The `decreases` clause specifies an expression that must strictly decrease (in a
 
 1. The `decreases` expression is evaluated at function entry.
 2. At each recursive call site, the compiler verifies that the `decreases` expression (with the recursive call's arguments substituted) is strictly less than the value at function entry.
-3. The expression must have a type with a well-founded ordering: `Nat`, `Int` (with a precondition that it is non-negative), or a lexicographic tuple.
+3. The expression must have a type with a well-founded ordering: `Nat`, `Int` (floored at zero — the runtime check rejects a step whose new value is negative), an algebraic data type (ordered by the structural size of its concrete constructors), or a lexicographic tuple of these. A measure of any other type — `Float64` (which can decrease forever without crossing a floor), `String`, `Bool`, a function type — is rejected at check time with `E127`.
 
 Lexicographic decrease:
 
@@ -147,15 +147,20 @@ private fn ackermann(@Nat, @Nat -> @Nat)
     @Nat.0 + 1
   } else {
     if @Nat.0 == 0 then {
-      ackermann(1, @Nat.1 - 1)
+      ackermann(@Nat.1 - 1, 1)
     } else {
-      ackermann(ackermann(@Nat.0 - 1, @Nat.1), @Nat.1 - 1)
+      ackermann(@Nat.1 - 1, ackermann(@Nat.1, @Nat.0 - 1))
     }
   }
 }
 ```
 
 The tuple `(@Nat.1, @Nat.0)` decreases lexicographically on each recursive call.
+
+**Runtime checking.** A `decreases` clause the verifier cannot prove statically falls to Tier 3 (`E525`) and is enforced at run time: on each re-entry of the function, the measure — an ADT component through its structural size — must be strictly less than the previous activation's and non-negative, componentwise for a lexicographic tuple. A violating re-entry traps through the contract-violation channel with a message naming the function, so a non-terminating recursion fails loudly instead of hanging. Two consequences of the mechanism:
+
+- Tail-call optimization is preserved for self-recursion: a self-recursive tail call keeps its `return_call`, with the hop checked at the call site (the arguments are captured, the measure evaluated over them and compared against the live chain state, and this activation's guard state closed out before the transfer), so guarded iteration runs at constant stack depth. A *mutually*-recursive tail call between two guarded functions lowers to a plain call instead — with the frame elided there is no placement of the state restore that both preserves the chain and unwinds it — so that corner is bounded by the native stack, which the measure itself bounds.
+- An ADT measure is runtime-checked only when its type's reachable field structure is fully concrete. A measure whose type is parameterized (`List<Int>`), or whose fields reach a parameterized type, is not yet runtime-ranked — the static tiers still apply, and the obligation remains disclosed as Tier 3.
 
 ### 5.6.2 Mutual Recursion
 

@@ -343,7 +343,7 @@ private fn sum(@List<Int> -> @Int)
         assert result.summary.tier1_verified == 8
 
     def test_overall_tier_counts(self) -> None:
-        """All examples together: 357 T1 / 105 T3 / 462 total (current).
+        """All examples together: 358 T1 / 104 T3 / 462 total (current).
 
         Counts move when examples are added or their contracts become
         more / less verifiable.  Trajectory:
@@ -621,8 +621,15 @@ private fn sum(@List<Int> -> @Int)
         # adds two functions -- `format_row` and `main` -- with trivial
         # `requires(true)`/`ensures(true)` pairs (2 requires + 2 ensures), all
         # Tier 1: +4 T1, +0 T3, +4 total: 353/105/458 -> 357/105/462.
-        assert t1 == 357, f"Expected 357 T1, got {t1}"
-        assert t3 == 105, f"Expected 105 T3, got {t3}"
+        #
+        # #1172: `examples/gc_pressure.vera` declared its ACCUMULATOR as the
+        # decreases measure (it grows every hop) -- caught by the new runtime
+        # termination guard, which trapped the example at run.  Corrected to
+        # the counter (`@Int.1`), which the verifier discharges at Tier 1
+        # where the accumulator measure was Tier 3: +1 T1, -1 T3, +0 total:
+        # 357/105/462 -> 358/104/462.
+        assert t1 == 358, f"Expected 358 T1, got {t1}"
+        assert t3 == 104, f"Expected 104 T3, got {t3}"
         assert total == 462, f"Expected 462 total, got {total}"
         assert t3u == 0, f"Expected 0 tier3_unguarded, got {t3u}"
 

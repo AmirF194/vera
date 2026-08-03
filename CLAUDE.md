@@ -60,7 +60,7 @@ mypy vera/                        # Type-check the compiler itself
 
 python scripts/check_conformance.py    # Verify all 171 conformance programs (positives pass their level; negatives fail with their expected_error E-code)
 python scripts/check_examples.py      # Verify all 42 examples parse + check + verify
-python scripts/check_corpus_canonical.py # Verify all 218 corpus programs are in canonical form (vera fmt)
+python scripts/check_corpus_canonical.py # Verify all 217 corpus programs are in canonical form (vera fmt)
 python scripts/check_examples_readme.py # Verify vera run commands in examples/README.md
 python scripts/check_spec_examples.py # Verify spec code blocks parse
 python scripts/check_readme_examples.py # Verify README code blocks parse
@@ -127,7 +127,7 @@ Before changing code — **adding or removing** — write the test that proves y
 ## What not to break
 
 - Pre-commit hooks run mypy + pytest + conformance suite + example validation on every commit
-- All 171 conformance programs in `tests/conformance/` must hold at their declared level — positive entries pass, and the negative fixtures (`ch02_generic_over_unit_rejected`, `ch02_map_unit_value_rejected`, `ch04_let_unit_rejected`, `ch05_apply_fn_arity`, `ch05_where_helper_outer_slot_rejected`, `ch07_handler_state_body_scope_rejected`, `ch07_old_outside_ensures_rejected`, `ch07_state_unit_op_param_read_rejected`, `ch08_circular_import`, `ch08_visibility_private`, `ch09_builtin_effect_redefinition_rejected`, `ch09_builtin_redefinition`, `ch09_ord_adt_rejected`, `ch09_eq_non_derivable_rejected`, `ch09_sql_injection_rejected`, `ch09_sql_placeholder_mismatch_rejected`, `ch09_sql_placeholder_let_mismatch_rejected`, `ch09_sql_numbered_placeholder_rejected`, `ch07_bare_effect_op_rejected`) must *fail* `check` with their `expected_error` E-code
+- All 173 conformance programs in `tests/conformance/` must hold at their declared level — positive entries pass, and the negative fixtures (`ch02_generic_over_unit_rejected`, `ch02_map_unit_value_rejected`, `ch04_let_unit_rejected`, `ch05_apply_fn_arity`, `ch05_where_helper_outer_slot_rejected`, `ch07_handler_state_body_scope_rejected`, `ch07_old_outside_ensures_rejected`, `ch07_state_unit_op_param_read_rejected`, `ch08_circular_import`, `ch08_visibility_private`, `ch05_decreases_float_rejected`, `ch09_builtin_effect_redefinition_rejected`, `ch09_builtin_redefinition`, `ch09_ord_adt_rejected`, `ch09_eq_non_derivable_rejected`, `ch09_sql_injection_rejected`, `ch09_sql_placeholder_mismatch_rejected`, `ch09_sql_placeholder_let_mismatch_rejected`, `ch09_sql_numbered_placeholder_rejected`, `ch07_bare_effect_op_rejected`) must *fail* `check` with their `expected_error` E-code
 - All 42 examples in `examples/` must pass `vera check` and `vera verify`
 - Version must stay in sync across `pyproject.toml`, `vera/__init__.py`, `docs/index.html`, `README.md`, and `uv.lock` (gated by `scripts/check_version_sync.py`); CHANGELOG.md must also carry a matching `## [X.Y.Z]` section
 - All tests must pass: `pytest tests/ -v`

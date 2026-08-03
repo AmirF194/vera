@@ -258,6 +258,21 @@ class CodeGenerator(
         self._prelude_type_aliases: dict[str, ast.TypeExpr] = {}
         self._prelude_type_alias_params: dict[str, tuple[str, ...]] = {}
 
+        # #1172: runtime decreases-guard state.  ``_dec_guard_fns`` maps
+        # each guarded function's WAT name -> lexicographic component
+        # count, driving the per-function ``$dec_prev_<f>_<k>`` /
+        # ``$dec_active_<f>`` globals emission in assembly;
+        # ``_dec_rank_helpers`` collects the per-ADT structural-size
+        # functions (``$dec_size_<T>``) the ADT-measure comparisons call.
+        self._dec_guard_fns: dict[str, int] = {}
+        self._dec_rank_helpers: dict[str, str] = {}
+        # #1172: names of EVERY decreases-carrying function that can be a
+        # ``return_call`` target — locals (with where-helpers), imported
+        # bodies, mono clones, and shadowed ``mod$…`` emissions — built
+        # by the pre-pass in ``compile_program`` before Pass 2, so the
+        # tail-call discipline can classify a target that compiles later.
+        self._dec_guarded_names: set[str] = set()
+
         # Closure compilation state
         self._closure_table: list[str] = []  # lifted fn names for table
         self._closure_sigs: dict[str, str] = {}  # sig_key -> WAT type decl
@@ -1127,6 +1142,28 @@ class CodeGenerator(
 
         # Pass 1.6: rewrite ability operation calls → concrete expressions
         program, mono_decls = self._rewrite_ability_ops(program, mono_decls)
+
+        # #1172: pre-pass for the tail-call discipline — collect the name
+        # of every decreases-carrying function any ``return_call`` might
+        # target, before Pass 2 compiles the first body.
+        def _dec_collect(fdecl: ast.FnDecl, emit_name: str) -> None:
+            if any(
+                isinstance(c, ast.Decreases) and c.exprs
+                for c in fdecl.contracts
+            ):
+                self._dec_guarded_names.add(emit_name)
+            for wfn in fdecl.where_fns or ():
+                _dec_collect(wfn, wfn.name)
+
+        for tld in program.declarations:
+            if isinstance(tld.decl, ast.FnDecl):
+                _dec_collect(tld.decl, tld.decl.name)
+        for _path, idecl in self._imported_fn_decls:
+            _dec_collect(idecl, idecl.name)
+        for mdecl in mono_decls:
+            _dec_collect(mdecl, mdecl.name)
+        for _path, mangled, idecl in self._shadowed_module_fns:
+            _dec_collect(idecl, mangled)
 
         # Pass 1.9: check for cross-module calls that codegen can't handle
         self._check_cross_module_calls(program)

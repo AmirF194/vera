@@ -35,8 +35,12 @@ from vera.environment import (
 )
 from vera.types import (
     BOOL,
+    INT,
+    NAT,
+    AdtType,
     ModuleArtifacts,
     PureEffectRow,
+    RefinedType,
     Type,
     TypeVar,
     UnknownType,
@@ -856,7 +860,50 @@ class TypeChecker(
             self.env.in_contract = True
             for expr in contract.exprs:
                 ty = self._synth_expr(expr)
-                # Type is checked; termination verification is Tier 3
+                # #1172: every measure component must carry a well-founded
+                # ordering (spec §5.6.1(3)): Nat, Int (floored at zero by
+                # the runtime guard), or a constructor-backed algebraic
+                # data type (ordered by structural size).  Anything else —
+                # Float64 (decreases forever without crossing a floor),
+                # String/Bool/Byte (no decrease order), collections,
+                # function types, bare type variables — has no ordering
+                # the prover or the runtime guard could enforce, and
+                # accepting it silently made the decreases clause
+                # decorative.  A refinement measures as its base type; an
+                # upstream type error (UnknownType) stays silent to avoid
+                # cascading.
+                if ty is None:
+                    continue
+                base = ty.base if isinstance(ty, RefinedType) else ty
+                if isinstance(base, UnknownType):
+                    continue
+                well_founded = (
+                    base in (INT, NAT)
+                    or (
+                        isinstance(base, AdtType)
+                        and base.name in self.env.data_types
+                    )
+                )
+                if not well_founded:
+                    self._error(
+                        expr,
+                        f"decreases() measure must have a well-founded "
+                        f"ordering (Nat, Int, or a data type), found "
+                        f"{pretty_inferred_type(ty)}.",
+                        rationale="Termination is proved (or checked at "
+                                  "runtime) by showing the measure "
+                                  "strictly decreases and stays "
+                                  "non-negative; a type without that "
+                                  "order cannot bound recursion.",
+                        fix="Measure something that shrinks toward a "
+                            "floor: a Nat/Int counter (e.g. "
+                            "decreases(@Nat.0)), a shrinking structure "
+                            "(decreases(@List.0)), or a derived size "
+                            "(decreases(array_length(@Array<Int>.0))).",
+                        spec_ref='Chapter 5, Section 5.6.1 '
+                                 '"Decreases Clauses"',
+                        error_code="E127",
+                    )
             self.env.in_contract = False
 
     # -----------------------------------------------------------------

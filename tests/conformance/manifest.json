@@ -893,6 +893,34 @@
     ]
   },
   {
+    "id": "ch05_decreases_guard",
+    "file": "ch05_decreases_guard.vera",
+    "chapter": 5,
+    "title": "Runtime termination guard: lexicographic Ackermann and a structural ADT measure run clean (#1172)",
+    "level": "run",
+    "spec_ref": "Section 5.6.1",
+    "features": [
+      "decreases",
+      "termination",
+      "lexicographic",
+      "runtime_guard"
+    ]
+  },
+  {
+    "id": "ch05_decreases_float_rejected",
+    "file": "ch05_decreases_float_rejected.vera",
+    "chapter": 5,
+    "title": "A Float64 decreases measure has no well-founded ordering and is a checker error (#1172)",
+    "level": "check",
+    "spec_ref": "Section 5.6.1",
+    "expected_error": "E127",
+    "features": [
+      "decreases",
+      "termination",
+      "check_error"
+    ]
+  },
+  {
     "id": "ch06_requires",
     "file": "ch06_requires.vera",
     "chapter": 6,
@@ -1209,21 +1237,6 @@
     ]
   },
   {
-    "id": "ch07_old_outside_ensures_rejected",
-    "file": "ch07_old_outside_ensures_rejected.vera",
-    "chapter": 7,
-    "title": "old() outside an ensures clause is rejected (#1173)",
-    "level": "check",
-    "spec_ref": "Section 7.9.2",
-    "expected_error": "E174",
-    "features": [
-      "state_effect",
-      "old",
-      "contracts",
-      "check_error"
-    ]
-  },
-  {
     "id": "ch07_state_old_composite",
     "file": "ch07_state_old_composite.vera",
     "chapter": 7,
@@ -1307,6 +1320,21 @@
     "features": [
       "effects",
       "effect_op",
+      "check_error"
+    ]
+  },
+  {
+    "id": "ch07_old_outside_ensures_rejected",
+    "file": "ch07_old_outside_ensures_rejected.vera",
+    "chapter": 7,
+    "title": "old() outside an ensures clause is rejected (#1173)",
+    "level": "check",
+    "spec_ref": "Section 7.9.2",
+    "expected_error": "E174",
+    "features": [
+      "state_effect",
+      "old",
+      "contracts",
       "check_error"
     ]
   },

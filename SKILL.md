@@ -151,7 +151,6 @@ Every diagnostic has a stable error code grouped by compiler phase:
 - **W001** — Typed hole (`?`) — expected type and available bindings reported (warning, not error)
 - **E001–E007** — Parse errors (missing contracts, unexpected tokens)
 - **E020, E021, E023** — Malformed comments: unterminated `{-` (E020) or `/*` (E021), or a `/*` nested inside another (E023 — only `{- -}` nests). Each names the delimiter at fault and how to close it.
-- **E030, E031** — `old(...)` (E030) or `new(...)` (E031) applied to an expression. Both take an effect reference, as in `old(State<Int>)`; Vera has no `old(<expression>)` form.
 - **E010** — Transform errors (internal)
 - **E120–E176** — Type check: core + expressions (type mismatches, slot resolution, operators)
 - **E200–E233** — Type check: calls (unresolved functions, argument mismatches, module calls)
@@ -1319,6 +1318,8 @@ private fn factorial(@Nat -> @Nat)
 
 For nested recursion, use lexicographic ordering: `decreases(@Nat.0, @Nat.1)`.
 
+The measure must have a well-founded ordering — `Nat`, `Int`, a data type (ordered by structural size), or a lexicographic tuple of these; a `Float64`/`String`/`Bool` measure is rejected at check time (`E127`). A measure Z3 cannot prove is checked at run time: a recursive re-entry whose measure fails to strictly decrease (or goes negative) traps with a message naming the function, instead of looping forever. Self-recursive tail calls keep tail-call optimization (the hop is checked at the call site, so guarded iteration still runs at constant stack depth); only *mutually*-recursive tail calls between guarded functions fall back to plain calls. An ADT measure of a *parameterized* type (`List<Int>`) is not yet runtime-ranked.
+
 ### Workflow: writing contracts incrementally
 
 **Start with scaffolding, then strengthen.** A function with placeholder contracts type-checks
@@ -1448,8 +1449,6 @@ private fn increment(@Unit -> @Unit)
 ```
 
 In `ensures` clauses, `old(State<T>)` is the state before the call and `new(State<T>)` is the state after.
-
-Two rules go with them. Both take an **effect reference** — a stateful effect's name with its type arguments — never an expression: there is no `old(@Int.0)` form, because a slot holds one value for the whole call and only effect state changes across it (`[E030]`/`[E031]`). And both are valid **only inside `ensures`**; a `requires` or `decreases` clause is evaluated before the body runs, so it already observes the pre-state (`[E174]`/`[E175]`). `@T.result` is ensures-only for the same reason (`[E131]`).
 
 ### Exception effects
 

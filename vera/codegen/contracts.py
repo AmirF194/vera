@@ -808,3 +808,405 @@ class ContractsMixin:
             if registered_name == type_name:
                 return wasm_t
         return None
+
+    # -----------------------------------------------------------------
+    # Runtime decreases guard (#1172)
+    # -----------------------------------------------------------------
+
+    def _compile_decreases_entry(
+        self,
+        ctx: WasmContext,
+        decl: ast.FnDecl,
+        env: WasmSlotEnv,
+    ) -> tuple[list[str], list[str], list[str] | None]:
+        """Compile the entry check-and-set of the termination guard (#1172).
+
+        For a function carrying a ``decreases`` clause, emits at entry:
+
+        1. save this function's guard globals into fresh locals,
+        2. evaluate every measure component (an ADT component through its
+           structural-size helper, :meth:`_dec_rank_helper`),
+        3. if a previous activation is live, trap through
+           ``$vera.contract_fail`` unless the components decrease
+           lexicographically while staying non-negative — the runtime
+           mirror of ``_verify_decreases``'s Z3 rule
+           (``new < old && new >= 0``, ADTs by rank), extended
+           componentwise per spec §5.6.1's lexicographic tuples,
+        4. record this activation's components as the new baseline.
+
+        Returns ``(entry_instrs, restore_instrs, self_tail_prefix)``.
+        The restores run at every non-trap exit (`_compile_fn` places
+        them after the postconditions).  ``self_tail_prefix`` keeps TCO
+        alive for SELF-recursive tail calls — the #517 property the
+        documented pure-iteration idiom depends on: prepended before a
+        ``return_call`` back into this function, it captures the
+        argument values into locals, evaluates the measure over them,
+        traps unless the hop lexicographically decreases against this
+        activation's live globals, restores this activation's saved
+        state (its frame is about to be elided — the `$gc_sp` pattern),
+        and re-pushes the arguments for the transfer; the callee's entry
+        then re-baselines from the outer state, so the chain rides the
+        site checks with no frame growth.  ``None`` when a piece is
+        untranslatable — `_compile_fn` then demotes that function's
+        self-tail ``return_call``s to plain calls, where the entry check
+        covers every hop (correct, at native-stack depth).  A tail call
+        to a DIFFERENT guarded function is always demoted (the mutual-
+        tail corner: with the frame elided there is no placement of the
+        restore that neither erases the chain nor leaks it), and a tail
+        call to an unguarded target just prepends the restores.
+
+        A measure component the backend cannot translate produces no
+        guard (``([], [])``): the static tier has already disclosed the
+        obligation, and a partial guard would claim a check it does not
+        perform.  Per-function state lives in module globals
+        (``$dec_prev_<fn>_<k>`` / ``$dec_active_<fn>``, emitted by
+        assembly from ``_dec_guard_fns``); chains are per function, so
+        distinct guarded functions never compare measures across
+        namespaces.
+        """
+        contract = next(
+            (c for c in decl.contracts
+             if isinstance(c, ast.Decreases) and c.exprs),
+            None,
+        )
+        if contract is None:
+            return [], [], None
+
+        name = decl.name
+        comp_values: list[list[str]] = []
+        for expr in contract.exprs:
+            instrs = ctx.translate_expr(expr, env)
+            if instrs is None:
+                return [], [], None
+            wt = ctx._infer_expr_wasm_type(expr)
+            if wt == "i64":
+                comp_values.append(instrs)
+                continue
+            # An i32 component is an ADT pointer (E127 rejects Bool/Byte
+            # measures at check time): rank it by structural size.
+            adt_name = self._dec_measure_adt_name(expr)
+            if adt_name is None:
+                return [], [], None
+            size_fn = self._dec_rank_helper(adt_name)
+            if size_fn is None:
+                return [], [], None
+            comp_values.append([*instrs, f"call {size_fn}"])
+
+        n = len(comp_values)
+        saved_prev = [ctx.alloc_local("i64") for _ in range(n)]
+        saved_active = ctx.alloc_local("i32")
+        measured = [ctx.alloc_local("i64") for _ in range(n)]
+
+        entry: list[str] = []
+        for k in range(n):
+            entry.append(f"global.get $dec_prev_{name}_{k}")
+            entry.append(f"local.set {saved_prev[k]}")
+        entry.append(f"global.get $dec_active_{name}")
+        entry.append(f"local.set {saved_active}")
+        for k in range(n):
+            entry.extend(comp_values[k])
+            entry.append(f"local.set {measured[k]}")
+
+        entry.append(f"local.get {saved_active}")
+        entry.append("if")
+        # Lexicographic decrease against the saved previous components:
+        #   ok_k = (m_k < p_k && m_k >= 0) || (m_k == p_k && ok_{k+1})
+        # built innermost-first so the whole chain is straight-line
+        # stack code.
+        def _ok(k: int) -> list[str]:
+            strict = [
+                f"  local.get {measured[k]}",
+                f"  local.get {saved_prev[k]}",
+                "  i64.lt_s",
+                f"  local.get {measured[k]}",
+                "  i64.const 0",
+                "  i64.ge_s",
+                "  i32.and",
+            ]
+            if k == n - 1:
+                return strict
+            return [
+                *strict,
+                f"  local.get {measured[k]}",
+                f"  local.get {saved_prev[k]}",
+                "  i64.eq",
+                *_ok(k + 1),
+                "  i32.and",
+                "  i32.or",
+            ]
+
+        entry.extend(_ok(0))
+        entry.append("  i32.eqz")
+        entry.append("  if")
+        msg = (
+            f"decreases() measure in '{name}' failed to decrease: the "
+            f"termination metric must strictly decrease and stay "
+            f"non-negative on every recursive call"
+        )
+        ptr, length = self.string_pool.intern(msg)
+        self._needs_contract_fail = True
+        self._needs_memory = True
+        entry.append(f"    i32.const {ptr}")
+        entry.append(f"    i32.const {length}")
+        entry.append("    call $vera.contract_fail")
+        entry.append("    unreachable")
+        entry.append("  end")
+        entry.append("end")
+
+        for k in range(n):
+            entry.append(f"local.get {measured[k]}")
+            entry.append(f"global.set $dec_prev_{name}_{k}")
+        entry.append("i32.const 1")
+        entry.append(f"global.set $dec_active_{name}")
+
+        restore: list[str] = []
+        for k in range(n):
+            restore.append(f"local.get {saved_prev[k]}")
+            restore.append(f"global.set $dec_prev_{name}_{k}")
+        restore.append(f"local.get {saved_active}")
+        restore.append(f"global.set $dec_active_{name}")
+
+        self._dec_guard_fns[name] = n
+        tail_prefix = self._dec_self_tail_prefix(ctx, decl, contract, restore)
+        return entry, restore, tail_prefix
+
+    def _dec_self_tail_prefix(
+        self,
+        ctx: WasmContext,
+        decl: ast.FnDecl,
+        contract: ast.Decreases,
+        restore: list[str],
+    ) -> list[str] | None:
+        """The instruction prefix for a SELF-recursive ``return_call``.
+
+        At the site, the callee's arguments are already on the operand
+        stack in parameter order (a String/Array parameter as its
+        ``ptr, len`` i32 pair; a Unit parameter contributes nothing).
+        Capture them into fresh locals (popping in reverse), bind this
+        function's parameter slot names to those locals, evaluate every
+        measure component over that environment, and trap through
+        ``$vera.contract_fail`` unless the components decrease
+        lexicographically (and stay non-negative) against this
+        function's LIVE chain globals — the previous activation's
+        baseline, which for a self-tail site is this activation's own
+        entry measure.  Then restore the saved guard state (the frame is
+        about to be elided) and re-push the arguments.  Returns None
+        when any parameter or measure shape is untranslatable; the
+        caller demotes that site instead — never a partial check.
+        """
+        name = decl.name
+        param_layout: list[tuple[str, list[int]]] = []
+        capture_env = WasmSlotEnv()
+        for param_te in decl.params:
+            wt = self._type_expr_to_wasm_type(param_te)
+            if wt == "unsupported":
+                return None
+            if wt is None:
+                continue  # Unit — no operand-stack slot, no binder
+            if wt == "i32_pair":
+                ptr_l = ctx.alloc_local("i32")
+                len_l = ctx.alloc_local("i32")
+                locs = [ptr_l, len_l]
+                bind = ptr_l
+                kinds = "i32_pair"
+            else:
+                loc = ctx.alloc_local(wt)
+                locs = [loc]
+                bind = loc
+                kinds = wt
+            param_layout.append((kinds, locs))
+            slot = self._type_expr_to_slot_name(param_te)
+            if slot:
+                capture_env = capture_env.push(slot, bind)
+
+        comp_values: list[list[str]] = []
+        for expr in contract.exprs:
+            instrs = ctx.translate_expr(expr, capture_env)
+            if instrs is None:
+                return None
+            wt = ctx._infer_expr_wasm_type(expr)
+            if wt == "i64":
+                comp_values.append(instrs)
+                continue
+            adt_name = self._dec_measure_adt_name(expr)
+            if adt_name is None:
+                return None
+            size_fn = self._dec_rank_helper(adt_name)
+            if size_fn is None:
+                return None
+            comp_values.append([*instrs, f"call {size_fn}"])
+
+        n = len(comp_values)
+        measured = [ctx.alloc_local("i64") for _ in range(n)]
+
+        prefix: list[str] = []
+        # Capture: pop in reverse parameter order (a pair pops len, ptr).
+        for _kinds, locs in reversed(param_layout):
+            for loc in reversed(locs):
+                prefix.append(f"local.set {loc}")
+        for k in range(n):
+            prefix.extend(comp_values[k])
+            prefix.append(f"local.set {measured[k]}")
+        prefix.append(f"global.get $dec_active_{name}")
+        prefix.append("if")
+
+        def _ok(k: int) -> list[str]:
+            strict = [
+                f"  local.get {measured[k]}",
+                f"  global.get $dec_prev_{name}_{k}",
+                "  i64.lt_s",
+                f"  local.get {measured[k]}",
+                "  i64.const 0",
+                "  i64.ge_s",
+                "  i32.and",
+            ]
+            if k == n - 1:
+                return strict
+            return [
+                *strict,
+                f"  local.get {measured[k]}",
+                f"  global.get $dec_prev_{name}_{k}",
+                "  i64.eq",
+                *_ok(k + 1),
+                "  i32.and",
+                "  i32.or",
+            ]
+
+        prefix.extend(_ok(0))
+        prefix.append("  i32.eqz")
+        prefix.append("  if")
+        msg = (
+            f"decreases() measure in '{name}' failed to decrease: the "
+            f"termination metric must strictly decrease and stay "
+            f"non-negative on every recursive call"
+        )
+        ptr, length = self.string_pool.intern(msg)
+        prefix.append(f"    i32.const {ptr}")
+        prefix.append(f"    i32.const {length}")
+        prefix.append("    call $vera.contract_fail")
+        prefix.append("    unreachable")
+        prefix.append("  end")
+        prefix.append("end")
+        prefix.extend(restore)
+        # Re-push the arguments in parameter order for the transfer.
+        for _kinds, locs in param_layout:
+            for loc in locs:
+                prefix.append(f"local.get {loc}")
+        return prefix
+
+    #: Field types that contribute nothing to a structural rank — safe to
+    #: step over.  Everything else either recurses (a concrete layout
+    #: ADT) or fails helper generation (see `_dec_rank_helper`).
+    _DEC_SCALAR_FIELD_TYPES = frozenset(
+        {"Int", "Nat", "Bool", "Float64", "Byte", "String", "Unit"},
+    )
+
+    @staticmethod
+    def _dec_measure_adt_name(expr: ast.Expr) -> str | None:
+        """The ADT layout key for an i32-valued measure component.
+
+        A slot-reference measure — the dominant shape, ``decreases(
+        @List.1)`` — carries its type name syntactically.  A
+        PARAMETERIZED slot type (``@List<Int>.0``) is declined: the
+        registered layout describes the generic shape, but concrete
+        construction recomputes field offsets from the actual type
+        arguments (an ``Int`` payload is an 8-byte i64, pushing the tail
+        past the generic layout's offset), so a rank walk over the
+        generic offsets reads a payload as a pointer.  Ranking those
+        needs per-instantiation helpers (the ``$eq_<type>`` pattern);
+        until then a generic-typed measure gets no guard rather than a
+        wrong one.  Other ADT-valued expressions (a call returning an
+        ADT) are likewise not yet rankable.
+        """
+        if isinstance(expr, ast.SlotRef) and "<" not in expr.type_name:
+            return expr.type_name
+        return None
+
+    def _dec_rank_helper(self, adt_name: str) -> str | None:
+        """Emit (once) and name the structural-size helper for *adt_name*.
+
+        ``$dec_size_<T>(ptr) -> i64`` counts constructors: 1 for the node
+        plus the recursive size of every field whose declared type is
+        itself a layout-backed ADT.  Scalar fields and erased
+        type-parameter fields contribute nothing — the order is the
+        concrete structure's size, which spec §5.6.1(3) states.  Mutually
+        recursive ADTs work because helpers are recorded before their
+        bodies are built.  Returns None when the layout (or its parallel
+        ``field_types``) is unavailable — the caller then emits no guard.
+        """
+        mangled = mangle_type_name(adt_name)
+        fn_name = f"$dec_size_{mangled}"
+        if fn_name in self._dec_rank_helpers:
+            return fn_name
+        layouts = self._adt_layouts.get(adt_name)
+        if not layouts:
+            return None
+        # Reserve the name first so a recursive field type terminates.
+        self._dec_rank_helpers[fn_name] = ""
+
+        lines = [
+            f"  (func {fn_name} (param $p i32) (result i64)",
+            "    (local $tag i32)",
+            "    (local $acc i64)",
+            "    local.get $p",
+            "    i32.load",
+            "    local.set $tag",
+            "    i64.const 1",
+            "    local.set $acc",
+        ]
+        ok = True
+        for _ctor_name, layout in sorted(
+            layouts.items(), key=lambda kv: kv[1].tag,
+        ):
+            if not layout.field_offsets:
+                continue
+            if (layout.field_types
+                    and len(layout.field_types) != len(layout.field_offsets)):
+                ok = False
+                break
+            for i, (offset, _wt) in enumerate(layout.field_offsets):
+                ftype = (
+                    layout.field_types[i] if layout.field_types else None
+                )
+                if ftype in self._DEC_SCALAR_FIELD_TYPES:
+                    continue  # contributes nothing to the rank
+                if (
+                    ftype is None
+                    or "<" in ftype
+                    or ftype not in self._adt_layouts
+                ):
+                    # No field metadata, a parameterized field (the
+                    # registered generic offsets are not authoritative
+                    # for concrete construction — see
+                    # `_dec_measure_adt_name`), or a type-var / unknown
+                    # field type: the rank cannot be computed soundly, so
+                    # the WHOLE helper fails, the measure gets no guard —
+                    # never a frozen or wrong-offset rank (both false-
+                    # trapped genuinely shrinking programs:
+                    # ch02_adt_recursive, ch02_adt_tuple_recursive).
+                    ok = False
+                    break
+                sub = self._dec_rank_helper(ftype)
+                if sub is None:
+                    ok = False
+                    break
+                lines.append("    local.get $tag")
+                lines.append(f"    i32.const {layout.tag}")
+                lines.append("    i32.eq")
+                lines.append("    if")
+                lines.append("      local.get $acc")
+                lines.append("      local.get $p")
+                lines.append(f"      i32.load offset={offset}")
+                lines.append(f"      call {sub}")
+                lines.append("      i64.add")
+                lines.append("      local.set $acc")
+                lines.append("    end")
+            if not ok:
+                break
+        if not ok:
+            del self._dec_rank_helpers[fn_name]
+            return None
+        lines.append("    local.get $acc")
+        lines.append("  )")
+        self._dec_rank_helpers[fn_name] = "\n".join(lines)
+        return fn_name
