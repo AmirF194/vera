@@ -61,6 +61,47 @@ class CrossModuleMixin:
             gen._type_aliases = saved_aliases
             gen._type_alias_params = saved_params
 
+    @contextlib.contextmanager
+    def _module_source_scope(
+        self, mod_path: tuple[str, ...] | None,
+    ) -> Iterator[None]:
+        """Locate diagnostics from *mod_path*'s bodies in ITS file (#1186).
+
+        ``_diag_location`` resolves every non-prelude node against
+        ``self.file`` / ``self.source`` — the MAIN file.  An imported body's
+        spans are module-local, so a skip inside it produced a diagnostic
+        carrying the importer's path with the module's line/column: the
+        rendered ``source_line`` quoted whatever happened to sit at that
+        line in the importer (a stray ``}`` in the #1186 repro), and the
+        cross-file branch in ``_drop_dangling_callers`` — which prefixes
+        the [E620] caller message with the module the root came from —
+        could never fire, because the root's file always compared equal to
+        ``self.file``.
+
+        For the duration of the ``with`` block both fields become the
+        module's own, so the coordinates and the file finally agree.
+        ``mod_path=None`` (or a path with no resolved module) is a no-op.
+        """
+        gen: CodeGenerator = self  # type: ignore[assignment]
+        mod = None
+        if mod_path is not None:
+            mod = next(
+                (m for m in gen._resolved_modules if m.path == mod_path),
+                None,
+            )
+        if mod is None:
+            yield
+            return
+        saved_file = gen.file
+        saved_source = gen.source
+        gen.file = str(mod.file_path)
+        gen.source = mod.source
+        try:
+            yield
+        finally:
+            gen.file = saved_file
+            gen.source = saved_source
+
     def _register_modules(self, program: ast.Program) -> None:
         """Register imported function signatures for cross-module codegen.
 

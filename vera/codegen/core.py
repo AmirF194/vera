@@ -298,6 +298,15 @@ class CodeGenerator(
         self._skipped_fn_roots: dict[str, Diagnostic | None] = {}
         self._fn_decl_by_wat_name: dict[str, ast.FnDecl] = {}
         self._closure_parents: dict[str, str] = {}
+        # #1183: every function absent from the emitted module -> the
+        # diagnostic that explains its absence (its own root skip for a
+        # directly-dropped function, its [E620] for a dangling caller).
+        # Seeded from `_skipped_fn_roots` and extended in
+        # `_drop_dangling_callers`; surfaced as `CompileResult.dropped_fns`
+        # so `execute()` and the CLI can tell "this entry was DECLARED and
+        # dropped" from "this entry was never written" instead of silently
+        # substituting whatever export happens to be first.
+        self._dropped_fn_diags: dict[str, Diagnostic | None] = {}
         # #773: generated structural-Eq helper functions, keyed by their
         # `$eq_<type>` name → WAT text.  Accumulated across every function /
         # closure body (merged from each WasmContext) and emitted once at
@@ -761,6 +770,10 @@ class CodeGenerator(
         are untouched.  Mutates *exports* in place; returns the pruned
         *functions_wat*.
         """
+        # #1183: a directly-skipped function is already absent from the
+        # module — record it before the early return so a program whose
+        # ONLY drop is the root still reports it.
+        self._dropped_fn_diags.update(self._skipped_fn_roots)
         if not self._skipped_fn_roots:
             return functions_wat
 
@@ -877,6 +890,9 @@ class CodeGenerator(
                 "this function and its callers.",
                 error_code="E620",
             )
+            # #1183: the [E620] just appended IS this function's
+            # explanation — a caller drop has no root skip of its own.
+            self._dropped_fn_diags[name] = self.diagnostics[-1]
 
         # Prune the doomed top-level functions and their exports; stub
         # the doomed closure bodies in place (table slots must survive).
@@ -1326,7 +1342,9 @@ class CodeGenerator(
             # #1111: resolve type aliases against THIS module's own
             # namespace (spec §8.4.1: aliases are module-local) — the flat
             # maps hold only the main file's + prelude's aliases.
-            with self._module_alias_scope(path):
+            # #1186: and locate any skip diagnostic in the module's OWN
+            # file — this body's spans are module-local coordinates.
+            with self._module_alias_scope(path), self._module_source_scope(path):
                 fn_wat = self._compile_fn_tracked(
                     idecl, export=False,
                     module_renames=self._module_intra_renames.get(path, {}),
@@ -1355,7 +1373,9 @@ class CodeGenerator(
             # #1111: same per-module alias namespace as Pass 2.5 — the
             # ``mod$…`` rename does not change which module's aliases
             # the body's type expressions belong to.
-            with self._module_alias_scope(path):
+            # #1186: likewise the ``mod$…`` rename does not move the body's
+            # spans, so its diagnostics still belong to the module's file.
+            with self._module_alias_scope(path), self._module_source_scope(path):
                 fn_wat = self._compile_fn_tracked(
                     dataclasses.replace(idecl, name=mangled),
                     export=False,
@@ -1610,6 +1630,7 @@ class CodeGenerator(
             if isinstance(decl, ast.FnDecl):
                 if self._return_type_is_string(decl.return_type):
                     fn_string_returns.add(decl.name)
+        dropped_fns = self._user_dropped_fns(program, exports)
         return CompileResult(
             wat=wat,
             wasm_bytes=bytes(wasm_bytes),
@@ -1637,7 +1658,51 @@ class CodeGenerator(
             },
             fn_source_map=dict(self._fn_source_map),
             prelude_fn_names=set(self._prelude_fn_names),
+            dropped_fns=dropped_fns,
         )
+
+    def _user_dropped_fns(
+        self, program: ast.Program, exports: list[str],
+    ) -> dict[str, Diagnostic | None]:
+        """USER-declared top-level functions absent from the module (#1183).
+
+        ``_dropped_fn_diags`` is the raw codegen bookkeeping: it also holds
+        prelude injections and ``forall`` templates, both of which are
+        routinely "dropped" on a perfectly healthy compile (an
+        uninstantiated template has no monomorphic body; an unreferenced
+        prelude combinator is never emitted).  Neither is something a user
+        can request as an entry point, and the diagnostics explaining them
+        are deliberately suppressed downstream — so surfacing them would
+        turn a normal compile into a wall of phantom "dropped" entries.
+
+        The published set is therefore narrowed to names the user wrote in
+        THIS program, that did not make it into *exports*, and whose
+        explaining diagnostic actually survived suppression (identity, not
+        equality — two skips can share a description).  ``forall``
+        templates are excluded on the same grounds as the prelude: a
+        template has no monomorphic body by construction, so its absence
+        from the module is structural, not a failure — a cross-module
+        generic library legitimately exports nothing at all.
+        """
+        surviving = {id(d) for d in self.diagnostics}
+        exported = set(exports)
+        dropped: dict[str, Diagnostic | None] = {}
+        for tld in program.declarations:
+            decl = tld.decl
+            if not isinstance(decl, ast.FnDecl):
+                continue
+            name = decl.name
+            if decl.forall_vars:
+                continue
+            if name in exported or name in self._prelude_fn_names:
+                continue
+            if name not in self._dropped_fn_diags:
+                continue
+            diag = self._dropped_fn_diags[name]
+            if diag is not None and id(diag) not in surviving:
+                continue
+            dropped[name] = diag
+        return dropped
 
     # -----------------------------------------------------------------
     # Type helpers (used by most mixins)

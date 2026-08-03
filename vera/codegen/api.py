@@ -140,6 +140,16 @@ class CompileResult:
     # code.  Without it the CLI's suppression-marker collapse cannot
     # fire for traps that go through prelude functions.
     prelude_fn_names: set[str] = field(default_factory=set)
+    # #1183: user-declared top-level functions that were DROPPED from the
+    # emitted module by the #1100 skip propagation, mapped to the
+    # diagnostic explaining the drop (the function's own `[E602]`-class
+    # root skip, or the `[E620]` it earned as a dangling caller).  The
+    # distinction this field exists to make is "declared and dropped" vs
+    # "never written": an entry point in the first category must be
+    # REFUSED, never silently replaced by whichever export survived.
+    # Names are the emitted WASM symbol names, so they compare directly
+    # against `exports` and against a `--fn` request.
+    dropped_fns: dict[str, "Diagnostic | None"] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -268,6 +278,43 @@ class HttpRequestData:
     path: str
     headers: dict[str, str]
     body: str
+
+
+def dropped_entry_message(
+    fn_name: str, result: CompileResult, *, suggest_fn: bool = True,
+) -> str:
+    """Explain why *fn_name* cannot be run, naming the root cause (#1183).
+
+    The counterpart to refusing the run: a user who asked for ``main`` and
+    is told only "not found in exports" has no way to learn that ``main``
+    WAS compiled until a callee it depends on turned out to be
+    uncompilable.  The stored diagnostic (its own ``[E602]``-class skip, or
+    the ``[E620]`` it earned as a dangling caller) already names the
+    construct and its location, so it is quoted verbatim rather than
+    paraphrased.
+
+    *suggest_fn* controls the "or pick another function" advice: ``--fn``
+    is a ``vera run`` flag, so callers on a compile path pass ``False``.
+    """
+    diag = result.dropped_fns.get(fn_name)
+    lines = [
+        f"Function '{fn_name}' was declared but dropped from the "
+        f"compiled output, so it cannot be run.",
+    ]
+    if diag is not None:
+        code = f"[{diag.error_code}] " if diag.error_code else ""
+        lines.append(f"\nReason: {code}{diag.description}")
+    else:  # pragma: no cover — every drop records its diagnostic
+        lines.append(
+            "\nReason: the function could not be compiled (see the "
+            "compilation notes above)."
+        )
+    survivors = ", ".join(result.exports) if result.exports else "(none)"
+    tail = "Fix the construct at the reported location"
+    if suggest_fn:
+        tail += ", or run a surviving function with --fn <name>"
+    lines.append(f"\n{tail}.\nAvailable exports: {survivors}")
+    return "\n".join(lines)
 
 
 def execute(
@@ -1021,17 +1068,29 @@ def execute(
         val = hp.value(store)
         return val if isinstance(val, int) else 0
 
-    # Determine function to call
+    # Determine function to call.
+    #
+    # #1183: falling through to `exports[0]` is a convenience for the
+    # single-function file that never declared a `main` — NOT a licence to
+    # substitute a different function for one the user actually wrote.  If
+    # the entry that would run was DECLARED and then dropped by the #1100
+    # skip propagation, running a sibling would print that sibling's answer
+    # under exit 0 with nothing on stderr: a silent wrong result, which is
+    # the one outcome the loud-skip design exists to prevent.  Refuse.
     auto_selected = False
     if fn_name is None:
         # Try "main" first, then first export
         if "main" in result.exports:
             fn_name = "main"
+        elif "main" in result.dropped_fns:
+            raise RuntimeError(dropped_entry_message("main", result))
         elif result.exports:
             fn_name = result.exports[0]
             auto_selected = True
         else:
             raise RuntimeError("No exported functions to call")
+    elif fn_name not in result.exports and fn_name in result.dropped_fns:
+        raise RuntimeError(dropped_entry_message(fn_name, result))
 
     func = instance.exports(store).get(fn_name)
     if func is None or not isinstance(func, wasmtime.Func):

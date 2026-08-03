@@ -4,6 +4,7 @@ from vera.codegen.api import (
     CompileResult,
     ExecuteResult,
     compile,
+    dropped_entry_message,
     execute,
 )
 from vera.codegen.memory import (
@@ -23,5 +24,6 @@ __all__ = [
     "_wasm_type_align",
     "_wasm_type_size",
     "compile",
+    "dropped_entry_message",
     "execute",
 ]
