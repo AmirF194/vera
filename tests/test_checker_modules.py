@@ -1256,6 +1256,25 @@ class TestReservedKeywordFnName:
     def _codes(errs: list[Diagnostic]) -> list[str]:
         return [e.error_code for e in errs]
 
+    def test_keyword_tuple_matches_checker_set(self) -> None:
+        """``KEYWORDS`` mirrors the checker's reserved keyword set exactly.
+
+        Pins ``set(KEYWORDS) == _KEYWORD_FN_NAMES - _HOST_INVOKED_FN_NAMES``
+        so a keyword added to the checker's set without a matching
+        per-keyword ``E153`` test here fails this pin instead of silently
+        escaping coverage.  The subtraction preserves the deliberate
+        omission of ``handle`` (the host-invoked carve-out).
+        """
+        from vera.checker.registration import (
+            _HOST_INVOKED_FN_NAMES,
+            _KEYWORD_FN_NAMES,
+        )
+
+        assert (
+            set(self.KEYWORDS)
+            == _KEYWORD_FN_NAMES - _HOST_INVOKED_FN_NAMES
+        )
+
     @pytest.mark.parametrize("name", KEYWORDS)
     def test_keyword_fn_name_is_E153(self, name: str) -> None:
         """Each reserved keyword is refused at the declaration site."""

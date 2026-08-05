@@ -838,6 +838,25 @@ def main() -> int:
                 f" live is {live_conformance}"
             )
 
+    # The by-the-numbers test count ("8,840 tests, including a ...").
+    # This line drifted silently through two releases because only the
+    # conformance half of the sentence was pinned.  A missing pattern is
+    # an error, not a skip — otherwise rewording the line disables the
+    # check and reopens the same blind spot one level up.
+    m = re.search(r"([\d,]+) tests, including", faq_md)
+    if not m:
+        errors.append(
+            "FAQ.md: headline test-count line"
+            " ('N tests, including ...') not found"
+        )
+    else:
+        doc_tests = int(m.group(1).replace(",", ""))
+        if doc_tests != live_total_tests:
+            errors.append(
+                f"FAQ.md: tests count: doc says {doc_tests},"
+                f" live is {live_total_tests}"
+            )
+
     # ------------------------------------------------------------------
     # 13. Check docs/index.html status block
     # ------------------------------------------------------------------
@@ -936,6 +955,24 @@ def main() -> int:
 
     history_md = (root / "HISTORY.md").read_text(encoding="utf-8")
     errors.extend(check_history_row_format(history_md))
+
+    # README's status row and HISTORY's "By the numbers" total are the
+    # same hand-maintained release count in two places; a release bumps
+    # both.  They disagreed for two releases (204/203, then 205/203)
+    # before this cross-check existed.
+    m_readme = re.search(r"(\d+) releases,", readme_md)
+    m_history = re.search(r"(\d+) tagged releases", history_md)
+    if not m_readme:
+        errors.append("README.md: release count ('N releases,') not found")
+    if not m_history:
+        errors.append(
+            "HISTORY.md: release count ('N tagged releases') not found"
+        )
+    if m_readme and m_history and m_readme.group(1) != m_history.group(1):
+        errors.append(
+            f"release count mismatch: README.md says {m_readme.group(1)},"
+            f" HISTORY.md says {m_history.group(1)} tagged releases"
+        )
 
     # ------------------------------------------------------------------
     # 17. Check the vera/README.md module map against the source tree
