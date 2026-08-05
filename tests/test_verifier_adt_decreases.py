@@ -343,7 +343,7 @@ private fn sum(@List<Int> -> @Int)
         assert result.summary.tier1_verified == 8
 
     def test_overall_tier_counts(self) -> None:
-        """All examples together: 358 T1 / 104 T3 / 462 total (current).
+        """All examples together: 359 T1 / 103 T3 / 462 total (current).
 
         Counts move when examples are added or their contracts become
         more / less verifiable.  Trajectory:
@@ -628,8 +628,14 @@ private fn sum(@List<Int> -> @Int)
         # the counter (`@Int.1`), which the verifier discharges at Tier 1
         # where the accumulator measure was Tier 3: +1 T1, -1 T3, +0 total:
         # 357/105/462 -> 358/104/462.
-        assert t1 == 358, f"Expected 358 T1, got {t1}"
-        assert t3 == 104, f"Expected 104 T3, got {t3}"
+        #
+        # #764: the tuple pseudo-constructor now translates in expression
+        # position and `_translate_block` models a destructure, so the
+        # syntax-tour `swap` (`Tuple<A, B>` construction + destructuring)
+        # discharges an obligation at Tier 1 that the truncated body left
+        # at Tier 3: +1 T1, -1 T3, +0 total: 358/104/462 -> 359/103/462.
+        assert t1 == 359, f"Expected 359 T1, got {t1}"
+        assert t3 == 103, f"Expected 103 T3, got {t3}"
         assert total == 462, f"Expected 462 total, got {total}"
         assert t3u == 0, f"Expected 0 tier3_unguarded, got {t3u}"
 

@@ -615,6 +615,354 @@ private fn bad_caller(@Int -> @Int)
 
 
 # =====================================================================
+# #764: block translation continues through a let-destructure
+# =====================================================================
+
+class TestCallPreAfterDestructure:
+    """#764: `_translate_block` models a `LetDestruct` — binding each
+    component via the RHS datatype's accessors — instead of truncating the
+    block, so a call precondition (E501) at or after the destructure is
+    statically checked again.
+
+    Before the fix the block translation returned ``None`` at the first
+    ``LetDestruct``, so every statement from the destructure onward —
+    including the block's final expression — was never seen by the E501
+    check or the postcondition proof.  The callee's runtime ``requires``
+    guard was the only backstop.
+
+    A *satisfied* call precondition discharges silently — verified
+    call-site checks are not enumerated in the obligation stream (Phase A,
+    ``vera/obligations/core.py``) — so the clean side of the fix is pinned
+    by the OK-half of ``test_destructure_component_debruijn_order``, whose
+    violating twin proves the check actually runs.
+    """
+
+    def test_call_violated_precondition_after_destructure(self) -> None:
+        """The issue's repro: an unconstrained destructured component fed to
+        a ``requires(> 0)`` callee must fire E501 (it verified silently
+        clean, Tier 1, before the fix)."""
+        _verify_err("""
+private fn needs_pos(@Int -> @Int)
+  requires(@Int.0 > 0)
+  ensures(true)
+  effects(pure)
+{ @Int.0 }
+
+private fn mk(@Int -> @Tuple<Int, Int>)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ Tuple(@Int.0, 3) }
+
+private fn caller(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let Tuple<@Int, @Int> = mk(@Int.0);
+  needs_pos(@Int.1)
+}
+""", "precondition")
+
+    def test_destructure_component_debruijn_order(self) -> None:
+        """Components bind leftmost-first, so for ``Tuple(5, -3)`` the slot
+        ``@Int.1`` is the FIRST component (5) and ``@Int.0`` the second
+        (-3).  A reversed push order flips both outcomes; the values are
+        distinct and non-coincident with any fallback."""
+        _verify_ok("""
+private fn needs_pos(@Int -> @Int)
+  requires(@Int.0 > 0)
+  ensures(true)
+  effects(pure)
+{ @Int.0 }
+
+private fn caller(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let Tuple<@Int, @Int> = Tuple(5, -3);
+  needs_pos(@Int.1)
+}
+""")
+        _verify_err("""
+private fn needs_pos(@Int -> @Int)
+  requires(@Int.0 > 0)
+  ensures(true)
+  effects(pure)
+{ @Int.0 }
+
+private fn caller(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let Tuple<@Int, @Int> = Tuple(5, -3);
+  needs_pos(@Int.0)
+}
+""", "precondition")
+
+    def test_ensures_after_destructure_proves_tier1(self) -> None:
+        """The block's final expression is translated again, so a
+        postcondition over it proves at Tier 1 (pre-fix the truncated body
+        demoted the ensures proof to the runtime tier).  The combination is
+        SUBTRACTION, not addition, so the proof is order-sensitive: with
+        components (5, 3), ``@Int.1 - @Int.0`` is first-minus-second = 2,
+        and a reversed push order would prove -2 instead (CodeRabbit,
+        PR #1200 round 5 — a commutative combiner masks the ordering)."""
+        result = _verify("""
+private fn summed(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 2)
+  effects(pure)
+{
+  let Tuple<@Int, @Int> = Tuple(5, 3);
+  @Int.1 - @Int.0
+}
+""")
+        assert not result.diagnostics
+        assert result.summary.tier3_runtime == 0, (
+            f"expected a fully Tier-1 result, got "
+            f"tier3_runtime={result.summary.tier3_runtime}"
+        )
+        ensures = [o for o in result.obligations if o.kind == "ensures"]
+        assert ensures and all(o.status == "verified" for o in ensures)
+
+    def test_stmt_position_call_after_destructure(self) -> None:
+        """The #730 × #764 product case: a statement-position (discarded-
+        result) violating call AFTER the destructure is still checked — the
+        ExprStmt arm runs on the post-destructure env."""
+        _verify_err("""
+private fn non_zero(@Int -> @Int)
+  requires(@Int.0 != 0)
+  ensures(true)
+  effects(pure)
+{ @Int.0 }
+
+private fn caller(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let Tuple<@Int, @Int> = Tuple(0, 7);
+  non_zero(@Int.1);
+  @Int.0
+}
+""", "precondition")
+
+    def test_call_before_destructure_still_checked(self) -> None:
+        """Regression guard for the pre-fix behaviour that DID work: a
+        violating call before the destructure keeps firing E501."""
+        _verify_err("""
+private fn non_zero(@Int -> @Int)
+  requires(@Int.0 != 0)
+  ensures(true)
+  effects(pure)
+{ @Int.0 }
+
+private fn caller(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  non_zero(0);
+  let Tuple<@Int, @Int> = Tuple(1, 2);
+  @Int.1
+}
+""", "precondition")
+
+
+# =====================================================================
+# #1199: block translation continues through an untranslatable let
+# =====================================================================
+
+class TestCallPreAfterOpaqueLet:
+    """#1199 (folded into the #764 fix): a `let` whose value the SMT layer
+    cannot translate — an effect-op result — no longer truncates the block.
+    The slot binds to a fresh unconstrained constant of the value's
+    recorded type and translation continues, so a later call's E501 is
+    still checked.  Against an opaque value an unprovable precondition
+    fires — the posture an opaque *function* result already had — and the
+    repair is an `assert`/`assume`, whose fact the #804 threading carries
+    into the check.  Opaque constants are span-keyed: distinct statements
+    yield distinct constants (two effect results are never provably
+    equal), while every translation pass over one statement sees the same
+    term.
+    """
+
+    def test_call_violated_after_opaque_let(self) -> None:
+        """An unconstrained effect-op value fed to `requires(> 0)` fires
+        E501 (pre-fix the block truncated and this verified silently
+        clean)."""
+        _verify_err("""
+private fn needs_pos(@Int -> @Int)
+  requires(@Int.0 > 0)
+  ensures(true)
+  effects(pure)
+{ @Int.0 }
+
+private fn caller(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<Random>)
+{
+  let @Int = random_int(0, 9);
+  needs_pos(@Int.0)
+}
+""", "precondition")
+
+    def test_assert_repairs_opaque_let_call(self) -> None:
+        """The documented repair: an `assert` on the opaque value threads
+        its fact (#804) into the call check, so the precondition proves and
+        no E501 fires.  Green pre-fix too (nothing was checked at all) —
+        kept as the over-fire guard for the opaque path."""
+        _verify_ok("""
+private fn needs_pos(@Int -> @Int)
+  requires(@Int.0 > 0)
+  ensures(true)
+  effects(pure)
+{ @Int.0 }
+
+private fn caller(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<Random>)
+{
+  let @Int = random_int(1, 9);
+  assert(@Int.0 > 0);
+  needs_pos(@Int.0)
+}
+""")
+
+    def test_two_opaque_lets_are_distinct(self) -> None:
+        """Two effect-op lets bind DISTINCT opaque constants — a
+        `requires(@Int.0 == @Int.1)` callee cannot prove them equal, so
+        E501 fires.  A shared-constant bug (same name for both) would prove
+        the equality and silently drop this E501."""
+        _verify_err("""
+private fn same(@Int, @Int -> @Int)
+  requires(@Int.0 == @Int.1)
+  ensures(true)
+  effects(pure)
+{ @Int.0 }
+
+private fn caller(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<Random>)
+{
+  let @Int = random_int(0, 9);
+  let @Int = random_int(0, 9);
+  same(@Int.1, @Int.0)
+}
+""", "precondition")
+
+    def test_ensures_after_opaque_let_proves(self) -> None:
+        """A postcondition independent of the opaque value proves at
+        Tier 1 (pre-fix the truncated body demoted it to E522)."""
+        result = _verify("""
+private fn seven(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 7)
+  effects(<Random>)
+{
+  let @Int = random_int(0, 9);
+  7
+}
+""")
+        assert not [d for d in result.diagnostics
+                    if d.error_code == "E522"]
+        ensures = [o for o in result.obligations if o.kind == "ensures"]
+        assert ensures and all(o.status == "verified" for o in ensures)
+
+    def test_ensures_depending_on_opaque_value_demotes_not_violates(
+        self,
+    ) -> None:
+        """The taint gate: a postcondition that DEPENDS on the opaque value
+        must demote to E522 Tier-3 — a countermodel over the unconstrained
+        stand-in says nothing about the value the effect produces, so
+        claiming E500 "postcondition violated" would be a false error (the
+        corpus regression the gate was built for: eleven conformance
+        programs and two examples flipped to false E500s without it).
+        Removing the gate turns this E522 into an E500 error."""
+        result = _verify("""
+private fn passthrough(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 0)
+  effects(<Random>)
+{
+  let @Int = random_int(0, 9);
+  @Int.0
+}
+""")
+        assert not [d for d in result.diagnostics
+                    if d.severity == "error"], (
+            f"expected no errors, got "
+            f"{[(d.error_code, d.description[:60]) for d in result.diagnostics]}"
+        )
+        e522 = [d for d in result.diagnostics if d.error_code == "E522"]
+        assert len(e522) == 1
+        ensures = [o for o in result.obligations if o.kind == "ensures"]
+        assert ensures and ensures[0].status == "tier3"
+
+    def test_nat_sub_over_opaque_values_is_tier3(self) -> None:
+        """A `@Nat - @Nat` underflow obligation whose operands resolve to
+        opaque effect values classifies as plain ``tier3`` — not
+        ``timeout`` (the cause is opacity, not the solver), and not a
+        violated E502 (the stand-ins refute nothing the effect produces).
+
+        The operands are NESTED BLOCKS each returning an opaque-bound
+        slot: the nat-sub walker translates a block operand through
+        `_translate_block`, so it resolves to the opaque constant and
+        `check_valid` returns "opaque", exercising the else-leg's opaque
+        routing (verified by line coverage — a plain `let @Nat = ...;`
+        operand leaves the walker's own env unresolved and never reaches
+        the check; CodeRabbit, PR #1200 round 3).  The inner `@Int`→`@Nat`
+        narrowings likewise classify guarded ``tier3``, covering the
+        value-site `nat_bind` else-leg."""
+        result = _verify("""
+private fn f(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<Random>)
+{
+  { let @Nat = random_int(0, 9); @Nat.0 } - { let @Nat = random_int(0, 9); @Nat.0 }
+}
+""")
+        subs = [o for o in result.obligations if o.kind == "nat_sub"]
+        assert subs and all(o.status == "tier3" for o in subs), [
+            (o.kind, o.status) for o in result.obligations
+        ]
+        binds = [o for o in result.obligations if o.kind == "nat_bind"]
+        assert binds and all(o.status == "tier3" for o in binds), [
+            (o.kind, o.status) for o in result.obligations
+        ]
+        assert not [d for d in result.diagnostics
+                    if d.error_code in ("E502", "E503")]
+
+    def test_call_violated_after_opaque_destructure(self) -> None:
+        """The destructure analogue: a tuple of effect-op results is
+        unprojectable, so each component binds a fresh opaque constant and
+        the later violating call still fires E501 (pre-fix: silent)."""
+        _verify_err("""
+private fn needs_pos(@Int -> @Int)
+  requires(@Int.0 > 0)
+  ensures(true)
+  effects(pure)
+{ @Int.0 }
+
+private fn caller(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<Random>)
+{
+  let Tuple<@Int, @Int> = Tuple(random_int(0, 9), random_int(0, 9));
+  needs_pos(@Int.1)
+}
+""", "precondition")
+
+
+# =====================================================================
 # #882: call-site preconditions over ADT-typed arguments
 # =====================================================================
 
@@ -1511,4 +1859,126 @@ private fn f(@Int -> @Box<Nat>)
         assert not errors, (
             f"shadowed self-recursive module generic must verify clean, got "
             f"{[(d.error_code, d.description[:60]) for d in errors]}"
+        )
+
+
+# =====================================================================
+# User-declared `data Tuple` vs the builtin tuple pseudo-constructor
+# (PR #1200 review round; the SMT twin of codegen's FIX-3 discrimination
+# in vera/wasm/data.py)
+# =====================================================================
+
+_USER_TUPLE_ADT_PROGRAM = """
+private data Tuple<A, B> {
+  Tuple(A, B)
+}
+
+public fn g(@Int -> @Int)
+  requires(true)
+  ensures(@Int.result == 2)
+  effects(pure)
+{
+  let @Tuple<Int, Int> = Tuple(5, 3);
+  match @Tuple<Int, Int>.0 {
+    Tuple(@Int, @Int) -> @Int.1 - @Int.0
+  }
+}
+"""
+
+
+class TestUserTupleCtorRegistryRouting:
+    """A registered user `data Tuple<A, B>` takes the registry-backed
+    constructor path, never the builtin pseudo-constructor synthesis door.
+
+    The synthesis door reverse-maps argument sorts to types (a Nat-typed
+    argument recovers as Int from Z3's IntSort), so routing a REGISTERED
+    Tuple through it would materialise fresh instantiations of the user
+    ADT (`Tuple<Int, Int>`) that the declared-type side never created —
+    violating the #882/#918 never-newly-enables posture and desyncing the
+    constructor term's sort from the declared-side sort (`Tuple<Nat,
+    Nat>`).  Codegen discriminates the same name collision (the FIX-3
+    path in vera/wasm/data.py, pinned by TestFix3UserTupleGate); these
+    tests pin the SMT side: the name "Tuple" confers no special SMT
+    behaviour once it names a registry ADT.
+    """
+
+    def test_user_tuple_profile_matches_isomorphic_user_adt(self) -> None:
+        """Differential: a user `data Tuple` program and its `data Pair`
+        rename must produce identical obligation profiles.
+
+        The rename is mechanical (every `Tuple` token becomes `Pair`), so
+        the two programs are isomorphic; any profile divergence can only
+        come from name-keyed special-casing in the SMT layer.  Before the
+        registry guard the Tuple spelling proved its ensures Tier-1 by
+        materialising a fresh `Tuple<Int, Int>` instantiation while the
+        Pair spelling honestly demoted — this asserts that divergence can
+        never return.
+        """
+        tuple_profile = [
+            (o.fn_name, o.kind, o.status)
+            for o in _verify(_USER_TUPLE_ADT_PROGRAM).obligations
+        ]
+        pair_profile = [
+            (o.fn_name, o.kind, o.status)
+            for o in _verify(
+                _USER_TUPLE_ADT_PROGRAM.replace("Tuple", "Pair"),
+            ).obligations
+        ]
+        assert tuple_profile == pair_profile, (
+            f"user Tuple diverged from isomorphic user Pair:\n"
+            f"  Tuple: {tuple_profile}\n  Pair:  {pair_profile}"
+        )
+
+    def test_user_tuple_uncached_ctor_instantiation_demotes(self) -> None:
+        """A user-Tuple ctor call whose argument-pinned instantiation was
+        never cached demotes; it must not mint the instantiation itself.
+
+        `pick`'s parameter type materialises the user ADT at `<Nat, Nat>`;
+        the call argument `Tuple(@Nat.0, @Nat.0)` pins `<Int, Int>` (Nat
+        reverse-maps to Int), which is uncached — so the constructor is
+        untranslatable and `f`'s ensures, which depends on the call
+        result, honestly demotes to the runtime tier.  Before the guard
+        the synthesis door minted the `<Int, Int>` instantiation and the
+        ensures "proved" against a term whose sort disagreed with the
+        declared side.  A future improvement may legitimately flip this
+        obligation back to verified — but only by REUSING the declared
+        `<Nat, Nat>` sort (e.g. recorded-type-hint routing), never by
+        minting; the isomorphic-rename differential above still governs.
+        """
+        result = _verify("""
+private data Tuple<A, B> {
+  Tuple(A, B)
+}
+
+private fn pick(@Tuple<Nat, Nat> -> @Int)
+  requires(true)
+  ensures(@Int.result >= 0)
+  effects(pure)
+{
+  match @Tuple<Nat, Nat>.0 {
+    Tuple(@Nat, @Nat) -> nat_to_int(@Nat.0)
+  }
+}
+
+public fn f(@Nat -> @Int)
+  requires(true)
+  ensures(@Int.result >= 0)
+  effects(pure)
+{
+  pick(Tuple(@Nat.0, @Nat.0))
+}
+""")
+        errors = [d for d in result.diagnostics if d.severity == "error"]
+        assert not errors, (
+            f"valid program must not error: "
+            f"{[(d.error_code, d.description[:60]) for d in errors]}"
+        )
+        f_ensures = [
+            o for o in result.obligations
+            if o.fn_name == "f" and o.kind == "ensures"
+        ]
+        assert len(f_ensures) == 1
+        assert f_ensures[0].status == "tier3", (
+            f"f's ensures depends on an uncached user-Tuple instantiation; "
+            f"expected honest tier3 demotion, got {f_ensures[0].status!r}"
         )

@@ -153,7 +153,7 @@ class SlotEnv:
 class SmtResult:
     """Outcome of a Z3 validity check."""
 
-    status: str  # "verified" | "violated" | "unknown" | "unsupported"
+    status: str  # "verified" | "violated" | "unknown" | "unsupported" | "opaque"
     counterexample: dict[str, str] | None = None  # slot_name → value
 
 
@@ -315,6 +315,12 @@ class SmtContext:
         self._fn_lookup = fn_lookup
         self._module_fn_lookup = module_fn_lookup
         self._call_violations: list[CallViolation] = []
+        # #1199: True once any opaque stand-in constant entered this
+        # function's body model (see _fresh_opaque_slot).  The verifier's
+        # ensures / refined-return checks consult it: a failed proof over a
+        # tainted model demotes to Tier-3 instead of claiming a definite
+        # violation the opaque value may never realise.
+        self._opaque_tainted = False
         # #882: call sites whose precondition obligation cannot be checked
         # statically (untranslatable ADT-argument, etc.) — demoted to a loud
         # Tier-3 by the verifier rather than silently dropped.
@@ -2066,6 +2072,64 @@ class SmtContext:
 
         return ret_var
 
+    def _fresh_opaque_slot(
+        self, node: ast.Expr, tag: str, ty: Type | None = None,
+    ) -> z3.ExprRef | None:
+        """#1199: a fresh unconstrained constant standing in for a value the
+        SMT layer cannot translate — an effect-op result (``IO.read(...)``,
+        ``random_int(...)``) bound by a ``let``.
+
+        The sort comes from *ty* when the caller already resolved it (a
+        destructure component's source type), else from the checker's
+        recorded type for *node* via the verifier-injected
+        ``_recorded_type_hook``.  Returns ``None`` — callers keep their
+        conservative bail — when no hook, no recorded type, or no
+        representable sort.
+
+        The name is **span-keyed**, not counter-keyed: the warm
+        ``VerificationSession`` and a cold ``verify()`` must mint identical
+        names for the same program (the full-corpus warm==cold differential
+        compares diagnostic text), and every translation pass over the same
+        statement must see the *same* term.  Two different statements get
+        different spans, hence distinct constants — two ``random_int`` lets
+        must never be provably equal.
+        """
+        if ty is None:
+            hook = getattr(self, "_recorded_type_hook", None)
+            if hook is None:
+                return None
+            ty = hook(node)
+            if ty is None:
+                return None
+        if isinstance(ty, RefinedType):
+            ty = ty.base
+        sort = self._vera_type_to_z3_sort(ty)
+        if sort is None:
+            return None
+        span = getattr(node, "span", None)
+        if span is None:  # pragma: no cover — parser always spans statements
+            return None
+        self._opaque_tainted = True
+        return z3.Const(f"_opaque_{tag}_{span.line}_{span.column}", sort)
+
+    def _term_mentions_opaque(self, term: z3.ExprRef) -> bool:
+        """#1199: True when *term* contains an ``_opaque_``-named constant
+        minted by :py:meth:`_fresh_opaque_slot`.  Iterative with an id-keyed
+        seen-set (shared subterms are common in translated goals)."""
+        seen: set[int] = set()
+        stack: list[z3.ExprRef] = [term]
+        while stack:
+            t = stack.pop()
+            tid = t.get_id()
+            if tid in seen:
+                continue
+            seen.add(tid)
+            if (z3.is_app(t) and t.num_args() == 0
+                    and t.decl().name().startswith("_opaque_")):
+                return True
+            stack.extend(t.children())
+        return False
+
     def _translate_block(
         self, block: ast.Block, env: SlotEnv
     ) -> z3.ExprRef | None:
@@ -2086,7 +2150,20 @@ class SmtContext:
                 if isinstance(stmt, ast.LetStmt):
                     val = self.translate_expr(stmt.value, current_env)
                     if val is None:
-                        return None
+                        # #1199: an untranslatable value (an effect-op
+                        # result) no longer truncates the block — bind a
+                        # fresh opaque constant of the value's recorded
+                        # type and continue, so a later call's E501 is
+                        # still checked.  Against an unconstrained value
+                        # an unprovable precondition fires, the posture an
+                        # opaque *function* result already gets; the
+                        # repair is an assert/assume, whose fact the #804
+                        # threading carries into the check.  No recorded
+                        # type / representable sort keeps the pre-#1199
+                        # bail.
+                        val = self._fresh_opaque_slot(stmt.value, "let")
+                        if val is None:
+                            return None
                     # Extract slot type name from the let binding
                     type_name = self._type_expr_to_slot_name(stmt.type_expr)
                     if type_name is None:  # pragma: no cover
@@ -2111,8 +2188,75 @@ class SmtContext:
                         fact = self.translate_expr(stmt.expr.expr, current_env)
                         if fact is not None:
                             self._path_conditions.append(fact)
+                elif isinstance(stmt, ast.LetDestruct):
+                    # #764: model the destructure instead of truncating the
+                    # block.  Each component is bound to the RHS datatype's
+                    # accessor term, leftmost-first — the checker's binding
+                    # order (`_check_let_destruct`), so De Bruijn indices
+                    # agree: for `let Tuple<@Int, @Int> = ...` the FIRST
+                    # component is `@Int.1` and the second `@Int.0`.  Raw
+                    # projections only, mirroring the LetStmt arm above: no
+                    # extra @Nat/refinement facts are assumed here — the
+                    # narrowing walks (`_obligate_destructure_narrowings`)
+                    # obligate those separately, exactly as they do for a
+                    # plain `let @Nat = ...`.  An RHS the SMT layer cannot
+                    # project (untranslatable, or not modelled as a Z3
+                    # datatype) falls to the #1199 opaque path: one fresh
+                    # unconstrained constant per component, sorted from the
+                    # checker's recorded source tuple type — later E501
+                    # checks still run, against opaque values.  Only when
+                    # even that type is unavailable does the pre-#764
+                    # conservative bail remain.
+                    val = self.translate_expr(stmt.value, current_env)
+                    idx: int | None = None
+                    if val is not None:
+                        idx = self._find_ctor_index(
+                            val.sort(), stmt.constructor)
+                        if (idx is not None
+                                and val.sort().constructor(idx).arity()
+                                != len(stmt.type_bindings)):
+                            idx = None  # malformed arity — unprojectable
+                    comps: list[z3.ExprRef] = []
+                    if val is not None and idx is not None:
+                        comps = [
+                            val.sort().accessor(idx, i)(val)
+                            for i in range(len(stmt.type_bindings))
+                        ]
+                    else:
+                        # The opaque fallback derives component sorts from
+                        # the source type's arguments, which equal the
+                        # field types positionally ONLY for the variadic
+                        # Tuple pseudo-constructor (definitionally: one
+                        # field per type argument, in order).  A general
+                        # ADT constructor may reorder or repeat its type
+                        # parameters (`data Rev<A, B> { R(B, A) }`), where
+                        # `type_args[i]` is the wrong sort for field `i` —
+                        # so a non-tuple opaque destructure keeps the
+                        # conservative bail (CodeRabbit, PR #1200 round 4).
+                        if stmt.constructor != "Tuple":
+                            return None
+                        hook = getattr(self, "_recorded_type_hook", None)
+                        rhs_ty = hook(stmt.value) if hook else None
+                        if isinstance(rhs_ty, RefinedType):
+                            rhs_ty = rhs_ty.base
+                        if not (isinstance(rhs_ty, AdtType)
+                                and rhs_ty.type_args is not None
+                                and len(rhs_ty.type_args)
+                                == len(stmt.type_bindings)):
+                            return None
+                        for i, src_ty in enumerate(rhs_ty.type_args):
+                            opaque = self._fresh_opaque_slot(
+                                stmt.value, f"destr{i}", ty=src_ty)
+                            if opaque is None:
+                                return None
+                            comps.append(opaque)
+                    for te, comp in zip(stmt.type_bindings, comps):
+                        comp_name = self._type_expr_to_slot_name(te)
+                        if comp_name is None:  # pragma: no cover
+                            return None
+                        current_env = current_env.push(comp_name, comp)
                 else:
-                    # LetDestruct or unknown statement type
+                    # Unknown statement type
                     return None  # pragma: no cover
             return self.translate_expr(block.expr, current_env)
         finally:
@@ -2677,6 +2821,35 @@ class SmtContext:
         arg_types: list[Type | None] = [
             self._z3_sort_to_vera_type(a.sort()) for a in z3_args
         ]
+        # #764: the variadic tuple pseudo-constructor is structural and not
+        # in the ADT registry, so the registry-backed instantiation path
+        # below cannot resolve it — a literal `Tuple(5, 3)` was
+        # untranslatable while `f()` returning the same tuple translated
+        # fine.  Its sort is total in the argument sorts, so route through
+        # the #747 on-demand synthesis door and apply directly.  The
+        # registry guard keeps the #882/#918 never-newly-enables posture
+        # intact: a user `data Tuple<A, B>` is legal (the codegen twin of
+        # this collision is the FIX-3 discrimination in wasm/data.py), and
+        # its constructor must take the registry path below, which only
+        # reuses cached instantiations — this branch's reverse-mapped
+        # argument types (Nat recovers as Int from Z3's IntSort) would
+        # materialise a fresh `Tuple<Int, Int>` instantiation of the user
+        # ADT instead of reusing the declared-side sort (CR PR #1200).
+        # For the builtin carrier there is no registry entry and no cached
+        # instantiation to desync from: the synthesised sort is keyed by
+        # the same argument-derived types every ctor call recovers.
+        if expr.name == "Tuple" and "Tuple" not in self._adt_registry:
+            if not z3_args or any(t is None for t in arg_types):
+                return None
+            tuple_sort = self._get_or_create_adt_sort(
+                "Tuple", tuple(t for t in arg_types if t is not None),
+            )
+            if tuple_sort is None:
+                return None
+            t_idx = self._find_ctor_index(tuple_sort, "Tuple")
+            if t_idx is None:  # pragma: no cover
+                return None
+            return tuple_sort.constructor(t_idx)(*z3_args)
         type_args = self._ctor_instantiation_from_args(expr.name, arg_types)
         sort = self._find_sort_for_ctor(expr.name, type_args)
         if sort is None:
@@ -2825,6 +2998,31 @@ class SmtContext:
         if result == z3.unsat:
             return SmtResult(status="verified")
         elif result == z3.sat:
+            # #1199: a countermodel over an opaque effect-op stand-in
+            # (`_fresh_opaque_slot`) refutes nothing the effect actually
+            # produces — `random_int(1, 9)` never returns 0, yet its opaque
+            # constant "witnesses" a zero divisor.  Every obligation kind
+            # whose goal mentions such a constant reports "opaque" instead
+            # of "violated"; callers route it to their non-violated leg
+            # (Tier-3 / demotion), while a call precondition's strict
+            # `!= "verified"` check still records the E501 — establishing
+            # a precondition is the caller's obligation.  The check is
+            # per-goal (term traversal), not per-function: a genuine
+            # violation elsewhere in a function that also binds an opaque
+            # value stays loud.
+            if self._opaque_tainted and (
+                self._term_mentions_opaque(goal)
+                or any(self._term_mentions_opaque(a) for a in assumptions)
+                or any(self._term_mentions_opaque(pc)
+                       for pc in self._path_conditions)
+            ):
+                # The goal itself, an assumption, or a path condition
+                # mentioning an opaque constant all poison the countermodel
+                # the same way — a fact linking a goal variable to an
+                # opaque value lets the "witness" assign both freely
+                # (CodeRabbit, PR #1200 round 5).  Demoting is the safe
+                # direction: the runtime guard still enforces the contract.
+                return SmtResult(status="opaque")
             return SmtResult(status="violated", counterexample=ce)
         else:  # pragma: no cover
             return SmtResult(status="unknown")
@@ -2866,6 +3064,7 @@ class SmtContext:
         self._call_violations.clear()
         self._call_demotions.clear()
         self._fresh_counter = 0
+        self._opaque_tainted = False
         self._path_conditions.clear()
         self._length_fns = {
             "Int": z3.Function("length", z3.IntSort(), z3.IntSort()),

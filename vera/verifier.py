@@ -2443,6 +2443,38 @@ class ContractVerifier:
                     self._record_obligation(
                         decl.name, "ensures", contract, "verified",
                     )
+                elif smt_result.status == "opaque":
+                    # #1199: the postcondition's goal mentions an opaque
+                    # stand-in for an effect-op value (check_valid's
+                    # per-goal gate).  A countermodel over that
+                    # unconstrained constant says nothing about the value
+                    # the effect actually produces, so claiming a definite
+                    # violation would be a false E500 — the honest verdict
+                    # is the same Tier-3 demotion an untranslatable body
+                    # always got.  (A proof that SUCCEEDS despite the
+                    # opacity is kept: it holds for every value the
+                    # constant could take.)
+                    self._record_obligation(
+                        decl.name, "ensures", contract, "tier3",
+                        error_code="E522",
+                    )
+                    self._warning(
+                        contract,
+                        f"Cannot statically verify postcondition in "
+                        f"'{decl.name}'. The function body binds an "
+                        f"effect-operation value the verifier models "
+                        f"opaquely, and the postcondition depends on "
+                        f"it. Contract will be checked at runtime.",
+                        rationale="An effect operation's result is "
+                                  "outside the decidable fragment; the "
+                                  "verifier binds it as an unconstrained "
+                                  "value, so a postcondition that "
+                                  "depends on it can be neither proven "
+                                  "nor refuted statically.",
+                        spec_ref='Chapter 6, Section 6.8 "Summary of Verification Tiers"',
+                        error_code="E522",
+                        tier=3,
+                    )
                 elif smt_result.status == "violated":
                     self._record_obligation(
                         decl.name, "ensures", contract, "violated",
@@ -2508,7 +2540,11 @@ class ContractVerifier:
                         decl, ret_node, ret_type, "return type",
                         ret_result.counterexample,
                     )
-                else:  # pragma: no cover — solver timeout
+                else:
+                    # Solver timeout — or, #1199, a countermodel over an
+                    # opaque effect-op stand-in, which refutes nothing the
+                    # effect actually produces: both demote to the guarded
+                    # Tier-3 leg rather than claiming a definite E505.
                     self._record_refined_bind_tier3(
                         decl, ret_node, "return type",
                         guarded=self._refined_boundary_codegen_guardable(
@@ -4404,9 +4440,12 @@ class ContractVerifier:
                 counterexample=result.counterexample,
             )
             self._report_underflow(decl, expr, result.counterexample)
-        else:  # pragma: no cover — solver timeout
+        else:
+            # Solver timeout — or #1199's "opaque" (the goal mentions an
+            # effect-op stand-in), which is plain Tier-3, not a timeout.
             self._record_obligation(
-                decl.name, "nat_sub", expr, "timeout",
+                decl.name, "nat_sub", expr,
+                "tier3" if result.status == "opaque" else "timeout",
             )
 
     def _check_div_zero_obligation(
@@ -4483,9 +4522,12 @@ class ContractVerifier:
                 counterexample=result.counterexample,
             )
             self._report_div_by_zero(decl, expr, result.counterexample)
-        else:  # pragma: no cover — solver timeout
+        else:
+            # Solver timeout — or #1199's "opaque" (the goal mentions an
+            # effect-op stand-in), which is plain Tier-3, not a timeout.
             self._record_obligation(
-                decl.name, "div_zero", expr, "timeout",
+                decl.name, "div_zero", expr,
+                "tier3" if result.status == "opaque" else "timeout",
             )
 
     def _check_assert_obligation(
@@ -4890,9 +4932,17 @@ class ContractVerifier:
                 counterexample=result.counterexample,
             )
             self._report_nat_binding(decl, value_node, site, result.counterexample)
-        else:  # pragma: no cover — solver timeout
+        else:  # pragma: no cover — defensive; see comment
+            # Solver timeout — or #1199's "opaque" (the goal mentions an
+            # effect-op stand-in), which is plain Tier-3, not a timeout.
+            # Not currently reached by any test: the nat-bind walks record
+            # an opaque/untranslatable SOURCE upstream (before check_valid),
+            # so this leg is defensive routing for a goal that embeds an
+            # opaque term some other way.
             self._record_nat_bind_tier3(
-                decl, value_node, site, "timeout", guarded=guarded)
+                decl, value_node, site,
+                "tier3" if result.status == "opaque" else "timeout",
+                guarded=guarded)
 
     def _check_nat_binding_obligation_term(
         self,
@@ -4927,11 +4977,17 @@ class ContractVerifier:
                 error_code="E503", counterexample=result.counterexample,
             )
             self._report_nat_binding(decl, node, site, result.counterexample)
-        else:  # pragma: no cover — solver timeout
-            # Projection sites (sub-pattern / destructure) are unconditionally
+        else:  # pragma: no cover — defensive; see comment
+            # Solver timeout — or #1199's "opaque" (the term mentions an
+            # effect-op stand-in), which is plain Tier-3, not a timeout.
+            # Not currently reached by any test (the walks record opaque
+            # sources upstream); kept as defensive routing.  Projection
+            # sites (sub-pattern / destructure) are unconditionally
             # codegen-guarded.
             self._record_nat_bind_tier3(
-                decl, node, site, "timeout", guarded=True)
+                decl, node, site,
+                "tier3" if result.status == "opaque" else "timeout",
+                guarded=True)
 
     def _check_int_widening_obligation(
         self,
@@ -5800,8 +5856,8 @@ class ContractVerifier:
         tuple support) and obligated ``>= 0``.
 
         When the SMT layer cannot project the source into components — e.g.
-        an ``if``-expression over tuples, which it does not model as a
-        datatype — the narrowing is real but unverifiable *statically* here,
+        a tuple whose components are effect-op results, which it cannot
+        translate — the narrowing is real but unverifiable *statically* here,
         so it is surfaced as one guarded Tier-3 obligation per @Nat component
         (``tier3_runtime``) rather than dropped silently.  The destructure is
         a codegen-guarded site (recorded ``guarded=True``): codegen guards
@@ -5846,8 +5902,10 @@ class ContractVerifier:
             except Exception:  # pragma: no cover — non-datatype RHS  # noqa: BLE001
                 sort = idx = None
         if sort is None or idx is None:
-            # The SMT layer can't project this source (e.g. an if-expression
-            # over tuples).  Codegen still guards the @Nat destructure
+            # The SMT layer can't project this source (e.g. a tuple whose
+            # components are effect-op results — an if-expression over tuple
+            # literals is projectable since #764).  Codegen still guards the
+            # @Nat destructure
             # component at run time, so those are guarded Tier-3 (one per
             # component, matching the projectable path).  Refinements have no
             # codegen runtime guard yet, so a refined component is an E506
