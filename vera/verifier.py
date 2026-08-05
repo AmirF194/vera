@@ -5509,6 +5509,22 @@ class ContractVerifier:
         """
         ci = self._lookup_constructor_info(ctor_name)
         if ci is None or ci.field_types is None:
+            # #1201: the builtin tuple carrier has no registry constructor
+            # entry, but its "field types" ARE the scrutinee's component
+            # type args — positional and total.  Without this a match over
+            # a `Tuple<Nat, Nat>` parameter bound its `@Nat` components
+            # with no source fact (a valid ensures over one was falsely
+            # violated) and a genuine `@Nat` narrowing of an Int component
+            # was silently unobligated.  A USER `data Tuple` never reaches
+            # here — its constructor IS registered, so the lookup above
+            # succeeds and it keeps registry semantics (the verifier twin
+            # of codegen's FIX-3 discrimination in wasm/data.py).
+            if ctor_name == "Tuple":
+                base_ty = (scrut_ty.base
+                           if isinstance(scrut_ty, RefinedType) else scrut_ty)
+                if (isinstance(base_ty, AdtType)
+                        and base_ty.name == "Tuple" and base_ty.type_args):
+                    return base_ty.type_args
             return None
         field_types = ci.field_types
         if ci.parent_type_params:

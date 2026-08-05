@@ -8,7 +8,6 @@ Defects in shipped compiler, runtime, or tooling behaviour — this table matche
 
 | Bug | Issue |
 |-----|-------|
-| False E500: the match-bound `@Nat` component of a **builtin** `Tuple<Nat, Nat>`-typed parameter loses its non-negativity fact in the ensures proof context, so a valid postcondition over it is reported violated (the user-ADT twin — any registered `data` with the same shape — proves Tier-1). | [#1201](https://github.com/aallan/vera/issues/1201) |
 | `ch05_closure_nat_return` (a run-level conformance program in the pre-commit + CI gate) trapped **once** in a full `check_conformance.py` run (`unreachable` in `main` — the sentinel `assert` or a GC shadow-stack guard) and has not reproduced in ~960 attempts across isolated, parallel, eager-GC, and hash-seed-swept executions; the emitted WAT is deterministic and correct. Suspected rare runtime/GC/wasmtime interaction, tracked so a future intermittent CI red resolves here instead of starting fresh. | [#996](https://github.com/aallan/vera/issues/996) |
 
 ## Limitations

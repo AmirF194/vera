@@ -1644,3 +1644,65 @@ public fn main(@Unit -> @Int)
 }
 """, "narrowing into a @Nat constructor field")
         assert any(e.error_code == "E503" for e in errs)
+
+
+# =====================================================================
+# #1201: a builtin Tuple<Nat, Nat> parameter's match-bound components
+# carry their declared component types' facts (and narrowing sub-patterns
+# are obligated), exactly like a registry ADT's fields.
+# =====================================================================
+
+class TestBuiltinTupleMatchComponentFacts:
+    """`_instantiated_field_types` resolves the builtin tuple carrier's
+    "field types" from the scrutinee's `AdtType("Tuple", ...)` component
+    types — the builtin has no registry constructor entry, and without the
+    fallback a match over a `Tuple<Nat, Nat>` PARAMETER bound its `@Nat`
+    components with no non-negativity fact, so a valid ensures over a
+    component was reported violated (false E500, #1201) while the
+    isomorphic user-`data` twin proved.  A registered user `data Tuple`
+    still takes the registry path (the FIX-3 discrimination's verifier
+    twin)."""
+
+    def test_tuple_nat_param_component_ensures_proves(self) -> None:
+        """The #1201 repro: E500 before the fallback, Tier-1 after."""
+        result = _verify("""
+public fn pick(@Tuple<Nat, Nat> -> @Int)
+  requires(true)
+  ensures(@Int.result >= 0)
+  effects(pure)
+{
+  match @Tuple<Nat, Nat>.0 {
+    Tuple(@Nat, @Nat) -> nat_to_int(@Nat.0)
+  }
+}
+""")
+        errors = [d for d in result.diagnostics if d.severity == "error"]
+        assert not errors, (
+            f"both components are Nat by typing, the ensures holds: "
+            f"{[(d.error_code, d.description[:60]) for d in errors]}"
+        )
+        ensures = [o for o in result.obligations if o.kind == "ensures"]
+        assert len(ensures) == 1
+        assert ensures[0].status == "verified", (
+            f"component fact must discharge the ensures at Tier 1, got "
+            f"{ensures[0].status!r}"
+        )
+
+    def test_tuple_int_param_nat_subpattern_narrowing_obligated(self) -> None:
+        """The dual: binding an Int-typed component as `@Nat` is a genuine
+        narrowing and must be obligated (loud E503 on an unprovable one),
+        not silently assumed — the same verdict the destructure form gets.
+        """
+        errs = _verify_err("""
+public fn f(@Tuple<Int, Int> -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  match @Tuple<Int, Int>.0 {
+    Tuple(@Nat, @Nat) -> nat_to_int(@Nat.0)
+  }
+}
+""", "narrowing into a @Nat ADT sub-pattern bind")
+        assert len(errs) == 2, "one E503 per @Nat-bound Int component"
+        assert all(e.error_code == "E503" for e in errs)
