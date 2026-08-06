@@ -471,7 +471,7 @@ class TestClosureReturnNarrowingDifferential984:
         Tier-3 record per guard, and the guard itself still traps a
         negative."""
         statuses = _return_nat_bind_statuses(_NESTED_CLOSURE)
-        assert "tier3" in statuses, (
+        assert statuses == ["tier3"], (
             "nested: the return-narrowing obligation vanished — the #985 "
             "under-reporting regressed"
         )
@@ -1361,3 +1361,71 @@ class TestRefinedBoundaryGuardableHelper:
             RefinedType(AdtType("Array", (RefinedType(INT, pred),)), pred))
         assert g(RefinedType(INT, pred))
         assert g(RefinedType(AdtType("Array", (PrimitiveType("Int"),)), pred))
+
+
+class TestClosureInteriorBindingDifferential779:
+    """PR #1202: the #779 fresh-scope descent records interior closure
+    binding sites (`let @Nat = <closure Int param>`) as tier3 with
+    guarded=True — this differential proves the claimed guard exists:
+    the lifted closure's compiled body traps the negative narrowing and
+    passes the non-negative one.  The verifier side of the pair is
+    pinned in tests/test_verifier_fresh_scope.py
+    (test_nat_bind_in_closure_body_is_tier3_guarded)."""
+
+    _INTERIOR_LET = """\
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  let @Array<Int> = array_map([@Int.0], fn(@Int -> @Int) effects(pure) { let @Nat = @Int.0; nat_to_int(@Nat.0) });
+  @Array<Int>.0[0]
+}
+"""
+
+    def test_negative_traps(self) -> None:
+        assert _run(self._INTERIOR_LET, "go", -5) is None, (
+            "interior closure let-narrowing guard missing -> silent negative"
+        )
+
+    def test_non_negative_passes(self) -> None:
+        assert _run(self._INTERIOR_LET, "go", 7) == 7
+
+    def test_zero_survives(self) -> None:
+        assert _run(self._INTERIOR_LET, "go", 0) == 0
+
+
+class TestNestedSubpatternDifferential:
+    """PR #1202 silent-failure review: the nested `@Nat` sub-pattern bind
+    (`MkWrap(MkBox(@Nat))`) IS codegen-guarded — this differential proves
+    the guard the verifier's static fallback claims (guarded tier3 on an
+    unprojectable scrutinee, pinned in tests/test_verifier_fresh_scope.py
+    TestNestedSubpatternFallback).  The refined nested bind is the
+    UNGUARDED residual (#765) and is disclosed as tier3_unguarded/E506
+    instead."""
+
+    _NESTED_NAT = """\
+private data Box {
+  MkBox(Int)
+}
+
+private data Wrap {
+  MkWrap(Box)
+}
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  let @Wrap = MkWrap(MkBox(@Int.0));
+  match @Wrap.0 {
+    MkWrap(MkBox(@Nat)) -> nat_to_int(@Nat.0)
+  }
+}
+"""
+
+    def test_negative_traps(self) -> None:
+        assert _run(self._NESTED_NAT, "go", -5) is None, (
+            "nested @Nat sub-pattern guard missing -> silent negative"
+        )
+
+    def test_non_negative_passes(self) -> None:
+        assert _run(self._NESTED_NAT, "go", 7) == 7
+
+    def test_zero_survives(self) -> None:
+        assert _run(self._NESTED_NAT, "go", 0) == 0

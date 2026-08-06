@@ -129,8 +129,9 @@ public fn f(@Array<Nat> -> @Array<Int>)
     def test_nat_bind_in_closure_body_is_tier3_guarded(self) -> None:
         """`let @Nat = <closure Int param>` inside a closure body is a
         narrowing obligation, Tier-3 backed by the lifted closure's
-        interior codegen guard (verified by the run-trap differential
-        below)."""
+        interior codegen guard — proven by the compile-and-run
+        differential in tests/test_nat_narrowing_return_differential.py
+        (TestClosureInteriorBindingDifferential779)."""
         obls = _obligations_of("""
 public fn f(@Array<Int> -> @Array<Int>)
   requires(true)
@@ -281,3 +282,366 @@ public fn f(@Array<Int>, @Array<Int> -> @Array<Int>)
             "the nested closure's @Int body narrowing into its @Nat return "
             "must be obligated (codegen guards it; the stream must say so)"
         )
+
+
+# =====================================================================
+# Review round: the nat-binding walker descends assert / assume
+# conditions (a call argument narrowing inside one is obligated) and
+# carries the WALKER_COVERAGE marker so the #597 gate enforces its
+# case split from now on.
+# =====================================================================
+
+class TestNatBindingWalkerAssertAssume:
+    def test_narrowing_call_arg_inside_assert_condition_obligated(self) -> None:
+        """`assert(takes_nat(0 - 5) > 0)` hosts an @Int→@Nat narrowing in
+        the asserted condition; the nat-binding walker must reach it (the
+        primitive-op and calls walkers already descend assert conditions)
+        — before the fix it recorded ZERO nat_bind obligations and the
+        provably-negative argument passed silently."""
+        errs = _verify_err("""
+private fn takes_nat(@Nat -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ nat_to_int(@Nat.0) }
+
+public fn f(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  assert(takes_nat(0 - 5) > 0);
+  0
+}
+""", "narrowing")
+        assert any(e.error_code == "E503" for e in errs)
+
+    def test_narrowing_call_arg_inside_assume_condition_obligated(self) -> None:
+        """The assume twin: the condition is taken on trust, but a
+        narrowing op nested inside it still executes and is obligated."""
+        errs = _verify_err("""
+private fn takes_nat(@Nat -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ nat_to_int(@Nat.0) }
+
+public fn f(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  assume(takes_nat(0 - 5) > 0);
+  0
+}
+""", "narrowing")
+        assert any(e.error_code == "E503" for e in errs)
+
+
+# =====================================================================
+# Mutation-derived battery (PR #1202 test-coverage review): each test
+# below kills a specific mutant that survived the original 12 — the
+# nat-binding walker's container arms and env-honesty were unobserved
+# (a combined mutant deleting both arms passed the full suite).
+# =====================================================================
+
+class TestNatBindingFreshScopeHonesty:
+    """The nat-binding twins of the primitive walker's soundness pin and
+    scope-precision tests — the #779 care clause applies to BOTH walkers,
+    and only distinguishing shapes (an outer requires-constrained slot of
+    the same type) can tell an honest fresh env from a dishonest
+    enclosing-env descent."""
+
+    def test_closure_nat_bind_never_proves_against_outer_requires(self) -> None:
+        """M8 killer: outer `requires(@Int.0 >= 0)`, closure narrows ITS
+        OWN `@Int.0` — a dishonest enclosing-env descent would falsely
+        prove the narrowing from the outer fact while codegen still traps
+        a negative element."""
+        obls = _obligations_of("""
+public fn f(@Int, @Array<Int> -> @Array<Int>)
+  requires(@Int.0 >= 0)
+  ensures(true)
+  effects(pure)
+{
+  array_map(@Array<Int>.0, fn(@Int -> @Int) effects(pure) { let @Nat = @Int.0; nat_to_int(@Nat.0) })
+}
+""", "nat_bind")
+        assert len(obls) == 1
+        assert obls[0].status != "verified", (
+            "closure narrowing proved against the OUTER requires — the "
+            "dishonest-env false Tier-1"
+        )
+
+    def test_handle_clause_nat_bind_never_proves_against_outer_requires(self) -> None:
+        """M7 killer: the clause twin — the thrown payload can be negative
+        (`throw(0 - 5)`) regardless of the outer function's requires."""
+        obls = _obligations_of("""
+public fn f(@Int -> @Int)
+  requires(@Int.0 >= 0)
+  ensures(true)
+  effects(pure)
+{
+  handle[Exn<Int>] {
+    throw(@Int) -> { let @Nat = @Int.0; nat_to_int(@Nat.0) }
+  } in {
+    if @Int.0 == 0 then { throw(0 - 5) } else { @Int.0 }
+  }
+}
+""", "nat_bind")
+        assert len(obls) == 1
+        assert obls[0].status != "verified", (
+            "clause narrowing proved against the OUTER requires — the "
+            "dishonest-env false Tier-1"
+        )
+
+    def test_handle_body_nat_bind_proves_from_requires(self) -> None:
+        """M2 killer (enclosing-scope leg): a narrowing in the handle BODY
+        is enclosing-scope code and proves Tier-1 from the requires."""
+        obls = _obligations_of("""
+public fn f(@Int -> @Int)
+  requires(@Int.0 >= 0)
+  ensures(true)
+  effects(pure)
+{
+  handle[Exn<String>] {
+    throw(@String) -> { 0 }
+  } in {
+    let @Nat = @Int.0;
+    nat_to_int(@Nat.0)
+  }
+}
+""", "nat_bind")
+        assert len(obls) == 1
+        assert obls[0].status == "verified"
+
+    def test_forall_domain_nat_formal_call_proves_from_requires(self) -> None:
+        """M1 killer (domain leg): a @Nat-formal call argument in a
+        quantifier DOMAIN proves Tier-1 from the enclosing requires."""
+        obls = _obligations_of("""
+private fn take(@Nat -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ nat_to_int(@Nat.0) }
+
+public fn f(@Int, @Array<Int> -> @Bool)
+  requires(@Int.0 >= 0)
+  ensures(true)
+  effects(pure)
+{
+  forall(@Int, take(@Int.0), fn(@Int -> @Bool) effects(pure) { true })
+}
+""", "nat_bind")
+        assert len(obls) == 1
+        assert obls[0].status == "verified"
+
+    def test_exists_predicate_nat_bind_is_tier3(self) -> None:
+        """M1 killer (predicate leg, via `exists` to cover the tuple's
+        second member in this walker): a narrowing on the fresh
+        quantified slot is Tier-3."""
+        obls = _obligations_of("""
+public fn f(@Array<Int> -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  exists(@Int, array_length(@Array<Int>.0), fn(@Int -> @Bool) effects(pure) { nat_to_int({ let @Nat = @Int.0; @Nat.0 }) > 0 })
+}
+""", "nat_bind")
+        assert len(obls) == 1
+        assert obls[0].status == "tier3"
+
+
+class TestFreshScopePerKindClassification:
+    """Remaining per-kind fresh-scope classifications: the state-init
+    enclosing walk (M3), the clause state-update descent (M4), the
+    refined-narrowing disclosure, and loud-parity for assert / literal
+    index in closures."""
+
+    def test_handler_state_init_div_proves_from_requires(self) -> None:
+        """M3 killer: the ONLY enclosing-scope walk with no corpus signal —
+        a divisor in the handler state-init proves Tier-1 from requires."""
+        obls = _obligations_of("""
+public fn f(@Int -> @Int)
+  requires(@Int.0 != 0)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>](@Int = 100 / @Int.0) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) }
+  } in {
+    get(())
+  }
+}
+""", "div_zero")
+        assert len(obls) == 1
+        assert obls[0].status == "verified"
+
+    def test_clause_state_update_div_is_tier3(self) -> None:
+        """M4 killer: a slot-dependent divisor in a clause `with` state
+        update (fresh scope) is Tier-3."""
+        obls = _obligations_of("""
+public fn f(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>](@Int = 1) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) } with @Int = 10 / @Int.0
+  } in {
+    put(3);
+    get(())
+  }
+}
+""", "div_zero")
+        assert len(obls) == 1
+        assert obls[0].status == "tier3"
+
+    def test_refined_let_in_closure_discloses_unguarded(self) -> None:
+        """A refined narrowing inside a closure has no interior codegen
+        guard and an untranslatable predicate under the empty env — it
+        must disclose honestly: `tier3_unguarded` + the E506 warning (the
+        only user-visible signal), never a silent pass or a false
+        verdict."""
+        result = _verify("""
+type Pos = { @Int | @Int.0 > 0 };
+
+public fn f(@Array<Int> -> @Array<Int>)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  array_map(@Array<Int>.0, fn(@Int -> @Int) effects(pure) { let @Pos = @Int.0; @Pos.0 })
+}
+""")
+        errors = [d for d in result.diagnostics if d.severity == "error"]
+        assert not errors
+        refined = [o for o in result.obligations if o.kind == "refine_bind"]
+        assert len(refined) == 1
+        assert refined[0].status == "tier3_unguarded"
+        warnings = [d for d in result.diagnostics if d.severity == "warning"]
+        assert any(w.error_code == "E506" for w in warnings), (
+            "the E506 disclosure is the only user-visible signal of an "
+            "unguarded unproven refinement narrowing in a closure"
+        )
+
+    def test_refined_let_literal_in_closure_proves(self) -> None:
+        """The literal-precision twin: `let @Pos = 5` in a closure proves
+        (no slots involved — the empty env costs nothing)."""
+        obls = _obligations_of("""
+type Pos = { @Int | @Int.0 > 0 };
+
+public fn f(@Array<Int> -> @Array<Int>)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  array_map(@Array<Int>.0, fn(@Int -> @Int) effects(pure) { let @Pos = 5; @Pos.0 })
+}
+""", "refine_bind")
+        assert len(obls) == 1
+        assert obls[0].status == "verified"
+
+    def test_false_assert_in_closure_is_loud(self) -> None:
+        """Loud parity for assert: a literal-false asserted condition in a
+        closure body is the same E507 verdict as direct position."""
+        errs = _verify_err("""
+public fn f(@Array<Int> -> @Array<Int>)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  array_map(@Array<Int>.0, fn(@Int -> @Int) effects(pure) { assert(1 > 2); @Int.0 })
+}
+""", "assert")
+        assert any(e.error_code == "E507" for e in errs)
+
+    def test_literal_oob_index_in_closure_is_loud(self) -> None:
+        """Loud parity for bounds: a literal out-of-bounds index in a
+        closure body is the same E527 verdict as direct position."""
+        errs = _verify_err("""
+public fn f(@Array<Int> -> @Array<Int>)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  array_map(@Array<Int>.0, fn(@Int -> @Int) effects(pure) { [1, 2, 3][5] + @Int.0 })
+}
+""", "bounds")
+        assert any(e.error_code == "E527" for e in errs)
+
+    def test_ensures_position_quantifier_index_is_tier3(self) -> None:
+        """The walker also runs on ensures clauses: an index inside an
+        ensures-position quantifier predicate records Tier-3 (the common
+        real-world contract shape — all corpus quantifiers are
+        body-position, so this documents the intent)."""
+        result = _verify("""
+public fn f(@Array<Int> -> @Array<Int>)
+  requires(true)
+  ensures(forall(@Int, array_length(@Array<Int>.result), fn(@Int -> @Bool) effects(pure) { @Array<Int>.1[0] >= 0 }))
+  effects(pure)
+{
+  @Array<Int>.0
+}
+""")
+        errors = [d for d in result.diagnostics if d.severity == "error"]
+        assert not errors
+        idx = [o for o in result.obligations if o.kind == "index_bounds"]
+        assert len(idx) == 1
+        assert idx[0].status == "tier3"
+
+
+# =====================================================================
+# Silent-failure review round: a NESTED constructor sub-pattern
+# narrowing on an unprojectable scrutinee records an honest fallback
+# instead of vanishing — under the fresh-scope descent, every match in
+# a closure has an unprojectable scrutinee, so the silent `continue`
+# turned a corner case into the common case (verify-clean, bare
+# `anon_0` trap at runtime with zero disclosure).
+# =====================================================================
+
+_NESTED_SUBPAT_CLOSURE = """
+private data Box {
+  MkBox(Int)
+}
+
+private data Wrap {
+  MkWrap(Box)
+}
+
+private fn mk(@Int -> @Wrap)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ MkWrap(MkBox(@Int.0)) }
+
+public fn go(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Array<Int> = array_map([@Int.0], fn(@Int -> @Int) effects(pure) { match mk(@Int.0) { MkWrap(MkBox(@Nat)) -> nat_to_int(@Nat.0) } });
+  @Array<Int>.0[0]
+}
+"""
+
+
+class TestNestedSubpatternFallback:
+    def test_nested_nat_bind_in_closure_records_tier3(self) -> None:
+        """The nested `@Nat` bind (`MkWrap(MkBox(@Nat))`) on a closure's
+        unprojectable scrutinee records one guarded Tier-3 `nat_bind` —
+        the run-trap differential in
+        tests/test_nat_narrowing_return_differential.py proves the
+        codegen guard it claims (both direct and closure positions trap
+        a negative)."""
+        result = _verify(_NESTED_SUBPAT_CLOSURE)
+        errors = [d for d in result.diagnostics if d.severity == "error"]
+        assert not errors
+        binds = [o for o in result.obligations if o.kind == "nat_bind"]
+        assert len(binds) == 1, (
+            f"nested sub-pattern narrowing vanished from the stream, "
+            f"got {[(o.kind, o.status) for o in result.obligations]}"
+        )
+        assert binds[0].status == "tier3"

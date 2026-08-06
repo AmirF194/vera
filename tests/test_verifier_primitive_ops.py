@@ -426,9 +426,11 @@ class TestPrimitiveIndexObligation680:
     String indexing is a type error (E161 "Cannot index String"), so there
     is no string-index obligation — `IndexExpr` is array-only.
 
-    Index sites inside closure / quantifier bodies are intentionally not
-    walked (the captured length is beyond Tier 1 without #427); they remain
-    runtime-guarded.  `test_index_inside_closure_not_obligated` pins that.
+    Index sites inside closure / quantifier-predicate bodies are walked
+    under the #779 fresh-scope empty env — a slot-dependent or
+    captured-length site is obligated Tier-3 (runtime-guarded, #427), a
+    literal-only shape classifies exactly.
+    `test_index_inside_closure_obligated_tier3` pins that.
     """
 
     def test_literal_in_bounds_index_discharges(self) -> None:

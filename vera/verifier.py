@@ -3071,9 +3071,10 @@ class ContractVerifier:
         #   HandleExpr         → state init + body (enclosing env);
         #                        clause bodies / updates (empty env)
         #
-        # Intentionally not walked — cannot appear in a function body:
-        #   OldExpr            → contract state operator (ensures-only)
-        #   NewExpr            → contract state operator (ensures-only)
+        # Intentionally ignored — no Expr children to recurse into (the
+        # walker also visits ensures clauses, where these DO appear):
+        #   OldExpr            → contract state operator (leaf, effect_ref only)
+        #   NewExpr            → contract state operator (leaf, effect_ref only)
         #
         # Cannot occur — rejected before this walk:
         #   HoleExpr           → check time rejects
@@ -3153,7 +3154,7 @@ class ContractVerifier:
                         )
                     finally:
                         smt._path_conditions.pop()
-            else:  # pragma: no cover — condition untranslatable
+            else:  # condition untranslatable — hot under the #779 empty env
                 self._walk_for_primitive_op_obligations(
                     decl, expr.then_branch, smt, slot_env, assumptions,
                 )
@@ -3395,9 +3396,10 @@ class ContractVerifier:
             # obligation.  Recurse into the collection and index first (each
             # may host a nested division / subtraction / index), then check
             # this site.  Index sites inside closure / quantifier-predicate
-            # bodies are reached through the fresh-scope descent (#779) and
-            # fall to Tier-3 — the captured length is beyond the fresh
-            # scope's fragment (#427); the runtime bounds trap backs them.
+            # bodies are reached through the fresh-scope descent (#779):
+            # slot-dependent / captured-length sites fall to Tier-3 (beyond
+            # the fresh scope's fragment, #427; the runtime bounds trap
+            # backs them) while literal-only shapes classify exactly.
             self._walk_for_primitive_op_obligations(
                 decl, expr.collection, smt, slot_env, assumptions,
             )
@@ -3466,9 +3468,10 @@ class ContractVerifier:
         if isinstance(expr, ast.HandleExpr):
             # #779: the handler's state-init and BODY are enclosing-scope
             # code (handler state is not even visible in the body, spec
-            # §7.4), so they walk with the enclosing env at full precision.
+            # §7.5.1), so they walk with the enclosing env at full precision.
             # Clause bodies and state updates bind the operation's fresh
-            # parameters — the fresh-scope env (see AnonFn below).
+            # parameters (and the handler state slot) — the fresh-scope
+            # env (see AnonFn below).
             if expr.state is not None:
                 self._walk_for_primitive_op_obligations(
                     decl, expr.state.init_expr, smt, slot_env, assumptions,
@@ -3582,6 +3585,21 @@ class ContractVerifier:
         per-field @Nat mono metadata) — are surfaced as E504, neither
         statically proven nor runtime-checked (#747; the ``guarded`` flag
         threaded to :py:meth:`_record_nat_bind_tier3` decides which).
+
+        # WALKER_COVERAGE: (#597 — every Expr subclass has a disposition;
+        # check_walker_coverage.py enforces completeness.)
+        #   IntLit             → intentionally ignored (leaf, no binding site)
+        #   BoolLit            → intentionally ignored (leaf)
+        #   FloatLit           → intentionally ignored (leaf)
+        #   StringLit          → intentionally ignored (leaf)
+        #   UnitLit            → intentionally ignored (leaf)
+        #   SlotRef            → intentionally ignored (leaf)
+        #   ResultRef          → intentionally ignored (leaf)
+        #   NullaryConstructor → intentionally ignored (leaf)
+        #   OldExpr            → cannot occur (body-only walker — old/new
+        #                        outside ensures is rejected at check time)
+        #   NewExpr            → cannot occur (as OldExpr)
+        #   HoleExpr           → cannot occur (check time rejects)
         """
         if isinstance(expr, ast.BinaryExpr) and expr.op == ast.BinOp.PIPE:
             # `left |> right(a, …)` desugars to `right(left, a, …)`: the left
@@ -3712,11 +3730,11 @@ class ContractVerifier:
             # could prove a FALSE Tier-1), so obligate it SHALLOW-syntactically
             # as tier3 (never Tier-1 / E530): codegen guards the body's @Int
             # return value (`_compile_lifted_closure`), the definition-side dual
-            # of the closure-argument obligation.  The body is deliberately NOT
-            # walked — AnonFn stays a terminal for the SMT walk (see
-            # `_walk_for_primitive_op_obligations`'s docstring for the
-            # closure-opacity rationale), matching what the #984 narrowing dual
-            # below shares.
+            # of the closure-argument obligation.  The RETURN obligations in
+            # this arm stay shallow-syntactic (opacity-forced, never Tier-1 —
+            # the body's slots are not in the outer env), while the body
+            # ITSELF is walked separately below under the #779 fresh-scope
+            # empty env, matching what the #984 narrowing dual below shares.
             resolved_ret = self._resolve_type(expr.return_type)
             # #1032: a REFINED closure return — the return-side dual of the
             # #1024 formal narrowing at the apply_fn branch above.  Pre-fix
@@ -3781,8 +3799,10 @@ class ContractVerifier:
                 self._record_nat_bind_tier3(
                     decl, expr.body, "closure return", "tier3", guarded=True)
             # #779/#985: descend into the closure BODY under an EMPTY slot
-            # environment — the fresh-scope walk.  Interior binding sites
-            # (`let @Nat = ...` in the body) are obligated Tier-3 (a slot
+            # environment — the fresh-scope walk.  Interior slot-dependent
+            # binding sites are obligated Tier-3, while literal-only shapes
+            # classify exactly — a manifest `let @Nat = 0 - 5` is a loud
+            # E503 (a slot
             # reference never resolves onto an outer same-named slot, so no
             # FALSE Tier-1 is possible; the lifted closure's interior
             # codegen guards back them), and a NESTED AnonFn re-enters this
@@ -4040,7 +4060,7 @@ class ContractVerifier:
                         )
                     finally:
                         smt._path_conditions.pop()
-            else:  # pragma: no cover — condition untranslatable
+            else:  # condition untranslatable — hot under the #779 empty env
                 self._walk_for_nat_binding_obligations(
                     decl, expr.then_branch, smt, slot_env, assumptions,
                 )
@@ -4429,10 +4449,25 @@ class ContractVerifier:
                     )
             return
 
+        if isinstance(expr, (ast.AssertExpr, ast.AssumeExpr)):
+            # PR #1202 review: an assert/assume CONDITION can host a
+            # narrowing binding site (`assert(takes_nat(0 - 5) > 0)`) —
+            # the primitive-op and calls walkers already descend these;
+            # without this arm the nat-binding walker recorded nothing and
+            # a provably-negative argument passed silently.
+            self._walk_for_nat_binding_obligations(
+                decl, expr.expr, smt, slot_env, assumptions,
+            )
+            return
+
         if isinstance(expr, (ast.ForallExpr, ast.ExistsExpr)):
             # #779: the quantifier DOMAIN is enclosing-scope code (full
             # precision); the predicate is an AnonFn, whose arm above walks
-            # its body under the fresh-scope env.
+            # its body under the fresh-scope env.  (Latent: that arm's
+            # return obligations cite `_compile_lifted_closure`, but
+            # quantifier predicates are INLINED by `_translate_quantifier`,
+            # not lifted — moot today because the checker-accepted non-Bool
+            # predicate shapes fail codegen before any guard could run.)
             self._walk_for_nat_binding_obligations(
                 decl, expr.domain, smt, slot_env, assumptions,
             )
@@ -4444,8 +4479,11 @@ class ContractVerifier:
         if isinstance(expr, ast.HandleExpr):
             # #779: state-init and BODY are enclosing-scope code; clause
             # bodies and state updates bind the operation's fresh
-            # parameters, so they walk under the empty fresh-scope env
-            # (mirroring the primitive-op walker and #1179's calls walk).
+            # parameters (and the handler state slot), so they walk under
+            # the empty fresh-scope env
+            # (mirroring the primitive-op walker; #1179's calls walk visits
+            # the same positions but keeps the enclosing env — a call-site
+            # hit there only ADDS a proof, so it has no aliasing hazard).
             if expr.state is not None:
                 self._walk_for_nat_binding_obligations(
                     decl, expr.state.init_expr, smt, slot_env, assumptions,
@@ -4502,7 +4540,7 @@ class ContractVerifier:
         """
         lhs = smt.translate_expr(expr.left, slot_env)
         rhs = smt.translate_expr(expr.right, slot_env)
-        if lhs is None or rhs is None:  # pragma: no cover — both Nat
+        if lhs is None or rhs is None:  # standard path under the #779 empty env
             self._record_obligation(decl.name, "nat_sub", expr, "tier3")
             return
         if self._is_opaque_shadow(lhs) or self._is_opaque_shadow(rhs):
@@ -5118,7 +5156,7 @@ class ContractVerifier:
         :py:meth:`SmtContext.check_valid`.
         """
         val = smt.translate_expr(value_node, slot_env)
-        if val is None:  # pragma: no cover — untranslatable value
+        if val is None:  # standard path under the #779 empty env
             self._record_int_widen_tier3(
                 decl, value_node, site, "tier3", guarded=guarded)
             return
@@ -5861,17 +5899,26 @@ class ContractVerifier:
                 # review).  Opaque path only: a nested field is always an
                 # accessor term.  (A *literal* nested scrutinee — `match
                 # Some(Some(-5)) {}` — isn't Z3-translated here, a degenerate
-                # case left to its own track.)  The nested
-                # bind's RUNTIME guard remains a
-                # #758-class deferral (codegen's `_extract_constructor_fields`
-                # binds only direct sub-patterns), so a verified program is
-                # sound (E505 on a bad nested narrowing) while an unverified
-                # compile is honestly Tier-3 there.
+                # case left to its own track.)
                 if sort is not None and idx is not None:
                     self._obligate_subpattern_term(
                         decl, scrutinee, field_ty,
                         sort.accessor(idx, i)(scrutinee_z3), sub_pat, smt,
                         assumptions)
+                else:
+                    # PR #1202 silent-failure review: an UNPROJECTABLE
+                    # scrutinee (no sort/index — under the #779 fresh-scope
+                    # descent this is EVERY match in a closure or handler
+                    # clause) previously fell through silently, so a nested
+                    # narrowing vanished from the stream while codegen's
+                    # per-bind guard still trapped it at run time (verified
+                    # in both direct and closure positions — the trap
+                    # exists, so the guarded Tier-3 records below are
+                    # truthful).  Mirror the direct BindingPattern legs'
+                    # honest fallbacks, statically: field types come from
+                    # the registry instantiation, no Z3 terms needed.
+                    self._record_nested_subpattern_fallbacks(
+                        decl, scrutinee, sub_pat, field_ty)
                 continue
             if not isinstance(sub_pat, ast.BindingPattern):
                 continue
@@ -5949,6 +5996,56 @@ class ContractVerifier:
                         decl, scrutinee, "ADT sub-pattern bind", "tier3",
                         guarded=True)
         return facts
+
+    def _record_nested_subpattern_fallbacks(
+        self,
+        decl: ast.FnDecl,
+        scrutinee: ast.Expr,
+        pattern: ast.ConstructorPattern,
+        parent_field_ty: Type | None,
+    ) -> None:
+        """Record honest Tier-3 fallbacks for every narrowing bind inside a
+        nested constructor sub-pattern whose scrutinee the SMT layer cannot
+        project (PR #1202 silent-failure review).
+
+        The Z3-term recursion (:py:meth:`_obligate_subpattern_term`) needs
+        an accessor term; when the scrutinee is unprojectable this walks
+        the same ``(sub_pattern, field_type)`` pairs *statically* — field
+        types come from :py:meth:`_instantiated_field_types` against the
+        parent field's declared instantiation — and mirrors the direct
+        BindingPattern legs' fallback semantics exactly: a genuine `@Nat`
+        narrowing records ``tier3`` guarded (codegen's per-bind guard traps
+        it — verified by run probes in both direct and closure positions),
+        a refined narrowing records the unguarded E506 disclosure, and a
+        `@Nat`→`@Int` widening records ``tier3`` guarded.  Recursion
+        descends further nested constructor patterns; termination follows
+        the finite pattern AST."""
+        field_types = self._instantiated_field_types(
+            pattern.name, parent_field_ty)
+        if field_types is None:
+            return
+        for sub_pat, field_ty in zip(pattern.sub_patterns, field_types):
+            if isinstance(sub_pat, ast.ConstructorPattern):
+                self._record_nested_subpattern_fallbacks(
+                    decl, scrutinee, sub_pat, field_ty)
+                continue
+            if not isinstance(sub_pat, ast.BindingPattern):
+                continue
+            target = self._resolve_type(sub_pat.type_expr)
+            if (self._is_refined_type(target)
+                    and self._refined_field_narrows(target, field_ty)):
+                self._record_refined_bind_tier3(
+                    decl, scrutinee, "ADT sub-pattern bind", guarded=False)
+            elif (self._is_nat_type(target)
+                    and not self._is_nat_type(field_ty)):
+                self._record_nat_bind_tier3(
+                    decl, scrutinee, "ADT sub-pattern bind", "tier3",
+                    guarded=True)
+            elif (self._is_int_type(target)
+                    and self._is_nat_type(field_ty)):
+                self._record_int_widen_tier3(
+                    decl, scrutinee, "ADT sub-pattern bind", "tier3",
+                    guarded=True)
 
     def _obligate_destructure_narrowings(
         self,
