@@ -1,0 +1,24 @@
+-- A2b: STATELESS put clause referencing the op param. Checker: @Nat.0 = arg.
+-- Observable via division trap: 10 / @Nat.0 traps iff the resolved value is 0.
+-- put(5): arg=5 (no trap; pre-diff capture was the pre-store cell = 0 -> trap).
+public fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>] {
+    get(@Unit) -> { resume(77) },
+    put(@Nat) -> { let @Nat = 10 / @Nat.0; resume(()) }
+  } in {
+    put(5);
+    nat_to_int(get(()))
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}

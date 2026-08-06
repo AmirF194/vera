@@ -1,0 +1,26 @@
+-- Probe 6: arg is an alias of a composite. put(@Option<MaybeInt>) with
+-- type MaybeInt = Option<Int> under State<Option<Option<Int>>>. Checker
+-- binds "Option<Option<Int>>"; body uses that canonical spelling.
+type MaybeInt = Option<Int>;
+
+public fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Option<Option<Int>>>](@Option<Option<Int>> = Some(Some(5))) {
+    get(@Unit) -> { resume(@Option<Option<Int>>.0) },
+    put(@Option<MaybeInt>) -> { resume(()) } with @Option<Option<Int>> = @Option<Option<Int>>.1
+  } in {
+    put(Some(Some(9)));
+    option_unwrap_or(option_unwrap_or(get(()), Some(0 - 1)), 0 - 1)
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 9)
+  effects(pure)
+{
+  probe(())
+}

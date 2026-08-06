@@ -8,6 +8,7 @@ for State handler expressions.
 from __future__ import annotations
 
 from vera import ast
+from vera.skip import CodegenSkip
 from vera.wasm.async_fusion import await_needs_check, fused_async_target
 
 
@@ -138,6 +139,28 @@ class CompilabilityMixin:
             )
             return False
         type_name = self._type_expr_to_slot_name(type_arg)
+        # #1205: collapse scalar-resolving aliases (parameterised ones
+        # included) into the base import family — `wt` above is derived
+        # from the RESOLVED type, so registering the unresolved name
+        # split the family (`state_put_Count` typed i64) from the name
+        # the per-function lowering derives.  A depth-overflowed alias
+        # chain (round-5 F4) surfaces as a loud per-function skip here
+        # — never an opaque fallback, which would silently split the
+        # family against a fully-resolving sibling site.
+        if type_name:
+            try:
+                type_name = self._family_name_te(type_arg, type_name)
+            except CodegenSkip as skip:
+                self._warning(
+                    decl,
+                    f"Function '{decl.name}' uses State with an "
+                    f"unresolvable type alias — {skip.reason} — skipped.",
+                    rationale="State<T> family resolution refuses alias "
+                    "applications nested deeper than the resolver bound; "
+                    "flatten the alias chain.",
+                    error_code="E607",
+                )
+                return False
         if type_name and (type_name, wt) not in self._state_types:
             self._state_types.append((type_name, wt))
         return True
@@ -173,6 +196,24 @@ class CompilabilityMixin:
         # i32_pair (String, Array<T>) → WASM exception tag uses two i32 params
         wasm_tag_t = "i32 i32" if wt == "i32_pair" else wt
         type_name = self._type_expr_to_slot_name(type_arg)
+        # #1205: scalar-resolving aliases join the base tag family (see
+        # `_check_state_type`) — `Exn<Code>` with `type Code = Int`
+        # otherwise declares an i64 tag the i32-typed catch sites of the
+        # unresolved-name derivation cannot match.
+        if type_name:
+            try:
+                type_name = self._family_name_te(type_arg, type_name)
+            except CodegenSkip as skip:
+                self._warning(
+                    decl,
+                    f"Function '{decl.name}' uses Exn with an "
+                    f"unresolvable type alias — {skip.reason} — skipped.",
+                    rationale="Exn<E> family resolution refuses alias "
+                    "applications nested deeper than the resolver bound; "
+                    "flatten the alias chain.",
+                    error_code="E612",
+                )
+                return False
         if type_name and (type_name, wasm_tag_t) not in self._exn_types:
             self._exn_types.append((type_name, wasm_tag_t))
         return True
@@ -422,6 +463,17 @@ class CompilabilityMixin:
                         wt = self._type_expr_to_wasm_type(type_arg)
                         if wt and wt not in ("unsupported", "i32_pair"):
                             type_name = self._type_expr_to_slot_name(type_arg)
+                            # #1205: same scalar-alias collapse as
+                            # `_check_state_type` — the two registration
+                            # paths must key one family.  Depth overflow
+                            # is registered as-is; the per-function
+                            # lowering raises the loud skip.
+                            if type_name:
+                                try:
+                                    type_name = self._family_name_te(
+                                        type_arg, type_name)
+                                except CodegenSkip:
+                                    pass
                             if type_name and (type_name, wt) not in self._state_types:
                                 self._state_types.append((type_name, wt))
                 elif node.effect.name == "Exn":
@@ -431,6 +483,14 @@ class CompilabilityMixin:
                         if wt and wt != "unsupported":
                             wasm_tag_t = "i32 i32" if wt == "i32_pair" else wt
                             type_name = self._type_expr_to_slot_name(type_arg)
+                            # #1205: same collapse as `_check_exn_type`.
+                            # Depth overflow: see the State scan above.
+                            if type_name:
+                                try:
+                                    type_name = self._family_name_te(
+                                        type_arg, type_name)
+                                except CodegenSkip:
+                                    pass
                             if type_name and (type_name, wasm_tag_t) not in self._exn_types:
                                 self._exn_types.append((type_name, wasm_tag_t))
             self._scan_expr_for_handlers(node.body)

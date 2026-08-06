@@ -1,0 +1,21 @@
+public fn go(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  ghelper(@Int.0)
+}
+where {
+  forall<T> fn ghelper(@T -> @T)
+    requires(true)
+    ensures(true)
+    effects(pure)
+  {
+    handle[State<T>](@Nat = 3) {
+      put(@T) -> { resume(()) }
+    } in {
+      put(@T.0);
+      get(())
+    }
+  }
+}

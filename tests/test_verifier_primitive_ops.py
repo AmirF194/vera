@@ -235,7 +235,7 @@ private fn ld_div(@Int, @Int -> @Int)
         """An untranslatable scalar `let` (a `random_int` effect result the SMT
         layer doesn't model) that shadows a constrained outer must NOT let the
         outer's `requires(@Int.0 != 0)` falsely discharge a division by it.
-        `requires(@Int.0 != 0); let @Int = random_int(0, 10); 1 / @Int.0` —
+        `requires(@Int.0 != 0); let @Int = Random.random_int(0, 10); 1 / @Int.0` —
         random_int can be 0, so the division is unsafe and must be honest Tier-3
         (the shadowed value is unknown), not a false Tier-1 (#680 review).  This
         is the silent-failure differential: before the shadow fix it verified
@@ -245,7 +245,7 @@ public fn f(@Int -> @Int)
   requires(@Int.0 != 0)
   ensures(true)
   effects(<Random>)
-{ let @Int = random_int(0, 10); 1 / @Int.0 }
+{ let @Int = Random.random_int(0, 10); 1 / @Int.0 }
 """)
         errors = [d for d in result.diagnostics if d.severity == "error"]
         assert errors == [], f"expected no error, got: {[e.description for e in errors]}"
@@ -337,7 +337,7 @@ private fn nonlit_destr_div(@Int -> @Int)
     def test_untranslatable_destructure_component_keeps_debruijn(self) -> None:
         """An untranslatable destructured component with NO stale outer must
         still push a tracked placeholder, so same-type De Bruijn positions
-        don't collapse.  `let Tuple<@Int, @Int> = Tuple(10, random_int(0, 10));
+        don't collapse.  `let Tuple<@Int, @Int> = Tuple(10, Random.random_int(0, 10));
         1 / @Int.0` must be Tier-3: `@Int.0` is the *opaque second component*,
         not the literal `10` it would shift onto if the component were skipped
         (PR #778 review, `verifier.py` De Bruijn collapse).  A skip here is a
@@ -347,7 +347,7 @@ private fn debruijn_keep(@Unit -> @Int)
   requires(true)
   ensures(true)
   effects(<Random>)
-{ let Tuple<@Int, @Int> = Tuple(10, random_int(0, 10)); 1 / @Int.0 }
+{ let Tuple<@Int, @Int> = Tuple(10, Random.random_int(0, 10)); 1 / @Int.0 }
 """)
         errors = [d for d in result.diagnostics if d.severity == "error"]
         assert errors == [], [e.error_code for e in errors]
@@ -359,7 +359,7 @@ private fn debruijn_keep(@Unit -> @Int)
     def test_compound_shadow_divisor_is_tier3_not_e526(self) -> None:
         """A divisor that *contains* an opaque shadow (`shadow + 1`), not just
         one that IS a shadow, must fall to Tier-3 — Z3 must not pick
-        `shadow = -1` and emit a false E526.  `let @Int = random_int(0, 10);
+        `shadow = -1` and emit a false E526.  `let @Int = Random.random_int(0, 10);
         1 / (@Int.0 + 1)` shadows the outer `@Int.0`, so the compound divisor
         is opaque (PR #778 review, `verifier.py` `_contains_opaque_shadow`)."""
         result = _verify("""
@@ -367,7 +367,7 @@ private fn compound_shadow(@Int -> @Int)
   requires(@Int.0 != 0)
   ensures(true)
   effects(<Random>)
-{ let @Int = random_int(0, 10); 1 / (@Int.0 + 1) }
+{ let @Int = Random.random_int(0, 10); 1 / (@Int.0 + 1) }
 """)
         errors = [d for d in result.diagnostics if d.severity == "error"]
         assert errors == [], [e.error_code for e in errors]
@@ -426,9 +426,11 @@ class TestPrimitiveIndexObligation680:
     String indexing is a type error (E161 "Cannot index String"), so there
     is no string-index obligation — `IndexExpr` is array-only.
 
-    Index sites inside closure / quantifier bodies are intentionally not
-    walked (the captured length is beyond Tier 1 without #427); they remain
-    runtime-guarded.  `test_index_inside_closure_not_obligated` pins that.
+    Index sites inside closure / quantifier-predicate bodies are walked
+    under the #779 fresh-scope empty env — a slot-dependent or
+    captured-length site is obligated Tier-3 (runtime-guarded, #427), a
+    literal-only shape classifies exactly.
+    `test_index_inside_closure_obligated_tier3` pins that.
     """
 
     def test_literal_in_bounds_index_discharges(self) -> None:
@@ -519,14 +521,15 @@ private fn at(@Array<Int>, @Nat -> @Int)
         assert len(idx) == 1, f"expected one index_bounds obligation, got {len(idx)}"
         assert idx[0].status == "tier3"
 
-    def test_index_inside_closure_not_obligated(self) -> None:
+    def test_index_inside_closure_obligated_tier3(self) -> None:
         """An index inside an `array_map` closure body (a captured array) is
-        NOT obligated — the walker does not recurse into closure bodies, where
-        the captured length is beyond Tier 1 (#427).  Pinned via a differential:
-        the closure body records ZERO index_bounds obligations.  A `_verify_ok`
-        alone would NOT catch a walker that started recursing into AnonFn —
-        the captured index degrades to honest Tier 3 (no error) — so we assert
-        the obligation count directly.  (Mirrors ch05_capture_array_index.)"""
+        obligated Tier-3 — the #779 fresh-scope descent walks the closure
+        body under an empty slot environment, where the captured length is
+        beyond the decidable fragment (#427), so the obligation records the
+        runtime bounds trap honestly instead of vanishing from the stream.
+        Asserted by count and status, not `_verify_ok`, so both a walker
+        that stops descending (obligation vanishes) and one that starts
+        proving against the outer env (a false Tier-1) are caught."""
         result = _verify("""
 private fn step_flat(@Array<Int> -> @Array<Int>)
   requires(true)
@@ -537,7 +540,8 @@ private fn step_flat(@Array<Int> -> @Array<Int>)
         errors = [d for d in result.diagnostics if d.severity == "error"]
         assert errors == [], f"expected no error, got: {[e.description for e in errors]}"
         idx = [o for o in result.obligations if o.kind == "index_bounds"]
-        assert idx == [], f"closure-body index must not be obligated, got {len(idx)}"
+        assert len(idx) == 1, f"closure-body index must be obligated once, got {len(idx)}"
+        assert idx[0].status == "tier3"
 
     def test_index_obligation_recorded_index_bounds_kind(self) -> None:
         """A guarded index records exactly one `index_bounds` obligation,

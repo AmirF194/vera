@@ -1,0 +1,23 @@
+-- A9 control: no fn Nat param -> per the checker the get clause has only the
+-- state binding, so @Nat.1 must be E130 even though the BODY let-binds a Nat.
+public fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@Nat = 0) {
+    get(@Unit) -> { resume(@Nat.1) },
+    put(@Nat) -> { resume(()) }
+  } in {
+    let @Nat = 777;
+    nat_to_int(get(()))
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}

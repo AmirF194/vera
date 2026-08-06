@@ -1,0 +1,25 @@
+-- Probe 17: head re-entry via a wrapper alias, single user application.
+type Id<T> = T;
+type Two<T> = Id<Id<T>>;
+
+public fn probe(@Nat -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Two<Nat>>](@Two<Nat> = 0) {
+    get(@Unit) -> { resume(@Two<Nat>.0) },
+    put(@Two<Nat>) -> { resume(()) }
+  } in {
+    put(@Nat.0);
+    nat_to_int(get(()))
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 7)
+  effects(pure)
+{
+  probe(7)
+}

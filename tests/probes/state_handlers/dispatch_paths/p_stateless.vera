@@ -1,0 +1,12 @@
+public fn go(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>] {
+    put(@Int) -> { resume(()) }
+  } in {
+    put(7);
+    get(())
+  }
+}

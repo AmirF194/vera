@@ -1,0 +1,31 @@
+-- P4b: Byte-cell handle nested inside an Int-cell GET clause. The Byte
+-- clause's resume(9) must be i32 (family restored to Int for the outer tail).
+-- Expected: 9 * 1000 + 3 = 9003.
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>](@Int = 3) {
+    get(@Unit) -> {
+      let @Byte = handle[State<Byte>](@Byte = 2) {
+        get(@Unit) -> { resume(9) },
+        put(@Byte) -> { resume(()) }
+      } in {
+        get(())
+      };
+      resume(byte_to_int(@Byte.0) * 1000 + @Int.0)
+    },
+    put(@Int) -> { resume(()) }
+  } in {
+    get(())
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}

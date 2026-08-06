@@ -1,0 +1,25 @@
+-- A6b: get clause referencing @Nat.0 (the CELL name) while ann is @Count and an
+-- outer fn @Nat param exists. Checker: clause scope has no Nat binding -> the
+-- fn param (9), NOT the state (41). Codegen must agree.
+type Count = Nat;
+
+public fn probe(@Nat -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@Count = 41) {
+    get(@Unit) -> { resume(@Nat.0) },
+    put(@Nat) -> { resume(()) }
+  } in {
+    nat_to_int(get(()))
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(9)
+}

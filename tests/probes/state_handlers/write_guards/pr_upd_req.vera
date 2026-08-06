@@ -1,0 +1,20 @@
+-- Precision: the clause-scope update obligation under a FRESH env.
+public fn t(@Unit -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@Nat = 1) {
+    get(@Unit) -> { resume(@Nat.0) } with @Nat = @Nat.0
+  } in {
+    get(());
+    get(()) < 0
+  }
+}
+public fn main(@Unit -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  t(())
+}

@@ -1,0 +1,24 @@
+-- A10c: patternless put under a STATELESS handler. Checker: @Nat.0 in the
+-- clause = fn param (2) -> 10/2, no trap. Codegen fallback binds the arg
+-- under "Nat" -> 10/0 -> trap?
+public fn probe(@Nat -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>] {
+    get(@Unit) -> { resume(77) },
+    put() -> { let @Nat = 10 / @Nat.0; resume(()) }
+  } in {
+    put(0);
+    nat_to_int(get(()))
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(2)
+}

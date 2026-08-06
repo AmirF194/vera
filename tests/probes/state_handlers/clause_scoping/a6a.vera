@@ -1,0 +1,23 @@
+-- A6a: STATEFUL get clause reading state by the ANNOTATION name (ann != cell name)
+type Count = Nat;
+
+public fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@Count = 41) {
+    get(@Unit) -> { resume(@Count.0) },
+    put(@Nat) -> { resume(()) }
+  } in {
+    nat_to_int(get(()))
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}

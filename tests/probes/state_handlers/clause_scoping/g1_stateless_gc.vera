@@ -1,0 +1,39 @@
+-- Angle 2c GC: STATELESS composite handler; put clause body allocates.
+-- Capture + its shadow push now skipped; the ARG must stay rooted across the
+-- clause body's allocation, and the stored cell value must survive to a later
+-- intrinsic read (peek helper: lexical scoping -> bare host-cell get).
+private fn peek(@Unit -> @Option<Int>)
+  requires(true)
+  ensures(true)
+  effects(<State<Option<Int>>>)
+{
+  get(())
+}
+
+public fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Option<Int>>] {
+    get(@Unit) -> { resume(Some(99)) },
+    put(@Option<Int>) -> {
+      let @Option<Int> = Some(1);
+      resume(())
+    }
+  } in {
+    put(Some(5));
+    match peek(()) {
+      Some(@Int) -> @Int.0,
+      None -> 0 - 1
+    }
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}

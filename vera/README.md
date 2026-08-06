@@ -74,7 +74,7 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `ast.py` | 895 | Transform | Frozen dataclass AST nodes, source formatting | `Program`, `Node`, `Expr`, `format_expr` |
 | `types.py` | 662 | Type check | Semantic type representation | `Type`, `is_subtype()` |
 | `prelude.py` | 927 | Type check | Standard prelude — built-in ADT and combinator injection | `inject_prelude()`, `overridable_builtin_names()` |
-| `slots.py` | 162 | Type check | Slot reference table for `vera check --explain-slots` | `slot_table()`, `slot_ref_name()` |
+| `slots.py` | 289 | Type check | Slot reference table for `vera check --explain-slots` | `slot_table()`, `slot_ref_name()` |
 | `environment.py` | 2,167 | Type check | Type environment, scope stacks, ability registry, all built-in registrations | `TypeEnv`, `AbilityInfo` |
 | `checker/` | 5,948 | Type check | Two-pass type checker (mixin package) | `typecheck()` |
 | `  core.py` | 952 | | TypeChecker class, orchestration, contracts, constraint validation | |
@@ -85,7 +85,7 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `  eq_ability.py` | 199 | | Eq ability derivation checks | |
 | `  sql.py` | 308 | | SQL literal-provenance resolution + placeholder counting (#309) | `resolve_literal_string()`, `count_placeholders()` |
 | `  calls.py` | 1,556 | | Function/constructor/module/ability calls | |
-| `  control.py` | 627 | | If/match, patterns, effect handlers | |
+| `  control.py` | 709 | | If/match, patterns, effect handlers | |
 | `resolver.py` | 332 | Resolve | Module path resolution, parse cache | `ModuleResolver` |
 | `monomorphize.py` | 2,438 | Resolve | Shared generic instantiation discovery + AST substitution (verifier and codegen) | `substitute_type_vars()`, `resolve_type_alias()`, `canonicalize_type_aliases()` |
 | `smt.py` | 2,877 | Verify | Z3 translation layer | `SmtContext`, `SlotEnv` |
@@ -99,7 +99,7 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | ` ├ calls_arrays.py` | 2,694 | | `array_length` / `append` / `range` / `concat` / `slice` / `map` / `filter` / `fold` / `mapi` / `reverse` / `find` / `any` / `all` / `flatten` / `sort_by` | |
 | ` ├ calls_containers.py` | 1,304 | | Map, Set, Decimal (opaque-handle types) | |
 | ` ├ calls_encoding.py` | 2,210 | | Base64 and URL encoding/decoding/parsing | |
-| ` ├ calls_handlers.py` | 1,818 | | Show/Hash ability dispatch, `handle[State<T>]` and `handle[Exn<E>]` | |
+| ` ├ calls_handlers.py` | 2,022 | | Show/Hash ability dispatch, `handle[State<T>]` and `handle[Exn<E>]` | |
 | ` ├ calls_markup.py` | 400 | | JSON, HTML, Markdown, Regex, async/await (#841: fused concurrent lowering for `async(Http.get/post)`, identity otherwise) | |
 | ` ├ async_fusion.py` | 435 | | #841 fusion predicates — the single source of truth shared by the `_scan_io_ops` import pre-scan and the `WasmContext` async/await lowering | `fused_async_target()`, `await_needs_check()`, `compute_future_ret_fns()` |
 | ` ├ calls_math.py` | 635 | | `abs`, `min`, `max`, `floor`, `ceil`, `round`, `sqrt`, `pow`, Float64 predicates, numeric conversions | |
@@ -125,7 +125,7 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `codegen/` | 15,855 | Compile | Codegen orchestrator (mixin package) | `compile()`, `execute()` |
 | `  api.py` | 1,341 | | Public API, dataclasses, `compile()`/`execute()` orchestration, core IO host bindings (#421) | |
 | `  memory.py` | 105 | | Compile-time ADT layout helpers (`ConstructorLayout`, alignment) (#421) | |
-| `  core.py` | 2,304 | | CodeGenerator class, orchestration, ability op rewriting (Pass 1.6), skip propagation to callers (#1100) | |
+| `  core.py` | 2,561 | | CodeGenerator class, orchestration, ability op rewriting (Pass 1.6), skip propagation to callers (#1100) | |
 | `  modules.py` | 1,017 | | Cross-module registration + call detection (C7e), per-module alias + source scopes (#1111/#1186) | |
 | `  registration.py` | 479 | | Pass 1 forward declarations, ADT layout | |
 | `  monomorphize.py` | 1,369 | | Generic instantiation, type inference, ability constraint checking (Pass 1.5) | |
@@ -743,7 +743,7 @@ Honest inventory of what the compiler cannot do, and where each limitation is ad
 
 | Limitation | Why | Planned |
 |-----------|-----|---------|
-| **Verification gaps that downgrade silently** | the effect-operation argument, the generic-instantiated constructor field, and the nested constructor sub-pattern (#765) have no codegen runtime guard, so an unverified compile can store a negative `@Nat` at one of those sites — every other narrowing **binding site** and the top-level/where-helper and (non-nested) closure **return** positions are statically obligated (#552, #747, #758, #984) and codegen-guarded; a closure nested inside another closure's body is guarded but not verifier-reported (#985) | [#754](https://github.com/aallan/vera/issues/754), [#757](https://github.com/aallan/vera/issues/757) |
+| **Verification gaps that downgrade silently** | the effect-operation argument, the generic-instantiated constructor field, the `nat_to_int`/`nat_to_string` conversion-builtin arguments, and the *refined* nested constructor sub-pattern (#765; the `@Nat` nested bind is guarded) have no codegen runtime guard, so an unverified compile can store a negative `@Nat` at one of those sites — or, at the refined nested bind, a value violating its refinement predicate (the E506 disclosure) — every other narrowing **binding site** and the top-level/where-helper and closure **return** positions — nested closures included — are statically obligated (#552, #747, #758, #984, #985) and codegen-guarded | [#754](https://github.com/aallan/vera/issues/754), [#757](https://github.com/aallan/vera/issues/757) |
 | **No effect row variable unification** | Subeffecting implemented; `forall<E>` row variables permissive (full row-variable unification deferred) | [#294](https://github.com/aallan/vera/issues/294) |
 | **No incremental compilation** | Full file processed from scratch each time | [#56](https://github.com/aallan/vera/issues/56) |
 | **No REPL** | No interactive evaluation; all code must be written to files | [#224](https://github.com/aallan/vera/issues/224) |

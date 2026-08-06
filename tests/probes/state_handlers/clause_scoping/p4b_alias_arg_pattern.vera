@@ -1,0 +1,30 @@
+-- Angle 4: alias INSIDE a composite clause pattern.
+-- Checker canonicalizes type args in slot names (Option<Cnt> == Option<Int>),
+-- codegen keeps them opaque. @Option<Cnt>.0 per checker = STATE (bound last);
+-- per codegen = the put ARG (separate stack).
+type Cnt = Int;
+
+public fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Option<Int>>](@Option<Int> = Some(100)) {
+    get(@Unit) -> { resume(@Option<Int>.0) },
+    put(@Option<Cnt>) -> { resume(()) } with @Option<Int> = @Option<Cnt>.0
+  } in {
+    put(Some(7));
+    match get(()) {
+      Some(@Int) -> @Int.0,
+      None -> 0 - 1
+    }
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}

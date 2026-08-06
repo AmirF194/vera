@@ -1,0 +1,25 @@
+private forall<T> fn sneak(@T, @Bool -> @T)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  match @Bool.0 {
+    true -> {
+      handle[State<T>](@Nat = 3) {
+        put(@T) -> { resume(()) }
+      } in {
+        put(@T.0);
+        get(())
+      }
+    },
+    false -> { @T.0 }
+  }
+}
+
+public fn go(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  sneak(@Int.0, true)
+}

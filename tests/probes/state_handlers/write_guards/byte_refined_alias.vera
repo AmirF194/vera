@@ -1,0 +1,23 @@
+type SmallByte = { @Byte | @Byte.0 < 10 };
+
+public fn f(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<SmallByte>](@SmallByte = 5) {
+    get(@Unit) -> { resume(@SmallByte.0) },
+    put(@SmallByte) -> { resume(()) }
+  } in {
+    put(3);
+    byte_to_int(get(()))
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 3)
+  effects(pure)
+{
+  f(())
+}

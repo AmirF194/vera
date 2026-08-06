@@ -170,7 +170,7 @@ private fn natarith_387(@Nat, @Nat -> @Nat)
         mutation ``and → or`` would call the mixed ADD @Nat-typed, then
         spuriously obligate the @Int subtraction."""
         result = _verify("""
-private fn mixedarith_387(@Nat, @Int -> @Int)
+private fn mixedarith_387(@Nat, @Nat, @Int -> @Int)
   requires(true) ensures(true) effects(pure)
 { (@Nat.0 + @Int.0) - @Nat.1 }
 """)

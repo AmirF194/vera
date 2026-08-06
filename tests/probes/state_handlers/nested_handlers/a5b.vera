@@ -1,0 +1,30 @@
+-- A5b: STATELESS inner handler inside a STATEFUL outer (same type). The inner
+-- clause ops must see state_slot_name=None, not the outer's. Checker: inner
+-- get clause @Nat.0 = fn param 9.
+public fn probe(@Nat -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@Nat = 100) {
+    get(@Unit) -> { resume(@Nat.0) },
+    put(@Nat) -> { resume(()) }
+  } in {
+    put(7);
+    let @Nat = handle[State<Nat>] {
+      get(@Unit) -> { resume(@Nat.0) }
+    } in {
+      put(4);
+      get(())
+    };
+    nat_to_int(1000 * get(()) + @Nat.0)
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(9)
+}

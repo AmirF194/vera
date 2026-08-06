@@ -1,0 +1,15 @@
+-- TypeVar-typed quantifier domain instantiated to Int: legitimate program?
+private forall<T> fn p(@T -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  forall(@Int, @T.0, fn(@Int -> @Bool) effects(pure) { true })
+}
+public fn main(@Unit -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  p(3)
+}

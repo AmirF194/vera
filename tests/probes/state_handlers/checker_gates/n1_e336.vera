@@ -1,0 +1,21 @@
+-- E336 sanity: divergent (non-resolve-equal) annotation must be rejected.
+public fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@Int = 0) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Nat) -> { resume(()) }
+  } in {
+    nat_to_int(get(()))
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}

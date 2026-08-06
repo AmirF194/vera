@@ -1,0 +1,7 @@
+public fn f(@Int -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  forall(@Int, no_such_fn(@Int.0), fn(@Int -> @Bool) effects(pure) { true })
+}

@@ -1,0 +1,7 @@
+public fn f(@Byte -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  forall(@Int, @Byte.0, fn(@Int -> @Bool) effects(pure) { true })
+}

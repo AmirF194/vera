@@ -1,0 +1,26 @@
+-- P5: a with-expr slot ref reaching PAST the clause scope (decl scope has no
+-- Int) must be E130 at check time — put clause scope: @Int.0=state, @Int.1=param,
+-- so @Int.2 dangles. If the checker ACCEPTED it, the old call-site env would
+-- have resolved it against the handled body's lets (behavior change risk).
+private fn bad(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>](@Int = 0) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) } with @Int = @Int.2
+  } in {
+    let @Int = 55;
+    put(@Int.0);
+    get(())
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  bad(())
+}

@@ -1,0 +1,30 @@
+-- Probe 1b: silent wrong-value shape. Pattern @Option<Id<Id<Int>>>,
+-- with-update refs @Option<Id<Int>>.0. Checker canonicalizes the ref to
+-- Option<Int>.0 = the STATE slot (keep-old semantics; conformance
+-- ch07_state_clause_transform keep_old pins @T.0 = state). Expected
+-- output per checker: 5. If codegen binds the pattern under
+-- "Option<Id<Int>>" and resolves the syntactic ref to it, the with-value
+-- is the PUT ARGUMENT -> output 9.
+type Id<T> = T;
+
+public fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Option<Int>>](@Option<Int> = Some(5)) {
+    get(@Unit) -> { resume(@Option<Int>.0) },
+    put(@Option<Id<Id<Int>>>) -> { resume(()) } with @Option<Int> = @Option<Id<Int>>.0
+  } in {
+    put(Some(9));
+    option_unwrap_or(get(()), 0 - 1)
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}

@@ -1,0 +1,25 @@
+-- P20b: let-bound effectful closure applied via apply_fn inside the handled
+-- body -- admitted?
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Int = 5000;
+  handle[State<Int>](@Int = 1) {
+    get(@Unit) -> { resume(@Int.0 + @Int.1) },
+    put(@Int) -> { resume(()) }
+  } in {
+    let @Fn = fn(@Int -> @Int) effects(<State<Int>>) { put(@Int.0); get(()) };
+    let @Int = apply_fn(@Fn.0, 42);
+    get(())
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}

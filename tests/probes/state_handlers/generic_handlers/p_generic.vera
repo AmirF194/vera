@@ -1,0 +1,19 @@
+private forall<T> fn wrap(@T -> @T)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<T>](@T = @T.0) {
+    put(@T) -> { resume(()) }
+  } in {
+    get(())
+  }
+}
+
+public fn main(-> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  wrap(41) + 1
+}

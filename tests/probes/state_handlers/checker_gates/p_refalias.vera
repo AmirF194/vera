@@ -1,0 +1,14 @@
+type Pos = { @Int | @Int.0 > 0 };
+
+public fn go(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Pos>](@Pos = 1) {
+    get(@Unit) -> { resume(@Pos.0) },
+    put(@Pos) -> { resume(()) }
+  } in {
+    get(())
+  }
+}

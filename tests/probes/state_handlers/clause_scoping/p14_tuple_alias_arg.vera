@@ -1,0 +1,27 @@
+-- Probe 14 (control): Tuple arg with one alias component.
+-- put(@Tuple<Cnt, Int>) binds "Tuple<Int, Int>" per checker.
+type Cnt = Int;
+
+public fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Tuple<Int, Int>>](@Tuple<Int, Int> = Tuple(1, 2)) {
+    get(@Unit) -> { resume(@Tuple<Int, Int>.0) },
+    put(@Tuple<Cnt, Int>) -> { resume(()) } with @Tuple<Int, Int> = @Tuple<Int, Int>.1
+  } in {
+    put(Tuple(20, 22));
+    match get(()) {
+      Tuple(@Int, @Int) -> @Int.1
+    }
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 20)
+  effects(pure)
+{
+  probe(())
+}

@@ -19,6 +19,7 @@ from vera.types import (
     is_subtype,
     pretty_type,
     pretty_inferred_type,
+    state_cell_decl_equal,
     substitute,
     types_equal,
 )
@@ -416,6 +417,34 @@ class ControlFlowMixin:
             )
             return UnknownType()
 
+        # #1202 adversarial round (F4): the parameterized BUILTIN effects
+        # take exactly one type argument — `handle[State<Int, Nat>]` and
+        # bare `handle[State]` previously sailed through check (the zip
+        # below truncates; a missing arg leaked an unresolved TypeVar into
+        # downstream diagnostics) and died at codegen with E602/E121.
+        # Check-green ⇒ compilable: reject the arity here.  User-declared
+        # effects are untouched (their arity is their declaration's).
+        if (effect_inst.name in ("State", "Exn")
+                and isinstance(expr.effect, ast.EffectRef)
+                and len(expr.effect.type_args or []) != 1):
+            got = len(expr.effect.type_args or [])
+            self._error(
+                expr.effect,
+                f"handle[{effect_inst.name}] requires exactly one type "
+                f"argument (got {got}).",
+                rationale=f"The builtin {effect_inst.name} effect is "
+                          f"parameterized by exactly one type — "
+                          f"{effect_inst.name}<T> — which types its "
+                          f"operations and, for State, the handler's "
+                          f"state cell.",
+                fix=f"Write handle[{effect_inst.name}<T>](...) with a "
+                    f"single concrete type argument, e.g. "
+                    f"handle[State<Int>](@Int = 0) {{ ... }}.",
+                spec_ref='Chapter 7, Section 7.5.1 "Handler Syntax"',
+                error_code="E337",
+            )
+            return UnknownType()
+
         # Build type mapping for effect type params
         mapping: dict[str, Type] = {}
         if eff_info.type_params and effect_inst.type_args:
@@ -447,6 +476,57 @@ class ControlFlowMixin:
                             f"<value>) {{ ... }}.",
                         spec_ref='Chapter 7, Section 7.5.1 "Handler Syntax"',
                         error_code="E331",
+                    )
+
+            # #1206: for the builtin State effect the declared state IS the
+            # State<T> cell — obligations and codegen guards key off T
+            # (#1203), so a divergent declared type is documentation that
+            # lies about what the cell holds.  Structural equality of the
+            # RESOLVED types is the test (`is_subtype` is deliberately
+            # blind here: Int <: Nat both ways by rule 3b, and refinements
+            # erase to their bases by rules 5–7): aliases of T are equal
+            # after resolution and stay accepted; Int-for-Nat and
+            # refinement-decorated declarations are rejected.  TypeVar
+            # anywhere on either side defers to instantiation (the E128
+            # lesson: a generic shape whose instantiations are fine must
+            # not die at the generic site).
+            if (effect_inst.name == "State"
+                    and isinstance(expr.effect, ast.EffectRef)
+                    and expr.effect.type_args
+                    and len(expr.effect.type_args) == 1
+                    and state_type is not None
+                    and not isinstance(state_type, UnknownType)):
+                cell_type = self._resolve_type(expr.effect.type_args[0])
+                if (not isinstance(cell_type, UnknownType)
+                        and not contains_typevar(cell_type)
+                        and not contains_typevar(state_type)
+                        and not state_cell_decl_equal(
+                            cell_type, state_type)):
+                    self._error(
+                        expr.state.type_expr,
+                        f"Handler state is declared "
+                        f"@{pretty_type(state_type)} but the handled "
+                        f"effect's cell type is "
+                        f"State<{pretty_type(cell_type)}>.",
+                        rationale="For the builtin State effect the "
+                                  "handler state declaration IS the "
+                                  "State<T> cell: verification "
+                                  "obligations and runtime guards key "
+                                  "off T, so a divergent declared type "
+                                  "is documentation that lies about "
+                                  "what the cell holds.",
+                        fix=f"Declare the state as "
+                            f"@{pretty_type(cell_type)} (an alias that "
+                            f"resolves to it is fine), and express any "
+                            f"refinement in the effect's State<T> "
+                            f"argument itself via a NAMED refinement "
+                            f"alias — type Small = {{ @Nat | ... }}; "
+                            f"handle[State<Small>](@Small = ...) — an "
+                            f"inline refinement literal in the State<T> "
+                            f"argument is not compilable.",
+                        spec_ref='Chapter 7, Section 7.5.1 '
+                                 '"Handler Syntax"',
+                        error_code="E336",
                     )
 
         # Compute handler state canonical type name (for with-clause checks)
@@ -547,7 +627,17 @@ class ControlFlowMixin:
                                      '"Handler Semantics"',
                             error_code="E334",
                         )
-                    upd_type = self._synth_expr(upd_expr)
+                    # Synth WITH the declared state type as expected —
+                    # the same #993 bidirectional threading the state
+                    # INIT got: without it a byte-width literal
+                    # (`with @Byte = 77`) synthesized as Nat and E335'd
+                    # while the identical literal was accepted at init,
+                    # put arguments, and resume values (round-3 review:
+                    # the coercion inconsistency made codegen's
+                    # with-update Byte arm unreachable from check-green
+                    # source).
+                    upd_type = self._synth_expr(
+                        upd_expr, expected=state_type)
                     if (upd_type and state_type
                             and not isinstance(upd_type, UnknownType)
                             and not is_subtype(upd_type, state_type)):
@@ -614,7 +704,9 @@ class ControlFlowMixin:
         # stack is E217 (the bare-call path in calls.py), because codegen cannot
         # route it to the host.
         self._handled_effects.append(effect_inst.name)
+        self._handled_effect_insts.append(effect_inst)
         body_type = self._synth_expr(expr.body)
+        self._handled_effect_insts.pop()
         self._handled_effects.pop()
 
         if pushed_state_hint:

@@ -1,0 +1,29 @@
+-- Angle 4b: same shape, ref spelled @Option<Int>.1 — per checker that IS the
+-- put arg (param bound first). Codegen's "Option<Int>" stack holds only the
+-- state, so .1 should dangle.
+type Cnt = Int;
+
+public fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Option<Int>>](@Option<Int> = Some(100)) {
+    get(@Unit) -> { resume(@Option<Int>.0) },
+    put(@Option<Cnt>) -> { resume(()) } with @Option<Int> = @Option<Int>.1
+  } in {
+    put(Some(7));
+    match get(()) {
+      Some(@Int) -> @Int.0,
+      None -> 0 - 1
+    }
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}

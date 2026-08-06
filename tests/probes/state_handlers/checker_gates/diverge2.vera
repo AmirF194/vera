@@ -1,0 +1,12 @@
+public fn t(@Int -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@Int = @Int.0) {
+    get(@Unit) -> { resume(@Int.0) }
+  } in {
+    get(()) < 0
+  }
+}
+public fn main(@Unit -> @Bool) requires(true) ensures(true) effects(pure) { t(0 - 5) }

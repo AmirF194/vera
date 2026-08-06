@@ -1,0 +1,9 @@
+import loclib;
+
+public fn go(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  bad(@Int.0)
+}

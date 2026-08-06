@@ -1,0 +1,20 @@
+-- P11: resume(<Int>) inside an Exn throw clause - checkable?
+private fn f(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[Exn<String>] {
+    throw(@String) -> { resume(@Int.0); 0 }
+  } in {
+    if @Int.0 < 0 then { throw("neg") } else { @Int.0 }
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  f(0 - 3)
+}

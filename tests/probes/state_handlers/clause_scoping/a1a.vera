@@ -1,0 +1,24 @@
+-- A1a: State<Nat> cell, @Count annotation, put(@Nat) pattern (all names split)
+type Count = Nat;
+
+public fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@Count = 100) {
+    get(@Unit) -> { resume(@Count.0) },
+    put(@Nat) -> { resume(()) } with @Count = 2 * @Count.0 + 3 * @Nat.0
+  } in {
+    put(5);
+    nat_to_int(get(()))
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}

@@ -1,0 +1,15 @@
+public fn t(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>](@Int = 1) {
+    put(@Int) -> { resume(()) }
+  } in {
+    handle[State<Nat>](@Int = 0) {
+      put(@Nat) -> { resume(()) }
+    } in {
+      nat_to_int(get(()))
+    }
+  }
+}

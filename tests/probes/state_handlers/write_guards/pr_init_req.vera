@@ -1,0 +1,19 @@
+-- Precision: an enclosing `requires` must discharge the init obligation Tier-1.
+public fn t(@Int -> @Bool)
+  requires(@Int.0 >= 0)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@Nat = @Int.0) {
+    get(@Unit) -> { resume(@Nat.0) }
+  } in {
+    get(()) < 0
+  }
+}
+public fn main(@Unit -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  t(4)
+}

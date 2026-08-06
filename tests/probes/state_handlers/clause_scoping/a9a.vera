@@ -1,0 +1,24 @@
+-- A9: call-site env shift. The get clause references @Nat.1 — per the checker
+-- that is the fn PARAM (clause scope = fn scopes + [state]). The body binds a
+-- let @Nat before calling get(()); clause inlining at the call site sees it.
+public fn probe(@Nat -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@Nat = 0) {
+    get(@Unit) -> { resume(@Nat.1) },
+    put(@Nat) -> { resume(()) }
+  } in {
+    let @Nat = 777;
+    nat_to_int(get(()))
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(9)
+}

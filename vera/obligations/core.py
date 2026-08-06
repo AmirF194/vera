@@ -95,6 +95,12 @@ ObligationKind = Literal[
                   # `> i64.MAX` -> loud E530; else honest tier3 (the codegen
                   # coercion trap is the guard, so the postcondition stays
                   # sound).
+    "state_decl",  # a generic handler's declared state type diverging from
+                  # the instantiated State<T> cell (#1206's E336 defers on a
+                  # TypeVar cell; the monomorphized clone re-checks it and a
+                  # divergence records violated/E533 — PR #1202 adversarial
+                  # round, F3).  Always violated-or-absent: equality holds ->
+                  # no record.
 ]
 
 ObligationStatus = Literal[

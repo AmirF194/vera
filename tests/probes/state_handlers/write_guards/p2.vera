@@ -1,0 +1,22 @@
+-- Probe 2: negative stored through a @Nat state cell, OBSERVED as a Bool so
+-- no other @Nat boundary guard can mask it.
+public fn stored_is_negative(@Int -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@Nat = 0) {
+    get(@Unit) -> { resume(@Nat.0) }
+  } in {
+    put(@Int.0);
+    get(()) < 0
+  }
+}
+
+public fn main(@Unit -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  stored_is_negative(0 - 5)
+}

@@ -1,0 +1,9 @@
+type NonEmpty = { @String | string_length(@String.0) > 0 };
+private fn p(@NonEmpty -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  forall(@Int, @NonEmpty.0, fn(@Int -> @Bool) effects(pure) { true })
+}
+public fn main(@Unit -> @Int) requires(true) ensures(true) effects(pure) { 0 }

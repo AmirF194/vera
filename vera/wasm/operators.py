@@ -35,6 +35,25 @@ class OperatorsMixin:
         if type_name is None:
             raise CodegenInvariantError(  # pragma: no cover
                 "slot reference type argument is not a NamedType", ref)
+        # Refs resolve by the OPAQUE syntactic rendering only.  Round-4
+        # tried canonical-first resolution (globally, then scoped to
+        # clause bodies) and BOTH were unsound the same way: a canonical
+        # key over codegen's mixed-keyed environments sees only the
+        # canonically-KEYED subset of the checker's merged equivalence
+        # class, so a "hit" can land on the wrong member whenever any
+        # same-class binding is spelled differently (round-4's
+        # Future<Alias> regression; round-5's clause-body-let and
+        # outer-param shapes).  A canonical-first hit is sound only when
+        # the canonical stack provably contains the checker's WHOLE
+        # class — which requires the #1208/#1213 single naming module.
+        # Until then: a divergent spelling with NO same-keyed sibling in
+        # scope dangles loudly here (E699); one WITH a same-keyed
+        # sibling silently resolves to that sibling wherever the
+        # checker's merged/split class disagrees (#1208 documents the
+        # shapes — a clause-body `let` or a plain param+let pair of one
+        # class under two spellings).  The clause translator refuses
+        # the pattern/annotation seam's versions in BOTH directions
+        # (its class-collision skips); the general fix is #1213's.
         local_idx = env.resolve(type_name, ref.index)
         if local_idx is None:
             # Defensive invariant: a check-green slot reference must map to a
@@ -1770,6 +1789,12 @@ class OperatorsMixin:
         if type_name is None:
             raise CodegenInvariantError(  # pragma: no cover
                 "old(State<T>) effect ref has no extractable type name", expr)
+        # #1205: the snapshot map is keyed by the scalar-collapsed family
+        # (see `_collect_old_types`) — `old(State<Count>)` reads the
+        # `Nat` family's snapshot.
+        eff_ref = expr.effect_ref
+        if isinstance(eff_ref, ast.EffectRef) and eff_ref.type_args:
+            type_name = self._family_name(eff_ref.type_args[0], type_name)
         local_idx = self.get_old_state_local(type_name)
         if local_idx is None:
             raise CodegenInvariantError(  # pragma: no cover

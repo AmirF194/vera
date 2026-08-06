@@ -1,0 +1,26 @@
+-- Probe 13 (control): parameterised alias in ARG position of a clause
+-- pattern, single application. put(@Option<Id2<Int>>) binds "Option<Int>"
+-- per checker; ref @Option<Int>.1 = the put argument -> 9.
+type Id2<T> = T;
+
+public fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Option<Int>>](@Option<Int> = Some(5)) {
+    get(@Unit) -> { resume(@Option<Int>.0) },
+    put(@Option<Id2<Int>>) -> { resume(()) } with @Option<Int> = @Option<Int>.1
+  } in {
+    put(Some(9));
+    option_unwrap_or(get(()), 0 - 1)
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 9)
+  effects(pure)
+{
+  probe(())
+}

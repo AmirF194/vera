@@ -1,0 +1,18 @@
+type Count = Nat;
+
+public fn bump(@Nat -> @Int)
+  requires(true)
+  ensures(new(State<Count>) >= old(State<Count>))
+  effects(<State<Count>>)
+{
+  put(get(()) + @Nat.0);
+  nat_to_int(get(()))
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  0
+}

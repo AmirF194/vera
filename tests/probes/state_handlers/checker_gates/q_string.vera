@@ -1,0 +1,8 @@
+private fn p(@String -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  exists(@Int, @String.0, fn(@Int -> @Bool) effects(pure) { true })
+}
+public fn main(@Unit -> @Int) requires(true) ensures(true) effects(pure) { 0 }

@@ -1,0 +1,31 @@
+-- Probe 15: old/new(State<...>) WT derivation over the head-re-entry shape.
+-- Single-application control (Id<Nat>) plus the nested double (Id<Id<Nat>>).
+type Id<T> = T;
+
+public fn keep_single(@Unit -> @Unit)
+  requires(true)
+  ensures(new(State<Id<Nat>>) == old(State<Id<Nat>>))
+  effects(<State<Id<Nat>>>)
+{
+  let @Id<Nat> = get(());
+  put(@Id<Nat>.0);
+  ()
+}
+
+public fn keep_double(@Unit -> @Unit)
+  requires(true)
+  ensures(new(State<Id<Id<Nat>>>) == old(State<Id<Id<Nat>>>))
+  effects(<State<Id<Id<Nat>>>>)
+{
+  let @Id<Nat> = get(());
+  put(@Id<Nat>.0);
+  ()
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  0
+}

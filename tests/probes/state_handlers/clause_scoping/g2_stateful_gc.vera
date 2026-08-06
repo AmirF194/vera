@@ -1,0 +1,29 @@
+-- Angle 2c GC control: STATEFUL composite keep-old (with @T = @T.0) whose
+-- clause body allocates — the pre-store CAPTURE must survive the allocation.
+public fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Option<Int>>](@Option<Int> = Some(42)) {
+    get(@Unit) -> { resume(@Option<Int>.0) },
+    put(@Option<Int>) -> {
+      let @Option<Int> = Some(7);
+      resume(())
+    } with @Option<Int> = @Option<Int>.0
+  } in {
+    put(Some(5));
+    match get(()) {
+      Some(@Int) -> @Int.0,
+      None -> 0 - 1
+    }
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}

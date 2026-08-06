@@ -38,7 +38,18 @@ def _verify(source: str) -> VerifyResult:
     narrowing obligations fire here exactly as for ``vera verify``.
     """
     ast = parse_to_ast(source)
-    _diags, arts = typecheck_with_artifacts(ast, source)
+    diags, arts = typecheck_with_artifacts(ast, source)
+    # Check-clean is every verifier test's premise: verification
+    # semantics on an ill-typed program are meaningless, and discarding
+    # the checker diagnostics here let a fixture with a dangling slot
+    # ref (E130) pass its `errors == []` assertion trivially — the same
+    # fake-green class the differential harness's gate closed (PR #1202
+    # review rounds, twice).
+    check_errors = [d for d in diags if d.severity == "error"]
+    assert not check_errors, (
+        "verifier-test fixture must type-check cleanly, got: "
+        f"{[(d.error_code, d.description[:70]) for d in check_errors]}"
+    )
     return verify(
         ast, source,
         expr_types=arts.expr_semantic_types,

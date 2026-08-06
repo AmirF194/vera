@@ -426,7 +426,7 @@ private fn f(@Int -> @Int)
   requires(@Int.0 != 0)
   ensures(true)
   effects(<Random>)
-{ let @Int = random_int(0, 10); 1 / (2 * @Int.0) }
+{ let @Int = Random.random_int(0, 10); 1 / (2 * @Int.0) }
 """)
         errors = [d for d in result.diagnostics if d.severity == "error"]
         assert errors == [], [e.error_code for e in errors]
@@ -446,7 +446,7 @@ private fn f(@Int -> @Int)
   requires(@Int.0 != 0)
   ensures(true)
   effects(<Random>)
-{ let @Int = random_int(0, 10); 1 / ((@Int.0 + 1) * (@Int.0 + 2)) }
+{ let @Int = Random.random_int(0, 10); 1 / ((@Int.0 + 1) * (@Int.0 + 2)) }
 """)
         errors = [d for d in result.diagnostics if d.severity == "error"]
         assert errors == [], [e.error_code for e in errors]
@@ -470,7 +470,7 @@ private fn f(@Int -> @Int)
   requires(@Int.0 != 0)
   ensures(true)
   effects(<Random>)
-{ let @Int = random_int(0, 10); 1 / (@Int.0 - @Int.0) }
+{ let @Int = Random.random_int(0, 10); 1 / (@Int.0 - @Int.0) }
 """)
         errors = [d for d in result.diagnostics if d.severity == "error"]
         assert [e.error_code for e in errors] == ["E526"], [
@@ -492,7 +492,7 @@ private fn f(@Int -> @Int)
   requires(@Int.0 != 0)
   ensures(true)
   effects(<Random>)
-{ let @Int = random_int(0, 10); 1 % (@Int.0 + 1) }
+{ let @Int = Random.random_int(0, 10); 1 % (@Int.0 + 1) }
 """)
         errors = [d for d in result.diagnostics if d.severity == "error"]
         assert errors == [], [e.error_code for e in errors]
@@ -513,7 +513,7 @@ private fn f(@Int -> @Int)
   requires(@Int.0 != 0)
   ensures(true)
   effects(<Random>)
-{ let @Int = random_int(0, 10); 1 % @Int.0 }
+{ let @Int = Random.random_int(0, 10); 1 % @Int.0 }
 """)
         errors = [d for d in result.diagnostics if d.severity == "error"]
         assert errors == [], [e.error_code for e in errors]
@@ -523,7 +523,7 @@ private fn f(@Int -> @Int)
         ]
 
     def test_mixed_destructure_divisor_by_literal_component_discharges(self) -> None:
-        """In `Tuple(10, random_int(...))` the FIRST component is a translatable
+        """In `Tuple(10, Random.random_int(...))` the FIRST component is a translatable
         literal: dividing by it (`@Int.1`, the prior De Bruijn slot) discharges
         `10 != 0` at Tier-1 even though the SECOND component is opaque.  The
         literal projection must survive an opaque sibling in the same tuple."""
@@ -532,7 +532,7 @@ private fn f(@Unit -> @Int)
   requires(true)
   ensures(true)
   effects(<Random>)
-{ let Tuple<@Int, @Int> = Tuple(10, random_int(0, 10)); 1 / @Int.1 }
+{ let Tuple<@Int, @Int> = Tuple(10, Random.random_int(0, 10)); 1 / @Int.1 }
 """)
         errors = [d for d in result.diagnostics if d.severity == "error"]
         assert errors == [], [e.error_code for e in errors]
@@ -542,7 +542,7 @@ private fn f(@Unit -> @Int)
         ]
 
     def test_mixed_destructure_divisor_by_opaque_component_stays_tier3(self) -> None:
-        """The De Bruijn-collapse trap: in `Tuple(10, random_int(...))` dividing
+        """The De Bruijn-collapse trap: in `Tuple(10, Random.random_int(...))` dividing
         by `@Int.0` (most-recent slot = the OPAQUE second component) must stay
         Tier-3.  If the opaque component were skipped instead of pushed, `@Int.0`
         would collapse onto the literal `10` and falsely discharge — the worst
@@ -552,7 +552,7 @@ private fn f(@Unit -> @Int)
   requires(true)
   ensures(true)
   effects(<Random>)
-{ let Tuple<@Int, @Int> = Tuple(10, random_int(0, 10)); 1 / @Int.0 }
+{ let Tuple<@Int, @Int> = Tuple(10, Random.random_int(0, 10)); 1 / @Int.0 }
 """)
         errors = [d for d in result.diagnostics if d.severity == "error"]
         assert errors == [], [e.error_code for e in errors]
@@ -563,7 +563,7 @@ private fn f(@Unit -> @Int)
 
     def test_outer_requires_does_not_discharge_shadowing_opaque_let(self) -> None:
         """The canonical silent-failure differential: an opaque `let @Int =
-        random_int(...)` shadows an outer `@Int` param guarded by
+        Random.random_int(...)` shadows an outer `@Int` param guarded by
         `requires(@Int.0 != 0)`.  Dividing by `@Int.0` now refers to the
         *shadow* (which can be 0), so it must be Tier-3, NOT verified against
         the stale outer guard.  A `verified` here is a SILENT_FAILURE."""
@@ -572,7 +572,7 @@ public fn f(@Int -> @Int)
   requires(@Int.0 != 0)
   ensures(true)
   effects(<Random>)
-{ let @Int = random_int(0, 10); 1 / @Int.0 }
+{ let @Int = Random.random_int(0, 10); 1 / @Int.0 }
 """)
         errors = [d for d in result.diagnostics if d.severity == "error"]
         assert errors == [], [e.error_code for e in errors]
@@ -592,7 +592,7 @@ private fn f(@Int -> @Int)
   requires(@Int.0 != 0)
   ensures(true)
   effects(<Random>)
-{ let @Int = random_int(0, 10); 1 / @Int.1 }
+{ let @Int = Random.random_int(0, 10); 1 / @Int.1 }
 """)
         errors = [d for d in result.diagnostics if d.severity == "error"]
         assert errors == [], [e.error_code for e in errors]
@@ -613,7 +613,7 @@ private fn f(@Int -> @Int)
   requires(@Int.0 != 0)
   ensures(true)
   effects(<Random>)
-{ let @Int = random_int(1, 10); let @Int = random_int(0, 10); @Int.0 / @Int.1 }
+{ let @Int = Random.random_int(1, 10); let @Int = Random.random_int(0, 10); @Int.0 / @Int.1 }
 """)
         errors = [d for d in result.diagnostics if d.severity == "error"]
         assert errors == [], [e.error_code for e in errors]
@@ -633,7 +633,7 @@ private fn f(@Int -> @Int)
   requires(@Int.0 != 0)
   ensures(true)
   effects(<Random>)
-{ let @Int = random_int(0, 10); (1 / @Int.0) + (2 / @Int.0) }
+{ let @Int = Random.random_int(0, 10); (1 / @Int.0) + (2 / @Int.0) }
 """)
         errors = [d for d in result.diagnostics if d.severity == "error"]
         assert errors == [], [e.error_code for e in errors]
@@ -754,7 +754,7 @@ private fn leak(@Nat -> @Nat)
         st = _nat_sub_status("""
 effect Rng { op rand(Unit -> Nat); }
 
-private fn e(@Unit -> @Nat)
+private fn drawtwo(@Unit -> @Nat)
   requires(true) ensures(true) effects(<Rng>)
 { let @Nat = Rng.rand(()); let @Nat = Rng.rand(()); @Nat.0 - @Nat.1 }
 """)
@@ -948,7 +948,7 @@ private fn appended(@Unit -> @Int)
         """An index `let`-shadowing a guarded index param must be Tier-3, NOT
         silently verified against the stale outer bound.  The param carries
         `0 <= @Int.0 && @Int.0 < array_length(...)`; after `let @Int =
-        random_int(...)`, `@Int.0` is the (unbounded) shadow, so the bounds are
+        Random.random_int(...)`, `@Int.0` is the (unbounded) shadow, so the bounds are
         indeterminate → Tier 3.  A lost shadow would resolve `@Int.0` to the
         guarded param and falsely *verify* (silent failure) — the differential:
         the same body WITHOUT the `let` verifies at Tier 1, with it falls to
@@ -957,7 +957,7 @@ private fn appended(@Unit -> @Int)
 private fn idx(@Array<Int>, @Int -> @Int)
   requires(0 <= @Int.0 && @Int.0 < array_length(@Array<Int>.0))
   ensures(true) effects(<Random>)
-{ let @Int = random_int(0, 5); @Array<Int>.0[@Int.0] }
+{ let @Int = Random.random_int(0, 5); @Array<Int>.0[@Int.0] }
 """)
         errors = [d for d in result.diagnostics if d.severity == "error"]
         assert errors == [], [e.error_code for e in errors]
@@ -998,19 +998,24 @@ private fn destr(@Array<Int> -> @Int)
             (o.kind, o.status) for o in idx
         ]
 
-    def test_index_inside_quantifier_closure_not_obligated(self) -> None:
-        """An index inside a `forall` quantifier closure body is NOT walked
-        (captured length beyond Tier 1 without #427), so it records ZERO
-        index_bounds obligations — left to the runtime trap (#779)."""
+    def test_index_inside_quantifier_closure_obligated_tier3(self) -> None:
+        """An index inside a `forall` quantifier predicate body is walked
+        under the #779 fresh-scope descent (captured length beyond the
+        fragment without #427), recording exactly one Tier-3
+        index_bounds obligation — the runtime trap is reported, not
+        omitted."""
         result = _verify("""
 private fn allpos(@Array<Int> -> @Bool)
   requires(true) ensures(true) effects(pure)
-{ forall(@Int, array_length(@Array<Int>.0), fn(@Int -> @Bool) effects(pure) { @Array<Int>.1[5] == 0 }) }
+{ forall(@Int, array_length(@Array<Int>.0), fn(@Int -> @Bool) effects(pure) { @Array<Int>.0[5] == 0 }) }
 """)
         errors = [d for d in result.diagnostics if d.severity == "error"]
         assert errors == [], [e.error_code for e in errors]
         idx = [o for o in result.obligations if o.kind == "index_bounds"]
-        assert idx == [], f"quantifier-body index must not be obligated, got {len(idx)}"
+        assert len(idx) == 1, (
+            f"quantifier-body index must be obligated once, got {len(idx)}"
+        )
+        assert idx[0].status == "tier3"
 
 
 class TestDestructureDeBruijnAlignment680:
@@ -1051,7 +1056,7 @@ private fn lit_order_second(@Unit -> @Int)
         result = _verify("""
 private fn mixed_opaque_first(@Unit -> @Int)
   requires(true) ensures(true) effects(<Random>)
-{ let Tuple<@Int, @Int> = Tuple(10, random_int(0, 10)); 1 / @Int.0 }
+{ let Tuple<@Int, @Int> = Tuple(10, Random.random_int(0, 10)); 1 / @Int.0 }
 """)
         errors = [d for d in result.diagnostics if d.severity == "error"]
         assert errors == [], [e.error_code for e in errors]
@@ -1066,7 +1071,7 @@ private fn mixed_opaque_first(@Unit -> @Int)
         result = _verify("""
 private fn mixed_opaque_lit(@Unit -> @Int)
   requires(true) ensures(true) effects(<Random>)
-{ let Tuple<@Int, @Int> = Tuple(10, random_int(0, 10)); 1 / @Int.1 }
+{ let Tuple<@Int, @Int> = Tuple(10, Random.random_int(0, 10)); 1 / @Int.1 }
 """)
         errors = [d for d in result.diagnostics if d.severity == "error"]
         assert errors == [], [e.error_code for e in errors]
@@ -1121,7 +1126,7 @@ public fn destr_shadows_guard(@Int -> @Int)
         result = _verify("""
 public fn opaque_destr_guard(@Int -> @Int)
   requires(@Int.0 != 0) ensures(true) effects(<Random>)
-{ let Tuple<@Int, @Int> = Tuple(random_int(0, 10), random_int(0, 10)); 1 / @Int.0 }
+{ let Tuple<@Int, @Int> = Tuple(Random.random_int(0, 10), Random.random_int(0, 10)); 1 / @Int.0 }
 """)
         errors = [d for d in result.diagnostics if d.severity == "error"]
         assert errors == [], [e.error_code for e in errors]
@@ -1208,7 +1213,7 @@ class TestShadowAuditInteractions680:
         result = _verify("""
 private fn f(@Int -> @Array<Int>)
   requires(@Int.0 != 0) ensures(true) effects(<Random>)
-{ let @Int = random_int(0, 10); [1 / @Int.0, 99] }
+{ let @Int = Random.random_int(0, 10); [1 / @Int.0, 99] }
 """)
         assert [d for d in result.diagnostics if d.severity == "error"] == []
         divs = [o for o in result.obligations if o.kind == "div_zero"]
@@ -1220,7 +1225,7 @@ private fn f(@Int -> @Array<Int>)
         result = _verify("""
 private fn f(@Int -> @Int)
   requires(@Int.0 != 0) ensures(true) effects(<Random>)
-{ let @Int = random_int(0, 10); assert(1 / @Int.0 > 0); 0 }
+{ let @Int = Random.random_int(0, 10); assert(1 / @Int.0 > 0); 0 }
 """)
         assert [d for d in result.diagnostics if d.severity == "error"] == []
         divs = [o for o in result.obligations if o.kind == "div_zero"]
@@ -1276,7 +1281,7 @@ private fn f(@Int -> @Int)
 private fn f(@Int, @Nat -> @Array<Int>)
   requires(@Int.0 != 0) ensures(true) effects(<Random>)
 {
-  let @Int = random_int(0, 9);
+  let @Int = Random.random_int(0, 9);
   let @Nat = random_nat(0, 9);
   [1 / @Int.0, @Nat.0 - @Nat.1]
 }
@@ -1296,7 +1301,7 @@ private fn f(@Int -> @Array<Int>)
   requires(@Int.0 != 0) ensures(true) effects(<Random>)
 {
   let @Int = 1 / @Int.0;
-  let @Int = random_int(0, 9);
+  let @Int = Random.random_int(0, 9);
   [@Int.1, 1 / @Int.0]
 }
 """)
@@ -1307,13 +1312,13 @@ private fn f(@Int -> @Array<Int>)
 
     def test_nested_block_shadow_does_not_leak_to_outer_divisor(self) -> None:
         """An opaque shadow bound inside a nested block does not bleed onto an
-        outer divisor.  `let @Int = { let @Int = random_int(...); ... }; 1 /
+        outer divisor.  `let @Int = { let @Int = Random.random_int(...); ... }; 1 /
         @Int.1` divides by the outer constrained param (`@Int.1`), Tier-1."""
         result = _verify("""
 private fn f(@Int -> @Int)
   requires(@Int.0 != 0) ensures(true) effects(<Random>)
 {
-  let @Int = { let @Int = random_int(0, 9); @Int.0 + 0 };
+  let @Int = { let @Int = Random.random_int(0, 9); @Int.0 + 0 };
   1 / @Int.1
 }
 """)
@@ -1329,7 +1334,7 @@ private fn f(@Int -> @Int)
 private fn f(@Int -> @Int)
   requires(@Int.0 != 0) ensures(true) effects(<Random>)
 {
-  let @Int = { let @Int = random_int(0, 9); @Int.0 };
+  let @Int = { let @Int = Random.random_int(0, 9); @Int.0 };
   1 / @Int.0
 }
 """)

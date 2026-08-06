@@ -1,0 +1,16 @@
+public fn f(@Bool -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Byte = if @Bool.0 then { 1 } else { 2 };
+  byte_to_int(@Byte.0)
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  f(true)
+}

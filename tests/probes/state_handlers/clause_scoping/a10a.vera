@@ -1,0 +1,26 @@
+-- A10: PATTERNLESS put clause (grammar allows zero params). Checker binds NO
+-- op param; codegen's fallback binds the arg under type_name ("Nat").
+-- with-expr @Nat.0: checker -> fn param (9); codegen fallback -> the arg (5)?
+type Count = Nat;
+
+public fn probe(@Nat -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@Count = 100) {
+    get(@Unit) -> { resume(@Count.0) },
+    put() -> { resume(()) } with @Count = @Nat.0
+  } in {
+    put(5);
+    nat_to_int(get(()))
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(9)
+}

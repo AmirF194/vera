@@ -1,0 +1,22 @@
+-- A2a: STATELESS get clause. Checker: @Nat.0 in clause = enclosing fn param
+-- (no state binding). Pre-diff codegen captured the cell -> 5; post must be 9.
+public fn probe(@Nat -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>] {
+    get(@Unit) -> { resume(@Nat.0) }
+  } in {
+    put(5);
+    nat_to_int(get(()))
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(9)
+}

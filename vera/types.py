@@ -503,6 +503,58 @@ def types_equal(a: Type, b: Type) -> bool:
     return a == b
 
 
+def state_cell_decl_equal(cell: Type, declared: Type) -> bool:
+    """The E336/E533 equality: does a handler state DECLARATION match the
+    builtin State effect's resolved cell type?
+
+    ``types_equal`` — deliberately NOT ``is_subtype``, which conflates
+    ``Int``/``Nat`` (rule 3b) and erases refinements to their bases (rules
+    5–7) — tightened for refined pairs: ``types_equal`` compares refined
+    types by BASE only (predicates are the verifier's domain in
+    subtyping), which would let a refined-vs-refined divergence lie
+    (``@{... > 3}`` on ``State<{... < 10}>``).  Predicate AST ``==`` is
+    structural and span-insensitive, so the same alias, two textually
+    identical aliases, and identical literals all stay equal; only
+    genuinely different predicates diverge.  Shared by the checker's
+    concrete gate (E336) and the verifier's per-instantiation recheck
+    (E533) so the two phases can never drift.
+    """
+    if not types_equal(cell, declared):
+        return False
+    return _refined_predicates_agree(cell, declared)
+
+
+def _refined_predicates_agree(a: Type, b: Type) -> bool:
+    """Structural predicate agreement at EVERY depth of two
+    ``types_equal`` types — ``types_equal`` compares refined types by
+    base only, at the top AND inside ADT type arguments, so
+    ``Option<{@Int | P}>`` vs ``Option<{@Int | Q}>`` passed the
+    round-3 top-level-only check (PR #1202 review round: E336 and E533
+    silently accepted nested refined divergence)."""
+    if isinstance(a, RefinedType) and isinstance(b, RefinedType):
+        return (a.predicate == b.predicate
+                and _refined_predicates_agree(a.base, b.base))
+    if isinstance(a, RefinedType) or isinstance(b, RefinedType):
+        # types_equal held, so a one-sided refinement means the pair
+        # already diverges structurally — defensive False.
+        return False
+    if isinstance(a, AdtType) and isinstance(b, AdtType):
+        return all(
+            _refined_predicates_agree(x, y)
+            for x, y in zip(a.type_args, b.type_args)
+        )
+    if isinstance(a, FunctionType) and isinstance(b, FunctionType):
+        # A refined predicate inside a fn-typed position (param or
+        # return) is a divergence surface too — `State<fn({@Int | P}
+        # -> Int)>` with a `{@Int | Q}` declared param compiled
+        # (round-9 review): recurse both.
+        return (all(
+            _refined_predicates_agree(x, y)
+            for x, y in zip(a.params, b.params))
+            and _refined_predicates_agree(a.return_type, b.return_type))
+    return True
+
+
 def contains_typevar(ty: Type) -> bool:
     """True if *ty* contains any TypeVar anywhere in its structure."""
     if isinstance(ty, TypeVar):

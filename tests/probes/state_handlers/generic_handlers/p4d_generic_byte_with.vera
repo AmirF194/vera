@@ -1,0 +1,34 @@
+-- P4d: generic handler with literal init and literal with-update, instantiated
+-- at Byte. The generic site skips E335 (TypeVar); the mono clone reaches
+-- codegen as `with @Byte = 200` / init 1 — the byte-literal arms must fire
+-- (i32.const) or the module is invalid WASM.
+-- Expected: cell(@Byte) after put(3) -> with 200; byte_to_int -> 200.
+private forall<T> fn cellget(@T -> @T)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<T>](@T = @T.0) {
+    get(@Unit) -> { resume(@T.0) },
+    put(@T) -> { resume(()) }
+  } in {
+    get(())
+  }
+}
+
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Byte = 7;
+  byte_to_int(cellget(@Byte.0))
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}

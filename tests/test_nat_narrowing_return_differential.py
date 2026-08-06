@@ -76,8 +76,18 @@ def _resolved_pipeline(
         program = parse_to_ast(source)
         resolver = ModuleResolver(_root=Path(path).parent)
         resolved = resolver.resolve_imports(program, Path(path))
-        _diags, arts = typecheck_with_artifacts(
+        diags, arts = typecheck_with_artifacts(
             program, source, file=path, resolved_modules=resolved,
+        )
+        # Check-clean is part of every differential's premise ("a
+        # check-green program must ..."): a fixture the checker rejects
+        # would silently exercise nothing (a round-3 reviewer caught a
+        # test validating a check-rejected program through exactly this
+        # gap).
+        errors = [d for d in diags if d.severity == "error"]
+        assert not errors, (
+            "differential fixture must type-check cleanly, got: "
+            f"{[(d.error_code, d.description[:70]) for d in errors]}"
         )
         yield program, arts, resolved, path
     finally:
@@ -458,23 +468,24 @@ class TestClosureReturnNarrowingDifferential984:
             f"non-narrowing closure return"
         )
 
-    def test_nested_closure_guarded_by_codegen_but_verifier_underreports_985(
+    def test_nested_closure_verifier_and_codegen_agree_985(
         self,
     ) -> None:
         """A closure nested inside ANOTHER closure's body: codegen guards its
         @Int -> @Nat return (every lifted closure passes through
-        ``_compile_lifted_closure``) but the verifier's ``AnonFn`` walk is
-        terminal — it does not recurse into the outer closure's body — so the
-        nested return narrowing carries NO obligation.  Sound OVER-guarding (an
-        extra real trap, never a false proof), but a reporting-completeness gap:
-        the narrowing dual of the #985 widening residual.  Pinned so a future
-        change that DROPS the guard (unsound silent negative) or that STARTS
-        obligating (closing #985) is caught here and this test updated."""
-        # The verifier under-reports: no nat_bind for the nested closure return.
-        assert _return_nat_bind_statuses(_NESTED_CLOSURE) == [], (
-            "nested: an obligation appeared — did #985 close?  Update this test."
+        ``_compile_lifted_closure``) AND the verifier reports the matching
+        ``nat_bind`` obligation — the #779 fresh-scope descent re-enters the
+        ``AnonFn`` arm for the nested closure, closing the #985
+        reporting-completeness residual.  The strict verifier↔codegen
+        differential now holds at every closure depth: one runtime-guarded
+        Tier-3 record per guard, and the guard itself still traps a
+        negative."""
+        statuses = _return_nat_bind_statuses(_NESTED_CLOSURE)
+        assert statuses == ["tier3"], (
+            "nested: the return-narrowing obligation vanished — the #985 "
+            "under-reporting regressed"
         )
-        # ...yet codegen still guards it, so a negative traps (sound).
+        # ...and codegen still guards it, so a negative traps (sound).
         assert _run(_NESTED_CLOSURE, "go", -5) is None, (
             "nested: codegen guard missing -> a silent negative @Nat"
         )
@@ -1360,3 +1371,1387 @@ class TestRefinedBoundaryGuardableHelper:
             RefinedType(AdtType("Array", (RefinedType(INT, pred),)), pred))
         assert g(RefinedType(INT, pred))
         assert g(RefinedType(AdtType("Array", (PrimitiveType("Int"),)), pred))
+
+
+class TestClosureInteriorBindingDifferential779:
+    """PR #1202: the #779 fresh-scope descent records interior closure
+    binding sites (`let @Nat = <closure Int param>`) as tier3 with
+    guarded=True — this differential proves the claimed guard exists:
+    the lifted closure's compiled body traps the negative narrowing and
+    passes the non-negative one.  The verifier side of the pair is
+    pinned in tests/test_verifier_fresh_scope.py
+    (test_nat_bind_in_closure_body_is_tier3_guarded)."""
+
+    _INTERIOR_LET = """\
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  let @Array<Int> = array_map([@Int.0], fn(@Int -> @Int) effects(pure) { let @Nat = @Int.0; nat_to_int(@Nat.0) });
+  @Array<Int>.0[0]
+}
+"""
+
+    def test_negative_traps(self) -> None:
+        assert _run(self._INTERIOR_LET, "go", -5) is None, (
+            "interior closure let-narrowing guard missing -> silent negative"
+        )
+
+    def test_non_negative_passes(self) -> None:
+        assert _run(self._INTERIOR_LET, "go", 7) == 7
+
+    def test_zero_survives(self) -> None:
+        assert _run(self._INTERIOR_LET, "go", 0) == 0
+
+
+class TestNestedSubpatternDifferential:
+    """PR #1202 silent-failure review: the nested `@Nat` sub-pattern bind
+    (`MkWrap(MkBox(@Nat))`) IS codegen-guarded — this differential proves
+    the guard the verifier's static fallback claims (guarded tier3 on an
+    unprojectable scrutinee, pinned in tests/test_verifier_fresh_scope.py
+    TestNestedSubpatternFallback).  The refined nested bind is the
+    UNGUARDED residual (#765) and is disclosed as tier3_unguarded/E506
+    instead."""
+
+    _NESTED_NAT = """\
+private data Box {
+  MkBox(Int)
+}
+
+private data Wrap {
+  MkWrap(Box)
+}
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  let @Wrap = MkWrap(MkBox(@Int.0));
+  match @Wrap.0 {
+    MkWrap(MkBox(@Nat)) -> nat_to_int(@Nat.0)
+  }
+}
+"""
+
+    def test_negative_traps(self) -> None:
+        assert _run(self._NESTED_NAT, "go", -5) is None, (
+            "nested @Nat sub-pattern guard missing -> silent negative"
+        )
+
+    def test_non_negative_passes(self) -> None:
+        assert _run(self._NESTED_NAT, "go", 7) == 7
+
+    def test_zero_survives(self) -> None:
+        assert _run(self._NESTED_NAT, "go", 0) == 0
+
+    _NESTED_NAT_CLOSURE = """\
+private data Box {
+  MkBox(Int)
+}
+
+private data Wrap {
+  MkWrap(Box)
+}
+
+private fn mk(@Int -> @Wrap) requires(true) ensures(true) effects(pure)
+{ MkWrap(MkBox(@Int.0)) }
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  let @Array<Int> = array_map([@Int.0], fn(@Int -> @Int) effects(pure) { match mk(@Int.0) { MkWrap(MkBox(@Nat)) -> nat_to_int(@Nat.0) } });
+  @Array<Int>.0[0]
+}
+"""
+
+    def test_closure_position_negative_traps(self) -> None:
+        """The CLOSURE-position twin — the exact combination the static
+        fallback covers (unprojectable scrutinee under the fresh-scope
+        descent, guarded=True record): the runtime guard it claims must
+        trap here too, not only in direct position."""
+        assert _run(self._NESTED_NAT_CLOSURE, "go", -5) is None, (
+            "closure nested @Nat sub-pattern guard missing -> silent negative"
+        )
+
+    def test_closure_position_non_negative_passes(self) -> None:
+        assert _run(self._NESTED_NAT_CLOSURE, "go", 7) == 7
+
+    def test_closure_position_zero_survives(self) -> None:
+        """Zero must SURVIVE the closure-position nested guard — an
+        off-by-one `> 0` guard mutant would trap valid @Nat zero."""
+        assert _run(self._NESTED_NAT_CLOSURE, "go", 0) == 0
+
+
+class TestHandlerStateBoundaryDifferential1203:
+    """#1203: every handler write boundary into a @Nat state cell is
+    runtime-guarded — state-init, the builtin `put` argument, the `with`
+    state update, and the `resume` argument.  Each traps a negative and
+    passes the non-negative control; the verifier stream twins live in
+    tests/test_verifier_fresh_scope.py
+    (TestHandlerStateBoundaryObligations)."""
+
+    _INIT = """\
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Nat>](@Nat = @Int.0) {
+    get(@Unit) -> { resume(@Nat.0) },
+    put(@Nat) -> { resume(()) }
+  } in {
+    nat_to_int(get(()))
+  }
+}
+"""
+    _PUT = """\
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Nat>](@Nat = 0) {
+    get(@Unit) -> { resume(@Nat.0) },
+    put(@Nat) -> { resume(()) }
+  } in {
+    put(@Int.0);
+    nat_to_int(get(()))
+  }
+}
+"""
+    _WITH = """\
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Nat>](@Nat = 0) {
+    get(@Unit) -> { resume(@Nat.0) },
+    put(@Nat) -> { resume(()) } with @Nat = @Int.0
+  } in {
+    put(5);
+    nat_to_int(get(()))
+  }
+}
+"""
+    _RESUME = """\
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Nat>](@Nat = 0) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Nat) -> { resume(()) }
+  } in {
+    nat_to_int(get(()))
+  }
+}
+"""
+
+    def test_init_negative_traps(self) -> None:
+        assert _run(self._INIT, "go", -7) is None
+    def test_init_non_negative_passes(self) -> None:
+        assert _run(self._INIT, "go", 9) == 9
+    def test_init_zero_survives(self) -> None:
+        assert _run(self._INIT, "go", 0) == 0
+    def test_put_negative_traps(self) -> None:
+        assert _run(self._PUT, "go", -7) is None
+    def test_put_non_negative_passes(self) -> None:
+        assert _run(self._PUT, "go", 9) == 9
+    def test_with_negative_traps(self) -> None:
+        assert _run(self._WITH, "go", -7) is None
+    def test_with_non_negative_passes(self) -> None:
+        assert _run(self._WITH, "go", 9) == 9
+    def test_resume_negative_traps(self) -> None:
+        assert _run(self._RESUME, "go", -7) is None
+    def test_resume_non_negative_passes(self) -> None:
+        assert _run(self._RESUME, "go", 9) == 9
+
+    def test_put_zero_survives(self) -> None:
+        """The four boundaries are wired independently in codegen — each
+        needs its own zero-boundary probe (a `> 0` off-by-one at any one
+        would reject valid @Nat zero and pass the others' probes)."""
+        assert _run(self._PUT, "go", 0) == 0
+
+    def test_with_zero_survives(self) -> None:
+        assert _run(self._WITH, "go", 0) == 0
+
+    def test_resume_zero_survives(self) -> None:
+        assert _run(self._RESUME, "go", 0) == 0
+
+    _PUT_NO_CLAUSE = """\
+public fn go(@Int -> @Bool) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Nat>](@Nat = 0) {
+    get(@Unit) -> { resume(@Nat.0) }
+  } in {
+    put(@Int.0);
+    get(()) < 0
+  }
+}
+"""
+
+    def test_bare_put_negative_traps(self) -> None:
+        """The BARE intrinsic dispatch path (no `put` clause declared) —
+        the adversarial round's critical find: the clause-inlined guard
+        never runs here, so this fixture stored -7 and returned true
+        through the @Nat cell.  The guard now lives on the bare path too
+        (keyed off the state-cell type in the dispatch target)."""
+        assert _run(self._PUT_NO_CLAUSE, "go", -7) is None
+    def test_bare_put_non_negative_passes(self) -> None:
+        assert _run(self._PUT_NO_CLAUSE, "go", 9) == 0
+    def test_bare_put_zero_survives(self) -> None:
+        assert _run(self._PUT_NO_CLAUSE, "go", 0) == 0
+
+    _PUT_IN_CLAUSE_BODY = """\
+public fn go(@Int -> @Bool) requires(true) ensures(true) effects(<State<Nat>>)
+{
+  handle[State<Nat>](@Nat = 0) {
+    get(@Unit) -> { put(@Int.0); resume(@Nat.0) },
+    put(@Nat) -> { resume(()) }
+  } in {
+    get(());
+    get(()) < 0
+  }
+}
+"""
+
+    def test_clause_body_put_negative_traps(self) -> None:
+        """A put INSIDE another clause's body takes the bare path too
+        (`_state_clause_ops` is cleared in clauses) — same guard."""
+        assert _run(self._PUT_IN_CLAUSE_BODY, "go", -5) is None
+    def test_clause_body_put_non_negative_passes(self) -> None:
+        assert _run(self._PUT_IN_CLAUSE_BODY, "go", 9) == 0
+
+
+class TestHandlerStateWidenDifferential1203:
+    """The widen DUAL of the boundary differentials: a `State<Int>` cell
+    receiving an intrinsically-@Nat value is guarded at every boundary —
+    a @Nat above i64.MAX would bit-reinterpret to a negative @Int.  The
+    adversarial round's mutation battery showed every widen arm was
+    deletable without detection; these pin each arm at U64_MAX with
+    in-range and i64.MAX boundary controls."""
+
+    _WIDEN_INIT = """\
+public fn go(@Nat -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Int>](@Int = @Nat.0) {
+    get(@Unit) -> { resume(@Int.0) }
+  } in {
+    get(())
+  }
+}
+"""
+    _WIDEN_PUT = """\
+public fn go(@Nat -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Int>](@Int = 0) {
+    get(@Unit) -> { resume(@Int.0) }
+  } in {
+    put(@Nat.0);
+    get(())
+  }
+}
+"""
+    _WIDEN_RESUME = """\
+public fn go(@Nat -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Int>](@Int = 0) {
+    get(@Unit) -> { resume(nat_to_int(@Nat.0)) }
+  } in {
+    get(())
+  }
+}
+"""
+
+    def test_widen_init_u64max_traps(self) -> None:
+        assert _run(self._WIDEN_INIT, "go", U64_MAX) is None
+    def test_widen_init_in_range_passes(self) -> None:
+        assert _run(self._WIDEN_INIT, "go", 42) == 42
+    def test_widen_put_u64max_traps(self) -> None:
+        assert _run(self._WIDEN_PUT, "go", U64_MAX) is None
+    def test_widen_put_in_range_passes(self) -> None:
+        assert _run(self._WIDEN_PUT, "go", 42) == 42
+    def test_widen_resume_i64max_passes(self) -> None:
+        """Boundary control: exactly i64.MAX survives (the suite's
+        established no-trap-at-i64-max convention)."""
+        assert _run(self._WIDEN_RESUME, "go", 2**63 - 1) == 2**63 - 1
+
+    def test_widen_resume_u64max_traps(self) -> None:
+        """The resume widen arm's own U64_MAX probe — the class
+        docstring's promise; deleting the get-resume widen guard was
+        green without it (PR #1202 review)."""
+        assert _run(self._WIDEN_RESUME, "go", U64_MAX) is None
+
+    _WIDEN_WITH = """\
+public fn go(@Nat -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Int>](@Int = 0) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) } with @Int = @Nat.0
+  } in {
+    put(1);
+    get(())
+  }
+}
+"""
+
+    def test_widen_with_update_u64max_traps(self) -> None:
+        """The `with @Int = <@Nat>` state-update widen arm — obligated
+        `widen_guarded=True`, so the guard promise needs its trap
+        witness."""
+        assert _run(self._WIDEN_WITH, "go", U64_MAX) is None
+    def test_widen_with_update_in_range_passes(self) -> None:
+        assert _run(self._WIDEN_WITH, "go", 42) == 42
+
+    _TAIL_MATCH_RESUME = """\
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Nat>](@Nat = 0) {
+    get(@Unit) -> { match 1 { @Int -> resume(@Int.1) } },
+    put(@Nat) -> { resume(()) }
+  } in {
+    nat_to_int(get(()))
+  }
+}
+"""
+
+    def test_tail_match_resume_negative_traps(self) -> None:
+        """`_tail_resume_arg`'s single-arm-match descent — deleting the
+        MatchExpr arm silently un-guards this legal, lowerable form."""
+        assert _run(self._TAIL_MATCH_RESUME, "go", -7) is None
+    def test_tail_match_resume_non_negative_passes(self) -> None:
+        assert _run(self._TAIL_MATCH_RESUME, "go", 9) == 9
+
+    _ALIAS_ANNOTATION = """\
+type Count = Nat;
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Nat>](@Count = @Int.0) {
+    get(@Unit) -> { resume(@Count.0) },
+    put(@Nat) -> { resume(()) }
+  } in {
+    nat_to_int(get(()))
+  }
+}
+"""
+
+    def test_alias_annotation_init_traps(self) -> None:
+        """The legal annotation-vs-argument NAME divergence (#1205/#1206):
+        `(@Count = ...)` on `State<Nat>` with `type Count = Nat` passes
+        E336 (resolution-equal) while the annotation's slot NAME differs
+        from the cell family — the init guard must key off the effect's
+        cell type, not the annotation's name.  (The truly divergent
+        `(@Int = ...)` shape this fixture previously used is now
+        check-rejected outright — see the E336 pin below.)"""
+        assert _run(self._ALIAS_ANNOTATION, "go", -5) is None
+    def test_alias_annotation_init_passes(self) -> None:
+        """And the clause scope binds the state under the ANNOTATION's own
+        slot name: `resume(@Count.0)` reads the cell through the alias."""
+        assert _run(self._ALIAS_ANNOTATION, "go", 9) == 9
+
+    _DIVERGENT_ANNOTATION = """\
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Nat>](@Int = @Int.0) {
+    get(@Unit) -> { resume(@Nat.0) },
+    put(@Nat) -> { resume(()) }
+  } in {
+    nat_to_int(get(()))
+  }
+}
+"""
+
+    def test_divergent_annotation_rejected_e336(self) -> None:
+        """The lying-annotation shape (`(@Int = ...)` on `State<Nat>`) is
+        now unreachable from checked source: E336 (#1206).  This is what
+        retired the runtime differential this fixture used to drive — the
+        guards-key-off-the-cell-type property lives on in the legal alias
+        shape above, and the full E336 accept/reject matrix lives in
+        tests/test_checker_types.py."""
+        diags, _arts = typecheck_with_artifacts(
+            parse_to_ast(self._DIVERGENT_ANNOTATION))
+        assert any(d.error_code == "E336" for d in diags)
+
+
+class TestScalarAliasFamilyDifferential1205:
+    """#1205 compile-and-run differentials: a scalar type alias as
+    ``State<T>`` / ``Exn<E>`` joins the BASE import/tag family (name and
+    WASM type resolve together), the clause scope binds slots under
+    SOURCE names, and every #1203 boundary guard keys through the alias.
+    Each fixture was invalid WASM (i32/i64 type mismatch), a dangling
+    slot ref (E699), or a silent wrong-binding before the fix."""
+
+    _ALIAS_CELL = """\
+type Count = Nat;
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Count>](@Count = 6) {
+    get(@Unit) -> { resume(@Count.0) },
+    put(@Count) -> { resume(()) }
+  } in {
+    nat_to_int(get(()))
+  }
+}
+"""
+
+    def test_alias_cell_compiles_and_runs(self) -> None:
+        """`State<Count>` with `type Count = Nat` — the issue repro —
+        was invalid WASM (family typed i32 against i64 values).  The
+        init (6) cannot coincide with a default-initialised cell, a
+        dropped read, or the argument (0)."""
+        assert _run(self._ALIAS_CELL, "go", 0) == 6
+
+    _REFINED_ALIAS_CELL = """\
+type Pos = { @Int | @Int.0 > 0 };
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Pos>](@Pos = 1) {
+    get(@Unit) -> { resume(@Pos.0) },
+    put(@Pos) -> { resume(()) }
+  } in {
+    get(())
+  }
+}
+"""
+
+    def test_refined_alias_cell_compiles_and_runs(self) -> None:
+        """A refined alias erases to its base scalar family (`Pos` →
+        `Int`)."""
+        assert _run(self._REFINED_ALIAS_CELL, "go", 0) == 1
+
+    _ALIAS_INIT_GUARD = """\
+type Count = Nat;
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Count>](@Count = @Int.0) {
+    get(@Unit) -> { resume(@Count.0) },
+    put(@Count) -> { resume(()) }
+  } in {
+    nat_to_int(get(()))
+  }
+}
+"""
+
+    def test_alias_init_guard_traps(self) -> None:
+        """The #1203 init guard keys through the alias: a negative @Int
+        into the `Count`(=Nat) cell traps."""
+        assert _run(self._ALIAS_INIT_GUARD, "go", -5) is None
+    def test_alias_init_guard_passes(self) -> None:
+        assert _run(self._ALIAS_INIT_GUARD, "go", 9) == 9
+
+    _ALIAS_PUT_GUARD = """\
+type Count = Nat;
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Count>](@Count = 0) {
+    get(@Unit) -> { resume(@Count.0) },
+    put(@Count) -> { resume(()) }
+  } in {
+    put(@Int.0);
+    nat_to_int(get(()))
+  }
+}
+"""
+
+    def test_alias_put_guard_traps(self) -> None:
+        """put's argument boundary through the alias: a negative @Int
+        into the `Count`(=Nat) cell traps at the clause-inlined store."""
+        assert _run(self._ALIAS_PUT_GUARD, "go", -5) is None
+    def test_alias_put_guard_passes(self) -> None:
+        assert _run(self._ALIAS_PUT_GUARD, "go", 9) == 9
+
+    _ALIAS_WIDEN_INIT = """\
+type Whole = Int;
+
+public fn go(@Nat -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Whole>](@Whole = @Nat.0) {
+    get(@Unit) -> { resume(@Whole.0) }
+  } in {
+    get(())
+  }
+}
+"""
+
+    def test_alias_widen_init_u64max_traps(self) -> None:
+        """The widen dual through an Int alias: a @Nat above i64.MAX
+        into the `Whole`(=Int) cell traps."""
+        assert _run(self._ALIAS_WIDEN_INIT, "go", U64_MAX) is None
+    def test_alias_widen_init_in_range_passes(self) -> None:
+        assert _run(self._ALIAS_WIDEN_INIT, "go", 42) == 42
+
+    _STATELESS_CLAUSE_ARG = """\
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Int>] {
+    put(@Int) -> { assert(@Int.0 == 7); resume(()) }
+  } in {
+    put(7);
+    get(())
+  }
+}
+"""
+
+    def test_stateless_clause_binds_op_arg(self) -> None:
+        """A STATELESS handler's clause scope has no state binding — the
+        checker binds `@Int.0` to put's ARGUMENT.  Pre-fix codegen
+        pushed the pre-store cell capture anyway, so the assert read the
+        cell (0), not the argument (7): silently wrong values wherever
+        the types align, this trap where the assert caught it."""
+        assert _run(self._STATELESS_CLAUSE_ARG, "go", 0) == 7
+
+    _STATELESS_CLAUSE_ARG_NEG = """\
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Int>] {
+    put(@Int) -> { assert(@Int.0 == 0); resume(()) }
+  } in {
+    put(7);
+    get(())
+  }
+}
+"""
+
+    _PUT_PATTERN_NAME = """\
+type Count = Nat;
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Nat>](@Nat = 0) {
+    get(@Unit) -> { resume(@Nat.0) },
+    put(@Count) -> { assert(@Count.0 == 7); resume(()) }
+  } in {
+    put(7);
+    nat_to_int(get(()))
+  }
+}
+"""
+
+    def test_put_param_binds_under_pattern_name(self) -> None:
+        """A put clause whose PATTERN names an alias of the argument type
+        (`put(@Count)` on `State<Nat>`) binds the argument under the
+        pattern's own slot name — `@Count.0` is the argument in the
+        clause body (the state binds under the annotation's `@Nat`), and
+        codegen must push under the same name or the ref dangles."""
+        assert _run(self._PUT_PATTERN_NAME, "go", 0) == 7
+
+    def test_stateless_clause_arg_not_cell(self) -> None:
+        """The mirror pin: asserting the CELL's pre-store value (0) —
+        what the pre-fix skew read — must now trap, proving `@Int.0`
+        reaches the argument and not the capture."""
+        assert _run(self._STATELESS_CLAUSE_ARG_NEG, "go", 0) is None
+
+    _EXN_ALIAS = """\
+type Code = Int;
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[Exn<Code>] {
+    throw(@Code) -> { 0 - @Code.0 }
+  } in {
+    throw(42)
+  }
+}
+"""
+
+    def test_exn_alias_compiles_and_runs(self) -> None:
+        """`Exn<Code>` with `type Code = Int` — the Exn twin of the
+        State family split (tag typed i64, catch local i32) — and the
+        caught payload binds under the clause pattern's own name."""
+        assert _run(self._EXN_ALIAS, "go", 0) == -42
+
+    _EXN_PATTERN_NAME = """\
+type Code = Int;
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[Exn<Code>] {
+    throw(@Int) -> { 0 - @Int.0 }
+  } in {
+    throw(42)
+  }
+}
+"""
+
+    def test_exn_caught_binds_under_pattern_name(self) -> None:
+        """A clause pattern naming the RESOLVED base (`throw(@Int)` on
+        `Exn<Code>`) binds the caught payload under the PATTERN's own
+        slot name — `@Int.0` is the payload, `@Int.1` the enclosing
+        function's parameter (checker binding order), and codegen must
+        agree or the ref lands one slot off."""
+        assert _run(self._EXN_PATTERN_NAME, "go", 0) == -42
+
+    _OLD_ALIAS = """\
+type Count = Nat;
+
+public fn bump(@Nat -> @Int)
+  requires(true)
+  ensures(new(State<Count>) >= old(State<Count>))
+  effects(<State<Count>>)
+{
+  put(get(()) + @Nat.0);
+  nat_to_int(get(()))
+}
+"""
+
+    def test_old_state_alias_snapshot(self) -> None:
+        """`old(State<Count>)` snapshots (and the postcondition compares)
+        through the collapsed family — the comparison previously typed
+        its operands off the unresolved name (i32) against i64 reads."""
+        assert _run(self._OLD_ALIAS, "bump", 5) == 5
+
+
+class TestClauseScopeCheckerParity:
+    """The adversarial round's clause-scope findings, pinned: clause
+    slot names use the CHECKER's rule (top name syntactic, type
+    arguments canonicalized), a patternless clause binds nothing, and
+    clause bodies compile against the HANDLER-DECLARATION scope — each
+    shape below either silently produced the wrong value or dangled
+    (E699) on a check-green program before the round-2 fixes."""
+
+    _MIXED_ARG_REF = """\
+type Cnt = Int;
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Option<Int>>](@Option<Int> = Some(100)) {
+    get(@Unit) -> { resume(@Option<Int>.0) },
+    put(@Option<Cnt>) -> { resume(()) } with @Option<Int> = @Option<Int>.1
+  } in {
+    put(Some(7));
+    match get(()) {
+      Some(@Int) -> @Int.0,
+      None -> 0 - 1
+    }
+  }
+}
+"""
+
+    def test_alias_arg_pattern_canonical_ref(self) -> None:
+        """`put(@Option<Cnt>)` binds under canonical `Option<Int>` (the
+        checker's rule), so the with-expr's `@Option<Int>.1` is the put
+        ARGUMENT — the with-override stores it (7).  Pre-fix the pattern
+        bound under the opaque spelling and the ref dangled (E699)."""
+        assert _run(self._MIXED_ARG_REF, "go", 0) == 7
+
+    _MIXED_ANNOTATION = """\
+type Cnt = Int;
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Option<Int>>](@Option<Cnt> = Some(100)) {
+    get(@Unit) -> { resume(@Option<Int>.0) }
+  } in {
+    match get(()) {
+      Some(@Int) -> @Int.0,
+      None -> 0 - 1
+    }
+  }
+}
+"""
+
+    def test_alias_annotation_canonical_state(self) -> None:
+        """An alias inside the composite ANNOTATION (E336-equal): the
+        state binds under canonical `Option<Int>`, so the natural
+        `@Option<Int>.0` spelling reads the state (100).  Pre-fix:
+        E699."""
+        assert _run(self._MIXED_ANNOTATION, "go", 0) == 100
+
+    _EXN_MIXED_PATTERN = """\
+type Cnt = Int;
+
+private fn boom(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<Exn<Option<Int>>>)
+{
+  throw(Some(7))
+}
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  let @Option<Int> = Some(100);
+  handle[Exn<Option<Int>>] {
+    throw(@Option<Cnt>) -> {
+      match @Option<Int>.0 {
+        Some(@Int) -> @Int.0,
+        None -> 0 - 1
+      }
+    }
+  } in {
+    boom(())
+  }
+}
+"""
+
+    def test_exn_alias_pattern_canonical_payload(self) -> None:
+        """The Exn twin: `throw(@Option<Cnt>)` binds the payload under
+        canonical `Option<Int>`, so `@Option<Int>.0` is the CAUGHT value
+        (7), not the enclosing binding (100) — the pre-fix opaque
+        binding silently read the outer one."""
+        assert _run(self._EXN_MIXED_PATTERN, "go", 0) == 7
+
+    _PATTERNLESS_PUT = """\
+type Count = Nat;
+
+public fn go(@Nat -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Nat>](@Count = 100) {
+    get(@Unit) -> { resume(@Count.0) },
+    put() -> { resume(()) } with @Count = @Nat.0
+  } in {
+    put(5);
+    nat_to_int(get(()))
+  }
+}
+"""
+
+    def test_patternless_put_binds_nothing(self) -> None:
+        """A patternless `put()` clause binds NO op-param slot (the
+        checker's zip has nothing to bind), so the with-expr's `@Nat.0`
+        is the enclosing fn parameter (9) — pre-fix codegen pushed the
+        argument anyway and the with stored 5."""
+        assert _run(self._PATTERNLESS_PUT, "go", 9) == 9
+
+    _PATTERNLESS_THROW = """\
+private fn boom(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<Exn<Int>>)
+{
+  throw(7)
+}
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[Exn<Int>] {
+    throw() -> { @Int.0 }
+  } in {
+    boom(())
+  }
+}
+"""
+
+    def test_patternless_throw_binds_nothing(self) -> None:
+        """The Exn twin: a patternless `throw()` binds no payload, so
+        `@Int.0` in the clause is the enclosing fn parameter — pre-fix
+        the payload was pushed anyway and the body read 7."""
+        assert _run(self._PATTERNLESS_THROW, "go", 100) == 100
+
+    _CALL_SITE_SHADOW = """\
+public fn go(@Nat -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Nat>](@Nat = 0) {
+    get(@Unit) -> { resume(@Nat.1) },
+    put(@Nat) -> { resume(()) }
+  } in {
+    let @Nat = 777;
+    nat_to_int(get(()))
+  }
+}
+"""
+
+    def test_clause_compiles_at_declaration_scope(self) -> None:
+        """A clause body reaching past its own bindings resolves against
+        the HANDLER-DECLARATION scope, as the checker checks it:
+        `@Nat.1` is the fn parameter (9), not the `let @Nat = 777` the
+        handled body made before the op call — pre-fix the clause
+        inlined against the call-site env and read 777."""
+        assert _run(self._CALL_SITE_SHADOW, "go", 9) == 9
+
+
+class TestParameterizedAliasFamily:
+    """The #1205 residual the adversarial round surfaced: a
+    PARAMETERISED alias resolving to a scalar (`type Id<T> = T` at
+    `Id<Nat>`, an alias of that, and the Exn twin) still split the
+    family — registration substituted (import declared i64) while the
+    name-level collapse left the compound name opaque (WT fell to the
+    unknown-name i32 default).  All three were invalid WASM."""
+
+    _PARAM_ALIAS = """\
+type Id<T> = T;
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Id<Nat>>](@Id<Nat> = 4) {
+    put(@Id<Nat>) -> { resume(()) }
+  } in {
+    put(9);
+    nat_to_int(get(()))
+  }
+}
+"""
+
+    def test_parameterized_alias_cell(self) -> None:
+        assert _run(self._PARAM_ALIAS, "go", 0) == 9
+
+    _ALIAS_OF_GENERIC = """\
+type Id<T> = T;
+type IdN = Id<Nat>;
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<IdN>](@IdN = 4) {
+    put(@IdN) -> { resume(()) }
+  } in {
+    put(9);
+    nat_to_int(get(()))
+  }
+}
+"""
+
+    def test_alias_of_generic_alias_cell(self) -> None:
+        assert _run(self._ALIAS_OF_GENERIC, "go", 0) == 9
+
+    _EXN_PARAM_ALIAS = """\
+type Id<T> = T;
+
+private fn boom(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<Exn<Id<Int>>>)
+{
+  throw(7)
+}
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[Exn<Id<Int>>] {
+    throw(@Id<Int>) -> { 0 - @Id<Int>.0 }
+  } in {
+    boom(())
+  }
+}
+"""
+
+    def test_exn_parameterized_alias(self) -> None:
+        assert _run(self._EXN_PARAM_ALIAS, "go", 0) == -7
+
+
+class TestByteStateCell:
+    """`State<Byte>` cells (adversarial round, finding 3): the family
+    imports were correctly i32 all along, but an int LITERAL at any
+    write boundary emitted the default `i64.const` into them — invalid
+    WASM on every literal-writing Byte handler.  The #865 width
+    coercion (the `let @Byte = 0` arm's sibling) now covers the init,
+    both put dispatch paths, the `with` update, and the get-clause
+    resume value."""
+
+    _BYTE_CELL = """\
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Byte>](@Byte = 0) {
+    get(@Unit) -> { resume(@Byte.0) },
+    put(@Byte) -> { resume(()) }
+  } in {
+    put(42);
+    byte_to_int(get(()))
+  }
+}
+"""
+
+    def test_byte_cell_init_and_clause_put_literals(self) -> None:
+        """Init literal + CLAUSE-inlined put literal (a put clause is
+        present, so the argument takes the inlined path)."""
+        assert _run(self._BYTE_CELL, "go", 0) == 42
+
+    _BYTE_RESUME_LITERAL = """\
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Byte>](@Byte = 5) {
+    get(@Unit) -> { resume(9) },
+    put(@Byte) -> { resume(()) }
+  } in {
+    byte_to_int(get(()))
+  }
+}
+"""
+
+    def test_byte_resume_literal(self) -> None:
+        """`resume(9)` in a `State<Byte>` get clause is the op's i32
+        result — the literal previously widened to i64."""
+        assert _run(self._BYTE_RESUME_LITERAL, "go", 0) == 9
+
+    _BYTE_WITH_LITERAL = """\
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Byte>](@Byte = 5) {
+    get(@Unit) -> { resume(@Byte.0) },
+    put(@Byte) -> { resume(()) } with @Byte = 77
+  } in {
+    put(1);
+    byte_to_int(get(()))
+  }
+}
+"""
+
+    def test_byte_with_update_literal(self) -> None:
+        assert _run(self._BYTE_WITH_LITERAL, "go", 0) == 77
+
+    _BYTE_BARE_PUT = """\
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Byte>](@Byte = 5) {
+    get(@Unit) -> { resume(@Byte.0) }
+  } in {
+    put(33);
+    byte_to_int(get(()))
+  }
+}
+"""
+
+    def test_byte_bare_put_literal(self) -> None:
+        """No put clause — the bare intrinsic dispatch path's literal."""
+        assert _run(self._BYTE_BARE_PUT, "go", 0) == 33
+
+
+class TestQualifiedStatePut:
+    """`State.put(...)` — the QUALIFIED spelling — routes through the
+    same dispatcher as bare `put(...)` (round-4 review): it previously
+    took a bare unguarded call, silently skipping the clause's `with`
+    transform, storing a negative into a @Nat cell, and emitting a Byte
+    literal at i64."""
+
+    _QUAL_WITH = """\
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Nat>](@Nat = 0) {
+    get(@Unit) -> { resume(@Nat.0) },
+    put(@Nat) -> { resume(()) } with @Nat = @Nat.1 * 2
+  } in {
+    State.put(4);
+    nat_to_int(get(()))
+  }
+}
+"""
+
+    def test_qualified_put_applies_clause_transform(self) -> None:
+        """The doubling `with` fires on the qualified spelling too —
+        pre-fix `State.put(4)` stored 4 while `put(4)` stored 8."""
+        assert _run(self._QUAL_WITH, "go", 0) == 8
+
+    _QUAL_GUARD = """\
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Nat>](@Nat = 0) {
+    get(@Unit) -> { resume(@Nat.0) }
+  } in {
+    State.put(@Int.0);
+    nat_to_int(get(()))
+  }
+}
+"""
+
+    def test_qualified_put_negative_traps(self) -> None:
+        """The #1203 narrowing guard covers the qualified dispatch —
+        pre-fix -5 round-tripped through the @Nat cell silently."""
+        assert _run(self._QUAL_GUARD, "go", -5) is None
+    def test_qualified_put_non_negative_passes(self) -> None:
+        assert _run(self._QUAL_GUARD, "go", 9) == 9
+
+    _QUAL_BYTE = """\
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Byte>](@Byte = 5) {
+    get(@Unit) -> { resume(@Byte.0) }
+  } in {
+    State.put(33);
+    byte_to_int(get(()))
+  }
+}
+"""
+
+    def test_qualified_put_byte_literal(self) -> None:
+        """The #865 Byte-literal width coercion covers the qualified
+        dispatch — pre-fix the literal emitted i64 into the i32 family."""
+        assert _run(self._QUAL_BYTE, "go", 0) == 33
+
+
+class TestNestedParameterizedAliasResolution:
+    """Round-3's resolver root cause: marking an alias head as \"seen\"
+    BEFORE substituting truncated legitimate finite expansions
+    (`Id<Id<Nat>>` substitutes to `Id<Nat>`, whose head re-entry a
+    seen-set misread as a cycle) — a silent handler bypass, an
+    invalid-WASM family split reachable via an innocent wrapper alias,
+    and a silent wrong clause binding.  Arguments now resolve FIRST
+    (the checker's order), depth-bounded."""
+
+    _NESTED_APPLICATION = """\
+type Id<T> = T;
+
+public fn go(@Nat -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Id<Id<Nat>>>](@Nat = 0) {
+    get(@Unit) -> { resume(@Nat.0) },
+    put(@Nat) -> { resume(()) }
+  } in {
+    put(@Nat.0);
+    nat_to_int(get(()))
+  }
+}
+"""
+
+    def test_nested_application_cell(self) -> None:
+        """`State<Id<Id<Nat>>>` — one substitution produced `Id<Nat>`
+        and the walk stopped there: registration typed the import i64
+        while the lowering derived i32 from the opaque compound name.
+        Invalid WASM pre-fix."""
+        assert _run(self._NESTED_APPLICATION, "go", 7) == 7
+
+    _WRAPPER_ALIAS = """\
+type Id<T> = T;
+type Two<T> = Id<Id<T>>;
+
+public fn go(@Nat -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Two<Nat>>](@Nat = 0) {
+    get(@Unit) -> { resume(@Nat.0) },
+    put(@Nat) -> { resume(()) }
+  } in {
+    put(@Nat.0);
+    nat_to_int(get(()))
+  }
+}
+"""
+
+    def test_wrapper_alias_cell(self) -> None:
+        """A single user application (`Two<Nat>` = `Id<Id<Nat>>`) hit
+        the same truncation — entirely innocent source."""
+        assert _run(self._WRAPPER_ALIAS, "go", 7) == 7
+
+    _HANDLER_BYPASS = """\
+type Id<T> = T;
+
+private fn bump(@Nat -> @Nat)
+  requires(true)
+  ensures(true)
+  effects(<State<Id<Id<Nat>>>>)
+{
+  put(@Nat.0);
+  get(())
+}
+
+public fn go(@Nat -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Nat>](@Nat = 0) {
+    get(@Unit) -> { resume(@Nat.0) },
+    put(@Nat) -> { resume(()) }
+  } in {
+    bump(@Nat.0);
+    nat_to_int(get(()))
+  }
+}
+"""
+
+    def test_effect_spelling_shares_the_handler_cell(self) -> None:
+        """Two spellings of ONE resolved effect (`State<Id<Id<Nat>>>`
+        declared, `State<Nat>` handled): the callee's ops must land in
+        the handler's cell.  Pre-fix they routed to an unmanaged opaque
+        family — the callee's put vanished and the handler's get read 0
+        with valid WASM (the round's silent handler bypass)."""
+        assert _run(self._HANDLER_BYPASS, "go", 7) == 7
+
+    _EXN_NESTED_APPLICATION = """\
+type Id<T> = T;
+
+private fn boom(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<Exn<Id<Id<Int>>>>)
+{
+  throw(41)
+}
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[Exn<Id<Id<Int>>>] {
+    throw(@Int) -> { @Int.0 }
+  } in {
+    boom(())
+  }
+}
+"""
+
+    def test_exn_nested_application(self) -> None:
+        assert _run(self._EXN_NESTED_APPLICATION, "go", 0) == 41
+
+    _REFINED_ARG_PATTERN = """\
+type Pos = { @Int | @Int.0 > 0 };
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Option<Pos>>](@Option<Pos> = Some(5)) {
+    get(@Unit) -> { resume(@Option<Pos>.0) },
+    put(@Option<Pos>) -> { resume(()) }
+  } in {
+    put(Some(9));
+    option_unwrap_or(get(()), 0 - 1)
+  }
+}
+"""
+
+    def test_refined_arg_clause_binding_reachable(self) -> None:
+        """A REFINED-resolving type argument in clause/annotation
+        position (`Option<Pos>`): round-3's checker-mirrored bind key
+        rendered the predicate-elided form no writable reference can
+        spell, turning this working program into a dangling E699.  The
+        source-spelling deviation keeps bind and ref meeting at the one
+        spelling the checker accepts."""
+        assert _run(self._REFINED_ARG_PATTERN, "go", 0) == 9
+
+
+class TestResumeInWithExprRejected:
+    """A `resume(...)` inside a `with` state-update expression was
+    silently IGNORED (the lowering counts only the body's tail resume;
+    the with-expr just evaluates for its value) — now a loud E602 skip
+    with move-it-to-the-body guidance (round-3 review, F5)."""
+
+    _RESUME_IN_WITH = """\
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Int>](@Int = 5) {
+    get(@Unit) -> { resume(@Int.0) } with @Int = { resume(77); @Int.0 + 1 },
+    put(@Int) -> { resume(()) }
+  } in {
+    get(())
+  }
+}
+"""
+
+    def test_resume_in_with_is_loud_skip(self) -> None:
+        with _resolved_pipeline(self._RESUME_IN_WITH) as (
+                program, arts, resolved, path):
+            result = codegen_compile(
+                program, source=self._RESUME_IN_WITH, file=path,
+                resolved_modules=resolved,
+                expr_semantic_types=arts.expr_semantic_types,
+            )
+            msgs = [d.description for d in result.diagnostics]
+            assert any(
+                "'with' state-update expression has no effect" in m
+                for m in msgs
+            ), msgs
+
+
+class TestClauseScopeMixedSpellings:
+    """Round-5/6: the ref layer resolves OPAQUE-only (both canonical-first
+    attempts were unsound — a canonical hit can land on the wrong member
+    of the checker's merged class whenever any same-class binding is
+    spelled differently), so mixed-spelling shapes are either CORRECT
+    under the shared opaque rule or LOUD.  These pin the shapes round 5
+    proved silently wrong under canonical-first resolution."""
+
+    _CLAUSE_LET_SHADOW = """\
+type Cnt = Int;
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Option<Int>>](@Option<Int> = Some(5)) {
+    get(@Unit) -> {
+      let @Option<Cnt> = Some(77);
+      resume(@Option<Cnt>.0)
+    }
+  } in {
+    match get(()) {
+      Some(@Int) -> @Int.0,
+      None -> 0 - 1
+    }
+  }
+}
+"""
+
+    def test_clause_body_let_shadows_correctly(self) -> None:
+        """A clause-body `let` of the same checker-class as the state:
+        `@Option<Cnt>.0` is the let (most recent member — 77) under the
+        checker AND under opaque resolution.  Canonical-first resolution
+        silently returned the state (5)."""
+        assert _run(self._CLAUSE_LET_SHADOW, "go", 0) == 77
+
+    _OUTER_MIXED_PARAMS = """\
+type Cnt = Int;
+
+public fn go(@Option<Int>, @Option<Cnt> -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>](@Int = 0) {
+    get(@Unit) -> {
+      resume(match @Option<Cnt>.0 {
+        Some(@Int) -> @Int.0,
+        None -> 0 - 1
+      })
+    }
+  } in {
+    get(())
+  }
+}
+
+public fn drive(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  go(Some(111), Some(222))
+}
+"""
+
+    def test_clause_ref_to_alias_spelled_outer_param(self) -> None:
+        """A clause-body ref to an alias-spelled OUTER param: opaque
+        resolution finds the `@Option<Cnt>` param (222) — canonical-first
+        silently hit the canonically-spelled sibling (111)."""
+        assert _run(self._OUTER_MIXED_PARAMS, "drive", 0) == 222
+
+    def test_refined_class_collision_is_loud_skip(self) -> None:
+        """Two aliases of ONE refined class as pattern and annotation
+        (`put(@Option<P2>)` under `(@Option<Pos> = ...)`) would bind one
+        checker stack under two keys — a mixed reference resolves
+        silently wrong — so the clause translator refuses it loudly
+        with spell-both-with-one-alias guidance."""
+        src = """\
+type Pos = { @Int | @Int.0 > 0 };
+type P2 = Pos;
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Option<Pos>>](@Option<Pos> = Some(5)) {
+    get(@Unit) -> { resume(@Option<Pos>.0) },
+    put(@Option<P2>) -> { resume(()) } with @Option<Pos> = @Option<P2>.0
+  } in {
+    put(Some(9));
+    option_unwrap_or(get(()), 0 - 1)
+  }
+}
+"""
+        with _resolved_pipeline(src) as (program, arts, resolved, path):
+            result = codegen_compile(
+                program, source=src, file=path, resolved_modules=resolved,
+                expr_semantic_types=arts.expr_semantic_types,
+            )
+            msgs = [d.description for d in result.diagnostics]
+            assert any("spell both with ONE alias" in m for m in msgs), msgs
+
+    def test_alias_depth_overflow_is_loud(self) -> None:
+        """A 33-deep (legal, acyclic) alias chain as a State cell: the
+        resolver's depth bound surfaces as a loud per-function E607 skip
+        — an opaque fallback would silently split the family against a
+        fully-resolving sibling site (round-5 F4)."""
+        chain = "type A0 = Nat;\n" + "".join(
+            f"type A{i} = A{i - 1};\n" for i in range(1, 34))
+        src = chain + """
+public fn go(@Nat -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<State<A33>>)
+{
+  put(@Nat.0);
+  nat_to_int(get(()))
+}
+"""
+        with _resolved_pipeline(src) as (program, arts, resolved, path):
+            result = codegen_compile(
+                program, source=src, file=path, resolved_modules=resolved,
+                expr_semantic_types=arts.expr_semantic_types,
+            )
+            msgs = [d.description for d in result.diagnostics]
+            assert any("nested deeper than 32" in m for m in msgs), msgs
+
+    _QUAL_USER_SHADOW = """\
+private fn put(@Int -> @Unit) requires(true) ensures(true) effects(pure)
+{
+  ()
+}
+
+public fn go(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<State<Int>>)
+{
+  State.put(5);
+  get(())
+}
+"""
+
+    def test_qualified_put_user_shadow_is_loud(self) -> None:
+        """A user fn named `put` in a DELEGATED context (handler in the
+        caller): the fn-level effect-op mapping is skipped by the shadow
+        carve-out, so the round-4 delegation dispatched the synthesized
+        bare call to the USER fn silently (checker semantics: the
+        builtin op).  The delegation is now gated on the dispatcher
+        actually resolving the op — the unresolved case fails loudly at
+        module compile (the pre-round-4 behaviour)."""
+        with _resolved_pipeline(self._QUAL_USER_SHADOW) as (
+                program, arts, resolved, path):
+            result = codegen_compile(
+                program, source=self._QUAL_USER_SHADOW, file=path,
+                resolved_modules=resolved,
+                expr_semantic_types=arts.expr_semantic_types,
+            )
+            assert not result.ok
+            msgs = [d.description for d in result.diagnostics]
+            assert any(
+                "unknown func" in m and "$vera.put" in m for m in msgs
+            ), msgs
+
+
+class TestClauseClassCollisionBothDirections:
+    """Round-7: the collision gate's two directions and the renderer
+    ordering bug that dodged it.  Direction 1 (one checker class, two
+    bind keys) includes PARAMETERISED refined aliases — the strict
+    renderer must substitute params before eliding predicates or
+    `Ref<Int>` renders `{@T | ...}` against the checker's
+    `{@Int | ...}` and the gate never fires.  Direction 2 (two checker
+    classes, one bind key): a refinement LITERAL erases to its base in
+    codegen keys, merging what the checker splits."""
+
+    def _compile_msgs(self, src: str) -> list[str]:
+        with _resolved_pipeline(src) as (program, arts, resolved, path):
+            result = codegen_compile(
+                program, source=src, file=path, resolved_modules=resolved,
+                expr_semantic_types=arts.expr_semantic_types,
+            )
+            return [d.description for d in result.diagnostics]
+
+    def test_parameterised_refined_alias_collision_is_loud(self) -> None:
+        msgs = self._compile_msgs("""\
+type Ref<T> = { @T | true };
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Option<Ref<Int>>>](@Option<Ref<Int>> = Some(5)) {
+    get(@Unit) -> { resume(@Option<Ref<Int>>.0) },
+    put(@Option<{ @Int | true }>) -> { resume(()) } with @Option<Ref<Int>> = @Option<{ @Int | true }>.0
+  } in {
+    put(Some(9));
+    option_unwrap_or(get(()), 0 - 1)
+  }
+}
+""")
+        assert any("spell both with ONE alias" in m for m in msgs), msgs
+
+    def test_reverse_skew_merged_key_is_loud(self) -> None:
+        """The dual direction: refined-literal annotation + plain
+        pattern bind under ONE codegen key while the checker splits
+        them — previously a silent wrong value (the with-expr's ref
+        resolved to the state where the checker meant the argument)."""
+        msgs = self._compile_msgs("""\
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Option<{ @Int | @Int.0 > 0 }>>](@Option<{ @Int | @Int.0 > 0 }> = Some(5)) {
+    get(@Unit) -> { resume(@Option<{ @Int | @Int.0 > 0 }>.0) },
+    put(@Option<Int>) -> { resume(()) } with @Option<{ @Int | @Int.0 > 0 }> = @Option<Int>.0
+  } in {
+    put(Some(9));
+    option_unwrap_or(get(()), 0 - 1)
+  }
+}
+""")
+        assert any("DIFFERENT slot classes" in m for m in msgs), msgs
+
+    def test_old_state_depth_overflow_is_clean_skip(self) -> None:
+        """`old(State<A33>)` in an ensures — the ONE family-resolution
+        door outside every CodegenSkip net: the depth error escaped as
+        a raw crash on a check-green program (round-7 F2).  Now the
+        same clean E602 skip the body path uses."""
+        chain = "type A0 = Nat;\n" + "".join(
+            f"type A{i} = A{i - 1};\n" for i in range(1, 34))
+        src = chain + """
+public fn bump(@Nat -> @Int)
+  requires(true)
+  ensures(new(State<Nat>) >= old(State<A33>))
+  effects(<State<Nat>>)
+{
+  put(@Nat.0);
+  nat_to_int(get(()))
+}
+"""
+        msgs = self._compile_msgs(src)
+        assert any("old(State<T>) snapshot" in m
+                   and "nested deeper than 32" in m for m in msgs), msgs

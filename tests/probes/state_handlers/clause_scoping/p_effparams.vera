@@ -1,0 +1,15 @@
+effect Pair<A, B> {
+  op both(A, B -> Unit);
+}
+
+public fn t(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[Pair<Int, Bool>] {
+    both(@Int, @Bool) -> { resume(()) }
+  } in {
+    7
+  }
+}

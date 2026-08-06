@@ -1,0 +1,25 @@
+type Name = String;
+
+public fn risky(@Int -> @String)
+  requires(true)
+  ensures(true)
+  effects(<Exn<Name>>)
+{
+  if @Int.0 < 0 then {
+    throw("negative")
+  } else {
+    "ok"
+  }
+}
+
+public fn main(@Unit -> @String)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[Exn<Name>] {
+    throw(@Name) -> { string_concat("caught: ", @Name.0) }
+  } in {
+    risky(0 - 1)
+  }
+}

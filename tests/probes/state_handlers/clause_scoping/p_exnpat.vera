@@ -1,0 +1,13 @@
+type Code = Int;
+
+public fn go(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[Exn<Code>] {
+    throw(@Int) -> { 0 - @Int.0 }
+  } in {
+    throw(42)
+  }
+}

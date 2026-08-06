@@ -1,0 +1,16 @@
+module statelib;
+
+type Count = Nat;
+
+public fn bump(@Nat -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Count>](@Count = 0) {
+    put(@Count) -> { resume(()) }
+  } in {
+    put(@Nat.0);
+    nat_to_int(get(()))
+  }
+}

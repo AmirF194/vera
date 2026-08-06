@@ -1,0 +1,20 @@
+public fn use_level(@Byte -> @Byte)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Byte>](@Byte = 0) {
+    put(@Byte) -> { resume(()) }
+  } in {
+    put(@Byte.0);
+    get(())
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  byte_to_int(use_level(42))
+}

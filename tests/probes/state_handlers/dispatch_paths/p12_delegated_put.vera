@@ -1,0 +1,22 @@
+-- P12: bare put in a fn that DELEGATES handling to its caller.
+private fn poke(@Unit -> @Unit)
+  requires(true)
+  ensures(true)
+  effects(<State<Nat>>)
+{
+  put(nat_to_int(get(())) - 33)
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@Nat = 0) {
+    get(@Unit) -> { resume(@Nat.0) },
+    put(@Nat) -> { resume(()) }
+  } in {
+    poke(());
+    nat_to_int(get(()))
+  }
+}

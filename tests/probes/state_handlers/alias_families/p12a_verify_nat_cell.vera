@@ -1,0 +1,24 @@
+-- Probe 12a: obligation-parity baseline — plain State<Nat> cell with a
+-- Nat-narrowing let inside the handled body.
+public fn probe(@Int -> @Int)
+  requires(@Int.0 > 0 - 100)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@Nat = 0) {
+    get(@Unit) -> { resume(@Nat.0) },
+    put(@Nat) -> { resume(()) }
+  } in {
+    let @Nat = @Int.0;
+    put(@Nat.0);
+    nat_to_int(get(()))
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(7)
+}

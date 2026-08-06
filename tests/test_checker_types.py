@@ -1279,7 +1279,7 @@ private fn main(@Unit -> @Int)
         self._assert_e126("""
 private fn f(@Int -> @Bool)
   requires(true)
-  ensures(forall(@{ @Int | @Int.0 }, [1, 2], fn(@Int -> @Bool) effects(pure) { true }))
+  ensures(forall(@{ @Int | @Int.0 }, 2, fn(@Int -> @Bool) effects(pure) { true }))
   effects(pure)
 { true }
 """)
@@ -1289,7 +1289,7 @@ private fn f(@Int -> @Bool)
         self._assert_e126("""
 private fn f(@Int -> @Bool)
   requires(true)
-  ensures(exists(@{ @Int | @Int.0 }, [1, 2], fn(@Int -> @Bool) effects(pure) { true }))
+  ensures(exists(@{ @Int | @Int.0 }, 2, fn(@Int -> @Bool) effects(pure) { true }))
   effects(pure)
 { true }
 """)
@@ -1572,7 +1572,7 @@ private fn main(@Unit -> @Int)
         (reached through a forall binder inside an `@Int`-based outer
         predicate) still gets the allowance."""
         _check_ok("""
-type T = { @Int | forall(@{ @Byte | @Byte.0 < 10 }, [1], fn(@Byte -> @Bool) effects(pure) { true }) && @Int.0 > 0 };
+type T = { @Int | forall(@{ @Byte | @Byte.0 < 10 }, 1, fn(@Byte -> @Bool) effects(pure) { true }) && @Int.0 > 0 };
 
 private fn main(@Unit -> @Int)
   requires(true) ensures(true) effects(pure)
@@ -1584,7 +1584,7 @@ private fn main(@Unit -> @Int)
         inside an `@Byte`-based outer predicate must NOT inherit the
         outer allowance — E142."""
         errs = _check_err("""
-type U = { @Byte | forall(@{ @Int | b(@Int.0) < 10 }, [1], fn(@Int -> @Bool) effects(pure) { true }) && @Byte.0 < 10 };
+type U = { @Byte | forall(@{ @Int | b(@Int.0) < 10 }, 1, fn(@Int -> @Bool) effects(pure) { true }) && @Byte.0 < 10 };
 
 private fn b(@Int -> @Byte)
   requires(true) ensures(true) effects(pure)
@@ -3062,3 +3062,501 @@ public fn main(@Unit -> @Int)
 }
 """, "zero-size")
         assert any(e.error_code == "E183" for e in errs)
+
+
+class TestQuantifierBoundType1204:
+    """#1204: the quantifier's second argument is a numeric BOUND (spec
+    §6.3.3) — an array-typed domain previously type-checked and then died
+    at codegen with a raw WASM translation error; it is now a loud E128
+    at check time (check-green ⇒ compilable)."""
+
+    def test_forall_array_domain_rejected(self) -> None:
+        errs = _check_err("""
+private fn f(@Array<Int> -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ forall(@Int, @Array<Int>.0, fn(@Int -> @Bool) effects(pure) { true }) }
+""", "bound must be an integer")
+        assert any(e.error_code == "E128" for e in errs)
+
+    def test_exists_array_domain_rejected(self) -> None:
+        errs = _check_err("""
+private fn f(@Array<Int> -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ exists(@Int, @Array<Int>.0, fn(@Int -> @Bool) effects(pure) { true }) }
+""", "bound must be an integer")
+        assert any(e.error_code == "E128" for e in errs)
+
+    def test_length_bound_accepted(self) -> None:
+        """The count form — array_length — stays accepted."""
+        _check_ok("""
+private fn f(@Array<Int> -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ forall(@Int, array_length(@Array<Int>.0), fn(@Int -> @Bool) effects(pure) { true }) }
+""")
+
+    def test_nat_bound_accepted(self) -> None:
+        _check_ok("""
+private fn f(@Nat -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ forall(@Int, @Nat.0, fn(@Int -> @Bool) effects(pure) { true }) }
+""")
+
+    def test_refined_int_bound_accepted(self) -> None:
+        """A refinement over an integer base is a valid bound (spec
+        §6.3.3) — the refinement-unwrap branch of the gate."""
+        _check_ok("""
+type Small = { @Int | @Int.0 < 100 };
+
+private fn f(@Small -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ forall(@Int, @Small.0, fn(@Int -> @Bool) effects(pure) { true }) }
+""")
+
+    def test_string_bound_rejected(self) -> None:
+        """A String domain is the same E128 as an array domain."""
+        errs = _check_err("""
+private fn f(@String -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ forall(@Int, @String.0, fn(@Int -> @Bool) effects(pure) { true }) }
+""", "bound must be an integer")
+        assert any(e.error_code == "E128" for e in errs)
+
+    def test_typevar_bound_accepted(self) -> None:
+        """A TypeVar bound in a generic fn defers to the instantiation —
+        the E128 gate must not kill the Int/Nat instantiations that
+        monomorphise and run (PR #1202 adversarial round regression)."""
+        _check_ok("""
+private forall<T> fn p(@T -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ forall(@Int, @T.0, fn(@Int -> @Bool) effects(pure) { true }) }
+
+public fn main(@Unit -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ p(3) }
+""")
+
+    def test_float_bound_rejected(self) -> None:
+        """A Float64 domain is E128 — numeric but not an index count (the
+        likeliest future accidental acceptance)."""
+        errs = _check_err("""
+private fn f(@Float64 -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ forall(@Int, @Float64.0, fn(@Int -> @Bool) effects(pure) { true }) }
+""", "bound must be an integer")
+        assert any(e.error_code == "E128" for e in errs)
+
+
+class TestHandlerStateCellType1206:
+    """#1206: for the builtin State effect the handler state declaration
+    IS the ``State<T>`` cell — a declared type that does not
+    structurally equal the resolved cell type is a loud E336 (the
+    annotation is documentation that could otherwise lie: obligations
+    and codegen guards key off T, #1203).  Equality is ``types_equal``
+    on RESOLVED types — ``is_subtype`` is deliberately the wrong tool
+    here (``Int <: Nat`` holds both ways by rule 3b, and refinements
+    erase to their bases by rules 5-7)."""
+
+    def test_int_annotation_on_nat_cell_rejected(self) -> None:
+        """The #1206 repro: `(@Int = ...)` on `State<Nat>`."""
+        errs = _check_err("""
+private fn t(@Int -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@Int = 0) {
+    put(@Nat) -> { resume(()) }
+  } in {
+    get(()) < 0
+  }
+}
+""", "cell type is State<Nat>")
+        assert any(e.error_code == "E336" for e in errs)
+
+    def test_nat_annotation_on_int_cell_rejected(self) -> None:
+        """The narrowing direction diverges too — Int cells hold
+        negatives the @Nat annotation denies."""
+        errs = _check_err("""
+private fn t(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>](@Nat = 0) {
+    put(@Int) -> { resume(()) }
+  } in {
+    get(())
+  }
+}
+""", "cell type is State<Int>")
+        assert any(e.error_code == "E336" for e in errs)
+
+    def test_refined_annotation_on_plain_cell_rejected(self) -> None:
+        """A refinement-decorated annotation over the right base is the
+        canonical lie: it claims a predicate no obligation or guard
+        enforces at the handler boundaries."""
+        errs = _check_err("""
+private fn t(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@{ @Nat | @Nat.0 < 10 } = 0) {
+    put(@Nat) -> { resume(()) }
+  } in {
+    nat_to_int(get(()))
+  }
+}
+""", "cell type is State<Nat>")
+        assert any(e.error_code == "E336" for e in errs)
+
+    def test_plain_annotation_on_refined_cell_rejected(self) -> None:
+        errs = _check_err("""
+private fn t(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<{ @Nat | @Nat.0 < 10 }>](@Nat = 0) {
+    put(@Nat) -> { resume(()) }
+  } in {
+    nat_to_int(get(()))
+  }
+}
+""", "Handler state is declared")
+        assert any(e.error_code == "E336" for e in errs)
+
+    def test_alias_annotation_accepted(self) -> None:
+        """An alias that RESOLVES to the cell type is not a divergence
+        (`@Count` on `State<Nat>` with `type Count = Nat`)."""
+        _check_ok("""
+type Count = Nat;
+
+private fn t(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@Count = 0) {
+    put(@Nat) -> { resume(()) }
+  } in {
+    nat_to_int(get(()))
+  }
+}
+""")
+
+    def test_alias_cell_plain_annotation_accepted(self) -> None:
+        """The mirror: `@Nat` on `State<Count>`."""
+        _check_ok("""
+type Count = Nat;
+
+private fn t(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Count>](@Nat = 0) {
+    put(@Count) -> { resume(()) }
+  } in {
+    nat_to_int(get(()))
+  }
+}
+""")
+
+    def test_refined_alias_both_sides_accepted(self) -> None:
+        """A refined alias used for BOTH the cell and the annotation
+        resolves to the same refined type — equal, accepted (the
+        refinement lives in the State<T> argument, where #1203's
+        obligations disclose it honestly)."""
+        _check_ok("""
+type Pos = { @Int | @Int.0 > 0 };
+
+private fn t(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Pos>](@Pos = 1) {
+    put(@Pos) -> { resume(()) }
+  } in {
+    get(())
+  }
+}
+""")
+
+    def test_generic_cell_defers_to_instantiation(self) -> None:
+        """`handle[State<T>](@T = ...)` inside a forall body must not
+        die at the generic site — TypeVar on either side defers (the
+        E128 lesson)."""
+        _check_ok("""
+private forall<T> fn wrap(@T -> @T)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<T>](@T = @T.0) {
+    put(@T) -> { resume(()) }
+  } in {
+    get(())
+  }
+}
+
+private fn use(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  wrap(41) + 1
+}
+""")
+
+    def test_user_effect_state_stays_free(self) -> None:
+        """The check scopes to the BUILTIN State effect only — a user
+        effect's handler state is the handler's own accumulator and may
+        take any type."""
+        _check_ok("""
+effect Tick {
+  op tick(Unit -> Unit);
+}
+
+private fn t(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[Tick](@Int = 0 - 5) {
+    tick(@Unit) -> { resume(()) }
+  } in {
+    7
+  }
+}
+""")
+
+    def test_refined_divergent_predicates_rejected(self) -> None:
+        """The adversarial round's F1: `types_equal` compares refined
+        types by BASE only, so a refined-vs-refined divergence
+        (`@{> 3}` on `State<{< 10}>`) passed while the plain-`@Nat`
+        spelling on the same cell was rejected — the gate rejected the
+        milder lie and accepted the worse one.  Predicates now compare
+        structurally (span-insensitive AST equality)."""
+        errs = _check_err("""
+type Small = { @Nat | @Nat.0 < 10 };
+type Big = { @Nat | @Nat.0 > 3 };
+
+private fn t(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Small>](@Big = 5) {
+    put(@Small) -> { resume(()) }
+  } in {
+    nat_to_int(get(()))
+  }
+}
+""", "Handler state is declared")
+        assert any(e.error_code == "E336" for e in errs)
+
+    def test_contradictory_refined_annotation_rejected(self) -> None:
+        """The unsatisfiable-annotation shape: a predicate no cell value
+        (not even the init) can satisfy."""
+        errs = _check_err("""
+type Small = { @Nat | @Nat.0 < 10 };
+type Huge = { @Nat | @Nat.0 > 999 };
+
+private fn t(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Small>](@Huge = 5) {
+    put(@Small) -> { resume(()) }
+  } in {
+    nat_to_int(get(()))
+  }
+}
+""", "Handler state is declared")
+        assert any(e.error_code == "E336" for e in errs)
+
+    def test_two_identical_refined_aliases_accepted(self) -> None:
+        """Two DISTINCT alias declarations with textually identical
+        predicates resolve to structurally equal refined types (AST
+        equality is span-insensitive) — not a divergence."""
+        _check_ok("""
+type Small = { @Nat | @Nat.0 < 10 };
+type Small2 = { @Nat | @Nat.0 < 10 };
+
+private fn t(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Small>](@Small2 = 5) {
+    put(@Small) -> { resume(()) }
+  } in {
+    nat_to_int(get(()))
+  }
+}
+""")
+
+
+class TestBuiltinEffectArity337:
+    """Adversarial round F4: `handle[State<Int, Nat>]` and bare
+    `handle[State]` sailed through check (the type-param zip truncates;
+    a missing arg leaked a TypeVar into downstream diagnostics) and died
+    at codegen — E337 now rejects the arity at check time.  User effects
+    keep their declared arity."""
+
+    def test_state_two_type_args_rejected(self) -> None:
+        errs = _check_err("""
+private fn t(@Unit -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int, Nat>](@Bool = true) {
+    put(@Int) -> { resume(()) }
+  } in {
+    true
+  }
+}
+""", "exactly one type argument")
+        assert any(e.error_code == "E337" for e in errs)
+
+    def test_state_bare_rejected(self) -> None:
+        errs = _check_err("""
+private fn t(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State] {
+    put(@Int) -> { resume(()) }
+  } in {
+    7
+  }
+}
+""", "exactly one type argument")
+        assert any(e.error_code == "E337" for e in errs)
+
+    def test_exn_two_type_args_rejected(self) -> None:
+        errs = _check_err("""
+private fn t(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[Exn<Int, Bool>] {
+    throw(@Int) -> { 0 }
+  } in {
+    7
+  }
+}
+""", "exactly one type argument")
+        assert any(e.error_code == "E337" for e in errs)
+
+    def test_exn_bare_rejected(self) -> None:
+        """Completes the arity matrix: bare `handle[Exn]`."""
+        errs = _check_err("""
+private fn t(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[Exn] {
+    throw(@Int) -> { 0 }
+  } in {
+    7
+  }
+}
+""", "exactly one type argument")
+        assert any(e.error_code == "E337" for e in errs)
+
+    def test_user_effect_two_type_args_accepted(self) -> None:
+        """The distinguishing input for the builtin-only scoping: a USER
+        effect declared with two type parameters handles with two type
+        arguments and must not produce E337 (a mutant dropping the
+        State/Exn name test fails here)."""
+        _check_ok("""
+effect Pair<A, B> {
+  op both(A, B -> Unit);
+}
+
+private fn t(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[Pair<Int, Bool>] {
+    both(@Int, @Bool) -> { resume(()) }
+  } in {
+    7
+  }
+}
+""")
+
+    def test_nested_refined_divergence_rejected(self) -> None:
+        """`types_equal` compares refined types by base only INSIDE ADT
+        type arguments too — `Option<{@Int | > 0}>` vs
+        `Option<{@Int | > 5}>` passed the top-level-only predicate check
+        (round-8 review): `state_cell_decl_equal` now recurses."""
+        errs = _check_err("""
+private fn t(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Option<{ @Int | @Int.0 > 0 }>>](@Option<{ @Int | @Int.0 > 5 }> = Some(9)) {
+    get(@Unit) -> { resume(@Option<{ @Int | @Int.0 > 5 }>.0) }
+  } in {
+    match get(()) {
+      Some(@Int) -> @Int.0,
+      None -> 0 - 1
+    }
+  }
+}
+""", "Handler state is declared")
+        assert any(e.error_code == "E336" for e in errs)
+
+    def test_fn_typed_refined_divergence_rejected(self) -> None:
+        """Round-9: `_refined_predicates_agree` recurses FunctionType
+        params and returns too — a refined predicate inside a fn-typed
+        cell position (`State<fn({@Int | > 0} -> Int)>` declared with
+        `{@Int | > 5}`) compiled before the arm."""
+        errs = _check_err("""
+type FP = fn({ @Int | @Int.0 > 0 } -> Int) effects(pure);
+
+type FQ = fn({ @Int | @Int.0 > 5 } -> Int) effects(pure);
+
+private fn g(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<FP>](@FQ = fn(@Int -> @Int) effects(pure) { @Int.0 }) {
+    get(@Unit) -> { resume(@FQ.0) },
+    put(@FQ) -> { resume(()) }
+  } in {
+    5
+  }
+}
+""", "Handler state is declared")
+        assert any(e.error_code == "E336" for e in errs)

@@ -1,0 +1,30 @@
+-- Exn angle: PATTERNLESS throw clause. Checker binds NO payload slot, so
+-- @Int.0 in the clause body = the fn param (100). Codegen's fallback binds the
+-- payload under type_name "Int" -> @Int.0 = the thrown value (7)?
+private fn boom(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<Exn<Int>>)
+{
+  throw(7)
+}
+
+public fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[Exn<Int>] {
+    throw() -> { @Int.0 }
+  } in {
+    boom(())
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}

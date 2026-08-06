@@ -1,0 +1,13 @@
+public fn go(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@Nat = 0) {
+    get(@Unit) -> { resume(@Nat.0) },
+    put(@Nat) -> { resume(()) } with @Nat = @Nat.1 * 2
+  } in {
+    State.put(4);
+    nat_to_int(get(()))
+  }
+}

@@ -1,0 +1,23 @@
+-- P17b: minimal handle[State<String>] in a PURE fn (handler discharges the
+-- effect, so the decl-effect E607 gate never runs). Body-scan refuses to
+-- register i32_pair families, but the lowering still emits the calls.
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<String>](@String = "hi") {
+    get(@Unit) -> { resume(@String.0) },
+    put(@String) -> { resume(()) }
+  } in {
+    string_length(get(()))
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}

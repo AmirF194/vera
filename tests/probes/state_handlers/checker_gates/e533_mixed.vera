@@ -1,0 +1,21 @@
+private forall<T> fn sneak(@T -> @T)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<T>](@Int = 3) {
+    put(@T) -> { resume(()) }
+  } in {
+    put(@T.0);
+    get(())
+  }
+}
+
+public fn go(@Int, @Nat -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Nat = sneak(@Nat.0);
+  sneak(@Int.0)
+}

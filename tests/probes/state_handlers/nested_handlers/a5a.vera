@@ -1,0 +1,32 @@
+-- A5a: nested same-family handlers (State<Nat> outer, State<Count> inner,
+-- Count = Nat -> SAME host family): 5-tuple save/restore + cell push/pop.
+type Count = Nat;
+
+public fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@Nat = 100) {
+    get(@Unit) -> { resume(@Nat.0) },
+    put(@Nat) -> { resume(()) }
+  } in {
+    put(7);
+    let @Nat = handle[State<Count>](@Count = 50) {
+      get(@Unit) -> { resume(@Count.0) },
+      put(@Count) -> { resume(()) } with @Count = @Count.0 + @Count.1
+    } in {
+      put(3);
+      get(())
+    };
+    nat_to_int(1000 * get(()) + @Nat.0)
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}

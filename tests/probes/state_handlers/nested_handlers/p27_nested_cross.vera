@@ -1,0 +1,20 @@
+type Count = Nat;
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Count>](@Count = 1) {
+    put(@Count) -> { resume(()) }
+  } in {
+    put(5);
+    let @Int = handle[State<Nat>](@Nat = 100) {
+      put(@Nat) -> { resume(()) }
+    } in {
+      put(200);
+      nat_to_int(get(()))
+    };
+    nat_to_int(get(())) + @Int.0
+  }
+}

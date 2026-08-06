@@ -1,0 +1,28 @@
+-- P1: clause slot ref past its own bindings resolves at handler-DECLARATION
+-- scope (1000), not the op call-site's deeper lets (77/88).
+-- Checker: get clause scope = [decl 1000, state] -> @Int.0=state, @Int.1=1000.
+-- After put(88): state=88. Expected get = 88 + 1000 = 1088.
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Int = 1000;
+  handle[State<Int>](@Int = 5) {
+    get(@Unit) -> { resume(@Int.0 + @Int.1) },
+    put(@Int) -> { resume(()) }
+  } in {
+    let @Int = 77;
+    let @Int = 88;
+    put(@Int.0);
+    get(())
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}

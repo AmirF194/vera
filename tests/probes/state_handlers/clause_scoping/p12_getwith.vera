@@ -1,0 +1,24 @@
+-- P12: get clause WITH a `with` update: body value + post-update ordering.
+-- get: resume(state*10), then state+1. Two gets: 50 then 60 -> 110.
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>](@Int = 5) {
+    get(@Unit) -> { resume(@Int.0 * 10) } with @Int = @Int.0 + 1,
+    put(@Int) -> { resume(()) }
+  } in {
+    let @Int = get(());
+    let @Int = get(());
+    @Int.0 + @Int.1
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}

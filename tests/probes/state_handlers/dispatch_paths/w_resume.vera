@@ -1,0 +1,25 @@
+-- Focus 2: a WHERE-HELPER named `resume`.
+private fn outer(@Int -> @Nat)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  resume(@Int.0)
+}
+where {
+  fn resume(@Nat -> @Nat)
+    requires(true)
+    ensures(true)
+    effects(pure)
+  {
+    @Nat.0
+  }
+}
+
+public fn main(@Unit -> @Nat)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  outer(0 - 2)
+}

@@ -1,0 +1,14 @@
+type Count = Nat;
+
+public fn go(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@Count = 0) {
+    get(@Unit) -> { resume(@Count.0) },
+    put(@Count) -> { resume(()) }
+  } in {
+    nat_to_int(get(()))
+  }
+}

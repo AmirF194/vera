@@ -1,0 +1,23 @@
+type Pos = { @Int | @Int.0 > 0 };
+type Pos2 = Pos;
+
+public fn keep(@Int -> @Int)
+  requires(@Int.0 > 0)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Pos2>](@Pos2 = 1) {
+    put(@Pos2) -> { resume(()) }
+  } in {
+    put(@Int.0);
+    get(())
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  keep(5)
+}

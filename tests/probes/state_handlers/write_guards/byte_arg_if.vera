@@ -1,0 +1,15 @@
+public fn byte_id(@Byte -> @Byte)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  @Byte.0
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  byte_to_int(byte_id(if true then { 1 } else { 2 }))
+}

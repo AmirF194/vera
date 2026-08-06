@@ -343,7 +343,7 @@ private fn sum(@List<Int> -> @Int)
         assert result.summary.tier1_verified == 8
 
     def test_overall_tier_counts(self) -> None:
-        """All examples together: 359 T1 / 103 T3 / 462 total (current).
+        """All examples together: 359 T1 / 125 T3 / 484 total (current).
 
         Counts move when examples are added or their contracts become
         more / less verifiable.  Trajectory:
@@ -634,9 +634,19 @@ private fn sum(@List<Int> -> @Int)
         # syntax-tour `swap` (`Tuple<A, B>` construction + destructuring)
         # discharges an obligation at Tier 1 that the truncated body left
         # at Tier 3: +1 T1, -1 T3, +0 total: 358/104/462 -> 359/103/462.
+        #
+        # #779: the obligation walkers now descend into fresh-scope bodies
+        # (closure bodies, quantifier predicates, handler clauses) and the
+        # enclosing-scope handler bodies / quantifier domains, so primitive
+        # ops and binding sites there are REPORTED instead of omitted.  All
+        # 22 new corpus obligations are honest Tier-3 (fresh slots are
+        # unconstrained by design) and Tier 1 is UNCHANGED — the empty
+        # fresh-scope env can neither prove a false Tier-1 nor lose an
+        # existing proof: +0 T1, +22 T3, +22 total: 359/103/462 ->
+        # 359/125/484.
         assert t1 == 359, f"Expected 359 T1, got {t1}"
-        assert t3 == 103, f"Expected 103 T3, got {t3}"
-        assert total == 462, f"Expected 462 total, got {total}"
+        assert t3 == 125, f"Expected 125 T3, got {t3}"
+        assert total == 484, f"Expected 484 total, got {total}"
         assert t3u == 0, f"Expected 0 tier3_unguarded, got {t3u}"
 
 

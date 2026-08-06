@@ -1,0 +1,31 @@
+-- Exn angle: scalar-alias pattern name (top-level alias, opaque both sides).
+-- Checker binds payload under "Code"; @Code.0 = payload = 7.
+type Code = Int;
+
+private fn boom(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<Exn<Int>>)
+{
+  throw(7)
+}
+
+public fn probe(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[Exn<Int>] {
+    throw(@Code) -> { @Code.0 * 1000 + @Int.0 }
+  } in {
+    boom(())
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(100)
+}

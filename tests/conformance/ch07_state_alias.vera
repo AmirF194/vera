@@ -1,0 +1,28 @@
+-- Conformance: a scalar type alias as the State<T> cell type (Chapter 7,
+-- Section 7.5).  Tests: `State<Count>` with `type Count = Nat` joins the
+-- Nat host-import family (name and WASM type resolve together, #1205);
+-- clause slots bind under the SOURCE alias name (`@Count.0`); the
+-- resolution-equal annotation `@Count` on the aliased cell passes E336.
+type Count = Nat;
+
+public fn tally(@Nat -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Count>](@Count = 0) {
+    get(@Unit) -> { resume(@Count.0) },
+    put(@Count) -> { resume(()) }
+  } in {
+    put(@Nat.0);
+    nat_to_int(get(()))
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  tally(7)
+}

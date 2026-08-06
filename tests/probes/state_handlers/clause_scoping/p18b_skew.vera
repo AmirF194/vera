@@ -1,0 +1,19 @@
+public fn f(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>] {
+    get(@Unit) -> { resume(@Int.0) }
+  } in {
+    get(())
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  f(42)
+}

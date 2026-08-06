@@ -57,7 +57,10 @@ from vera.types import (
     RefinedType,
     Type,
     TypeVar,
+    UnknownType,
     contains_typevar,
+    pretty_type,
+    state_cell_decl_equal,
     substitute,
     types_equal,
 )
@@ -298,6 +301,16 @@ class ContractVerifier:
         # (`Option<Nat>`) — without it, `is_some_g<Nat>` matching `Some(@T)`
         # E503'd with the impossible counterexample `Some(-1)`.
         self._instance_subst: dict[str, Type] | None = None
+        # The nat-binding walker's handled-effect context: effect NAMES
+        # of the `handle[...]` expressions enclosing the current walk
+        # position, innermost last.  The bare-`put` side-table fallback
+        # resolves WHICH effect's `put` a call targets through this
+        # stack first (mirroring the checker's innermost-handler-first
+        # rule) — `lookup_effect_op` alone searches the fn's declared
+        # row and then ALL registered effects in registration order, so
+        # a pure fn handling a user effect named `put` picked up the
+        # builtin State's op and claimed its guard (round-8 review).
+        self._walk_handled_effects: list[str] = []
 
     # -----------------------------------------------------------------
     # #747: checker-provided expression types (span-keyed)
@@ -2311,6 +2324,7 @@ class ContractVerifier:
         #      here.  Emits `value >= 0` at each, discharged from
         #      preconditions and path conditions exactly like #520.
         if decl.body is not None:
+            self._walk_handled_effects = []
             self._walk_for_nat_binding_obligations(
                 decl, decl.body, smt, slot_env, assumptions,
             )
@@ -3062,14 +3076,19 @@ class ContractVerifier:
         #   ResultRef          → @result reference, no sub-expression
         #   NullaryConstructor → nullary ADT tag, no sub-expression
         #
-        # Intentionally not walked — binds fresh slots / out of fragment, so a
-        # primitive op there is left to the codegen runtime trap (#779, #427):
-        #   AnonFn             → closure body
-        #   ForallExpr         → quantifier body
-        #   ExistsExpr         → quantifier body
-        #   HandleExpr         → handler clause / body
-        #   OldExpr            → contract state operator
-        #   NewExpr            → contract state operator
+        # Fresh-scope descent (#779) — walked, with scope-honest precision:
+        #   AnonFn             → body under an EMPTY slot env (fresh params;
+        #                        slot-dependent obligations fall to Tier-3,
+        #                        literal-only shapes classify exactly)
+        #   ForallExpr         → domain (enclosing env) + predicate (AnonFn)
+        #   ExistsExpr         → domain (enclosing env) + predicate (AnonFn)
+        #   HandleExpr         → state init + body (enclosing env);
+        #                        clause bodies / updates (empty env)
+        #
+        # Intentionally ignored — no Expr children to recurse into (the
+        # walker also visits ensures clauses, where these DO appear):
+        #   OldExpr            → contract state operator (leaf, effect_ref only)
+        #   NewExpr            → contract state operator (leaf, effect_ref only)
         #
         # Cannot occur — rejected before this walk:
         #   HoleExpr           → check time rejects
@@ -3149,7 +3168,7 @@ class ContractVerifier:
                         )
                     finally:
                         smt._path_conditions.pop()
-            else:  # pragma: no cover — condition untranslatable
+            else:  # condition untranslatable — hot under the #779 empty env
                 self._walk_for_primitive_op_obligations(
                     decl, expr.then_branch, smt, slot_env, assumptions,
                 )
@@ -3390,10 +3409,11 @@ class ContractVerifier:
             # #680: `arr[i]` carries a `0 <= i < array_length(arr)` bounds
             # obligation.  Recurse into the collection and index first (each
             # may host a nested division / subtraction / index), then check
-            # this site.  Index sites inside closure / quantifier bodies are
-            # NOT reached — AnonFn / ForallExpr / ExistsExpr terminate the
-            # walk below — because the captured length is beyond the Tier-1
-            # fragment (#427); those stay runtime-guarded.
+            # this site.  Index sites inside closure / quantifier-predicate
+            # bodies are reached through the fresh-scope descent (#779):
+            # slot-dependent / captured-length sites fall to Tier-3 (beyond
+            # the fresh scope's fragment, #427; the runtime bounds trap
+            # backs them) while literal-only shapes classify exactly.
             self._walk_for_primitive_op_obligations(
                 decl, expr.collection, smt, slot_env, assumptions,
             )
@@ -3446,13 +3466,64 @@ class ContractVerifier:
                     )
             return
 
+        if isinstance(expr, (ast.ForallExpr, ast.ExistsExpr)):
+            # #779: the quantifier DOMAIN evaluates in the enclosing scope,
+            # so it walks with the enclosing env at full precision (a
+            # divisor there can prove Tier-1 from the function's requires).
+            # The predicate is an AnonFn — the fresh-scope case below.
+            self._walk_for_primitive_op_obligations(
+                decl, expr.domain, smt, slot_env, assumptions,
+            )
+            self._walk_for_primitive_op_obligations(
+                decl, expr.predicate, smt, slot_env, assumptions,
+            )
+            return
+
+        if isinstance(expr, ast.HandleExpr):
+            # #779: the handler's state-init and BODY are enclosing-scope
+            # code (handler state is not even visible in the body, spec
+            # §7.5.1), so they walk with the enclosing env at full precision.
+            # Clause bodies and state updates bind the operation's fresh
+            # parameters (and the handler state slot) — the fresh-scope
+            # env (see AnonFn below).
+            if expr.state is not None:
+                self._walk_for_primitive_op_obligations(
+                    decl, expr.state.init_expr, smt, slot_env, assumptions,
+                )
+            self._walk_for_primitive_op_obligations(
+                decl, expr.body, smt, slot_env, assumptions,
+            )
+            for clause in expr.clauses:
+                self._walk_for_primitive_op_obligations(
+                    decl, clause.body, smt, SlotEnv(), [],
+                )
+                if clause.state_update is not None:
+                    self._walk_for_primitive_op_obligations(
+                        decl, clause.state_update[1], smt, SlotEnv(), [],
+                    )
+            return
+
+        if isinstance(expr, ast.AnonFn):
+            # #779: a closure body binds fresh slots, so it walks with an
+            # EMPTY slot environment and no outer assumptions: a slot
+            # reference inside never resolves onto an outer same-named slot
+            # (which could prove a FALSE Tier-1 against the outer
+            # function's facts — the mistranslation hazard the issue's
+            # care-clause names).  Every slot-dependent obligation falls to
+            # the honest Tier-3 leg — codegen's unconditional traps back
+            # div/index, and the lifted closure's interior guards back the
+            # binding sites — while a literal-only shape still classifies
+            # exactly (a manifest `5 / 0` is a loud E526, matching direct
+            # position).  Captured array bounds stay Tier-3 pending the
+            # Tier-2 work in #427.
+            self._walk_for_primitive_op_obligations(
+                decl, expr.body, smt, SlotEnv(), [],
+            )
+            return
+
         # Remaining expression types terminate the walk.  Literals and slot
-        # refs are genuine leaves.  Closure / quantifier bodies (AnonFn /
-        # ForallExpr / ExistsExpr) and handler clause/body expressions are
-        # *not* walked: their bodies bind fresh slots, so an op there is
-        # left to the codegen runtime trap rather than statically obligated
-        # (tracked as #779; closure-captured array bounds also need the
-        # Tier 2 work in #427).
+        # refs are genuine leaves; OldExpr / NewExpr cannot appear in a
+        # function body (rejected at check time outside ensures).
         return
 
     def _lookup_constructor_info(self, name: str) -> ConstructorInfo | None:
@@ -3472,6 +3543,146 @@ class ContractVerifier:
             if name in adt.constructors:
                 return adt.constructors[name]
         return self._module_constructors.get(name)
+
+    def _obligate_binding_triple(
+        self,
+        decl: ast.FnDecl,
+        value: ast.Expr,
+        formal: Type | None,
+        smt: SmtContext,
+        slot_env: SlotEnv,
+        assumptions: list[object],
+        *,
+        site: str,
+        nat_guarded: bool,
+        widen_guarded: bool,
+    ) -> None:
+        """The refined-first / @Nat / widen binding-obligation triple for a
+        single value flowing into a typed slot (#1203 — shared by the
+        handler state-init, state-update, get-resume, and State-put sites;
+        the older call-argument and constructor-field copies carry
+        site-specific side-table subtleties and stay inline).  The refined
+        arm is ALWAYS unguarded: no handler boundary emits a
+        refined-predicate guard, so it discloses E506 honestly."""
+        refined = self._refined_binding_target(value, formal)
+        if (refined is not None
+                and self._narrows_into_refined(value, refined)):
+            self._check_refined_binding_obligation(
+                decl, value, refined, smt, slot_env, assumptions,
+                site=site, guarded=False,
+            )
+        elif (self._nat_binding_target(value, formal)
+                and self._narrows_into_nat(value)):
+            self._check_nat_binding_obligation(
+                decl, value, smt, slot_env, assumptions,
+                site=site, guarded=nat_guarded,
+            )
+        elif (self._int_widening_target(value, formal)
+                and self._result_is_nat(value)):
+            self._check_int_widening_obligation(
+                decl, value, smt, slot_env, list(assumptions),
+                site=site, guarded=widen_guarded,
+            )
+
+    def _check_state_decl_divergence(
+        self, decl: ast.FnDecl, expr: ast.HandleExpr,
+    ) -> None:
+        """The per-instantiation twin of the checker's E336 (#1206): a
+        GENERIC handler's ``handle[State<T>](@Concrete = ...)`` defers the
+        cell/declaration equality at the generic site (TypeVar on the cell
+        side), and nothing re-checked it once ``T`` went concrete — the
+        declared annotation could lie at every instantiation with check,
+        verify, and run all green (PR #1202 adversarial round, F3).
+
+        Generic instances are verified as monomorphized CLONES whose
+        TypeExprs are textually substituted, so resolving both sides here
+        sees the instantiated types; divergence records a ``violated``
+        obligation (E533) — violations are never dropped by the
+        per-instance aggregation, which prefixes the failing
+        instantiations — plus its paired diagnostic.  Both phases share
+        :func:`vera.types.state_cell_decl_equal`, so the concrete gate and
+        this recheck cannot drift.  Non-generic code never reaches this
+        (the checker's E336 gates first; verify runs only check-clean
+        programs), and an UNinstantiated generic still carries the
+        TypeVar and defers."""
+        eff = expr.effect
+        if (not isinstance(eff, ast.EffectRef)
+                or eff.name != "State"
+                or not eff.type_args
+                or len(eff.type_args) != 1
+                or expr.state is None):
+            return
+        cell = self._resolve_type(eff.type_args[0])
+        declared = self._resolve_type(expr.state.type_expr)
+        if (cell is None or declared is None
+                or isinstance(cell, UnknownType)
+                or isinstance(declared, UnknownType)
+                or contains_typevar(cell)
+                or contains_typevar(declared)
+                or state_cell_decl_equal(cell, declared)):
+            return
+        # Obligation and diagnostic share ONE anchor (the init expr —
+        # a TypeExpr is not an Expr, and the aggregate emitter pairs a
+        # diagnostic to its obligation by exact (severity, line, column),
+        # so split anchors buried the crafted message under the
+        # synthesized fallback with its generic assert/requires guidance
+        # — round-3 review).
+        node = expr.state.init_expr
+        self._record_obligation(
+            decl.name, "state_decl", expr.state.init_expr, "violated",
+            error_code="E533",
+        )
+        self._error(
+            node,
+            f"Handler state is declared @{pretty_type(declared)} but the "
+            f"handled effect's cell type is State<{pretty_type(cell)}> at "
+            f"this instantiation.",
+            rationale="For the builtin State effect the handler state "
+                      "declaration IS the State<T> cell; a generic "
+                      "handler defers the E336 equality check at the "
+                      "generic site (TypeVar cell), so a divergent "
+                      "concrete declaration resurfaces here, where the "
+                      "instantiation made both sides concrete.",
+            fix="Declare the handler state as @T (the effect's own type "
+                "parameter) so every instantiation matches, or make the "
+                "handler non-generic with the concrete cell type.",
+            spec_ref='Chapter 7, Section 7.5.1 "Handler Syntax"',
+            error_code="E533",
+        )
+
+    def _handler_cell_type(self, expr: ast.HandleExpr) -> Type | None:
+        """The handler's state CELL type — the effect's ``State<T>`` type
+        argument when present (#1203; the declared ``with`` annotation can
+        diverge from it and must not drive the obligations), falling back
+        to the declared annotation for non-State or unparameterised
+        forms."""
+        eff = expr.effect
+        if (isinstance(eff, ast.EffectRef) and eff.name == "State"
+                and eff.type_args):
+            return self._resolve_type(eff.type_args[0])
+        if expr.state is not None:
+            return self._resolve_type(expr.state.type_expr)
+        return None
+
+    @staticmethod
+    def _tail_resume_value(body: ast.Expr) -> ast.Expr | None:
+        """The tail ``resume(v)``'s argument, descending the same join-free
+        chain codegen's ``_tail_resume_arg`` uses (Block trailing
+        expression, single-arm match) — ``None`` when the tail is not a
+        one-argument resume (#1203)."""
+        tail: ast.Expr = body
+        while True:
+            if isinstance(tail, ast.Block):
+                tail = tail.expr
+                continue
+            if isinstance(tail, ast.MatchExpr) and len(tail.arms) == 1:
+                tail = tail.arms[0].body
+                continue
+            break
+        if (isinstance(tail, ast.FnCall) and tail.name == "resume"
+                and len(tail.args) == 1):
+            return tail.args[0]
+        return None
 
     def _walk_for_nat_binding_obligations(
         self,
@@ -3523,11 +3734,30 @@ class ContractVerifier:
         constructor-field, and *all* call-arguments — concrete directly,
         generic on the monomorphised callee) are recorded ``tier3_runtime``
         (backed by the codegen ``i64.lt_s`` guard), while the genuinely
-        unguarded narrowings — the effect-operation argument and the
-        generic-instantiated constructor field (constructors carry no
+        unguarded narrowings — the *user-effect* operation argument and
+        the generic-instantiated constructor field (constructors carry no
         per-field @Nat mono metadata) — are surfaced as E504, neither
         statically proven nor runtime-checked (#747; the ``guarded`` flag
-        threaded to :py:meth:`_record_nat_bind_tier3` decides which).
+        threaded to :py:meth:`_record_nat_bind_tier3` decides which).  The
+        builtin State ``put`` argument and the get-clause ``resume`` value
+        are the exception since #1203: obligated at the "State-op" sites
+        and codegen-guarded on BOTH dispatch paths (clause-inlined and
+        bare intrinsic), so they record ``tier3_runtime``.
+
+        # WALKER_COVERAGE: (#597 — every Expr subclass has a disposition;
+        # check_walker_coverage.py enforces completeness.)
+        #   IntLit             → intentionally ignored (leaf, no binding site)
+        #   BoolLit            → intentionally ignored (leaf)
+        #   FloatLit           → intentionally ignored (leaf)
+        #   StringLit          → intentionally ignored (leaf)
+        #   UnitLit            → intentionally ignored (leaf)
+        #   SlotRef            → intentionally ignored (leaf)
+        #   ResultRef          → intentionally ignored (leaf)
+        #   NullaryConstructor → intentionally ignored (leaf)
+        #   OldExpr            → cannot occur (body-only walker — old/new
+        #                        outside ensures is rejected at check time)
+        #   NewExpr            → cannot occur (as OldExpr)
+        #   HoleExpr           → cannot occur (check time rejects)
         """
         if isinstance(expr, ast.BinaryExpr) and expr.op == ast.BinOp.PIPE:
             # `left |> right(a, …)` desugars to `right(left, a, …)`: the left
@@ -3658,11 +3888,11 @@ class ContractVerifier:
             # could prove a FALSE Tier-1), so obligate it SHALLOW-syntactically
             # as tier3 (never Tier-1 / E530): codegen guards the body's @Int
             # return value (`_compile_lifted_closure`), the definition-side dual
-            # of the closure-argument obligation.  The body is deliberately NOT
-            # walked — AnonFn stays a terminal for the SMT walk (see
-            # `_walk_for_primitive_op_obligations`'s docstring for the
-            # closure-opacity rationale), matching what the #984 narrowing dual
-            # below shares.
+            # of the closure-argument obligation.  The RETURN obligations in
+            # this arm stay shallow-syntactic (opacity-forced, never Tier-1 —
+            # the body's slots are not in the outer env), while the body
+            # ITSELF is walked separately below under the #779 fresh-scope
+            # empty env, matching what the #984 narrowing dual below shares.
             resolved_ret = self._resolve_type(expr.return_type)
             # #1032: a REFINED closure return — the return-side dual of the
             # #1024 formal narrowing at the apply_fn branch above.  Pre-fix
@@ -3726,6 +3956,19 @@ class ContractVerifier:
                     and self._return_narrows_into_nat(expr.body)):
                 self._record_nat_bind_tier3(
                     decl, expr.body, "closure return", "tier3", guarded=True)
+            # #779/#985: descend into the closure BODY under an EMPTY slot
+            # environment — the fresh-scope walk.  Interior slot-dependent
+            # binding sites are obligated Tier-3, while literal-only shapes
+            # classify exactly — a manifest `let @Nat = 0 - 5` is a loud
+            # E503 (a slot
+            # reference never resolves onto an outer same-named slot, so no
+            # FALSE Tier-1 is possible; the lifted closure's interior
+            # codegen guards back them), and a NESTED AnonFn re-enters this
+            # arm so its own return widening/narrowing obligations record —
+            # the #985 residual of the shallow single-level treatment above.
+            self._walk_for_nat_binding_obligations(
+                decl, expr.body, smt, SlotEnv(), [],
+            )
             return
 
         if isinstance(expr, (ast.FnCall, ast.ModuleCall)):
@@ -3735,6 +3978,46 @@ class ContractVerifier:
             else:
                 callee = self._lookup_module_function(expr.path, expr.name)
             param_types = getattr(callee, "param_types", None)
+            if (param_types is None and isinstance(expr, ast.FnCall)
+                    and expr.name == "put"):
+                # #1203: the State `put` has no function-registry entry, so
+                # the formal loop below never fired and a narrowing
+                # argument (`put(@Int.0)` against the @Nat cell) carried no
+                # obligation at all — verify-clean while `vera run` stored
+                # a negative.  The checker's #747 side-table records the
+                # instantiated target, so the refined/nat/widen triple runs
+                # with formal=None (table-driven).  The guarded flag is
+                # COMPUTED, not hardcoded (PR #1202 adversarial round —
+                # a hardcoded True claimed a runtime check the bare
+                # intrinsic path did not have): the builtin State put is
+                # guarded on both dispatch paths (the clause-inlined store
+                # and the bare intrinsic call, which keys the guard off the
+                # dispatch target's cell type); a user-effect op named
+                # `put` is the #754 unguarded class (its handler does not
+                # compile today, E602) and discloses E504/E531.  The
+                # refined branch is ALWAYS unguarded — no handler boundary
+                # emits a refined-predicate guard (only sign-bit pairs) —
+                # so it discloses E506 honestly.  `resume` values are
+                # obligated from the HandleExpr arm instead, where the
+                # clause's effect identity is known.
+                op = None
+                for eff_name in reversed(self._walk_handled_effects):
+                    info = self.env.lookup_effect(eff_name)
+                    if info is not None and "put" in info.operations:
+                        op = info.operations["put"]
+                        break
+                if op is None:
+                    op = self.env.lookup_effect_op("put")
+                put_guarded = (op is not None
+                               and op.parent_effect == "State")
+                put_site = ("State-op argument" if put_guarded
+                            else "effect-operation argument")
+                for arg in expr.args:
+                    self._obligate_binding_triple(
+                        decl, arg, None, smt, slot_env, assumptions,
+                        site=put_site,
+                        nat_guarded=put_guarded, widen_guarded=put_guarded,
+                    )
             if param_types is not None:
                 # A generic function whose `TypeVar` formal is fixed to @Nat
                 # by context (e.g. `T = Nat`) is recovered from the checker's
@@ -3975,7 +4258,7 @@ class ContractVerifier:
                         )
                     finally:
                         smt._path_conditions.pop()
-            else:  # pragma: no cover — condition untranslatable
+            else:  # condition untranslatable — hot under the #779 empty env
                 self._walk_for_nat_binding_obligations(
                     decl, expr.then_branch, smt, slot_env, assumptions,
                 )
@@ -4364,6 +4647,133 @@ class ContractVerifier:
                     )
             return
 
+        if isinstance(expr, (ast.AssertExpr, ast.AssumeExpr)):
+            # PR #1202 review: an assert/assume CONDITION can host a
+            # narrowing binding site (`assert(takes_nat(0 - 5) > 0)`) —
+            # the primitive-op and calls walkers already descend these;
+            # without this arm the nat-binding walker recorded nothing and
+            # a provably-negative argument passed silently.
+            self._walk_for_nat_binding_obligations(
+                decl, expr.expr, smt, slot_env, assumptions,
+            )
+            return
+
+        if isinstance(expr, (ast.ForallExpr, ast.ExistsExpr)):
+            # #779: the quantifier DOMAIN is enclosing-scope code (full
+            # precision); the predicate is an AnonFn, whose arm above walks
+            # its body under the fresh-scope env.  (Latent: that arm's
+            # return obligations cite `_compile_lifted_closure`, but
+            # quantifier predicates are INLINED by `_translate_quantifier`,
+            # not lifted — moot today because the checker-accepted non-Bool
+            # predicate shapes fail codegen before any guard could run.)
+            self._walk_for_nat_binding_obligations(
+                decl, expr.domain, smt, slot_env, assumptions,
+            )
+            self._walk_for_nat_binding_obligations(
+                decl, expr.predicate, smt, slot_env, assumptions,
+            )
+            return
+
+        if isinstance(expr, ast.HandleExpr):
+            # #779: state-init and BODY are enclosing-scope code; clause
+            # bodies and state updates bind the operation's fresh
+            # parameters (and the handler state slot), so they walk under
+            # the empty fresh-scope env
+            # (mirroring the primitive-op walker; #1179's calls walk visits
+            # the same positions but keeps the enclosing env — a call-site
+            # hit there only ADDS a proof, so it has no aliasing hazard).
+            if expr.state is not None:
+                # #1203: the state-init BINDS into the state CELL — whose
+                # type is the effect's `State<T>` type argument, NOT the
+                # declared `with` annotation (the checker rejects a
+                # concrete mismatch as E336 (#1206), but a generic
+                # handler's TypeVar cell defers that check and the
+                # divergence can reappear at instantiation, so the
+                # obligations keep keying off the cell; pre-E336, keying
+                # off the annotation let `(@Int = <neg>)` on a
+                # `State<Nat>` handler bypass the obligation entirely —
+                # PR #1202 adversarial round).  Same refined/nat/widen triple as a let binding,
+                # at enclosing-scope precision (a `requires` can prove it
+                # Tier-1).  Codegen guards the init store, so guarded=True
+                # for the sign-bit pair; the refined predicate has NO
+                # handler-boundary guard, so that arm discloses honestly.
+                self._check_state_decl_divergence(decl, expr)
+                state_ty = self._handler_cell_type(expr)
+                self._obligate_binding_triple(
+                    decl, expr.state.init_expr, state_ty, smt, slot_env,
+                    assumptions, site="handler state init",
+                    nat_guarded=True, widen_guarded=True,
+                )
+                self._walk_for_nat_binding_obligations(
+                    decl, expr.state.init_expr, smt, slot_env, assumptions,
+                )
+            # The handled effect's NAME wraps the BODY walk ONLY — the
+            # checker marks the effect handled around `_synth_expr(body)`
+            # alone (control.py: the state init and the clauses are
+            # checked BEFORE the push), so a bare `put` in a nested
+            # handler's init or clause body belongs to the ENCLOSING
+            # context.  Round-9 review: the wider push claimed the
+            # builtin State guard for an init/clause put the checker
+            # typed as a user effect's op.  `_verify_fn` resets the
+            # stack per function as leak insurance.
+            if isinstance(expr.effect, ast.EffectRef):
+                self._walk_handled_effects.append(expr.effect.name)
+            try:
+                self._walk_for_nat_binding_obligations(
+                    decl, expr.body, smt, slot_env, assumptions,
+                )
+            finally:
+                if isinstance(expr.effect, ast.EffectRef):
+                    self._walk_handled_effects.pop()
+            cell_ty = self._handler_cell_type(expr)
+            # The resume obligation below is builtin-State-specific: its
+            # guarded=True promise is the STATE clause inlining's wrapper.
+            # A user effect declaring an op named `get` gets no such
+            # guard, so it must not enter this arm (round-4 review).
+            is_builtin_state = (
+                isinstance(expr.effect, ast.EffectRef)
+                and expr.effect.name == "State"
+            )
+            for clause in expr.clauses:
+                # #1203: a State GET clause's tail `resume(v)` is the op's
+                # cell-typed RESULT — obligate a narrowing/widening resume
+                # value here, where the effect identity is known (the
+                # FnCall walk cannot see the enclosing handler).  Fresh
+                # clause scope: slot-dependent values record Tier-3,
+                # guarded=True (codegen wraps the get-clause body's net
+                # value — run-differential-backed).
+                if (is_builtin_state and cell_ty is not None
+                        and clause.op_name == "get"):
+                    r_arg = self._tail_resume_value(clause.body)
+                    if r_arg is not None:
+                        self._obligate_binding_triple(
+                            decl, r_arg, cell_ty, smt, SlotEnv(), [],
+                            site="State-op resume",
+                            nat_guarded=True, widen_guarded=True,
+                        )
+                self._walk_for_nat_binding_obligations(
+                    decl, clause.body, smt, SlotEnv(), [],
+                )
+                if clause.state_update is not None:
+                    # #1203: `with @T = <expr>` WRITES the state cell — the
+                    # same binding triple against the CELL type (preferring
+                    # the effect's `State<T>` argument over the declared
+                    # annotation, as at the init), under the fresh clause
+                    # env (slot-dependent updates record Tier-3; a
+                    # literal-negative is loud).
+                    upd_ty = (cell_ty if cell_ty is not None
+                              else self._resolve_type(
+                                  clause.state_update[0]))
+                    self._obligate_binding_triple(
+                        decl, clause.state_update[1], upd_ty, smt,
+                        SlotEnv(), [], site="handler state update",
+                        nat_guarded=True, widen_guarded=True,
+                    )
+                    self._walk_for_nat_binding_obligations(
+                        decl, clause.state_update[1], smt, SlotEnv(), [],
+                    )
+            return
+
         # Other expression types — no nested binding site to walk.
         return
 
@@ -4403,7 +4813,7 @@ class ContractVerifier:
         """
         lhs = smt.translate_expr(expr.left, slot_env)
         rhs = smt.translate_expr(expr.right, slot_env)
-        if lhs is None or rhs is None:  # pragma: no cover — both Nat
+        if lhs is None or rhs is None:  # standard path under the #779 empty env
             self._record_obligation(decl.name, "nat_sub", expr, "tier3")
             return
         if self._is_opaque_shadow(lhs) or self._is_opaque_shadow(rhs):
@@ -5019,7 +5429,7 @@ class ContractVerifier:
         :py:meth:`SmtContext.check_valid`.
         """
         val = smt.translate_expr(value_node, slot_env)
-        if val is None:  # pragma: no cover — untranslatable value
+        if val is None:  # standard path under the #779 empty env
             self._record_int_widen_tier3(
                 decl, value_node, site, "tier3", guarded=guarded)
             return
@@ -5761,18 +6171,29 @@ class ContractVerifier:
                 # OBLIGATED — else it is an unguarded false Tier-1 (CR PR-
                 # review).  Opaque path only: a nested field is always an
                 # accessor term.  (A *literal* nested scrutinee — `match
-                # Some(Some(-5)) {}` — isn't Z3-translated here, a degenerate
-                # case left to its own track.)  The nested
-                # bind's RUNTIME guard remains a
-                # #758-class deferral (codegen's `_extract_constructor_fields`
-                # binds only direct sub-patterns), so a verified program is
-                # sound (E505 on a bad nested narrowing) while an unverified
-                # compile is honestly Tier-3 there.
+                # Some(Some(-5)) {}` — leaves sort/idx unset, so it takes the
+                # static fallback below too; its guarded=True holds because
+                # codegen's recursive `_extract_constructor_fields` applies
+                # `_emit_nat_bind_guard` to the nested `@Nat` bind.)
                 if sort is not None and idx is not None:
                     self._obligate_subpattern_term(
                         decl, scrutinee, field_ty,
                         sort.accessor(idx, i)(scrutinee_z3), sub_pat, smt,
                         assumptions)
+                else:
+                    # PR #1202 silent-failure review: an UNPROJECTABLE
+                    # scrutinee (no sort/index — under the #779 fresh-scope
+                    # descent this is EVERY match in a closure or handler
+                    # clause) previously fell through silently, so a nested
+                    # narrowing vanished from the stream while codegen's
+                    # per-bind guard still trapped it at run time (verified
+                    # in both direct and closure positions — the trap
+                    # exists, so the guarded Tier-3 records below are
+                    # truthful).  Mirror the direct BindingPattern legs'
+                    # honest fallbacks, statically: field types come from
+                    # the registry instantiation, no Z3 terms needed.
+                    self._record_nested_subpattern_fallbacks(
+                        decl, scrutinee, sub_pat, field_ty)
                 continue
             if not isinstance(sub_pat, ast.BindingPattern):
                 continue
@@ -5850,6 +6271,56 @@ class ContractVerifier:
                         decl, scrutinee, "ADT sub-pattern bind", "tier3",
                         guarded=True)
         return facts
+
+    def _record_nested_subpattern_fallbacks(
+        self,
+        decl: ast.FnDecl,
+        scrutinee: ast.Expr,
+        pattern: ast.ConstructorPattern,
+        parent_field_ty: Type | None,
+    ) -> None:
+        """Record honest Tier-3 fallbacks for every narrowing bind inside a
+        nested constructor sub-pattern whose scrutinee the SMT layer cannot
+        project (PR #1202 silent-failure review).
+
+        The Z3-term recursion (:py:meth:`_obligate_subpattern_term`) needs
+        an accessor term; when the scrutinee is unprojectable this walks
+        the same ``(sub_pattern, field_type)`` pairs *statically* — field
+        types come from :py:meth:`_instantiated_field_types` against the
+        parent field's declared instantiation — and mirrors the direct
+        BindingPattern legs' fallback semantics exactly: a genuine `@Nat`
+        narrowing records ``tier3`` guarded (codegen's per-bind guard traps
+        it — verified by run probes in both direct and closure positions),
+        a refined narrowing records the unguarded E506 disclosure, and a
+        `@Nat`→`@Int` widening records ``tier3`` guarded.  Recursion
+        descends further nested constructor patterns; termination follows
+        the finite pattern AST."""
+        field_types = self._instantiated_field_types(
+            pattern.name, parent_field_ty)
+        if field_types is None:
+            return
+        for sub_pat, field_ty in zip(pattern.sub_patterns, field_types):
+            if isinstance(sub_pat, ast.ConstructorPattern):
+                self._record_nested_subpattern_fallbacks(
+                    decl, scrutinee, sub_pat, field_ty)
+                continue
+            if not isinstance(sub_pat, ast.BindingPattern):
+                continue
+            target = self._resolve_type(sub_pat.type_expr)
+            if (self._is_refined_type(target)
+                    and self._refined_field_narrows(target, field_ty)):
+                self._record_refined_bind_tier3(
+                    decl, scrutinee, "ADT sub-pattern bind", guarded=False)
+            elif (self._is_nat_type(target)
+                    and not self._is_nat_type(field_ty)):
+                self._record_nat_bind_tier3(
+                    decl, scrutinee, "ADT sub-pattern bind", "tier3",
+                    guarded=True)
+            elif (self._is_int_type(target)
+                    and self._is_nat_type(field_ty)):
+                self._record_int_widen_tier3(
+                    decl, scrutinee, "ADT sub-pattern bind", "tier3",
+                    guarded=True)
 
     def _obligate_destructure_narrowings(
         self,
@@ -5984,7 +6455,8 @@ class ContractVerifier:
         *all* call-arguments — concrete directly, generic on the
         monomorphised callee (#747), so a Tier-3 narrowing there genuinely
         falls to a runtime check (``tier3_runtime``).  The unguarded cases —
-        the effect-operation argument and the generic-instantiated
+        the *user-effect* operation argument (the builtin State-op sites
+        are guarded since #1203) and the generic-instantiated
         constructor field (constructors carry no per-field @Nat mono
         metadata) — may be neither statically proven nor runtime-checked, so
         surface an E504 warning and exclude them from the discharged totals

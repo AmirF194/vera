@@ -1,0 +1,23 @@
+type A = Nat;
+type B = Nat;
+
+public fn t(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<A>](@B = 0) {
+    put(@A) -> { resume(()) }
+  } in {
+    put(4);
+    nat_to_int(get(()))
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  t(())
+}

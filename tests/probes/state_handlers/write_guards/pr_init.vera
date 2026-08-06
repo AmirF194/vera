@@ -1,0 +1,19 @@
+-- 1(a): state-init guard vs the "value rides the operand stack across push".
+public fn t(@Int -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@Nat = @Int.0) {
+    get(@Unit) -> { resume(@Nat.0) }
+  } in {
+    get(()) < 0
+  }
+}
+public fn main(@Unit -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  t(0 - 4)
+}

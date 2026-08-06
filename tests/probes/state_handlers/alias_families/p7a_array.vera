@@ -1,0 +1,26 @@
+-- Angle 7: get(()) as array-literal element under an ALIAS cell.
+-- _effect_op_result_vera["get"] = "Count" (source alias); element WT must
+-- still come out i64 via the family.
+type Count = Nat;
+
+public fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Count>](@Count = 21) {
+    get(@Unit) -> { resume(@Count.0) },
+    put(@Count) -> { resume(()) }
+  } in {
+    let @Array<Nat> = [get(()), get(())];
+    nat_to_int(@Array<Nat>.0[0] + @Array<Nat>.0[1])
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}

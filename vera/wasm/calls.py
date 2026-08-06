@@ -442,24 +442,44 @@ class CallsMixin:
         # enforced before inlining).  resume(()) is a UnitLit: no value,
         # matching put's void result.
         if call.name == "resume" and self._in_state_clause:
+            if self._state_clause_family is not None:
+                byte_val = self._state_byte_literal(
+                    call.args[0], self._state_clause_family)
+                if byte_val is not None:
+                    return byte_val
             return self.translate_expr(call.args[0], env)
 
         # Check if this is an effect operation (e.g. get/put/throw)
         if call.name in self._effect_ops:
             target_name, _is_void = self._effect_ops[call.name]
             instructions: list[str] = []
-            # #747: the effect-op-argument @Int -> @Nat narrowing is the one
-            # runtime-guard site left unguarded here — `_effect_ops` carries
-            # only the dispatch target, not the op's formal types, so a
-            # concrete-@Nat-formal check would need a new op-parameter
-            # registry across the handler-dispatch path.  It is the rarest
-            # site, already obligated statically by the verifier and flagged
-            # E504 when Tier-3; the runtime guard is tracked as a follow-up.
+            # #747: the effect-op-argument @Int -> @Nat narrowing is in
+            # general unguarded here — `_effect_ops` carries only the
+            # dispatch target, not the op's formal types (#754 tracks the
+            # general registry).  The builtin State `put` is the exception
+            # (#1203, PR #1202 adversarial round): its cell type IS the
+            # dispatch target's suffix, so the same nat/widen guard pair
+            # the clause-inlined path emits wraps the argument on the bare
+            # path too — a handler with no `put` clause, a `put` inside
+            # another clause's body, and a delegated bare `put` (handler in
+            # the caller) all previously stored a negative silently.
             for arg in call.args:
                 arg_instrs = self.translate_expr(arg, env)
                 if arg_instrs is None:
                     return None
                 instructions.extend(arg_instrs)
+            if (call.name == "put" and len(call.args) == 1
+                    and target_name.startswith("$vera.state_put_")):
+                cell_tn = target_name[len("$vera.state_put_"):]
+                if (self._resolve_base_type_name(cell_tn) == "Nat"
+                        and self._narrows_into_nat(call.args[0])):
+                    instructions = self._emit_nat_bind_guard(instructions)
+                elif (self._resolve_base_type_name(cell_tn) == "Int"
+                        and self._result_is_nat(call.args[0])):
+                    instructions = self._emit_int_widen_guard(instructions)
+                byte_arg = self._state_byte_literal(call.args[0], cell_tn)
+                if byte_arg is not None:
+                    instructions = byte_arg
             # throw uses WASM throw instruction, not call
             if call.name == "throw":
                 instructions.append(f"throw {target_name}")
@@ -570,6 +590,28 @@ class CallsMixin:
         self, call: ast.QualifiedCall, env: WasmSlotEnv
     ) -> list[str] | None:
         """Translate a qualified call (e.g. IO.print) to host import call."""
+        if (call.qualifier == "State" and call.name in ("get", "put")
+                and (call.name in self._state_clause_ops
+                     or call.name in self._effect_ops)):
+            # The builtin State ops route through the UNQUALIFIED
+            # dispatcher, which owns the clause-inline registry, the
+            # #1203 argument guards, and the #865 Byte coercion — the
+            # qualified spelling previously took a bare unguarded call:
+            # `State.put(x)` inside a handled body skipped the clause's
+            # `with` transform, stored a negative into a @Nat cell
+            # silently, and emitted a Byte literal at i64 (round-4
+            # review).  Delegation makes the two spellings identical by
+            # construction — but ONLY when the dispatcher will actually
+            # resolve the op: in a delegated fn where a user function
+            # shadows the name, `_compile_fn` skips the effect_ops
+            # mapping and the synthesized bare call would silently
+            # dispatch to the USER fn (round-5 review) — the unresolved
+            # case falls through to the legacy path's loud
+            # unknown-func failure instead.
+            return self._translate_call(
+                ast.FnCall(name=call.name, args=call.args, span=call.span),
+                env,
+            )
         instructions: list[str] = []
         for arg in call.args:
             arg_instrs = self.translate_expr(arg, env)

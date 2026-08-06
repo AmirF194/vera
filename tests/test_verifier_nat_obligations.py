@@ -805,7 +805,7 @@ public fn f(@Nat -> @Option<Nat>)
         Closes the deferral the SMT tuple-datatype support unblocked: the RHS
         now translates to a projectable Z3 datatype."""
         result = _verify("""
-private fn mk(@Unit -> @Tuple<Int, Int>)
+private fn mk(@Int -> @Tuple<Int, Int>)
   requires(true)
   ensures(true)
   effects(pure)
@@ -816,7 +816,7 @@ private fn f(@Unit -> @Nat)
   ensures(true)
   effects(pure)
 {
-  let Tuple<@Nat, @Nat> = mk(@Unit.0);
+  let Tuple<@Nat, @Nat> = mk(1);
   @Nat.0
 }
 """)
@@ -839,7 +839,7 @@ private fn f(@Unit -> @Nat)
         cannot project an opaque tuple's components, so the already-@Nat
         source is the discharge analog."""
         result = _verify("""
-private fn mkn(@Unit -> @Tuple<Nat, Nat>)
+private fn mkn(@Int -> @Tuple<Nat, Nat>)
   requires(true)
   ensures(true)
   effects(pure)
@@ -850,7 +850,7 @@ private fn f(@Unit -> @Nat)
   ensures(true)
   effects(pure)
 {
-  let Tuple<@Nat, @Nat> = mkn(@Unit.0);
+  let Tuple<@Nat, @Nat> = mkn(1);
   @Nat.0
 }
 """)
@@ -901,7 +901,7 @@ private fn g(@Int -> @Nat)
   ensures(true)
   effects(<Random>)
 {
-  let Tuple<@Nat, @Nat> = Tuple(random_int(0, 9), random_int(0, 9));
+  let Tuple<@Nat, @Nat> = Tuple(Random.random_int(0, 9), Random.random_int(0, 9));
   @Nat.0
 }
 """)

@@ -1,0 +1,9 @@
+module loclib;
+
+public forall<T> fn bad(@T -> @Int)
+  requires(true)
+  ensures(@Int.result == 2)
+  effects(pure)
+{
+  1
+}

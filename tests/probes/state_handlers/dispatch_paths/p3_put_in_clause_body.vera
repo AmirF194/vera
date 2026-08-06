@@ -1,0 +1,31 @@
+-- P3: put INSIDE a get-clause body -> _state_clause_ops cleared -> bare
+-- intrinsic path, even though this very handler HAS a put clause.
+private fn f(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<State<Nat>>)
+{
+  handle[State<Nat>](@Nat = 0) {
+    get(@Unit) -> {
+      put(@Int.0);
+      resume(@Nat.0)
+    },
+    put(@Nat) -> { resume(()) }
+  } in {
+    let @Int = nat_to_int(get(()));
+    nat_to_int(get(()))
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@Nat = 0) {
+    get(@Unit) -> { resume(@Nat.0) },
+    put(@Nat) -> { resume(()) }
+  } in {
+    f(0 - 5)
+  }
+}

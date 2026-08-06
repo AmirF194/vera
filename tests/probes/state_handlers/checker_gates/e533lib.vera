@@ -1,0 +1,14 @@
+module e533lib;
+
+public forall<T> fn sneak(@T -> @T)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<T>](@Nat = 3) {
+    put(@T) -> { resume(()) }
+  } in {
+    put(@T.0);
+    get(())
+  }
+}

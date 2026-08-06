@@ -190,7 +190,15 @@ class FunctionCompilationMixin:
                         and eff.type_args and len(eff.type_args) == 1):
                     type_name = self._type_expr_to_slot_name(eff.type_args[0])
                     if type_name:
-                        mangled = mangle_type_name(type_name)
+                        # #1205: the import NAME keys on the scalar-collapsed
+                        # family (matching `_check_state_type` registration);
+                        # the Vera-name mirror below stays the SOURCE name
+                        # (note it also feeds the #1006/#914-A2 clone-naming
+                        # contract for a `get(())` array element driving a
+                        # generic instantiation — see the tracked mono
+                        # discovery desync).
+                        mangled = mangle_type_name(
+                            self._family_name_te(eff.type_args[0], type_name))
                         # Only map if no user-defined function shadows the op
                         if "get" not in self._fn_sigs:
                             effect_ops["get"] = (
@@ -215,8 +223,12 @@ class FunctionCompilationMixin:
                         and eff.type_args and len(eff.type_args) == 1):
                     type_name = self._type_expr_to_slot_name(eff.type_args[0])
                     if type_name and "throw" not in self._fn_sigs:
+                        # #1205: tag family name collapses like the State
+                        # import family (matching `_check_exn_type`).
                         effect_ops["throw"] = (
-                            f"$exn_{mangle_type_name(type_name)}", False
+                            f"$exn_"
+                            f"{mangle_type_name(self._family_name_te(eff.type_args[0], type_name))}",
+                            False,
                         )
 
         # Flatten ADT layouts into ctor_name -> layout for WasmContext
@@ -610,8 +622,29 @@ class FunctionCompilationMixin:
             return None
         pre_instrs = pre_instrs + dec_entry_instrs
 
-        # Snapshot old state for postcondition old() references
-        snapshot_instrs = self._snapshot_old_state(ctx, decl)
+        # Snapshot old state for postcondition old() references.  The
+        # snapshot's family resolution can raise (an `old(State<T>)`
+        # whose alias chain overflows the resolver bound — round-7
+        # review, F2: this was the ONE `_family_name_te` door outside
+        # every CodegenSkip net, and the raise escaped as a crash on a
+        # check-green program).  Degrade to the same clean E602 skip
+        # the body path uses.
+        try:
+            snapshot_instrs = self._snapshot_old_state(ctx, decl)
+        except CodegenSkip as skip:
+            self._harvest_interp_inference_failures(ctx)
+            self._warning(
+                skip.node if getattr(skip.node, "span", None) else decl,
+                f"Function '{decl.name}' postcondition old(State<T>) "
+                f"snapshot contains unsupported "
+                f"{type(skip.node).__name__}: {skip.reason} — function "
+                f"skipped.",
+                rationale="The WASM backend could not resolve the "
+                "old-state snapshot's State<T> family. This function "
+                "will not appear in the compiled output.",
+                error_code="E602",
+            )
+            return None
 
         # Compile body.
         #

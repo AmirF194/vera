@@ -1,0 +1,18 @@
+-- Conformance: a handler state declaration whose type diverges from the
+-- builtin State effect's cell type is a checker error (Chapter 7,
+-- Section 7.5.1).  Tests: E336 — `(@Int = ...)` on `handle[State<Nat>]`
+-- is rejected: the declared state IS the State<T> cell, and obligations
+-- and codegen guards key off T, so a divergent annotation is
+-- documentation that lies (#1206).  An alias that RESOLVES to T stays
+-- accepted (see ch07_state_alias).
+public fn t(@Int -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@Int = 0) {
+    put(@Nat) -> { resume(()) }
+  } in {
+    get(()) < 0
+  }
+}

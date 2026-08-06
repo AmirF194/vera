@@ -60,6 +60,133 @@ def type_expr_slot_name(te: ast.TypeExpr) -> str | None:
     return None
 
 
+_SCALAR_BASE_NAMES = frozenset({"Int", "Nat", "Float64", "Bool", "Byte"})
+
+
+def substitute_named(
+    te: ast.TypeExpr, subst: dict[str, ast.TypeExpr],
+) -> ast.TypeExpr:
+    """Rewrite ``NamedType`` occurrences of *subst* keys inside *te* —
+    the minimal substitution the alias walk below needs (a parameterised
+    alias body mentions its params as bare or argument-position
+    ``NamedType``s).  Refinement predicates are left untouched: the walk
+    only ever *names* the result, never re-checks the predicate."""
+    if isinstance(te, ast.NamedType):
+        if not te.type_args and te.name in subst:
+            return subst[te.name]
+        if te.type_args:
+            return ast.NamedType(
+                name=te.name,
+                type_args=tuple(
+                    substitute_named(a, subst) for a in te.type_args),
+            )
+        return te
+    if isinstance(te, ast.RefinementType):
+        return ast.RefinementType(
+            base_type=substitute_named(te.base_type, subst),
+            predicate=te.predicate,
+        )
+    return te
+
+
+_RESOLVE_DEPTH_LIMIT = 32
+
+
+class AliasResolutionDepthError(Exception):
+    """An alias application nested past ``_RESOLVE_DEPTH_LIMIT`` — a
+    legal (acyclic, check-green) but absurd chain the resolver refuses
+    to resolve.  Raised instead of silently returning ``None``: the
+    family-collapse callers' opaque fallback on ``None`` would SPLIT the
+    State/Exn family exactly the way the pre-round-4 truncation did
+    (round-5 review, F4), so overflow must surface loudly (the codegen
+    thin methods convert it to a ``CodegenSkip`` → E602)."""
+
+
+
+def resolve_alias_type_expr(
+    te: ast.TypeExpr,
+    aliases: dict[str, ast.TypeExpr],
+    alias_params: dict[str, tuple[str, ...]],
+    _depth: int = 0,
+) -> ast.NamedType | None:
+    """Walk *te* to its terminal ``NamedType`` through refinement
+    unwrapping, bare alias-chain follows, and PARAMETERISED alias
+    substitution (``type Id<T> = T`` applied at ``Id<Nat>`` — the
+    #630-era latent gap the PR #1202 adversarial rounds showed still
+    split the state family).  ``None`` when the walk lands on a
+    non-``NamedType`` (an ``FnType``-bodied alias, etc.).  Lives here so
+    the ``CodeGenerator`` registration side and the ``WasmContext``
+    lowering side resolve through ONE implementation and cannot drift.
+
+    Arguments resolve FIRST, mirroring the checker's order — a
+    seen-set head-follow truncated legitimate finite expansions
+    (``Id<Id<Nat>>`` substitutes to ``Id<Nat>``, whose head re-entry a
+    seen-set misreads as a cycle, stopping one level short: the round-3
+    review's silent handler-bypass and invalid-WASM shapes).  True
+    cycles are E132 at check; the depth bound is defence-in-depth so a
+    future upstream regression degrades to the opaque fallback instead
+    of a hang."""
+    if _depth > _RESOLVE_DEPTH_LIMIT:
+        raise AliasResolutionDepthError(
+            f"type alias application nested deeper than "
+            f"{_RESOLVE_DEPTH_LIMIT} levels"
+        )
+    while isinstance(te, ast.RefinementType):
+        te = te.base_type
+    if not isinstance(te, ast.NamedType):
+        return None
+    if te.type_args:
+        resolved_args: list[ast.TypeExpr] = []
+        for a in te.type_args:
+            ra = resolve_alias_type_expr(a, aliases, alias_params, _depth + 1)
+            resolved_args.append(ra if ra is not None else a)
+        te = ast.NamedType(name=te.name, type_args=tuple(resolved_args))
+    alias = aliases.get(te.name)
+    if alias is None:
+        return te
+    if not isinstance(alias, (ast.NamedType, ast.RefinementType)):
+        return None
+    params = alias_params.get(te.name)
+    if params and te.type_args and len(params) == len(te.type_args):
+        alias = substitute_named(alias, dict(zip(params, te.type_args)))
+    elif te.type_args:
+        # A parameterised application of a non-parameterised alias (or an
+        # arity mismatch) is ill-formed upstream — keep it opaque rather
+        # than resolving to something the application didn't mean.
+        return te
+    return resolve_alias_type_expr(alias, aliases, alias_params, _depth + 1)
+
+
+def resolve_scalar_alias_te(
+    te: ast.TypeExpr,
+    aliases: dict[str, ast.TypeExpr],
+    alias_params: dict[str, tuple[str, ...]],
+) -> str | None:
+    """Collapse a ``State<T>``/``Exn<E>`` type argument to its scalar
+    base name IFF it resolves to a scalar primitive; ``None`` otherwise.
+
+    The single resolution rule for the host-import and tag FAMILIES
+    (#1205): the family's WASM type is derived from the RESOLVED type
+    (``_type_expr_to_wasm_type`` canonicalizes), so the family NAME must
+    resolve identically or a scalar alias splits into a name keyed one
+    way and a WASM type keyed the other — the emitted ``state_put_Count``
+    family carried i64 values into i32-typed uses, and the parameterised
+    spellings (``Id<Nat>``, an alias of ``Id<Nat>``, ``Exn<Id<Int>>``)
+    split identically.  Collapsing means a scalar-resolving argument
+    NEVER mints a new import name: it joins the base family
+    (``state_put_Nat``) every host binding (wasmtime, api.py,
+    runtime.mjs) already provides — no #808-class import-surface fan-in.
+    Composite-resolving names stay opaque on purpose: their WASM type is
+    uniformly i32 (pointer), so name and type cannot diverge, and
+    collapsing them WOULD change the import surface (#914 full-name
+    invariant).
+    """
+    cn = resolve_alias_type_expr(te, aliases, alias_params)
+    if cn is not None and not cn.type_args and cn.name in _SCALAR_BASE_NAMES:
+        return cn.name
+    return None
+
+
 def slot_ref_name(ref: ast.SlotRef) -> str | None:
     """Canonical lookup name for a ``@T.n`` slot reference, or ``None``.
 

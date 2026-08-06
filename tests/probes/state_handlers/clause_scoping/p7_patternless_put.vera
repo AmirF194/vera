@@ -1,0 +1,26 @@
+-- P7: patternless put() clause WITH state declared: the checker binds ONLY the
+-- state (arg unbound). with-expr scope: [decl 600, state] -> @Int.0=state(40),
+-- @Int.1=600. Expected: with = 40+600 = 640; get -> 640.
+-- (If codegen still pushed the arg: [600, arg 9, state 40] -> @Int.1=9 -> 49.)
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Int = 600;
+  handle[State<Int>](@Int = 40) {
+    get(@Unit) -> { resume(@Int.0) },
+    put() -> { resume(()) } with @Int = @Int.0 + @Int.1
+  } in {
+    put(9);
+    get(())
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}

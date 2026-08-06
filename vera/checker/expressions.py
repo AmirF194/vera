@@ -24,6 +24,8 @@ from vera.types import (
     UNIT,
     AdtType,
     PrimitiveType,
+    RefinedType,
+    TypeVar,
     EffectInstance,
     FunctionType,
     Type,
@@ -1288,7 +1290,7 @@ class ExpressionsMixin:
         """Type-check forall(type, domain, predicate)."""
         self._check_refinement_predicates(expr.binding_type)  # #861
         self._resolve_type(expr.binding_type)
-        self._synth_expr(expr.domain)
+        self._check_quantifier_bound(expr.domain, "forall")
         self._synth_expr(expr.predicate)
         return BOOL
 
@@ -1296,9 +1298,54 @@ class ExpressionsMixin:
         """Type-check exists(type, domain, predicate)."""
         self._check_refinement_predicates(expr.binding_type)  # #861
         self._resolve_type(expr.binding_type)
-        self._synth_expr(expr.domain)
+        self._check_quantifier_bound(expr.domain, "exists")
         self._synth_expr(expr.predicate)
         return BOOL
+
+    def _check_quantifier_bound(self, domain: ast.Expr, form: str) -> None:
+        """The quantifier's domain is a numeric BOUND (spec §6.3.3:
+        ``forall(@IndexType, @BoundExpr, @PredicateFn)`` quantifies the
+        index over ``0 .. bound-1``) — require an @Int/@Nat bound (#1204).
+
+        An array-typed domain previously type-checked and then died at
+        codegen with a raw WASM translation error (`_translate_quantifier`
+        lowers only the count form); rejecting it here keeps the
+        check-green ⇒ compilable contract."""
+        domain_ty = self._synth_expr(domain)
+        base = domain_ty
+        while isinstance(base, RefinedType):
+            base = base.base
+        if (base is None or isinstance(base, (UnknownType, TypeVar))
+                or (isinstance(base, PrimitiveType)
+                    and base.name in ("Int", "Nat"))):
+            # A TypeVar bound (`forall<T> fn ... forall(@Int, @T.0, ...)`)
+            # defers to the instantiation — rejecting it here would kill
+            # the Int/Nat instantiations that monomorphise and run
+            # correctly (PR #1202 adversarial round).  The non-integer
+            # instantiations remain a codegen-level gap tracked with the
+            # array-domain family.
+            return
+        shown = getattr(base, "name", None) or {
+            "FunctionType": "a function type",
+        }.get(type(base).__name__, type(base).__name__)
+        self._error(
+            domain,
+            f"{form}() bound must be an integer count, got {shown}.",
+            rationale=(
+                "A quantifier's second argument is the exclusive upper "
+                "BOUND of the index range — the quantified variable runs "
+                "over 0 .. bound-1 — not a collection to iterate. To "
+                "quantify over an array's indices, pass its length as the "
+                "bound and index the array inside the predicate."
+            ),
+            fix=(
+                "Pass an integer bound: forall(@Int, "
+                "array_length(@Array<T>.0), fn(@Int -> @Bool) ... { "
+                "@Array<T>.0[@Int.0] ... })."
+            ),
+            spec_ref='Chapter 6, Section 6.3.3 "Quantified Expressions"',
+            error_code="E128",
+        )
 
     # -----------------------------------------------------------------
     # Old / New (contract expressions)

@@ -1,0 +1,29 @@
+private fn bump(@Unit -> @Unit)
+  requires(true)
+  ensures(true)
+  effects(<State<Byte>>)
+{
+  put(150)
+}
+
+public fn f(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Byte>](@Byte = 7) {
+    get(@Unit) -> { resume(@Byte.0) },
+    put(@Byte) -> { resume(()) }
+  } in {
+    bump(());
+    byte_to_int(get(()))
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 150)
+  effects(pure)
+{
+  f(())
+}

@@ -1,0 +1,14 @@
+type Small = { @Nat | @Nat.0 < 10 };
+type Small2 = { @Nat | @Nat.0 < 10 };
+
+public fn go(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Small>](@Small2 = 5) {
+    put(@Small) -> { resume(()) }
+  } in {
+    nat_to_int(get(()))
+  }
+}

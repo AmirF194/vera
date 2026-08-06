@@ -1,0 +1,20 @@
+-- Probe: put(@Int.0) into a State<Nat> cell, handler has NO clauses.
+public fn store_neg(@Int -> @Nat)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@Nat = 0) {
+  } in {
+    put(@Int.0);
+    get(())
+  }
+}
+
+public fn main(@Unit -> @Nat)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  store_neg(0 - 5)
+}

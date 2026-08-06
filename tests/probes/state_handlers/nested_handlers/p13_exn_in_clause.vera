@@ -1,0 +1,31 @@
+-- P13: a FULL nested handle[Exn<Int>] inside a State<Int> GET clause body.
+-- The import walker misses clauses, so the exn tag may go unregistered.
+-- Nested: throw(2) -> clause returns 2+40=42. resume(42 + state 5) = 47.
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>](@Int = 5) {
+    get(@Unit) -> {
+      let @Int = handle[Exn<Int>] {
+        throw(@Int) -> { @Int.0 + 40 }
+      } in {
+        throw(2);
+        999
+      };
+      resume(@Int.0 + @Int.1)
+    },
+    put(@Int) -> { resume(()) }
+  } in {
+    get(())
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}

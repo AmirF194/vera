@@ -1,0 +1,11 @@
+public fn f(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[Exn<String, Int>] {
+    throw(@String) -> { 0 - 1 }
+  } in {
+    @Int.0
+  }
+}

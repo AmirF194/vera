@@ -1,0 +1,34 @@
+-- P2b: nested SAME-type handle[State<Int>] inside the outer State<Int> GET
+-- clause body. Nested cell isolated (push/pop); outer state survives.
+-- Nested: init 6; put(get(())+1): get -> 6*10=60, store 61; get -> 610.
+-- Outer clause: [outer-state capture 50, let 610] -> resume(610+50)=660.
+-- Expected: 660.
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>](@Int = 50) {
+    get(@Unit) -> {
+      let @Int = handle[State<Int>](@Int = 6) {
+        get(@Unit) -> { resume(@Int.0 * 10) },
+        put(@Int) -> { resume(()) }
+      } in {
+        put(get(()) + 1);
+        get(())
+      };
+      resume(@Int.0 + @Int.1)
+    },
+    put(@Int) -> { resume(()) }
+  } in {
+    get(())
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}

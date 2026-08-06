@@ -1,0 +1,15 @@
+type Id<T> = T;
+type IdN = Id<Nat>;
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<IdN>](@IdN = 4) {
+    put(@IdN) -> { resume(()) }
+  } in {
+    put(9);
+    nat_to_int(get(()))
+  }
+}

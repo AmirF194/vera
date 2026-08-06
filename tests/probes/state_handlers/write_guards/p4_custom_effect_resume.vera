@@ -1,0 +1,25 @@
+-- P4: user-defined effect, resumable op returning Nat; resume(<Int>) in
+-- the clause. Verifier fallback fires guarded=True; codegen skips handler.
+effect Counter {
+  op next(Unit -> Nat);
+}
+
+private fn use_counter(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[Counter] {
+    next(@Unit) -> { resume(@Int.0) }
+  } in {
+    nat_to_int(next(()))
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  use_counter(0 - 9)
+}

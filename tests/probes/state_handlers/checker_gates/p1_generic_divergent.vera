@@ -1,0 +1,27 @@
+private forall<T> fn sneak(@T -> @T)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<T>](@Int = 0 - 7) {
+    put(@T) -> { resume(()) }
+  } in {
+    get(())
+  }
+}
+
+public fn go(@Nat -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  nat_to_int(sneak(@Nat.0))
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  go(5)
+}
