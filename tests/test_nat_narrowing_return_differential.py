@@ -458,23 +458,24 @@ class TestClosureReturnNarrowingDifferential984:
             f"non-narrowing closure return"
         )
 
-    def test_nested_closure_guarded_by_codegen_but_verifier_underreports_985(
+    def test_nested_closure_verifier_and_codegen_agree_985(
         self,
     ) -> None:
         """A closure nested inside ANOTHER closure's body: codegen guards its
         @Int -> @Nat return (every lifted closure passes through
-        ``_compile_lifted_closure``) but the verifier's ``AnonFn`` walk is
-        terminal — it does not recurse into the outer closure's body — so the
-        nested return narrowing carries NO obligation.  Sound OVER-guarding (an
-        extra real trap, never a false proof), but a reporting-completeness gap:
-        the narrowing dual of the #985 widening residual.  Pinned so a future
-        change that DROPS the guard (unsound silent negative) or that STARTS
-        obligating (closing #985) is caught here and this test updated."""
-        # The verifier under-reports: no nat_bind for the nested closure return.
-        assert _return_nat_bind_statuses(_NESTED_CLOSURE) == [], (
-            "nested: an obligation appeared — did #985 close?  Update this test."
+        ``_compile_lifted_closure``) AND the verifier reports the matching
+        ``nat_bind`` obligation — the #779 fresh-scope descent re-enters the
+        ``AnonFn`` arm for the nested closure, closing the #985
+        reporting-completeness residual.  The strict verifier↔codegen
+        differential now holds at every closure depth: one runtime-guarded
+        Tier-3 record per guard, and the guard itself still traps a
+        negative."""
+        statuses = _return_nat_bind_statuses(_NESTED_CLOSURE)
+        assert "tier3" in statuses, (
+            "nested: the return-narrowing obligation vanished — the #985 "
+            "under-reporting regressed"
         )
-        # ...yet codegen still guards it, so a negative traps (sound).
+        # ...and codegen still guards it, so a negative traps (sound).
         assert _run(_NESTED_CLOSURE, "go", -5) is None, (
             "nested: codegen guard missing -> a silent negative @Nat"
         )

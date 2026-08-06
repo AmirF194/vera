@@ -998,10 +998,12 @@ private fn destr(@Array<Int> -> @Int)
             (o.kind, o.status) for o in idx
         ]
 
-    def test_index_inside_quantifier_closure_not_obligated(self) -> None:
-        """An index inside a `forall` quantifier closure body is NOT walked
-        (captured length beyond Tier 1 without #427), so it records ZERO
-        index_bounds obligations — left to the runtime trap (#779)."""
+    def test_index_inside_quantifier_closure_obligated_tier3(self) -> None:
+        """An index inside a `forall` quantifier predicate body is walked
+        under the #779 fresh-scope descent (captured length beyond the
+        fragment without #427), recording exactly one Tier-3
+        index_bounds obligation — the runtime trap is reported, not
+        omitted."""
         result = _verify("""
 private fn allpos(@Array<Int> -> @Bool)
   requires(true) ensures(true) effects(pure)
@@ -1010,7 +1012,10 @@ private fn allpos(@Array<Int> -> @Bool)
         errors = [d for d in result.diagnostics if d.severity == "error"]
         assert errors == [], [e.error_code for e in errors]
         idx = [o for o in result.obligations if o.kind == "index_bounds"]
-        assert idx == [], f"quantifier-body index must not be obligated, got {len(idx)}"
+        assert len(idx) == 1, (
+            f"quantifier-body index must be obligated once, got {len(idx)}"
+        )
+        assert idx[0].status == "tier3"
 
 
 class TestDestructureDeBruijnAlignment680:

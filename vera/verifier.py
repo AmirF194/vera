@@ -3062,14 +3062,18 @@ class ContractVerifier:
         #   ResultRef          → @result reference, no sub-expression
         #   NullaryConstructor → nullary ADT tag, no sub-expression
         #
-        # Intentionally not walked — binds fresh slots / out of fragment, so a
-        # primitive op there is left to the codegen runtime trap (#779, #427):
-        #   AnonFn             → closure body
-        #   ForallExpr         → quantifier body
-        #   ExistsExpr         → quantifier body
-        #   HandleExpr         → handler clause / body
-        #   OldExpr            → contract state operator
-        #   NewExpr            → contract state operator
+        # Fresh-scope descent (#779) — walked, with scope-honest precision:
+        #   AnonFn             → body under an EMPTY slot env (fresh params;
+        #                        slot-dependent obligations fall to Tier-3,
+        #                        literal-only shapes classify exactly)
+        #   ForallExpr         → domain (enclosing env) + predicate (AnonFn)
+        #   ExistsExpr         → domain (enclosing env) + predicate (AnonFn)
+        #   HandleExpr         → state init + body (enclosing env);
+        #                        clause bodies / updates (empty env)
+        #
+        # Intentionally not walked — cannot appear in a function body:
+        #   OldExpr            → contract state operator (ensures-only)
+        #   NewExpr            → contract state operator (ensures-only)
         #
         # Cannot occur — rejected before this walk:
         #   HoleExpr           → check time rejects
@@ -3390,10 +3394,10 @@ class ContractVerifier:
             # #680: `arr[i]` carries a `0 <= i < array_length(arr)` bounds
             # obligation.  Recurse into the collection and index first (each
             # may host a nested division / subtraction / index), then check
-            # this site.  Index sites inside closure / quantifier bodies are
-            # NOT reached — AnonFn / ForallExpr / ExistsExpr terminate the
-            # walk below — because the captured length is beyond the Tier-1
-            # fragment (#427); those stay runtime-guarded.
+            # this site.  Index sites inside closure / quantifier-predicate
+            # bodies are reached through the fresh-scope descent (#779) and
+            # fall to Tier-3 — the captured length is beyond the fresh
+            # scope's fragment (#427); the runtime bounds trap backs them.
             self._walk_for_primitive_op_obligations(
                 decl, expr.collection, smt, slot_env, assumptions,
             )
@@ -3446,13 +3450,63 @@ class ContractVerifier:
                     )
             return
 
+        if isinstance(expr, (ast.ForallExpr, ast.ExistsExpr)):
+            # #779: the quantifier DOMAIN evaluates in the enclosing scope,
+            # so it walks with the enclosing env at full precision (a
+            # divisor there can prove Tier-1 from the function's requires).
+            # The predicate is an AnonFn — the fresh-scope case below.
+            self._walk_for_primitive_op_obligations(
+                decl, expr.domain, smt, slot_env, assumptions,
+            )
+            self._walk_for_primitive_op_obligations(
+                decl, expr.predicate, smt, slot_env, assumptions,
+            )
+            return
+
+        if isinstance(expr, ast.HandleExpr):
+            # #779: the handler's state-init and BODY are enclosing-scope
+            # code (handler state is not even visible in the body, spec
+            # §7.4), so they walk with the enclosing env at full precision.
+            # Clause bodies and state updates bind the operation's fresh
+            # parameters — the fresh-scope env (see AnonFn below).
+            if expr.state is not None:
+                self._walk_for_primitive_op_obligations(
+                    decl, expr.state.init_expr, smt, slot_env, assumptions,
+                )
+            self._walk_for_primitive_op_obligations(
+                decl, expr.body, smt, slot_env, assumptions,
+            )
+            for clause in expr.clauses:
+                self._walk_for_primitive_op_obligations(
+                    decl, clause.body, smt, SlotEnv(), [],
+                )
+                if clause.state_update is not None:
+                    self._walk_for_primitive_op_obligations(
+                        decl, clause.state_update[1], smt, SlotEnv(), [],
+                    )
+            return
+
+        if isinstance(expr, ast.AnonFn):
+            # #779: a closure body binds fresh slots, so it walks with an
+            # EMPTY slot environment and no outer assumptions: a slot
+            # reference inside never resolves onto an outer same-named slot
+            # (which could prove a FALSE Tier-1 against the outer
+            # function's facts — the mistranslation hazard the issue's
+            # care-clause names).  Every slot-dependent obligation falls to
+            # the honest Tier-3 leg — codegen's unconditional traps back
+            # div/index, and the lifted closure's interior guards back the
+            # binding sites — while a literal-only shape still classifies
+            # exactly (a manifest `5 / 0` is a loud E526, matching direct
+            # position).  Captured array bounds stay Tier-3 pending the
+            # Tier-2 work in #427.
+            self._walk_for_primitive_op_obligations(
+                decl, expr.body, smt, SlotEnv(), [],
+            )
+            return
+
         # Remaining expression types terminate the walk.  Literals and slot
-        # refs are genuine leaves.  Closure / quantifier bodies (AnonFn /
-        # ForallExpr / ExistsExpr) and handler clause/body expressions are
-        # *not* walked: their bodies bind fresh slots, so an op there is
-        # left to the codegen runtime trap rather than statically obligated
-        # (tracked as #779; closure-captured array bounds also need the
-        # Tier 2 work in #427).
+        # refs are genuine leaves; OldExpr / NewExpr cannot appear in a
+        # function body (rejected at check time outside ensures).
         return
 
     def _lookup_constructor_info(self, name: str) -> ConstructorInfo | None:
@@ -3726,6 +3780,17 @@ class ContractVerifier:
                     and self._return_narrows_into_nat(expr.body)):
                 self._record_nat_bind_tier3(
                     decl, expr.body, "closure return", "tier3", guarded=True)
+            # #779/#985: descend into the closure BODY under an EMPTY slot
+            # environment — the fresh-scope walk.  Interior binding sites
+            # (`let @Nat = ...` in the body) are obligated Tier-3 (a slot
+            # reference never resolves onto an outer same-named slot, so no
+            # FALSE Tier-1 is possible; the lifted closure's interior
+            # codegen guards back them), and a NESTED AnonFn re-enters this
+            # arm so its own return widening/narrowing obligations record —
+            # the #985 residual of the shallow single-level treatment above.
+            self._walk_for_nat_binding_obligations(
+                decl, expr.body, smt, SlotEnv(), [],
+            )
             return
 
         if isinstance(expr, (ast.FnCall, ast.ModuleCall)):
@@ -4361,6 +4426,40 @@ class ContractVerifier:
                 if isinstance(part, ast.Expr):
                     self._walk_for_nat_binding_obligations(
                         decl, part, smt, slot_env, assumptions,
+                    )
+            return
+
+        if isinstance(expr, (ast.ForallExpr, ast.ExistsExpr)):
+            # #779: the quantifier DOMAIN is enclosing-scope code (full
+            # precision); the predicate is an AnonFn, whose arm above walks
+            # its body under the fresh-scope env.
+            self._walk_for_nat_binding_obligations(
+                decl, expr.domain, smt, slot_env, assumptions,
+            )
+            self._walk_for_nat_binding_obligations(
+                decl, expr.predicate, smt, slot_env, assumptions,
+            )
+            return
+
+        if isinstance(expr, ast.HandleExpr):
+            # #779: state-init and BODY are enclosing-scope code; clause
+            # bodies and state updates bind the operation's fresh
+            # parameters, so they walk under the empty fresh-scope env
+            # (mirroring the primitive-op walker and #1179's calls walk).
+            if expr.state is not None:
+                self._walk_for_nat_binding_obligations(
+                    decl, expr.state.init_expr, smt, slot_env, assumptions,
+                )
+            self._walk_for_nat_binding_obligations(
+                decl, expr.body, smt, slot_env, assumptions,
+            )
+            for clause in expr.clauses:
+                self._walk_for_nat_binding_obligations(
+                    decl, clause.body, smt, SlotEnv(), [],
+                )
+                if clause.state_update is not None:
+                    self._walk_for_nat_binding_obligations(
+                        decl, clause.state_update[1], smt, SlotEnv(), [],
                     )
             return
 

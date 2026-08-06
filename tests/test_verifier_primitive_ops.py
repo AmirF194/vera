@@ -519,14 +519,15 @@ private fn at(@Array<Int>, @Nat -> @Int)
         assert len(idx) == 1, f"expected one index_bounds obligation, got {len(idx)}"
         assert idx[0].status == "tier3"
 
-    def test_index_inside_closure_not_obligated(self) -> None:
+    def test_index_inside_closure_obligated_tier3(self) -> None:
         """An index inside an `array_map` closure body (a captured array) is
-        NOT obligated — the walker does not recurse into closure bodies, where
-        the captured length is beyond Tier 1 (#427).  Pinned via a differential:
-        the closure body records ZERO index_bounds obligations.  A `_verify_ok`
-        alone would NOT catch a walker that started recursing into AnonFn —
-        the captured index degrades to honest Tier 3 (no error) — so we assert
-        the obligation count directly.  (Mirrors ch05_capture_array_index.)"""
+        obligated Tier-3 — the #779 fresh-scope descent walks the closure
+        body under an empty slot environment, where the captured length is
+        beyond the decidable fragment (#427), so the obligation records the
+        runtime bounds trap honestly instead of vanishing from the stream.
+        Asserted by count and status, not `_verify_ok`, so both a walker
+        that stops descending (obligation vanishes) and one that starts
+        proving against the outer env (a false Tier-1) are caught."""
         result = _verify("""
 private fn step_flat(@Array<Int> -> @Array<Int>)
   requires(true)
@@ -537,7 +538,8 @@ private fn step_flat(@Array<Int> -> @Array<Int>)
         errors = [d for d in result.diagnostics if d.severity == "error"]
         assert errors == [], f"expected no error, got: {[e.description for e in errors]}"
         idx = [o for o in result.obligations if o.kind == "index_bounds"]
-        assert idx == [], f"closure-body index must not be obligated, got {len(idx)}"
+        assert len(idx) == 1, f"closure-body index must be obligated once, got {len(idx)}"
+        assert idx[0].status == "tier3"
 
     def test_index_obligation_recorded_index_bounds_kind(self) -> None:
         """A guarded index records exactly one `index_bounds` obligation,
