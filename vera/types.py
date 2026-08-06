@@ -503,6 +503,30 @@ def types_equal(a: Type, b: Type) -> bool:
     return a == b
 
 
+def state_cell_decl_equal(cell: Type, declared: Type) -> bool:
+    """The E336/E533 equality: does a handler state DECLARATION match the
+    builtin State effect's resolved cell type?
+
+    ``types_equal`` — deliberately NOT ``is_subtype``, which conflates
+    ``Int``/``Nat`` (rule 3b) and erases refinements to their bases (rules
+    5–7) — tightened for refined pairs: ``types_equal`` compares refined
+    types by BASE only (predicates are the verifier's domain in
+    subtyping), which would let a refined-vs-refined divergence lie
+    (``@{... > 3}`` on ``State<{... < 10}>``).  Predicate AST ``==`` is
+    structural and span-insensitive, so the same alias, two textually
+    identical aliases, and identical literals all stay equal; only
+    genuinely different predicates diverge.  Shared by the checker's
+    concrete gate (E336) and the verifier's per-instantiation recheck
+    (E533) so the two phases can never drift.
+    """
+    if not types_equal(cell, declared):
+        return False
+    if (isinstance(cell, RefinedType) and isinstance(declared, RefinedType)
+            and cell.predicate != declared.predicate):
+        return False
+    return True
+
+
 def contains_typevar(ty: Type) -> bool:
     """True if *ty* contains any TypeVar anywhere in its structure."""
     if isinstance(ty, TypeVar):

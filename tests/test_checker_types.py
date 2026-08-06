@@ -3349,3 +3349,126 @@ private fn t(@Unit -> @Int)
   }
 }
 """)
+
+    def test_refined_divergent_predicates_rejected(self) -> None:
+        """The adversarial round's F1: `types_equal` compares refined
+        types by BASE only, so a refined-vs-refined divergence
+        (`@{> 3}` on `State<{< 10}>`) passed while the plain-`@Nat`
+        spelling on the same cell was rejected — the gate rejected the
+        milder lie and accepted the worse one.  Predicates now compare
+        structurally (span-insensitive AST equality)."""
+        errs = _check_err("""
+type Small = { @Nat | @Nat.0 < 10 };
+type Big = { @Nat | @Nat.0 > 3 };
+
+private fn t(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Small>](@Big = 5) {
+    put(@Small) -> { resume(()) }
+  } in {
+    nat_to_int(get(()))
+  }
+}
+""", "Handler state is declared")
+        assert any(e.error_code == "E336" for e in errs)
+
+    def test_contradictory_refined_annotation_rejected(self) -> None:
+        """The unsatisfiable-annotation shape: a predicate no cell value
+        (not even the init) can satisfy."""
+        errs = _check_err("""
+type Small = { @Nat | @Nat.0 < 10 };
+type Huge = { @Nat | @Nat.0 > 999 };
+
+private fn t(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Small>](@Huge = 5) {
+    put(@Small) -> { resume(()) }
+  } in {
+    nat_to_int(get(()))
+  }
+}
+""", "Handler state is declared")
+        assert any(e.error_code == "E336" for e in errs)
+
+    def test_two_identical_refined_aliases_accepted(self) -> None:
+        """Two DISTINCT alias declarations with textually identical
+        predicates resolve to structurally equal refined types (AST
+        equality is span-insensitive) — not a divergence."""
+        _check_ok("""
+type Small = { @Nat | @Nat.0 < 10 };
+type Small2 = { @Nat | @Nat.0 < 10 };
+
+private fn t(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Small>](@Small2 = 5) {
+    put(@Small) -> { resume(()) }
+  } in {
+    nat_to_int(get(()))
+  }
+}
+""")
+
+
+class TestBuiltinEffectArity337:
+    """Adversarial round F4: `handle[State<Int, Nat>]` and bare
+    `handle[State]` sailed through check (the type-param zip truncates;
+    a missing arg leaked a TypeVar into downstream diagnostics) and died
+    at codegen — E337 now rejects the arity at check time.  User effects
+    keep their declared arity."""
+
+    def test_state_two_type_args_rejected(self) -> None:
+        errs = _check_err("""
+private fn t(@Unit -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int, Nat>](@Bool = true) {
+    put(@Int) -> { resume(()) }
+  } in {
+    true
+  }
+}
+""", "exactly one type argument")
+        assert any(e.error_code == "E337" for e in errs)
+
+    def test_state_bare_rejected(self) -> None:
+        errs = _check_err("""
+private fn t(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State] {
+    put(@Int) -> { resume(()) }
+  } in {
+    7
+  }
+}
+""", "exactly one type argument")
+        assert any(e.error_code == "E337" for e in errs)
+
+    def test_exn_two_type_args_rejected(self) -> None:
+        errs = _check_err("""
+private fn t(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[Exn<Int, Bool>] {
+    throw(@Int) -> { 0 }
+  } in {
+    7
+  }
+}
+""", "exactly one type argument")
+        assert any(e.error_code == "E337" for e in errs)

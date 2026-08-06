@@ -1706,7 +1706,7 @@ put(@Int) -> { resume(()) } with @Int = @Int.1 * 2   -- store double the argumen
 
 Because `@T.0` is the pre-store state, `with @T = @T.0` keeps the *old* state — it silently undoes the `put`. For an ordinary "store the argument" `put`, omit `with` entirely; reach for it only to transform the stored value. The `with` expression's type must match the handler's state type.
 
-For the builtin `State` effect the state declaration **is** the `State<T>` cell: its declared type must structurally equal the effect's `T` after alias resolution, or the handle is a checker error (E336) — declare `handle[State<Nat>](@Nat = ...)`, never `(@Int = ...)`, and put any refinement in the `State<T>` argument itself (an alias that resolves to `T`, like `type Count = Nat` with `(@Count = ...)`, is fine, and scalar aliases work as the cell type: `handle[State<Count>]`). A handler **without** a state declaration binds no state slot in its clauses — in a stateless `put` clause, `@T.0` is the operation's argument. A user-declared effect's handler state is the handler's own accumulator and may take any type.
+For the builtin `State` effect the state declaration **is** the `State<T>` cell: its declared type must structurally equal the effect's `T` after alias resolution (for refined types, predicate included), or the handle is a checker error (E336) — declare `handle[State<Nat>](@Nat = ...)`, never `(@Int = ...)`. An alias that resolves to `T`, like `type Count = Nat` with `(@Count = ...)`, is fine, and scalar aliases work as the cell type: `handle[State<Count>]`. A refined cell must use a **named** refinement alias on both sides — `type Small = { @Nat | @Nat.0 < 10 }; handle[State<Small>](@Small = 0)` — never an inline refinement literal in the `State<T>` argument (not compilable) or a refinement on the declaration alone (E336: nothing would enforce it). A handler **without** a state declaration binds no state slot in its clauses — in a stateless `put` clause, `@T.0` is the operation's argument. A user-declared effect's handler state is the handler's own accumulator and may take any type.
 
 ### Qualified operation calls
 
@@ -3160,7 +3160,7 @@ The reference compiler is under active development. The current release includes
 
 - A seven-stage pipeline: parse, transform, resolve, typecheck, verify, compile, execute
 - A 14-chapter formal specification
-- 8,988 tests, including a 179-program conformance suite
+- 9,009 tests, including a 179-program conformance suite
 - 42 working example programs
 - 164 built-in functions covering strings, arrays, math, parsing, and data types
 - Four built-in abilities (Eq, Ord, Hash, Show) with constrained generics and ADT auto-derivation
@@ -3337,6 +3337,7 @@ Every diagnostic has a stable error code. Codes are grouped by compiler phase:
 - **E334**: State update type name mismatch
 - **E335**: State update expression type mismatch
 - **E336**: Handler state diverges from the State<T> cell type
+- **E337**: Builtin effect handler type-argument arity
 - **E500**: Postcondition verified false
 - **E501**: Call-site precondition violation
 - **E502**: @Nat subtraction underflow obligation not discharged
@@ -3358,6 +3359,7 @@ Every diagnostic has a stable error code. Codes are grouped by compiler phase:
 - **E530**: Nat-to-Int widening out of i64 range
 - **E531**: Nat-to-Int widening unverified and not runtime-guarded
 - **E532**: Cannot verify call-site precondition (undecidable)
+- **E533**: Instantiated handler state diverges from the State<T> cell type
 - **E600**: Unsupported parameter type
 - **E601**: Unsupported return type
 - **E602**: Unsupported body expression type

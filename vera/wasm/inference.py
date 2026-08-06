@@ -13,7 +13,11 @@ from vera.monomorphize import (
     resolve_fn_type_alias,
     substitute_type_vars,
 )
-from vera.slots import resolve_scalar_alias_name, type_expr_slot_name
+from vera.slots import (
+    resolve_scalar_alias_te,
+    substitute_named,
+    type_expr_slot_name,
+)
 from vera.wasm.helpers import _element_wasm_type
 
 # `substitute_type_vars` was relocated to `vera.monomorphize` (the codegen-free
@@ -254,8 +258,8 @@ class InferenceMixin:
             # #1205: scalar-collapse before the WT map — `old(State<Count>)`
             # over `type Count = Nat` is an i64 read, not the unknown-name
             # i32 default.
-            if name:
-                name = self._resolve_scalar_alias_name(name)
+            if name and expr.effect_ref.type_args:
+                name = self._family_name(expr.effect_ref.type_args[0], name)
             return self._type_name_to_wasm(name) if name else None
         return None
 
@@ -2185,15 +2189,90 @@ class InferenceMixin:
         """
         return type_expr_slot_name(te)
 
-    def _resolve_scalar_alias_name(self, name: str) -> str:
-        """Scalar-gated alias collapse for host-import/tag FAMILY names
-        (#1205) — delegates to :func:`vera.slots.resolve_scalar_alias_name`
-        over this module set's alias table.  Distinct from
-        :py:meth:`_resolve_base_type_name`, which resolves
-        unconditionally (for TYPE questions); this resolves only when the
-        chain lands on a scalar (for NAMING questions, where composite
+    def _family_name(self, te: ast.TypeExpr, fallback: str) -> str:
+        """The ``State<T>``/``Exn<E>`` host-import/tag FAMILY name for a
+        type argument (#1205) — the scalar-gated collapse of
+        :func:`vera.slots.resolve_scalar_alias_te` over this module set's
+        alias tables (parameterised aliases substituted), falling back to
+        the opaque *fallback* slot name for composite-resolving
+        arguments.  Distinct from :py:meth:`_resolve_base_type_name`,
+        which resolves unconditionally (for TYPE questions); this
+        resolves only to scalars (for NAMING questions, where composite
         names must stay opaque per the #914 full-name invariant)."""
-        return resolve_scalar_alias_name(name, self._type_aliases)
+        return (resolve_scalar_alias_te(
+                    te, self._type_aliases, self._type_alias_params)
+                or fallback)
+
+    def _canonical_clause_slot_name(self, te: ast.TypeExpr) -> str | None:
+        """The CHECKER's slot-binding name for a clause pattern / state
+        annotation: top-level name syntactic (aliases opaque), type
+        ARGUMENTS fully resolved (the checker's
+        ``_type_expr_to_slot_name`` runs each argument through
+        ``_resolve_type`` before rendering with ``canonical_type_name``,
+        so ``put(@Option<Cnt>)`` binds under ``Option<Int>`` when
+        ``type Cnt = Int``, and a refined argument renders
+        predicate-elided as ``{@Int | ...}``).  The codegen-side clause
+        bindings must match or a mixed-spelling clause body resolves
+        against the wrong stack (PR #1202 adversarial round: two silent
+        wrong-value shapes, two dangling E699s on check-green
+        programs)."""
+        if isinstance(te, ast.RefinementType):
+            return self._canonical_clause_slot_name(te.base_type)
+        if isinstance(te, ast.FnType):
+            return "Fn"
+        if not isinstance(te, ast.NamedType):
+            return None
+        if not te.type_args:
+            return te.name
+        arg_names: list[str] = []
+        for a in te.type_args:
+            arg = self._checker_arg_name(a)
+            if arg is None:
+                return None
+            arg_names.append(arg)
+        return f"{te.name}<{', '.join(arg_names)}>"
+
+    def _checker_arg_name(self, a: ast.TypeExpr) -> str | None:
+        """Render a slot-name type ARGUMENT the way the checker's
+        ``_resolve_type`` + ``canonical_type_name``/``pretty_type`` pair
+        does: alias chains fully resolved (parameterised aliases
+        substituted), a refinement rendered predicate-elided as
+        ``{@<base> | ...}`` (``pretty_type``'s literal form — the
+        checker's binding keys erase predicates), nested arguments
+        recursively canonical."""
+        seen: set[str] = set()
+        te = a
+        while (isinstance(te, ast.NamedType)
+                and te.name in self._type_aliases
+                and te.name not in seen):
+            seen.add(te.name)
+            alias = self._type_aliases[te.name]
+            if not isinstance(alias, (ast.NamedType, ast.RefinementType)):
+                return type_expr_slot_name(a)
+            params = self._type_alias_params.get(te.name)
+            if (params and te.type_args
+                    and len(params) == len(te.type_args)):
+                alias = substitute_named(
+                    alias, dict(zip(params, te.type_args)))
+            te = alias
+        if isinstance(te, ast.RefinementType):
+            base = self._checker_arg_name(te.base_type)
+            return None if base is None else f"{{@{base} | ...}}"
+        if isinstance(te, ast.NamedType):
+            if te.type_args:
+                inner: list[str] = []
+                for x in te.type_args:
+                    n = self._checker_arg_name(x)
+                    if n is None:
+                        return None
+                    inner.append(n)
+                return f"{te.name}<{', '.join(inner)}>"
+            return te.name
+        # FnType or other non-named shape — the checker renders these
+        # via pretty_type's fn(...) form, which is not a slot-nameable
+        # key; fall back to the opaque rendering the pre-#1202 bindings
+        # used.
+        return type_expr_slot_name(a)
 
     def _resolve_base_type_name(
         self,

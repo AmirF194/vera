@@ -19,6 +19,7 @@ from vera.types import (
     is_subtype,
     pretty_type,
     pretty_inferred_type,
+    state_cell_decl_equal,
     substitute,
     types_equal,
 )
@@ -416,6 +417,34 @@ class ControlFlowMixin:
             )
             return UnknownType()
 
+        # #1202 adversarial round (F4): the parameterized BUILTIN effects
+        # take exactly one type argument — `handle[State<Int, Nat>]` and
+        # bare `handle[State]` previously sailed through check (the zip
+        # below truncates; a missing arg leaked an unresolved TypeVar into
+        # downstream diagnostics) and died at codegen with E602/E121.
+        # Check-green ⇒ compilable: reject the arity here.  User-declared
+        # effects are untouched (their arity is their declaration's).
+        if (effect_inst.name in ("State", "Exn")
+                and isinstance(expr.effect, ast.EffectRef)
+                and len(expr.effect.type_args or []) != 1):
+            got = len(expr.effect.type_args or [])
+            self._error(
+                expr.effect,
+                f"handle[{effect_inst.name}] requires exactly one type "
+                f"argument (got {got}).",
+                rationale=f"The builtin {effect_inst.name} effect is "
+                          f"parameterized by exactly one type — "
+                          f"{effect_inst.name}<T> — which types its "
+                          f"operations and, for State, the handler's "
+                          f"state cell.",
+                fix=f"Write handle[{effect_inst.name}<T>](...) with a "
+                    f"single concrete type argument, e.g. "
+                    f"handle[State<Int>](@Int = 0) {{ ... }}.",
+                spec_ref='Chapter 7, Section 7.5.1 "Handler Syntax"',
+                error_code="E337",
+            )
+            return UnknownType()
+
         # Build type mapping for effect type params
         mapping: dict[str, Type] = {}
         if eff_info.type_params and effect_inst.type_args:
@@ -471,7 +500,8 @@ class ControlFlowMixin:
                 if (not isinstance(cell_type, UnknownType)
                         and not contains_typevar(cell_type)
                         and not contains_typevar(state_type)
-                        and not types_equal(cell_type, state_type)):
+                        and not state_cell_decl_equal(
+                            cell_type, state_type)):
                     self._error(
                         expr.state.type_expr,
                         f"Handler state is declared "
@@ -489,7 +519,11 @@ class ControlFlowMixin:
                             f"@{pretty_type(cell_type)} (an alias that "
                             f"resolves to it is fine), and express any "
                             f"refinement in the effect's State<T> "
-                            f"argument itself.",
+                            f"argument itself via a NAMED refinement "
+                            f"alias — type Small = {{ @Nat | ... }}; "
+                            f"handle[State<Small>](@Small = ...) — an "
+                            f"inline refinement literal in the State<T> "
+                            f"argument is not compilable.",
                         spec_ref='Chapter 7, Section 7.5.1 '
                                  '"Handler Syntax"',
                         error_code="E336",

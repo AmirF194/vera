@@ -27,7 +27,7 @@ from vera.codegen.memory import ConstructorLayout
 from vera.errors import Diagnostic, SourceLocation
 from vera.monomorphize import canonicalize_type_aliases, qualify_nested_generic_decls
 from vera.prelude import PRELUDE_FILE, mentioned_fn_names
-from vera.slots import resolve_scalar_alias_name, type_expr_slot_name
+from vera.slots import resolve_scalar_alias_te, type_expr_slot_name
 from vera.wasm import StringPool
 from vera.wasm.async_fusion import (
     compute_future_ret_fns,
@@ -508,15 +508,19 @@ class CodeGenerator(
             tuple[tuple[str, ...], str], str
         ] = {}
 
-    def _resolve_scalar_alias_name(self, name: str) -> str:
-        """Scalar-gated alias collapse for host-import/tag FAMILY names
-        (#1205) — the CodeGenerator twin of ``WasmContext``'s method,
-        over the main file's alias table.  Registration
-        (``_check_state_type`` / ``_check_exn_type``) and per-function
-        lowering resolve through the SAME rule, so the declared import
-        families and the call sites that target them cannot diverge
-        (the #914 bug class)."""
-        return resolve_scalar_alias_name(name, self._type_aliases)
+    def _family_name_te(self, te: ast.TypeExpr, fallback: str) -> str:
+        """The ``State<T>``/``Exn<E>`` host-import/tag FAMILY name for a
+        type argument (#1205) — the CodeGenerator twin of
+        ``WasmContext._family_name``, over the active module's alias
+        tables (parameterised aliases substituted).  Registration
+        (``_check_state_type`` / ``_check_exn_type`` / the body scan)
+        and per-function lowering resolve through the SAME
+        :func:`vera.slots.resolve_scalar_alias_te`, so the declared
+        import families and the call sites that target them cannot
+        diverge (the #914 bug class)."""
+        return (resolve_scalar_alias_te(
+                    te, self._type_aliases, self._type_alias_params)
+                or fallback)
 
     # -----------------------------------------------------------------
     # Diagnostics

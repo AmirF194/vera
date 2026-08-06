@@ -1421,11 +1421,13 @@ class CallsHandlersMixin:
         # — `State<Count>` with `type Count = Nat` joins the `state_*_Nat`
         # family every host already binds, instead of minting a
         # `state_*_Count` family whose derived WT (i32, the unknown-name
-        # default) contradicts its registered i64.  SLOT names stay
-        # source-level: the checker binds clause slots under the pattern's
-        # and the `with` annotation's own names (aliases opaque), so the
+        # default) contradicts its registered i64; the te-level resolution
+        # also sees through parameterised aliases (`State<Id<Nat>>`, an
+        # alias of `Id<Nat>` — the adversarial round's residual split).
+        # SLOT names stay checker-level: top name syntactic, type
+        # arguments canonicalized (the checker's binding rule), so the
         # clause envs below use those, not the family.
-        family = self._resolve_scalar_alias_name(type_name)
+        family = self._family_name(type_arg, type_name)
         mangled = mangle_type_name(family)
 
         put_import = f"$vera.state_put_{mangled}"
@@ -1434,8 +1436,8 @@ class CallsHandlersMixin:
         pop_import = f"$vera.state_pop_{mangled}"
 
         # The clause-scope STATE slot name — the `with` ANNOTATION's own
-        # slot name, mirroring the checker's binding (control.py binds
-        # handler state under `_type_expr_to_slot_name(state.type_expr)`).
+        # slot name under the CHECKER's rule (top name syntactic,
+        # arguments canonicalized), mirroring control.py's binding.
         # None for a stateless handler: the checker binds NO state slot
         # then, and the clause translation must not either (pre-fix it
         # pushed the capture unconditionally, skewing a stateless put
@@ -1443,7 +1445,7 @@ class CallsHandlersMixin:
         # to the pre-store cell value).
         state_slot_name: str | None = None
         if expr.state is not None:
-            state_slot_name = self._type_expr_to_slot_name(
+            state_slot_name = self._canonical_clause_slot_name(
                 expr.state.type_expr)
 
         instructions: list[str] = []
@@ -1477,6 +1479,10 @@ class CallsHandlersMixin:
             elif (base_tn == "Int"
                     and self._result_is_nat(expr.state.init_expr)):
                 init_instrs = self._emit_int_widen_guard(init_instrs)
+            byte_init = self._state_byte_literal(
+                expr.state.init_expr, family)
+            if byte_init is not None:
+                init_instrs = byte_init
             instructions.extend(init_instrs)
 
         # 2. Push a fresh state cell (isolates this handler from any outer
@@ -1510,10 +1516,22 @@ class CallsHandlersMixin:
         # handler declares no clause for is the bare intrinsic op — never an
         # OUTER handler's clause (PR #1003 review: a nested handler with
         # only a put clause inherited the outer get transform).
+        # The clause bodies compile against THIS handler-declaration
+        # scope's env (threaded through the registry), not the op
+        # call-site's: the checker checks clause bodies at the handler
+        # declaration, so a clause slot reference reaching past the
+        # clause's own bindings must resolve against the declaration
+        # scope — inlining at the call-site env silently re-resolved it
+        # against same-typed bindings the handled body made before the op
+        # call (PR #1202 adversarial round, F3; locals are function-wide
+        # indices, so declaration-scope locals stay valid at every inline
+        # site).  The Exn lowering already compiles its clause in the
+        # handle's own env.
         self._state_clause_ops = {}
         for clause in expr.clauses:
             self._state_clause_ops[clause.op_name] = (
-                clause, type_name, state_slot_name, get_import, put_import,
+                clause, type_name, family, state_slot_name, env,
+                get_import, put_import,
             )
 
         # 4. Compile handler body
@@ -1568,9 +1586,8 @@ class CallsHandlersMixin:
         binding — a body referencing it fails slot resolution loudly rather
         than resolving to something wrong.
         """
-        clause, type_name, state_slot_name, get_import, put_import = (
-            self._state_clause_ops[call.name]
-        )
+        clause, type_name, family, state_slot_name, decl_env, get_import, \
+            put_import = self._state_clause_ops[call.name]
         if not self._clause_lowerable(clause.body):
             raise CodegenSkip(
                 call,
@@ -1580,9 +1597,9 @@ class CallsHandlersMixin:
                 "branch inside the argument instead: "
                 "resume(if c then a else b)",
             )
-        # #1205: WASM type and pointer-ness derive from the scalar-collapsed
-        # FAMILY name (matching the import decls), never the source alias.
-        family = self._resolve_scalar_alias_name(type_name)
+        # #1205: WASM type and pointer-ness derive from the threaded
+        # FAMILY name (computed once at the handle site — matching the
+        # import decls), never the source alias spelling.
         state_wt = self._type_name_to_wasm(family)
         # Composite state is a heap pointer (i32, excluding the non-pointer
         # i32 scalars) — root the capture/argument locals on the GC shadow
@@ -1615,6 +1632,9 @@ class CallsHandlersMixin:
             elif (self._resolve_base_type_name(type_name) == "Int"
                     and self._result_is_nat(call.args[0])):
                 arg_instrs = self._emit_int_widen_guard(arg_instrs)
+            byte_arg = self._state_byte_literal(call.args[0], family)
+            if byte_arg is not None:
+                arg_instrs = byte_arg
             arg_local = self.alloc_local(state_wt)
             instructions.extend(arg_instrs)
             instructions.append(f"local.set {arg_local}")
@@ -1643,19 +1663,26 @@ class CallsHandlersMixin:
             instructions.append(f"local.get {arg_local}")
             instructions.append(f"call {put_import}")
 
-        clause_env = env
-        if arg_local is not None:
-            param_slot = (
-                self._type_expr_to_slot_name(clause.params[0])
-                if clause.params else None
-            )
+        # The clause scope mirrors the checker exactly: it is based on
+        # the HANDLER-DECLARATION env (threaded from the handle site, F3
+        # — the call-site env would silently re-resolve outer references
+        # against bindings the handled body made before the op call);
+        # the op param binds ONLY when the clause declares one (a
+        # patternless `put()` binds nothing in the checker's zip — the
+        # argument still evaluates and stores, it just gets no name,
+        # F2); names use the checker's canonicalization rule.
+        clause_env = decl_env
+        if arg_local is not None and clause.params:
+            param_slot = self._canonical_clause_slot_name(clause.params[0])
             clause_env = clause_env.push(param_slot or type_name, arg_local)
         if state_slot_name is not None and state_local is not None:
             clause_env = clause_env.push(state_slot_name, state_local)
 
         saved_in_clause = self._in_state_clause
         saved_clause_ops = self._state_clause_ops
+        saved_clause_family = self._state_clause_family
         self._in_state_clause = True
+        self._state_clause_family = family
         # LOAD-BEARING: a clause body's get/put resolve to the builtin State
         # registry (not the handler ops), so a re-entrant clause is admitted
         # by the checker whenever the enclosing fn declares
@@ -1677,6 +1704,7 @@ class CallsHandlersMixin:
         finally:
             self._in_state_clause = saved_in_clause
             self._state_clause_ops = saved_clause_ops
+            self._state_clause_family = saved_clause_family
         if body_instrs is None:
             return None
         # #1203: for a GET clause the body's net value is the tail
@@ -1705,9 +1733,29 @@ class CallsHandlersMixin:
             elif (self._resolve_base_type_name(type_name) == "Int"
                     and self._result_is_nat(clause.state_update[1])):
                 upd_instrs = self._emit_int_widen_guard(upd_instrs)
+            byte_upd = self._state_byte_literal(
+                clause.state_update[1], family)
+            if byte_upd is not None:
+                upd_instrs = byte_upd
             instructions.extend(upd_instrs)
             instructions.append(f"call {put_import}")
         return instructions
+
+    def _state_byte_literal(
+        self, value: ast.Expr, family: str,
+    ) -> list[str] | None:
+        """#865's Byte-literal width coercion at a State-cell WRITE
+        boundary: ``@Byte`` is i32 (spec §11) but an int literal defaults
+        to ``i64.const``, so a literal flowing into a ``State<Byte>``
+        cell (init, put argument on either dispatch path, ``with``
+        update, get-clause resume value) validated as ill-typed WASM —
+        the family imports were correctly i32 all along.  Returns the
+        i32 lowering for an ``IntLit`` into a Byte-family cell, ``None``
+        otherwise (non-literals already produce i32).  The `let` binding
+        and constructor-field sites have their own #865/#1092 arms."""
+        if family == "Byte" and isinstance(value, ast.IntLit):
+            return [f"i32.const {value.value}"]
+        return None
 
     @staticmethod
     def _tail_resume_arg(body: ast.Expr) -> ast.Expr | None:
@@ -1824,7 +1872,7 @@ class CallsHandlersMixin:
         # payload local against the i64-tagged throw.  The caught-value
         # SLOT binding below stays source-level (the checker binds the
         # clause pattern's own name).
-        family = self._resolve_scalar_alias_name(type_name)
+        family = self._family_name(type_arg, type_name)
         tag_name = f"$exn_{mangle_type_name(family)}"
         is_pair = self._is_pair_type_name(family)
 
@@ -1884,14 +1932,18 @@ class CallsHandlersMixin:
             thrown_local = self.alloc_local(thrown_wt)
 
         # Push caught value into slot env for handler body, under the
-        # clause PATTERN's own slot name (the checker binds
-        # `throw(@Code)`'s payload as `@Code` whatever `E` was named);
-        # fall back to the effect-argument name for a patternless clause.
-        caught_slot = (
-            self._type_expr_to_slot_name(clause.params[0])
-            if clause.params else None
-        )
-        handler_env = env.push(caught_slot or type_name, thrown_local)
+        # clause PATTERN's own slot name in the checker's canonical form
+        # (top name syntactic, arguments resolved — `throw(@Code)` binds
+        # `@Code` whatever `E` was named).
+        if clause.params:
+            caught_slot = self._canonical_clause_slot_name(clause.params[0])
+            handler_env = env.push(caught_slot or type_name, thrown_local)
+        else:
+            # A patternless `throw()` clause binds nothing in the checker
+            # (its zip has no param to bind) — pushing the payload anyway
+            # skewed the clause body's same-typed references onto it (PR
+            # #1202 adversarial round, F2).
+            handler_env = env
         handler_instrs = self.translate_expr(clause.body, handler_env)
         if handler_instrs is None:
             return None  # pragma: no cover

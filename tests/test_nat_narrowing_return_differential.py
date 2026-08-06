@@ -1950,3 +1950,307 @@ public fn bump(@Nat -> @Int)
         through the collapsed family — the comparison previously typed
         its operands off the unresolved name (i32) against i64 reads."""
         assert _run(self._OLD_ALIAS, "bump", 5) == 5
+
+
+class TestClauseScopeCheckerParity:
+    """The adversarial round's clause-scope findings, pinned: clause
+    slot names use the CHECKER's rule (top name syntactic, type
+    arguments canonicalized), a patternless clause binds nothing, and
+    clause bodies compile against the HANDLER-DECLARATION scope — each
+    shape below either silently produced the wrong value or dangled
+    (E699) on a check-green program before the round-2 fixes."""
+
+    _MIXED_ARG_REF = """\
+type Cnt = Int;
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Option<Int>>](@Option<Int> = Some(100)) {
+    get(@Unit) -> { resume(@Option<Int>.0) },
+    put(@Option<Cnt>) -> { resume(()) } with @Option<Int> = @Option<Int>.1
+  } in {
+    put(Some(7));
+    match get(()) {
+      Some(@Int) -> @Int.0,
+      None -> 0 - 1
+    }
+  }
+}
+"""
+
+    def test_alias_arg_pattern_canonical_ref(self) -> None:
+        """`put(@Option<Cnt>)` binds under canonical `Option<Int>` (the
+        checker's rule), so the with-expr's `@Option<Int>.1` is the put
+        ARGUMENT — the with-override stores it (7).  Pre-fix the pattern
+        bound under the opaque spelling and the ref dangled (E699)."""
+        assert _run(self._MIXED_ARG_REF, "go", 0) == 7
+
+    _MIXED_ANNOTATION = """\
+type Cnt = Int;
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Option<Int>>](@Option<Cnt> = Some(100)) {
+    get(@Unit) -> { resume(@Option<Int>.0) }
+  } in {
+    match get(()) {
+      Some(@Int) -> @Int.0,
+      None -> 0 - 1
+    }
+  }
+}
+"""
+
+    def test_alias_annotation_canonical_state(self) -> None:
+        """An alias inside the composite ANNOTATION (E336-equal): the
+        state binds under canonical `Option<Int>`, so the natural
+        `@Option<Int>.0` spelling reads the state (100).  Pre-fix:
+        E699."""
+        assert _run(self._MIXED_ANNOTATION, "go", 0) == 100
+
+    _EXN_MIXED_PATTERN = """\
+type Cnt = Int;
+
+private fn boom(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<Exn<Option<Int>>>)
+{
+  throw(Some(7))
+}
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  let @Option<Int> = Some(100);
+  handle[Exn<Option<Int>>] {
+    throw(@Option<Cnt>) -> {
+      match @Option<Int>.0 {
+        Some(@Int) -> @Int.0,
+        None -> 0 - 1
+      }
+    }
+  } in {
+    boom(())
+  }
+}
+"""
+
+    def test_exn_alias_pattern_canonical_payload(self) -> None:
+        """The Exn twin: `throw(@Option<Cnt>)` binds the payload under
+        canonical `Option<Int>`, so `@Option<Int>.0` is the CAUGHT value
+        (7), not the enclosing binding (100) — the pre-fix opaque
+        binding silently read the outer one."""
+        assert _run(self._EXN_MIXED_PATTERN, "go", 0) == 7
+
+    _PATTERNLESS_PUT = """\
+type Count = Nat;
+
+public fn go(@Nat -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Nat>](@Count = 100) {
+    get(@Unit) -> { resume(@Count.0) },
+    put() -> { resume(()) } with @Count = @Nat.0
+  } in {
+    put(5);
+    nat_to_int(get(()))
+  }
+}
+"""
+
+    def test_patternless_put_binds_nothing(self) -> None:
+        """A patternless `put()` clause binds NO op-param slot (the
+        checker's zip has nothing to bind), so the with-expr's `@Nat.0`
+        is the enclosing fn parameter (9) — pre-fix codegen pushed the
+        argument anyway and the with stored 5."""
+        assert _run(self._PATTERNLESS_PUT, "go", 9) == 9
+
+    _PATTERNLESS_THROW = """\
+private fn boom(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<Exn<Int>>)
+{
+  throw(7)
+}
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[Exn<Int>] {
+    throw() -> { @Int.0 }
+  } in {
+    boom(())
+  }
+}
+"""
+
+    def test_patternless_throw_binds_nothing(self) -> None:
+        """The Exn twin: a patternless `throw()` binds no payload, so
+        `@Int.0` in the clause is the enclosing fn parameter — pre-fix
+        the payload was pushed anyway and the body read 7."""
+        assert _run(self._PATTERNLESS_THROW, "go", 100) == 100
+
+    _CALL_SITE_SHADOW = """\
+public fn go(@Nat -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Nat>](@Nat = 0) {
+    get(@Unit) -> { resume(@Nat.1) },
+    put(@Nat) -> { resume(()) }
+  } in {
+    let @Nat = 777;
+    nat_to_int(get(()))
+  }
+}
+"""
+
+    def test_clause_compiles_at_declaration_scope(self) -> None:
+        """A clause body reaching past its own bindings resolves against
+        the HANDLER-DECLARATION scope, as the checker checks it:
+        `@Nat.1` is the fn parameter (9), not the `let @Nat = 777` the
+        handled body made before the op call — pre-fix the clause
+        inlined against the call-site env and read 777."""
+        assert _run(self._CALL_SITE_SHADOW, "go", 9) == 9
+
+
+class TestParameterizedAliasFamily:
+    """The #1205 residual the adversarial round surfaced: a
+    PARAMETERISED alias resolving to a scalar (`type Id<T> = T` at
+    `Id<Nat>`, an alias of that, and the Exn twin) still split the
+    family — registration substituted (import declared i64) while the
+    name-level collapse left the compound name opaque (WT fell to the
+    unknown-name i32 default).  All three were invalid WASM."""
+
+    _PARAM_ALIAS = """\
+type Id<T> = T;
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Id<Nat>>](@Id<Nat> = 4) {
+    put(@Id<Nat>) -> { resume(()) }
+  } in {
+    put(9);
+    nat_to_int(get(()))
+  }
+}
+"""
+
+    def test_parameterized_alias_cell(self) -> None:
+        assert _run(self._PARAM_ALIAS, "go", 0) == 9
+
+    _ALIAS_OF_GENERIC = """\
+type Id<T> = T;
+type IdN = Id<Nat>;
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<IdN>](@IdN = 4) {
+    put(@IdN) -> { resume(()) }
+  } in {
+    put(9);
+    nat_to_int(get(()))
+  }
+}
+"""
+
+    def test_alias_of_generic_alias_cell(self) -> None:
+        assert _run(self._ALIAS_OF_GENERIC, "go", 0) == 9
+
+    _EXN_PARAM_ALIAS = """\
+type Id<T> = T;
+
+private fn boom(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<Exn<Id<Int>>>)
+{
+  throw(7)
+}
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[Exn<Id<Int>>] {
+    throw(@Id<Int>) -> { 0 - @Id<Int>.0 }
+  } in {
+    boom(())
+  }
+}
+"""
+
+    def test_exn_parameterized_alias(self) -> None:
+        assert _run(self._EXN_PARAM_ALIAS, "go", 0) == -7
+
+
+class TestByteStateCell:
+    """`State<Byte>` cells (adversarial round, finding 3): the family
+    imports were correctly i32 all along, but an int LITERAL at any
+    write boundary emitted the default `i64.const` into them — invalid
+    WASM on every literal-writing Byte handler.  The #865 width
+    coercion (the `let @Byte = 0` arm's sibling) now covers the init,
+    both put dispatch paths, the `with` update, and the get-clause
+    resume value."""
+
+    _BYTE_CELL = """\
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Byte>](@Byte = 0) {
+    get(@Unit) -> { resume(@Byte.0) },
+    put(@Byte) -> { resume(()) }
+  } in {
+    put(42);
+    byte_to_int(get(()))
+  }
+}
+"""
+
+    def test_byte_cell_init_and_clause_put_literals(self) -> None:
+        """Init literal + CLAUSE-inlined put literal (a put clause is
+        present, so the argument takes the inlined path)."""
+        assert _run(self._BYTE_CELL, "go", 0) == 42
+
+    _BYTE_RESUME_LITERAL = """\
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Byte>](@Byte = 5) {
+    get(@Unit) -> { resume(9) },
+    put(@Byte) -> { resume(()) }
+  } in {
+    byte_to_int(get(()))
+  }
+}
+"""
+
+    def test_byte_resume_literal(self) -> None:
+        """`resume(9)` in a `State<Byte>` get clause is the op's i32
+        result — the literal previously widened to i64."""
+        assert _run(self._BYTE_RESUME_LITERAL, "go", 0) == 9
+
+    _BYTE_WITH_LITERAL = """\
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Byte>](@Byte = 5) {
+    get(@Unit) -> { resume(@Byte.0) },
+    put(@Byte) -> { resume(()) } with @Byte = 77
+  } in {
+    put(1);
+    byte_to_int(get(()))
+  }
+}
+"""
+
+    def test_byte_with_update_literal(self) -> None:
+        assert _run(self._BYTE_WITH_LITERAL, "go", 0) == 77
+
+    _BYTE_BARE_PUT = """\
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Byte>](@Byte = 5) {
+    get(@Unit) -> { resume(@Byte.0) }
+  } in {
+    put(33);
+    byte_to_int(get(()))
+  }
+}
+"""
+
+    def test_byte_bare_put_literal(self) -> None:
+        """No put clause — the bare intrinsic dispatch path's literal."""
+        assert _run(self._BYTE_BARE_PUT, "go", 0) == 33

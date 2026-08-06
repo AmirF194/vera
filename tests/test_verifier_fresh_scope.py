@@ -946,3 +946,53 @@ public fn go(@Int -> @Int)
 }
 """, "State-op argument")
         assert any(e.error_code == "E503" for e in errs)
+
+
+class TestGenericStateDeclDivergence533:
+    """#1206's generic residual (adversarial round F3): the checker's
+    E336 defers on a TypeVar cell, and nothing re-checked the equality
+    once ``T`` went concrete — a `(@Nat = ...)` declaration on
+    `handle[State<T>]` instantiated at `@Int` ran green while the
+    annotation lied.  The verifier's per-instantiation walk (which
+    verifies textually-monomorphized clones) now records a violated
+    `state_decl` obligation (E533) through the shared
+    `state_cell_decl_equal`."""
+
+    _GENERIC_LIE = """
+private forall<T> fn sneak(@T -> @T)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{{
+  handle[State<T>]({ann} = 3) {{
+    put(@T) -> {{ resume(()) }}
+  }} in {{
+    put(@T.0);
+    get(())
+  }}
+}}
+
+public fn go(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{{
+  sneak(@Int.0)
+}}
+"""
+
+    def test_divergent_generic_annotation_is_loud(self) -> None:
+        """`(@Nat = 3)` on `State<T>` at T=Int: check-green (deferred),
+        verify-loud with the failing instantiation named."""
+        errs = _verify_err(self._GENERIC_LIE.format(ann="@Nat"),
+                           "instantiated at")
+        assert any(e.error_code == "E533" for e in errs)
+
+    def test_honest_generic_annotation_is_clean(self) -> None:
+        """The honest `@T` spelling matches at every instantiation — no
+        E533 (and nothing else new: the fixture is otherwise
+        verify-green)."""
+        result = _verify(self._GENERIC_LIE.format(ann="@T"))
+        errors = [d for d in result.diagnostics if d.severity == "error"]
+        assert not errors, [d.description for d in errors]
+        assert not any(o.kind == "state_decl" for o in result.obligations)

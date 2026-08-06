@@ -138,11 +138,20 @@ class WasmContext(
         # keep the bare host-cell call.  Saved/restored around each handler
         # body exactly like ``_effect_ops`` (nested handlers).
         self._state_clause_ops: dict[
-            str, tuple[ast.HandlerClause, str, str | None, str, str]
+            str,
+            tuple[
+                ast.HandlerClause, str, str, str | None,
+                "WasmSlotEnv", str, str,
+            ],
         ] = {}
         # True while translating an inlined State clause body/`with` expr —
         # gates the ``resume(v)`` lowering (v IS the op's result value).
         self._in_state_clause: bool = False
+        # The active clause's cell FAMILY name while translating it —
+        # lets the resume lowering apply the #865 Byte-literal width
+        # coercion (`resume(0)` in a `State<Byte>` get clause is the
+        # op's i32 result).
+        self._state_clause_family: str | None = None
         # Constructor layout mapping: ctor_name -> ConstructorLayout
         self._ctor_layouts: dict[str, ConstructorLayout] = ctor_layouts or {}
         # ADT type names for slot/param type resolution

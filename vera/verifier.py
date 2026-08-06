@@ -57,7 +57,10 @@ from vera.types import (
     RefinedType,
     Type,
     TypeVar,
+    UnknownType,
     contains_typevar,
+    pretty_type,
+    state_cell_decl_equal,
     substitute,
     types_equal,
 )
@@ -3570,6 +3573,66 @@ class ContractVerifier:
                 site=site, guarded=widen_guarded,
             )
 
+    def _check_state_decl_divergence(
+        self, decl: ast.FnDecl, expr: ast.HandleExpr,
+    ) -> None:
+        """The per-instantiation twin of the checker's E336 (#1206): a
+        GENERIC handler's ``handle[State<T>](@Concrete = ...)`` defers the
+        cell/declaration equality at the generic site (TypeVar on the cell
+        side), and nothing re-checked it once ``T`` went concrete — the
+        declared annotation could lie at every instantiation with check,
+        verify, and run all green (PR #1202 adversarial round, F3).
+
+        Generic instances are verified as monomorphized CLONES whose
+        TypeExprs are textually substituted, so resolving both sides here
+        sees the instantiated types; divergence records a ``violated``
+        obligation (E533) — violations are never dropped by the
+        per-instance aggregation, which prefixes the failing
+        instantiations — plus its paired diagnostic.  Both phases share
+        :func:`vera.types.state_cell_decl_equal`, so the concrete gate and
+        this recheck cannot drift.  Non-generic code never reaches this
+        (the checker's E336 gates first; verify runs only check-clean
+        programs), and an UNinstantiated generic still carries the
+        TypeVar and defers."""
+        eff = expr.effect
+        if (not isinstance(eff, ast.EffectRef)
+                or eff.name != "State"
+                or not eff.type_args
+                or len(eff.type_args) != 1
+                or expr.state is None):
+            return
+        cell = self._resolve_type(eff.type_args[0])
+        declared = self._resolve_type(expr.state.type_expr)
+        if (cell is None or declared is None
+                or isinstance(cell, UnknownType)
+                or isinstance(declared, UnknownType)
+                or contains_typevar(cell)
+                or contains_typevar(declared)
+                or state_cell_decl_equal(cell, declared)):
+            return
+        node = expr.state.type_expr
+        self._record_obligation(
+            decl.name, "state_decl", expr.state.init_expr, "violated",
+            error_code="E533",
+        )
+        self._error(
+            node,
+            f"Handler state is declared @{pretty_type(declared)} but the "
+            f"handled effect's cell type is State<{pretty_type(cell)}> at "
+            f"this instantiation.",
+            rationale="For the builtin State effect the handler state "
+                      "declaration IS the State<T> cell; a generic "
+                      "handler defers the E336 equality check at the "
+                      "generic site (TypeVar cell), so a divergent "
+                      "concrete declaration resurfaces here, where the "
+                      "instantiation made both sides concrete.",
+            fix="Declare the handler state as @T (the effect's own type "
+                "parameter) so every instantiation matches, or make the "
+                "handler non-generic with the concrete cell type.",
+            spec_ref='Chapter 7, Section 7.5.1 "Handler Syntax"',
+            error_code="E533",
+        )
+
     def _handler_cell_type(self, expr: ast.HandleExpr) -> Type | None:
         """The handler's state CELL type — the effect's ``State<T>`` type
         argument when present (#1203; the declared ``with`` annotation can
@@ -4596,15 +4659,19 @@ class ContractVerifier:
             if expr.state is not None:
                 # #1203: the state-init BINDS into the state CELL — whose
                 # type is the effect's `State<T>` type argument, NOT the
-                # declared `with` annotation (the two can diverge and the
-                # checker does not yet reject the mismatch; keying off the
-                # annotation let `(@Int = <neg>)` on a `State<Nat>` handler
-                # bypass the obligation entirely — PR #1202 adversarial
-                # round).  Same refined/nat/widen triple as a let binding,
+                # declared `with` annotation (the checker rejects a
+                # concrete mismatch as E336 (#1206), but a generic
+                # handler's TypeVar cell defers that check and the
+                # divergence can reappear at instantiation, so the
+                # obligations keep keying off the cell; pre-E336, keying
+                # off the annotation let `(@Int = <neg>)` on a
+                # `State<Nat>` handler bypass the obligation entirely —
+                # PR #1202 adversarial round).  Same refined/nat/widen triple as a let binding,
                 # at enclosing-scope precision (a `requires` can prove it
                 # Tier-1).  Codegen guards the init store, so guarded=True
                 # for the sign-bit pair; the refined predicate has NO
                 # handler-boundary guard, so that arm discloses honestly.
+                self._check_state_decl_divergence(decl, expr)
                 state_ty = self._handler_cell_type(expr)
                 self._obligate_binding_triple(
                     decl, expr.state.init_expr, state_ty, smt, slot_env,

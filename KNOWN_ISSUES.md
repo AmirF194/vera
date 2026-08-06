@@ -8,6 +8,9 @@ Defects in shipped compiler, runtime, or tooling behaviour — this table matche
 
 | Bug | Issue |
 |-----|-------|
+| A `get(())` array element driving a generic instantiation desyncs monomorphization discovery from the effect-op result naming (`pick$Nat` vs `pick$Int`) — a dangling call target, so the function is dropped loudly with E602. Fix direction: derive both from one result-type mirror. | [#1207](https://github.com/aallan/vera/issues/1207) |
+| Slot-environment naming keeps type-argument alias spellings opaque where the checker canonicalizes them (`@Option<Cnt>` binder vs `@Option<Int>` ref) — check-green programs dangle loudly (E699) at compile outside handler clauses (PR #1202 aligned the clause bindings). The complete fix canonicalizes `type_expr_slot_name` and `slot_ref_name` together — a global naming-layer change wanting its own PR. | [#1208](https://github.com/aallan/vera/issues/1208) |
+| `State<Alias>` of a composite type keys a distinct host cell family from `State<Composite>`, so cross-spelling handlers do not share state — as much a design question (is an alias the same cell?) as a bug; either resolution is mechanical once decided. | [#1209](https://github.com/aallan/vera/issues/1209) |
 | `ch05_closure_nat_return` (a run-level conformance program in the pre-commit + CI gate) trapped **once** in a full `check_conformance.py` run (`unreachable` in `main` — the sentinel `assert` or a GC shadow-stack guard) and has not reproduced in ~960 attempts across isolated, parallel, eager-GC, and hash-seed-swept executions; the emitted WAT is deterministic and correct. Suspected rare runtime/GC/wasmtime interaction, tracked so a future intermittent CI red resolves here instead of starting fresh. | [#996](https://github.com/aallan/vera/issues/996) |
 
 ## Limitations

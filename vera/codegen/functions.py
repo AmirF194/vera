@@ -192,10 +192,13 @@ class FunctionCompilationMixin:
                     if type_name:
                         # #1205: the import NAME keys on the scalar-collapsed
                         # family (matching `_check_state_type` registration);
-                        # the Vera-name mirror below stays the SOURCE name —
-                        # it answers type questions, not naming ones.
+                        # the Vera-name mirror below stays the SOURCE name
+                        # (note it also feeds the #1006/#914-A2 clone-naming
+                        # contract for a `get(())` array element driving a
+                        # generic instantiation — see the tracked mono
+                        # discovery desync).
                         mangled = mangle_type_name(
-                            self._resolve_scalar_alias_name(type_name))
+                            self._family_name_te(eff.type_args[0], type_name))
                         # Only map if no user-defined function shadows the op
                         if "get" not in self._fn_sigs:
                             effect_ops["get"] = (
@@ -224,7 +227,7 @@ class FunctionCompilationMixin:
                         # import family (matching `_check_exn_type`).
                         effect_ops["throw"] = (
                             f"$exn_"
-                            f"{mangle_type_name(self._resolve_scalar_alias_name(type_name))}",
+                            f"{mangle_type_name(self._family_name_te(eff.type_args[0], type_name))}",
                             False,
                         )
 

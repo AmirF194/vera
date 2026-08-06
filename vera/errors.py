@@ -758,6 +758,7 @@ ERROR_CODES: dict[str, str] = {
     "E334": "State update type name mismatch",
     "E335": "State update expression type mismatch",
     "E336": "Handler state diverges from the State<T> cell type",
+    "E337": "Builtin effect handler type-argument arity",
     # E5xx — Verification
     "E500": "Postcondition verified false",
     "E501": "Call-site precondition violation",
@@ -780,6 +781,7 @@ ERROR_CODES: dict[str, str] = {
     "E530": "Nat-to-Int widening out of i64 range",
     "E531": "Nat-to-Int widening unverified and not runtime-guarded",
     "E532": "Cannot verify call-site precondition (undecidable)",
+    "E533": "Instantiated handler state diverges from the State<T> cell type",
     # E6xx — Codegen
     "E600": "Unsupported parameter type",
     "E601": "Unsupported return type",

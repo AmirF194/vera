@@ -442,6 +442,11 @@ class CallsMixin:
         # enforced before inlining).  resume(()) is a UnitLit: no value,
         # matching put's void result.
         if call.name == "resume" and self._in_state_clause:
+            if self._state_clause_family is not None:
+                byte_val = self._state_byte_literal(
+                    call.args[0], self._state_clause_family)
+                if byte_val is not None:
+                    return byte_val
             return self.translate_expr(call.args[0], env)
 
         # Check if this is an effect operation (e.g. get/put/throw)
@@ -472,6 +477,9 @@ class CallsMixin:
                 elif (self._resolve_base_type_name(cell_tn) == "Int"
                         and self._result_is_nat(call.args[0])):
                     instructions = self._emit_int_widen_guard(instructions)
+                byte_arg = self._state_byte_literal(call.args[0], cell_tn)
+                if byte_arg is not None:
+                    instructions = byte_arg
             # throw uses WASM throw instruction, not call
             if call.name == "throw":
                 instructions.append(f"throw {target_name}")
