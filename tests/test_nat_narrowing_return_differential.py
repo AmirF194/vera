@@ -76,8 +76,18 @@ def _resolved_pipeline(
         program = parse_to_ast(source)
         resolver = ModuleResolver(_root=Path(path).parent)
         resolved = resolver.resolve_imports(program, Path(path))
-        _diags, arts = typecheck_with_artifacts(
+        diags, arts = typecheck_with_artifacts(
             program, source, file=path, resolved_modules=resolved,
+        )
+        # Check-clean is part of every differential's premise ("a
+        # check-green program must ..."): a fixture the checker rejects
+        # would silently exercise nothing (a round-3 reviewer caught a
+        # test validating a check-rejected program through exactly this
+        # gap).
+        errors = [d for d in diags if d.severity == "error"]
+        assert not errors, (
+            "differential fixture must type-check cleanly, got: "
+            f"{[(d.error_code, d.description[:70]) for d in errors]}"
         )
         yield program, arts, resolved, path
     finally:
@@ -1573,12 +1583,12 @@ public fn go(@Int -> @Bool) requires(true) ensures(true) effects(pure)
         (keyed off the state-cell type in the dispatch target)."""
         assert _run(self._PUT_NO_CLAUSE, "go", -7) is None
     def test_bare_put_non_negative_passes(self) -> None:
-        assert _run(self._PUT_NO_CLAUSE, "go", 9) is not None
+        assert _run(self._PUT_NO_CLAUSE, "go", 9) == 0
     def test_bare_put_zero_survives(self) -> None:
-        assert _run(self._PUT_NO_CLAUSE, "go", 0) is not None
+        assert _run(self._PUT_NO_CLAUSE, "go", 0) == 0
 
     _PUT_IN_CLAUSE_BODY = """\
-public fn go(@Int -> @Bool) requires(true) ensures(true) effects(pure)
+public fn go(@Int -> @Bool) requires(true) ensures(true) effects(<State<Nat>>)
 {
   handle[State<Nat>](@Nat = 0) {
     get(@Unit) -> { put(@Int.0); resume(@Nat.0) },
@@ -1595,7 +1605,7 @@ public fn go(@Int -> @Bool) requires(true) ensures(true) effects(pure)
         (`_state_clause_ops` is cleared in clauses) — same guard."""
         assert _run(self._PUT_IN_CLAUSE_BODY, "go", -5) is None
     def test_clause_body_put_non_negative_passes(self) -> None:
-        assert _run(self._PUT_IN_CLAUSE_BODY, "go", 9) is not None
+        assert _run(self._PUT_IN_CLAUSE_BODY, "go", 9) == 0
 
 
 class TestHandlerStateWidenDifferential1203:
@@ -1650,6 +1660,33 @@ public fn go(@Nat -> @Int) requires(true) ensures(true) effects(pure)
         """Boundary control: exactly i64.MAX survives (the suite's
         established no-trap-at-i64-max convention)."""
         assert _run(self._WIDEN_RESUME, "go", 2**63 - 1) == 2**63 - 1
+
+    def test_widen_resume_u64max_traps(self) -> None:
+        """The resume widen arm's own U64_MAX probe — the class
+        docstring's promise; deleting the get-resume widen guard was
+        green without it (PR #1202 review)."""
+        assert _run(self._WIDEN_RESUME, "go", U64_MAX) is None
+
+    _WIDEN_WITH = """\
+public fn go(@Nat -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Int>](@Int = 0) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) } with @Int = @Nat.0
+  } in {
+    put(1);
+    get(())
+  }
+}
+"""
+
+    def test_widen_with_update_u64max_traps(self) -> None:
+        """The `with @Int = <@Nat>` state-update widen arm — obligated
+        `widen_guarded=True`, so the guard promise needs its trap
+        witness."""
+        assert _run(self._WIDEN_WITH, "go", U64_MAX) is None
+    def test_widen_with_update_in_range_passes(self) -> None:
+        assert _run(self._WIDEN_WITH, "go", 42) == 42
 
     _TAIL_MATCH_RESUME = """\
 public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
@@ -1735,7 +1772,7 @@ type Count = Nat;
 
 public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
 {
-  handle[State<Count>](@Count = 0) {
+  handle[State<Count>](@Count = 6) {
     get(@Unit) -> { resume(@Count.0) },
     put(@Count) -> { resume(()) }
   } in {
@@ -1746,8 +1783,10 @@ public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
 
     def test_alias_cell_compiles_and_runs(self) -> None:
         """`State<Count>` with `type Count = Nat` — the issue repro —
-        was invalid WASM (family typed i32 against i64 values)."""
-        assert _run(self._ALIAS_CELL, "go", 0) == 0
+        was invalid WASM (family typed i32 against i64 values).  The
+        init (6) cannot coincide with a default-initialised cell, a
+        dropped read, or the argument (0)."""
+        assert _run(self._ALIAS_CELL, "go", 0) == 6
 
     _REFINED_ALIAS_CELL = """\
 type Pos = { @Int | @Int.0 > 0 };
@@ -2254,3 +2293,231 @@ public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
     def test_byte_bare_put_literal(self) -> None:
         """No put clause — the bare intrinsic dispatch path's literal."""
         assert _run(self._BYTE_BARE_PUT, "go", 0) == 33
+
+
+class TestQualifiedStatePut:
+    """`State.put(...)` — the QUALIFIED spelling — routes through the
+    same dispatcher as bare `put(...)` (round-4 review): it previously
+    took a bare unguarded call, silently skipping the clause's `with`
+    transform, storing a negative into a @Nat cell, and emitting a Byte
+    literal at i64."""
+
+    _QUAL_WITH = """\
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Nat>](@Nat = 0) {
+    get(@Unit) -> { resume(@Nat.0) },
+    put(@Nat) -> { resume(()) } with @Nat = @Nat.1 * 2
+  } in {
+    State.put(4);
+    nat_to_int(get(()))
+  }
+}
+"""
+
+    def test_qualified_put_applies_clause_transform(self) -> None:
+        """The doubling `with` fires on the qualified spelling too —
+        pre-fix `State.put(4)` stored 4 while `put(4)` stored 8."""
+        assert _run(self._QUAL_WITH, "go", 0) == 8
+
+    _QUAL_GUARD = """\
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Nat>](@Nat = 0) {
+    get(@Unit) -> { resume(@Nat.0) }
+  } in {
+    State.put(@Int.0);
+    nat_to_int(get(()))
+  }
+}
+"""
+
+    def test_qualified_put_negative_traps(self) -> None:
+        """The #1203 narrowing guard covers the qualified dispatch —
+        pre-fix -5 round-tripped through the @Nat cell silently."""
+        assert _run(self._QUAL_GUARD, "go", -5) is None
+    def test_qualified_put_non_negative_passes(self) -> None:
+        assert _run(self._QUAL_GUARD, "go", 9) == 9
+
+    _QUAL_BYTE = """\
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Byte>](@Byte = 5) {
+    get(@Unit) -> { resume(@Byte.0) }
+  } in {
+    State.put(33);
+    byte_to_int(get(()))
+  }
+}
+"""
+
+    def test_qualified_put_byte_literal(self) -> None:
+        """The #865 Byte-literal width coercion covers the qualified
+        dispatch — pre-fix the literal emitted i64 into the i32 family."""
+        assert _run(self._QUAL_BYTE, "go", 0) == 33
+
+
+class TestNestedParameterizedAliasResolution:
+    """Round-3's resolver root cause: marking an alias head as \"seen\"
+    BEFORE substituting truncated legitimate finite expansions
+    (`Id<Id<Nat>>` substitutes to `Id<Nat>`, whose head re-entry a
+    seen-set misread as a cycle) — a silent handler bypass, an
+    invalid-WASM family split reachable via an innocent wrapper alias,
+    and a silent wrong clause binding.  Arguments now resolve FIRST
+    (the checker's order), depth-bounded."""
+
+    _NESTED_APPLICATION = """\
+type Id<T> = T;
+
+public fn go(@Nat -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Id<Id<Nat>>>](@Id<Id<Nat>> = 0) {
+    get(@Unit) -> { resume(@Id<Id<Nat>>.0) },
+    put(@Id<Id<Nat>>) -> { resume(()) }
+  } in {
+    put(@Nat.0);
+    nat_to_int(get(()))
+  }
+}
+"""
+
+    def test_nested_application_cell(self) -> None:
+        """`State<Id<Id<Nat>>>` — one substitution produced `Id<Nat>`
+        and the walk stopped there: registration typed the import i64
+        while the lowering derived i32 from the opaque compound name.
+        Invalid WASM pre-fix."""
+        assert _run(self._NESTED_APPLICATION, "go", 7) == 7
+
+    _WRAPPER_ALIAS = """\
+type Id<T> = T;
+type Two<T> = Id<Id<T>>;
+
+public fn go(@Nat -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Two<Nat>>](@Two<Nat> = 0) {
+    get(@Unit) -> { resume(@Two<Nat>.0) },
+    put(@Two<Nat>) -> { resume(()) }
+  } in {
+    put(@Nat.0);
+    nat_to_int(get(()))
+  }
+}
+"""
+
+    def test_wrapper_alias_cell(self) -> None:
+        """A single user application (`Two<Nat>` = `Id<Id<Nat>>`) hit
+        the same truncation — entirely innocent source."""
+        assert _run(self._WRAPPER_ALIAS, "go", 7) == 7
+
+    _HANDLER_BYPASS = """\
+type Id<T> = T;
+
+private fn bump(@Nat -> @Nat)
+  requires(true)
+  ensures(true)
+  effects(<State<Id<Id<Nat>>>>)
+{
+  put(@Nat.0);
+  get(())
+}
+
+public fn go(@Nat -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Nat>](@Nat = 0) {
+    get(@Unit) -> { resume(@Nat.0) },
+    put(@Nat) -> { resume(()) }
+  } in {
+    bump(@Nat.0);
+    nat_to_int(get(()))
+  }
+}
+"""
+
+    def test_effect_spelling_shares_the_handler_cell(self) -> None:
+        """Two spellings of ONE resolved effect (`State<Id<Id<Nat>>>`
+        declared, `State<Nat>` handled): the callee's ops must land in
+        the handler's cell.  Pre-fix they routed to an unmanaged opaque
+        family — the callee's put vanished and the handler's get read 0
+        with valid WASM (the round's silent handler bypass)."""
+        assert _run(self._HANDLER_BYPASS, "go", 7) == 7
+
+    _EXN_NESTED_APPLICATION = """\
+type Id<T> = T;
+
+private fn boom(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<Exn<Id<Id<Int>>>>)
+{
+  throw(41)
+}
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[Exn<Id<Id<Int>>>] {
+    throw(@Id<Id<Int>>) -> { @Id<Id<Int>>.0 }
+  } in {
+    boom(())
+  }
+}
+"""
+
+    def test_exn_nested_application(self) -> None:
+        assert _run(self._EXN_NESTED_APPLICATION, "go", 0) == 41
+
+    _REFINED_ARG_PATTERN = """\
+type Pos = { @Int | @Int.0 > 0 };
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Option<Pos>>](@Option<Pos> = Some(5)) {
+    get(@Unit) -> { resume(@Option<Pos>.0) },
+    put(@Option<Pos>) -> { resume(()) }
+  } in {
+    put(Some(9));
+    option_unwrap_or(get(()), 0 - 1)
+  }
+}
+"""
+
+    def test_refined_arg_clause_binding_reachable(self) -> None:
+        """A REFINED-resolving type argument in clause/annotation
+        position (`Option<Pos>`): round-3's checker-mirrored bind key
+        rendered the predicate-elided form no writable reference can
+        spell, turning this working program into a dangling E699.  The
+        source-spelling deviation keeps bind and ref meeting at the one
+        spelling the checker accepts."""
+        assert _run(self._REFINED_ARG_PATTERN, "go", 0) == 9
+
+
+class TestResumeInWithExprRejected:
+    """A `resume(...)` inside a `with` state-update expression was
+    silently IGNORED (the lowering counts only the body's tail resume;
+    the with-expr just evaluates for its value) — now a loud E602 skip
+    with move-it-to-the-body guidance (round-3 review, F5)."""
+
+    _RESUME_IN_WITH = """\
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Int>](@Int = 5) {
+    get(@Unit) -> { resume(@Int.0) } with @Int = { resume(77); @Int.0 + 1 },
+    put(@Int) -> { resume(()) }
+  } in {
+    get(())
+  }
+}
+"""
+
+    def test_resume_in_with_is_loud_skip(self) -> None:
+        with _resolved_pipeline(self._RESUME_IN_WITH) as (
+                program, arts, resolved, path):
+            result = codegen_compile(
+                program, source=self._RESUME_IN_WITH, file=path,
+                resolved_modules=resolved,
+                expr_semantic_types=arts.expr_semantic_types,
+            )
+            msgs = [d.description for d in result.diagnostics]
+            assert any(
+                "'with' state-update expression has no effect" in m
+                for m in msgs
+            ), msgs

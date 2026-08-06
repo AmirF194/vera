@@ -3472,3 +3472,43 @@ private fn t(@Unit -> @Int)
 }
 """, "exactly one type argument")
         assert any(e.error_code == "E337" for e in errs)
+
+    def test_exn_bare_rejected(self) -> None:
+        """Completes the arity matrix: bare `handle[Exn]`."""
+        errs = _check_err("""
+private fn t(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[Exn] {
+    throw(@Int) -> { 0 }
+  } in {
+    7
+  }
+}
+""", "exactly one type argument")
+        assert any(e.error_code == "E337" for e in errs)
+
+    def test_user_effect_two_type_args_accepted(self) -> None:
+        """The distinguishing input for the builtin-only scoping: a USER
+        effect declared with two type parameters handles with two type
+        arguments and must not produce E337 (a mutant dropping the
+        State/Exn name test fails here)."""
+        _check_ok("""
+effect Pair<A, B> {
+  op both(A, B -> Unit);
+}
+
+private fn t(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[Pair<Int, Bool>] {
+    both(@Int, @Bool) -> { resume(()) }
+  } in {
+    7
+  }
+}
+""")

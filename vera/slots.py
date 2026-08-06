@@ -89,42 +89,58 @@ def substitute_named(
     return te
 
 
+_RESOLVE_DEPTH_LIMIT = 32
+
+
 def resolve_alias_type_expr(
     te: ast.TypeExpr,
     aliases: dict[str, ast.TypeExpr],
     alias_params: dict[str, tuple[str, ...]],
+    _depth: int = 0,
 ) -> ast.NamedType | None:
     """Walk *te* to its terminal ``NamedType`` through refinement
     unwrapping, bare alias-chain follows, and PARAMETERISED alias
     substitution (``type Id<T> = T`` applied at ``Id<Nat>`` — the
-    #630-era latent gap the PR #1202 adversarial round showed still
-    split the state family three ways).  ``None`` when the walk lands on
-    a non-``NamedType`` (an ``FnType``-bodied alias, etc.).  Mirrors
-    ``WasmContext._canonical_named_type``'s loop; lives here so the
-    ``CodeGenerator`` registration side and the ``WasmContext`` lowering
-    side resolve through ONE implementation and cannot drift."""
-    seen: set[str] = set()
-    while True:
-        while isinstance(te, ast.RefinementType):
-            te = te.base_type
-        if not isinstance(te, ast.NamedType):
-            return None
-        if te.name in seen:
-            break
-        seen.add(te.name)
-        alias = aliases.get(te.name)
-        if alias is None:
-            break
-        if isinstance(alias, (ast.NamedType, ast.RefinementType)):
-            params = alias_params.get(te.name)
-            if (params and te.type_args
-                    and len(params) == len(te.type_args)):
-                alias = substitute_named(
-                    alias, dict(zip(params, te.type_args)))
-            te = alias
-            continue
+    #630-era latent gap the PR #1202 adversarial rounds showed still
+    split the state family).  ``None`` when the walk lands on a
+    non-``NamedType`` (an ``FnType``-bodied alias, etc.).  Lives here so
+    the ``CodeGenerator`` registration side and the ``WasmContext``
+    lowering side resolve through ONE implementation and cannot drift.
+
+    Arguments resolve FIRST, mirroring the checker's order — a
+    seen-set head-follow truncated legitimate finite expansions
+    (``Id<Id<Nat>>`` substitutes to ``Id<Nat>``, whose head re-entry a
+    seen-set misreads as a cycle, stopping one level short: the round-3
+    review's silent handler-bypass and invalid-WASM shapes).  True
+    cycles are E132 at check; the depth bound is defence-in-depth so a
+    future upstream regression degrades to the opaque fallback instead
+    of a hang."""
+    if _depth > _RESOLVE_DEPTH_LIMIT:
         return None
-    return ast.NamedType(name=te.name, type_args=te.type_args)
+    while isinstance(te, ast.RefinementType):
+        te = te.base_type
+    if not isinstance(te, ast.NamedType):
+        return None
+    if te.type_args:
+        resolved_args: list[ast.TypeExpr] = []
+        for a in te.type_args:
+            ra = resolve_alias_type_expr(a, aliases, alias_params, _depth + 1)
+            resolved_args.append(ra if ra is not None else a)
+        te = ast.NamedType(name=te.name, type_args=tuple(resolved_args))
+    alias = aliases.get(te.name)
+    if alias is None:
+        return te
+    if not isinstance(alias, (ast.NamedType, ast.RefinementType)):
+        return None
+    params = alias_params.get(te.name)
+    if params and te.type_args and len(params) == len(te.type_args):
+        alias = substitute_named(alias, dict(zip(params, te.type_args)))
+    elif te.type_args:
+        # A parameterised application of a non-parameterised alias (or an
+        # arity mismatch) is ill-formed upstream — keep it opaque rather
+        # than resolving to something the application didn't mean.
+        return te
+    return resolve_alias_type_expr(alias, aliases, alias_params, _depth + 1)
 
 
 def resolve_scalar_alias_te(

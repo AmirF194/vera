@@ -284,9 +284,18 @@ public fn f(@Array<Int>, @Array<Int> -> @Array<Int>)
             o for o in result.obligations
             if o.kind == "nat_bind" and o.status == "tier3"
         ]
-        assert narrows, (
-            "the nested closure's @Int body narrowing into its @Nat return "
-            "must be obligated (codegen guards it; the stream must say so)"
+        # Exactly TWO records, and the count is the assertion (a stopped
+        # descent drops to 1, a double-record rises to 3): the nested
+        # closure's @Nat RETURN (the #985 subject), plus the fresh-scope
+        # walk's conservative record on the outer `nat_to_int` ARGUMENT —
+        # inside the closure the `array_length(...)` value's @Nat-ness is
+        # not provable from the empty environment, so the call-argument
+        # arm records an honest Tier-3 (the value is provably @Nat at
+        # runtime; the record can never trap).
+        assert len(narrows) == 2, (
+            "the nested closure's @Nat return + the conservative "
+            "nat_to_int-argument record must both be obligated — "
+            f"got {len(narrows)}"
         )
 
 
@@ -794,21 +803,33 @@ public fn go(@Int -> @Int)
         assert not errors, [e.error_code for e in errors]
         assert [o for o in result.obligations if o.kind == "nat_bind"] == []
 
+    _INNER_NAT = """
+public fn go(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>](@Int = 0) {
+    get(@Unit) -> { resume(@Int.0) }
+  } in {
+    handle[State<Nat>](@Nat = 0) {
+      get(@Unit) -> { resume(@Nat.0) }
+    } in {
+      put(@Int.0);
+      nat_to_int(get(()))
+    }
+  }
+}
+"""
+
     def test_inner_nat_put_is_loud(self) -> None:
         """The inverse: inner `State<Nat>` under outer `State<Int>` — the
         put narrows into the INNER @Nat cell and is a loud E503 (was a
-        silent tier3 under seed 3)."""
-        errs = _verify_err(self._INNER_INT.replace(
-            "State<Nat>", "State<TMP>").replace(
-            "State<Int>", "State<Nat>").replace(
-            "State<TMP>", "State<Int>").replace(
-            "(@Nat = 0)", "(@TMP = 0)").replace(
-            "(@Int = 0)", "(@Nat = 0)").replace(
-            "(@TMP = 0)", "(@Int = 0)").replace(
-            "resume(@Nat.0)", "resume(@TMP.0)").replace(
-            "resume(@Int.0)", "resume(@Nat.0)").replace(
-            "resume(@TMP.0)", "resume(@Int.0)"),
-            "State-op argument")
+        silent tier3 under seed 3).  A literal fixture, not a derived
+        transformation of `_INNER_INT`: a reader sees exactly what is
+        verified, and an edit to the sibling cannot silently change what
+        this seed-stability pin exercises (PR #1202 review)."""
+        errs = _verify_err(self._INNER_NAT, "State-op argument")
         assert any(e.error_code == "E503" for e in errs)
 
 
@@ -987,6 +1008,12 @@ public fn go(@Int -> @Int)
         errs = _verify_err(self._GENERIC_LIE.format(ann="@Nat"),
                            "instantiated at")
         assert any(e.error_code == "E533" for e in errs)
+        # The CRAFTED diagnostic must survive the per-instance
+        # aggregation — a split obligation/diagnostic anchor buried it
+        # under the synthesized fallback with generic assert/requires
+        # guidance (round-3 review); the cell-naming text is the proof
+        # the crafted message is the one surfacing.
+        assert any("cell type is State<" in e.description for e in errs)
 
     def test_honest_generic_annotation_is_clean(self) -> None:
         """The honest `@T` spelling matches at every instantiation — no

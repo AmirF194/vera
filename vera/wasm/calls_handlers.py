@@ -1597,6 +1597,20 @@ class CallsHandlersMixin:
                 "branch inside the argument instead: "
                 "resume(if c then a else b)",
             )
+        if (clause.state_update is not None
+                and self._contains_resume(clause.state_update[1])):
+            # A resume inside the `with` expression was silently IGNORED
+            # (the lowering counts only the body's resume; the with-expr
+            # just evaluates for its value) — reject loudly instead of
+            # running a program whose resume does nothing (round-3
+            # review, F5).
+            raise CodegenSkip(
+                call,
+                "resume(...) inside a 'with' state-update expression has "
+                "no effect (the clause body's tail resume is the "
+                "single-shot continuation) — move the resume to the "
+                "clause body and keep the 'with' expression pure",
+            )
         # #1205: WASM type and pointer-ness derive from the threaded
         # FAMILY name (computed once at the handle site — matching the
         # import decls), never the source alias spelling.
@@ -1681,8 +1695,10 @@ class CallsHandlersMixin:
         saved_in_clause = self._in_state_clause
         saved_clause_ops = self._state_clause_ops
         saved_clause_family = self._state_clause_family
+        saved_clause_scope = self._in_clause_scope
         self._in_state_clause = True
         self._state_clause_family = family
+        self._in_clause_scope = True
         # LOAD-BEARING: a clause body's get/put resolve to the builtin State
         # registry (not the handler ops), so a re-entrant clause is admitted
         # by the checker whenever the enclosing fn declares
@@ -1705,6 +1721,7 @@ class CallsHandlersMixin:
             self._in_state_clause = saved_in_clause
             self._state_clause_ops = saved_clause_ops
             self._state_clause_family = saved_clause_family
+            self._in_clause_scope = saved_clause_scope
         if body_instrs is None:
             return None
         # #1203: for a GET clause the body's net value is the tail
@@ -1740,6 +1757,28 @@ class CallsHandlersMixin:
             instructions.extend(upd_instrs)
             instructions.append(f"call {put_import}")
         return instructions
+
+    @staticmethod
+    def _contains_resume(node: object) -> bool:
+        """Whether *node* contains a ``resume(...)`` call anywhere —
+        nested ``HandleExpr`` clauses excluded (their resumes are the
+        inner handler's), mirroring ``_clause_lowerable``'s counter."""
+        if isinstance(node, ast.HandleExpr):
+            if CallsHandlersMixin._contains_resume(node.body):
+                return True
+            return (node.state is not None
+                    and CallsHandlersMixin._contains_resume(
+                        node.state.init_expr))
+        if isinstance(node, ast.FnCall) and node.name == "resume":
+            return True
+        if isinstance(node, (list, tuple)):
+            return any(CallsHandlersMixin._contains_resume(i) for i in node)
+        if is_dataclass(node) and not isinstance(node, type):
+            return any(
+                CallsHandlersMixin._contains_resume(getattr(node, f.name))
+                for f in fields(node)
+            )
+        return False
 
     def _state_byte_literal(
         self, value: ast.Expr, family: str,
@@ -1944,7 +1983,12 @@ class CallsHandlersMixin:
             # skewed the clause body's same-typed references onto it (PR
             # #1202 adversarial round, F2).
             handler_env = env
-        handler_instrs = self.translate_expr(clause.body, handler_env)
+        saved_clause_scope = self._in_clause_scope
+        self._in_clause_scope = True
+        try:
+            handler_instrs = self.translate_expr(clause.body, handler_env)
+        finally:
+            self._in_clause_scope = saved_clause_scope
         if handler_instrs is None:
             return None  # pragma: no cover
 

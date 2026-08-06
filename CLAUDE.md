@@ -60,7 +60,7 @@ mypy vera/                        # Type-check the compiler itself
 
 python scripts/check_conformance.py    # Verify all 179 conformance programs (positives pass their level; negatives fail with their expected_error E-code)
 python scripts/check_examples.py      # Verify all 42 examples parse + check + verify
-python scripts/check_corpus_canonical.py # Verify all 225 corpus programs are in canonical form (vera fmt)
+python scripts/check_corpus_canonical.py # Verify all 227 corpus programs are in canonical form (vera fmt)
 python scripts/check_examples_readme.py # Verify vera run commands in examples/README.md
 python scripts/check_spec_examples.py # Verify spec code blocks parse
 python scripts/check_readme_examples.py # Verify README code blocks parse

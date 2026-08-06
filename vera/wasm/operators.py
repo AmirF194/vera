@@ -35,6 +35,24 @@ class OperatorsMixin:
         if type_name is None:
             raise CodegenInvariantError(  # pragma: no cover
                 "slot reference type argument is not a NamedType", ref)
+        # INSIDE a handler clause body, a ref's name canonicalizes the
+        # way the clause BINDINGS key (checker rule: top name syntactic,
+        # type arguments alias-resolved) — so a parameterised-alias ref
+        # spelling (`@Id<Id<Nat>>.0`) finds its own binding, and the
+        # clause-scope stack IS the checker's equivalence-class stack
+        # (param + state, both canonical-keyed).  Deliberately NOT
+        # global: outside clause scope, bindings key by the opaque
+        # syntactic rendering, and a canonical-key lookup against those
+        # mixed-keyed stacks sees only a SUBSET of the checker's class —
+        # index skew (a round-4 Future<Alias> regression proved it).
+        # The global bind+ref canonicalization is #1208.
+        if self._in_clause_scope and ref.type_args:
+            canonical = self._canonical_clause_slot_name(
+                ast.NamedType(name=ref.type_name, type_args=ref.type_args))
+            if canonical is not None and canonical != type_name:
+                canon_idx = env.resolve(canonical, ref.index)
+                if canon_idx is not None:
+                    type_name = canonical
         local_idx = env.resolve(type_name, ref.index)
         if local_idx is None:
             # Defensive invariant: a check-green slot reference must map to a

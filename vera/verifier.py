@@ -3610,7 +3610,13 @@ class ContractVerifier:
                 or contains_typevar(declared)
                 or state_cell_decl_equal(cell, declared)):
             return
-        node = expr.state.type_expr
+        # Obligation and diagnostic share ONE anchor (the init expr —
+        # a TypeExpr is not an Expr, and the aggregate emitter pairs a
+        # diagnostic to its obligation by exact (severity, line, column),
+        # so split anchors buried the crafted message under the
+        # synthesized fallback with its generic assert/requires guidance
+        # — round-3 review).
+        node = expr.state.init_expr
         self._record_obligation(
             decl.name, "state_decl", expr.state.init_expr, "violated",
             error_code="E533",
@@ -3640,10 +3646,9 @@ class ContractVerifier:
         to the declared annotation for non-State or unparameterised
         forms."""
         eff = expr.effect
-        name = getattr(eff, "name", None)
-        type_args = getattr(eff, "type_args", None)
-        if name == "State" and type_args:
-            return self._resolve_type(type_args[0])
+        if (isinstance(eff, ast.EffectRef) and eff.name == "State"
+                and eff.type_args):
+            return self._resolve_type(eff.type_args[0])
         if expr.state is not None:
             return self._resolve_type(expr.state.type_expr)
         return None
@@ -3962,7 +3967,8 @@ class ContractVerifier:
             else:
                 callee = self._lookup_module_function(expr.path, expr.name)
             param_types = getattr(callee, "param_types", None)
-            if param_types is None and expr.name == "put":
+            if (param_types is None and isinstance(expr, ast.FnCall)
+                    and expr.name == "put"):
                 # #1203: the State `put` has no function-registry entry, so
                 # the formal loop below never fired and a narrowing
                 # argument (`put(@Int.0)` against the @Nat cell) carried no
@@ -4685,6 +4691,14 @@ class ContractVerifier:
                 decl, expr.body, smt, slot_env, assumptions,
             )
             cell_ty = self._handler_cell_type(expr)
+            # The resume obligation below is builtin-State-specific: its
+            # guarded=True promise is the STATE clause inlining's wrapper.
+            # A user effect declaring an op named `get` gets no such
+            # guard, so it must not enter this arm (round-4 review).
+            is_builtin_state = (
+                isinstance(expr.effect, ast.EffectRef)
+                and expr.effect.name == "State"
+            )
             for clause in expr.clauses:
                 # #1203: a State GET clause's tail `resume(v)` is the op's
                 # cell-typed RESULT — obligate a narrowing/widening resume
@@ -4693,7 +4707,8 @@ class ContractVerifier:
                 # clause scope: slot-dependent values record Tier-3,
                 # guarded=True (codegen wraps the get-clause body's net
                 # value — run-differential-backed).
-                if (cell_ty is not None and clause.op_name == "get"):
+                if (is_builtin_state and cell_ty is not None
+                        and clause.op_name == "get"):
                     r_arg = self._tail_resume_value(clause.body)
                     if r_arg is not None:
                         self._obligate_binding_triple(

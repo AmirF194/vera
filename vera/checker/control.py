@@ -627,7 +627,17 @@ class ControlFlowMixin:
                                      '"Handler Semantics"',
                             error_code="E334",
                         )
-                    upd_type = self._synth_expr(upd_expr)
+                    # Synth WITH the declared state type as expected —
+                    # the same #993 bidirectional threading the state
+                    # INIT got: without it a byte-width literal
+                    # (`with @Byte = 77`) synthesized as Nat and E335'd
+                    # while the identical literal was accepted at init,
+                    # put arguments, and resume values (round-3 review:
+                    # the coercion inconsistency made codegen's
+                    # with-update Byte arm unreachable from check-green
+                    # source).
+                    upd_type = self._synth_expr(
+                        upd_expr, expected=state_type)
                     if (upd_type and state_type
                             and not isinstance(upd_type, UnknownType)
                             and not is_subtype(upd_type, state_type)):

@@ -152,6 +152,10 @@ class WasmContext(
         # coercion (`resume(0)` in a `State<Byte>` get clause is the
         # op's i32 result).
         self._state_clause_family: str | None = None
+        # True while translating ANY handler clause body (State or Exn)
+        # — gates the scoped canonical slot-ref resolution (clause
+        # bindings key canonically; see `_translate_slot_ref`).
+        self._in_clause_scope: bool = False
         # Constructor layout mapping: ctor_name -> ConstructorLayout
         self._ctor_layouts: dict[str, ConstructorLayout] = ctor_layouts or {}
         # ADT type names for slot/param type resolution

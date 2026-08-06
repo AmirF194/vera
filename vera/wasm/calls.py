@@ -590,6 +590,20 @@ class CallsMixin:
         self, call: ast.QualifiedCall, env: WasmSlotEnv
     ) -> list[str] | None:
         """Translate a qualified call (e.g. IO.print) to host import call."""
+        if call.qualifier == "State" and call.name in ("get", "put"):
+            # The builtin State ops route through the UNQUALIFIED
+            # dispatcher, which owns the clause-inline registry, the
+            # #1203 argument guards, and the #865 Byte coercion — the
+            # qualified spelling previously took a bare unguarded call:
+            # `State.put(x)` inside a handled body skipped the clause's
+            # `with` transform, stored a negative into a @Nat cell
+            # silently, and emitted a Byte literal at i64 (round-4
+            # review).  Delegation makes the two spellings identical by
+            # construction.
+            return self._translate_call(
+                ast.FnCall(name=call.name, args=call.args, span=call.span),
+                env,
+            )
         instructions: list[str] = []
         for arg in call.args:
             arg_instrs = self.translate_expr(arg, env)

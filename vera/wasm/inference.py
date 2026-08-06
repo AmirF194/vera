@@ -2232,47 +2232,89 @@ class InferenceMixin:
             arg_names.append(arg)
         return f"{te.name}<{', '.join(arg_names)}>"
 
-    def _checker_arg_name(self, a: ast.TypeExpr) -> str | None:
-        """Render a slot-name type ARGUMENT the way the checker's
-        ``_resolve_type`` + ``canonical_type_name``/``pretty_type`` pair
-        does: alias chains fully resolved (parameterised aliases
-        substituted), a refinement rendered predicate-elided as
-        ``{@<base> | ...}`` (``pretty_type``'s literal form — the
-        checker's binding keys erase predicates), nested arguments
-        recursively canonical."""
-        seen: set[str] = set()
-        te = a
-        while (isinstance(te, ast.NamedType)
-                and te.name in self._type_aliases
-                and te.name not in seen):
-            seen.add(te.name)
-            alias = self._type_aliases[te.name]
-            if not isinstance(alias, (ast.NamedType, ast.RefinementType)):
-                return type_expr_slot_name(a)
-            params = self._type_alias_params.get(te.name)
-            if (params and te.type_args
-                    and len(params) == len(te.type_args)):
-                alias = substitute_named(
-                    alias, dict(zip(params, te.type_args)))
-            te = alias
+    def _checker_arg_name(
+        self, a: ast.TypeExpr, _depth: int = 0,
+    ) -> str | None:
+        """Render a slot-name type ARGUMENT for a clause binding key.
+
+        Mirrors the checker's argument resolution (``_resolve_type`` +
+        ``canonical_type_name``) with ONE reachability deviation:
+
+        * Alias chains resolve fully — parameterised aliases
+          substituted, arguments before heads (a seen-set head-follow
+          truncated ``Id<Id<Int>>`` one level short, the round-3
+          review's silent wrong-binding shape).
+        * An argument whose resolution passes through a REFINEMENT keeps
+          its SOURCE syntactic rendering instead of the checker's
+          predicate-elided ``{@Base | ...}`` form: the codegen ref side
+          (``slot_ref_name``) can never spell that form (refinement
+          literals are unparseable in ref position and erase to the
+          base), so the checker-form key would make the binding
+          unreachable by every writable reference — the round-3 review
+          turned working refined-arg programs into dangling E699s.  The
+          source spelling is exactly the one ref spelling the checker
+          accepts for such a binding (any other canonicalizes onto the
+          refined form and is E130 at check), so bind and ref meet
+          there.
+        """
+        if _depth > 32:
+            return type_expr_slot_name(a)
+        if self._head_resolves_through_refinement(a):
+            # Refined-resolving argument (a literal refinement, a refined
+            # alias, or an alias-of-a-refined-alias): keep the OUTERMOST
+            # source spelling — the reachability deviation above.  The
+            # pre-check keeps this at the original node, so a chain like
+            # `P2 -> Pos -> {refined}` keys "P2" (the spelling the refs
+            # use), never the intermediate "Pos".
+            return type_expr_slot_name(a)
+        te: ast.TypeExpr = a
+        if not isinstance(te, ast.NamedType):
+            # FnType etc. — not a slot-nameable key form; keep opaque.
+            return type_expr_slot_name(a)
+        if te.type_args:
+            inner: list[str] = []
+            for x in te.type_args:
+                n = self._checker_arg_name(x, _depth + 1)
+                if n is None:
+                    return None
+                inner.append(n)
+            head_args = f"<{', '.join(inner)}>"
+        alias = self._type_aliases.get(te.name)
+        if alias is None:
+            return te.name + (head_args if te.type_args else "")
+        if not isinstance(alias, ast.NamedType):
+            # FnType-bodied (or other non-named) alias — keep opaque.
+            return type_expr_slot_name(a)
+        params = self._type_alias_params.get(te.name)
+        if params and te.type_args and len(params) == len(te.type_args):
+            alias = substitute_named(alias, dict(zip(params, te.type_args)))
+        elif te.type_args:
+            return te.name + head_args
+        return self._checker_arg_name(alias, _depth + 1)
+
+    def _head_resolves_through_refinement(
+        self, te: ast.TypeExpr, _depth: int = 0,
+    ) -> bool:
+        """Whether *te*'s HEAD alias chain passes through (or is) a
+        refinement — the gate for ``_checker_arg_name``'s source-spelling
+        deviation.  Follows bare and parameterised head links only (type
+        arguments don't decide the head's refined-ness)."""
+        if _depth > 32:
+            return False
         if isinstance(te, ast.RefinementType):
-            base = self._checker_arg_name(te.base_type)
-            return None if base is None else f"{{@{base} | ...}}"
-        if isinstance(te, ast.NamedType):
-            if te.type_args:
-                inner: list[str] = []
-                for x in te.type_args:
-                    n = self._checker_arg_name(x)
-                    if n is None:
-                        return None
-                    inner.append(n)
-                return f"{te.name}<{', '.join(inner)}>"
-            return te.name
-        # FnType or other non-named shape — the checker renders these
-        # via pretty_type's fn(...) form, which is not a slot-nameable
-        # key; fall back to the opaque rendering the pre-#1202 bindings
-        # used.
-        return type_expr_slot_name(a)
+            return True
+        if not isinstance(te, ast.NamedType):
+            return False
+        alias = self._type_aliases.get(te.name)
+        if alias is None or not isinstance(
+                alias, (ast.NamedType, ast.RefinementType)):
+            return False
+        if isinstance(alias, ast.RefinementType):
+            return True
+        params = self._type_alias_params.get(te.name)
+        if params and te.type_args and len(params) == len(te.type_args):
+            alias = substitute_named(alias, dict(zip(params, te.type_args)))
+        return self._head_resolves_through_refinement(alias, _depth + 1)
 
     def _resolve_base_type_name(
         self,
