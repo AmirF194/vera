@@ -1429,3 +1429,34 @@ public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
 
     def test_zero_survives(self) -> None:
         assert _run(self._NESTED_NAT, "go", 0) == 0
+
+    _NESTED_NAT_CLOSURE = """\
+private data Box {
+  MkBox(Int)
+}
+
+private data Wrap {
+  MkWrap(Box)
+}
+
+private fn mk(@Int -> @Wrap) requires(true) ensures(true) effects(pure)
+{ MkWrap(MkBox(@Int.0)) }
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  let @Array<Int> = array_map([@Int.0], fn(@Int -> @Int) effects(pure) { match mk(@Int.0) { MkWrap(MkBox(@Nat)) -> nat_to_int(@Nat.0) } });
+  @Array<Int>.0[0]
+}
+"""
+
+    def test_closure_position_negative_traps(self) -> None:
+        """The CLOSURE-position twin — the exact combination the static
+        fallback covers (unprojectable scrutinee under the fresh-scope
+        descent, guarded=True record): the runtime guard it claims must
+        trap here too, not only in direct position."""
+        assert _run(self._NESTED_NAT_CLOSURE, "go", -5) is None, (
+            "closure nested @Nat sub-pattern guard missing -> silent negative"
+        )
+
+    def test_closure_position_non_negative_passes(self) -> None:
+        assert _run(self._NESTED_NAT_CLOSURE, "go", 7) == 7

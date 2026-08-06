@@ -23,6 +23,9 @@ E526).  Shared helpers live in tests/verifier_helpers.py.
 """
 from __future__ import annotations
 
+from vera.checker import typecheck_with_artifacts
+from vera.parser import parse_to_ast
+
 from tests.verifier_helpers import (
     _verify,
     _verify_err,
@@ -577,15 +580,24 @@ public fn f(@Array<Int> -> @Array<Int>)
         ensures-position quantifier predicate records Tier-3 (the common
         real-world contract shape — all corpus quantifiers are
         body-position, so this documents the intent)."""
-        result = _verify("""
+        src = """
 public fn f(@Array<Int> -> @Array<Int>)
   requires(true)
-  ensures(forall(@Int, array_length(@Array<Int>.result), fn(@Int -> @Bool) effects(pure) { @Array<Int>.1[0] >= 0 }))
+  ensures(forall(@Int, array_length(@Array<Int>.result), fn(@Int -> @Bool) effects(pure) { @Array<Int>.0[0] >= 0 }))
   effects(pure)
 {
   @Array<Int>.0
 }
-""")
+"""
+        # Self-protection (PR #1202 round-3 review): `_verify` discards
+        # check diagnostics, so an ill-typed predicate would still satisfy
+        # the tier3 assertions coincidentally — pin that the shape
+        # type-checks before trusting the verify verdict.
+        check_diags, _arts = typecheck_with_artifacts(parse_to_ast(src), src)
+        assert not [d for d in check_diags if d.severity == "error"], (
+            f"shape must type-check: {[d.description[:60] for d in check_diags]}"
+        )
+        result = _verify(src)
         errors = [d for d in result.diagnostics if d.severity == "error"]
         assert not errors
         idx = [o for o in result.obligations if o.kind == "index_bounds"]
