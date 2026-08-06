@@ -27,7 +27,11 @@ from vera.codegen.memory import ConstructorLayout
 from vera.errors import Diagnostic, SourceLocation
 from vera.monomorphize import canonicalize_type_aliases, qualify_nested_generic_decls
 from vera.prelude import PRELUDE_FILE, mentioned_fn_names
-from vera.slots import resolve_scalar_alias_te, type_expr_slot_name
+from vera.slots import (
+    AliasResolutionDepthError,
+    resolve_scalar_alias_te,
+    type_expr_slot_name,
+)
 from vera.wasm import StringPool
 from vera.wasm.async_fusion import (
     compute_future_ret_fns,
@@ -518,9 +522,13 @@ class CodeGenerator(
         :func:`vera.slots.resolve_scalar_alias_te`, so the declared
         import families and the call sites that target them cannot
         diverge (the #914 bug class)."""
-        return (resolve_scalar_alias_te(
-                    te, self._type_aliases, self._type_alias_params)
-                or fallback)
+        try:
+            return (resolve_scalar_alias_te(
+                        te, self._type_aliases, self._type_alias_params)
+                    or fallback)
+        except AliasResolutionDepthError as exc:
+            from vera.skip import CodegenSkip
+            raise CodegenSkip(te, str(exc)) from exc
 
     # -----------------------------------------------------------------
     # Diagnostics

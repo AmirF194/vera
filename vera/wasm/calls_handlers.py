@@ -1529,6 +1529,35 @@ class CallsHandlersMixin:
         # handle's own env.
         self._state_clause_ops = {}
         for clause in expr.clauses:
+            # The class-collision skip: when the clause PATTERN and the
+            # state ANNOTATION are the same slot stack to the checker
+            # (equal checker-canonical forms — e.g. two different
+            # aliases of one refined class) but would bind here under
+            # two DIFFERENT keys, a mixed-spelling clause reference
+            # resolves against the wrong member SILENTLY (round-5
+            # review, F3).  Same-key collisions are fine (one stack,
+            # checker-ordered); different-class keys are fine (two
+            # stacks both sides agree on); only the split-class shape
+            # is unlowerable until #1208/#1213 unify naming.
+            if (clause.params and state_slot_name is not None
+                    and expr.state is not None):
+                pattern_key = self._canonical_clause_slot_name(
+                    clause.params[0])
+                pattern_form = self._checker_form_slot_name(
+                    clause.params[0])
+                if (pattern_key is not None
+                        and pattern_key != state_slot_name
+                        and pattern_form is not None
+                        and pattern_form == self._checker_form_slot_name(
+                            expr.state.type_expr)):
+                    raise CodegenSkip(
+                        clause.params[0],
+                        "the clause pattern and the handler state "
+                        "annotation are the same slot class to the "
+                        "checker but are spelled through different "
+                        "aliases — spell both with ONE alias so clause "
+                        "references resolve unambiguously",
+                    )
             self._state_clause_ops[clause.op_name] = (
                 clause, type_name, family, state_slot_name, env,
                 get_import, put_import,
@@ -1695,10 +1724,8 @@ class CallsHandlersMixin:
         saved_in_clause = self._in_state_clause
         saved_clause_ops = self._state_clause_ops
         saved_clause_family = self._state_clause_family
-        saved_clause_scope = self._in_clause_scope
         self._in_state_clause = True
         self._state_clause_family = family
-        self._in_clause_scope = True
         # LOAD-BEARING: a clause body's get/put resolve to the builtin State
         # registry (not the handler ops), so a re-entrant clause is admitted
         # by the checker whenever the enclosing fn declares
@@ -1721,7 +1748,6 @@ class CallsHandlersMixin:
             self._in_state_clause = saved_in_clause
             self._state_clause_ops = saved_clause_ops
             self._state_clause_family = saved_clause_family
-            self._in_clause_scope = saved_clause_scope
         if body_instrs is None:
             return None
         # #1203: for a GET clause the body's net value is the tail
@@ -1983,12 +2009,7 @@ class CallsHandlersMixin:
             # skewed the clause body's same-typed references onto it (PR
             # #1202 adversarial round, F2).
             handler_env = env
-        saved_clause_scope = self._in_clause_scope
-        self._in_clause_scope = True
-        try:
-            handler_instrs = self.translate_expr(clause.body, handler_env)
-        finally:
-            self._in_clause_scope = saved_clause_scope
+        handler_instrs = self.translate_expr(clause.body, handler_env)
         if handler_instrs is None:
             return None  # pragma: no cover
 

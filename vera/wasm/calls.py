@@ -590,7 +590,9 @@ class CallsMixin:
         self, call: ast.QualifiedCall, env: WasmSlotEnv
     ) -> list[str] | None:
         """Translate a qualified call (e.g. IO.print) to host import call."""
-        if call.qualifier == "State" and call.name in ("get", "put"):
+        if (call.qualifier == "State" and call.name in ("get", "put")
+                and (call.name in self._state_clause_ops
+                     or call.name in self._effect_ops)):
             # The builtin State ops route through the UNQUALIFIED
             # dispatcher, which owns the clause-inline registry, the
             # #1203 argument guards, and the #865 Byte coercion — the
@@ -599,7 +601,13 @@ class CallsMixin:
             # `with` transform, stored a negative into a @Nat cell
             # silently, and emitted a Byte literal at i64 (round-4
             # review).  Delegation makes the two spellings identical by
-            # construction.
+            # construction — but ONLY when the dispatcher will actually
+            # resolve the op: in a delegated fn where a user function
+            # shadows the name, `_compile_fn` skips the effect_ops
+            # mapping and the synthesized bare call would silently
+            # dispatch to the USER fn (round-5 review) — the unresolved
+            # case falls through to the legacy path's loud
+            # unknown-func failure instead.
             return self._translate_call(
                 ast.FnCall(name=call.name, args=call.args, span=call.span),
                 env,

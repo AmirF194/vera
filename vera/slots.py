@@ -92,6 +92,17 @@ def substitute_named(
 _RESOLVE_DEPTH_LIMIT = 32
 
 
+class AliasResolutionDepthError(Exception):
+    """An alias application nested past ``_RESOLVE_DEPTH_LIMIT`` — a
+    legal (acyclic, check-green) but absurd chain the resolver refuses
+    to resolve.  Raised instead of silently returning ``None``: the
+    family-collapse callers' opaque fallback on ``None`` would SPLIT the
+    State/Exn family exactly the way the pre-round-4 truncation did
+    (round-5 review, F4), so overflow must surface loudly (the codegen
+    thin methods convert it to a ``CodegenSkip`` → E602)."""
+
+
+
 def resolve_alias_type_expr(
     te: ast.TypeExpr,
     aliases: dict[str, ast.TypeExpr],
@@ -116,7 +127,10 @@ def resolve_alias_type_expr(
     future upstream regression degrades to the opaque fallback instead
     of a hang."""
     if _depth > _RESOLVE_DEPTH_LIMIT:
-        return None
+        raise AliasResolutionDepthError(
+            f"type alias application nested deeper than "
+            f"{_RESOLVE_DEPTH_LIMIT} levels"
+        )
     while isinstance(te, ast.RefinementType):
         te = te.base_type
     if not isinstance(te, ast.NamedType):

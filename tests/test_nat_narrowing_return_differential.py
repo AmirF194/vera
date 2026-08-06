@@ -2371,9 +2371,9 @@ type Id<T> = T;
 
 public fn go(@Nat -> @Int) requires(true) ensures(true) effects(pure)
 {
-  handle[State<Id<Id<Nat>>>](@Id<Id<Nat>> = 0) {
-    get(@Unit) -> { resume(@Id<Id<Nat>>.0) },
-    put(@Id<Id<Nat>>) -> { resume(()) }
+  handle[State<Id<Id<Nat>>>](@Nat = 0) {
+    get(@Unit) -> { resume(@Nat.0) },
+    put(@Nat) -> { resume(()) }
   } in {
     put(@Nat.0);
     nat_to_int(get(()))
@@ -2394,9 +2394,9 @@ type Two<T> = Id<Id<T>>;
 
 public fn go(@Nat -> @Int) requires(true) ensures(true) effects(pure)
 {
-  handle[State<Two<Nat>>](@Two<Nat> = 0) {
-    get(@Unit) -> { resume(@Two<Nat>.0) },
-    put(@Two<Nat>) -> { resume(()) }
+  handle[State<Two<Nat>>](@Nat = 0) {
+    get(@Unit) -> { resume(@Nat.0) },
+    put(@Nat) -> { resume(()) }
   } in {
     put(@Nat.0);
     nat_to_int(get(()))
@@ -2455,7 +2455,7 @@ private fn boom(@Unit -> @Int)
 public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
 {
   handle[Exn<Id<Id<Int>>>] {
-    throw(@Id<Id<Int>>) -> { @Id<Id<Int>>.0 }
+    throw(@Int) -> { @Int.0 }
   } in {
     boom(())
   }
@@ -2521,3 +2521,166 @@ public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
                 "'with' state-update expression has no effect" in m
                 for m in msgs
             ), msgs
+
+
+class TestClauseScopeMixedSpellings:
+    """Round-5/6: the ref layer resolves OPAQUE-only (both canonical-first
+    attempts were unsound — a canonical hit can land on the wrong member
+    of the checker's merged class whenever any same-class binding is
+    spelled differently), so mixed-spelling shapes are either CORRECT
+    under the shared opaque rule or LOUD.  These pin the shapes round 5
+    proved silently wrong under canonical-first resolution."""
+
+    _CLAUSE_LET_SHADOW = """\
+type Cnt = Int;
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Option<Int>>](@Option<Int> = Some(5)) {
+    get(@Unit) -> {
+      let @Option<Cnt> = Some(77);
+      resume(@Option<Cnt>.0)
+    }
+  } in {
+    match get(()) {
+      Some(@Int) -> @Int.0,
+      None -> 0 - 1
+    }
+  }
+}
+"""
+
+    def test_clause_body_let_shadows_correctly(self) -> None:
+        """A clause-body `let` of the same checker-class as the state:
+        `@Option<Cnt>.0` is the let (most recent member — 77) under the
+        checker AND under opaque resolution.  Canonical-first resolution
+        silently returned the state (5)."""
+        assert _run(self._CLAUSE_LET_SHADOW, "go", 0) == 77
+
+    _OUTER_MIXED_PARAMS = """\
+type Cnt = Int;
+
+public fn go(@Option<Int>, @Option<Cnt> -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>](@Int = 0) {
+    get(@Unit) -> {
+      resume(match @Option<Cnt>.0 {
+        Some(@Int) -> @Int.0,
+        None -> 0 - 1
+      })
+    }
+  } in {
+    get(())
+  }
+}
+
+public fn drive(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  go(Some(111), Some(222))
+}
+"""
+
+    def test_clause_ref_to_alias_spelled_outer_param(self) -> None:
+        """A clause-body ref to an alias-spelled OUTER param: opaque
+        resolution finds the `@Option<Cnt>` param (222) — canonical-first
+        silently hit the canonically-spelled sibling (111)."""
+        assert _run(self._OUTER_MIXED_PARAMS, "drive", 0) == 222
+
+    def test_refined_class_collision_is_loud_skip(self) -> None:
+        """Two aliases of ONE refined class as pattern and annotation
+        (`put(@Option<P2>)` under `(@Option<Pos> = ...)`) would bind one
+        checker stack under two keys — a mixed reference resolves
+        silently wrong — so the clause translator refuses it loudly
+        with spell-both-with-one-alias guidance."""
+        src = """\
+type Pos = { @Int | @Int.0 > 0 };
+type P2 = Pos;
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Option<Pos>>](@Option<Pos> = Some(5)) {
+    get(@Unit) -> { resume(@Option<Pos>.0) },
+    put(@Option<P2>) -> { resume(()) } with @Option<Pos> = @Option<P2>.0
+  } in {
+    put(Some(9));
+    option_unwrap_or(get(()), 0 - 1)
+  }
+}
+"""
+        with _resolved_pipeline(src) as (program, arts, resolved, path):
+            result = codegen_compile(
+                program, source=src, file=path, resolved_modules=resolved,
+                expr_semantic_types=arts.expr_semantic_types,
+            )
+            msgs = [d.description for d in result.diagnostics]
+            assert any("spell both with ONE alias" in m for m in msgs), msgs
+
+    def test_alias_depth_overflow_is_loud(self) -> None:
+        """A 33-deep (legal, acyclic) alias chain as a State cell: the
+        resolver's depth bound surfaces as a loud per-function E607 skip
+        — an opaque fallback would silently split the family against a
+        fully-resolving sibling site (round-5 F4)."""
+        chain = "type A0 = Nat;\n" + "".join(
+            f"type A{i} = A{i - 1};\n" for i in range(1, 34))
+        src = chain + """
+public fn go(@Nat -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<State<A33>>)
+{
+  put(@Nat.0);
+  nat_to_int(get(()))
+}
+"""
+        with _resolved_pipeline(src) as (program, arts, resolved, path):
+            result = codegen_compile(
+                program, source=src, file=path, resolved_modules=resolved,
+                expr_semantic_types=arts.expr_semantic_types,
+            )
+            msgs = [d.description for d in result.diagnostics]
+            assert any("nested deeper than 32" in m for m in msgs), msgs
+
+    _QUAL_USER_SHADOW = """\
+private fn put(@Int -> @Unit) requires(true) ensures(true) effects(pure)
+{
+  ()
+}
+
+public fn go(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<State<Int>>)
+{
+  State.put(5);
+  get(())
+}
+"""
+
+    def test_qualified_put_user_shadow_is_loud(self) -> None:
+        """A user fn named `put` in a DELEGATED context (handler in the
+        caller): the fn-level effect-op mapping is skipped by the shadow
+        carve-out, so the round-4 delegation dispatched the synthesized
+        bare call to the USER fn silently (checker semantics: the
+        builtin op).  The delegation is now gated on the dispatcher
+        actually resolving the op — the unresolved case fails loudly at
+        module compile (the pre-round-4 behaviour)."""
+        with _resolved_pipeline(self._QUAL_USER_SHADOW) as (
+                program, arts, resolved, path):
+            result = codegen_compile(
+                program, source=self._QUAL_USER_SHADOW, file=path,
+                resolved_modules=resolved,
+                expr_semantic_types=arts.expr_semantic_types,
+            )
+            compiled_ok = result.ok
+            try:
+                execute(result, fn_name="go", args=[0])
+                ran = True
+            except Exception:  # noqa: BLE001 — ANY loud failure passes
+                ran = False
+            assert not (compiled_ok and ran), (
+                "qualified State.put with a user-fn shadow must fail "
+                "loudly, not dispatch to the user fn"
+            )
