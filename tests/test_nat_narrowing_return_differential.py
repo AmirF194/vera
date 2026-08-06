@@ -1669,3 +1669,24 @@ public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
         assert _run(self._TAIL_MATCH_RESUME, "go", -7) is None
     def test_tail_match_resume_non_negative_passes(self) -> None:
         assert _run(self._TAIL_MATCH_RESUME, "go", 9) == 9
+
+    _DIVERGENT_ANNOTATION = """\
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Nat>](@Int = @Int.0) {
+    get(@Unit) -> { resume(@Nat.0) },
+    put(@Nat) -> { resume(()) }
+  } in {
+    nat_to_int(get(()))
+  }
+}
+"""
+
+    def test_divergent_annotation_init_traps(self) -> None:
+        """A `with` annotation diverging from the effect's `State<T>`
+        (`(@Int = ...)` on `State<Nat>`, #1206) must not bypass the init
+        guard — both the verifier obligation and the codegen guard key
+        off the effect's cell type."""
+        assert _run(self._DIVERGENT_ANNOTATION, "go", -5) is None
+    def test_divergent_annotation_init_passes(self) -> None:
+        assert _run(self._DIVERGENT_ANNOTATION, "go", 9) == 9

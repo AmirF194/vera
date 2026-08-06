@@ -3530,6 +3530,46 @@ class ContractVerifier:
                 return adt.constructors[name]
         return self._module_constructors.get(name)
 
+    def _obligate_binding_triple(
+        self,
+        decl: ast.FnDecl,
+        value: ast.Expr,
+        formal: Type | None,
+        smt: SmtContext,
+        slot_env: SlotEnv,
+        assumptions: list[object],
+        *,
+        site: str,
+        nat_guarded: bool,
+        widen_guarded: bool,
+    ) -> None:
+        """The refined-first / @Nat / widen binding-obligation triple for a
+        single value flowing into a typed slot (#1203 — shared by the
+        handler state-init, state-update, get-resume, and State-put sites;
+        the older call-argument and constructor-field copies carry
+        site-specific side-table subtleties and stay inline).  The refined
+        arm is ALWAYS unguarded: no handler boundary emits a
+        refined-predicate guard, so it discloses E506 honestly."""
+        refined = self._refined_binding_target(value, formal)
+        if (refined is not None
+                and self._narrows_into_refined(value, refined)):
+            self._check_refined_binding_obligation(
+                decl, value, refined, smt, slot_env, assumptions,
+                site=site, guarded=False,
+            )
+        elif (self._nat_binding_target(value, formal)
+                and self._narrows_into_nat(value)):
+            self._check_nat_binding_obligation(
+                decl, value, smt, slot_env, assumptions,
+                site=site, guarded=nat_guarded,
+            )
+        elif (self._int_widening_target(value, formal)
+                and self._result_is_nat(value)):
+            self._check_int_widening_obligation(
+                decl, value, smt, slot_env, list(assumptions),
+                site=site, guarded=widen_guarded,
+            )
+
     def _handler_cell_type(self, expr: ast.HandleExpr) -> Type | None:
         """The handler's state CELL type — the effect's ``State<T>`` type
         argument when present (#1203; the declared ``with`` annotation can
@@ -3884,27 +3924,11 @@ class ContractVerifier:
                 put_guarded = (op is not None
                                and op.parent_effect == "State")
                 for arg in expr.args:
-                    refined_target = self._refined_binding_target(arg, None)
-                    if (refined_target is not None
-                            and self._narrows_into_refined(
-                                arg, refined_target)):
-                        self._check_refined_binding_obligation(
-                            decl, arg, refined_target, smt, slot_env,
-                            assumptions, site="State-op argument",
-                            guarded=False,
-                        )
-                    elif (self._nat_binding_target(arg, None)
-                            and self._narrows_into_nat(arg)):
-                        self._check_nat_binding_obligation(
-                            decl, arg, smt, slot_env, assumptions,
-                            site="State-op argument", guarded=put_guarded,
-                        )
-                    elif (self._int_widening_target(arg, None)
-                            and self._result_is_nat(arg)):
-                        self._check_int_widening_obligation(
-                            decl, arg, smt, slot_env, list(assumptions),
-                            site="State-op argument", guarded=put_guarded,
-                        )
+                    self._obligate_binding_triple(
+                        decl, arg, None, smt, slot_env, assumptions,
+                        site="State-op argument",
+                        nat_guarded=put_guarded, widen_guarded=put_guarded,
+                    )
             if param_types is not None:
                 # A generic function whose `TypeVar` formal is fixed to @Nat
                 # by context (e.g. `T = Nat`) is recovered from the checker's
@@ -4582,27 +4606,11 @@ class ContractVerifier:
                 # for the sign-bit pair; the refined predicate has NO
                 # handler-boundary guard, so that arm discloses honestly.
                 state_ty = self._handler_cell_type(expr)
-                init = expr.state.init_expr
-                refined_t = self._refined_binding_target(init, state_ty)
-                if (refined_t is not None
-                        and self._narrows_into_refined(init, refined_t)):
-                    self._check_refined_binding_obligation(
-                        decl, init, refined_t, smt, slot_env,
-                        assumptions, site="handler state init",
-                        guarded=False,
-                    )
-                elif (self._nat_binding_target(init, state_ty)
-                        and self._narrows_into_nat(init)):
-                    self._check_nat_binding_obligation(
-                        decl, init, smt, slot_env, assumptions,
-                        site="handler state init", guarded=True,
-                    )
-                elif (self._int_widening_target(init, state_ty)
-                        and self._result_is_nat(init)):
-                    self._check_int_widening_obligation(
-                        decl, init, smt, slot_env, list(assumptions),
-                        site="handler state init",
-                    )
+                self._obligate_binding_triple(
+                    decl, expr.state.init_expr, state_ty, smt, slot_env,
+                    assumptions, site="handler state init",
+                    nat_guarded=True, widen_guarded=True,
+                )
                 self._walk_for_nat_binding_obligations(
                     decl, expr.state.init_expr, smt, slot_env, assumptions,
                 )
@@ -4621,27 +4629,11 @@ class ContractVerifier:
                 if (cell_ty is not None and clause.op_name == "get"):
                     r_arg = self._tail_resume_value(clause.body)
                     if r_arg is not None:
-                        refined_r = self._refined_binding_target(
-                            r_arg, cell_ty)
-                        if (refined_r is not None
-                                and self._narrows_into_refined(
-                                    r_arg, refined_r)):
-                            self._check_refined_binding_obligation(
-                                decl, r_arg, refined_r, smt, SlotEnv(), [],
-                                site="State-op resume", guarded=False,
-                            )
-                        elif (self._nat_binding_target(r_arg, cell_ty)
-                                and self._narrows_into_nat(r_arg)):
-                            self._check_nat_binding_obligation(
-                                decl, r_arg, smt, SlotEnv(), [],
-                                site="State-op resume", guarded=True,
-                            )
-                        elif (self._int_widening_target(r_arg, cell_ty)
-                                and self._result_is_nat(r_arg)):
-                            self._check_int_widening_obligation(
-                                decl, r_arg, smt, SlotEnv(), [],
-                                site="State-op resume", guarded=True,
-                            )
+                        self._obligate_binding_triple(
+                            decl, r_arg, cell_ty, smt, SlotEnv(), [],
+                            site="State-op resume",
+                            nat_guarded=True, widen_guarded=True,
+                        )
                 self._walk_for_nat_binding_obligations(
                     decl, clause.body, smt, SlotEnv(), [],
                 )
@@ -4655,26 +4647,11 @@ class ContractVerifier:
                     upd_ty = (cell_ty if cell_ty is not None
                               else self._resolve_type(
                                   clause.state_update[0]))
-                    upd = clause.state_update[1]
-                    refined_u = self._refined_binding_target(upd, upd_ty)
-                    if (refined_u is not None
-                            and self._narrows_into_refined(upd, refined_u)):
-                        self._check_refined_binding_obligation(
-                            decl, upd, refined_u, smt, SlotEnv(), [],
-                            site="handler state update", guarded=False,
-                        )
-                    elif (self._nat_binding_target(upd, upd_ty)
-                            and self._narrows_into_nat(upd)):
-                        self._check_nat_binding_obligation(
-                            decl, upd, smt, SlotEnv(), [],
-                            site="handler state update", guarded=True,
-                        )
-                    elif (self._int_widening_target(upd, upd_ty)
-                            and self._result_is_nat(upd)):
-                        self._check_int_widening_obligation(
-                            decl, upd, smt, SlotEnv(), [],
-                            site="handler state update",
-                        )
+                    self._obligate_binding_triple(
+                        decl, clause.state_update[1], upd_ty, smt,
+                        SlotEnv(), [], site="handler state update",
+                        nat_guarded=True, widen_guarded=True,
+                    )
                     self._walk_for_nat_binding_obligations(
                         decl, clause.state_update[1], smt, SlotEnv(), [],
                     )

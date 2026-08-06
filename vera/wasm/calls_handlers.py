@@ -1436,17 +1436,21 @@ class CallsHandlersMixin:
             init_instrs = self.translate_expr(expr.state.init_expr, env)
             if init_instrs is None:
                 return None
-            # #1203: the init value BINDS into the declared state cell —
-            # guard the @Int -> @Nat narrowing (and the @Nat -> @Int widen
-            # dual) exactly like a `let` binding, so an unverified compile
-            # traps instead of storing a negative through the @Nat cell.
-            state_tn = getattr(expr.state.type_expr, "name", None)
-            if (state_tn is not None
-                    and self._resolve_base_type_name(state_tn) == "Nat"
+            # #1203: the init value BINDS into the state CELL — guard the
+            # @Int -> @Nat narrowing (and the @Nat -> @Int widen dual)
+            # exactly like a `let` binding, so an unverified compile traps
+            # instead of storing a negative through the @Nat cell.  Keyed
+            # off `type_name` — the effect's `State<T>` argument, the same
+            # source every other guard site and the host imports use — NOT
+            # the declared `with` annotation, which can diverge (#1206)
+            # and, as a RefinementType, has no `name` at all (PR #1202
+            # review: the getattr skipped both branches for refined
+            # binders while the verifier recorded the obligation).
+            base_tn = self._resolve_base_type_name(type_name)
+            if (base_tn == "Nat"
                     and self._narrows_into_nat(expr.state.init_expr)):
                 init_instrs = self._emit_nat_bind_guard(init_instrs)
-            elif (state_tn is not None
-                    and self._resolve_base_type_name(state_tn) == "Int"
+            elif (base_tn == "Int"
                     and self._result_is_nat(expr.state.init_expr)):
                 init_instrs = self._emit_int_widen_guard(init_instrs)
             instructions.extend(init_instrs)
@@ -1669,9 +1673,11 @@ class CallsHandlersMixin:
     @staticmethod
     def _tail_resume_arg(body: ast.Expr) -> ast.Expr | None:
         """The tail ``resume(v)``'s argument expression, descending the
-        same join-free chain as :py:meth:`_clause_lowerable` (Block
-        trailing expression, single-arm match) — ``None`` when the tail is
-        not a one-argument resume (#1203 get-result guard)."""
+        join-free chain (Block trailing expression, single-arm match) —
+        ``None`` when the tail is not a one-argument resume.  The SINGLE
+        owner of the descent: :py:meth:`_clause_lowerable` consumes this
+        helper, so the lowering predicate and the #1203 get-result guard
+        can never drift apart."""
         tail: ast.Expr = body
         while True:
             if isinstance(tail, ast.Block):
@@ -1731,20 +1737,12 @@ class CallsHandlersMixin:
                 )
             return 0
 
-        tail: ast.Expr = body
-        while True:
-            if isinstance(tail, ast.Block):
-                tail = tail.expr
-                continue
-            if isinstance(tail, ast.MatchExpr) and len(tail.arms) == 1:
-                tail = tail.arms[0].body
-                continue
-            break
-        return (
-            isinstance(tail, ast.FnCall)
-            and tail.name == "resume"
-            and total_count(body) == 1
-        )
+        # Single source of truth for the join-free tail descent: the same
+        # helper the get-resume guard uses (PR #1202 review — two copies
+        # of the descent would drift, and a drift silently un-guards a
+        # clause this predicate still lowers).
+        return (self._tail_resume_arg(body) is not None
+                and total_count(body) == 1)
 
     def _translate_handle_exn(
         self, expr: ast.HandleExpr, env: WasmSlotEnv,
