@@ -50,6 +50,7 @@ looping — the ordering restriction is well-founded by construction.
 from __future__ import annotations
 
 import re
+import sys
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
@@ -109,19 +110,25 @@ class AliasEnv:
     (``None`` for a non-parameterised alias).  *type_params* is the set of
     type-variable names in scope at the point being rendered; a type
     parameter SHADOWS a same-named alias, which is why it is tested first.
-    *data_types* is the set of declared ADT names, needed only because a
-    user ADT may take a name the resolver otherwise treats specially — see
-    :func:`_resolve_named`.
+    *data_types* maps each declared ADT name to its DECLARATION INDEX, in the
+    same shared index space as ``_order`` (#1208).  An ADT matters to naming
+    only because a user ADT may take a name the resolver otherwise treats
+    specially — and whether it does so depends on where it was declared
+    relative to the alias body asking, hence the index rather than a flat
+    set; see :func:`_resolve_named`.  A built-in ADT carries ``-1``: it
+    precedes every user declaration and is therefore always visible.
     """
 
     aliases: Mapping[str, ast.TypeExpr]
     alias_params: Mapping[str, tuple[str, ...] | None]
     type_params: frozenset[str] = frozenset()
-    data_types: frozenset[str] = frozenset()
-    # Derived: alias name -> declaration index, so an alias body can be
-    # resolved against only the aliases that precede it.  Also the per-env
-    # memo of already-resolved alias bodies (an alias's restricted
-    # resolution is fixed, so it is computed at most once).
+    data_types: Mapping[str, int] = field(default_factory=dict)
+    # Alias name -> declaration index, so an alias body can be resolved
+    # against only the declarations that precede it.  Shares ONE index space
+    # with ``data_types``, which is what lets the bound order the two
+    # registries against each other.  Also the per-env memo of
+    # already-resolved alias bodies (an alias's restricted resolution is
+    # fixed, so it is computed at most once).
     _order: Mapping[str, int] = field(
         default_factory=dict, repr=False, compare=False)
     _memo: dict[str, Type] = field(
@@ -162,6 +169,7 @@ def alias_env_from_environment(env: object) -> AliasEnv:
     """
     aliases: dict[str, ast.TypeExpr] = {}
     alias_params: dict[str, tuple[str, ...] | None] = {}
+    order: dict[str, int] = {}
     type_aliases = getattr(env, "type_aliases", {})
     for name, info in type_aliases.items():
         body = getattr(info, "body", None)
@@ -169,11 +177,17 @@ def alias_env_from_environment(env: object) -> AliasEnv:
             continue
         aliases[name] = body
         alias_params[name] = getattr(info, "type_params", None)
+        order[name] = getattr(info, "decl_index", -1)
+    data_types = {
+        name: getattr(info, "decl_index", -1)
+        for name, info in getattr(env, "data_types", {}).items()
+    }
     return AliasEnv(
         aliases=aliases,
         alias_params=alias_params,
         type_params=frozenset(getattr(env, "type_params", {})),
-        data_types=frozenset(getattr(env, "data_types", ())),
+        data_types=data_types,
+        _order=order,
     )
 
 
@@ -189,29 +203,39 @@ def alias_env_from_declarations(
     UNDER these declarations — prelude aliases first, then the module's —
     preserving the declaration order the alias-visibility rule needs.
 
-    Declared ADTs are collected too.  The BUILT-IN ADTs (``Option``,
-    ``Result``, ``Json``, …) are deliberately not seeded: data-type
-    membership only changes a rendering for a name the resolver treats
-    specially (``Decimal``, a ``REMOVED_ALIASES`` entry), and no built-in
-    ADT takes one of those names — every other ADT reaches the same opaque
-    ``AdtType`` either way.
+    Declared ADTs are collected too, and stamped with the SAME shared
+    declaration index the aliases get (#1208) — a walk in source order is
+    exactly the order the checker's registration pass allocates them in.  The
+    BUILT-IN ADTs (``Option``, ``Result``, ``Json``, …) are deliberately not
+    seeded: data-type membership only changes a rendering for a name the
+    resolver treats specially (``Decimal``, a ``REMOVED_ALIASES`` entry), and
+    no built-in ADT takes one of those names — every other ADT reaches the
+    same opaque ``AdtType`` either way.
     """
     aliases: dict[str, ast.TypeExpr] = dict(base.aliases) if base else {}
     alias_params: dict[str, tuple[str, ...] | None] = (
         dict(base.alias_params) if base else {})
-    data_types: set[str] = set(base.data_types) if base else set()
+    data_types: dict[str, int] = dict(base.data_types) if base else {}
+    order: dict[str, int] = dict(base._order) if base else {}
+    # Layered declarations continue the base's index space rather than
+    # restarting it, so "the prelude was declared first" survives the merge.
+    idx = max((*order.values(), *data_types.values(), -1)) + 1
     for item in decls:
         decl = getattr(item, "decl", item)
         if isinstance(decl, ast.TypeAliasDecl):
             aliases[decl.name] = decl.type_expr
             alias_params[decl.name] = decl.type_params
+            order[decl.name] = idx
+            idx += 1
         elif isinstance(decl, ast.DataDecl):
-            data_types.add(decl.name)
+            data_types[decl.name] = idx
+            idx += 1
     return AliasEnv(
         aliases=aliases,
         alias_params=alias_params,
         type_params=base.type_params if base else frozenset(),
-        data_types=frozenset(data_types),
+        data_types=data_types,
+        _order=order,
     )
 
 
@@ -236,6 +260,17 @@ def with_type_params(env: AliasEnv, params: Iterable[str]) -> AliasEnv:
 # Resolution — the checker's `_resolve_type`, as a pure function
 # =====================================================================
 
+_UNBOUNDED = sys.maxsize
+"""The visibility bound for a rendering that is NOT inside an alias body.
+
+The checker resolves a parameter's type expression after registration has
+finished, so every declaration is in scope; only an alias BODY is bounded,
+and only by its own declaration index.  A sentinel rather than
+``len(env.aliases)``, because the index space is shared with the ADTs and so
+runs past the alias count.
+"""
+
+
 def resolve_type_expr(te: ast.TypeExpr, env: AliasEnv) -> Type:
     """Resolve *te* to the semantic :class:`~vera.types.Type` the checker's
     ``_resolve_type`` would produce for it.
@@ -246,7 +281,7 @@ def resolve_type_expr(te: ast.TypeExpr, env: AliasEnv) -> Type:
     Total: it reports no diagnostics and raises nothing, where the checker
     would additionally emit E133 / E134 / E135 and return the same type.
     """
-    return _resolve(te, env, env.type_params, len(env.aliases))
+    return _resolve(te, env, env.type_params, _UNBOUNDED)
 
 
 def _resolve(
@@ -296,18 +331,15 @@ def _resolve_named(
     user ``Decimal`` keeps its type arguments (``Option<Decimal<Int>>``)
     instead of having them dropped by the built-in ``Decimal`` branch.
 
-    RECORDED SPLIT (#1208, narrower than the one above and not closed here):
-    *data_types* is a flat set, so ADT visibility is NOT bounded by
-    declaration order the way alias visibility is.  An alias whose body names
-    a special-cased ADT declared LATER in the file — ``type M = Decimal;``
-    above ``data Decimal`` — resolved at registration time against a table
-    that did not yet hold the ADT, so the checker gives the built-in
-    ``Decimal`` (or, for ``Float``, ``?``) while this gives the ADT.  Closing
-    it needs the two registries merged into one declaration-index space,
-    which the live ``Environment`` cannot reconstruct without recording each
-    alias's registration position — a data change, so it is stated here
-    rather than assumed away.  Both spellings of the corner require an ADT
-    named after a removed alias or a built-in in the first place.
+    ADT visibility is bounded by declaration index exactly as alias
+    visibility is, because the two registries share ONE index space (#1208).
+    ``type M = Decimal;`` declared ABOVE ``data Decimal`` resolved, at
+    registration time, against a table that did not yet hold the ADT — so the
+    built-in ``Decimal`` branch is what the checker took, and what is taken
+    here.  Declared below it, the ADT branch wins on both sides.  The bound
+    only ever matters for an ADT named after a removed alias or a built-in in
+    the first place; every other ADT reaches the same opaque ``AdtType``
+    whichever branch it takes.
     """
     name = te.name
     if name in type_params:
@@ -327,7 +359,8 @@ def _resolve_named(
                 _resolve(a, env, type_params, limit) for a in te.type_args)
             return substitute(body, dict(zip(params, args)))
         return body
-    if name not in env.data_types:
+    adt_idx = env.data_types.get(name)
+    if adt_idx is None or adt_idx >= limit:
         if name == "Decimal":
             return AdtType("Decimal", ())  # checker: E134 when args supplied
         if name in REMOVED_ALIASES:

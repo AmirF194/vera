@@ -240,21 +240,40 @@ def test_an_alias_still_outranks_a_same_named_adt() -> None:
     assert _name("@Option<MyAlias>", prelude=prelude) == "Option<Int>"
 
 
-def test_adt_visibility_is_not_bounded_by_declaration_order() -> None:
-    """RECORDED SPLIT (see `_resolve_named`): alias visibility is bounded by
-    declaration index, ADT visibility is not.
+def test_adt_visibility_is_bounded_by_declaration_index() -> None:
+    """ADT visibility is bounded by declaration index, exactly as alias
+    visibility is — the two registries share ONE index space (#1208).
 
     An alias body naming a special-cased ADT declared BELOW it resolves
-    against the ADT here; the checker, whose table did not yet hold the ADT
-    when it resolved that body, gives the built-in `Decimal` (observed:
-    `Option<Decimal>`).  Declared the other way round the two agree.  Pinned
-    so the corner is stated rather than silent — closing it needs the alias
-    and data registries merged into one declaration-index space, which is a
-    data change to `TypeAliasInfo`, not a rendering change."""
+    against the table as it stood when `_register_alias` ran, which did not
+    yet hold the ADT: the built-in `Decimal` branch, arguments dropped.  The
+    ADT is only reachable from an alias declared AFTER it.  Both directions
+    are asserted, because a bound applied in the wrong direction would agree
+    with the checker on one ordering and not the other."""
     forward = "type M = Decimal<Int>;\nprivate data Decimal { MkDec(Int) }\n"
-    assert _name("@Option<M>", prelude=forward) == "Option<Decimal<Int>>"
+    assert _name("@Option<M>", prelude=forward) == "Option<Decimal>"
     backward = "private data Decimal { MkDec(Int) }\ntype M = Decimal<Int>;\n"
     assert _name("@Option<M>", prelude=backward) == "Option<Decimal<Int>>"
+
+
+def test_removed_alias_adt_visibility_is_bounded_the_same_way() -> None:
+    """The mirror spelling of the corner: a `data Float` declared below the
+    alias leaves the removed-alias branch reachable (`?`); declared above it,
+    the ADT branch wins."""
+    forward = "type F = Float;\nprivate data Float { MkFl(Int) }\n"
+    assert _name("@Option<F>", prelude=forward) == "Option<?>"
+    backward = "private data Float { MkFl(Int) }\ntype F = Float;\n"
+    assert _name("@Option<F>", prelude=backward) == "Option<Float>"
+
+
+def test_adt_visibility_bound_does_not_reach_the_top_level() -> None:
+    """The bound applies INSIDE an alias body only.  A slot named directly
+    for the ADT renders against the whole table, whatever the declaration
+    order — the checker resolves those after registration has finished."""
+    forward = "type M = Decimal<Int>;\nprivate data Decimal { MkDec(Int) }\n"
+    assert _name("@Option<Decimal<Int>>", prelude=forward) \
+        == "Option<Decimal<Int>>"
+    assert _name("@Decimal<Int>", prelude=forward) == "Decimal<Int>"
 
 
 def test_unresolvable_type_expression_renders_question_mark() -> None:

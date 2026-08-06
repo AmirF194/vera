@@ -643,6 +643,9 @@ class ContractVerifier:
     def _register_data(self, decl: ast.DataDecl) -> None:
         """Register an ADT with constructor info for SMT translation."""
         from vera.environment import AdtInfo, ConstructorInfo
+        # #1208: same shared declaration-index stamp as the checker's
+        # registration pass, allocated before anything resolves.
+        decl_index = self.env.next_decl_index()
         # Set up type params for resolving constructor field types
         saved_params = dict(self.env.type_params)
         if decl.type_params:
@@ -664,6 +667,7 @@ class ContractVerifier:
             name=decl.name,
             type_params=decl.type_params,
             constructors=ctors,
+            decl_index=decl_index,
         )
         self.env.type_params = saved_params
 
@@ -698,12 +702,14 @@ class ContractVerifier:
     def _register_alias(self, decl: ast.TypeAliasDecl) -> None:
         """Register a type alias."""
         from vera.environment import TypeAliasInfo
+        decl_index = self.env.next_decl_index()
         resolved = self._resolve_type(decl.type_expr)
         self.env.type_aliases[decl.name] = TypeAliasInfo(
             name=decl.name,
             type_params=decl.type_params,
             resolved_type=resolved,
             body=decl.type_expr,
+            decl_index=decl_index,
         )
 
     def _register_ability(self, decl: ast.AbilityDecl) -> None:

@@ -555,9 +555,42 @@ where {
 )
 
 
+# The declaration-ORDER corner (#1208) needs its own preludes: the whole
+# point is where the `data` sits relative to the `type`, so these cannot ride
+# the shared prelude.  An ADT named after a built-in special case (`Decimal`)
+# or a removed alias (`Float`) is the only shape whose rendering the ordering
+# can change, and each is swept in BOTH orders — a visibility bound applied
+# in the wrong direction agrees with the checker on one ordering only.
+_ORDERING_FN = """\
+public fn ord(@Option<{alias}>, @{adt}<Int> -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{{
+  let @Option<{alias}> = @Option<{alias}>.0;
+  1
+}}
+"""
+
+_ORDERING_BATTERY: tuple[tuple[str, str], ...] = tuple(
+    (f"decl_order_{adt.lower()}_{label}", prelude + _ORDERING_FN.format(
+        alias="M", adt=adt))
+    for adt in ("Decimal", "Float")
+    for label, prelude in (
+        ("alias_first",
+         f"type M = {adt}<Int>;\nprivate data {adt} {{ Mk{adt}(Int) }}\n"),
+        ("adt_first",
+         f"private data {adt} {{ Mk{adt}(Int) }}\ntype M = {adt}<Int>;\n"),
+    )
+)
+
+
 def _battery_sources() -> list[tuple[str, str]]:
     return [(f"<battery:{name}>", _BATTERY_PRELUDE + body)
-            for name, body in _BATTERY]
+            for name, body in _BATTERY] + [
+        (f"<battery:{name}>", source)
+        for name, source in _ORDERING_BATTERY
+    ]
 
 
 # =====================================================================
@@ -629,6 +662,15 @@ def test_inline_battery_reaches_the_alias_corners(sweep: Sweep) -> None:
     assert "Fn" in rendered                    # function type at top level
     assert "Option<?>" in rendered             # arity mismatch / removed
     assert any(r.startswith("Option<fn(") for r in rendered)
+    # #1208: the declaration-ORDER corner, in both directions.  An ADT
+    # declared below the alias that names it is invisible to that body (the
+    # built-in `Decimal` branch, arguments dropped; `?` for the removed
+    # `Float`); declared above it, the ADT branch wins and keeps them.  A
+    # bound applied in one direction only still renders three of these four.
+    ordering = {o.legacy for o in sweep.observations
+                if o.origin.startswith("<battery:decl_order_")}
+    assert {"Option<Decimal>", "Option<Decimal<Int>>",
+            "Option<?>", "Option<Float<Int>>"} <= ordering, ordering
 
 
 def test_differential_gate_detects_divergence() -> None:

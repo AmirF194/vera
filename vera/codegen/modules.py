@@ -480,6 +480,14 @@ class CrossModuleMixin:
             self._module_type_alias_params[mod.path] = dict(
                 temp._type_alias_params,
             )
+            # #1208: absorb this module's declaration ORDER into the shared
+            # index space, in the module's own source order (`temp` registered
+            # them 0-based).  Appended after everything stamped so far, which
+            # is what the bound needs: the prelude (negative block) precedes
+            # the module's aliases, and no main-file alias is ever in the
+            # module's namespace to be ordered against.
+            for name in sorted(temp._decl_order, key=temp._decl_order.__getitem__):
+                self._stamp_decl_order(name)
 
             # Collect ALL FnDecls from this module for compilation, and wire
             # up module-qualified-call resolution (#814 §8.5.3 + C2).

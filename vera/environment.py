@@ -64,6 +64,11 @@ class AdtInfo:
     type_params: tuple[str, ...] | None
     constructors: dict[str, ConstructorInfo]
     visibility: str | None = None  # "public" | "private" | None (C7c)
+    # #1208: this ADT's position in the module's SHARED declaration-index
+    # space — see :py:meth:`TypeEnv.next_decl_index`.  ``-1`` means "precedes
+    # every user declaration", which is what the built-in ADTs are and what
+    # any unstamped construction site conservatively gets.
+    decl_index: int = -1
 
 
 @dataclass
@@ -90,6 +95,13 @@ class TypeAliasInfo:
     # other construction sites stay valid; ``None`` means "body unavailable",
     # and the naming env simply omits that alias.
     body: ast.TypeExpr | None = None
+    # #1208: this alias's position in the module's SHARED declaration-index
+    # space — see :py:meth:`TypeEnv.next_decl_index`.  ``_register_alias``
+    # resolves each body against the table as it stood, so the index is what
+    # bounds which aliases AND which ADTs that body can see.  ``-1`` (the
+    # unstamped default) reads as "precedes everything", matching the
+    # always-visible behaviour the flat registries had.
+    decl_index: int = -1
 
 
 @dataclass
@@ -233,6 +245,26 @@ class TypeEnv:
     refinement_bases: list[Type] = field(default_factory=list)
     current_return_type: Type | None = None
     current_effect_row: EffectRowType | None = None
+
+    # #1208: the ONE per-module declaration counter that stamps
+    # ``AdtInfo.decl_index`` and ``TypeAliasInfo.decl_index``.  Shared
+    # deliberately: an alias body sees only what was registered before it, and
+    # "before" has to order the two registries against EACH OTHER, not just
+    # each within itself.
+    _decl_counter: int = 0
+
+    def next_decl_index(self) -> int:
+        """Allocate the next declaration index in this module's index space.
+
+        Called once per ``data`` / ``type`` registration, in source order, by
+        both the checker's and the verifier's registration passes.  The
+        resulting total order is what :mod:`vera.naming` bounds alias-body
+        resolution by, so it must be allocated at the moment of registration
+        and never reordered.
+        """
+        idx = self._decl_counter
+        self._decl_counter += 1
+        return idx
 
     def __post_init__(self) -> None:
         """Register built-in types, effects, and functions."""

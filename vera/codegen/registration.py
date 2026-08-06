@@ -24,6 +24,10 @@ class RegistrationMixin:
             elif isinstance(decl, ast.DataDecl):
                 self._register_data(decl)
             elif isinstance(decl, ast.TypeAliasDecl):
+                # #1208: aliases and ADTs share ONE index space, so the stamp
+                # happens in this single source-order walk (`_register_data`
+                # stamps the other branch).
+                self._stamp_decl_order(decl.name)
                 self._type_aliases[decl.name] = decl.type_expr
                 if decl.type_params:
                     self._type_alias_params[decl.name] = decl.type_params
@@ -257,6 +261,7 @@ class RegistrationMixin:
 
     def _register_data(self, decl: ast.DataDecl) -> None:
         """Register an ADT and precompute constructor layouts."""
+        self._stamp_decl_order(decl.name)  # #1208: shared with the aliases
         layouts: dict[str, ConstructorLayout] = {}
         for tag, ctor in enumerate(decl.constructors):
             layout = self._compute_constructor_layout(tag, ctor, decl)

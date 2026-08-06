@@ -72,6 +72,13 @@ _WAT_CALL_RE = re.compile(r"\b(?:return_call|call)\s+\$([^\s()]+)")
 # comment naming the instruction can never be read as an emission.
 _WAT_CALL_INDIRECT_RE = re.compile(r"(?m)^\s*call_indirect\b")
 
+# #1208: the two reserved floors of the shared declaration-index space (see
+# `CodeGenerator._decl_order`).  A built-in ADT precedes every declaration,
+# including the prelude's; the prelude block sits between it and the user's,
+# with room for far more injected declarations than the prelude has.
+_BUILTIN_DECL_INDEX = -(1 << 30)
+_PRELUDE_DECL_BASE = -(1 << 20)
+
 
 def _find_holes(program: ast.Program) -> list[ast.HoleExpr]:
     """Walk the AST and return all HoleExpr nodes."""
@@ -267,6 +274,26 @@ class CodeGenerator(
         # onto THESE, never onto the main file's aliases.
         self._prelude_type_aliases: dict[str, ast.TypeExpr] = {}
         self._prelude_type_alias_params: dict[str, tuple[str, ...]] = {}
+        # #1208: the SHARED declaration-index space over aliases AND ADTs, the
+        # codegen-side counterpart of ``TypeEnv.next_decl_index``.  An alias
+        # body sees only what was declared before it, and "before" has to
+        # order the two registries against EACH OTHER — a `data Decimal`
+        # declared below `type M = Decimal<Int>` is invisible to that body,
+        # exactly as at check.
+        #
+        # Three blocks, ordered as the checker sees them: built-ins first
+        # (unstamped, they read ``_BUILTIN_DECL_INDEX``), then the prelude
+        # (a NEGATIVE block, because `inject_prelude` PREPENDS its
+        # declarations while codegen registers the main file before injecting
+        # them — without the block a main-file alias over a prelude alias
+        # would resolve opaquely here and fully at check), then user
+        # declarations from 0 up: the main file, then each module as it is
+        # captured.  Relative order within one namespace is exact, which is
+        # all the bound reads.  Unscoped, like ``_adt_layouts``: a name is
+        # only ever looked up when it is in the active alias / layout maps.
+        self._decl_order: dict[str, int] = {}
+        self._decl_order_next: int = 0
+        self._prelude_decl_order_next: int = _PRELUDE_DECL_BASE
         # #1208: the naming environment the ONE renderer (:mod:`vera.naming`)
         # resolves against, held as the single value the flat maps above
         # describe.  DERIVED from those maps rather than taken from
@@ -1090,11 +1117,38 @@ class CodeGenerator(
         this too — a stale env renders a name against the wrong namespace, and
         a name minted one way and looked up another misses SILENTLY.
         """
+        order = self._decl_order
         self._alias_env = AliasEnv(
             aliases=dict(self._type_aliases),
             alias_params=dict(self._type_alias_params),
-            data_types=frozenset(self._adt_layouts),
+            data_types={
+                name: order.get(name, _BUILTIN_DECL_INDEX)
+                for name in self._adt_layouts
+            },
+            _order={
+                name: order.get(name, _BUILTIN_DECL_INDEX)
+                for name in self._type_aliases
+            },
         )
+
+    def _stamp_decl_order(self, name: str, *, prelude: bool = False) -> None:
+        """Record *name*'s position in the shared declaration-index space.
+
+        Called once per ``type`` / ``data`` registration, in source order.
+        Idempotent by name — a name is stamped where it FIRST registers, and
+        a later re-registration (the prelude pass revisits declarations, a
+        second module reuses a name) does not move it.  *prelude* draws from
+        the negative block instead, so injected declarations precede the
+        main file's whatever order codegen happens to walk them in.
+        """
+        if name in self._decl_order:
+            return
+        if prelude:
+            self._decl_order[name] = self._prelude_decl_order_next
+            self._prelude_decl_order_next += 1
+        else:
+            self._decl_order[name] = self._decl_order_next
+            self._decl_order_next += 1
 
     def compile_program(self, program: ast.Program) -> CompileResult:
         """Compile a complete Vera program to WebAssembly."""
@@ -1224,10 +1278,16 @@ class CodeGenerator(
         # the `<prelude>` origin) for prelude-origin diagnostics.
         self._prelude_source = inject_prelude(program)
         for tld in program.declarations:
-            if (
-                id(tld) not in pre_inject_ids
-                and isinstance(tld.decl, ast.TypeAliasDecl)
-            ):
+            if id(tld) in pre_inject_ids:
+                continue
+            # #1208: stamp every INJECTED declaration into the prelude block
+            # of the shared index space, in the order `inject_prelude` laid
+            # them down — which is ahead of the main file's, where codegen
+            # has already stamped from 0.  Both kinds, because the bound
+            # orders aliases and ADTs against each other.
+            if isinstance(tld.decl, (ast.TypeAliasDecl, ast.DataDecl)):
+                self._stamp_decl_order(tld.decl.name, prelude=True)
+            if isinstance(tld.decl, ast.TypeAliasDecl):
                 self._prelude_type_aliases[tld.decl.name] = tld.decl.type_expr
                 if tld.decl.type_params:
                     self._prelude_type_alias_params[tld.decl.name] = (
@@ -1257,6 +1317,7 @@ class CodeGenerator(
                     self._register_data(decl)
             elif isinstance(decl, ast.TypeAliasDecl):
                 if decl.name not in self._type_aliases:
+                    self._stamp_decl_order(decl.name)
                     self._type_aliases[decl.name] = decl.type_expr
                     if decl.type_params:
                         self._type_alias_params[decl.name] = decl.type_params
