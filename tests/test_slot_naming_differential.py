@@ -1,24 +1,39 @@
-"""Differential gate: :mod:`vera.naming` must render what the CHECKER renders.
+"""Differential gate: the CHECKER must render what :mod:`vera.naming` renders.
 
 The consolidation in #1208 / #1209 replaces six per-subsystem naming
 renderings with one, and takes the checker's rendering as the rule — so the
 load-bearing claim is not "the module looks right", it is "the module is
-byte-identical to the checker on every type expression the checker names".
-A unit suite cannot establish that: the divergences that caused the bug
-class live in alias corners nobody thought to enumerate.
+byte-identical to the historical checker rendering on every type expression
+the checker names".  A unit suite cannot establish that: the divergences
+that caused the bug class live in alias corners nobody thought to enumerate.
 
-So this instruments the checker's two naming entry points, runs it over the
+WHY THE REFERENCE RENDERING LIVES IN THIS FILE.  Before the delegation
+commit, the LEGACY side of each pair was simply the checker's own return
+value, and the MODULE side was :func:`vera.naming.slot_name`.  Once the
+checker delegates, that comparison is the module against itself and proves
+nothing.  So the legacy side is now ``_reference_slot_name`` below: the
+historical in-checker composition — syntactic head, arguments through
+``checker._resolve_type`` and joined by ``canonical_type_name``, the
+refined-top recursion, ``Fn``, ``?`` — rebuilt from checker machinery that
+is still live and still used broadly (``_resolve_type`` /
+``canonical_type_name`` did not move).  It is deliberately NOT imported from
+:mod:`vera.naming`: an independent statement of the rule is what pins the
+rule in place, so a future edit to the module has to disagree with a written
+-down reference rather than silently re-baseline both sides at once.
+
+This instruments the checker's two naming entry points, runs it over the
 whole ``.vera`` corpus (examples, conformance programs and their module
 fixtures, and the PR #1202 probe corpus) plus an inline battery aimed at the
 alias / refinement / function-type / shadowing corners, and asserts ZERO
 divergence across every recorded pair.
 
-The module-side environment is built AT RECORD TIME from the live
-:class:`~vera.environment.Environment` (``alias_env_from_environment``), so
-each comparison sees exactly the alias table and type-parameter scope the
-checker had at that instant — mid-check ``forall`` scopes included.  The
-checker's own result is what is returned to it, so instrumentation cannot
-change what the checker does.
+The comparison happens AT RECORD TIME against the live
+:class:`~vera.environment.Environment`, so each pair sees exactly the alias
+table and type-parameter scope the checker had at that instant — mid-check
+``forall`` scopes included.  The checker's own result is what is returned to
+it, so instrumentation cannot change what the checker computes; the
+reference's extra ``_resolve_type`` calls can append duplicate diagnostics,
+which nothing here reads.
 
 Every recorded pair is compared regardless of whether the program CHECKS:
 naming runs while diagnostics accumulate, and a program that fails to check
@@ -44,6 +59,7 @@ import pytest
 from vera import ast, naming
 from vera.checker.core import TypeChecker
 from vera.parser import parse_to_ast
+from vera.types import canonical_type_name
 
 _ROOT = Path(__file__).resolve().parent.parent
 _CORPUS_DIRS = (
@@ -56,6 +72,31 @@ _CORPUS_DIRS = (
 # =====================================================================
 # The harness
 # =====================================================================
+
+def _reference_slot_name(checker: TypeChecker, te: ast.TypeExpr) -> str:
+    """The historical in-checker rendering, rebuilt from live machinery.
+
+    Byte-for-byte the composition ``TypeChecker._type_expr_to_slot_name``
+    carried before it delegated to :mod:`vera.naming`, expressed against the
+    parts that stayed in the checker: ``_resolve_type`` (argument-position
+    resolution) and ``canonical_type_name`` (the join).  ``_slot_type_name``'s
+    historical body was the ``NamedType`` case of this, so one reference
+    covers both entry points.
+
+    Kept here, not in ``vera/``, precisely because it is the thing the module
+    is being checked AGAINST — see the module docstring.
+    """
+    if isinstance(te, ast.NamedType):
+        if te.type_args:
+            resolved = tuple(checker._resolve_type(a) for a in te.type_args)
+            return canonical_type_name(te.name, resolved)
+        return te.name
+    if isinstance(te, ast.RefinementType):
+        return _reference_slot_name(checker, te.base_type)
+    if isinstance(te, ast.FnType):
+        return "Fn"
+    return "?"
+
 
 @dataclass
 class Observation:
@@ -126,46 +167,51 @@ def _record(origin: str, sweep: Sweep) -> Iterator[None]:
     ``_slot_ref_key`` routes through ``_slot_type_name``, so slot REFERENCES
     are covered by the same instrumentation as the binding side — the two
     sides being keyed identically is the property that matters.
+
+    The MODULE side is what the (delegating) checker returns; the LEGACY side
+    is :func:`_reference_slot_name`.  The checker's own value is returned
+    unchanged either way, so the program under check behaves as it would
+    without the instrumentation.
     """
     had_key = "_slot_type_name" in TypeChecker.__dict__
     orig_te = TypeChecker._type_expr_to_slot_name
     orig_key = TypeChecker._slot_type_name
 
-    def _module_side(
+    def _observe(
         self: TypeChecker, te: ast.TypeExpr,
-        args: tuple[ast.TypeExpr, ...] | None, entry: str, legacy: str,
+        args: tuple[ast.TypeExpr, ...] | None, entry: str, module: str,
     ) -> None:
-        env = naming.alias_env_from_environment(self.env)
+        aliases = naming.alias_env_from_environment(self.env).aliases
         try:
-            module = naming.slot_name(te, env)
+            legacy = _reference_slot_name(self, te)
         except Exception as exc:  # noqa: BLE001 — a raise IS a divergence
-            module = f"<raised {type(exc).__name__}: {exc}>"
+            legacy = f"<raised {type(exc).__name__}: {exc}>"
         sweep.observations.append(Observation(
             origin=origin,
             entry=entry,
             legacy=legacy,
             module=module,
-            env_aliases=len(env.aliases),
-            alias_in_arg=_mentions_alias(args, env.aliases),
+            env_aliases=len(aliases),
+            alias_in_arg=_mentions_alias(args, aliases),
             shape=ast.format_type_expr(te)
             if isinstance(te, (ast.NamedType, ast.RefinementType, ast.FnType))
             else repr(te),
         ))
 
     def te_patch(self: TypeChecker, te: ast.TypeExpr) -> str:
-        legacy = orig_te(self, te)
+        module = orig_te(self, te)
         args = te.type_args if isinstance(te, ast.NamedType) else None
-        _module_side(self, te, args, "_type_expr_to_slot_name", legacy)
-        return legacy
+        _observe(self, te, args, "_type_expr_to_slot_name", module)
+        return module
 
     def key_patch(
         self: TypeChecker, type_name: str,
         type_args: tuple[ast.TypeExpr, ...] | None,
     ) -> str:
-        legacy = orig_key(self, type_name, type_args)
+        module = orig_key(self, type_name, type_args)
         te = ast.NamedType(name=type_name, type_args=type_args)
-        _module_side(self, te, type_args, "_slot_type_name", legacy)
-        return legacy
+        _observe(self, te, type_args, "_slot_type_name", module)
+        return module
 
     TypeChecker._type_expr_to_slot_name = te_patch  # type: ignore[method-assign]
     TypeChecker._slot_type_name = key_patch  # type: ignore[method-assign]
@@ -383,6 +429,39 @@ public fn b17(
   1
 }
 """),
+    # The data-type branch outranks the `Decimal` / removed-alias branches
+    # in the checker's `_resolve_named_type`, so an ADT that takes one of
+    # those names changes what its own name renders as.  Declared in the
+    # BODY, not the shared prelude, so the other battery entries keep
+    # reaching the built-in spellings (`Option<?>`, argument-dropping
+    # `Decimal`).  The ADTs are declared ABOVE the aliases that name them —
+    # ADT visibility is not declaration-order-bounded here, see
+    # `test_adt_visibility_is_not_bounded_by_declaration_order`.
+    ("data_type_shadows_special_names", """\
+private data Float { MkFl(Int) }
+private data Decimal { MkDec(Int) }
+private data Array { MkArr(Int) }
+type Money = Decimal<Int>;
+type Amount = Option<Float>;
+
+public fn b24(
+  @Option<Float>,
+  @Float,
+  @Option<Decimal>,
+  @Option<Decimal<Int>>,
+  @Decimal<Float>,
+  @Option<Array>,
+  @Option<Array<MyAlias>>,
+  @Option<Money>,
+  @Option<Amount>
+  -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  1
+}
+"""),
     ("let_bindings_and_composites", """\
 public fn b18(@Array<MyAlias> -> @Int)
   requires(true)
@@ -556,7 +635,12 @@ def test_differential_gate_detects_divergence() -> None:
     """The gate can go RED: perturb the module renderer, see it reported.
 
     Without this, a green differential is equally consistent with "the
-    harness records nothing it compares".
+    harness records nothing it compares".  This is also what keeps the gate
+    non-vacuous after the delegation: the perturbation moves the checker's
+    answer (it now routes through :func:`vera.naming.slot_name`) while
+    ``_reference_slot_name`` — which reaches ``_resolve_type`` and
+    ``canonical_type_name`` directly — stands still, so the two sides really
+    are two sides.
     """
     source = _BATTERY_PRELUDE + _BATTERY[1][1]
     clean = Sweep()
@@ -581,7 +665,8 @@ def test_differential_gate_detects_divergence() -> None:
         perturbed_sweep.observations)
     assert all(o.module.endswith("$MUTANT")
                for o in perturbed_sweep.divergences)
-    # ...and the checker itself was unaffected by the perturbation: the
-    # instrumentation returns the legacy result either way.
+    # ...and the reference side is independent of the module: it renders the
+    # same strings whether or not the module is perturbed.
     assert ([o.legacy for o in perturbed_sweep.observations]
             == [o.legacy for o in clean.observations])
+    assert not any(o.legacy.endswith("$MUTANT") for o in clean.observations)

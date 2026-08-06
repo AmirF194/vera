@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from vera.resolver import ResolvedModule
 
-from vera import ast
+from vera import ast, naming
 from vera.errors import Diagnostic, SourceLocation
 from vera.environment import (
     AdtInfo,
@@ -45,7 +45,6 @@ from vera.types import (
     Type,
     TypeVar,
     UnknownType,
-    canonical_type_name,
     is_subtype,
     pretty_type,
     pretty_inferred_type,
@@ -805,19 +804,18 @@ class TypeChecker(
 
     def _type_expr_to_slot_name(self, te: ast.TypeExpr) -> str:
         """Extract the canonical slot name from a type expression used as a
-        parameter binding.  This is the syntactic name — aliases are opaque."""
-        if isinstance(te, ast.NamedType):
-            if te.type_args:
-                resolved_args = tuple(
-                    self._resolve_type(a) for a in te.type_args)
-                return canonical_type_name(te.name, resolved_args)
-            return te.name
-        if isinstance(te, ast.RefinementType):
-            return self._type_expr_to_slot_name(te.base_type)
-        if isinstance(te, ast.FnType):
-            # Function-typed parameters: use a synthetic name
-            return "Fn"
-        return "?"
+        parameter binding.  The head is the syntactic name — aliases are
+        opaque — while type arguments resolve.
+
+        Delegates to :func:`vera.naming.slot_name` (#1208), which is the ONE
+        renderer of that rule; the six subsystems that used to answer this
+        question independently disagreed about aliases, and a name minted one
+        way and looked up another misses silently.  The argument diagnostics
+        the old in-place composition emitted as a side effect are preserved
+        by ``_check_slot_name_args`` — see its docstring.
+        """
+        self._check_slot_name_args(te)
+        return naming.slot_name(te, self._naming_env())
 
     # -----------------------------------------------------------------
     # Contracts

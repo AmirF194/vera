@@ -205,6 +205,58 @@ def test_removed_alias_head_stays_syntactic() -> None:
     assert _name("@Float") == "Float"
 
 
+# =====================================================================
+# Clause: a DECLARED ADT outranks the special-cased names
+# =====================================================================
+
+_ADT_SHADOWS = ALIASES + """\
+private data Float { MkFl(Int) }
+private data Decimal { MkDec(Int) }
+"""
+
+
+def test_declared_adt_outranks_the_removed_alias_branch() -> None:
+    """`private data Float { ... }` checks clean (`Float` is not a primitive,
+    only a REMOVED alias), and the checker reaches its data-type branch
+    BEFORE its removed-alias branch — so the argument renders `Float`, not
+    the `?` the removed-alias branch would give."""
+    assert _name("@Option<Float>", prelude=_ADT_SHADOWS) == "Option<Float>"
+    assert _name("@Float", prelude=_ADT_SHADOWS) == "Float"
+
+
+def test_declared_adt_outranks_the_builtin_decimal_branch() -> None:
+    """The built-in `Decimal` branch is opaque and DROPS type arguments; a
+    user-declared `data Decimal` keeps them, because the data-type branch is
+    reached first."""
+    assert _name("@Option<Decimal<Int>>", prelude=_ADT_SHADOWS) \
+        == "Option<Decimal<Int>>"
+    assert _name("@Decimal<Float>", prelude=_ADT_SHADOWS) == "Decimal<Float>"
+
+
+def test_an_alias_still_outranks_a_same_named_adt() -> None:
+    """Alias before data type, as in the checker: both may be declared under
+    one name, and an argument resolves to the alias body."""
+    prelude = ALIASES + "private data MyAlias { MkMy(Int) }\n"
+    assert _name("@Option<MyAlias>", prelude=prelude) == "Option<Int>"
+
+
+def test_adt_visibility_is_not_bounded_by_declaration_order() -> None:
+    """RECORDED SPLIT (see `_resolve_named`): alias visibility is bounded by
+    declaration index, ADT visibility is not.
+
+    An alias body naming a special-cased ADT declared BELOW it resolves
+    against the ADT here; the checker, whose table did not yet hold the ADT
+    when it resolved that body, gives the built-in `Decimal` (observed:
+    `Option<Decimal>`).  Declared the other way round the two agree.  Pinned
+    so the corner is stated rather than silent — closing it needs the alias
+    and data registries merged into one declaration-index space, which is a
+    data change to `TypeAliasInfo`, not a rendering change."""
+    forward = "type M = Decimal<Int>;\nprivate data Decimal { MkDec(Int) }\n"
+    assert _name("@Option<M>", prelude=forward) == "Option<Decimal<Int>>"
+    backward = "private data Decimal { MkDec(Int) }\ntype M = Decimal<Int>;\n"
+    assert _name("@Option<M>", prelude=backward) == "Option<Decimal<Int>>"
+
+
 def test_unresolvable_type_expression_renders_question_mark() -> None:
     class _Alien(ast.TypeExpr):
         pass

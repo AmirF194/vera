@@ -109,11 +109,15 @@ class AliasEnv:
     (``None`` for a non-parameterised alias).  *type_params* is the set of
     type-variable names in scope at the point being rendered; a type
     parameter SHADOWS a same-named alias, which is why it is tested first.
+    *data_types* is the set of declared ADT names, needed only because a
+    user ADT may take a name the resolver otherwise treats specially — see
+    :func:`_resolve_named`.
     """
 
     aliases: Mapping[str, ast.TypeExpr]
     alias_params: Mapping[str, tuple[str, ...] | None]
     type_params: frozenset[str] = frozenset()
+    data_types: frozenset[str] = frozenset()
     # Derived: alias name -> declaration index, so an alias body can be
     # resolved against only the aliases that precede it.  Also the per-env
     # memo of already-resolved alias bodies (an alias's restricted
@@ -151,9 +155,10 @@ def alias_env_from_environment(env: object) -> AliasEnv:
     ``TypeAliasInfo`` built by some future path that has no TypeExpr in hand
     — is OMITTED rather than guessed at, so it renders opaquely (the
     conservative direction: an opaque head is what the checker produces for
-    an unknown name anyway).  ``env.type_params`` supplies the shadowing set,
-    so the result reflects the checker's state at the moment it is called,
-    mid-check type parameters included.
+    an unknown name anyway).  ``env.type_params`` supplies the shadowing set
+    and ``env.data_types`` the declared-ADT set, so the result reflects the
+    checker's state at the moment it is called, mid-check type parameters
+    included.
     """
     aliases: dict[str, ast.TypeExpr] = {}
     alias_params: dict[str, tuple[str, ...] | None] = {}
@@ -168,6 +173,7 @@ def alias_env_from_environment(env: object) -> AliasEnv:
         aliases=aliases,
         alias_params=alias_params,
         type_params=frozenset(getattr(env, "type_params", {})),
+        data_types=frozenset(getattr(env, "data_types", ())),
     )
 
 
@@ -182,19 +188,30 @@ def alias_env_from_declarations(
     wrappers or bare ``Decl`` nodes.  *base* layers an outer environment
     UNDER these declarations — prelude aliases first, then the module's —
     preserving the declaration order the alias-visibility rule needs.
+
+    Declared ADTs are collected too.  The BUILT-IN ADTs (``Option``,
+    ``Result``, ``Json``, …) are deliberately not seeded: data-type
+    membership only changes a rendering for a name the resolver treats
+    specially (``Decimal``, a ``REMOVED_ALIASES`` entry), and no built-in
+    ADT takes one of those names — every other ADT reaches the same opaque
+    ``AdtType`` either way.
     """
     aliases: dict[str, ast.TypeExpr] = dict(base.aliases) if base else {}
     alias_params: dict[str, tuple[str, ...] | None] = (
         dict(base.alias_params) if base else {})
+    data_types: set[str] = set(base.data_types) if base else set()
     for item in decls:
         decl = getattr(item, "decl", item)
         if isinstance(decl, ast.TypeAliasDecl):
             aliases[decl.name] = decl.type_expr
             alias_params[decl.name] = decl.type_params
+        elif isinstance(decl, ast.DataDecl):
+            data_types.add(decl.name)
     return AliasEnv(
         aliases=aliases,
         alias_params=alias_params,
         type_params=base.type_params if base else frozenset(),
+        data_types=frozenset(data_types),
     )
 
 
@@ -209,6 +226,7 @@ def with_type_params(env: AliasEnv, params: Iterable[str]) -> AliasEnv:
         aliases=env.aliases,
         alias_params=env.alias_params,
         type_params=env.type_params | frozenset(params),
+        data_types=env.data_types,
         _order=env._order,
         _memo=env._memo,
     )
@@ -264,14 +282,32 @@ def _resolve_named(
     """``_resolve_named_type``'s branch order, exactly.
 
     Type parameter (SHADOWS everything) -> primitive -> alias (arity-checked,
-    substituted) -> ``Decimal`` (opaque, arguments dropped) -> removed alias
-    (``?``) -> opaque ADT.  The checker's data-type and built-in-container
-    branches are absorbed by that last one: both build ``AdtType(name, args)``
-    from the same resolved arguments, so no registry of data types is needed
-    here.  (The single observable difference that would need one: a user
-    declaring a data type named ``Float`` or ``Decimal`` — names the checker
-    would resolve as an ADT and this resolves as removed/opaque.  Nothing
-    forbids it, so it is recorded here rather than assumed away.)
+    substituted) -> DECLARED ADT -> ``Decimal`` (opaque, arguments dropped)
+    -> removed alias (``?``) -> opaque ADT.  The checker's built-in-container
+    branch (``Array``/``Tuple``/``Map``/``Set``) is absorbed by the last one:
+    it builds ``AdtType(name, args)`` from the same resolved arguments, and
+    its extra work is E135 diagnostics, which naming does not emit.
+
+    The declared-ADT branch, by contrast, is NOT absorbable, and it must sit
+    exactly where the checker puts it — ahead of the ``Decimal`` and removed
+    -alias branches.  A user may declare ``data Float`` or ``data Decimal``
+    (both check clean), and for those the checker takes the ADT branch first:
+    ``@Option<Float>`` renders ``Option<Float>``, not ``Option<?>``, and a
+    user ``Decimal`` keeps its type arguments (``Option<Decimal<Int>>``)
+    instead of having them dropped by the built-in ``Decimal`` branch.
+
+    RECORDED SPLIT (#1208, narrower than the one above and not closed here):
+    *data_types* is a flat set, so ADT visibility is NOT bounded by
+    declaration order the way alias visibility is.  An alias whose body names
+    a special-cased ADT declared LATER in the file — ``type M = Decimal;``
+    above ``data Decimal`` — resolved at registration time against a table
+    that did not yet hold the ADT, so the checker gives the built-in
+    ``Decimal`` (or, for ``Float``, ``?``) while this gives the ADT.  Closing
+    it needs the two registries merged into one declaration-index space,
+    which the live ``Environment`` cannot reconstruct without recording each
+    alias's registration position — a data change, so it is stated here
+    rather than assumed away.  Both spellings of the corner require an ADT
+    named after a removed alias or a built-in in the first place.
     """
     name = te.name
     if name in type_params:
@@ -291,10 +327,11 @@ def _resolve_named(
                 _resolve(a, env, type_params, limit) for a in te.type_args)
             return substitute(body, dict(zip(params, args)))
         return body
-    if name == "Decimal":
-        return AdtType("Decimal", ())  # checker: E134 when args supplied
-    if name in REMOVED_ALIASES:
-        return UnknownType()
+    if name not in env.data_types:
+        if name == "Decimal":
+            return AdtType("Decimal", ())  # checker: E134 when args supplied
+        if name in REMOVED_ALIASES:
+            return UnknownType()
     return AdtType(name, tuple(
         _resolve(a, env, type_params, limit) for a in te.type_args
     ) if te.type_args else ())

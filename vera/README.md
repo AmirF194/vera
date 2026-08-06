@@ -77,9 +77,9 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `naming.py` | 677 | Type check | The ONE slot / slot-reference-key / State-Exn-family renderer (#1208, #1209) — the checker's rendering, as a total pure function over an `AliasEnv` | `slot_name()`, `slot_ref_key()`, `family_name()`, `AliasEnv` |
 | `slots.py` | 218 | Type check | Slot reference table for `vera check --explain-slots` | `slot_table()`, `slot_ref_name()` |
 | `environment.py` | 2,167 | Type check | Type environment, scope stacks, ability registry, all built-in registrations | `TypeEnv`, `AbilityInfo` |
-| `checker/` | 5,948 | Type check | Two-pass type checker (mixin package) | `typecheck()` |
+| `checker/` | 6,620 | Type check | Two-pass type checker (mixin package) | `typecheck()` |
 | `  core.py` | 952 | | TypeChecker class, orchestration, contracts, constraint validation | |
-| `  resolution.py` | 419 | | AST TypeExpr → semantic Type, inference | |
+| `  resolution.py` | 470 | | AST TypeExpr → semantic Type, inference | |
 | `  modules.py` | 180 | | Cross-module registration (C7b/C7c) | |
 | `  registration.py` | 717 | | Pass 1 forward declarations, ability registration | |
 | `  expressions.py` | 1,335 | | Expression synthesis (bidirectional), operators, statements | |
