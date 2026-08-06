@@ -1,0 +1,36 @@
+-- P8: tail resume under a single-arm match, on a clause that ALSO has `with`;
+-- decl_env + tail descent + with ordering.
+-- put clause scope [20000, param, state]: @Int.0=state, @Int.1=param.
+-- put(5): with = 5*3 = 15.  get: state=15 -> Boxed(30) -> match binds ->
+-- [20000, state, bound]: @Int.0=bound(30), @Int.2=20000 -> resume(20030).
+-- Expected: 20030.
+private data Box {
+  Boxed(Int)
+}
+
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Int = 20000;
+  handle[State<Int>](@Int = 3) {
+    get(@Unit) -> {
+      match Boxed(@Int.0 * 2) {
+        Boxed(@Int) -> resume(@Int.0 + @Int.2)
+      }
+    },
+    put(@Int) -> { resume(()) } with @Int = @Int.1 * 3
+  } in {
+    put(5);
+    get(())
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}

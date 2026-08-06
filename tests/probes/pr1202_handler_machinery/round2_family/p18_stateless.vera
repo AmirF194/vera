@@ -1,0 +1,12 @@
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>] {
+    put(@Int) -> { resume(()) }
+  } in {
+    put(0 - 7);
+    get(())
+  }
+}

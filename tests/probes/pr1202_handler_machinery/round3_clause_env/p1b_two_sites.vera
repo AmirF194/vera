@@ -1,0 +1,27 @@
+-- P1b: the same get clause inlined at TWO different let-depths must behave
+-- identically (both see decl-scope 1000, not the site-local lets).
+-- Expected: siteB - siteA = 0.
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Int = 1000;
+  handle[State<Int>](@Int = 5) {
+    get(@Unit) -> { resume(@Int.0 + @Int.1) },
+    put(@Int) -> { resume(()) }
+  } in {
+    let @Int = get(());
+    let @Int = 300;
+    let @Int = get(());
+    @Int.0 - @Int.2
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}

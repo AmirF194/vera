@@ -1,0 +1,23 @@
+-- D2: resume in a Block tail with a preceding let -> still guarded?
+private fn f(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@Nat = 3) {
+    get(@Unit) -> {
+      let @Int = nat_to_int(@Nat.0);
+      resume(@Int.0 - 90)
+    }
+  } in {
+    nat_to_int(get(()))
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  f(())
+}

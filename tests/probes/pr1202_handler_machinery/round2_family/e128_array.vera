@@ -1,0 +1,12 @@
+public fn all_pos(@Array<Int> -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  forall(@Int, @Array<Int>.0, fn(@Int -> @Bool)
+    requires(true)
+    ensures(true)
+  {
+    true
+  })
+}

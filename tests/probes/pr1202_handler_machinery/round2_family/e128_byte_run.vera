@@ -1,0 +1,15 @@
+public fn f(@Byte -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  forall(@Int, @Byte.0, fn(@Int -> @Bool) effects(pure) { @Int.0 >= 0 })
+}
+
+public fn main(@Unit -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  f(3)
+}

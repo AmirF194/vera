@@ -1,0 +1,14 @@
+type P = { @Int | @Int.0 > 0 };
+type Q = { @Int | @Int.0 < 0 };
+
+public fn t(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<P>](@Q = 0 - 5) {
+    put(@P) -> { resume(()) }
+  } in {
+    get(())
+  }
+}

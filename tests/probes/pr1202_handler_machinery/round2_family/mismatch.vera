@@ -1,0 +1,13 @@
+-- Does the checker require the `with` type to match State<T>'s T?
+public fn t(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@Int = 5) {
+    get(@Unit) -> { resume(@Nat.0) }
+  } in {
+    nat_to_int(get(()))
+  }
+}
+public fn main(@Unit -> @Int) requires(true) ensures(true) effects(pure) { t(()) }

@@ -1,0 +1,9 @@
+import e533lib;
+
+public fn go(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  sneak(@Int.0)
+}

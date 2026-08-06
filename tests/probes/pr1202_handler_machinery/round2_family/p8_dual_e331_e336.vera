@@ -1,0 +1,11 @@
+public fn t(@Unit -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@Int = true) {
+    put(@Nat) -> { resume(()) }
+  } in {
+    get(()) < 0
+  }
+}

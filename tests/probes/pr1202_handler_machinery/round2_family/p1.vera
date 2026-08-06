@@ -1,0 +1,22 @@
+-- Probe: put(@Int.0) into a State<Nat> cell; handler declares only a get clause,
+-- so `put` in the body takes the BARE intrinsic path (no clause inlining).
+public fn store_neg(@Int -> @Nat)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@Nat = 0) {
+    get(@Unit) -> { resume(@Nat.0) }
+  } in {
+    put(@Int.0);
+    get(())
+  }
+}
+
+public fn main(@Unit -> @Nat)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  store_neg(0 - 5)
+}

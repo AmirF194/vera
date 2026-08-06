@@ -1,0 +1,36 @@
+-- P4a: Int-cell handle nested inside a Byte-cell GET clause. The Int clause's
+-- resume(5) must stay i64; the Byte clause's resume literal path must be i32.
+-- Inner: get -> 5. Outer resume(int_to_byte(@Int.0 - 5 + 9)) = 9 iff inner==5.
+-- Expected: byte_to_int(get) = 9.
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Byte>](@Byte = 1) {
+    get(@Unit) -> {
+      let @Int = handle[State<Int>](@Int = 100) {
+        get(@Unit) -> { resume(5) },
+        put(@Int) -> { resume(()) }
+      } in {
+        get(())
+      };
+      let @Byte = match int_to_byte(@Int.0 - 5 + 9) {
+        Some(@Byte) -> @Byte.0,
+        None -> 0
+      };
+      resume(@Byte.0)
+    },
+    put(@Byte) -> { resume(()) }
+  } in {
+    byte_to_int(get(()))
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}

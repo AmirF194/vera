@@ -1,0 +1,15 @@
+public forall<T> fn f(@T -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  forall(@Int, @T.0, fn(@Int -> @Bool) effects(pure) { true })
+}
+
+public fn main(@Unit -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  f(3)
+}

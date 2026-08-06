@@ -1,0 +1,30 @@
+-- P3: closure inside a clause body capturing the clause's state slot AND a
+-- decl-scope slot. Closure scope: [decl 30, state 7] + param.
+-- @Int.0=param, @Int.1=state(7), @Int.2=decl(30).
+-- map [1,2] -> [38, 39]; resume(38+39)=77. Body distractor let 500 must not leak.
+-- Expected: 77.
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Int = 30;
+  handle[State<Int>](@Int = 7) {
+    get(@Unit) -> {
+      let @Array<Int> = array_map([1, 2], fn(@Int -> @Int) effects(pure) { @Int.0 + @Int.1 + @Int.2 });
+      resume(@Array<Int>.0[0] + @Array<Int>.0[1])
+    },
+    put(@Int) -> { resume(()) }
+  } in {
+    let @Int = 500;
+    get(())
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}

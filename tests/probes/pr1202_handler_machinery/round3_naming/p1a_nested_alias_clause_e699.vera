@@ -1,0 +1,28 @@
+-- Probe 1a: put clause pattern spelled @Option<Id<Id<Int>>> under
+-- State<Option<Int>>; body refs @Option<Int>.1 (checker: the put argument,
+-- since state binds after the pattern). If codegen binds the pattern under
+-- "Option<Id<Int>>" instead of the checker's "Option<Int>", the .1 ref
+-- dangles at compile.
+type Id<T> = T;
+
+public fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Option<Int>>](@Option<Int> = Some(5)) {
+    get(@Unit) -> { resume(@Option<Int>.0) },
+    put(@Option<Id<Id<Int>>>) -> { resume(()) } with @Option<Int> = @Option<Int>.1
+  } in {
+    put(Some(9));
+    option_unwrap_or(get(()), 0 - 1)
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}

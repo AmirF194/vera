@@ -1,0 +1,21 @@
+-- Probe 5: `resume` inside an Exn clause (focus #2: is the fallback's
+-- guarded=True truthful there?).
+public fn f(@Int -> @Nat)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[Exn<Int>] {
+    throw(@Int) -> { resume(@Int.0) }
+  } in {
+    1
+  }
+}
+
+public fn main(@Unit -> @Nat)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  f(0 - 3)
+}

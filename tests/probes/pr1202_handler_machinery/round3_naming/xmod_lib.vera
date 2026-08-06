@@ -1,0 +1,17 @@
+module xmod_lib;
+
+type Hid<T> = T;
+
+public fn tally(@Nat -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Hid<Nat>>](@Hid<Nat> = 0) {
+    get(@Unit) -> { resume(@Hid<Nat>.0) },
+    put(@Hid<Nat>) -> { resume(()) }
+  } in {
+    put(@Nat.0);
+    nat_to_int(get(()))
+  }
+}

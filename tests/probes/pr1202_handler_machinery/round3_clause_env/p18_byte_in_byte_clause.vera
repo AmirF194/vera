@@ -1,0 +1,33 @@
+-- P18: nested State<Byte> handle inside a State<Byte> GET clause (same family,
+-- so the import walker gap does not mask it). Both get clauses resume int
+-- LITERALS: the _state_clause_family save/restore must keep both at i32 and
+-- the outer tail must still see family Byte after the nested restore.
+-- Inner get -> 9; outer resume(@Byte.0) -> 9. Expected: 9.
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Byte>](@Byte = 1) {
+    get(@Unit) -> {
+      let @Byte = handle[State<Byte>](@Byte = 2) {
+        get(@Unit) -> { resume(9) },
+        put(@Byte) -> { resume(()) }
+      } in {
+        get(())
+      };
+      resume(@Byte.0)
+    },
+    put(@Byte) -> { resume(()) }
+  } in {
+    byte_to_int(get(()))
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}

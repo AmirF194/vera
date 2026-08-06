@@ -1,0 +1,8 @@
+private fn p(@Int -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  forall(@Int, (), fn(@Int -> @Bool) effects(pure) { true })
+}
+public fn main(@Unit -> @Int) requires(true) ensures(true) effects(pure) { 0 }

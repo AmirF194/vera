@@ -1,0 +1,25 @@
+-- Focus 2: a WHERE-HELPER named `put` — does the #1203 fallback misfire on it?
+private fn outer(@Int -> @Nat)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  put(@Int.0)
+}
+where {
+  fn put(@Nat -> @Nat)
+    requires(true)
+    ensures(true)
+    effects(pure)
+  {
+    @Nat.0
+  }
+}
+
+public fn main(@Unit -> @Nat)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  outer(0 - 2)
+}

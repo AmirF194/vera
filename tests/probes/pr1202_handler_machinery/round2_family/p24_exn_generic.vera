@@ -1,0 +1,14 @@
+type Id<T> = T;
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[Exn<Id<Int>>] {
+    throw(@Id<Int>) -> { 0 - @Id<Int>.0 }
+  } in {
+    throw(7);
+    1
+  }
+}

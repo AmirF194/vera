@@ -1,0 +1,14 @@
+type Count = Nat;
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Count>](@Nat = 10) {
+    put(@Count) -> { resume(()) } with @Nat = @Nat.0 * 2 + @Count.0
+  } in {
+    put(5);
+    nat_to_int(get(()))
+  }
+}

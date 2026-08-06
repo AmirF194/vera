@@ -1,0 +1,16 @@
+type IntToInt = fn(Int -> Int) effects(pure);
+
+public fn t(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @IntToInt = fn(@Int -> @Int) effects(pure) {
+    handle[State<Nat>](@Int = 0) {
+      put(@Nat) -> { resume(()) }
+    } in {
+      nat_to_int(get(())) + @Int.0
+    }
+  };
+  apply_fn(@IntToInt.0, 3)
+}

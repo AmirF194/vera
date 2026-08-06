@@ -1,0 +1,12 @@
+public fn go(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Byte>](@Byte = int_to_byte(0)) {
+    put(@Byte) -> { resume(()) }
+  } in {
+    put(int_to_byte(7));
+    byte_to_int(get(()))
+  }
+}

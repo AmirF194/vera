@@ -1,0 +1,32 @@
+-- P17: pins WHICH instantiation the checker gives a bare get(()) inside a
+-- NESTED handler's clause body. Outer = State<String>, nested = State<Nat>.
+-- If the checker types get via the OUTER (innermost enclosing at clause-check
+-- time), `let @String = get(())` is check-green and codegen (which routes to
+-- the NESTED Nat family) emits an i64 call bound as a String pair.
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<String>](@String = "hi") {
+    get(@Unit) -> { resume(@String.0) },
+    put(@String) -> { resume(()) }
+  } in {
+    let @Nat = handle[State<Nat>](@Nat = 7) {
+      get(@Unit) -> { resume(@Nat.0) },
+      put(@Nat) -> { let @String = get(()); resume(()) }
+    } in {
+      put(3);
+      get(())
+    };
+    nat_to_int(@Nat.0)
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}

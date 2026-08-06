@@ -1,0 +1,29 @@
+-- Probe 4: refined type-argument in a clause pattern. Cell Option<Pos>
+-- (refinement nested inside a composite arg). Checker binds the put pattern
+-- under "Option<{@Int | ...}>" (pretty_type predicate-elision) and any of
+-- the user's ref spellings (@Option<Pos>) resolve to the same key -> green.
+-- Codegen bind side now mirrors that key, but the ref side is syntactic
+-- ("Option<Pos>") -> no writable spelling reaches the binding.
+type Pos = { @Int | @Int.0 > 0 };
+
+public fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Option<Pos>>](@Option<Pos> = Some(5)) {
+    get(@Unit) -> { resume(@Option<Pos>.0) },
+    put(@Option<Pos>) -> { resume(()) }
+  } in {
+    put(Some(9));
+    option_unwrap_or(get(()), 0 - 1)
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}

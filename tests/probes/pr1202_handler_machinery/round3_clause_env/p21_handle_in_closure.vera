@@ -1,0 +1,27 @@
+-- P21: FULL handle inside a lifted closure body; the get clause reaches past
+-- its state binding to the CLOSURE's param (the decl scope inside the lifted
+-- fn). Expected: [3*100+10, 3*100+20] -> 310+320 = 630.
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Array<Int> = array_map([10, 20], fn(@Int -> @Int) effects(pure) {
+    handle[State<Int>](@Int = 1) {
+      get(@Unit) -> { resume(@Int.0 * 100 + @Int.1) },
+      put(@Int) -> { resume(()) }
+    } in {
+      put(3);
+      get(())
+    }
+  });
+  @Array<Int>.0[0] + @Array<Int>.0[1]
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}

@@ -1,0 +1,29 @@
+-- P6: the same put clause (with `with`) inlined at TWO call sites at different
+-- let-depths. with-expr scope: [decl 4000, param, state] -> @Int.0=state(old),
+-- @Int.1=param(new).
+-- put(2): 1*100+2=102.  put(@Int.0+4)=put(7): 102*100+7=10207.
+-- Expected: 10207.
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Int = 4000;
+  handle[State<Int>](@Int = 1) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) } with @Int = @Int.0 * 100 + @Int.1
+  } in {
+    put(2);
+    let @Int = 3;
+    put(@Int.0 + 4);
+    get(())
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}

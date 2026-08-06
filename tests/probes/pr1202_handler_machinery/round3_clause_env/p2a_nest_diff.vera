@@ -1,0 +1,38 @@
+-- P2a: FULL nested handle[State<Nat>] inside the outer State<Int> GET clause
+-- body; after it exits, the outer clause still resolves state + decl scope.
+-- Outer clause scope: [decl 7000, state]. Body let @Int = 900 must NOT leak.
+-- put(@Int.0 + 55) with @Int.0=900 -> state=955.
+-- Nested: init 3, put(21), get -> resume(21+21)=42.
+-- Expected: 42 + 955 + 7000 = 7997.
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Int = 7000;
+  handle[State<Int>](@Int = 10) {
+    get(@Unit) -> {
+      let @Nat = handle[State<Nat>](@Nat = 3) {
+        get(@Unit) -> { resume(@Nat.0 + @Nat.0) },
+        put(@Nat) -> { resume(()) }
+      } in {
+        put(21);
+        get(())
+      };
+      resume(nat_to_int(@Nat.0) + @Int.0 + @Int.1)
+    },
+    put(@Int) -> { resume(()) }
+  } in {
+    let @Int = 900;
+    put(@Int.0 + 55);
+    get(())
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}

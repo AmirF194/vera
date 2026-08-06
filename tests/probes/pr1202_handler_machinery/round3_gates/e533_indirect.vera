@@ -1,0 +1,28 @@
+private forall<T> fn sneak(@T -> @T)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<T>](@Nat = 3) {
+    put(@T) -> { resume(()) }
+  } in {
+    put(@T.0);
+    get(())
+  }
+}
+
+private forall<T> fn outer(@T -> @T)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  sneak(@T.0)
+}
+
+public fn go(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  outer(@Int.0)
+}

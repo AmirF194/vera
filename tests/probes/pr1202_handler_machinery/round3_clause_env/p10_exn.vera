@@ -1,0 +1,40 @@
+-- P10: Exn clause env. Patternless throw() binds NOTHING: @Int.0 = decl-let
+-- 800 -> 801. With-param variant: payload(7)*1000 + decl(800) = 7800.
+-- Expected: 801 * 100000 + 7800 = 80107800.
+private fn patternless(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Int = 800;
+  handle[Exn<Int>] {
+    throw() -> { @Int.0 + 1 }
+  } in {
+    let @Int = 5;
+    throw(@Int.0 + 2);
+    9999
+  }
+}
+
+private fn with_param(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Int = 800;
+  handle[Exn<Int>] {
+    throw(@Int) -> { @Int.0 * 1000 + @Int.1 }
+  } in {
+    let @Int = 5;
+    throw(@Int.0 + 2);
+    9999
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  patternless(()) * 100000 + with_param(())
+}

@@ -1,0 +1,8 @@
+public fn f(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Int = no_such_fn(@Int.0);
+  @Int.0
+}

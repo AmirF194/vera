@@ -1,0 +1,33 @@
+-- P4e: generic handler with `with @T = 201` instantiated at Byte — does the
+-- generic site skip E335 (TypeVar), making the mono clone reach codegen's
+-- byte_upd arm from check-green source?
+private forall<T> fn bump(@T -> @T)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<T>](@T = @T.0) {
+    get(@Unit) -> { resume(@T.0) },
+    put(@T) -> { resume(()) } with @T = 201
+  } in {
+    put(@T.0);
+    get(())
+  }
+}
+
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Byte = 7;
+  byte_to_int(bump(@Byte.0))
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}

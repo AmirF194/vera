@@ -1,0 +1,23 @@
+type Small = { @Nat | @Nat.0 < 10 };
+type Big = { @Nat | @Nat.0 > 3 };
+
+public fn t(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Small>](@Big = 5) {
+    put(@Small) -> { resume(()) }
+  } in {
+    put(1);
+    nat_to_int(get(()))
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  t(())
+}

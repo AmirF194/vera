@@ -1,0 +1,38 @@
+-- Exn angle: composite payload whose clause PATTERN spells an alias arg.
+-- Checker: @Option<Int>.0 in the clause = the CAUGHT PAYLOAD (pattern binds
+-- under canonical "Option<Int>", most recent). Codegen post-diff binds the
+-- payload under opaque "Option<Cnt>" -> @Option<Int>.0 = outer fn param.
+type Cnt = Int;
+
+private fn boom(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<Exn<Option<Int>>>)
+{
+  throw(Some(7))
+}
+
+public fn probe(@Option<Int> -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[Exn<Option<Int>>] {
+    throw(@Option<Cnt>) -> {
+      match @Option<Int>.0 {
+        Some(@Int) -> @Int.0,
+        None -> 0 - 1
+      }
+    }
+  } in {
+    boom(())
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(Some(100))
+}

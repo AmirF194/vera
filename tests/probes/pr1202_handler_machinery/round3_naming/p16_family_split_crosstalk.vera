@@ -1,0 +1,38 @@
+-- Probe 16: one handler, two spellings of the same resolved effect.
+-- bump_double declares effects(<State<Id<Id<Nat>>>>) (checker-resolved:
+-- State<Nat>); the handler is handle[State<Nat>]. If check accepts the
+-- composition, codegen routes bump_double's ops to the opaque
+-- "Id<Id<Nat>>" family while the handler manages the "Nat" family ->
+-- ops bypass the handler's cell silently.
+type Id<T> = T;
+
+private fn bump_double(@Nat -> @Nat)
+  requires(true)
+  ensures(true)
+  effects(<State<Id<Id<Nat>>>>)
+{
+  put(@Nat.0);
+  get(())
+}
+
+public fn probe(@Nat -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@Nat = 0) {
+    get(@Unit) -> { resume(@Nat.0) },
+    put(@Nat) -> { resume(()) }
+  } in {
+    bump_double(@Nat.0);
+    nat_to_int(get(()))
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 7)
+  effects(pure)
+{
+  probe(7)
+}

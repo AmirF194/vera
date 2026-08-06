@@ -1,0 +1,28 @@
+private fn outer(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  helper(@Int.0)
+}
+where {
+  fn helper(@Int -> @Int)
+    requires(true)
+    ensures(true)
+    effects(pure)
+  {
+    handle[State<Nat>](@Int = 0) {
+      put(@Nat) -> { resume(()) }
+    } in {
+      nat_to_int(get(()))
+    }
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  outer(5)
+}

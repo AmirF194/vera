@@ -1,0 +1,29 @@
+-- Probe 2b: State<Id<Id<Nat>>> cell, but clause bodies/annotation refs use
+-- the spelling both sides bind ("Id<Nat>": top-level syntactic + resolved
+-- args) so the ref-side split (#1208) cannot fire. Isolates the FAMILY
+-- name/WASM-type question: registration types the import from the fully
+-- recursive _type_expr_to_wasm_type (i64) while the resolve_alias_type_expr
+-- seen-set stops at the second Id, leaving the family name opaque.
+type Id<T> = T;
+
+public fn probe(@Nat -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Id<Id<Nat>>>](@Id<Id<Nat>> = 0) {
+    get(@Unit) -> { resume(@Id<Nat>.0) },
+    put(@Id<Nat>) -> { resume(()) }
+  } in {
+    put(@Nat.0);
+    nat_to_int(get(()))
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 7)
+  effects(pure)
+{
+  probe(7)
+}

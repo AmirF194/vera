@@ -1,0 +1,24 @@
+-- P15: a resume(...) smuggled into the WITH expr of a get clause (a Block
+-- statement). _clause_lowerable counts only clause.body resumes, so this is
+-- not rejected there; the checker types resume as Unit-returning (statement).
+-- What does codegen do with it?
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>](@Int = 5) {
+    get(@Unit) -> { resume(@Int.0) } with @Int = { resume(77); @Int.0 + 1 },
+    put(@Int) -> { resume(()) }
+  } in {
+    get(())
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}

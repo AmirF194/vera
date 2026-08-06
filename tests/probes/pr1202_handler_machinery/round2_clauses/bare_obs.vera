@@ -1,0 +1,9 @@
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Nat>](@Nat = 0) {
+    get(@Unit) -> { resume(@Nat.0) }
+  } in {
+    put(@Int.0);
+    if get(()) > 100 then { 77 } else { 55 }
+  }
+}

@@ -1,0 +1,59 @@
+-- D1: literal-negative at each boundary -> all four should be LOUD E503
+private fn init_neg(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@Nat = 0 - 1) {
+    get(@Unit) -> { resume(@Nat.0) }
+  } in {
+    nat_to_int(get(()))
+  }
+}
+
+private fn put_neg(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@Nat = 0) {
+    get(@Unit) -> { resume(@Nat.0) }
+  } in {
+    put(0 - 2);
+    nat_to_int(get(()))
+  }
+}
+
+private fn resume_neg(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@Nat = 0) {
+    get(@Unit) -> { resume(0 - 3) }
+  } in {
+    nat_to_int(get(()))
+  }
+}
+
+private fn upd_neg(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@Nat = 0) {
+    get(@Unit) -> { resume(@Nat.0) },
+    put(@Nat) -> { resume(()) } with @Nat = 0 - 4
+  } in {
+    put(1);
+    nat_to_int(get(()))
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  init_neg(()) + put_neg(()) + resume_neg(()) + upd_neg(())
+}

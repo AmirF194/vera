@@ -1,0 +1,35 @@
+-- P17c: pins WHICH instantiation the checker gives a bare get(()) inside a
+-- NESTED handler's clause body. Outer = State<Option<Int>> (registerable i32
+-- family), nested = State<Nat>. If the checker types get via the OUTER
+-- instantiation, `let @Option<Int> = get(())` is check-green while codegen
+-- routes the call to the NESTED Nat family (i64) — a WT clash.
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Option<Int>>](@Option<Int> = Some(9)) {
+    get(@Unit) -> { resume(@Option<Int>.0) },
+    put(@Option<Int>) -> { resume(()) }
+  } in {
+    let @Nat = handle[State<Nat>](@Nat = 7) {
+      get(@Unit) -> { resume(@Nat.0) },
+      put(@Nat) -> {
+        let @Option<Int> = get(());
+        resume(())
+      }
+    } in {
+      put(3);
+      get(())
+    };
+    nat_to_int(@Nat.0)
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}

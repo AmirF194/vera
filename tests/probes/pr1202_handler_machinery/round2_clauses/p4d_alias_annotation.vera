@@ -1,0 +1,29 @@
+-- Angle 4c: alias inside the composite ANNOTATION. E336 accepts it
+-- (resolve-equal). Checker binds state under canonical "Option<Int>";
+-- codegen state_slot_name is the opaque "Option<Cnt>". A body ref spelled
+-- @Option<Int>.0 (natural spelling, checker: the state) should miss
+-- codegen's key.
+type Cnt = Int;
+
+public fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Option<Int>>](@Option<Cnt> = Some(100)) {
+    get(@Unit) -> { resume(@Option<Int>.0) }
+  } in {
+    match get(()) {
+      Some(@Int) -> @Int.0,
+      None -> 0 - 1
+    }
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}

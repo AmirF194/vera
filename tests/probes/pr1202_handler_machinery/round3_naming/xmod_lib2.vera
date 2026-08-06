@@ -1,0 +1,10 @@
+module xmod_lib2;
+
+public fn bump(@Nat -> @Nat)
+  requires(true)
+  ensures(true)
+  effects(<State<Nat>>)
+{
+  put(@Nat.0);
+  get(())
+}

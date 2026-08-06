@@ -1,0 +1,25 @@
+-- P20: closure inside the handled body performing put -> if admitted, the
+-- clause inline inside the LIFTED function would bind decl_env locals of the
+-- WRONG function.
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Int = 5000;
+  handle[State<Int>](@Int = 1) {
+    get(@Unit) -> { resume(@Int.0 + @Int.1) },
+    put(@Int) -> { resume(()) }
+  } in {
+    let @Array<Int> = array_map([1, 2], fn(@Int -> @Int) effects(<State<Int>>) { put(@Int.0); get(()) });
+    get(())
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}

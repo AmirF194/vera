@@ -1,0 +1,35 @@
+-- P9: a bare put(1000) INSIDE the nested Nat handler's put clause body.
+-- CHECKER types it against the innermost ENCLOSING handler at the clause's
+-- declaration point = the OUTER State<Int> (its _handled_effect_insts entry;
+-- the nested State<Nat> is pushed only for the nested BODY) -> put : Int.
+-- So per checker semantics the outer Int cell becomes 1000 and the nested
+-- Nat cell keeps 3: expected result = 3 * 100000 + 1000 = 301000.
+-- If codegen routes it to the NESTED Nat family instead: nested cell becomes
+-- 1000 (get -> 1000), outer cell stays 111 -> 1000*100000 + 111 = 100000111.
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>](@Int = 111) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) }
+  } in {
+    let @Nat = handle[State<Nat>](@Nat = 7) {
+      get(@Unit) -> { resume(@Nat.0) },
+      put(@Nat) -> { put(1000); resume(()) }
+    } in {
+      put(3);
+      get(())
+    };
+    nat_to_int(@Nat.0) * 100000 + get(())
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}

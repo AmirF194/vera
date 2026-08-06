@@ -1,0 +1,7 @@
+public fn f(@Unit -> @Byte)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Byte = 999 in @Byte.0
+}

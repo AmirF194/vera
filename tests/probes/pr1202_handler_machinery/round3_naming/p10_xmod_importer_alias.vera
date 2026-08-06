@@ -1,0 +1,26 @@
+-- Probe 10 (angle 4 reverse): the IMPORTER declares the alias and handles
+-- State<Nid<Nat>> around a module fn declared with plain State<Nat>.
+import xmod_lib2;
+
+type Nid<T> = T;
+
+public fn probe(@Nat -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nid<Nat>>](@Nid<Nat> = 0) {
+    get(@Unit) -> { resume(@Nid<Nat>.0) },
+    put(@Nid<Nat>) -> { resume(()) }
+  } in {
+    nat_to_int(bump(@Nat.0))
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 7)
+  effects(pure)
+{
+  probe(7)
+}

@@ -1,0 +1,15 @@
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Nat>](@Nat = 0) {
+    get(@Unit) -> { resume(@Nat.0) },
+    put(@Nat) -> { resume(()) }
+  } in {
+    handle[State<Int>](@Int = 0) {
+      get(@Unit) -> { resume(@Int.1) },
+      put(@Int) -> { resume(()) }
+    } in {
+      put(@Int.0);
+      get(())
+    }
+  }
+}

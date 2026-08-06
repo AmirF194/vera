@@ -1,0 +1,31 @@
+-- P19: Int handler nested in the Byte handler's handled BODY (both families
+-- register). Byte get clause resumes literal 9 (i32); Int get clause resumes
+-- literal 1000 (i64). Family must switch per clause and restore to None/Byte.
+-- Expected: 9 * 10000 + 1000 = 91000.
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Byte>](@Byte = 1) {
+    get(@Unit) -> { resume(9) },
+    put(@Byte) -> { resume(()) }
+  } in {
+    put(3);
+    let @Int = handle[State<Int>](@Int = 4) {
+      get(@Unit) -> { resume(1000) },
+      put(@Int) -> { resume(()) }
+    } in {
+      get(())
+    };
+    byte_to_int(get(())) * 10000 + @Int.0
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}

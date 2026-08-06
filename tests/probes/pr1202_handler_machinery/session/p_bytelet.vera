@@ -1,0 +1,8 @@
+public fn go(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Byte = 7;
+  byte_to_int(@Byte.0)
+}

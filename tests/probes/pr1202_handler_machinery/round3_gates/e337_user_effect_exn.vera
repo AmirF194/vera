@@ -1,0 +1,11 @@
+effect Exn {
+  op boom(@Int -> @Unit)
+}
+
+public fn f(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  0
+}

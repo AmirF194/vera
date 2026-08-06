@@ -1,0 +1,23 @@
+-- P10: unrefined alias to Nat; bare-path put (no put clause); opaque arg
+type MyNat = Nat;
+
+private fn f(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<MyNat>](@MyNat = 0) {
+    get(@Unit) -> { resume(@MyNat.0) }
+  } in {
+    put(nat_to_int(get(())) - 77);
+    nat_to_int(get(()))
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  f(())
+}

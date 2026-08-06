@@ -1,0 +1,28 @@
+-- P8: refined-alias state cell; init violates the predicate at runtime,
+-- opaque to SMT (contains an outer get). Does anything trap?
+type Pos = { @Int | @Int.0 > 0 };
+
+private fn f(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<State<Int>>)
+{
+  handle[State<Pos>](@Pos = get(()) - 50) {
+    get(@Unit) -> { resume(@Pos.0) }
+  } in {
+    get(())
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>](@Int = 0) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) }
+  } in {
+    f(())
+  }
+}
