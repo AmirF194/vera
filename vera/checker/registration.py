@@ -648,6 +648,7 @@ class RegistrationMixin:
             name=decl.name,
             type_params=decl.type_params,
             resolved_type=resolved,
+            body=decl.type_expr,
         )
 
         self.env.type_params = saved_params

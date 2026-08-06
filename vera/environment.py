@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from vera import ast
 from vera.types import (
     BOOL,
     BUILTIN_TYPEVAR_MARKER,
@@ -80,6 +81,15 @@ class TypeAliasInfo:
     name: str
     type_params: tuple[str, ...] | None
     resolved_type: Type
+    # #1208: the SYNTACTIC alias body, exactly as written.  ``resolved_type``
+    # is the semantic collapse computed at registration time and cannot be
+    # walked back to the spelling, but the one naming renderer
+    # (:mod:`vera.naming`) needs the source-level body to build its
+    # ``AliasEnv`` from a live :class:`Environment` — the same map codegen
+    # already keeps in its own ``_type_aliases`` side-table.  Defaulted so the
+    # other construction sites stay valid; ``None`` means "body unavailable",
+    # and the naming env simply omits that alias.
+    body: ast.TypeExpr | None = None
 
 
 @dataclass

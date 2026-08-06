@@ -696,6 +696,7 @@ class ContractVerifier:
             name=decl.name,
             type_params=decl.type_params,
             resolved_type=resolved,
+            body=decl.type_expr,
         )
 
     def _register_ability(self, decl: ast.AbilityDecl) -> None:
