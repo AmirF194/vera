@@ -74,7 +74,7 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `ast.py` | 895 | Transform | Frozen dataclass AST nodes, source formatting | `Program`, `Node`, `Expr`, `format_expr` |
 | `types.py` | 662 | Type check | Semantic type representation | `Type`, `is_subtype()` |
 | `prelude.py` | 927 | Type check | Standard prelude — built-in ADT and combinator injection | `inject_prelude()`, `overridable_builtin_names()` |
-| `slots.py` | 162 | Type check | Slot reference table for `vera check --explain-slots` | `slot_table()`, `slot_ref_name()` |
+| `slots.py` | 203 | Type check | Slot reference table for `vera check --explain-slots` | `slot_table()`, `slot_ref_name()` |
 | `environment.py` | 2,167 | Type check | Type environment, scope stacks, ability registry, all built-in registrations | `TypeEnv`, `AbilityInfo` |
 | `checker/` | 5,948 | Type check | Two-pass type checker (mixin package) | `typecheck()` |
 | `  core.py` | 952 | | TypeChecker class, orchestration, contracts, constraint validation | |
@@ -125,7 +125,7 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `codegen/` | 15,855 | Compile | Codegen orchestrator (mixin package) | `compile()`, `execute()` |
 | `  api.py` | 1,341 | | Public API, dataclasses, `compile()`/`execute()` orchestration, core IO host bindings (#421) | |
 | `  memory.py` | 105 | | Compile-time ADT layout helpers (`ConstructorLayout`, alignment) (#421) | |
-| `  core.py` | 2,304 | | CodeGenerator class, orchestration, ability op rewriting (Pass 1.6), skip propagation to callers (#1100) | |
+| `  core.py` | 2,561 | | CodeGenerator class, orchestration, ability op rewriting (Pass 1.6), skip propagation to callers (#1100) | |
 | `  modules.py` | 1,017 | | Cross-module registration + call detection (C7e), per-module alias + source scopes (#1111/#1186) | |
 | `  registration.py` | 479 | | Pass 1 forward declarations, ADT layout | |
 | `  monomorphize.py` | 1,369 | | Generic instantiation, type inference, ability constraint checking (Pass 1.5) | |

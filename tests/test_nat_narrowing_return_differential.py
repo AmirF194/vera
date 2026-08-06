@@ -1670,6 +1670,34 @@ public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
     def test_tail_match_resume_non_negative_passes(self) -> None:
         assert _run(self._TAIL_MATCH_RESUME, "go", 9) == 9
 
+    _ALIAS_ANNOTATION = """\
+type Count = Nat;
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Nat>](@Count = @Int.0) {
+    get(@Unit) -> { resume(@Count.0) },
+    put(@Nat) -> { resume(()) }
+  } in {
+    nat_to_int(get(()))
+  }
+}
+"""
+
+    def test_alias_annotation_init_traps(self) -> None:
+        """The legal annotation-vs-argument NAME divergence (#1205/#1206):
+        `(@Count = ...)` on `State<Nat>` with `type Count = Nat` passes
+        E336 (resolution-equal) while the annotation's slot NAME differs
+        from the cell family — the init guard must key off the effect's
+        cell type, not the annotation's name.  (The truly divergent
+        `(@Int = ...)` shape this fixture previously used is now
+        check-rejected outright — see the E336 pin below.)"""
+        assert _run(self._ALIAS_ANNOTATION, "go", -5) is None
+    def test_alias_annotation_init_passes(self) -> None:
+        """And the clause scope binds the state under the ANNOTATION's own
+        slot name: `resume(@Count.0)` reads the cell through the alias."""
+        assert _run(self._ALIAS_ANNOTATION, "go", 9) == 9
+
     _DIVERGENT_ANNOTATION = """\
 public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
 {
@@ -1682,11 +1710,243 @@ public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
 }
 """
 
-    def test_divergent_annotation_init_traps(self) -> None:
-        """A `with` annotation diverging from the effect's `State<T>`
-        (`(@Int = ...)` on `State<Nat>`, #1206) must not bypass the init
-        guard — both the verifier obligation and the codegen guard key
-        off the effect's cell type."""
-        assert _run(self._DIVERGENT_ANNOTATION, "go", -5) is None
-    def test_divergent_annotation_init_passes(self) -> None:
-        assert _run(self._DIVERGENT_ANNOTATION, "go", 9) == 9
+    def test_divergent_annotation_rejected_e336(self) -> None:
+        """The lying-annotation shape (`(@Int = ...)` on `State<Nat>`) is
+        now unreachable from checked source: E336 (#1206).  This is what
+        retired the runtime differential this fixture used to drive — the
+        guards-key-off-the-cell-type property lives on in the legal alias
+        shape above, and the full E336 accept/reject matrix lives in
+        tests/test_checker_types.py."""
+        diags, _arts = typecheck_with_artifacts(
+            parse_to_ast(self._DIVERGENT_ANNOTATION))
+        assert any(d.error_code == "E336" for d in diags)
+
+
+class TestScalarAliasFamilyDifferential1205:
+    """#1205 compile-and-run differentials: a scalar type alias as
+    ``State<T>`` / ``Exn<E>`` joins the BASE import/tag family (name and
+    WASM type resolve together), the clause scope binds slots under
+    SOURCE names, and every #1203 boundary guard keys through the alias.
+    Each fixture was invalid WASM (i32/i64 type mismatch), a dangling
+    slot ref (E699), or a silent wrong-binding before the fix."""
+
+    _ALIAS_CELL = """\
+type Count = Nat;
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Count>](@Count = 0) {
+    get(@Unit) -> { resume(@Count.0) },
+    put(@Count) -> { resume(()) }
+  } in {
+    nat_to_int(get(()))
+  }
+}
+"""
+
+    def test_alias_cell_compiles_and_runs(self) -> None:
+        """`State<Count>` with `type Count = Nat` — the issue repro —
+        was invalid WASM (family typed i32 against i64 values)."""
+        assert _run(self._ALIAS_CELL, "go", 0) == 0
+
+    _REFINED_ALIAS_CELL = """\
+type Pos = { @Int | @Int.0 > 0 };
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Pos>](@Pos = 1) {
+    get(@Unit) -> { resume(@Pos.0) },
+    put(@Pos) -> { resume(()) }
+  } in {
+    get(())
+  }
+}
+"""
+
+    def test_refined_alias_cell_compiles_and_runs(self) -> None:
+        """A refined alias erases to its base scalar family (`Pos` →
+        `Int`)."""
+        assert _run(self._REFINED_ALIAS_CELL, "go", 0) == 1
+
+    _ALIAS_INIT_GUARD = """\
+type Count = Nat;
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Count>](@Count = @Int.0) {
+    get(@Unit) -> { resume(@Count.0) },
+    put(@Count) -> { resume(()) }
+  } in {
+    nat_to_int(get(()))
+  }
+}
+"""
+
+    def test_alias_init_guard_traps(self) -> None:
+        """The #1203 init guard keys through the alias: a negative @Int
+        into the `Count`(=Nat) cell traps."""
+        assert _run(self._ALIAS_INIT_GUARD, "go", -5) is None
+    def test_alias_init_guard_passes(self) -> None:
+        assert _run(self._ALIAS_INIT_GUARD, "go", 9) == 9
+
+    _ALIAS_PUT_GUARD = """\
+type Count = Nat;
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Count>](@Count = 0) {
+    get(@Unit) -> { resume(@Count.0) },
+    put(@Count) -> { resume(()) }
+  } in {
+    put(@Int.0);
+    nat_to_int(get(()))
+  }
+}
+"""
+
+    def test_alias_put_guard_traps(self) -> None:
+        """put's argument boundary through the alias: a negative @Int
+        into the `Count`(=Nat) cell traps at the clause-inlined store."""
+        assert _run(self._ALIAS_PUT_GUARD, "go", -5) is None
+    def test_alias_put_guard_passes(self) -> None:
+        assert _run(self._ALIAS_PUT_GUARD, "go", 9) == 9
+
+    _ALIAS_WIDEN_INIT = """\
+type Whole = Int;
+
+public fn go(@Nat -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Whole>](@Whole = @Nat.0) {
+    get(@Unit) -> { resume(@Whole.0) }
+  } in {
+    get(())
+  }
+}
+"""
+
+    def test_alias_widen_init_u64max_traps(self) -> None:
+        """The widen dual through an Int alias: a @Nat above i64.MAX
+        into the `Whole`(=Int) cell traps."""
+        assert _run(self._ALIAS_WIDEN_INIT, "go", U64_MAX) is None
+    def test_alias_widen_init_in_range_passes(self) -> None:
+        assert _run(self._ALIAS_WIDEN_INIT, "go", 42) == 42
+
+    _STATELESS_CLAUSE_ARG = """\
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Int>] {
+    put(@Int) -> { assert(@Int.0 == 7); resume(()) }
+  } in {
+    put(7);
+    get(())
+  }
+}
+"""
+
+    def test_stateless_clause_binds_op_arg(self) -> None:
+        """A STATELESS handler's clause scope has no state binding — the
+        checker binds `@Int.0` to put's ARGUMENT.  Pre-fix codegen
+        pushed the pre-store cell capture anyway, so the assert read the
+        cell (0), not the argument (7): silently wrong values wherever
+        the types align, this trap where the assert caught it."""
+        assert _run(self._STATELESS_CLAUSE_ARG, "go", 0) == 7
+
+    _STATELESS_CLAUSE_ARG_NEG = """\
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Int>] {
+    put(@Int) -> { assert(@Int.0 == 0); resume(()) }
+  } in {
+    put(7);
+    get(())
+  }
+}
+"""
+
+    _PUT_PATTERN_NAME = """\
+type Count = Nat;
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Nat>](@Nat = 0) {
+    get(@Unit) -> { resume(@Nat.0) },
+    put(@Count) -> { assert(@Count.0 == 7); resume(()) }
+  } in {
+    put(7);
+    nat_to_int(get(()))
+  }
+}
+"""
+
+    def test_put_param_binds_under_pattern_name(self) -> None:
+        """A put clause whose PATTERN names an alias of the argument type
+        (`put(@Count)` on `State<Nat>`) binds the argument under the
+        pattern's own slot name — `@Count.0` is the argument in the
+        clause body (the state binds under the annotation's `@Nat`), and
+        codegen must push under the same name or the ref dangles."""
+        assert _run(self._PUT_PATTERN_NAME, "go", 0) == 7
+
+    def test_stateless_clause_arg_not_cell(self) -> None:
+        """The mirror pin: asserting the CELL's pre-store value (0) —
+        what the pre-fix skew read — must now trap, proving `@Int.0`
+        reaches the argument and not the capture."""
+        assert _run(self._STATELESS_CLAUSE_ARG_NEG, "go", 0) is None
+
+    _EXN_ALIAS = """\
+type Code = Int;
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[Exn<Code>] {
+    throw(@Code) -> { 0 - @Code.0 }
+  } in {
+    throw(42)
+  }
+}
+"""
+
+    def test_exn_alias_compiles_and_runs(self) -> None:
+        """`Exn<Code>` with `type Code = Int` — the Exn twin of the
+        State family split (tag typed i64, catch local i32) — and the
+        caught payload binds under the clause pattern's own name."""
+        assert _run(self._EXN_ALIAS, "go", 0) == -42
+
+    _EXN_PATTERN_NAME = """\
+type Code = Int;
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[Exn<Code>] {
+    throw(@Int) -> { 0 - @Int.0 }
+  } in {
+    throw(42)
+  }
+}
+"""
+
+    def test_exn_caught_binds_under_pattern_name(self) -> None:
+        """A clause pattern naming the RESOLVED base (`throw(@Int)` on
+        `Exn<Code>`) binds the caught payload under the PATTERN's own
+        slot name — `@Int.0` is the payload, `@Int.1` the enclosing
+        function's parameter (checker binding order), and codegen must
+        agree or the ref lands one slot off."""
+        assert _run(self._EXN_PATTERN_NAME, "go", 0) == -42
+
+    _OLD_ALIAS = """\
+type Count = Nat;
+
+public fn bump(@Nat -> @Int)
+  requires(true)
+  ensures(new(State<Count>) >= old(State<Count>))
+  effects(<State<Count>>)
+{
+  put(get(()) + @Nat.0);
+  nat_to_int(get(()))
+}
+"""
+
+    def test_old_state_alias_snapshot(self) -> None:
+        """`old(State<Count>)` snapshots (and the postcondition compares)
+        through the collapsed family — the comparison previously typed
+        its operands off the unresolved name (i32) against i64 reads."""
+        assert _run(self._OLD_ALIAS, "bump", 5) == 5

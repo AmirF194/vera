@@ -757,6 +757,7 @@ ERROR_CODES: dict[str, str] = {
     "E333": "Handler with-state but no state declaration",
     "E334": "State update type name mismatch",
     "E335": "State update expression type mismatch",
+    "E336": "Handler state diverges from the State<T> cell type",
     # E5xx — Verification
     "E500": "Postcondition verified false",
     "E501": "Call-site precondition violation",

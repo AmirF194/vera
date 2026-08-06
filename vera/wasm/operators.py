@@ -1770,6 +1770,10 @@ class OperatorsMixin:
         if type_name is None:
             raise CodegenInvariantError(  # pragma: no cover
                 "old(State<T>) effect ref has no extractable type name", expr)
+        # #1205: the snapshot map is keyed by the scalar-collapsed family
+        # (see `_collect_old_types`) — `old[State<Count>](...)` reads the
+        # `Nat` family's snapshot.
+        type_name = self._resolve_scalar_alias_name(type_name)
         local_idx = self.get_old_state_local(type_name)
         if local_idx is None:
             raise CodegenInvariantError(  # pragma: no cover

@@ -190,7 +190,12 @@ class FunctionCompilationMixin:
                         and eff.type_args and len(eff.type_args) == 1):
                     type_name = self._type_expr_to_slot_name(eff.type_args[0])
                     if type_name:
-                        mangled = mangle_type_name(type_name)
+                        # #1205: the import NAME keys on the scalar-collapsed
+                        # family (matching `_check_state_type` registration);
+                        # the Vera-name mirror below stays the SOURCE name —
+                        # it answers type questions, not naming ones.
+                        mangled = mangle_type_name(
+                            self._resolve_scalar_alias_name(type_name))
                         # Only map if no user-defined function shadows the op
                         if "get" not in self._fn_sigs:
                             effect_ops["get"] = (
@@ -215,8 +220,12 @@ class FunctionCompilationMixin:
                         and eff.type_args and len(eff.type_args) == 1):
                     type_name = self._type_expr_to_slot_name(eff.type_args[0])
                     if type_name and "throw" not in self._fn_sigs:
+                        # #1205: tag family name collapses like the State
+                        # import family (matching `_check_exn_type`).
                         effect_ops["throw"] = (
-                            f"$exn_{mangle_type_name(type_name)}", False
+                            f"$exn_"
+                            f"{mangle_type_name(self._resolve_scalar_alias_name(type_name))}",
+                            False,
                         )
 
         # Flatten ADT layouts into ctor_name -> layout for WasmContext

@@ -13,7 +13,7 @@ from vera.monomorphize import (
     resolve_fn_type_alias,
     substitute_type_vars,
 )
-from vera.slots import type_expr_slot_name
+from vera.slots import resolve_scalar_alias_name, type_expr_slot_name
 from vera.wasm.helpers import _element_wasm_type
 
 # `substitute_type_vars` was relocated to `vera.monomorphize` (the codegen-free
@@ -251,6 +251,11 @@ class InferenceMixin:
         # the shared canonical-slot-name → WASM map so the `==` picks i32.
         if isinstance(expr, (ast.OldExpr, ast.NewExpr)):
             name = self._extract_state_type_name(expr.effect_ref)
+            # #1205: scalar-collapse before the WT map — `old(State<Count>)`
+            # over `type Count = Nat` is an i64 read, not the unknown-name
+            # i32 default.
+            if name:
+                name = self._resolve_scalar_alias_name(name)
             return self._type_name_to_wasm(name) if name else None
         return None
 
@@ -2179,6 +2184,16 @@ class InferenceMixin:
         qualified and distinguishable (#914 finding 2).
         """
         return type_expr_slot_name(te)
+
+    def _resolve_scalar_alias_name(self, name: str) -> str:
+        """Scalar-gated alias collapse for host-import/tag FAMILY names
+        (#1205) — delegates to :func:`vera.slots.resolve_scalar_alias_name`
+        over this module set's alias table.  Distinct from
+        :py:meth:`_resolve_base_type_name`, which resolves
+        unconditionally (for TYPE questions); this resolves only when the
+        chain lands on a scalar (for NAMING questions, where composite
+        names must stay opaque per the #914 full-name invariant)."""
+        return resolve_scalar_alias_name(name, self._type_aliases)
 
     def _resolve_base_type_name(
         self,

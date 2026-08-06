@@ -778,7 +778,11 @@ class ContractsMixin:
                 expr.effect_ref,
             )
             if type_name is not None:
-                types.add(type_name)
+                # #1205: key the snapshot set by the scalar-collapsed
+                # family — matches `_state_types` registration and the
+                # `_translate_old_expr` read, so `old[State<Count>]`
+                # snapshots (and finds) the `Nat` family.
+                types.add(self._resolve_scalar_alias_name(type_name))
             return
         # Walk child expressions
         for child in self._expr_children(expr):

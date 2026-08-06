@@ -1415,12 +1415,36 @@ class CallsHandlersMixin:
             raise CodegenSkip(
                 expr, "State<T> type argument has no slot name"
             )
-        mangled = mangle_type_name(type_name)
+        # #1205: `type_name` serves two ROLES that a scalar alias splits
+        # apart.  The import FAMILY (names + WASM types) keys on the
+        # scalar-collapsed name, matching `_check_state_type` registration
+        # — `State<Count>` with `type Count = Nat` joins the `state_*_Nat`
+        # family every host already binds, instead of minting a
+        # `state_*_Count` family whose derived WT (i32, the unknown-name
+        # default) contradicts its registered i64.  SLOT names stay
+        # source-level: the checker binds clause slots under the pattern's
+        # and the `with` annotation's own names (aliases opaque), so the
+        # clause envs below use those, not the family.
+        family = self._resolve_scalar_alias_name(type_name)
+        mangled = mangle_type_name(family)
 
         put_import = f"$vera.state_put_{mangled}"
         get_import = f"$vera.state_get_{mangled}"
         push_import = f"$vera.state_push_{mangled}"
         pop_import = f"$vera.state_pop_{mangled}"
+
+        # The clause-scope STATE slot name — the `with` ANNOTATION's own
+        # slot name, mirroring the checker's binding (control.py binds
+        # handler state under `_type_expr_to_slot_name(state.type_expr)`).
+        # None for a stateless handler: the checker binds NO state slot
+        # then, and the clause translation must not either (pre-fix it
+        # pushed the capture unconditionally, skewing a stateless put
+        # clause's `@T.0` from the checker's binding — the op argument —
+        # to the pre-store cell value).
+        state_slot_name: str | None = None
+        if expr.state is not None:
+            state_slot_name = self._type_expr_to_slot_name(
+                expr.state.type_expr)
 
         instructions: list[str] = []
 
@@ -1473,7 +1497,7 @@ class CallsHandlersMixin:
         saved_clause_ops = dict(self._state_clause_ops)
         self._effect_ops["get"] = (get_import, False)
         self._effect_ops["put"] = (put_import, True)
-        self._effect_op_result_wt["get"] = self._type_name_to_wasm(type_name)
+        self._effect_op_result_wt["get"] = self._type_name_to_wasm(family)
         # #1006: the VERA-name mirror of the WT record above —
         # `_infer_vera_type` needs the Vera name (not the layout-ambiguous
         # WAT type) to type a `get(())` array-literal element.
@@ -1489,7 +1513,7 @@ class CallsHandlersMixin:
         self._state_clause_ops = {}
         for clause in expr.clauses:
             self._state_clause_ops[clause.op_name] = (
-                clause, type_name, get_import, put_import,
+                clause, type_name, state_slot_name, get_import, put_import,
             )
 
         # 4. Compile handler body
@@ -1544,7 +1568,7 @@ class CallsHandlersMixin:
         binding — a body referencing it fails slot resolution loudly rather
         than resolving to something wrong.
         """
-        clause, type_name, get_import, put_import = (
+        clause, type_name, state_slot_name, get_import, put_import = (
             self._state_clause_ops[call.name]
         )
         if not self._clause_lowerable(clause.body):
@@ -1556,7 +1580,10 @@ class CallsHandlersMixin:
                 "branch inside the argument instead: "
                 "resume(if c then a else b)",
             )
-        state_wt = self._type_name_to_wasm(type_name)
+        # #1205: WASM type and pointer-ness derive from the scalar-collapsed
+        # FAMILY name (matching the import decls), never the source alias.
+        family = self._resolve_scalar_alias_name(type_name)
+        state_wt = self._type_name_to_wasm(family)
         # Composite state is a heap pointer (i32, excluding the non-pointer
         # i32 scalars) — root the capture/argument locals on the GC shadow
         # stack so an allocating clause body (or `with` expr) cannot free or
@@ -1567,17 +1594,14 @@ class CallsHandlersMixin:
         # reclaimed by the function's epilogue $gc_sp restore.
         state_is_ptr = (
             state_wt == "i32"
-            and type_name not in ("Bool", "Byte")
-            and not _is_host_handle_type(type_name)
+            and family not in ("Bool", "Byte")
+            and not _is_host_handle_type(family)
         )
-        if state_is_ptr:
-            # Force the enclosing function's GC prologue/epilogue so the
-            # pushes below are reclaimed at exit (same pattern as the
-            # host-produced effect-op push in context.py).
-            self.needs_alloc = True
         instructions: list[str] = []
 
-        # put's argument — the clause's @T.1 (op params bind first).
+        # put's argument — the op param, bound under the clause PATTERN's
+        # own slot name (the checker binds `put(@Count)`'s argument as
+        # `@Count`, whatever the effect's argument was named).
         arg_local: int | None = None
         if call.name == "put":
             arg_instrs = self.translate_expr(call.args[0], env)
@@ -1595,14 +1619,24 @@ class CallsHandlersMixin:
             instructions.extend(arg_instrs)
             instructions.append(f"local.set {arg_local}")
             if state_is_ptr:
+                self.needs_alloc = True
                 instructions.extend(gc_shadow_push(arg_local))
 
-        # Capture the PRE-store state — the clause's @T.0 (bound last).
-        state_local = self.alloc_local(state_wt)
-        instructions.append(f"call {get_import}")
-        instructions.append(f"local.set {state_local}")
-        if state_is_ptr:
-            instructions.extend(gc_shadow_push(state_local))
+        # Capture the PRE-store state — the clause's LAST-bound slot — but
+        # ONLY when the handler declares state: a stateless handler's
+        # clause scope has no state binding at all in the checker, so
+        # capturing here skewed every clause slot index by one (`@T.0` in a
+        # stateless put clause meant the OP ARGUMENT to the checker but
+        # resolved to the pre-store cell value — silently wrong values
+        # where the types align, a trap where a guard caught it).
+        state_local: int | None = None
+        if state_slot_name is not None:
+            state_local = self.alloc_local(state_wt)
+            instructions.append(f"call {get_import}")
+            instructions.append(f"local.set {state_local}")
+            if state_is_ptr:
+                self.needs_alloc = True
+                instructions.extend(gc_shadow_push(state_local))
 
         # Intrinsic store: put stores its argument regardless of the clause.
         if call.name == "put":
@@ -1611,8 +1645,13 @@ class CallsHandlersMixin:
 
         clause_env = env
         if arg_local is not None:
-            clause_env = clause_env.push(type_name, arg_local)
-        clause_env = clause_env.push(type_name, state_local)
+            param_slot = (
+                self._type_expr_to_slot_name(clause.params[0])
+                if clause.params else None
+            )
+            clause_env = clause_env.push(param_slot or type_name, arg_local)
+        if state_slot_name is not None and state_local is not None:
+            clause_env = clause_env.push(state_slot_name, state_local)
 
         saved_in_clause = self._in_state_clause
         saved_clause_ops = self._state_clause_ops
@@ -1779,8 +1818,15 @@ class CallsHandlersMixin:
             raise CodegenSkip(
                 expr, "Exn<E> type argument has no slot name"
             )
-        tag_name = f"$exn_{mangle_type_name(type_name)}"
-        is_pair = self._is_pair_type_name(type_name)
+        # #1205: tag family, pair-ness, and payload WT derive from the
+        # scalar-collapsed family (matching `_check_exn_type` registration)
+        # — `Exn<Code>` with `type Code = Int` otherwise binds an i32
+        # payload local against the i64-tagged throw.  The caught-value
+        # SLOT binding below stays source-level (the checker binds the
+        # clause pattern's own name).
+        family = self._resolve_scalar_alias_name(type_name)
+        tag_name = f"$exn_{mangle_type_name(family)}"
+        is_pair = self._is_pair_type_name(family)
 
         # Unique label ids for nested handlers
         hid = self._next_handle_id
@@ -1834,11 +1880,18 @@ class CallsHandlersMixin:
             thrown_local = self.alloc_local("i32")  # ptr
             _len_local = self.alloc_local("i32")    # len (consecutive: thrown_local + 1)
         else:
-            thrown_wt = self._type_name_to_wasm(type_name)
+            thrown_wt = self._type_name_to_wasm(family)
             thrown_local = self.alloc_local(thrown_wt)
 
-        # Push caught value into slot env for handler body
-        handler_env = env.push(type_name, thrown_local)
+        # Push caught value into slot env for handler body, under the
+        # clause PATTERN's own slot name (the checker binds
+        # `throw(@Code)`'s payload as `@Code` whatever `E` was named);
+        # fall back to the effect-argument name for a patternless clause.
+        caught_slot = (
+            self._type_expr_to_slot_name(clause.params[0])
+            if clause.params else None
+        )
+        handler_env = env.push(caught_slot or type_name, thrown_local)
         handler_instrs = self.translate_expr(clause.body, handler_env)
         if handler_instrs is None:
             return None  # pragma: no cover

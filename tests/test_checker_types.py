@@ -3162,3 +3162,190 @@ private fn f(@Float64 -> @Bool)
 { forall(@Int, @Float64.0, fn(@Int -> @Bool) effects(pure) { true }) }
 """, "bound must be an integer")
         assert any(e.error_code == "E128" for e in errs)
+
+
+class TestHandlerStateCellType1206:
+    """#1206: for the builtin State effect the handler state declaration
+    IS the ``State<T>`` cell — a declared type that does not
+    structurally equal the resolved cell type is a loud E336 (the
+    annotation is documentation that could otherwise lie: obligations
+    and codegen guards key off T, #1203).  Equality is ``types_equal``
+    on RESOLVED types — ``is_subtype`` is deliberately the wrong tool
+    here (``Int <: Nat`` holds both ways by rule 3b, and refinements
+    erase to their bases by rules 5-7)."""
+
+    def test_int_annotation_on_nat_cell_rejected(self) -> None:
+        """The #1206 repro: `(@Int = ...)` on `State<Nat>`."""
+        errs = _check_err("""
+private fn t(@Int -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@Int = 0) {
+    put(@Nat) -> { resume(()) }
+  } in {
+    get(()) < 0
+  }
+}
+""", "cell type is State<Nat>")
+        assert any(e.error_code == "E336" for e in errs)
+
+    def test_nat_annotation_on_int_cell_rejected(self) -> None:
+        """The narrowing direction diverges too — Int cells hold
+        negatives the @Nat annotation denies."""
+        errs = _check_err("""
+private fn t(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>](@Nat = 0) {
+    put(@Int) -> { resume(()) }
+  } in {
+    get(())
+  }
+}
+""", "cell type is State<Int>")
+        assert any(e.error_code == "E336" for e in errs)
+
+    def test_refined_annotation_on_plain_cell_rejected(self) -> None:
+        """A refinement-decorated annotation over the right base is the
+        canonical lie: it claims a predicate no obligation or guard
+        enforces at the handler boundaries."""
+        errs = _check_err("""
+private fn t(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@{ @Nat | @Nat.0 < 10 } = 0) {
+    put(@Nat) -> { resume(()) }
+  } in {
+    nat_to_int(get(()))
+  }
+}
+""", "cell type is State<Nat>")
+        assert any(e.error_code == "E336" for e in errs)
+
+    def test_plain_annotation_on_refined_cell_rejected(self) -> None:
+        errs = _check_err("""
+private fn t(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<{ @Nat | @Nat.0 < 10 }>](@Nat = 0) {
+    put(@Nat) -> { resume(()) }
+  } in {
+    nat_to_int(get(()))
+  }
+}
+""", "Handler state is declared")
+        assert any(e.error_code == "E336" for e in errs)
+
+    def test_alias_annotation_accepted(self) -> None:
+        """An alias that RESOLVES to the cell type is not a divergence
+        (`@Count` on `State<Nat>` with `type Count = Nat`)."""
+        _check_ok("""
+type Count = Nat;
+
+private fn t(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@Count = 0) {
+    put(@Nat) -> { resume(()) }
+  } in {
+    nat_to_int(get(()))
+  }
+}
+""")
+
+    def test_alias_cell_plain_annotation_accepted(self) -> None:
+        """The mirror: `@Nat` on `State<Count>`."""
+        _check_ok("""
+type Count = Nat;
+
+private fn t(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Count>](@Nat = 0) {
+    put(@Count) -> { resume(()) }
+  } in {
+    nat_to_int(get(()))
+  }
+}
+""")
+
+    def test_refined_alias_both_sides_accepted(self) -> None:
+        """A refined alias used for BOTH the cell and the annotation
+        resolves to the same refined type — equal, accepted (the
+        refinement lives in the State<T> argument, where #1203's
+        obligations disclose it honestly)."""
+        _check_ok("""
+type Pos = { @Int | @Int.0 > 0 };
+
+private fn t(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Pos>](@Pos = 1) {
+    put(@Pos) -> { resume(()) }
+  } in {
+    get(())
+  }
+}
+""")
+
+    def test_generic_cell_defers_to_instantiation(self) -> None:
+        """`handle[State<T>](@T = ...)` inside a forall body must not
+        die at the generic site — TypeVar on either side defers (the
+        E128 lesson)."""
+        _check_ok("""
+private forall<T> fn wrap(@T -> @T)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<T>](@T = @T.0) {
+    put(@T) -> { resume(()) }
+  } in {
+    get(())
+  }
+}
+
+private fn use(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  wrap(41) + 1
+}
+""")
+
+    def test_user_effect_state_stays_free(self) -> None:
+        """The check scopes to the BUILTIN State effect only — a user
+        effect's handler state is the handler's own accumulator and may
+        take any type."""
+        _check_ok("""
+effect Tick {
+  op tick(Unit -> Unit);
+}
+
+private fn t(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[Tick](@Int = 0 - 5) {
+    tick(@Unit) -> { resume(()) }
+  } in {
+    7
+  }
+}
+""")

@@ -138,7 +138,7 @@ class WasmContext(
         # keep the bare host-cell call.  Saved/restored around each handler
         # body exactly like ``_effect_ops`` (nested handlers).
         self._state_clause_ops: dict[
-            str, tuple[ast.HandlerClause, str, str, str]
+            str, tuple[ast.HandlerClause, str, str | None, str, str]
         ] = {}
         # True while translating an inlined State clause body/`with` expr —
         # gates the ``resume(v)`` lowering (v IS the op's result value).

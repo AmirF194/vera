@@ -138,6 +138,12 @@ class CompilabilityMixin:
             )
             return False
         type_name = self._type_expr_to_slot_name(type_arg)
+        # #1205: collapse scalar aliases into the base import family —
+        # `wt` above is derived from the RESOLVED type, so registering
+        # the unresolved name split the family (`state_put_Count` typed
+        # i64) from the name the per-function lowering derives.
+        if type_name:
+            type_name = self._resolve_scalar_alias_name(type_name)
         if type_name and (type_name, wt) not in self._state_types:
             self._state_types.append((type_name, wt))
         return True
@@ -173,6 +179,12 @@ class CompilabilityMixin:
         # i32_pair (String, Array<T>) → WASM exception tag uses two i32 params
         wasm_tag_t = "i32 i32" if wt == "i32_pair" else wt
         type_name = self._type_expr_to_slot_name(type_arg)
+        # #1205: scalar aliases join the base tag family (see
+        # `_check_state_type`) — `Exn<Code>` with `type Code = Int`
+        # otherwise declares an i64 tag the i32-typed catch sites of the
+        # unresolved-name derivation cannot match.
+        if type_name:
+            type_name = self._resolve_scalar_alias_name(type_name)
         if type_name and (type_name, wasm_tag_t) not in self._exn_types:
             self._exn_types.append((type_name, wasm_tag_t))
         return True
@@ -422,6 +434,12 @@ class CompilabilityMixin:
                         wt = self._type_expr_to_wasm_type(type_arg)
                         if wt and wt not in ("unsupported", "i32_pair"):
                             type_name = self._type_expr_to_slot_name(type_arg)
+                            # #1205: same scalar-alias collapse as
+                            # `_check_state_type` — the two registration
+                            # paths must key one family.
+                            if type_name:
+                                type_name = self._resolve_scalar_alias_name(
+                                    type_name)
                             if type_name and (type_name, wt) not in self._state_types:
                                 self._state_types.append((type_name, wt))
                 elif node.effect.name == "Exn":
@@ -431,6 +449,10 @@ class CompilabilityMixin:
                         if wt and wt != "unsupported":
                             wasm_tag_t = "i32 i32" if wt == "i32_pair" else wt
                             type_name = self._type_expr_to_slot_name(type_arg)
+                            # #1205: same collapse as `_check_exn_type`.
+                            if type_name:
+                                type_name = self._resolve_scalar_alias_name(
+                                    type_name)
                             if type_name and (type_name, wasm_tag_t) not in self._exn_types:
                                 self._exn_types.append((type_name, wasm_tag_t))
             self._scan_expr_for_handlers(node.body)

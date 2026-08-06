@@ -60,6 +60,47 @@ def type_expr_slot_name(te: ast.TypeExpr) -> str | None:
     return None
 
 
+_SCALAR_BASE_NAMES = frozenset({"Int", "Nat", "Float64", "Bool", "Byte"})
+
+
+def resolve_scalar_alias_name(
+    name: str, aliases: dict[str, ast.TypeExpr],
+) -> str:
+    """Collapse a type-alias name to its base name IFF the alias chain
+    lands on a scalar primitive; otherwise return *name* unchanged.
+
+    The single resolution rule for the ``State<T>``/``Exn<E>`` host-import
+    and tag FAMILIES (#1205): the family's WASM type is derived from the
+    RESOLVED type (``_type_expr_to_wasm_type`` canonicalizes), so the
+    family NAME must resolve identically or a scalar alias splits into a
+    name keyed one way and a WASM type keyed the other — the emitted
+    ``state_put_Count`` family carried i64 values into i32-typed uses.
+    Collapsing means a scalar alias NEVER mints a new import name: it
+    joins the base family (``state_put_Nat``) that every host binding
+    (wasmtime, api.py, runtime.mjs) already provides — no #808-class
+    import-surface fan-in.  Composite names stay opaque on purpose: their
+    WASM type is uniformly i32 (pointer), so name and type cannot diverge,
+    and collapsing them WOULD change the import surface (#914 full-name
+    invariant).
+
+    Alias chains follow ``NamedType`` links and refinement erasure
+    (``type Pos = { @Int | ... }`` → ``Int``), with a seen-set cycle
+    guard mirroring ``_resolve_base_type_name`` (cyclic aliases are an
+    upstream E132; the guard is defence-in-depth).
+    """
+    seen: set[str] = set()
+    cur = name
+    while cur in aliases and cur not in seen:
+        seen.add(cur)
+        te = aliases[cur]
+        if isinstance(te, ast.RefinementType):
+            te = te.base_type
+        if not isinstance(te, ast.NamedType) or te.type_args:
+            return name
+        cur = te.name
+    return cur if cur in _SCALAR_BASE_NAMES else name
+
+
 def slot_ref_name(ref: ast.SlotRef) -> str | None:
     """Canonical lookup name for a ``@T.n`` slot reference, or ``None``.
 

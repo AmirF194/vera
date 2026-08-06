@@ -884,3 +884,65 @@ public fn go(@Int -> @Int)
             f"tier3_unguarded, got "
             f"{[(o.kind, o.status) for o in result.obligations]}"
         )
+
+
+class TestScalarAliasObligationParity1205:
+    """#1205 obligation↔guard parity: the checker resolves aliases when
+    typing the handler cell (`_handler_cell_type` → `_resolve_type`), so
+    every #1203 obligation fires through a scalar alias exactly as its
+    codegen guard does — the fix collapsed the GUARD side's family
+    naming, and these pin that neither side drifted."""
+
+    _ALIAS_INIT = """
+type Count = Nat;
+
+public fn go(@Int -> @Int)
+  requires({requires})
+  ensures(true)
+  effects(pure)
+{{
+  handle[State<Count>](@Count = @Int.0) {{
+    get(@Unit) -> {{ resume(@Count.0) }},
+    put(@Count) -> {{ resume(()) }}
+  }} in {{
+    nat_to_int(get(()))
+  }}
+}}
+"""
+
+    def test_alias_init_narrowing_is_loud(self) -> None:
+        """`(@Count = @Int.0)` on `State<Count>` — the cell resolves to
+        @Nat, so the unconstrained refutable narrowing is the same loud
+        E503 as the unaliased fixture's."""
+        errs = _verify_err(self._ALIAS_INIT.format(requires="true"),
+                           "handler state init")
+        assert any(e.error_code == "E503" for e in errs)
+
+    def test_alias_init_narrowing_proves_from_requires(self) -> None:
+        """And the Tier-1 twin discharges through the alias."""
+        obls = _obligations_of(
+            self._ALIAS_INIT.format(requires="@Int.0 >= 0"), "nat_bind")
+        assert len(obls) == 1
+        assert obls[0].status == "verified"
+
+    def test_alias_put_argument_is_loud(self) -> None:
+        """`put(@Int.0)` into the aliased @Nat cell — the State-op
+        argument obligation resolves the alias too."""
+        errs = _verify_err("""
+type Count = Nat;
+
+public fn go(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Count>](@Count = 0) {
+    get(@Unit) -> { resume(@Count.0) },
+    put(@Count) -> { resume(()) }
+  } in {
+    put(@Int.0);
+    nat_to_int(get(()))
+  }
+}
+""", "State-op argument")
+        assert any(e.error_code == "E503" for e in errs)

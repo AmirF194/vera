@@ -449,6 +449,52 @@ class ControlFlowMixin:
                         error_code="E331",
                     )
 
+            # #1206: for the builtin State effect the declared state IS the
+            # State<T> cell — obligations and codegen guards key off T
+            # (#1203), so a divergent declared type is documentation that
+            # lies about what the cell holds.  Structural equality of the
+            # RESOLVED types is the test (`is_subtype` is deliberately
+            # blind here: Int <: Nat both ways by rule 3b, and refinements
+            # erase to their bases by rules 5–7): aliases of T are equal
+            # after resolution and stay accepted; Int-for-Nat and
+            # refinement-decorated declarations are rejected.  TypeVar
+            # anywhere on either side defers to instantiation (the E128
+            # lesson: a generic shape whose instantiations are fine must
+            # not die at the generic site).
+            if (effect_inst.name == "State"
+                    and isinstance(expr.effect, ast.EffectRef)
+                    and expr.effect.type_args
+                    and len(expr.effect.type_args) == 1
+                    and state_type is not None
+                    and not isinstance(state_type, UnknownType)):
+                cell_type = self._resolve_type(expr.effect.type_args[0])
+                if (not isinstance(cell_type, UnknownType)
+                        and not contains_typevar(cell_type)
+                        and not contains_typevar(state_type)
+                        and not types_equal(cell_type, state_type)):
+                    self._error(
+                        expr.state.type_expr,
+                        f"Handler state is declared "
+                        f"@{pretty_type(state_type)} but the handled "
+                        f"effect's cell type is "
+                        f"State<{pretty_type(cell_type)}>.",
+                        rationale="For the builtin State effect the "
+                                  "handler state declaration IS the "
+                                  "State<T> cell: verification "
+                                  "obligations and runtime guards key "
+                                  "off T, so a divergent declared type "
+                                  "is documentation that lies about "
+                                  "what the cell holds.",
+                        fix=f"Declare the state as "
+                            f"@{pretty_type(cell_type)} (an alias that "
+                            f"resolves to it is fine), and express any "
+                            f"refinement in the effect's State<T> "
+                            f"argument itself.",
+                        spec_ref='Chapter 7, Section 7.5.1 '
+                                 '"Handler Syntax"',
+                        error_code="E336",
+                    )
+
         # Compute handler state canonical type name (for with-clause checks)
         state_tname_outer: str | None = None
         if state_type and expr.state:

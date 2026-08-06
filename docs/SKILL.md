@@ -1700,6 +1700,8 @@ put(@Int) -> { resume(()) } with @Int = @Int.1 * 2   -- store double the argumen
 
 Because `@T.0` is the pre-store state, `with @T = @T.0` keeps the *old* state — it silently undoes the `put`. For an ordinary "store the argument" `put`, omit `with` entirely; reach for it only to transform the stored value. The `with` expression's type must match the handler's state type.
 
+For the builtin `State` effect the state declaration **is** the `State<T>` cell: its declared type must structurally equal the effect's `T` after alias resolution, or the handle is a checker error (E336) — declare `handle[State<Nat>](@Nat = ...)`, never `(@Int = ...)`, and put any refinement in the `State<T>` argument itself (an alias that resolves to `T`, like `type Count = Nat` with `(@Count = ...)`, is fine, and scalar aliases work as the cell type: `handle[State<Count>]`). A handler **without** a state declaration binds no state slot in its clauses — in a stateless `put` clause, `@T.0` is the operation's argument. A user-declared effect's handler state is the handler's own accumulator and may take any type.
+
 ### Qualified operation calls
 
 When two effects have operations with the same name, qualify the call:
@@ -2370,7 +2372,7 @@ public fn main(@Unit -> @Unit)
 
 ## Conformance Suite
 
-The `tests/conformance/` directory contains 177 small programs — most self-contained, with the Chapter 8 module-system programs and a few cross-module Chapter 7 and 9 programs importing companion `_lib.vera` / `_mid.vera` modules — that validate every language feature against the spec — often one program per feature, though some features (slot references, match, contracts) span several. These are the best minimal working examples of Vera syntax and semantics.
+The `tests/conformance/` directory contains 179 small programs — most self-contained, with the Chapter 8 module-system programs and a few cross-module Chapter 7 and 9 programs importing companion `_lib.vera` / `_mid.vera` modules — that validate every language feature against the spec — often one program per feature, though some features (slot references, match, contracts) span several. These are the best minimal working examples of Vera syntax and semantics.
 
 Each program is organized by spec chapter (`ch01_int_literals.vera`, `ch04_match_basic.vera`, `ch07_state_handler.vera`, etc.) and the `manifest.json` file maps features to programs. When you need to see how a specific construct works, check the conformance program before reading the spec.
 

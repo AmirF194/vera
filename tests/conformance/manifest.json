@@ -1381,6 +1381,34 @@
     ]
   },
   {
+    "id": "ch07_state_alias",
+    "file": "ch07_state_alias.vera",
+    "chapter": 7,
+    "title": "Scalar type alias as the State<T> cell type",
+    "level": "run",
+    "spec_ref": "Section 7.5",
+    "features": [
+      "effect_handler",
+      "handler_state",
+      "state_effect",
+      "type_alias"
+    ]
+  },
+  {
+    "id": "ch07_handler_state_type_mismatch_rejected",
+    "file": "ch07_handler_state_type_mismatch_rejected.vera",
+    "chapter": 7,
+    "title": "Handler state diverging from the State<T> cell type is a checker error",
+    "level": "check",
+    "spec_ref": "Section 7.5.1",
+    "expected_error": "E336",
+    "features": [
+      "effect_handler",
+      "handler_state",
+      "state_effect"
+    ]
+  },
+  {
     "id": "ch08_module_decl",
     "file": "ch08_module_decl.vera",
     "chapter": 8,

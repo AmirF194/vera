@@ -8,8 +8,6 @@ Defects in shipped compiler, runtime, or tooling behaviour — this table matche
 
 | Bug | Issue |
 |-----|-------|
-| `handle[State<T>]` with a type-alias or refined `T` (`type Count = Nat`, `type Pos = { @Int | ... }`) is check- and verify-green but emits an invalid WASM module (i32/i64 type mismatch) — the state-cell host-import family never resolves the alias; the fix touches the import-name surface that `api.py`/`runtime.mjs` bind. | [#1205](https://github.com/aallan/vera/issues/1205) |
-| The checker accepts a handler state declaration whose annotated type diverges from the effect's `State<T>` argument (`handle[State<Nat>](@Int = ...)`) — the #1203 obligations and guards key off the effect's `T` so the divergence no longer bypasses them, but the lying annotation itself should be a loud type error. | [#1206](https://github.com/aallan/vera/issues/1206) |
 | `ch05_closure_nat_return` (a run-level conformance program in the pre-commit + CI gate) trapped **once** in a full `check_conformance.py` run (`unreachable` in `main` — the sentinel `assert` or a GC shadow-stack guard) and has not reproduced in ~960 attempts across isolated, parallel, eager-GC, and hash-seed-swept executions; the emitted WAT is deterministic and correct. Suspected rare runtime/GC/wasmtime interaction, tracked so a future intermittent CI red resolves here instead of starting fresh. | [#996](https://github.com/aallan/vera/issues/996) |
 
 ## Limitations
