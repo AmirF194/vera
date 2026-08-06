@@ -857,16 +857,15 @@ private fn f(@Unit -> @Nat)
         assert not [o for o in result.obligations if o.kind == "nat_bind"]
         assert [d for d in result.diagnostics if d.severity == "error"] == []
 
-    def test_if_expr_destructure_tier3_runtime(self) -> None:
-        """#747: an `if`-expression tuple source the SMT layer does not model
-        as a projectable datatype leaves a real @Int->@Nat destructure
-        narrowing unverifiable *statically* — but codegen guards every @Nat
-        destructure component at run time, so each is recorded as a guarded
-        Tier-3 obligation (`tier3` / `tier3_runtime`), not a false unguarded
-        E504 (CodeRabbit, PR #756).  Both @Nat components of the
-        `Tuple<@Nat, @Nat>` are recorded independently — the per-component
-        accounting the untranslatable fallback must mirror the projectable
-        path (CodeRabbit, PR #756 round 6)."""
+    def test_if_expr_destructure_projects_and_catches(self) -> None:
+        """#764: an `if`-expression tuple source is now PROJECTABLE — the
+        tuple pseudo-constructor translates (both arms are `Tuple(...)`
+        literals, so the ite is datatype-sorted) and each @Int->@Nat
+        component narrowing is statically checked.  With an unconstrained
+        `@Int.0` the narrowing is unprovable, so each component fires a
+        loud per-component E503 — the same verdict `let @Nat = @Int.0`
+        gets, replacing the silent guarded-Tier-3 this shape produced when
+        the SMT layer could not model it (the pre-#764 pin)."""
         result = _verify("""
 private fn f(@Int -> @Nat)
   requires(true)
@@ -877,12 +876,39 @@ private fn f(@Int -> @Nat)
   @Nat.0
 }
 """)
+        violated = [o for o in result.obligations
+                    if o.kind == "nat_bind" and o.status == "violated"]
+        assert len(violated) == 2, [(o.kind, o.status)
+                                    for o in result.obligations]
+        e503 = [d for d in result.diagnostics if d.error_code == "E503"]
+        assert len(e503) == 2 and all(d.severity == "error" for d in e503)
+
+    def test_effect_op_destructure_tier3_runtime(self) -> None:
+        """#747/#756 fallback pin, re-anchored by #764: a tuple source the
+        SMT layer genuinely cannot translate (effect-op components) leaves
+        a real @Int->@Nat destructure narrowing unverifiable *statically* —
+        but codegen guards every @Nat destructure component at run time, so
+        each is recorded as a guarded Tier-3 obligation (`tier3` /
+        `tier3_runtime`), not a false unguarded E504 (CodeRabbit, PR #756).
+        Both components are recorded independently — the per-component
+        accounting the untranslatable fallback must mirror the projectable
+        path (CodeRabbit, PR #756 round 6).  The pre-#764 anchor for this
+        pin was an `if`-expression over tuples, which is projectable now
+        that the tuple pseudo-constructor translates."""
+        result = _verify("""
+private fn g(@Int -> @Nat)
+  requires(true)
+  ensures(true)
+  effects(<Random>)
+{
+  let Tuple<@Nat, @Nat> = Tuple(random_int(0, 9), random_int(0, 9));
+  @Nat.0
+}
+""")
         tier3 = [o for o in result.obligations
                  if o.kind == "nat_bind" and o.status == "tier3"]
-        # One Tier-3 obligation per @Nat component (the 2-tuple → 2).
         assert len(tier3) == 2, [(o.kind, o.status)
                                  for o in result.obligations]
-        # Codegen-guarded → counted as runtime checks, with no E504 warning.
         assert result.summary.tier3_runtime == 2
         assert not [d for d in result.diagnostics if d.error_code == "E504"]
         assert [d for d in result.diagnostics if d.severity == "error"] == []
@@ -1618,3 +1644,65 @@ public fn main(@Unit -> @Int)
 }
 """, "narrowing into a @Nat constructor field")
         assert any(e.error_code == "E503" for e in errs)
+
+
+# =====================================================================
+# #1201: a builtin Tuple<Nat, Nat> parameter's match-bound components
+# carry their declared component types' facts (and narrowing sub-patterns
+# are obligated), exactly like a registry ADT's fields.
+# =====================================================================
+
+class TestBuiltinTupleMatchComponentFacts:
+    """`_instantiated_field_types` resolves the builtin tuple carrier's
+    "field types" from the scrutinee's `AdtType("Tuple", ...)` component
+    types — the builtin has no registry constructor entry, and without the
+    fallback a match over a `Tuple<Nat, Nat>` PARAMETER bound its `@Nat`
+    components with no non-negativity fact, so a valid ensures over a
+    component was reported violated (false E500, #1201) while the
+    isomorphic user-`data` twin proved.  A registered user `data Tuple`
+    still takes the registry path (the FIX-3 discrimination's verifier
+    twin)."""
+
+    def test_tuple_nat_param_component_ensures_proves(self) -> None:
+        """The #1201 repro: E500 before the fallback, Tier-1 after."""
+        result = _verify("""
+public fn pick(@Tuple<Nat, Nat> -> @Int)
+  requires(true)
+  ensures(@Int.result >= 0)
+  effects(pure)
+{
+  match @Tuple<Nat, Nat>.0 {
+    Tuple(@Nat, @Nat) -> nat_to_int(@Nat.0)
+  }
+}
+""")
+        errors = [d for d in result.diagnostics if d.severity == "error"]
+        assert not errors, (
+            f"both components are Nat by typing, the ensures holds: "
+            f"{[(d.error_code, d.description[:60]) for d in errors]}"
+        )
+        ensures = [o for o in result.obligations if o.kind == "ensures"]
+        assert len(ensures) == 1
+        assert ensures[0].status == "verified", (
+            f"component fact must discharge the ensures at Tier 1, got "
+            f"{ensures[0].status!r}"
+        )
+
+    def test_tuple_int_param_nat_subpattern_narrowing_obligated(self) -> None:
+        """The dual: binding an Int-typed component as `@Nat` is a genuine
+        narrowing and must be obligated (loud E503 on an unprovable one),
+        not silently assumed — the same verdict the destructure form gets.
+        """
+        errs = _verify_err("""
+public fn f(@Tuple<Int, Int> -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  match @Tuple<Int, Int>.0 {
+    Tuple(@Nat, @Nat) -> nat_to_int(@Nat.0)
+  }
+}
+""", "narrowing into a @Nat ADT sub-pattern bind")
+        assert len(errs) == 2, "one E503 per @Nat-bound Int component"
+        assert all(e.error_code == "E503" for e in errs)
