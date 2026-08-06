@@ -1068,6 +1068,20 @@
     ]
   },
   {
+    "id": "ch06_quantifier_array_domain_rejected",
+    "file": "ch06_quantifier_array_domain_rejected.vera",
+    "chapter": 6,
+    "title": "An array-typed quantifier domain is a check-time E128 (#1204)",
+    "level": "check",
+    "spec_ref": "Section 6.3.3",
+    "expected_error": "E128",
+    "features": [
+      "quantifiers",
+      "forall",
+      "check_error"
+    ]
+  },
+  {
     "id": "ch07_pure",
     "file": "ch07_pure.vera",
     "chapter": 7,

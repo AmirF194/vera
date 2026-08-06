@@ -657,3 +657,93 @@ class TestNestedSubpatternFallback:
             f"got {[(o.kind, o.status) for o in result.obligations]}"
         )
         assert binds[0].status == "tier3"
+
+
+# =====================================================================
+# #1203: handler boundary writes into a @Nat state cell are obligated —
+# state-init (enclosing scope, provable), the builtin `put` argument,
+# the `with` state update, and the `resume` argument.  Before the fix
+# every one was verify-clean with zero obligations while `vera run`
+# stored a negative through the cell (the run-trap differentials live in
+# tests/test_nat_narrowing_return_differential.py).
+# =====================================================================
+
+_STATE_HANDLER = """\
+  handle[State<Nat>](@Nat = {init}) {{
+    get(@Unit) -> {{ resume({resume_arg}) }},
+    put(@Nat) -> {{ resume(()) }}{with_clause}
+  }} in {{
+    {body}
+  }}
+"""
+
+
+def _state_fixture(init="0", resume_arg="@Nat.0", with_clause="", body="nat_to_int(get(()))", requires="true"):
+    return f"""
+public fn go(@Int -> @Int)
+  requires({requires})
+  ensures(true)
+  effects(pure)
+{{
+{_STATE_HANDLER.format(init=init, resume_arg=resume_arg, with_clause=with_clause, body=body)}
+}}
+"""
+
+
+class TestHandlerStateBoundaryObligations:
+    def test_state_init_unconstrained_narrowing_is_loud(self) -> None:
+        """`(@Nat = @Int.0)` — the init is enclosing-scope code at FULL
+        precision, so an unconstrained refutable narrowing is the same
+        loud E503 as a direct-position `let @Nat = @Int.0` (the Tier-1
+        twin below proves it from requires)."""
+        errs = _verify_err(_state_fixture(init="@Int.0"),
+                           "handler state init")
+        assert any(e.error_code == "E503" for e in errs)
+
+    def test_state_init_narrowing_proves_from_requires(self) -> None:
+        """The enclosing-scope precision twin: `requires(@Int.0 >= 0)`
+        discharges the init narrowing at Tier 1."""
+        obls = _obligations_of(
+            _state_fixture(init="@Int.0", requires="@Int.0 >= 0"), "nat_bind")
+        assert len(obls) == 1
+        assert obls[0].status == "verified"
+
+    def test_put_argument_unconstrained_narrowing_is_loud(self) -> None:
+        """`put(@Int.0)` in the handled BODY — enclosing-scope precision,
+        so the refutable narrowing into the @Nat cell is the same loud
+        E503 as a direct call argument (was a silent zero-obligation
+        pass)."""
+        errs = _verify_err(
+            _state_fixture(body="put(@Int.0);\n  nat_to_int(get(()))"),
+            "effect-op argument")
+        assert any(e.error_code == "E503" for e in errs)
+
+    def test_put_argument_narrowing_proves_from_requires(self) -> None:
+        """The precision twin: `requires(@Int.0 >= 0)` discharges the put
+        argument at Tier 1."""
+        obls = _obligations_of(
+            _state_fixture(body="put(@Int.0);\n  nat_to_int(get(()))",
+                           requires="@Int.0 >= 0"),
+            "nat_bind")
+        assert len(obls) == 1
+        assert obls[0].status == "verified"
+
+    def test_with_update_narrowing_is_obligated(self) -> None:
+        """`with @Nat = @Int.0` — the clause state update narrows the
+        captured outer @Int into the @Nat cell; obligated Tier-3 (fresh
+        clause scope)."""
+        obls = _obligations_of(
+            _state_fixture(
+                with_clause=" with @Nat = @Int.0",
+                body="put(5);\n  nat_to_int(get(()))"),
+            "nat_bind")
+        assert len(obls) == 1
+        assert obls[0].status == "tier3"
+
+    def test_resume_argument_narrowing_is_obligated(self) -> None:
+        """`resume(@Int.0)` in the get clause — the resume value flows
+        into the op's @Nat return; the narrowing is obligated."""
+        obls = _obligations_of(
+            _state_fixture(resume_arg="@Int.0"), "nat_bind")
+        assert len(obls) == 1
+        assert obls[0].status == "tier3"

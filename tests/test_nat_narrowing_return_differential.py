@@ -1465,3 +1465,78 @@ public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
         """Zero must SURVIVE the closure-position nested guard — an
         off-by-one `> 0` guard mutant would trap valid @Nat zero."""
         assert _run(self._NESTED_NAT_CLOSURE, "go", 0) == 0
+
+
+class TestHandlerStateBoundaryDifferential1203:
+    """#1203: every handler write boundary into a @Nat state cell is
+    runtime-guarded — state-init, the builtin `put` argument, the `with`
+    state update, and the `resume` argument.  Each traps a negative and
+    passes the non-negative control; the verifier stream twins live in
+    tests/test_verifier_fresh_scope.py
+    (TestHandlerStateBoundaryObligations)."""
+
+    _INIT = """\
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Nat>](@Nat = @Int.0) {
+    get(@Unit) -> { resume(@Nat.0) },
+    put(@Nat) -> { resume(()) }
+  } in {
+    nat_to_int(get(()))
+  }
+}
+"""
+    _PUT = """\
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Nat>](@Nat = 0) {
+    get(@Unit) -> { resume(@Nat.0) },
+    put(@Nat) -> { resume(()) }
+  } in {
+    put(@Int.0);
+    nat_to_int(get(()))
+  }
+}
+"""
+    _WITH = """\
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Nat>](@Nat = 0) {
+    get(@Unit) -> { resume(@Nat.0) },
+    put(@Nat) -> { resume(()) } with @Nat = @Int.0
+  } in {
+    put(5);
+    nat_to_int(get(()))
+  }
+}
+"""
+    _RESUME = """\
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Nat>](@Nat = 0) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Nat) -> { resume(()) }
+  } in {
+    nat_to_int(get(()))
+  }
+}
+"""
+
+    def test_init_negative_traps(self) -> None:
+        assert _run(self._INIT, "go", -7) is None
+    def test_init_non_negative_passes(self) -> None:
+        assert _run(self._INIT, "go", 9) == 9
+    def test_init_zero_survives(self) -> None:
+        assert _run(self._INIT, "go", 0) == 0
+    def test_put_negative_traps(self) -> None:
+        assert _run(self._PUT, "go", -7) is None
+    def test_put_non_negative_passes(self) -> None:
+        assert _run(self._PUT, "go", 9) == 9
+    def test_with_negative_traps(self) -> None:
+        assert _run(self._WITH, "go", -7) is None
+    def test_with_non_negative_passes(self) -> None:
+        assert _run(self._WITH, "go", 9) == 9
+    def test_resume_negative_traps(self) -> None:
+        assert _run(self._RESUME, "go", -7) is None
+    def test_resume_non_negative_passes(self) -> None:
+        assert _run(self._RESUME, "go", 9) == 9

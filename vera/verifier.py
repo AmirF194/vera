@@ -3820,6 +3820,41 @@ class ContractVerifier:
             else:
                 callee = self._lookup_module_function(expr.path, expr.name)
             param_types = getattr(callee, "param_types", None)
+            if param_types is None and expr.name in ("put", "resume"):
+                # #1203: the builtin State ops and `resume` have no function
+                # registry entry, so the formal loop below never fired and a
+                # narrowing argument (`put(@Int.0)` against the @Nat cell in
+                # the handled body — enclosing scope, loud on refutable —
+                # or `resume(@Int.0)` into a @Nat op result in a clause —
+                # fresh scope, Tier-3) carried no obligation at all:
+                # verify-clean while `vera run` stored or returned a
+                # negative.  The checker's #747 side-table records the
+                # instantiated target for these arguments, so the same
+                # refined/nat/widen triple runs with formal=None
+                # (table-driven).  guarded=True: codegen guards the put
+                # store, the `with` override, and the get-resume result.
+                for arg in expr.args:
+                    refined_target = self._refined_binding_target(arg, None)
+                    if (refined_target is not None
+                            and self._narrows_into_refined(
+                                arg, refined_target)):
+                        self._check_refined_binding_obligation(
+                            decl, arg, refined_target, smt, slot_env,
+                            assumptions, site="effect-op argument",
+                            guarded=True,
+                        )
+                    elif (self._nat_binding_target(arg, None)
+                            and self._narrows_into_nat(arg)):
+                        self._check_nat_binding_obligation(
+                            decl, arg, smt, slot_env, assumptions,
+                            site="effect-op argument", guarded=True,
+                        )
+                    elif (self._int_widening_target(arg, None)
+                            and self._result_is_nat(arg)):
+                        self._check_int_widening_obligation(
+                            decl, arg, smt, slot_env, list(assumptions),
+                            site="effect-op argument",
+                        )
             if param_types is not None:
                 # A generic function whose `TypeVar` formal is fixed to @Nat
                 # by context (e.g. `T = Nat`) is recovered from the checker's
@@ -4485,6 +4520,32 @@ class ContractVerifier:
             # the same positions but keeps the enclosing env — a call-site
             # hit there only ADDS a proof, so it has no aliasing hazard).
             if expr.state is not None:
+                # #1203: the state-init BINDS into the declared state cell
+                # type — the same refined/nat/widen triple as a let binding,
+                # at enclosing-scope precision (a `requires` can prove it
+                # Tier-1).  Codegen guards the init store, so guarded=True.
+                state_ty = self._resolve_type(expr.state.type_expr)
+                init = expr.state.init_expr
+                refined_t = self._refined_binding_target(init, state_ty)
+                if (refined_t is not None
+                        and self._narrows_into_refined(init, refined_t)):
+                    self._check_refined_binding_obligation(
+                        decl, init, refined_t, smt, slot_env,
+                        assumptions, site="handler state init",
+                        guarded=True,
+                    )
+                elif (self._nat_binding_target(init, state_ty)
+                        and self._narrows_into_nat(init)):
+                    self._check_nat_binding_obligation(
+                        decl, init, smt, slot_env, assumptions,
+                        site="handler state init", guarded=True,
+                    )
+                elif (self._int_widening_target(init, state_ty)
+                        and self._result_is_nat(init)):
+                    self._check_int_widening_obligation(
+                        decl, init, smt, slot_env, list(assumptions),
+                        site="handler state init",
+                    )
                 self._walk_for_nat_binding_obligations(
                     decl, expr.state.init_expr, smt, slot_env, assumptions,
                 )
@@ -4496,6 +4557,31 @@ class ContractVerifier:
                     decl, clause.body, smt, SlotEnv(), [],
                 )
                 if clause.state_update is not None:
+                    # #1203: `with @T = <expr>` WRITES the state cell — the
+                    # same binding triple against the update's declared
+                    # target type, under the fresh clause env (slot-dependent
+                    # updates record Tier-3; a literal-negative is loud).
+                    upd_ty = self._resolve_type(clause.state_update[0])
+                    upd = clause.state_update[1]
+                    refined_u = self._refined_binding_target(upd, upd_ty)
+                    if (refined_u is not None
+                            and self._narrows_into_refined(upd, refined_u)):
+                        self._check_refined_binding_obligation(
+                            decl, upd, refined_u, smt, SlotEnv(), [],
+                            site="handler state update", guarded=True,
+                        )
+                    elif (self._nat_binding_target(upd, upd_ty)
+                            and self._narrows_into_nat(upd)):
+                        self._check_nat_binding_obligation(
+                            decl, upd, smt, SlotEnv(), [],
+                            site="handler state update", guarded=True,
+                        )
+                    elif (self._int_widening_target(upd, upd_ty)
+                            and self._result_is_nat(upd)):
+                        self._check_int_widening_obligation(
+                            decl, upd, smt, SlotEnv(), [],
+                            site="handler state update",
+                        )
                     self._walk_for_nat_binding_obligations(
                         decl, clause.state_update[1], smt, SlotEnv(), [],
                     )

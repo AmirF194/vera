@@ -1436,6 +1436,19 @@ class CallsHandlersMixin:
             init_instrs = self.translate_expr(expr.state.init_expr, env)
             if init_instrs is None:
                 return None
+            # #1203: the init value BINDS into the declared state cell —
+            # guard the @Int -> @Nat narrowing (and the @Nat -> @Int widen
+            # dual) exactly like a `let` binding, so an unverified compile
+            # traps instead of storing a negative through the @Nat cell.
+            state_tn = getattr(expr.state.type_expr, "name", None)
+            if (state_tn is not None
+                    and self._resolve_base_type_name(state_tn) == "Nat"
+                    and self._narrows_into_nat(expr.state.init_expr)):
+                init_instrs = self._emit_nat_bind_guard(init_instrs)
+            elif (state_tn is not None
+                    and self._resolve_base_type_name(state_tn) == "Int"
+                    and self._result_is_nat(expr.state.init_expr)):
+                init_instrs = self._emit_int_widen_guard(init_instrs)
             instructions.extend(init_instrs)
 
         # 2. Push a fresh state cell (isolates this handler from any outer
@@ -1566,6 +1579,14 @@ class CallsHandlersMixin:
             arg_instrs = self.translate_expr(call.args[0], env)
             if arg_instrs is None:
                 return None
+            # #1203: put's argument writes the state cell — guard the
+            # narrowing/widening at the boundary (the `let` guard's twin).
+            if (self._resolve_base_type_name(type_name) == "Nat"
+                    and self._narrows_into_nat(call.args[0])):
+                arg_instrs = self._emit_nat_bind_guard(arg_instrs)
+            elif (self._resolve_base_type_name(type_name) == "Int"
+                    and self._result_is_nat(call.args[0])):
+                arg_instrs = self._emit_int_widen_guard(arg_instrs)
             arg_local = self.alloc_local(state_wt)
             instructions.extend(arg_instrs)
             instructions.append(f"local.set {arg_local}")
@@ -1615,13 +1636,55 @@ class CallsHandlersMixin:
             self._state_clause_ops = saved_clause_ops
         if body_instrs is None:
             return None
+        # #1203: for a GET clause the body's net value is the tail
+        # `resume(v)` argument — the op's @T-typed RESULT at this call
+        # site — so guard a narrowing/widening resume value the same way
+        # the closure-return guard works (`_compile_lifted_closure`'s
+        # analogue for the inlined clause).
+        if call.name == "get":
+            resume_arg = self._tail_resume_arg(clause.body)
+            if resume_arg is not None:
+                if (self._resolve_base_type_name(type_name) == "Nat"
+                        and self._narrows_into_nat(resume_arg)):
+                    body_instrs = self._emit_nat_bind_guard(body_instrs)
+                elif (self._resolve_base_type_name(type_name) == "Int"
+                        and self._result_is_nat(resume_arg)):
+                    body_instrs = self._emit_int_widen_guard(body_instrs)
         instructions.extend(body_instrs)
         if clause.state_update is not None:
             if upd_instrs is None:
                 return None
+            # #1203: `with @T = <expr>` overrides the state cell — the
+            # third write boundary; same guard pair as put's argument.
+            if (self._resolve_base_type_name(type_name) == "Nat"
+                    and self._narrows_into_nat(clause.state_update[1])):
+                upd_instrs = self._emit_nat_bind_guard(upd_instrs)
+            elif (self._resolve_base_type_name(type_name) == "Int"
+                    and self._result_is_nat(clause.state_update[1])):
+                upd_instrs = self._emit_int_widen_guard(upd_instrs)
             instructions.extend(upd_instrs)
             instructions.append(f"call {put_import}")
         return instructions
+
+    @staticmethod
+    def _tail_resume_arg(body: ast.Expr) -> ast.Expr | None:
+        """The tail ``resume(v)``'s argument expression, descending the
+        same join-free chain as :py:meth:`_clause_lowerable` (Block
+        trailing expression, single-arm match) — ``None`` when the tail is
+        not a one-argument resume (#1203 get-result guard)."""
+        tail: ast.Expr = body
+        while True:
+            if isinstance(tail, ast.Block):
+                tail = tail.expr
+                continue
+            if isinstance(tail, ast.MatchExpr) and len(tail.arms) == 1:
+                tail = tail.arms[0].body
+                continue
+            break
+        if (isinstance(tail, ast.FnCall) and tail.name == "resume"
+                and len(tail.args) == 1):
+            return tail.args[0]
+        return None
 
     def _clause_lowerable(self, body: ast.Expr) -> bool:
         """True when the clause body has EXACTLY one ``resume(...)`` and it

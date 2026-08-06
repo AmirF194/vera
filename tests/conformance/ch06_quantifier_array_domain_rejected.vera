@@ -1,0 +1,18 @@
+-- Conformance: quantifier bound must be an integer count (Chapter 6, #1204)
+-- Tests: an array-typed quantifier domain is a check-time E128, not a
+-- codegen failure — the second argument is the exclusive index bound.
+private fn all_pos(@Array<Int> -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  forall(@Int, @Array<Int>.0, fn(@Int -> @Bool) effects(pure) { true })
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  0
+}

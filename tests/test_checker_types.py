@@ -1279,7 +1279,7 @@ private fn main(@Unit -> @Int)
         self._assert_e126("""
 private fn f(@Int -> @Bool)
   requires(true)
-  ensures(forall(@{ @Int | @Int.0 }, [1, 2], fn(@Int -> @Bool) effects(pure) { true }))
+  ensures(forall(@{ @Int | @Int.0 }, 2, fn(@Int -> @Bool) effects(pure) { true }))
   effects(pure)
 { true }
 """)
@@ -1289,7 +1289,7 @@ private fn f(@Int -> @Bool)
         self._assert_e126("""
 private fn f(@Int -> @Bool)
   requires(true)
-  ensures(exists(@{ @Int | @Int.0 }, [1, 2], fn(@Int -> @Bool) effects(pure) { true }))
+  ensures(exists(@{ @Int | @Int.0 }, 2, fn(@Int -> @Bool) effects(pure) { true }))
   effects(pure)
 { true }
 """)
@@ -1572,7 +1572,7 @@ private fn main(@Unit -> @Int)
         (reached through a forall binder inside an `@Int`-based outer
         predicate) still gets the allowance."""
         _check_ok("""
-type T = { @Int | forall(@{ @Byte | @Byte.0 < 10 }, [1], fn(@Byte -> @Bool) effects(pure) { true }) && @Int.0 > 0 };
+type T = { @Int | forall(@{ @Byte | @Byte.0 < 10 }, 1, fn(@Byte -> @Bool) effects(pure) { true }) && @Int.0 > 0 };
 
 private fn main(@Unit -> @Int)
   requires(true) ensures(true) effects(pure)
@@ -3062,3 +3062,49 @@ public fn main(@Unit -> @Int)
 }
 """, "zero-size")
         assert any(e.error_code == "E183" for e in errs)
+
+
+class TestQuantifierBoundType1204:
+    """#1204: the quantifier's second argument is a numeric BOUND (spec
+    §6.2.4) — an array-typed domain previously type-checked and then died
+    at codegen with a raw WASM translation error; it is now a loud E128
+    at check time (check-green ⇒ compilable)."""
+
+    def test_forall_array_domain_rejected(self) -> None:
+        errs = _check_err("""
+private fn f(@Array<Int> -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ forall(@Int, @Array<Int>.0, fn(@Int -> @Bool) effects(pure) { true }) }
+""", "bound must be an integer")
+        assert any(e.error_code == "E128" for e in errs)
+
+    def test_exists_array_domain_rejected(self) -> None:
+        errs = _check_err("""
+private fn f(@Array<Int> -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ exists(@Int, @Array<Int>.0, fn(@Int -> @Bool) effects(pure) { true }) }
+""", "bound must be an integer")
+        assert any(e.error_code == "E128" for e in errs)
+
+    def test_length_bound_accepted(self) -> None:
+        """The count form — array_length — stays accepted."""
+        _check_ok("""
+private fn f(@Array<Int> -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ forall(@Int, array_length(@Array<Int>.0), fn(@Int -> @Bool) effects(pure) { true }) }
+""")
+
+    def test_nat_bound_accepted(self) -> None:
+        _check_ok("""
+private fn f(@Nat -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ forall(@Int, @Nat.0, fn(@Int -> @Bool) effects(pure) { true }) }
+""")

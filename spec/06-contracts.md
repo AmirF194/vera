@@ -179,6 +179,8 @@ The syntax is:
 forall(@IndexType, @BoundExpr, @PredicateFn)
 ```
 
+The bound is an **integer count** — the quantified index runs over `0 .. bound-1`.  An `@Int`/`@Nat` (or a refinement over one) is required; any other domain type — an array, a string — is a check-time error (**E128**).  To quantify over an array's elements, pass `array_length(arr)` as the bound and index the array inside the predicate.
+
 Where:
 - `@IndexType` is the type of the bound variable (must be `Nat` or `Int`)
 - `@BoundExpr` is the exclusive upper bound (inclusive lower bound is always 0)
