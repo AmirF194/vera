@@ -1540,3 +1540,132 @@ public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
         assert _run(self._RESUME, "go", -7) is None
     def test_resume_non_negative_passes(self) -> None:
         assert _run(self._RESUME, "go", 9) == 9
+
+    def test_put_zero_survives(self) -> None:
+        """The four boundaries are wired independently in codegen — each
+        needs its own zero-boundary probe (a `> 0` off-by-one at any one
+        would reject valid @Nat zero and pass the others' probes)."""
+        assert _run(self._PUT, "go", 0) == 0
+
+    def test_with_zero_survives(self) -> None:
+        assert _run(self._WITH, "go", 0) == 0
+
+    def test_resume_zero_survives(self) -> None:
+        assert _run(self._RESUME, "go", 0) == 0
+
+    _PUT_NO_CLAUSE = """\
+public fn go(@Int -> @Bool) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Nat>](@Nat = 0) {
+    get(@Unit) -> { resume(@Nat.0) }
+  } in {
+    put(@Int.0);
+    get(()) < 0
+  }
+}
+"""
+
+    def test_bare_put_negative_traps(self) -> None:
+        """The BARE intrinsic dispatch path (no `put` clause declared) —
+        the adversarial round's critical find: the clause-inlined guard
+        never runs here, so this fixture stored -7 and returned true
+        through the @Nat cell.  The guard now lives on the bare path too
+        (keyed off the state-cell type in the dispatch target)."""
+        assert _run(self._PUT_NO_CLAUSE, "go", -7) is None
+    def test_bare_put_non_negative_passes(self) -> None:
+        assert _run(self._PUT_NO_CLAUSE, "go", 9) is not None
+    def test_bare_put_zero_survives(self) -> None:
+        assert _run(self._PUT_NO_CLAUSE, "go", 0) is not None
+
+    _PUT_IN_CLAUSE_BODY = """\
+public fn go(@Int -> @Bool) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Nat>](@Nat = 0) {
+    get(@Unit) -> { put(@Int.0); resume(@Nat.0) },
+    put(@Nat) -> { resume(()) }
+  } in {
+    get(());
+    get(()) < 0
+  }
+}
+"""
+
+    def test_clause_body_put_negative_traps(self) -> None:
+        """A put INSIDE another clause's body takes the bare path too
+        (`_state_clause_ops` is cleared in clauses) — same guard."""
+        assert _run(self._PUT_IN_CLAUSE_BODY, "go", -5) is None
+    def test_clause_body_put_non_negative_passes(self) -> None:
+        assert _run(self._PUT_IN_CLAUSE_BODY, "go", 9) is not None
+
+
+class TestHandlerStateWidenDifferential1203:
+    """The widen DUAL of the boundary differentials: a `State<Int>` cell
+    receiving an intrinsically-@Nat value is guarded at every boundary —
+    a @Nat above i64.MAX would bit-reinterpret to a negative @Int.  The
+    adversarial round's mutation battery showed every widen arm was
+    deletable without detection; these pin each arm at U64_MAX with
+    in-range and i64.MAX boundary controls."""
+
+    _WIDEN_INIT = """\
+public fn go(@Nat -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Int>](@Int = @Nat.0) {
+    get(@Unit) -> { resume(@Int.0) }
+  } in {
+    get(())
+  }
+}
+"""
+    _WIDEN_PUT = """\
+public fn go(@Nat -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Int>](@Int = 0) {
+    get(@Unit) -> { resume(@Int.0) }
+  } in {
+    put(@Nat.0);
+    get(())
+  }
+}
+"""
+    _WIDEN_RESUME = """\
+public fn go(@Nat -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Int>](@Int = 0) {
+    get(@Unit) -> { resume(nat_to_int(@Nat.0)) }
+  } in {
+    get(())
+  }
+}
+"""
+
+    def test_widen_init_u64max_traps(self) -> None:
+        assert _run(self._WIDEN_INIT, "go", U64_MAX) is None
+    def test_widen_init_in_range_passes(self) -> None:
+        assert _run(self._WIDEN_INIT, "go", 42) == 42
+    def test_widen_put_u64max_traps(self) -> None:
+        assert _run(self._WIDEN_PUT, "go", U64_MAX) is None
+    def test_widen_put_in_range_passes(self) -> None:
+        assert _run(self._WIDEN_PUT, "go", 42) == 42
+    def test_widen_resume_i64max_passes(self) -> None:
+        """Boundary control: exactly i64.MAX survives (the suite's
+        established no-trap-at-i64-max convention)."""
+        assert _run(self._WIDEN_RESUME, "go", 2**63 - 1) == 2**63 - 1
+
+    _TAIL_MATCH_RESUME = """\
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Nat>](@Nat = 0) {
+    get(@Unit) -> { match 1 { @Int -> resume(@Int.1) } },
+    put(@Nat) -> { resume(()) }
+  } in {
+    nat_to_int(get(()))
+  }
+}
+"""
+
+    def test_tail_match_resume_negative_traps(self) -> None:
+        """`_tail_resume_arg`'s single-arm-match descent — deleting the
+        MatchExpr arm silently un-guards this legal, lowerable form."""
+        assert _run(self._TAIL_MATCH_RESUME, "go", -7) is None
+    def test_tail_match_resume_non_negative_passes(self) -> None:
+        assert _run(self._TAIL_MATCH_RESUME, "go", 9) == 9

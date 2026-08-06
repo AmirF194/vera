@@ -927,15 +927,25 @@ class CallsMixin:
                 )
 
     def _effect_type_mapping(self, effect_name: str) -> dict[str, Type]:
-        """Get the type argument mapping for an effect from the current
-        effect row context."""
+        """Get the type argument mapping for an effect — innermost enclosing
+        HANDLER first (#1203 determinism: an op inside nested same-name
+        handlers resolves against the governing handler's instantiation,
+        §7.5.2), then the current effect row.  The row fallback iterates a
+        frozenset, whose order is hash-dependent — acceptable only because
+        a declared row cannot meaningfully carry two instantiations of one
+        effect; the nested-handler case, which CAN, is covered by the
+        stack."""
+        eff_info = self.env.lookup_effect(effect_name)
+        if eff_info is None or not eff_info.type_params:
+            return {}
+        for inst in reversed(self._handled_effect_insts):
+            if inst.name == effect_name and inst.type_args:
+                return dict(zip(eff_info.type_params, inst.type_args))
         if not isinstance(self.env.current_effect_row, ConcreteEffectRow):
             return {}
         for ei in self.env.current_effect_row.effects:
-            if ei.name == effect_name:
-                eff_info = self.env.lookup_effect(effect_name)
-                if eff_info and eff_info.type_params and ei.type_args:
-                    return dict(zip(eff_info.type_params, ei.type_args))
+            if ei.name == effect_name and ei.type_args:
+                return dict(zip(eff_info.type_params, ei.type_args))
         return {}
 
     # -----------------------------------------------------------------

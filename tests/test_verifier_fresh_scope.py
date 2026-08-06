@@ -256,7 +256,10 @@ public fn f(@Array<Nat>, @Array<Int> -> @Array<Int>)
             o for o in result.obligations
             if o.kind == "nat_to_int_coerce" and o.status == "tier3"
         ]
-        assert widen, (
+        # Exactly ONE record: only the NESTED closure return widens (the
+        # outer body is `nat_to_int(...)`, already @Int) — the exact count
+        # fails on a stopped descent (0) and on double-recording (2).
+        assert len(widen) == 1, (
             "the nested closure's @Nat body widening into its @Int return "
             "must be obligated (codegen guards it; the stream must say so)"
         )
@@ -678,7 +681,13 @@ _STATE_HANDLER = """\
 """
 
 
-def _state_fixture(init="0", resume_arg="@Nat.0", with_clause="", body="nat_to_int(get(()))", requires="true"):
+def _state_fixture(
+    init: str = "0",
+    resume_arg: str = "@Nat.0",
+    with_clause: str = "",
+    body: str = "nat_to_int(get(()))",
+    requires: str = "true",
+) -> str:
     return f"""
 public fn go(@Int -> @Int)
   requires({requires})
@@ -715,7 +724,7 @@ class TestHandlerStateBoundaryObligations:
         pass)."""
         errs = _verify_err(
             _state_fixture(body="put(@Int.0);\n  nat_to_int(get(()))"),
-            "effect-op argument")
+            "State-op argument")
         assert any(e.error_code == "E503" for e in errs)
 
     def test_put_argument_narrowing_proves_from_requires(self) -> None:
@@ -747,3 +756,131 @@ class TestHandlerStateBoundaryObligations:
             _state_fixture(resume_arg="@Int.0"), "nat_bind")
         assert len(obls) == 1
         assert obls[0].status == "tier3"
+
+
+class TestNestedStateHandlerDeterminism:
+    """PR #1202 adversarial round: with two `State<T>` instantiations in
+    scope (nested handlers), the put-argument target came from a
+    frozenset iteration — PYTHONHASHSEED roulette that flipped `verify`
+    between false E503 and clean across seeds.  The checker now resolves
+    innermost-handler-first (§7.5.2), so both fixtures are
+    seed-stable."""
+
+    _INNER_INT = """
+public fn go(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@Nat = 0) {
+    get(@Unit) -> { resume(@Nat.0) }
+  } in {
+    handle[State<Int>](@Int = 0) {
+      get(@Unit) -> { resume(@Int.0) }
+    } in {
+      put(@Int.0);
+      get(())
+    }
+  }
+}
+"""
+
+    def test_inner_int_put_is_clean(self) -> None:
+        """`put(@Int.0)` targets the INNER `State<Int>` cell — no
+        narrowing, no obligation, verify-clean (was a false E503 under
+        hash seeds 0-2)."""
+        result = _verify(self._INNER_INT)
+        errors = [d for d in result.diagnostics if d.severity == "error"]
+        assert not errors, [e.error_code for e in errors]
+        assert [o for o in result.obligations if o.kind == "nat_bind"] == []
+
+    def test_inner_nat_put_is_loud(self) -> None:
+        """The inverse: inner `State<Nat>` under outer `State<Int>` — the
+        put narrows into the INNER @Nat cell and is a loud E503 (was a
+        silent tier3 under seed 3)."""
+        errs = _verify_err(self._INNER_INT.replace(
+            "State<Nat>", "State<TMP>").replace(
+            "State<Int>", "State<Nat>").replace(
+            "State<TMP>", "State<Int>").replace(
+            "(@Nat = 0)", "(@TMP = 0)").replace(
+            "(@Int = 0)", "(@Nat = 0)").replace(
+            "(@TMP = 0)", "(@Int = 0)").replace(
+            "resume(@Nat.0)", "resume(@TMP.0)").replace(
+            "resume(@Int.0)", "resume(@Nat.0)").replace(
+            "resume(@TMP.0)", "resume(@Int.0)"),
+            "State-op argument")
+        assert any(e.error_code == "E503" for e in errs)
+
+
+class TestHandlerStateWidenAndRefinedStream:
+    """Stream twins for the widen and refined boundary arms (the
+    adversarial mutation battery showed the widen sites were deletable
+    undetected) and the refined disclosure honesty: no handler boundary
+    emits a refined-predicate guard, so those obligations must record
+    `tier3_unguarded` + E506, never a guarded claim."""
+
+    def test_widen_init_obligated(self) -> None:
+        obls = _obligations_of("""
+public fn go(@Nat -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>](@Int = @Nat.0) {
+    get(@Unit) -> { resume(@Int.0) }
+  } in {
+    get(())
+  }
+}
+""", "nat_to_int_coerce")
+        assert len(obls) == 1
+
+    def test_widen_put_obligated(self) -> None:
+        obls = _obligations_of("""
+public fn go(@Nat -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>](@Int = 0) {
+    get(@Unit) -> { resume(@Int.0) }
+  } in {
+    put(@Nat.0);
+    get(())
+  }
+}
+""", "nat_to_int_coerce")
+        assert len(obls) == 1
+
+    def test_refined_update_discloses_unguarded(self) -> None:
+        """`with @Pos = <clause slot>` — the refined predicate has no
+        handler-boundary guard; the obligation records tier3_unguarded
+        with the E506 disclosure (a guarded claim here would be false —
+        the adversarial round's pre-armed-desync finding)."""
+        result = _verify("""
+type Pos = { @Int | @Int.0 > 0 };
+
+public fn go(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Pos>](@Pos = 1) {
+    get(@Unit) -> { resume(@Pos.0) },
+    put(@Pos) -> { resume(()) } with @Pos = @Int.0
+  } in {
+    put(5);
+    get(())
+  }
+}
+""")
+        errors = [d for d in result.diagnostics if d.severity == "error"]
+        assert not errors, [e.error_code for e in errors]
+        unguarded = [o for o in result.obligations
+                     if o.kind == "refine_bind"
+                     and o.status == "tier3_unguarded"]
+        assert len(unguarded) == 1, (
+            f"the untranslatable update narrowing must disclose "
+            f"tier3_unguarded, got "
+            f"{[(o.kind, o.status) for o in result.obligations]}"
+        )

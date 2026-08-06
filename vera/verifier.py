@@ -3530,6 +3530,41 @@ class ContractVerifier:
                 return adt.constructors[name]
         return self._module_constructors.get(name)
 
+    def _handler_cell_type(self, expr: ast.HandleExpr) -> Type | None:
+        """The handler's state CELL type — the effect's ``State<T>`` type
+        argument when present (#1203; the declared ``with`` annotation can
+        diverge from it and must not drive the obligations), falling back
+        to the declared annotation for non-State or unparameterised
+        forms."""
+        eff = expr.effect
+        name = getattr(eff, "name", None)
+        type_args = getattr(eff, "type_args", None)
+        if name == "State" and type_args:
+            return self._resolve_type(type_args[0])
+        if expr.state is not None:
+            return self._resolve_type(expr.state.type_expr)
+        return None
+
+    @staticmethod
+    def _tail_resume_value(body: ast.Expr) -> ast.Expr | None:
+        """The tail ``resume(v)``'s argument, descending the same join-free
+        chain codegen's ``_tail_resume_arg`` uses (Block trailing
+        expression, single-arm match) — ``None`` when the tail is not a
+        one-argument resume (#1203)."""
+        tail: ast.Expr = body
+        while True:
+            if isinstance(tail, ast.Block):
+                tail = tail.expr
+                continue
+            if isinstance(tail, ast.MatchExpr) and len(tail.arms) == 1:
+                tail = tail.arms[0].body
+                continue
+            break
+        if (isinstance(tail, ast.FnCall) and tail.name == "resume"
+                and len(tail.args) == 1):
+            return tail.args[0]
+        return None
+
     def _walk_for_nat_binding_obligations(
         self,
         decl: ast.FnDecl,
@@ -3580,11 +3615,15 @@ class ContractVerifier:
         constructor-field, and *all* call-arguments — concrete directly,
         generic on the monomorphised callee) are recorded ``tier3_runtime``
         (backed by the codegen ``i64.lt_s`` guard), while the genuinely
-        unguarded narrowings — the effect-operation argument and the
-        generic-instantiated constructor field (constructors carry no
+        unguarded narrowings — the *user-effect* operation argument and
+        the generic-instantiated constructor field (constructors carry no
         per-field @Nat mono metadata) — are surfaced as E504, neither
         statically proven nor runtime-checked (#747; the ``guarded`` flag
-        threaded to :py:meth:`_record_nat_bind_tier3` decides which).
+        threaded to :py:meth:`_record_nat_bind_tier3` decides which).  The
+        builtin State ``put`` argument and the get-clause ``resume`` value
+        are the exception since #1203: obligated at the "State-op" sites
+        and codegen-guarded on BOTH dispatch paths (clause-inlined and
+        bare intrinsic), so they record ``tier3_runtime``.
 
         # WALKER_COVERAGE: (#597 — every Expr subclass has a disposition;
         # check_walker_coverage.py enforces completeness.)
@@ -3820,19 +3859,30 @@ class ContractVerifier:
             else:
                 callee = self._lookup_module_function(expr.path, expr.name)
             param_types = getattr(callee, "param_types", None)
-            if param_types is None and expr.name in ("put", "resume"):
-                # #1203: the builtin State ops and `resume` have no function
-                # registry entry, so the formal loop below never fired and a
-                # narrowing argument (`put(@Int.0)` against the @Nat cell in
-                # the handled body — enclosing scope, loud on refutable —
-                # or `resume(@Int.0)` into a @Nat op result in a clause —
-                # fresh scope, Tier-3) carried no obligation at all:
-                # verify-clean while `vera run` stored or returned a
-                # negative.  The checker's #747 side-table records the
-                # instantiated target for these arguments, so the same
-                # refined/nat/widen triple runs with formal=None
-                # (table-driven).  guarded=True: codegen guards the put
-                # store, the `with` override, and the get-resume result.
+            if param_types is None and expr.name == "put":
+                # #1203: the State `put` has no function-registry entry, so
+                # the formal loop below never fired and a narrowing
+                # argument (`put(@Int.0)` against the @Nat cell) carried no
+                # obligation at all — verify-clean while `vera run` stored
+                # a negative.  The checker's #747 side-table records the
+                # instantiated target, so the refined/nat/widen triple runs
+                # with formal=None (table-driven).  The guarded flag is
+                # COMPUTED, not hardcoded (PR #1202 adversarial round —
+                # a hardcoded True claimed a runtime check the bare
+                # intrinsic path did not have): the builtin State put is
+                # guarded on both dispatch paths (the clause-inlined store
+                # and the bare intrinsic call, which keys the guard off the
+                # dispatch target's cell type); a user-effect op named
+                # `put` is the #754 unguarded class (its handler does not
+                # compile today, E602) and discloses E504/E531.  The
+                # refined branch is ALWAYS unguarded — no handler boundary
+                # emits a refined-predicate guard (only sign-bit pairs) —
+                # so it discloses E506 honestly.  `resume` values are
+                # obligated from the HandleExpr arm instead, where the
+                # clause's effect identity is known.
+                op = self.env.lookup_effect_op("put")
+                put_guarded = (op is not None
+                               and op.parent_effect == "State")
                 for arg in expr.args:
                     refined_target = self._refined_binding_target(arg, None)
                     if (refined_target is not None
@@ -3840,20 +3890,20 @@ class ContractVerifier:
                                 arg, refined_target)):
                         self._check_refined_binding_obligation(
                             decl, arg, refined_target, smt, slot_env,
-                            assumptions, site="effect-op argument",
-                            guarded=True,
+                            assumptions, site="State-op argument",
+                            guarded=False,
                         )
                     elif (self._nat_binding_target(arg, None)
                             and self._narrows_into_nat(arg)):
                         self._check_nat_binding_obligation(
                             decl, arg, smt, slot_env, assumptions,
-                            site="effect-op argument", guarded=True,
+                            site="State-op argument", guarded=put_guarded,
                         )
                     elif (self._int_widening_target(arg, None)
                             and self._result_is_nat(arg)):
                         self._check_int_widening_obligation(
                             decl, arg, smt, slot_env, list(assumptions),
-                            site="effect-op argument",
+                            site="State-op argument", guarded=put_guarded,
                         )
             if param_types is not None:
                 # A generic function whose `TypeVar` formal is fixed to @Nat
@@ -4520,11 +4570,18 @@ class ContractVerifier:
             # the same positions but keeps the enclosing env — a call-site
             # hit there only ADDS a proof, so it has no aliasing hazard).
             if expr.state is not None:
-                # #1203: the state-init BINDS into the declared state cell
-                # type — the same refined/nat/widen triple as a let binding,
+                # #1203: the state-init BINDS into the state CELL — whose
+                # type is the effect's `State<T>` type argument, NOT the
+                # declared `with` annotation (the two can diverge and the
+                # checker does not yet reject the mismatch; keying off the
+                # annotation let `(@Int = <neg>)` on a `State<Nat>` handler
+                # bypass the obligation entirely — PR #1202 adversarial
+                # round).  Same refined/nat/widen triple as a let binding,
                 # at enclosing-scope precision (a `requires` can prove it
-                # Tier-1).  Codegen guards the init store, so guarded=True.
-                state_ty = self._resolve_type(expr.state.type_expr)
+                # Tier-1).  Codegen guards the init store, so guarded=True
+                # for the sign-bit pair; the refined predicate has NO
+                # handler-boundary guard, so that arm discloses honestly.
+                state_ty = self._handler_cell_type(expr)
                 init = expr.state.init_expr
                 refined_t = self._refined_binding_target(init, state_ty)
                 if (refined_t is not None
@@ -4532,7 +4589,7 @@ class ContractVerifier:
                     self._check_refined_binding_obligation(
                         decl, init, refined_t, smt, slot_env,
                         assumptions, site="handler state init",
-                        guarded=True,
+                        guarded=False,
                     )
                 elif (self._nat_binding_target(init, state_ty)
                         and self._narrows_into_nat(init)):
@@ -4552,23 +4609,59 @@ class ContractVerifier:
             self._walk_for_nat_binding_obligations(
                 decl, expr.body, smt, slot_env, assumptions,
             )
+            cell_ty = self._handler_cell_type(expr)
             for clause in expr.clauses:
+                # #1203: a State GET clause's tail `resume(v)` is the op's
+                # cell-typed RESULT — obligate a narrowing/widening resume
+                # value here, where the effect identity is known (the
+                # FnCall walk cannot see the enclosing handler).  Fresh
+                # clause scope: slot-dependent values record Tier-3,
+                # guarded=True (codegen wraps the get-clause body's net
+                # value — run-differential-backed).
+                if (cell_ty is not None and clause.op_name == "get"):
+                    r_arg = self._tail_resume_value(clause.body)
+                    if r_arg is not None:
+                        refined_r = self._refined_binding_target(
+                            r_arg, cell_ty)
+                        if (refined_r is not None
+                                and self._narrows_into_refined(
+                                    r_arg, refined_r)):
+                            self._check_refined_binding_obligation(
+                                decl, r_arg, refined_r, smt, SlotEnv(), [],
+                                site="State-op resume", guarded=False,
+                            )
+                        elif (self._nat_binding_target(r_arg, cell_ty)
+                                and self._narrows_into_nat(r_arg)):
+                            self._check_nat_binding_obligation(
+                                decl, r_arg, smt, SlotEnv(), [],
+                                site="State-op resume", guarded=True,
+                            )
+                        elif (self._int_widening_target(r_arg, cell_ty)
+                                and self._result_is_nat(r_arg)):
+                            self._check_int_widening_obligation(
+                                decl, r_arg, smt, SlotEnv(), [],
+                                site="State-op resume", guarded=True,
+                            )
                 self._walk_for_nat_binding_obligations(
                     decl, clause.body, smt, SlotEnv(), [],
                 )
                 if clause.state_update is not None:
                     # #1203: `with @T = <expr>` WRITES the state cell — the
-                    # same binding triple against the update's declared
-                    # target type, under the fresh clause env (slot-dependent
-                    # updates record Tier-3; a literal-negative is loud).
-                    upd_ty = self._resolve_type(clause.state_update[0])
+                    # same binding triple against the CELL type (preferring
+                    # the effect's `State<T>` argument over the declared
+                    # annotation, as at the init), under the fresh clause
+                    # env (slot-dependent updates record Tier-3; a
+                    # literal-negative is loud).
+                    upd_ty = (cell_ty if cell_ty is not None
+                              else self._resolve_type(
+                                  clause.state_update[0]))
                     upd = clause.state_update[1]
                     refined_u = self._refined_binding_target(upd, upd_ty)
                     if (refined_u is not None
                             and self._narrows_into_refined(upd, refined_u)):
                         self._check_refined_binding_obligation(
                             decl, upd, refined_u, smt, SlotEnv(), [],
-                            site="handler state update", guarded=True,
+                            site="handler state update", guarded=False,
                         )
                     elif (self._nat_binding_target(upd, upd_ty)
                             and self._narrows_into_nat(upd)):
@@ -6268,7 +6361,8 @@ class ContractVerifier:
         *all* call-arguments — concrete directly, generic on the
         monomorphised callee (#747), so a Tier-3 narrowing there genuinely
         falls to a runtime check (``tier3_runtime``).  The unguarded cases —
-        the effect-operation argument and the generic-instantiated
+        the *user-effect* operation argument (the builtin State-op sites
+        are guarded since #1203) and the generic-instantiated
         constructor field (constructors carry no per-field @Nat mono
         metadata) — may be neither statically proven nor runtime-checked, so
         surface an E504 warning and exclude them from the discharged totals

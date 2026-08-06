@@ -614,7 +614,9 @@ class ControlFlowMixin:
         # stack is E217 (the bare-call path in calls.py), because codegen cannot
         # route it to the host.
         self._handled_effects.append(effect_inst.name)
+        self._handled_effect_insts.append(effect_inst)
         body_type = self._synth_expr(expr.body)
+        self._handled_effect_insts.pop()
         self._handled_effects.pop()
 
         if pushed_state_hint:

@@ -25,6 +25,7 @@ from vera.types import (
     AdtType,
     PrimitiveType,
     RefinedType,
+    TypeVar,
     EffectInstance,
     FunctionType,
     Type,
@@ -1303,7 +1304,7 @@ class ExpressionsMixin:
 
     def _check_quantifier_bound(self, domain: ast.Expr, form: str) -> None:
         """The quantifier's domain is a numeric BOUND (spec §6.3.3:
-        ``forall(@IndexType, @BoundExpr, @PredicateFn)```` quantifies the
+        ``forall(@IndexType, @BoundExpr, @PredicateFn)`` quantifies the
         index over ``0 .. bound-1``) — require an @Int/@Nat bound (#1204).
 
         An array-typed domain previously type-checked and then died at
@@ -1314,11 +1315,19 @@ class ExpressionsMixin:
         base = domain_ty
         while isinstance(base, RefinedType):
             base = base.base
-        if (base is None or isinstance(base, UnknownType)
+        if (base is None or isinstance(base, (UnknownType, TypeVar))
                 or (isinstance(base, PrimitiveType)
                     and base.name in ("Int", "Nat"))):
+            # A TypeVar bound (`forall<T> fn ... forall(@Int, @T.0, ...)`)
+            # defers to the instantiation — rejecting it here would kill
+            # the Int/Nat instantiations that monomorphise and run
+            # correctly (PR #1202 adversarial round).  The non-integer
+            # instantiations remain a codegen-level gap tracked with the
+            # array-domain family.
             return
-        shown = getattr(base, "name", type(base).__name__)
+        shown = getattr(base, "name", None) or {
+            "FunctionType": "a function type",
+        }.get(type(base).__name__, type(base).__name__)
         self._error(
             domain,
             f"{form}() bound must be an integer count, got {shown}.",

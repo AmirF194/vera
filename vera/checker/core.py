@@ -34,6 +34,7 @@ from vera.environment import (
     TypeEnv,
 )
 from vera.types import (
+    EffectInstance,
     BOOL,
     INT,
     NAT,
@@ -330,6 +331,12 @@ class TypeChecker(
         # routable only when its effect is in this stack (rewritten to the
         # handler clause); otherwise it is E217.
         self._handled_effects: list[str] = []
+        # #1203 determinism: the handled-effect INSTANCES, innermost last —
+        # `_effect_type_mapping` consults this stack innermost-first so an
+        # op inside nested same-name handlers (State<Int> under State<Nat>)
+        # resolves against the governing handler's type args instead of a
+        # frozenset iteration whose order is PYTHONHASHSEED roulette.
+        self._handled_effect_insts: list[EffectInstance] = []
         # #969: canonical slot-type names bound by the PARENT function whose
         # where-block is currently being checked.  A where-helper is a closed,
         # param-rooted scope (spec §5): its body cannot read the outer

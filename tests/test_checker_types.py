@@ -1584,7 +1584,7 @@ private fn main(@Unit -> @Int)
         inside an `@Byte`-based outer predicate must NOT inherit the
         outer allowance — E142."""
         errs = _check_err("""
-type U = { @Byte | forall(@{ @Int | b(@Int.0) < 10 }, [1], fn(@Int -> @Bool) effects(pure) { true }) && @Byte.0 < 10 };
+type U = { @Byte | forall(@{ @Int | b(@Int.0) < 10 }, 1, fn(@Int -> @Bool) effects(pure) { true }) && @Byte.0 < 10 };
 
 private fn b(@Int -> @Byte)
   requires(true) ensures(true) effects(pure)
@@ -3066,7 +3066,7 @@ public fn main(@Unit -> @Int)
 
 class TestQuantifierBoundType1204:
     """#1204: the quantifier's second argument is a numeric BOUND (spec
-    §6.2.4) — an array-typed domain previously type-checked and then died
+    §6.3.3) — an array-typed domain previously type-checked and then died
     at codegen with a raw WASM translation error; it is now a loud E128
     at check time (check-green ⇒ compilable)."""
 
@@ -3108,3 +3108,57 @@ private fn f(@Nat -> @Bool)
   effects(pure)
 { forall(@Int, @Nat.0, fn(@Int -> @Bool) effects(pure) { true }) }
 """)
+
+    def test_refined_int_bound_accepted(self) -> None:
+        """A refinement over an integer base is a valid bound (spec
+        §6.3.3) — the refinement-unwrap branch of the gate."""
+        _check_ok("""
+type Small = { @Int | @Int.0 < 100 };
+
+private fn f(@Small -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ forall(@Int, @Small.0, fn(@Int -> @Bool) effects(pure) { true }) }
+""")
+
+    def test_string_bound_rejected(self) -> None:
+        """A String domain is the same E128 as an array domain."""
+        errs = _check_err("""
+private fn f(@String -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ forall(@Int, @String.0, fn(@Int -> @Bool) effects(pure) { true }) }
+""", "bound must be an integer")
+        assert any(e.error_code == "E128" for e in errs)
+
+    def test_typevar_bound_accepted(self) -> None:
+        """A TypeVar bound in a generic fn defers to the instantiation —
+        the E128 gate must not kill the Int/Nat instantiations that
+        monomorphise and run (PR #1202 adversarial round regression)."""
+        _check_ok("""
+private forall<T> fn p(@T -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ forall(@Int, @T.0, fn(@Int -> @Bool) effects(pure) { true }) }
+
+public fn main(@Unit -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ p(3) }
+""")
+
+    def test_float_bound_rejected(self) -> None:
+        """A Float64 domain is E128 — numeric but not an index count (the
+        likeliest future accidental acceptance)."""
+        errs = _check_err("""
+private fn f(@Float64 -> @Bool)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ forall(@Int, @Float64.0, fn(@Int -> @Bool) effects(pure) { true }) }
+""", "bound must be an integer")
+        assert any(e.error_code == "E128" for e in errs)
