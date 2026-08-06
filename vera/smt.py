@@ -17,6 +17,7 @@ import z3
 
 from vera import ast
 from vera.monomorphize import mangle_type_name, unmangle_type_name
+from vera.naming import EMPTY_ALIAS_ENV, AliasEnv
 from vera.slots import slot_ref_name, type_expr_slot_name
 from vera.types import (
     AdtType,
@@ -286,8 +287,14 @@ class SmtContext:
         module_fn_lookup: (
             Callable[[tuple[str, ...], str], Any] | None
         ) = None,
+        alias_env: AliasEnv = EMPTY_ALIAS_ENV,
     ) -> None:
         self.solver = z3.Solver()
+        # #1208: the naming environment this context renders slot names and
+        # State/Exn families against.  Defaulted empty for the WARM session,
+        # which builds one context before any program is known and rebinds
+        # this per program exactly as it rebinds `_fn_lookup`.
+        self._alias_env = alias_env
         self.solver.set("timeout", timeout_ms)
         # Retained so reset() can re-apply it on warm-session reuse.
         self._timeout_ms = timeout_ms

@@ -2985,21 +2985,26 @@ public fn use_alias(@MyInt -> @Int)
         regression in the upstream rejection must not turn into a
         stack-blow inside codegen.
 
-        This test directly constructs a ``WasmContext`` with a cyclic
-        ``_type_aliases`` map and exercises the guard, because
+        This test directly constructs a ``WasmContext`` whose naming
+        environment (``_alias_env``, #1208) holds a cyclic alias table and
+        exercises the guard, because
         source-level cyclic aliases are now intercepted at check
         time (``vera/checker/registration.py::_check_alias_cycles``)
         before they could reach this code path.  Closes #633.
         """
         from vera import ast
+        from vera.naming import AliasEnv
         from vera.wasm.context import WasmContext
         from vera.wasm.helpers import StringPool
 
+        def _aliases(table: dict[str, ast.TypeExpr]) -> AliasEnv:
+            return AliasEnv(aliases=table, alias_params={})
+
         ctx = WasmContext(string_pool=StringPool())
-        ctx._type_aliases = {
+        ctx.set_alias_env(_aliases({
             "A": ast.NamedType(name="B", type_args=[]),
             "B": ast.NamedType(name="A", type_args=[]),
-        }
+        }))
         # Pre-guard, this would recurse A → B → A → … forever.
         # Post-guard, it stops on second visit and returns the
         # originally-requested name (treated as opaque, no resolution
@@ -3008,19 +3013,19 @@ public fn use_alias(@MyInt -> @Int)
         assert ctx._resolve_base_type_name("B") == "B"
 
         # Three-cycle: A → B → C → A
-        ctx._type_aliases = {
+        ctx.set_alias_env(_aliases({
             "A": ast.NamedType(name="B", type_args=[]),
             "B": ast.NamedType(name="C", type_args=[]),
             "C": ast.NamedType(name="A", type_args=[]),
-        }
+        }))
         assert ctx._resolve_base_type_name("A") == "A"
         assert ctx._resolve_base_type_name("B") == "B"
         assert ctx._resolve_base_type_name("C") == "C"
 
         # Self-loop: type X = X
-        ctx._type_aliases = {
+        ctx.set_alias_env(_aliases({
             "X": ast.NamedType(name="X", type_args=[]),
-        }
+        }))
         assert ctx._resolve_base_type_name("X") == "X"
 
         # Prefix-chain cycle: A leads into a B↔C cycle that doesn't
@@ -3031,11 +3036,11 @@ public fn use_alias(@MyInt -> @Int)
         # CodeRabbit caught this on PR #649.  The fix threads a
         # `_root_name` parameter through the recursion so cycles
         # always return the caller's original input.
-        ctx._type_aliases = {
+        ctx.set_alias_env(_aliases({
             "A": ast.NamedType(name="B", type_args=[]),
             "B": ast.NamedType(name="C", type_args=[]),
             "C": ast.NamedType(name="B", type_args=[]),
-        }
+        }))
         assert ctx._resolve_base_type_name("A") == "A", (
             "Prefix-chain cycle (A → B → C → B): caller asked about "
             "A, must get A back, not the revisited cycle node B."

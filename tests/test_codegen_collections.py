@@ -1084,9 +1084,11 @@ class TestMapTagFutureStripTermination1097:
 
     def _ctx(self, aliases: dict[str, _ast.NamedType]) -> WasmContext:
         import vera.wasm.context as wasm_context
+        from vera.naming import AliasEnv
 
         ctx = object.__new__(wasm_context.WasmContext)
-        ctx._type_aliases = aliases
+        # #1208: the alias table reaches the context as ONE naming env.
+        ctx._alias_env = AliasEnv(aliases=aliases, alias_params={})
         return ctx
 
     def test_future_cycle_alias_terminates(self) -> None:

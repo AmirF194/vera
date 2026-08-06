@@ -43,6 +43,7 @@ from vera.lsp.convert import (
 from vera.obligations.cache import walk_nodes
 from vera.obligations.core import ProofObligation
 from vera.obligations.session import VerificationSession
+from vera.naming import EMPTY_ALIAS_ENV, AliasEnv
 from vera.slots import slot_table
 
 _SEVERITY = {
@@ -62,6 +63,14 @@ class Analysis:
     obligations: list[ProofObligation] = field(default_factory=list)
     artifacts: CheckArtifacts | None = None
     program: ast.Program | None = None
+    # #1208: the document's naming environment, lifted out of `artifacts` so
+    # the slot-table and hover renderers can name against the checker's own
+    # alias table.  Empty when the pipeline stopped at parse/transform — there
+    # is no check, so there are no aliases to name against.
+    alias_env: AliasEnv = EMPTY_ALIAS_ENV
+    # #1208: the same, per imported module (`CheckArtifacts.module_alias_envs`).
+    module_alias_envs: dict[tuple[str, ...], AliasEnv] = field(
+        default_factory=dict)
 
 
 def analyze(
@@ -88,6 +97,8 @@ def analyze(
     analysis.program = program
     check_diags, artifacts = typecheck_with_artifacts(program, text, file=uri)
     analysis.artifacts = artifacts
+    analysis.alias_env = artifacts.alias_env
+    analysis.module_alias_envs = artifacts.module_alias_envs
     analysis.diagnostics = list(check_diags)
 
     if not any(d.severity == "error" for d in check_diags):

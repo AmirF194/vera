@@ -642,7 +642,7 @@ class InferenceMixin:
            re-loops.  (Used by generic FnType-alias resolution where
            the alias's type params bind concrete types from the
            call site.)
-        3. Follows `NamedType` alias chains via `self._type_aliases`
+        3. Follows `NamedType` alias chains via `self._alias_env.aliases`
            one step per outer iteration, so any `RefinementType`
            wrapping the alias body is unwrapped on the next
            iteration.
@@ -686,7 +686,7 @@ class InferenceMixin:
             if not isinstance(te, ast.NamedType):
                 return None
             # Unified cycle guard for both `alias_map` substitution
-            # and `_type_aliases` chain following.  Without this, an
+            # and `_alias_env.aliases` chain following.  Without this, an
             # alias_map self-reference (`{T: NamedType("T")}`) or a
             # cyclic chain through a mix of substitutions and follows
             # would loop forever.
@@ -706,11 +706,11 @@ class InferenceMixin:
             # type params with the concrete `te.type_args` *before*
             # continuing — otherwise the alias body's type variables
             # leak into the returned NamedType.
-            alias = self._type_aliases.get(te.name)
+            alias = self._alias_env.aliases.get(te.name)
             if alias is None:
                 break
             if isinstance(alias, (ast.NamedType, ast.RefinementType)):
-                alias_params = self._type_alias_params.get(te.name)
+                alias_params = self._alias_env.alias_params.get(te.name)
                 if (alias_params and te.type_args
                         and len(alias_params) == len(te.type_args)):
                     local_subst = dict(zip(alias_params, te.type_args))
@@ -799,7 +799,7 @@ class InferenceMixin:
         alias_map: dict[str, ast.TypeExpr] | None = None,
     ) -> bool:
         """True if walking `te` through `RefinementType` /
-        `alias_map` / `_type_aliases` lands on a `FnType`.
+        `alias_map` / `_alias_env.aliases` lands on a `FnType`.
 
         Used by `_canonical_wasm_type` to distinguish the
         FnType-return case (closure-pointer ABI, `"i32"`) from
@@ -823,7 +823,7 @@ class InferenceMixin:
             if alias_map is not None and te.name in alias_map:
                 te = alias_map[te.name]
                 continue
-            alias = self._type_aliases.get(te.name)
+            alias = self._alias_env.aliases.get(te.name)
             if alias is None:
                 return False
             if isinstance(alias, ast.FnType):
@@ -1613,7 +1613,11 @@ class InferenceMixin:
         # its target carries the alias's own free type params, which must
         # not leak; without args it is unresolvable (falls through to the
         # arity-checked substitution path below, which yields None).
-        if not type_arg_names and type_name not in self._type_alias_params:
+        # `alias_params` keys EVERY alias, mapping a non-parameterised one to
+        # `None` (the former flat map simply omitted it), so "is this alias
+        # generic?" is a None test here, not a membership test (#1208).
+        if (not type_arg_names
+                and self._alias_env.alias_params.get(type_name) is None):
             canonical, _ = self._canonicalize_alias_slot_name(type_name)
             if canonical != type_name:
                 parsed = Monomorphizer._parse_type_name(canonical)
@@ -1637,9 +1641,9 @@ class InferenceMixin:
         # the alias target and canonicalize; an arity mismatch (or a target
         # that resolves to no NamedType) is unresolvable — return None so
         # the caller keeps the loud skip.
-        alias_params = self._type_alias_params.get(type_name)
+        alias_params = self._alias_env.alias_params.get(type_name)
         if alias_params is not None:
-            target = self._type_aliases.get(type_name)
+            target = self._alias_env.aliases.get(type_name)
             if (target is not None
                     and type_arg_names
                     and len(type_arg_names) == len(alias_params)):
@@ -1831,8 +1835,8 @@ class InferenceMixin:
         # the enclosing function (`head`) gets dropped via [E602], and
         # the call site references a non-existent `$head` — the symptom
         # documented in #655 Shape B.
-        if type_name in self._type_aliases:
-            target = self._type_aliases[type_name]
+        if type_name in self._alias_env.aliases:
+            target = self._alias_env.aliases[type_name]
             while isinstance(target, ast.RefinementType):
                 target = target.base_type
             if isinstance(target, ast.NamedType):
@@ -1991,8 +1995,8 @@ class InferenceMixin:
                     name=closure_arg.type_name,
                     type_args=closure_arg.type_args,
                 ),
-                self._type_aliases,
-                self._type_alias_params,
+                self._alias_env.aliases,
+                self._alias_env.alias_params,
             )
             return fn_type.return_type if fn_type is not None else None
         if isinstance(closure_arg, ast.AnonFn):
@@ -2020,8 +2024,8 @@ class InferenceMixin:
                     name=closure_arg.type_name,
                     type_args=closure_arg.type_args,
                 ),
-                self._type_aliases,
-                self._type_alias_params,
+                self._alias_env.aliases,
+                self._alias_env.alias_params,
             )
             return tuple(fn_type.params) if fn_type is not None else None
         if isinstance(closure_arg, ast.AnonFn):
@@ -2203,7 +2207,7 @@ class InferenceMixin:
         names must stay opaque per the #914 full-name invariant)."""
         try:
             return (resolve_scalar_alias_te(
-                        te, self._type_aliases, self._type_alias_params)
+                        te, self._alias_env.aliases, self._alias_env.alias_params)
                     or fallback)
         except AliasResolutionDepthError as exc:
             # Loud, not opaque: falling back on overflow would key the
@@ -2287,13 +2291,13 @@ class InferenceMixin:
                     return None
                 inner.append(n)
             head_args = f"<{', '.join(inner)}>"
-        alias = self._type_aliases.get(te.name)
+        alias = self._alias_env.aliases.get(te.name)
         if alias is None:
             return te.name + (head_args if te.type_args else "")
         if not isinstance(alias, ast.NamedType):
             # FnType-bodied (or other non-named) alias — keep opaque.
             return type_expr_slot_name(a)
-        params = self._type_alias_params.get(te.name)
+        params = self._alias_env.alias_params.get(te.name)
         if params and te.type_args and len(params) == len(te.type_args):
             alias = substitute_named(alias, dict(zip(params, te.type_args)))
         elif te.type_args:
@@ -2350,7 +2354,7 @@ class InferenceMixin:
                     return None
                 inner.append(n)
             head_args = f"<{', '.join(inner)}>"
-        alias = self._type_aliases.get(a.name)
+        alias = self._alias_env.aliases.get(a.name)
         if alias is None:
             return a.name + (head_args if a.type_args else "")
         if not isinstance(alias, (ast.NamedType, ast.RefinementType)):
@@ -2362,7 +2366,7 @@ class InferenceMixin:
         # gate compared the unsubstituted form against the checker's and
         # never fired — round-7 review, F1).  Mirrors
         # `resolve_alias_type_expr`'s ordering.
-        params = self._type_alias_params.get(a.name)
+        params = self._alias_env.alias_params.get(a.name)
         if params and a.type_args and len(params) == len(a.type_args):
             alias = substitute_named(alias, dict(zip(params, a.type_args)))
         elif a.type_args and not isinstance(alias, ast.RefinementType):
@@ -2385,13 +2389,13 @@ class InferenceMixin:
             return True
         if not isinstance(te, ast.NamedType):
             return False
-        alias = self._type_aliases.get(te.name)
+        alias = self._alias_env.aliases.get(te.name)
         if alias is None or not isinstance(
                 alias, (ast.NamedType, ast.RefinementType)):
             return False
         if isinstance(alias, ast.RefinementType):
             return True
-        params = self._type_alias_params.get(te.name)
+        params = self._alias_env.alias_params.get(te.name)
         if params and te.type_args and len(params) == len(te.type_args):
             alias = substitute_named(alias, dict(zip(params, te.type_args)))
         return self._head_resolves_through_refinement(alias, _depth + 1)
@@ -2433,11 +2437,11 @@ class InferenceMixin:
             # Cycle — return the caller's original name unchanged
             # (treat as opaque, no resolution available).
             return _root_name
-        if name not in self._type_aliases:
+        if name not in self._alias_env.aliases:
             # Not an alias — this is the underlying base name.
             return name
         _seen = _seen | {name}
-        alias = self._type_aliases[name]
+        alias = self._alias_env.aliases[name]
         if isinstance(alias, ast.RefinementType):
             if isinstance(alias.base_type, ast.NamedType):
                 return self._resolve_base_type_name(
@@ -2527,8 +2531,8 @@ class InferenceMixin:
         # depth-1 behaviour is unchanged (a direct alias resolves in one hop).
         if resolve_fn_type_alias(
             ast.NamedType(name=type_name, type_args=type_args),
-            self._type_aliases,
-            self._type_alias_params,
+            self._alias_env.aliases,
+            self._alias_env.alias_params,
         ) is not None:
             return "i32"
         return None
@@ -2567,8 +2571,8 @@ class InferenceMixin:
         whose target has no nameable slot form, is returned unchanged for
         the caller's own fallthrough handling.
         """
-        while name in self._type_aliases and name not in _seen:
-            target = type_expr_slot_name(self._type_aliases[name])
+        while name in self._alias_env.aliases and name not in _seen:
+            target = type_expr_slot_name(self._alias_env.aliases[name])
             if target is None or target == name:
                 break
             _seen = _seen | {name}
@@ -2646,8 +2650,8 @@ class InferenceMixin:
         # substitutes at each hop.
         if resolve_fn_type_alias(
             ast.NamedType(name=base, type_args=None),
-            self._type_aliases,
-            self._type_alias_params,
+            self._alias_env.aliases,
+            self._alias_env.alias_params,
         ) is not None:
             return "i32"
         # Bare "Fn" for anonymous function types

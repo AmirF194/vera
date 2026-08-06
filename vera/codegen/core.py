@@ -26,6 +26,7 @@ from vera.codegen.api import CompileResult
 from vera.codegen.memory import ConstructorLayout
 from vera.errors import Diagnostic, SourceLocation
 from vera.monomorphize import canonicalize_type_aliases, qualify_nested_generic_decls
+from vera.naming import EMPTY_ALIAS_ENV, AliasEnv
 from vera.prelude import PRELUDE_FILE, mentioned_fn_names
 from vera.slots import (
     AliasResolutionDepthError,
@@ -266,6 +267,17 @@ class CodeGenerator(
         # onto THESE, never onto the main file's aliases.
         self._prelude_type_aliases: dict[str, ast.TypeExpr] = {}
         self._prelude_type_alias_params: dict[str, tuple[str, ...]] = {}
+        # #1208: the naming environment the ONE renderer (:mod:`vera.naming`)
+        # resolves against, held as the single value the flat maps above
+        # describe.  DERIVED from those maps rather than taken from
+        # ``CheckArtifacts.module_alias_envs``: codegen's alias view is not the
+        # checker's — it is the prelude's aliases overlaid by the main file's
+        # (and, inside ``_module_alias_scope``, by the compiling module's), and
+        # it is built from the TRANSFORMED, monomorphized AST.  Sourcing it
+        # from the check would name against a table codegen does not otherwise
+        # use, which is exactly the mint-one-way / look-up-another split #1208
+        # closes.  `_sync_alias_env` re-derives it wherever the maps change.
+        self._alias_env: AliasEnv = EMPTY_ALIAS_ENV
 
         # #1172: runtime decreases-guard state.  ``_dec_guard_fns`` maps
         # each guarded function's WAT name -> lexicographic component
@@ -1068,6 +1080,22 @@ class CodeGenerator(
     # Compilation entry point
     # -----------------------------------------------------------------
 
+    def _sync_alias_env(self) -> None:
+        """Re-derive ``_alias_env`` from the flat alias maps (#1208).
+
+        The naming environment must describe the SAME aliases every other
+        alias consumer reads mid-compile, so it is rebuilt at each point the
+        flat maps change: Pass-1 registration, prelude injection, and both
+        ends of ``_module_alias_scope``'s swap.  A new mutation site must call
+        this too — a stale env renders a name against the wrong namespace, and
+        a name minted one way and looked up another misses SILENTLY.
+        """
+        self._alias_env = AliasEnv(
+            aliases=dict(self._type_aliases),
+            alias_params=dict(self._type_alias_params),
+            data_types=frozenset(self._adt_layouts),
+        )
+
     def compile_program(self, program: ast.Program) -> CompileResult:
         """Compile a complete Vera program to WebAssembly."""
         # Pass 0a: reject programs with typed holes
@@ -1232,6 +1260,8 @@ class CodeGenerator(
                     self._type_aliases[decl.name] = decl.type_expr
                     if decl.type_params:
                         self._type_alias_params[decl.name] = decl.type_params
+        # #1208: prelude aliases and ADTs are now in the flat maps too.
+        self._sync_alias_env()
 
         # #305: Pass-1 signatures for USER fns whose params/return
         # reference prelude ADTs (Request/Response/Json/HtmlNode) were

@@ -32,7 +32,8 @@ class CrossModuleMixin:
         main file's aliases must never re-type a module's declarations.
         For the duration of the ``with`` block the flat
         ``_type_aliases`` / ``_type_alias_params`` maps (main file +
-        non-shadowed prelude) are swapped for ``{prelude, **module_own}``
+        non-shadowed prelude) — and the ``_alias_env`` those two describe
+        (#1208) — are swapped for ``{prelude, **module_own}``
         — the module's aliases overlaying the prelude's, mirroring how
         the main file's own aliases overlay the prelude in the flat maps.
         Every alias consumer downstream (signature derivation, contract
@@ -66,11 +67,17 @@ class CrossModuleMixin:
             if name not in mod_aliases
         }
         gen._type_alias_params.update(mod_params)
+        # #1208: the naming environment is part of the swapped pair — it
+        # describes exactly these two maps, so it moves with them or it names
+        # the module's declarations against the main file's aliases.
+        saved_env = gen._alias_env
+        gen._sync_alias_env()
         try:
             yield
         finally:
             gen._type_aliases = saved_aliases
             gen._type_alias_params = saved_params
+            gen._alias_env = saved_env
 
     @contextlib.contextmanager
     def _module_source_scope(

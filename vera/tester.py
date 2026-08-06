@@ -19,6 +19,7 @@ import z3
 
 from vera import ast
 from vera.errors import Diagnostic, SourceLocation
+from vera.naming import EMPTY_ALIAS_ENV, AliasEnv
 from vera.slots import type_expr_slot_name
 from vera.smt import SlotEnv, SmtContext
 from vera.types import BOOL, BYTE, FLOAT64, INT, NAT, STRING, UNIT, ModuleArtifacts, PrimitiveType, RefinedType, Type, base_type
@@ -155,6 +156,7 @@ def test(
     expr_semantic_types: dict[tuple[int, int, int, int], Type] | None = None,
     expr_target_types: dict[tuple[int, int, int, int], Type] | None = None,
     module_artifacts: ModuleArtifacts | None = None,
+    alias_env: AliasEnv = EMPTY_ALIAS_ENV,
 ) -> TestResult:
     """Test a type-checked Vera program by generating inputs from contracts.
 
@@ -174,6 +176,10 @@ def test(
     ``module_artifacts`` (#987) carries each resolved module's OWN side-tables so
     the tester-compiled WASM also emits the widen guards for IMPORTED bodies —
     the same threading ``vera run`` / ``vera compile`` use.
+
+    ``alias_env`` (#1208) is the checked program's naming environment
+    (``CheckArtifacts.alias_env``), carried down to the Z3 input generator so
+    the slot names it declares variables under are the checker's.
     """
     engine = _TestEngine(
         program=program,
@@ -185,6 +191,7 @@ def test(
         expr_semantic_types=expr_semantic_types,
         expr_target_types=expr_target_types,
         module_artifacts=module_artifacts,
+        alias_env=alias_env,
     )
     return engine.run()
 
@@ -209,6 +216,7 @@ class _TestEngine:
         expr_target_types: (
             dict[tuple[int, int, int, int], Type] | None) = None,
         module_artifacts: ModuleArtifacts | None = None,
+        alias_env: AliasEnv = EMPTY_ALIAS_ENV,
     ) -> None:
         self.program = program
         self.source = source
@@ -224,6 +232,9 @@ class _TestEngine:
         # #987: per-module tables so the tester's WASM emits the widen guards for
         # imported bodies too (threaded into `codegen_compile` below).
         self.module_artifacts = module_artifacts
+        # #1208: the checked program's naming environment, threaded into the
+        # Z3 input generator so its slot names are the checker's.
+        self.alias_env = alias_env
 
     def run(self) -> TestResult:
         """Execute the full test pipeline."""
@@ -345,7 +356,8 @@ class _TestEngine:
 
             # Generate inputs
             param_types = _get_param_types(decl)
-            inputs = _generate_inputs(decl, param_types, self.trials)
+            inputs = _generate_inputs(
+                decl, param_types, self.trials, self.alias_env)
 
             if inputs is None:  # pragma: no cover — _classify_functions filters unsupported types
                 unsupported_names = _unsupported_type_names(param_types)
@@ -717,6 +729,7 @@ def _generate_inputs(
     decl: ast.FnDecl,
     param_types: list[Type],
     count: int,
+    alias_env: AliasEnv = EMPTY_ALIAS_ENV,
 ) -> list[list[int | float | str]] | None:
     """Generate test inputs from requires() clauses via Z3.
 
@@ -730,7 +743,7 @@ def _generate_inputs(
             return None
 
     # 2. Declare Z3 variables
-    smt = SmtContext(timeout_ms=5000)
+    smt = SmtContext(timeout_ms=5000, alias_env=alias_env)
     slot_env = SlotEnv()
     z3_vars: list[z3.ExprRef] = []
     var_types: list[Type] = []  # base types for each var

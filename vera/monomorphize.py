@@ -28,11 +28,12 @@ instantiation sets in agreement.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, fields, replace
 from typing import Any, cast
 
 from vera import ast
+from vera.naming import EMPTY_ALIAS_ENV, AliasEnv
 from vera.slots import slot_ref_name, type_expr_slot_name
 
 
@@ -108,8 +109,8 @@ def substitute_type_vars(
 
 def resolve_type_alias(
     te: ast.TypeExpr,
-    type_aliases: dict[str, ast.TypeExpr],
-    type_alias_params: dict[str, tuple[str, ...]],
+    type_aliases: Mapping[str, ast.TypeExpr],
+    type_alias_params: Mapping[str, tuple[str, ...] | None],
 ) -> ast.TypeExpr | None:
     """Resolve a ``TypeExpr`` through the alias chain to its terminal shape.
 
@@ -177,8 +178,8 @@ def resolve_type_alias(
 
 def resolve_fn_type_alias(
     te: ast.TypeExpr,
-    type_aliases: dict[str, ast.TypeExpr],
-    type_alias_params: dict[str, tuple[str, ...]],
+    type_aliases: Mapping[str, ast.TypeExpr],
+    type_alias_params: Mapping[str, tuple[str, ...] | None],
 ) -> ast.FnType | None:
     """Resolve a ``TypeExpr`` to the ``FnType`` it aliases, transitively.
 
@@ -1049,6 +1050,8 @@ class MonoContext:
       discovered set is a sound superset under that normalization, which the
       #732 differential test maintains (its ``collapse`` table is the one place
       that mapping lives) and pins.
+    * ``alias_env`` — the same alias namespace as the two maps above, carried
+      as the one value :mod:`vera.naming` renders against (#1208).
     * ``fn_ret_type_exprs`` — function name (bare-keyed, same as ``fn_ret_types``)
       → declared return **TypeExpr** (type args RETAINED, unlike ``fn_ret_types``).
       Lets discovery recover a user fn's *parameterized* return (`maybe → Option<Decimal>`)
@@ -1067,6 +1070,11 @@ class MonoContext:
     type_alias_params: dict[str, tuple[str, ...]]
     fn_ret_types: dict[str, str]
     fn_ret_type_exprs: dict[str, ast.TypeExpr] = field(default_factory=dict)
+    # #1208: the naming environment for this consumer's alias namespace — the
+    # `type_aliases` / `type_alias_params` pair above as ONE value, plus the
+    # declared-ADT names.  Defaulted empty so a consumer that has not been
+    # threaded yet behaves exactly as before.
+    alias_env: AliasEnv = EMPTY_ALIAS_ENV
 
 
 class Monomorphizer:

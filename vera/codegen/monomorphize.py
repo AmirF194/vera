@@ -23,6 +23,7 @@ from vera.monomorphize import (
     collect_nested_generic_decls,
     declared_return_clone_key,
 )
+from vera.naming import EMPTY_ALIAS_ENV
 from vera.skip import DERIVED_HELPER_DEPTH_CAP
 from vera.slots import type_expr_slot_name
 
@@ -119,6 +120,8 @@ class MonomorphizationMixin:
             adt_tp_counts=getattr(self, "_adt_tp_counts", {}),
             type_aliases=getattr(self, "_type_aliases", {}),
             type_alias_params=getattr(self, "_type_alias_params", {}),
+            # #1208: the same namespace as the two maps above, as one value.
+            alias_env=getattr(self, "_alias_env", EMPTY_ALIAS_ENV),
             fn_ret_types=fn_ret_types,
             # #899 issue 1: the declared return TypeExprs (type args retained)
             # let discovery recover a user fn's parameterized return in

@@ -662,8 +662,8 @@ class AliasResolutionDepthError(Exception):
 
 def resolve_alias_type_expr(
     te: ast.TypeExpr,
-    aliases: dict[str, ast.TypeExpr],
-    alias_params: dict[str, tuple[str, ...]],
+    aliases: Mapping[str, ast.TypeExpr],
+    alias_params: Mapping[str, tuple[str, ...] | None],
     _depth: int = 0,
 ) -> ast.NamedType | None:
     """Walk *te* to its terminal ``NamedType`` through refinement

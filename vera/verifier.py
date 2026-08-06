@@ -39,6 +39,7 @@ from vera.obligations.core import (
     ProofObligation,
     expr_text_for,
 )
+from vera.naming import EMPTY_ALIAS_ENV, AliasEnv, alias_env_from_environment
 from vera.slots import slot_table, type_expr_slot_name
 from vera.smt import SlotEnv, SmtContext
 from vera.types import (
@@ -213,6 +214,12 @@ class ContractVerifier:
         # program.  None (the default) preserves the historical
         # fresh-context-per-function cold path exactly.
         self._shared_smt = shared_smt
+        # #1208: the naming environment for THIS verifier's module — alias
+        # bodies, alias parameters, and declared-ADT names, as
+        # :mod:`vera.naming` renders against.  Built from `self.env` once
+        # registration has populated it (see `register_program`); empty until
+        # then, because there is nothing to name before the aliases register.
+        self._alias_env: AliasEnv = EMPTY_ALIAS_ENV
         self.source = source
         self.file = file
         self.timeout_ms = timeout_ms
@@ -907,6 +914,11 @@ class ContractVerifier:
                 self._top_level_fn_infos[tld.decl.name] = self._fn_info_for_decl(
                     tld.decl, visibility=tld.visibility,
                 )
+        # #1208: registration has recorded every alias body (`TypeAliasInfo.body`)
+        # and every ADT, so the naming environment is now complete for this
+        # module.  Rebuilt here rather than lazily so it is a plain value: the
+        # warm session re-registers per program and picks up the new one.
+        self._alias_env = alias_env_from_environment(self.env)
         # #732: discover every concrete instantiation of each generic NOW, off
         # the registered env, so both verify_program (cold) and the warm
         # incremental session — which both go through register_program — verify
@@ -1126,6 +1138,9 @@ class ContractVerifier:
             adt_tp_counts=adt_tp_counts,
             type_aliases=type_aliases,
             type_alias_params=type_alias_params,
+            # #1208: the verifier's own naming environment, built from the
+            # same `TypeEnv` the two maps above are harvested from.
+            alias_env=self._alias_env,
             fn_ret_types=fn_ret_types,
             fn_ret_type_exprs=fn_ret_type_exprs,
         )
@@ -2132,11 +2147,16 @@ class ContractVerifier:
             smt.reset()
             smt._fn_lookup = fn_lookup
             smt._module_fn_lookup = self._lookup_module_function
+            # #1208: the warm context outlives the program that built it, so
+            # its naming environment is rebound per function exactly as the
+            # lookups above are.
+            smt._alias_env = self._alias_env
         else:
             smt = SmtContext(
                 timeout_ms=self.timeout_ms,
                 fn_lookup=fn_lookup,
                 module_fn_lookup=self._lookup_module_function,
+                alias_env=self._alias_env,
             )
         # CR PR-review: let the SMT match translation assume a constructor
         # pattern's refined / @Nat sub-pattern SOURCE facts while checking the
@@ -5726,6 +5746,7 @@ class ContractVerifier:
             timeout_ms=self.timeout_ms,
             fn_lookup=self.env.lookup_function,
             module_fn_lookup=self._lookup_module_function,
+            alias_env=self._alias_env,
         )
         for adt_info in self.env.data_types.values():
             smt.register_adt(adt_info)

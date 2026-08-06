@@ -13,6 +13,7 @@ function ``fn foo(@Int, @Int -> @Int)``:
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Mapping
 
 from vera import ast
 
@@ -88,8 +89,8 @@ _SCALAR_BASE_NAMES = frozenset({"Int", "Nat", "Float64", "Bool", "Byte"})
 
 def resolve_scalar_alias_te(
     te: ast.TypeExpr,
-    aliases: dict[str, ast.TypeExpr],
-    alias_params: dict[str, tuple[str, ...]],
+    aliases: Mapping[str, ast.TypeExpr],
+    alias_params: Mapping[str, tuple[str, ...] | None],
 ) -> str | None:
     """Collapse a ``State<T>``/``Exn<E>`` type argument to its scalar
     base name IFF it resolves to a scalar primitive; ``None`` otherwise.

@@ -372,8 +372,8 @@ class CallsMarkupMixin:
             arg,
             self._future_ret_fns,
             self._future_ret_module_fns,
-            self._type_aliases,
-            self._type_alias_params,
+            self._alias_env.aliases,
+            self._alias_env.alias_params,
         ):
             return self.translate_expr(arg, env)
         arg_instrs = self.translate_expr(arg, env)

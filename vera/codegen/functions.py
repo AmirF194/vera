@@ -310,9 +310,10 @@ class FunctionCompilationMixin:
         # #865: per-parameter concrete-@Byte flags for the call-site
         # int-literal → i32.const coercion.
         ctx.set_fn_byte_params(self._fn_byte_params)
-        # Provide type aliases so closures can resolve FnType return types
-        ctx.set_type_aliases(self._type_aliases)
-        ctx.set_type_alias_params(self._type_alias_params)
+        # Provide the naming environment so closures can resolve FnType
+        # return types.  One value, so the alias bodies and their parameter
+        # lists cannot be handed over half-updated (#1184 / #1208).
+        ctx.set_alias_env(self._alias_env)
         ctx.set_closure_id_start(self._next_closure_id)
         ctx.set_closure_sigs(self._closure_sigs)
         # #814 §8.5.3: module-qualified call target table, so a ``m::f`` call

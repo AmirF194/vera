@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 
 from vera import ast, naming
 from vera.errors import Diagnostic, SourceLocation
+from vera.naming import AliasEnv
 from vera.environment import (
     AdtInfo,
     FunctionInfo,
@@ -127,6 +128,20 @@ class CheckArtifacts:
     # the #820 @Nat -> @Int widening guard fires at the array-element /
     # tuple-construction sites through the import door, not just same-file.
     module_artifacts: ModuleArtifacts
+    # #1208: the ENTRY module's naming environment — the alias bodies, alias
+    # parameters, and declared-ADT names :mod:`vera.naming` renders slot names,
+    # slot-reference keys, and State/Exn cell families against.  Captured from
+    # the checker's own ``TypeEnv`` once the program has been checked, so a
+    # consumer downstream of the check renders against exactly the table the
+    # checker keyed its bindings by rather than rebuilding an approximation.
+    alias_env: AliasEnv
+    # #1208: the per-resolved-module counterpart, keyed by module path exactly
+    # as ``module_artifacts`` above is (#987).  Aliases are MODULE-scoped (spec
+    # §8.4.1), so an imported body has to be named against ITS namespace, not
+    # the entry module's — the same reason the span tables are per-module.
+    # Populated only when ``collect_module_artifacts`` is on, empty otherwise,
+    # again matching ``module_artifacts``.
+    module_alias_envs: dict[tuple[str, ...], AliasEnv]
 
 
 def typecheck_with_artifacts(
@@ -153,6 +168,10 @@ def typecheck_with_artifacts(
     extra ``check_program`` per resolved module for nothing, so they leave it
     ``False`` (``module_artifacts`` is then an empty dict, which ``_compile_fn``
     already tolerates — the #986 imported-body suppression fallback).
+    ``module_alias_envs`` (#1208) rides the same gate for the same reason: it
+    is collected from those same sub-checks.  ``alias_env``, by contrast, is
+    the entry module's own and always present — it costs one walk of an
+    already-built table.
     """
     checker = TypeChecker(
         source=source, file=file, resolved_modules=resolved_modules,
@@ -164,9 +183,11 @@ def typecheck_with_artifacts(
     checker.check_program(program)
 
     module_arts: ModuleArtifacts = {}
+    module_envs: dict[tuple[str, ...], naming.AliasEnv] = {}
     diagnostics = list(checker.errors)
     if collect_module_artifacts:
-        module_arts, body_errors = _collect_module_artifacts(resolved_modules)
+        module_arts, module_envs, body_errors = _collect_module_artifacts(
+            resolved_modules)
         # Merge imported-body errors (Cortex #1147 Finding 2), deduped against
         # the top-level program's own diagnostics — a module's E151, say, can be
         # reported by both the top-level registration and its sub-check.
@@ -187,14 +208,18 @@ def typecheck_with_artifacts(
         expr_semantic_types=checker.expr_semantic_types,
         expr_target_types=checker.expr_target_types,
         module_artifacts=module_arts,
+        alias_env=naming.alias_env_from_environment(checker.env),
+        module_alias_envs=module_envs,
     )
 
 
 def _collect_module_artifacts(
     resolved_modules: list[ResolvedModule] | None,
-) -> tuple[ModuleArtifacts, list[Diagnostic]]:
-    """Collect each resolved module's OWN span-keyed side-tables (#987) and its
-    OWN check ERRORS (Cortex #1147 Finding 2).
+) -> tuple[ModuleArtifacts, dict[tuple[str, ...], naming.AliasEnv],
+           list[Diagnostic]]:
+    """Collect each resolved module's OWN span-keyed side-tables (#987), its
+    OWN naming environment (#1208), and its OWN check ERRORS (Cortex #1147
+    Finding 2).
 
     The top-level program's ``expr_target_types`` / ``expr_semantic_types`` are
     keyed by bare span ``(line, col, end_line, end_col)`` with no file identity,
@@ -236,6 +261,7 @@ def _collect_module_artifacts(
     """
     mods = resolved_modules or []
     result: ModuleArtifacts = {}
+    envs: dict[tuple[str, ...], naming.AliasEnv] = {}
     body_errors: list[Diagnostic] = []
     seen: set[tuple[str | None, int, int, str, str]] = set()
     for mod in mods:
@@ -258,6 +284,11 @@ def _collect_module_artifacts(
         sub.hole_sites = []
         sub.check_program(mod.program)
         result[mod.path] = (sub_semantic, sub_target)
+        # #1208: that module's OWN alias namespace, captured from the same
+        # isolated sub-check the span tables come from — aliases are
+        # module-local (spec §8.4.1), so this is the only place the module's
+        # view exists after its check finishes.
+        envs[mod.path] = naming.alias_env_from_environment(sub.env)
         # Cortex #1147 Finding 2: surface each imported body's OWN check ERRORS.
         # The body is compiled into the flat WASM module, so a body that fails
         # its standalone check — e.g. a library whose SQL is non-literal (E207)
@@ -272,7 +303,7 @@ def _collect_module_artifacts(
             if key not in seen:
                 seen.add(key)
                 body_errors.append(e)
-    return result, body_errors
+    return result, envs, body_errors
 
 
 # =====================================================================

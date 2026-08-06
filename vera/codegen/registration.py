@@ -27,6 +27,8 @@ class RegistrationMixin:
                 self._type_aliases[decl.name] = decl.type_expr
                 if decl.type_params:
                     self._type_alias_params[decl.name] = decl.type_params
+        # #1208: the naming env describes the maps just populated.
+        self._sync_alias_env()
 
     def _register_fn(self, decl: ast.FnDecl) -> None:
         """Register a function's WASM signature."""

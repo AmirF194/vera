@@ -847,8 +847,8 @@ class CallsMixin:
         if isinstance(arg, ast.SlotRef):
             fn_type = resolve_fn_type_alias(
                 ast.NamedType(name=arg.type_name, type_args=arg.type_args),
-                self._type_aliases,
-                self._type_alias_params,
+                self._alias_env.aliases,
+                self._alias_env.alias_params,
             )
             if fn_type is not None:
                 return (tuple(fn_type.params), fn_type.return_type)
@@ -878,7 +878,7 @@ class CallsMixin:
             return None
         arg_params, arg_return = arg_shape
 
-        alias_params = self._type_alias_params.get(param_te.name)
+        alias_params = self._alias_env.alias_params.get(param_te.name)
         if (
             not alias_params
             or not param_te.type_args
@@ -894,8 +894,8 @@ class CallsMixin:
                     for p in alias_params
                 ),
             ),
-            self._type_aliases,
-            self._type_alias_params,
+            self._alias_env.aliases,
+            self._alias_env.alias_params,
         )
         if alias_te is None:
             return None

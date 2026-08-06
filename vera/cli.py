@@ -121,6 +121,7 @@ def cmd_check(
     """Parse, transform, and type-check a .vera file."""
     from vera.ast import FnDecl, format_type_expr
     from vera.checker import typecheck
+    from vera.checker.core import typecheck_with_artifacts
     from vera.resolver import ModuleResolver
     from vera.slots import format_slot_table, slot_table, slot_table_dict
 
@@ -134,9 +135,21 @@ def cmd_check(
         resolved = resolver.resolve_imports(program, p)
         resolve_diags = resolver.errors
 
-        diagnostics = resolve_diags + typecheck(
-            program, source, file=str(p), resolved_modules=resolved,
-        )
+        if explain_slots:
+            # #1208: the slot table is a NAMING question, so it is answered
+            # against the checker's own alias table
+            # (``CheckArtifacts.alias_env``) rather than a syntactic rebuild.
+            # Only this flag pays for the artifact-collecting check; a plain
+            # ``vera check`` keeps the cheaper entry point, and the
+            # diagnostics are the same list either way.
+            check_diags, artifacts = typecheck_with_artifacts(
+                program, source, file=str(p), resolved_modules=resolved,
+            )
+        else:
+            check_diags = typecheck(
+                program, source, file=str(p), resolved_modules=resolved,
+            )
+        diagnostics = resolve_diags + check_diags
 
         errors = [d for d in diagnostics if d.severity == "error"]
         warnings = [d for d in diagnostics if d.severity == "warning"]
@@ -1404,6 +1417,7 @@ def cmd_test(
             expr_semantic_types=artifacts.expr_semantic_types,
             expr_target_types=artifacts.expr_target_types,
             module_artifacts=artifacts.module_artifacts,
+            alias_env=artifacts.alias_env,
         )
 
         has_errors = any(d.severity == "error" for d in result.diagnostics)
