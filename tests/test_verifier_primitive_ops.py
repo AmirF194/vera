@@ -235,7 +235,7 @@ private fn ld_div(@Int, @Int -> @Int)
         """An untranslatable scalar `let` (a `random_int` effect result the SMT
         layer doesn't model) that shadows a constrained outer must NOT let the
         outer's `requires(@Int.0 != 0)` falsely discharge a division by it.
-        `requires(@Int.0 != 0); let @Int = random_int(0, 10); 1 / @Int.0` —
+        `requires(@Int.0 != 0); let @Int = Random.random_int(0, 10); 1 / @Int.0` —
         random_int can be 0, so the division is unsafe and must be honest Tier-3
         (the shadowed value is unknown), not a false Tier-1 (#680 review).  This
         is the silent-failure differential: before the shadow fix it verified
@@ -245,7 +245,7 @@ public fn f(@Int -> @Int)
   requires(@Int.0 != 0)
   ensures(true)
   effects(<Random>)
-{ let @Int = random_int(0, 10); 1 / @Int.0 }
+{ let @Int = Random.random_int(0, 10); 1 / @Int.0 }
 """)
         errors = [d for d in result.diagnostics if d.severity == "error"]
         assert errors == [], f"expected no error, got: {[e.description for e in errors]}"
@@ -337,7 +337,7 @@ private fn nonlit_destr_div(@Int -> @Int)
     def test_untranslatable_destructure_component_keeps_debruijn(self) -> None:
         """An untranslatable destructured component with NO stale outer must
         still push a tracked placeholder, so same-type De Bruijn positions
-        don't collapse.  `let Tuple<@Int, @Int> = Tuple(10, random_int(0, 10));
+        don't collapse.  `let Tuple<@Int, @Int> = Tuple(10, Random.random_int(0, 10));
         1 / @Int.0` must be Tier-3: `@Int.0` is the *opaque second component*,
         not the literal `10` it would shift onto if the component were skipped
         (PR #778 review, `verifier.py` De Bruijn collapse).  A skip here is a
@@ -347,7 +347,7 @@ private fn debruijn_keep(@Unit -> @Int)
   requires(true)
   ensures(true)
   effects(<Random>)
-{ let Tuple<@Int, @Int> = Tuple(10, random_int(0, 10)); 1 / @Int.0 }
+{ let Tuple<@Int, @Int> = Tuple(10, Random.random_int(0, 10)); 1 / @Int.0 }
 """)
         errors = [d for d in result.diagnostics if d.severity == "error"]
         assert errors == [], [e.error_code for e in errors]
@@ -359,7 +359,7 @@ private fn debruijn_keep(@Unit -> @Int)
     def test_compound_shadow_divisor_is_tier3_not_e526(self) -> None:
         """A divisor that *contains* an opaque shadow (`shadow + 1`), not just
         one that IS a shadow, must fall to Tier-3 — Z3 must not pick
-        `shadow = -1` and emit a false E526.  `let @Int = random_int(0, 10);
+        `shadow = -1` and emit a false E526.  `let @Int = Random.random_int(0, 10);
         1 / (@Int.0 + 1)` shadows the outer `@Int.0`, so the compound divisor
         is opaque (PR #778 review, `verifier.py` `_contains_opaque_shadow`)."""
         result = _verify("""
@@ -367,7 +367,7 @@ private fn compound_shadow(@Int -> @Int)
   requires(@Int.0 != 0)
   ensures(true)
   effects(<Random>)
-{ let @Int = random_int(0, 10); 1 / (@Int.0 + 1) }
+{ let @Int = Random.random_int(0, 10); 1 / (@Int.0 + 1) }
 """)
         errors = [d for d in result.diagnostics if d.severity == "error"]
         assert errors == [], [e.error_code for e in errors]

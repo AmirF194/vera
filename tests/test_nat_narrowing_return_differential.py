@@ -2674,13 +2674,84 @@ public fn go(@Int -> @Int)
                 resolved_modules=resolved,
                 expr_semantic_types=arts.expr_semantic_types,
             )
-            compiled_ok = result.ok
-            try:
-                execute(result, fn_name="go", args=[0])
-                ran = True
-            except Exception:  # noqa: BLE001 — ANY loud failure passes
-                ran = False
-            assert not (compiled_ok and ran), (
-                "qualified State.put with a user-fn shadow must fail "
-                "loudly, not dispatch to the user fn"
+            assert not result.ok
+            msgs = [d.description for d in result.diagnostics]
+            assert any(
+                "unknown func" in m and "$vera.put" in m for m in msgs
+            ), msgs
+
+
+class TestClauseClassCollisionBothDirections:
+    """Round-7: the collision gate's two directions and the renderer
+    ordering bug that dodged it.  Direction 1 (one checker class, two
+    bind keys) includes PARAMETERISED refined aliases — the strict
+    renderer must substitute params before eliding predicates or
+    `Ref<Int>` renders `{@T | ...}` against the checker's
+    `{@Int | ...}` and the gate never fires.  Direction 2 (two checker
+    classes, one bind key): a refinement LITERAL erases to its base in
+    codegen keys, merging what the checker splits."""
+
+    def _compile_msgs(self, src: str) -> list[str]:
+        with _resolved_pipeline(src) as (program, arts, resolved, path):
+            result = codegen_compile(
+                program, source=src, file=path, resolved_modules=resolved,
+                expr_semantic_types=arts.expr_semantic_types,
             )
+            return [d.description for d in result.diagnostics]
+
+    def test_parameterised_refined_alias_collision_is_loud(self) -> None:
+        msgs = self._compile_msgs("""\
+type Ref<T> = { @T | true };
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Option<Ref<Int>>>](@Option<Ref<Int>> = Some(5)) {
+    get(@Unit) -> { resume(@Option<Ref<Int>>.0) },
+    put(@Option<{ @Int | true }>) -> { resume(()) } with @Option<Ref<Int>> = @Option<{ @Int | true }>.0
+  } in {
+    put(Some(9));
+    option_unwrap_or(get(()), 0 - 1)
+  }
+}
+""")
+        assert any("spell both with ONE alias" in m for m in msgs), msgs
+
+    def test_reverse_skew_merged_key_is_loud(self) -> None:
+        """The dual direction: refined-literal annotation + plain
+        pattern bind under ONE codegen key while the checker splits
+        them — previously a silent wrong value (the with-expr's ref
+        resolved to the state where the checker meant the argument)."""
+        msgs = self._compile_msgs("""\
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Option<{ @Int | @Int.0 > 0 }>>](@Option<{ @Int | @Int.0 > 0 }> = Some(5)) {
+    get(@Unit) -> { resume(@Option<{ @Int | @Int.0 > 0 }>.0) },
+    put(@Option<Int>) -> { resume(()) } with @Option<{ @Int | @Int.0 > 0 }> = @Option<Int>.0
+  } in {
+    put(Some(9));
+    option_unwrap_or(get(()), 0 - 1)
+  }
+}
+""")
+        assert any("DIFFERENT slot classes" in m for m in msgs), msgs
+
+    def test_old_state_depth_overflow_is_clean_skip(self) -> None:
+        """`old(State<A33>)` in an ensures — the ONE family-resolution
+        door outside every CodegenSkip net: the depth error escaped as
+        a raw crash on a check-green program (round-7 F2).  Now the
+        same clean E602 skip the body path uses."""
+        chain = "type A0 = Nat;\n" + "".join(
+            f"type A{i} = A{i - 1};\n" for i in range(1, 34))
+        src = chain + """
+public fn bump(@Nat -> @Int)
+  requires(true)
+  ensures(new(State<Nat>) >= old(State<A33>))
+  effects(<State<Nat>>)
+{
+  put(@Nat.0);
+  nat_to_int(get(()))
+}
+"""
+        msgs = self._compile_msgs(src)
+        assert any("old(State<T>) snapshot" in m
+                   and "nested deeper than 32" in m for m in msgs), msgs

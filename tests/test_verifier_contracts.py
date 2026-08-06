@@ -158,7 +158,7 @@ private fn absolute_value(@Int -> @Int)
 
     def test_max(self) -> None:
         _verify_ok("""
-private fn max(@Int, @Int -> @Int)
+private fn imax(@Int, @Int -> @Int)
   requires(true)
   ensures(@Int.result >= @Int.0)
   ensures(@Int.result >= @Int.1)
@@ -170,7 +170,7 @@ private fn max(@Int, @Int -> @Int)
 
     def test_min(self) -> None:
         _verify_ok("""
-private fn min(@Int, @Int -> @Int)
+private fn imin(@Int, @Int -> @Int)
   requires(true)
   ensures(@Int.result <= @Int.0)
   ensures(@Int.result <= @Int.1)
@@ -182,7 +182,7 @@ private fn min(@Int, @Int -> @Int)
 
     def test_clamp(self) -> None:
         _verify_ok("""
-private fn clamp(@Int, @Int, @Int -> @Int)
+private fn iclamp(@Int, @Int, @Int -> @Int)
   requires(@Int.1 <= @Int.2)
   ensures(@Int.result >= @Int.1)
   ensures(@Int.result <= @Int.2)
@@ -195,7 +195,7 @@ private fn clamp(@Int, @Int, @Int -> @Int)
 
     def test_nested_if(self) -> None:
         _verify_ok("""
-private fn sign(@Int -> @Int)
+private fn isign(@Int -> @Int)
   requires(true)
   ensures(@Int.result >= -1)
   ensures(@Int.result <= 1)

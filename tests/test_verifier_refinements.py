@@ -249,7 +249,7 @@ private fn caller(@Int -> @Int)
         result = _verify("""
 type Percentage = { @Int | @Int.0 >= 0 && @Int.0 <= 100 };
 
-private fn clamp(@Int -> @Percentage)
+private fn clamp_percent(@Int -> @Percentage)
   requires(true) ensures(true) effects(pure)
 {
   if @Int.0 < 0 then { 0 }
@@ -513,11 +513,11 @@ private fn always_false(@Unit -> @Bool)
   requires(true) ensures(true) effects(pure)
 { false }
 
-type Checked = { @Unit | always_false(@Unit.0) };
+type Checked = { @Unit | always_false(()) };
 
 public fn make(@Unit -> @Checked)
   requires(true) ensures(true) effects(pure)
-{ @Unit.0 }
+{ () }
 """)
         assert [d for d in result.diagnostics if d.severity == "error"] == []
         # Recorded UNguarded (excluded from totals), never a claimed runtime
@@ -1166,13 +1166,13 @@ private fn use_opt(@Option<PosInt> -> @Int)
         bad = _verify("""
 type PosInt = { @Int | @Int.0 > 0 };
 
-private fn mk(@Unit -> @Tuple<Int, Int>)
+private fn mk(@Int -> @Tuple<Int, Int>)
   requires(true) ensures(true) effects(pure)
 { Tuple(0 - 5, 3) }
 
 private fn use_it(@Unit -> @Int)
   requires(true) ensures(true) effects(pure)
-{ let Tuple<@PosInt, @Int> = mk(@Unit.0); @PosInt.0 }
+{ let Tuple<@PosInt, @Int> = mk(1); @PosInt.0 }
 """)
         errs = [d for d in bad.diagnostics if d.error_code == "E505"]
         assert errs, "expected E505 on the non-literal destructure component"
@@ -1231,14 +1231,14 @@ public fn f(@Tuple<PosInt, Int> -> @Int)
 type PosInt = { @Int | @Int.0 > 0 };
 type NonNeg = { @Int | @Int.0 >= 0 };
 
-private fn mk(@Unit -> @Tuple<Int, Int>)
+private fn mk(@Int -> @Tuple<Int, Int>)
   requires(true) ensures(true) effects(pure)
 { Tuple(0 - 5, 3) }
 
 public fn f(@Unit -> @Int)
   requires(true) ensures(true) effects(pure)
 {
-  let Tuple<@PosInt, @Int> = mk(@Unit.0);
+  let Tuple<@PosInt, @Int> = mk(1);
   let @NonNeg = @PosInt.0;
   @NonNeg.0
 }
@@ -1264,14 +1264,14 @@ public fn f(@Unit -> @Int)
 type PosInt = { @Int | @Int.0 > 0 };
 type NonNeg = { @Int | @Int.0 >= 0 };
 
-private fn mk(@Unit -> @PosInt)
+private fn mk(@Int -> @PosInt)
   requires(true) ensures(true) effects(pure)
 { 5 }
 
 public fn f(@Unit -> @Int)
   requires(true) ensures(true) effects(pure)
 {
-  let @PosInt = mk(@Unit.0);
+  let @PosInt = mk(1);
   let @NonNeg = @PosInt.0;
   @NonNeg.0
 }
@@ -1282,14 +1282,14 @@ public fn f(@Unit -> @Int)
 type PosInt = { @Int | @Int.0 > 0 };
 type NonNeg = { @Int | @Int.0 >= 0 };
 
-private fn mk(@Unit -> @Int)
+private fn mk(@Int -> @Int)
   requires(true) ensures(true) effects(pure)
 { 5 }
 
 public fn f(@Unit -> @Int)
   requires(true) ensures(true) effects(pure)
 {
-  let @PosInt = mk(@Unit.0);
+  let @PosInt = mk(1);
   let @NonNeg = @PosInt.0;
   @NonNeg.0
 }

@@ -521,9 +521,28 @@ def state_cell_decl_equal(cell: Type, declared: Type) -> bool:
     """
     if not types_equal(cell, declared):
         return False
-    if (isinstance(cell, RefinedType) and isinstance(declared, RefinedType)
-            and cell.predicate != declared.predicate):
+    return _refined_predicates_agree(cell, declared)
+
+
+def _refined_predicates_agree(a: Type, b: Type) -> bool:
+    """Structural predicate agreement at EVERY depth of two
+    ``types_equal`` types — ``types_equal`` compares refined types by
+    base only, at the top AND inside ADT type arguments, so
+    ``Option<{@Int | P}>`` vs ``Option<{@Int | Q}>`` passed the
+    round-3 top-level-only check (PR #1202 review round: E336 and E533
+    silently accepted nested refined divergence)."""
+    if isinstance(a, RefinedType) and isinstance(b, RefinedType):
+        return (a.predicate == b.predicate
+                and _refined_predicates_agree(a.base, b.base))
+    if isinstance(a, RefinedType) or isinstance(b, RefinedType):
+        # types_equal held, so a one-sided refinement means the pair
+        # already diverges structurally — defensive False.
         return False
+    if isinstance(a, AdtType) and isinstance(b, AdtType):
+        return all(
+            _refined_predicates_agree(x, y)
+            for x, y in zip(a.type_args, b.type_args)
+        )
     return True
 
 

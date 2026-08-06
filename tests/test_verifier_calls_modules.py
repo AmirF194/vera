@@ -806,7 +806,7 @@ private fn caller(@Unit -> @Int)
   ensures(true)
   effects(<Random>)
 {
-  let @Int = random_int(0, 9);
+  let @Int = Random.random_int(0, 9);
   needs_pos(@Int.0)
 }
 """, "precondition")
@@ -828,7 +828,7 @@ private fn caller(@Unit -> @Int)
   ensures(true)
   effects(<Random>)
 {
-  let @Int = random_int(1, 9);
+  let @Int = Random.random_int(1, 9);
   assert(@Int.0 > 0);
   needs_pos(@Int.0)
 }
@@ -851,8 +851,8 @@ private fn caller(@Unit -> @Int)
   ensures(true)
   effects(<Random>)
 {
-  let @Int = random_int(0, 9);
-  let @Int = random_int(0, 9);
+  let @Int = Random.random_int(0, 9);
+  let @Int = Random.random_int(0, 9);
   same(@Int.1, @Int.0)
 }
 """, "precondition")
@@ -866,7 +866,7 @@ private fn seven(@Unit -> @Int)
   ensures(@Int.result == 7)
   effects(<Random>)
 {
-  let @Int = random_int(0, 9);
+  let @Int = Random.random_int(0, 9);
   7
 }
 """)
@@ -891,7 +891,7 @@ private fn passthrough(@Unit -> @Int)
   ensures(@Int.result == 0)
   effects(<Random>)
 {
-  let @Int = random_int(0, 9);
+  let @Int = Random.random_int(0, 9);
   @Int.0
 }
 """)
@@ -926,7 +926,7 @@ private fn f(@Unit -> @Int)
   ensures(true)
   effects(<Random>)
 {
-  { let @Nat = random_int(0, 9); @Nat.0 } - { let @Nat = random_int(0, 9); @Nat.0 }
+  { let @Nat = Random.random_int(0, 9); @Nat.0 } - { let @Nat = Random.random_int(0, 9); @Nat.0 }
 }
 """)
         subs = [o for o in result.obligations if o.kind == "nat_sub"]
@@ -956,7 +956,7 @@ private fn caller(@Unit -> @Int)
   ensures(true)
   effects(<Random>)
 {
-  let Tuple<@Int, @Int> = Tuple(random_int(0, 9), random_int(0, 9));
+  let Tuple<@Int, @Int> = Tuple(Random.random_int(0, 9), Random.random_int(0, 9));
   needs_pos(@Int.1)
 }
 """, "precondition")
@@ -1096,18 +1096,19 @@ public fn main(@Unit -> @Bool)
 """, "precondition")
 
     def test_untranslatable_adt_field_demotes_to_e532(self) -> None:
-        """An ADT with a host-handle field (`Map`) can't be modelled in Z3.
-        The precondition obligation must demote LOUDLY to Tier-3 (E532 warning),
-        never silently vanish — DESIGN.md degrades loudly (#882).
+        """A precondition over a host-handle value (`map_size` on a `Map`)
+        can't be modelled in Z3.  The obligation must demote LOUDLY to
+        Tier-3 (E532 warning), never silently vanish — DESIGN.md degrades
+        loudly (#882).  (The fixture's original shape — `==` on an ADT
+        wrapping a Map — is now E243-rejected at check by the #874 Eq
+        gate, so the untranslatable-but-legal route is a Map builtin.)
 
         E532 ("Cannot verify call-site precondition (undecidable)") is the
         dedicated code for this class — distinct from E522, whose registered
         meaning is a *postcondition* demotion (body undecidable)."""
         src = """
-private data M { MkM(Map<String, Int>) }
-
-private fn g(@M, @M -> @Bool)
-  requires(@M.1 == @M.0)
+private fn g(@Map<String, Int> -> @Bool)
+  requires(map_size(@Map<String, Int>.0) >= 0)
   ensures(true)
   effects(pure)
 { true }
@@ -1116,7 +1117,7 @@ public fn main(@Unit -> @Bool)
   requires(true)
   ensures(true)
   effects(pure)
-{ g(MkM(map_new()), MkM(map_new())) }
+{ g(map_new()) }
 """
         warns = _verify_warn(src, "precondition")
         assert any(w.error_code == "E532" for w in warns), (

@@ -622,8 +622,29 @@ class FunctionCompilationMixin:
             return None
         pre_instrs = pre_instrs + dec_entry_instrs
 
-        # Snapshot old state for postcondition old() references
-        snapshot_instrs = self._snapshot_old_state(ctx, decl)
+        # Snapshot old state for postcondition old() references.  The
+        # snapshot's family resolution can raise (an `old(State<T>)`
+        # whose alias chain overflows the resolver bound — round-7
+        # review, F2: this was the ONE `_family_name_te` door outside
+        # every CodegenSkip net, and the raise escaped as a crash on a
+        # check-green program).  Degrade to the same clean E602 skip
+        # the body path uses.
+        try:
+            snapshot_instrs = self._snapshot_old_state(ctx, decl)
+        except CodegenSkip as skip:
+            self._harvest_interp_inference_failures(ctx)
+            self._warning(
+                skip.node if getattr(skip.node, "span", None) else decl,
+                f"Function '{decl.name}' postcondition old(State<T>) "
+                f"snapshot contains unsupported "
+                f"{type(skip.node).__name__}: {skip.reason} — function "
+                f"skipped.",
+                rationale="The WASM backend could not resolve the "
+                "old-state snapshot's State<T> family. This function "
+                "will not appear in the compiled output.",
+                error_code="E602",
+            )
+            return None
 
         # Compile body.
         #

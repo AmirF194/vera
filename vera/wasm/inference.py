@@ -2355,14 +2355,21 @@ class InferenceMixin:
             return a.name + (head_args if a.type_args else "")
         if not isinstance(alias, (ast.NamedType, ast.RefinementType)):
             return type_expr_slot_name(a)
-        if isinstance(alias, ast.RefinementType):
-            base = self._checker_form_arg_name(alias.base_type, _depth + 1)
-            return None if base is None else f"{{@{base} | ...}}"
+        # Substitute the alias's params BEFORE branching on refinement —
+        # a parameterised alias whose body is a refinement
+        # (`type Ref<T> = { @T | P }` at `Ref<Int>`) must render
+        # `{@Int | ...}` like the checker, not `{@T | ...}` (the round-6
+        # gate compared the unsubstituted form against the checker's and
+        # never fired — round-7 review, F1).  Mirrors
+        # `resolve_alias_type_expr`'s ordering.
         params = self._type_alias_params.get(a.name)
         if params and a.type_args and len(params) == len(a.type_args):
             alias = substitute_named(alias, dict(zip(params, a.type_args)))
-        elif a.type_args:
+        elif a.type_args and not isinstance(alias, ast.RefinementType):
             return a.name + head_args
+        if isinstance(alias, ast.RefinementType):
+            base = self._checker_form_arg_name(alias.base_type, _depth + 1)
+            return None if base is None else f"{{@{base} | ...}}"
         return self._checker_form_arg_name(alias, _depth + 1)
 
     def _head_resolves_through_refinement(

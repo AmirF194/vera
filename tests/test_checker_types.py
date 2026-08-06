@@ -3512,3 +3512,26 @@ private fn t(@Unit -> @Int)
   }
 }
 """)
+
+    def test_nested_refined_divergence_rejected(self) -> None:
+        """`types_equal` compares refined types by base only INSIDE ADT
+        type arguments too — `Option<{@Int | > 0}>` vs
+        `Option<{@Int | > 5}>` passed the top-level-only predicate check
+        (round-8 review): `state_cell_decl_equal` now recurses."""
+        errs = _check_err("""
+private fn t(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Option<{ @Int | @Int.0 > 0 }>>](@Option<{ @Int | @Int.0 > 5 }> = Some(9)) {
+    get(@Unit) -> { resume(@Option<{ @Int | @Int.0 > 5 }>.0) }
+  } in {
+    match get(()) {
+      Some(@Int) -> @Int.0,
+      None -> 0 - 1
+    }
+  }
+}
+""", "Handler state is declared")
+        assert any(e.error_code == "E336" for e in errs)

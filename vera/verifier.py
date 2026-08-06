@@ -301,6 +301,16 @@ class ContractVerifier:
         # (`Option<Nat>`) — without it, `is_some_g<Nat>` matching `Some(@T)`
         # E503'd with the impossible counterexample `Some(-1)`.
         self._instance_subst: dict[str, Type] | None = None
+        # The nat-binding walker's handled-effect context: effect NAMES
+        # of the `handle[...]` expressions enclosing the current walk
+        # position, innermost last.  The bare-`put` side-table fallback
+        # resolves WHICH effect's `put` a call targets through this
+        # stack first (mirroring the checker's innermost-handler-first
+        # rule) — `lookup_effect_op` alone searches the fn's declared
+        # row and then ALL registered effects in registration order, so
+        # a pure fn handling a user effect named `put` picked up the
+        # builtin State's op and claimed its guard (round-8 review).
+        self._walk_handled_effects: list[str] = []
 
     # -----------------------------------------------------------------
     # #747: checker-provided expression types (span-keyed)
@@ -2314,6 +2324,7 @@ class ContractVerifier:
         #      here.  Emits `value >= 0` at each, discharged from
         #      preconditions and path conditions exactly like #520.
         if decl.body is not None:
+            self._walk_handled_effects = []
             self._walk_for_nat_binding_obligations(
                 decl, decl.body, smt, slot_env, assumptions,
             )
@@ -3989,13 +4000,22 @@ class ContractVerifier:
                 # so it discloses E506 honestly.  `resume` values are
                 # obligated from the HandleExpr arm instead, where the
                 # clause's effect identity is known.
-                op = self.env.lookup_effect_op("put")
+                op = None
+                for eff_name in reversed(self._walk_handled_effects):
+                    info = self.env.lookup_effect(eff_name)
+                    if info is not None and "put" in info.operations:
+                        op = info.operations["put"]
+                        break
+                if op is None:
+                    op = self.env.lookup_effect_op("put")
                 put_guarded = (op is not None
                                and op.parent_effect == "State")
+                put_site = ("State-op argument" if put_guarded
+                            else "effect-operation argument")
                 for arg in expr.args:
                     self._obligate_binding_triple(
                         decl, arg, None, smt, slot_env, assumptions,
-                        site="State-op argument",
+                        site=put_site,
                         nat_guarded=put_guarded, widen_guarded=put_guarded,
                     )
             if param_types is not None:
@@ -4662,6 +4682,12 @@ class ContractVerifier:
             # (mirroring the primitive-op walker; #1179's calls walk visits
             # the same positions but keeps the enclosing env — a call-site
             # hit there only ADDS a proof, so it has no aliasing hazard).
+            # Push the handled effect's NAME for the bare-`put` fallback's
+            # innermost-first resolution (popped at this arm's single
+            # return; `_verify_fn` resets the stack per function as leak
+            # insurance against a mid-walk exception).
+            if isinstance(expr.effect, ast.EffectRef):
+                self._walk_handled_effects.append(expr.effect.name)
             if expr.state is not None:
                 # #1203: the state-init BINDS into the state CELL — whose
                 # type is the effect's `State<T>` type argument, NOT the
@@ -4737,6 +4763,8 @@ class ContractVerifier:
                     self._walk_for_nat_binding_obligations(
                         decl, clause.state_update[1], smt, SlotEnv(), [],
                     )
+            if isinstance(expr.effect, ast.EffectRef):
+                self._walk_handled_effects.pop()
             return
 
         # Other expression types — no nested binding site to walk.

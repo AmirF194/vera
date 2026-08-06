@@ -855,6 +855,7 @@ public fn go(@Nat -> @Int)
 }
 """, "nat_to_int_coerce")
         assert len(obls) == 1
+        assert obls[0].status == "tier3"
 
     def test_widen_put_obligated(self) -> None:
         obls = _obligations_of("""
@@ -872,6 +873,7 @@ public fn go(@Nat -> @Int)
 }
 """, "nat_to_int_coerce")
         assert len(obls) == 1
+        assert obls[0].status == "tier3"
 
     def test_refined_update_discloses_unguarded(self) -> None:
         """`with @Pos = <clause slot>` — the refined predicate has no
@@ -985,7 +987,7 @@ private forall<T> fn sneak(@T -> @T)
   ensures(true)
   effects(pure)
 {{
-  handle[State<T>]({ann} = 3) {{
+  handle[State<T>]({ann} = {init}) {{
     put(@T) -> {{ resume(()) }}
   }} in {{
     put(@T.0);
@@ -1005,8 +1007,9 @@ public fn go(@Int -> @Int)
     def test_divergent_generic_annotation_is_loud(self) -> None:
         """`(@Nat = 3)` on `State<T>` at T=Int: check-green (deferred),
         verify-loud with the failing instantiation named."""
-        errs = _verify_err(self._GENERIC_LIE.format(ann="@Nat"),
-                           "instantiated at")
+        errs = _verify_err(
+            self._GENERIC_LIE.format(ann="@Nat", init="3"),
+            "instantiated at")
         assert any(e.error_code == "E533" for e in errs)
         # The CRAFTED diagnostic must survive the per-instance
         # aggregation — a split obligation/diagnostic anchor buried it
@@ -1019,7 +1022,46 @@ public fn go(@Int -> @Int)
         """The honest `@T` spelling matches at every instantiation — no
         E533 (and nothing else new: the fixture is otherwise
         verify-green)."""
-        result = _verify(self._GENERIC_LIE.format(ann="@T"))
+        result = _verify(
+            self._GENERIC_LIE.format(ann="@T", init="@T.0"))
         errors = [d for d in result.diagnostics if d.severity == "error"]
         assert not errors, [d.description for d in errors]
         assert not any(o.kind == "state_decl" for o in result.obligations)
+
+
+class TestUserEffectPutDisclosure:
+    """Round-8: the bare-`put` side-table fallback resolves WHICH
+    effect's `put` a call targets through the walker's handled-effect
+    stack (innermost-first, mirroring the checker) — `lookup_effect_op`
+    alone searched the declared row then ALL registered effects, so a
+    pure fn handling a user effect named `put` picked up the builtin
+    State's op, claimed its guard, and labeled the site "State-op"."""
+
+    def test_user_effect_put_is_unguarded_effect_op_site(self) -> None:
+        errs = _verify_err("""
+effect Store {
+  op put(Nat -> Unit);
+}
+
+public fn go(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[Store] {
+    put(@Nat) -> { resume(()) }
+  } in {
+    put(@Int.0);
+    7
+  }
+}
+""", "effect-operation argument")
+        assert any(e.error_code == "E503" for e in errs)
+
+    def test_builtin_state_put_keeps_its_site_label(self) -> None:
+        """The State control: the same shape handled by the builtin
+        keeps the State-op site (and its guarded flag)."""
+        errs = _verify_err(_state_fixture(
+            body="put(@Int.0);\n  nat_to_int(get(()))"),
+            "State-op argument")
+        assert any(e.error_code == "E503" for e in errs)

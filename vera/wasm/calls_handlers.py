@@ -1472,11 +1472,10 @@ class CallsHandlersMixin:
             # and, as a RefinementType, has no `name` at all (PR #1202
             # review: the getattr skipped both branches for refined
             # binders while the verifier recorded the obligation).
-            base_tn = self._resolve_base_type_name(type_name)
-            if (base_tn == "Nat"
+            if (family == "Nat"
                     and self._narrows_into_nat(expr.state.init_expr)):
                 init_instrs = self._emit_nat_bind_guard(init_instrs)
-            elif (base_tn == "Int"
+            elif (family == "Int"
                     and self._result_is_nat(expr.state.init_expr)):
                 init_instrs = self._emit_int_widen_guard(init_instrs)
             byte_init = self._state_byte_literal(
@@ -1545,11 +1544,12 @@ class CallsHandlersMixin:
                     clause.params[0])
                 pattern_form = self._checker_form_slot_name(
                     clause.params[0])
+                state_form = self._checker_form_slot_name(
+                    expr.state.type_expr)
                 if (pattern_key is not None
                         and pattern_key != state_slot_name
                         and pattern_form is not None
-                        and pattern_form == self._checker_form_slot_name(
-                            expr.state.type_expr)):
+                        and pattern_form == state_form):
                     raise CodegenSkip(
                         clause.params[0],
                         "the clause pattern and the handler state "
@@ -1557,6 +1557,25 @@ class CallsHandlersMixin:
                         "checker but are spelled through different "
                         "aliases — spell both with ONE alias so clause "
                         "references resolve unambiguously",
+                    )
+                # The DUAL direction (round-7 review, F3): the pattern
+                # and annotation bind under ONE key here (a refinement
+                # literal erases to its base in codegen keys) while the
+                # checker keeps them DISTINCT classes — a reference the
+                # checker resolves to one of them silently lands on the
+                # merged stack's other member.
+                if (pattern_key is not None
+                        and pattern_key == state_slot_name
+                        and pattern_form is not None
+                        and state_form is not None
+                        and pattern_form != state_form):
+                    raise CodegenSkip(
+                        clause.params[0],
+                        "the clause pattern and the handler state "
+                        "annotation are DIFFERENT slot classes to the "
+                        "checker but would bind here under one key — "
+                        "name the refined type with an alias (and use "
+                        "it on both) so the classes stay distinct",
                     )
             self._state_clause_ops[clause.op_name] = (
                 clause, type_name, family, state_slot_name, env,
@@ -1669,10 +1688,10 @@ class CallsHandlersMixin:
                 return None
             # #1203: put's argument writes the state cell — guard the
             # narrowing/widening at the boundary (the `let` guard's twin).
-            if (self._resolve_base_type_name(type_name) == "Nat"
+            if (family == "Nat"
                     and self._narrows_into_nat(call.args[0])):
                 arg_instrs = self._emit_nat_bind_guard(arg_instrs)
-            elif (self._resolve_base_type_name(type_name) == "Int"
+            elif (family == "Int"
                     and self._result_is_nat(call.args[0])):
                 arg_instrs = self._emit_int_widen_guard(arg_instrs)
             byte_arg = self._state_byte_literal(call.args[0], family)
@@ -1758,10 +1777,10 @@ class CallsHandlersMixin:
         if call.name == "get":
             resume_arg = self._tail_resume_arg(clause.body)
             if resume_arg is not None:
-                if (self._resolve_base_type_name(type_name) == "Nat"
+                if (family == "Nat"
                         and self._narrows_into_nat(resume_arg)):
                     body_instrs = self._emit_nat_bind_guard(body_instrs)
-                elif (self._resolve_base_type_name(type_name) == "Int"
+                elif (family == "Int"
                         and self._result_is_nat(resume_arg)):
                     body_instrs = self._emit_int_widen_guard(body_instrs)
         instructions.extend(body_instrs)
@@ -1770,10 +1789,10 @@ class CallsHandlersMixin:
                 return None
             # #1203: `with @T = <expr>` overrides the state cell — the
             # third write boundary; same guard pair as put's argument.
-            if (self._resolve_base_type_name(type_name) == "Nat"
+            if (family == "Nat"
                     and self._narrows_into_nat(clause.state_update[1])):
                 upd_instrs = self._emit_nat_bind_guard(upd_instrs)
-            elif (self._resolve_base_type_name(type_name) == "Int"
+            elif (family == "Int"
                     and self._result_is_nat(clause.state_update[1])):
                 upd_instrs = self._emit_int_widen_guard(upd_instrs)
             byte_upd = self._state_byte_literal(
