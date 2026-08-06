@@ -1460,3 +1460,8 @@ public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
 
     def test_closure_position_non_negative_passes(self) -> None:
         assert _run(self._NESTED_NAT_CLOSURE, "go", 7) == 7
+
+    def test_closure_position_zero_survives(self) -> None:
+        """Zero must SURVIVE the closure-position nested guard — an
+        off-by-one `> 0` guard mutant would trap valid @Nat zero."""
+        assert _run(self._NESTED_NAT_CLOSURE, "go", 0) == 0

@@ -5898,8 +5898,10 @@ class ContractVerifier:
                 # OBLIGATED — else it is an unguarded false Tier-1 (CR PR-
                 # review).  Opaque path only: a nested field is always an
                 # accessor term.  (A *literal* nested scrutinee — `match
-                # Some(Some(-5)) {}` — isn't Z3-translated here, a degenerate
-                # case left to its own track.)
+                # Some(Some(-5)) {}` — leaves sort/idx unset, so it takes the
+                # static fallback below too; its guarded=True holds because
+                # codegen's recursive `_extract_constructor_fields` applies
+                # `_emit_nat_bind_guard` to the nested `@Nat` bind.)
                 if sort is not None and idx is not None:
                     self._obligate_subpattern_term(
                         decl, scrutinee, field_ty,
