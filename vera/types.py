@@ -543,6 +543,15 @@ def _refined_predicates_agree(a: Type, b: Type) -> bool:
             _refined_predicates_agree(x, y)
             for x, y in zip(a.type_args, b.type_args)
         )
+    if isinstance(a, FunctionType) and isinstance(b, FunctionType):
+        # A refined predicate inside a fn-typed position (param or
+        # return) is a divergence surface too — `State<fn({@Int | P}
+        # -> Int)>` with a `{@Int | Q}` declared param compiled
+        # (round-9 review): recurse both.
+        return (all(
+            _refined_predicates_agree(x, y)
+            for x, y in zip(a.params, b.params))
+            and _refined_predicates_agree(a.return_type, b.return_type))
     return True
 
 

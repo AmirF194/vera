@@ -1065,3 +1065,42 @@ public fn go(@Int -> @Int)
             body="put(@Int.0);\n  nat_to_int(get(()))"),
             "State-op argument")
         assert any(e.error_code == "E503" for e in errs)
+
+    def test_nested_clause_put_keeps_enclosing_context(self) -> None:
+        """Round-9: the handled-effect push wraps the BODY walk only —
+        the checker marks the effect handled around the body alone, so
+        a bare `put` in a NESTED State handler's clause body under an
+        outer user-effect handler is the USER effect's op (enclosing
+        context): it must disclose as an unguarded effect-operation
+        argument, not claim the builtin State guard."""
+        result = _verify("""
+effect Store {
+  op put(Nat -> Unit);
+}
+
+public fn go(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[Store] {
+    put(@Nat) -> { resume(()) }
+  } in {
+    handle[State<Nat>](@Nat = 0) {
+      get(@Unit) -> { resume(@Nat.0) },
+      put(@Nat) -> { put(@Int.0); resume(()) }
+    } in {
+      nat_to_int(get(()))
+    }
+  }
+}
+""")
+        disclosures = [
+            d for d in result.diagnostics
+            if "effect-operation argument" in d.description
+        ]
+        assert disclosures, [d.description[:70] for d in result.diagnostics]
+        assert not any(
+            "State-op argument" in d.description
+            for d in result.diagnostics
+        ), "the clause-body put must not claim the builtin State site"

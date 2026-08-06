@@ -3535,3 +3535,28 @@ private fn t(@Unit -> @Int)
 }
 """, "Handler state is declared")
         assert any(e.error_code == "E336" for e in errs)
+
+    def test_fn_typed_refined_divergence_rejected(self) -> None:
+        """Round-9: `_refined_predicates_agree` recurses FunctionType
+        params and returns too — a refined predicate inside a fn-typed
+        cell position (`State<fn({@Int | > 0} -> Int)>` declared with
+        `{@Int | > 5}`) compiled before the arm."""
+        errs = _check_err("""
+type FP = fn({ @Int | @Int.0 > 0 } -> Int) effects(pure);
+
+type FQ = fn({ @Int | @Int.0 > 5 } -> Int) effects(pure);
+
+private fn g(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<FP>](@FQ = fn(@Int -> @Int) effects(pure) { @Int.0 }) {
+    get(@Unit) -> { resume(@FQ.0) },
+    put(@FQ) -> { resume(()) }
+  } in {
+    5
+  }
+}
+""", "Handler state is declared")
+        assert any(e.error_code == "E336" for e in errs)

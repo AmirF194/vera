@@ -4682,12 +4682,6 @@ class ContractVerifier:
             # (mirroring the primitive-op walker; #1179's calls walk visits
             # the same positions but keeps the enclosing env — a call-site
             # hit there only ADDS a proof, so it has no aliasing hazard).
-            # Push the handled effect's NAME for the bare-`put` fallback's
-            # innermost-first resolution (popped at this arm's single
-            # return; `_verify_fn` resets the stack per function as leak
-            # insurance against a mid-walk exception).
-            if isinstance(expr.effect, ast.EffectRef):
-                self._walk_handled_effects.append(expr.effect.name)
             if expr.state is not None:
                 # #1203: the state-init BINDS into the state CELL — whose
                 # type is the effect's `State<T>` type argument, NOT the
@@ -4713,9 +4707,24 @@ class ContractVerifier:
                 self._walk_for_nat_binding_obligations(
                     decl, expr.state.init_expr, smt, slot_env, assumptions,
                 )
-            self._walk_for_nat_binding_obligations(
-                decl, expr.body, smt, slot_env, assumptions,
-            )
+            # The handled effect's NAME wraps the BODY walk ONLY — the
+            # checker marks the effect handled around `_synth_expr(body)`
+            # alone (control.py: the state init and the clauses are
+            # checked BEFORE the push), so a bare `put` in a nested
+            # handler's init or clause body belongs to the ENCLOSING
+            # context.  Round-9 review: the wider push claimed the
+            # builtin State guard for an init/clause put the checker
+            # typed as a user effect's op.  `_verify_fn` resets the
+            # stack per function as leak insurance.
+            if isinstance(expr.effect, ast.EffectRef):
+                self._walk_handled_effects.append(expr.effect.name)
+            try:
+                self._walk_for_nat_binding_obligations(
+                    decl, expr.body, smt, slot_env, assumptions,
+                )
+            finally:
+                if isinstance(expr.effect, ast.EffectRef):
+                    self._walk_handled_effects.pop()
             cell_ty = self._handler_cell_type(expr)
             # The resume obligation below is builtin-State-specific: its
             # guarded=True promise is the STATE clause inlining's wrapper.
@@ -4763,8 +4772,6 @@ class ContractVerifier:
                     self._walk_for_nat_binding_obligations(
                         decl, clause.state_update[1], smt, SlotEnv(), [],
                     )
-            if isinstance(expr.effect, ast.EffectRef):
-                self._walk_handled_effects.pop()
             return
 
         # Other expression types — no nested binding site to walk.
