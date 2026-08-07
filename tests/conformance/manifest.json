@@ -1250,6 +1250,49 @@
     ]
   },
   {
+    "id": "ch07_clause_body_op_enclosing",
+    "file": "ch07_clause_body_op_enclosing.vera",
+    "chapter": 7,
+    "title": "A handler clause body's bare op belongs to the enclosing context",
+    "level": "run",
+    "spec_ref": "Section 7.5.2",
+    "features": [
+      "nested_handlers",
+      "handler_clause",
+      "state_effect",
+      "state_update"
+    ]
+  },
+  {
+    "id": "ch07_handler_registration_positions",
+    "file": "ch07_handler_registration_positions.vera",
+    "chapter": 7,
+    "title": "A handler in a clause body, state-init, or 'with' update is as real as one in the body",
+    "level": "run",
+    "spec_ref": "Section 7.5",
+    "features": [
+      "nested_handlers",
+      "handler_clause",
+      "state_effect",
+      "exn_handler",
+      "state_update"
+    ]
+  },
+  {
+    "id": "ch07_effect_op_source_order",
+    "file": "ch07_effect_op_source_order.vera",
+    "chapter": 7,
+    "title": "Bare effect-op resolution: innermost handler, then the declared row in source order",
+    "level": "run",
+    "spec_ref": "Section 7.4",
+    "features": [
+      "effects",
+      "effect_op",
+      "effect_row",
+      "state_effect"
+    ]
+  },
+  {
     "id": "ch07_state_composite",
     "file": "ch07_state_composite.vera",
     "chapter": 7,

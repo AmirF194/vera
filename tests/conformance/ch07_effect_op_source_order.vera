@@ -1,0 +1,58 @@
+-- Chapter 7, Section 7.4 — bare effect-op resolution order.
+-- Tests: two effects in one row declaring the same op name, source-order tie-break,
+-- innermost-handler precedence over the declared row.
+--
+-- The built-in State and Http both declare an op named 'get', so a row naming both
+-- has two candidates for a bare 'get'.  Resolution walks ordered candidates: the
+-- innermost enclosing handler first, then each enclosing handler, then the declared
+-- row IN THE ORDER IT IS WRITTEN.  Writing State first therefore binds State's get,
+-- whose result is the cell's Int; writing Http first would bind Http's get, which has
+-- no bare route (E217, ch07_bare_effect_op_rejected).  Nothing here iterates a set,
+-- so the binding is a property of the program text alone.
+-- Declared row with State written FIRST: the bare get reads the Int cell the caller
+-- established, so 7 * 10 = 70.
+private fn row_order(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<State<Int>, Http>)
+{
+  get(()) * 10
+}
+
+-- The declared row names only Http, but an enclosing handle[State<Int>] is nearer:
+-- the handled effect wins over the row, so the bare get reads the cell, 9 * 10 = 90.
+private fn handled_first(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<Http>)
+{
+  handle[State<Int>](@Int = 9) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) }
+  } in {
+    get(()) * 10
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 0)
+  effects(<Http>)
+{
+  let @Int = handle[State<Int>](@Int = 7) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) }
+  } in {
+    row_order(())
+  };
+  if @Int.0 != 70 then {
+    1
+  } else {
+    let @Int = handled_first(());
+    if @Int.0 != 90 then {
+      2
+    } else {
+      0
+    }
+  }
+}

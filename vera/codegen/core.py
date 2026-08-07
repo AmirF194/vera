@@ -199,6 +199,11 @@ class CodeGenerator(
         self._needs_memory: bool = False
         self._state_types: list[tuple[str, str]] = []  # (type_name, wasm_type)
         self._exn_types: list[tuple[str, str]] = []  # (type_name, wasm_type)
+        # #1210: State cell types the handler walk found and could NOT
+        # register.  Reset by `_scan_body_for_state_handlers` — the walk's
+        # entry point — at the start of each per-function walk, and read by
+        # it immediately after, so the list never outlives one function.
+        self._unregistrable_state_cells: list[ast.TypeExpr] = []
         self._md_ops_used: set[str] = set()  # Markdown host-import builtins
         self._regex_ops_used: set[str] = set()  # Regex host-import builtins
         self._map_ops_used: set[str] = set()  # Map host-import builtins

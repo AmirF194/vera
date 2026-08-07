@@ -126,7 +126,7 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `  extensions.py` | 146 | | vera/speculativeEdit proof-delta | |
 | `  server.py` | 287 | | pygls wiring, single-session serialisation | |
 | `  workflows.py` | 442 | | Skill-layer workflows: enforced edit sequences (#222 F) | |
-| `codegen/` | 15,855 | Compile | Codegen orchestrator (mixin package) | `compile()`, `execute()` |
+| `codegen/` | 17,669 | Compile | Codegen orchestrator (mixin package) | `compile()`, `execute()` |
 | `  api.py` | 1,341 | | Public API, dataclasses, `compile()`/`execute()` orchestration, core IO host bindings (#421) | |
 | `  memory.py` | 105 | | Compile-time ADT layout helpers (`ConstructorLayout`, alignment) (#421) | |
 | `  core.py` | 2,561 | | CodeGenerator class, orchestration, ability op rewriting (Pass 1.6), skip propagation to callers (#1100) | |
@@ -751,7 +751,7 @@ The `ERROR_CODES` dict in `errors.py` maps every code to a short description (15
 
 ## Test Suite
 
-Testing spans a **pytest suite** of 9,407 tests across 145 files — compiler-internals unit tests plus a **conformance suite** (196 programs in `tests/conformance/` validating every language feature against the spec) and **example programs** (42 end-to-end demos). The conformance suite is the definitive specification artifact — each program tests one feature and serves as a minimal working example.
+Testing spans a **pytest suite** of 9,444 tests across 146 files — compiler-internals unit tests plus a **conformance suite** (199 programs in `tests/conformance/` validating every language feature against the spec) and **example programs** (42 end-to-end demos). The conformance suite is the definitive specification artifact — each program tests one feature and serves as a minimal working example.
 
 See **[TESTING.md](../TESTING.md)** for the comprehensive testing reference -- test file table, conformance suite details, compiler code coverage, language feature coverage, helper conventions, validation scripts, CI pipeline, and guidelines for adding tests.
 

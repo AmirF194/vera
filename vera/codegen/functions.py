@@ -439,8 +439,14 @@ class FunctionCompilationMixin:
         else:
             result_part = ""
 
-        # Scan body for handle[State<T>] expressions to register imports
-        self._scan_body_for_state_handlers(decl.body)
+        # Scan body for handle[State<T>] expressions to register imports.
+        # #1210: a handler naming a cell type the backend cannot compile
+        # drops the function here with its own [E607], the same verdict the
+        # declared-effect gate reaches — the walk used to skip such a cell in
+        # silence and leave the lowering to emit calls to imports that were
+        # never declared.
+        if not self._scan_body_for_state_handlers(decl.body, decl):
+            return None
 
         # Scan body for IO qualified calls to register per-op imports
         self._scan_io_ops(decl.body)

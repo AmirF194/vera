@@ -1,0 +1,104 @@
+-- Chapter 7, Section 7.5 — a handler is reachable from every sub-expression position.
+-- Tests: a handler nested in a clause body, in a state-init expression, in a clause's
+-- 'with' update, and an Exn handler inside a State clause body.
+--
+-- A handle expression has four sub-expression positions: its state-init expression,
+-- each clause body, each clause's 'with' state update, and the handled body.  A
+-- handler that appears in any of them is as real as one in the body, so the effect
+-- it handles is available and its cell or tag exists.  Each function below reaches a
+-- cell family through exactly one of the three non-body positions.
+-- A State<Bool> handler nested inside the Nat handler's get clause body: the Bool
+-- cell reads true, so the get clause resumes the captured 8 and the Int cell is
+-- untouched at 111.
+private fn handler_in_clause_body(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>](@Int = 111) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) }
+  } in {
+    let @Nat = handle[State<Nat>](@Nat = 8) {
+      get(@Unit) -> { let @Bool = handle[State<Bool>](@Bool = true) { get(@Unit) -> { resume(@Bool.0) }, put(@Bool) -> { resume(()) } } in { get(()) }; resume(if @Bool.0 then { @Nat.0 } else { 0 }) },
+      put(@Nat) -> { resume(()) }
+    } in {
+      get(())
+    };
+    nat_to_int(@Nat.0) + get(())
+  }
+}
+
+-- A State<Nat> handler inside the outer handler's state-init expression: the nested
+-- get clause doubles 4 to 8, so the Int cell starts at 9.
+private fn handler_in_state_init(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>](@Int = nat_to_int(handle[State<Nat>](@Nat = 4) { get(@Unit) -> { resume(@Nat.0 + @Nat.0) }, put(@Nat) -> { resume(()) } } in { get(()) }) + 1) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) }
+  } in {
+    get(())
+  }
+}
+
+-- A State<Nat> handler inside the put clause's 'with' state update: the stored 10 is
+-- overridden with 10 + 5.
+private fn handler_in_with_update(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>](@Int = 1) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) } with @Int = @Int.1 + nat_to_int(handle[State<Nat>](@Nat = 5) { get(@Unit) -> { resume(@Nat.0) }, put(@Nat) -> { resume(()) } } in { get(()) })
+  } in {
+    put(10);
+    get(())
+  }
+}
+
+-- An Exn<Int> handler inside a State clause body: the throw is caught by the nested
+-- handler, which returns 42, and the get clause resumes 42 plus the captured 5.
+private fn exn_in_clause_body(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>](@Int = 5) {
+    get(@Unit) -> { let @Int = handle[Exn<Int>] { throw(@Int) -> { @Int.0 + 40 } } in { throw(2); 999 }; resume(@Int.0 + @Int.1) },
+    put(@Int) -> { resume(()) }
+  } in {
+    get(())
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 0)
+  effects(pure)
+{
+  let @Int = handler_in_clause_body(());
+  if @Int.0 != 119 then {
+    1
+  } else {
+    let @Int = handler_in_state_init(());
+    if @Int.0 != 9 then {
+      2
+    } else {
+      let @Int = handler_in_with_update(());
+      if @Int.0 != 15 then {
+        3
+      } else {
+        let @Int = exn_in_clause_body(());
+        if @Int.0 != 47 then {
+          4
+        } else {
+          0
+        }
+      }
+    }
+  }
+}

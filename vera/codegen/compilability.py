@@ -126,27 +126,49 @@ class CompilabilityMixin:
             )
             return False
         type_arg = eff.type_args[0]
+        if not self._register_state_cell(type_arg):
+            self._warn_unsupported_state_cell(decl, decl.name)
+            return False
+        return True
+
+    def _register_state_cell(self, type_arg: ast.TypeExpr) -> bool:
+        """Register the `State<type_arg>` host-cell family; False if it has none.
+
+        The ONE place a State cell's compilability is decided and its family
+        recorded, shared by the declared-effect gate (`_check_state_type`)
+        and the handler walk (`_scan_expr_for_handlers`) — the two paths must
+        accept exactly the same cell types, or a handler discharging the
+        effect inside a `pure` function registers nothing while its lowering
+        emits the calls anyway (#1210: `handle[State<String>]` was
+        check-green invalid WASM).
+
+        The import FAMILY is the cell the CHECKER typed (#1209), so every
+        alias spelling that resolves to it — scalar (#1205), composite,
+        parameterised — registers ONE family.  `wt` is derived from the
+        RESOLVED type, so registering an unresolved name split the family
+        (`state_put_Count` typed i64) from the name the per-function lowering
+        derives; resolving both keeps them one.
+        """
         wt = self._type_expr_to_wasm_type(type_arg)
         if wt is None or wt in ("unsupported", "i32_pair"):
-            self._warning(
-                decl,
-                f"Function '{decl.name}' uses State with "
-                f"unsupported type — skipped.",
-                rationale="State<T> requires a compilable primitive type "
-                "(Int, Nat, Bool, Float64).",
-                error_code="E607",
-            )
             return False
-        # The import FAMILY: the cell the CHECKER typed (#1209), so every
-        # alias spelling that resolves to it — scalar (#1205), composite,
-        # parameterised — registers ONE family.  `wt` above is derived from
-        # the RESOLVED type, so registering an unresolved name split the
-        # family (`state_put_Count` typed i64) from the name the
-        # per-function lowering derives; resolving both keeps them one.
         type_name = self._family_name_te(type_arg)
         if type_name and (type_name, wt) not in self._state_types:
             self._state_types.append((type_name, wt))
         return True
+
+    def _warn_unsupported_state_cell(
+        self, node: ast.Node, fn_name: str,
+    ) -> None:
+        """The E607 both State-cell paths emit — one wording, one code."""
+        self._warning(
+            node,
+            f"Function '{fn_name}' uses State with "
+            "unsupported type — skipped.",
+            rationale="State<T> requires a compilable primitive type "
+            "(Int, Nat, Bool, Float64).",
+            error_code="E607",
+        )
 
     def _check_exn_type(
         self, decl: ast.FnDecl, eff: ast.EffectRef
@@ -165,8 +187,7 @@ class CompilabilityMixin:
             )
             return False
         type_arg = eff.type_args[0]
-        wt = self._type_expr_to_wasm_type(type_arg)
-        if wt is None or wt == "unsupported":
+        if not self._register_exn_tag(type_arg):
             self._warning(
                 decl,
                 f"Function '{decl.name}' uses Exn with "
@@ -176,14 +197,28 @@ class CompilabilityMixin:
                 error_code="E612",
             )
             return False
-        # i32_pair (String, Array<T>) → WASM exception tag uses two i32 params
+        return True
+
+    def _register_exn_tag(self, type_arg: ast.TypeExpr) -> bool:
+        """Register the `Exn<type_arg>` WASM tag; False if it has none.
+
+        The State twin (`_register_state_cell`): one derivation shared by the
+        declared-effect gate and the handler walk, so a tag reached only from
+        a handler nested in a clause body is declared rather than emitted
+        undeclared (#1210).
+
+        The tag FAMILY resolves exactly like the State import family —
+        `Exn<Code>` with `type Code = Int` otherwise declares an i64 tag the
+        i32-typed catch sites of the unresolved-name derivation cannot match,
+        and `Exn<Payload>` with `type Payload = Option<Int>` declares a
+        second tag beside the `Option<Int>` one its throw sites target
+        (#1209).  Unlike a State cell, an `i32_pair` payload IS compilable:
+        the tag takes two i32 params.
+        """
+        wt = self._type_expr_to_wasm_type(type_arg)
+        if wt is None or wt == "unsupported":
+            return False
         wasm_tag_t = "i32 i32" if wt == "i32_pair" else wt
-        # The tag FAMILY resolves exactly like the State import family (see
-        # `_check_state_type`) — `Exn<Code>` with `type Code = Int`
-        # otherwise declares an i64 tag the i32-typed catch sites of the
-        # unresolved-name derivation cannot match, and `Exn<Payload>` with
-        # `type Payload = Option<Int>` declares a second tag beside the
-        # `Option<Int>` one its throw sites target (#1209).
         type_name = self._family_name_te(type_arg)
         if type_name and (type_name, wasm_tag_t) not in self._exn_types:
             self._exn_types.append((type_name, wasm_tag_t))
@@ -396,6 +431,17 @@ class CompilabilityMixin:
             for arm in node.arms:
                 self._scan_io_ops(arm.body)
         elif isinstance(node, ast.HandleExpr):
+            # All four sub-expression positions, matching
+            # `_scan_expr_for_handlers` (#1210): a host-imported builtin
+            # reached only from a state-init expression, a clause body, or a
+            # clause's `with` update would otherwise emit an orphaned
+            # `call $vera.<name>` with no import declaration.
+            if node.state is not None:
+                self._scan_io_ops(node.state.init_expr)
+            for clause in node.clauses:
+                self._scan_io_ops(clause.body)
+                if clause.state_update is not None:
+                    self._scan_io_ops(clause.state_update[1])
             self._scan_io_ops(node.body)
         # Defensive sub-expr recursion (#597) — three of the four
         # branches below (IndexExpr, ArrayLit, InterpolatedString)
@@ -420,41 +466,52 @@ class CompilabilityMixin:
         elif isinstance(node, ast.AnonFn):
             self._scan_io_ops(node.body)
 
-    def _scan_body_for_state_handlers(self, node: ast.Node) -> None:
-        """Walk a function body looking for handle expressions.
+    def _scan_body_for_state_handlers(
+        self, node: ast.Node, decl: ast.FnDecl | None = None,
+    ) -> bool:
+        """Walk a function body registering every handler's State/Exn family.
 
-        Registers State<T> types for host import generation and
-        Exn<E> types for exception tag generation.
+        The ENTRY POINT for the handler walk — ``_scan_expr_for_handlers``
+        does the recursion, this owns the per-function verdict.
+
+        Returns ``False`` when a ``handle[State<T>]`` reached from *node*
+        names a cell type the backend cannot compile, having emitted the same
+        ``E607`` the declared-effect gate emits; the caller drops the
+        function.  It used to skip such a cell in SILENCE while the lowering
+        emitted `state_push_…` for it regardless — a check-green program that
+        failed whole-module WAT compilation (#1210).
         """
-        if isinstance(node, ast.HandleExpr):
-            if isinstance(node.effect, ast.EffectRef):
-                if node.effect.name == "State":
-                    if node.effect.type_args and len(node.effect.type_args) == 1:
-                        type_arg = node.effect.type_args[0]
-                        wt = self._type_expr_to_wasm_type(type_arg)
-                        if wt and wt not in ("unsupported", "i32_pair"):
-                            # Same resolved FAMILY as `_check_state_type`
-                            # (#1209) — the two registration paths must key
-                            # one family, or a handler declared in a body
-                            # registers an import its own lowering never
-                            # calls.
-                            type_name = self._family_name_te(type_arg)
-                            if type_name and (type_name, wt) not in self._state_types:
-                                self._state_types.append((type_name, wt))
-                elif node.effect.name == "Exn":
-                    if node.effect.type_args and len(node.effect.type_args) == 1:
-                        type_arg = node.effect.type_args[0]
-                        wt = self._type_expr_to_wasm_type(type_arg)
-                        if wt and wt != "unsupported":
-                            wasm_tag_t = "i32 i32" if wt == "i32_pair" else wt
-                            # Same resolved FAMILY as `_check_exn_type`
-                            # (#1209) — see the State scan above.
-                            type_name = self._family_name_te(type_arg)
-                            if type_name and (type_name, wasm_tag_t) not in self._exn_types:
-                                self._exn_types.append((type_name, wasm_tag_t))
-            self._scan_expr_for_handlers(node.body)
-            return
+        self._unregistrable_state_cells: list[ast.TypeExpr] = []
         self._scan_expr_for_handlers(node)
+        if not self._unregistrable_state_cells:
+            return True
+        offender = self._unregistrable_state_cells[0]
+        self._warn_unsupported_state_cell(
+            offender if getattr(offender, "span", None) else (decl or offender),
+            decl.name if decl is not None else "<unknown>",
+        )
+        return False
+
+    def _register_scanned_handler(self, node: ast.HandleExpr) -> None:
+        """Register the State/Exn family of one ``handle`` expression.
+
+        Shares `_register_state_cell` / `_register_exn_tag` with the
+        declared-effect gate, so both registration paths key ONE family
+        (#1209) and accept exactly one set of cell types (#1210) — a handler
+        declared in a body must not register an import its own lowering never
+        calls, nor emit calls to one it never registered.
+        """
+        if not isinstance(node.effect, ast.EffectRef):
+            return
+        if not node.effect.type_args or len(node.effect.type_args) != 1:
+            # Arity is the checker's E337; nothing to register either way.
+            return
+        type_arg = node.effect.type_args[0]
+        if node.effect.name == "State":
+            if not self._register_state_cell(type_arg):
+                self._unregistrable_state_cells.append(type_arg)
+        elif node.effect.name == "Exn":
+            self._register_exn_tag(type_arg)
 
     def _scan_expr_for_handlers(self, node: ast.Node) -> None:
         """Recurse into expressions looking for HandleExpr nodes.
@@ -463,7 +520,17 @@ class CompilabilityMixin:
         # disposition; check_walker_coverage.py enforces completeness.)
         #
         # Handled (recurses into sub-exprs that may contain HandleExpr):
-        #   HandleExpr        → registers State<T>/Exn<E> types + recurses
+        #   HandleExpr        → registers State<T>/Exn<E> types, then
+        #                       recurses into ALL FOUR sub-expression
+        #                       positions: the state-init expression, each
+        #                       clause body, each clause's `with` update,
+        #                       and the handled body.  The walk used to
+        #                       descend the body ALONE (#1210), so a family
+        #                       reached only from one of the other three was
+        #                       never registered while the lowering emitted
+        #                       its calls — `unknown func
+        #                       $vera.state_push_Nat` at whole-module WAT
+        #                       compilation, from a check-green program.
         #   Block             → recurses into stmts + trailing expr
         #   FnCall            → recurses into each arg
         #   ConstructorCall   → recurses into each arg
@@ -509,7 +576,14 @@ class CompilabilityMixin:
         #   HoleExpr          → parser placeholder, check-time rejects
         """
         if isinstance(node, ast.HandleExpr):
-            self._scan_body_for_state_handlers(node)
+            self._register_scanned_handler(node)
+            if node.state is not None:
+                self._scan_expr_for_handlers(node.state.init_expr)
+            for clause in node.clauses:
+                self._scan_expr_for_handlers(clause.body)
+                if clause.state_update is not None:
+                    self._scan_expr_for_handlers(clause.state_update[1])
+            self._scan_expr_for_handlers(node.body)
             return
         if isinstance(node, ast.Block):
             for stmt in node.statements:
