@@ -219,7 +219,7 @@ vera lsp                                 # serve the Language Server Protocol ov
 vera version                             # print the installed version
 vera builtins --json                     # list the built-in function registry (no file needed)
 vera effects --json                      # list the effect and ability registry (no file needed)
-vera errors --json                       # list the diagnostic error-code registry E001–E702 (no file needed)
+vera errors --json                       # list the diagnostic-code registry: E001–E702 + W001/W002 (no file needed)
 ```
 
 `vera compile --target browser` produces a self-contained bundle (wasm + JS runtime + HTML) that runs in any browser — no build step, no bundler. Mandatory parity tests ensure identical behaviour between the command-line and browser runtimes for the pure-language surface (arithmetic, ADTs, pattern matching, closures, contracts, effects-as-host-imports, etc.).  The IO surface is the documented exception: terminal Vera programs that rely on `IO.sleep` for animation pacing or ANSI escape codes for cursor control compile cleanly to `--target browser` but render the escapes as literal text and freeze the tab while sleeping — the browser target expects Vera to be the pure simulation core and JavaScript to drive timing and rendering ([SKILL.md §Browser compilation](SKILL.md#browser-compilation) has the recommended pattern).

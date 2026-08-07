@@ -134,11 +134,11 @@ def check_vera_readme_test_counts(
 ) -> list[str]:
     """Pin the four counts in vera/README.md's "Test Suite" paragraph.
 
-    Only the module map was gated in that file, so this sentence drifted
-    unnoticed across many releases — it is the same class as FAQ.md's
-    headline line, and the same fix: read the numbers the way the oracle
-    reads every other citation of them.  A missing pattern is an error,
-    not a skip.
+    Only the module map is otherwise gated in that file, which leaves this
+    sentence free to drift release after release — the same class as
+    FAQ.md's headline line, and the same remedy: read the numbers the way
+    the oracle reads every other citation of them.  A missing pattern is
+    an error, not a skip.
     """
     m = _VERA_README_TESTS.search(readme_text)
     if m is None:

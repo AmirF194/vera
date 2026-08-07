@@ -701,7 +701,7 @@ When extending the compiler, add tests following the existing patterns:
 
 ## Validation Scripts
 
-Twenty-four scripts in `scripts/` validate cross-cutting concerns beyond unit tests (one of them — `build_site.py` — generates rather than checks; the doc-block gates share the fence-annotation reader `scripts/doc_annotations.py`, a helper module rather than a gate):
+Twenty-six scripts in `scripts/` validate cross-cutting concerns beyond unit tests (one of them — `build_site.py` — generates rather than checks; the doc-block gates share the fence-annotation reader `scripts/doc_annotations.py`, a helper module rather than a gate):
 
 | Script | What it validates |
 |--------|-------------------|
@@ -724,8 +724,10 @@ Twenty-four scripts in `scripts/` validate cross-cutting concerns beyond unit te
 | `check_changelog_updated.py` | CHANGELOG.md gains an entry when substantive files change (`Skip-changelog:` trailer to bypass) |
 | `check_walker_coverage.py` | Every walker function in `vera/` covers every `Expr` subclass via `isinstance` dispatch or `# WALKER_COVERAGE:` checklist comment (#597) |
 | `check_diagnostic_fields.py` | Every diagnostic in `vera/` carries rationale + spec_ref, and errors also a `fix` (warnings exempt); every present spec_ref resolves to a real spec section; every literal `error_code` is registered in `ERROR_CODES` (#828); `# diag-fields-exempt: <reason>` waives missing/unresolvable fields only — never a wrong-but-resolving spec_ref or an unregistered error_code (#682, #955) |
+| `check_explicit_encoding.py` | Every text-mode `open()` / `read_text()` / `write_text()`, `subprocess.run/Popen/check_output` text capture, and text-mode `tempfile.NamedTemporaryFile` under `vera/`, `scripts/` and `tests/` passes an explicit `encoding="utf-8"`; `# encoding-exempt: <reason>` opts a deliberate non-UTF-8 site out (#645) |
 | `check_e602_clean.py` | No unexpected E602/E604 silent-skip sites outside the explicit allowlist |
 | `check_doc_builtin_shadowing.py` | No documentation example defines a function named after an opaque verifier-modelled built-in (would fail `vera check` with E151); the `spec/09` signature reference is exempt ([#819](https://github.com/aallan/vera/issues/819)) |
+| `check_distribution.py` | The built wheel and sdist carry the project's own name and version, ship the files the installed package needs plus a packaged LICENSE, and exclude `tests/` and generated Python files |
 | `check_wheel_availability.py` | Every runtime dependency ships wheels for all supported platforms |
 | `check_licenses.py` | All installed packages have MIT-compatible licenses |
 | `build_site.py` | Regenerates the AI-readable site assets that `check_site_assets.py` verifies |
@@ -852,6 +854,7 @@ GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the
 | **security** | Ubuntu | [Gitleaks](https://github.com/gitleaks/gitleaks-action) secret scanning on full history |
 | **dependency-audit** | Python 3.12 x Ubuntu | `pip-audit --skip-editable --ignore-vuln CVE-2026-4539` — checks all installed packages against the OSV vulnerability database (skips the local editable `vera` package; `CVE-2026-4539` suppressed pending a pygments fix release) |
 | **wheel-preflight** | Python 3.12 x Ubuntu | `python scripts/check_wheel_availability.py` — verifies every runtime dep has prebuilt wheels for every (platform, python-version) tuple documented in README §Supported platforms; structural backstop for #691-class install regressions |
+| **package-distribution** | Python 3.12 x Ubuntu | `python -m build`, `twine check dist/*`, and `python scripts/check_distribution.py dist` on the artifacts that will ship under the `veralang` name, then a wheel smoke-test: install `dist/*.whl` into a fresh venv outside the checkout and run `vera version` / `vera check` / `vera run` over `hello_world.vera`. PR CI validates the archives and publishes nothing (#737) |
 | **sbom** | Python 3.12 x Ubuntu | `cyclonedx-py environment` — generates a [CycloneDX](https://cyclonedx.org) JSON SBOM of the full installed dependency tree and uploads it as a 90-day CI artifact |
 | **browser-parity** | Python 3.12 + Node.js 22 x Ubuntu | `pytest tests/test_browser.py -v` — verifies JS runtime matches Python runtime; collects V8 coverage via `NODE_V8_COVERAGE` and uploads to Codecov |
 
