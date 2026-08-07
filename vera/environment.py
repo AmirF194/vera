@@ -29,7 +29,6 @@ from vera.types import (
     RefinedType,
     Type,
     TypeVar,
-    pretty_effect,
     pretty_type,
     substitute,
 )
@@ -49,9 +48,10 @@ def _structural_type_key(ty: Type) -> str:
 
     Deterministic by construction: every branch is a fixed-shape recursion
     over dataclass fields, and the only set this touches is a function type's
-    effect row, which :func:`vera.types.pretty_effect` already sorts.  The
-    predicate is rendered by `ast.Node.pretty`, which walks declared field
-    order and skips spans, so the same predicate always renders the same way.
+    effect row, which :func:`_structural_effect_key` sorts on a key built the
+    same structural way.  The predicate is rendered by `ast.Node.pretty`,
+    which walks declared field order and skips spans, so the same predicate
+    always renders the same way.
     """
     if isinstance(ty, RefinedType):
         return (f"{{{_structural_type_key(ty.base)}"
@@ -67,7 +67,7 @@ def _structural_type_key(ty: Type) -> str:
     if isinstance(ty, FunctionType):
         params = ", ".join(_structural_type_key(p) for p in ty.params)
         return (f"fn({params} -> {_structural_type_key(ty.return_type)}) "
-                f"{pretty_effect(ty.effect)}")
+                f"{_structural_effect_key(ty.effect)}")
     return pretty_type(ty)
 
 
@@ -94,6 +94,40 @@ def _effect_sort_key(ei: EffectInstance) -> tuple[str, str]:
         ei.name,
         ", ".join(_structural_type_key(a) for a in ei.type_args),
     )
+
+
+def _structural_effect_key(eff: EffectRowType) -> str:
+    """A rendering of an effect ROW that DISCRIMINATES (round-9 review).
+
+    The type-argument tiebreak reaches an effect row whenever a type argument
+    is a function type — `effects(<Cb<fn(@Int -> @Bool) effects(<State<Pos>>)>>)`
+    — and that leg was rendered by :func:`vera.types.pretty_effect`, which
+    renders each member through `pretty_type`.  So the two elisions
+    :func:`_structural_type_key` exists to avoid came back at the NESTED
+    depth: two outer instances differing only inside a nested row (by a
+    refinement's predicate, or by a type variable's built-in marker) rendered
+    identically, tied, and a stable `sorted` handed back the `frozenset`'s own
+    order — the `PYTHONHASHSEED` dependence, three levels into its own fix.
+
+    Rendering members through :func:`_effect_sort_key` closes it and makes the
+    two mutually recursive, which is what "structural all the way down" means
+    here: a nested row's own function-typed arguments recurse back through
+    this.  Deterministic despite reading a `frozenset`, because the members
+    are sorted on that structural key rather than on a presentation string —
+    a total order, so the sort's stability is never consulted.  The open row
+    variable is part of the row's identity, so it is rendered too.
+    """
+    if isinstance(eff, PureEffectRow):
+        return "effects(pure)"
+    if isinstance(eff, ConcreteEffectRow):
+        parts = [
+            f"{name}<{args}>" if args else name
+            for name, args in sorted(_effect_sort_key(e) for e in eff.effects)
+        ]
+        if eff.row_var:
+            parts.append(eff.row_var)
+        return f"effects(<{', '.join(parts)}>)"
+    return "effects(?)"
 
 
 # =====================================================================

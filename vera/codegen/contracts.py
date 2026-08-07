@@ -492,7 +492,11 @@ class ContractsMixin:
         closure path emits top-level formal / return guards only — it never
         calls `_emit_component_refinement_guards` — so enumerating a closure's
         tuple components here would register families no lowering asks for.
-        (That asymmetry is the closure path's, not this derivation's.)
+        (That asymmetry is the closure path's, not this derivation's, and is
+        tracked as #1235: when the closure path consumes the same
+        `_tuple_component_guard_sites` decomposition the named path does,
+        emitter and registration flip together and this leg drops its
+        `FnDecl`-only condition.)
         """
         decompose = isinstance(sig, ast.FnDecl)
         for te in (*sig.params, sig.return_type):

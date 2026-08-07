@@ -342,11 +342,19 @@ _DESCENDABLE = ("Expr", "Block", "AnonFn", "Stmt")
 # and both carry a `# WALKER_COVERAGE:` checklist.
 _PRE_SCANS = ("_scan_io_ops", "_scan_expr_for_handlers")
 
-# Classes that carry a descendable field and are deliberately NOT dispatched
-# on by the recursion.  One line each, saying where the field IS reached —
-# an entry whose reason is "we do not need it" is the shape that produced
-# both round-5 holes, so each of these names a concrete other route.
-_JUSTIFIED_IGNORES: dict[str, str] = {
+# Descendable fields that are deliberately NOT reached by the recursion.  One
+# line each, saying where the field IS reached — an entry whose reason is "we
+# do not need it" is the shape that produced both round-5 holes, so each of
+# these names a concrete other route.
+#
+# Keyed EITHER by class name (one reason covering the class, permitted only
+# while the class has a single descendable field — see
+# `test_the_ignore_table_cannot_rot`) or by an exact `(class, field)` pair.
+# A class-level entry on a multi-field class would exempt whatever field the
+# class grows next, which is precisely the class-keyed obligation this gate
+# replaced (round-9 review); `HandlerClause` is the class that has two, so it
+# is written per pair, each naming its own read.
+_JUSTIFIED_IGNORES: dict[str | tuple[str, str], str] = {
     "FnDecl":
         "`decl.body` IS the entry point — `emit_function` hands it to both "
         "pre-scans; the recursion never meets a FnDecl.",
@@ -374,9 +382,12 @@ _JUSTIFIED_IGNORES: dict[str, str] = {
     "HandlerState":
         "reached through the HandleExpr branch, which walks "
         "`node.state.init_expr`.",
-    "HandlerClause":
+    ("HandlerClause", "body"):
         "reached through the HandleExpr branch, which walks `clause.body` "
-        "and `clause.state_update[1]` for every clause.",
+        "for every clause.",
+    ("HandlerClause", "state_update"):
+        "reached through the HandleExpr branch, which walks "
+        "`clause.state_update[1]` for every clause.",
     "MatchArm":
         "reached through the MatchExpr branch, which walks every "
         "`arm.body`.",
@@ -398,6 +409,31 @@ def _descendable_fields(cls: type) -> list[str]:
         if any(re.search(rf"\b{d}\b", text) for d in _DESCENDABLE):
             out.append(f.name)
     return out
+
+
+def _is_justified(cls: str, field: str) -> bool:
+    """True when this exact obligation is exempted in `_JUSTIFIED_IGNORES`."""
+    return cls in _JUSTIFIED_IGNORES or (cls, field) in _JUSTIFIED_IGNORES
+
+
+def _pair_holes(
+    canonical: dict[str, list[str]], dispatched: set[str], reads: set[str],
+) -> list[str]:
+    """The obligations a walker satisfies neither by route nor by exemption.
+
+    The obligation is a `(class, field)` PAIR, and a pair is discharged only
+    by the conjunction — the class has an `isinstance` branch AND the field
+    name is read in that branch — or by an entry in `_JUSTIFIED_IGNORES`.
+    ONE computation, called by the gate and by both can-go-red proofs, so the
+    mutations exercise the check that runs rather than a restatement of it.
+    """
+    return sorted(
+        f"{cls}.{field}"
+        for cls, fields in canonical.items()
+        for field in fields
+        if not _is_justified(cls, field)
+        and not (cls in dispatched and field in reads)
+    )
 
 
 def _canonical_classes() -> dict[str, list[str]]:
@@ -472,7 +508,7 @@ def pre_scan_walkers(
 
 
 class TestPreScanWalkerFieldCoverage:
-    """Every expression-carrying AST class is walked, or justified here.
+    """Every expression-carrying AST FIELD is walked, or justified here.
 
     The corpus-anchored differential in
     `tests/test_state_exn_registration.py` can only see a hole a corpus
@@ -483,23 +519,25 @@ class TestPreScanWalkerFieldCoverage:
     walkers already dispatch on — is a loud failure at the commit that adds
     it, whether or not anyone writes a program using it.
 
-    Two granularities, because they fail differently:
+    ONE obligation, at FIELD granularity: every `(class, field)` pair the
+    schema yields must have a dispatch route — the class `isinstance`-branched
+    AND the field name read inside that branch — or an entry in
+    `_JUSTIFIED_IGNORES` naming the route its expressions ARE reached by.
+    The two halves are a conjunction on one obligation rather than two checks
+    over two obligation sets, because a class-keyed obligation set discharges
+    the moment a class has ANY branch (round-9 review): adding
+    `IfExpr.finally_branch` and not walking it left the class dispatched, the
+    class obligation satisfied, and only a second, weaker screen standing
+    between a live sub-expression and going unregistered.
 
-    * CLASS — a canonical class must be `isinstance`-dispatched or justified
-      in `_JUSTIFIED_IGNORES`.
-    * FIELD — every descendable field of a dispatched class must be READ
-      somewhere in that walker's source.  Adding `IfExpr.finally_branch` and
-      not walking it leaves the class dispatched and the class-level check
-      green, which is exactly how a live sub-expression goes unregistered.
-
-    The field check compares NAMES, not (class, field) pairs: a walker reads
-    `node.body` / `clause.body` off untyped locals, so it cannot be attributed
-    to a class without typing the receivers.  A new field that reuses a name
-    some other branch already reads (`body`, `expr`, `value`, `args`)
-    therefore passes it.  Narrowing that would mean type-inferring the
-    walkers' locals — the check as it stands catches every NEW name, which is
-    the ordinary case, and the class-level gate plus the corpus differential
-    cover the rest.
+    The dispatch route reads a field NAME, because a walker reads
+    `node.body` / `clause.body` off untyped locals and cannot be attributed
+    to a class without typing the receivers.  The OBLIGATION is per pair
+    regardless, so a new field is only ever discharged by a name the walker
+    genuinely reads; a new field reusing a name some other branch already
+    reads (`body`, `expr`, `value`, `args`) is the residual, and narrowing
+    that would mean type-inferring the walkers' locals.  The corpus
+    differential covers the rest.
 
     Deliberately STRONGER than `scripts/check_walker_coverage.py`: a
     checklist disposition alone does not count as coverage here, only an
@@ -509,88 +547,85 @@ class TestPreScanWalkerFieldCoverage:
     of the callee and false of the arguments the walkers never reached.
     """
 
-    def test_every_expression_carrying_class_is_walked_or_justified(
+    def test_every_expression_carrying_field_is_walked_or_justified(
         self, pre_scan_walkers: dict[str, tuple[set, set, set]],
     ) -> None:
         canonical = _canonical_classes()
-        assert len(canonical) > 20, (
-            f"only {len(canonical)} AST classes carry a descendable field — "
-            "the schema scan has stopped matching, and this gate would pass "
-            "vacuously"
+        pairs = sum(len(fields) for fields in canonical.values())
+        assert len(canonical) > 20 and pairs > len(canonical), (
+            f"the schema scan yields {pairs} field obligations over "
+            f"{len(canonical)} AST classes — it has stopped matching (or "
+            "stopped distinguishing fields from classes), and this gate "
+            "would pass vacuously"
         )
-        for walker, (dispatched, _checklist, _reads) in (
+        for walker, (dispatched, _checklist, reads) in (
                 pre_scan_walkers.items()):
-            holes = sorted(
-                set(canonical) - dispatched - set(_JUSTIFIED_IGNORES))
+            holes = _pair_holes(canonical, dispatched, reads)
             assert not holes, (
-                f"`{walker}` never descends into "
-                + ", ".join(
-                    f"{name}.{'/'.join(canonical[name])}" for name in holes)
-                + " — add an `isinstance` branch, or add the class to "
-                "`_JUSTIFIED_IGNORES` with the route its expressions ARE "
-                "reached by.  A class carrying live sub-expressions that no "
+                f"`{walker}` never reaches " + ", ".join(holes)
+                + " — walk the field in an `isinstance` branch for its class, "
+                "or add the pair to `_JUSTIFIED_IGNORES` with the route it IS "
+                "reached by.  A field carrying live sub-expressions that no "
                 "pass walks is the #1210 bug: the registration pass misses "
                 "it while the lowering emits its calls anyway."
             )
 
     def test_the_ignore_table_cannot_rot(self) -> None:
-        """Every justified entry still exists and still carries a field.
+        """Every justified entry still names something that exists.
 
         Without this, a class removed from `vera/ast.py` (or one that loses
-        its last expression-carrying field) leaves a stale exemption behind
-        that would silently cover a LATER class of the same name.
+        the field an entry exempts) leaves a stale exemption behind that
+        would silently cover a LATER class or field of the same name.
+
+        It also holds the line between the two key shapes: a class-level
+        entry exempts whatever fields its class GROWS, so it is permitted
+        only while the class has exactly one — the moment a second appears,
+        the entry must be split into per-field ones that each name a route.
+        That is the same class-keyed-obligation hole the gate itself closed,
+        one table down.
         """
         canonical = _canonical_classes()
-        stale = sorted(set(_JUSTIFIED_IGNORES) - set(canonical))
-        assert not stale, (
-            f"{stale} are exempted in `_JUSTIFIED_IGNORES` but no longer "
-            "carry any expression-carrying field — delete the entries"
-        )
-        for name, reason in _JUSTIFIED_IGNORES.items():
+        for key, reason in _JUSTIFIED_IGNORES.items():
+            if isinstance(key, str):
+                assert key in canonical, (
+                    f"`{key}` is exempted in `_JUSTIFIED_IGNORES` but no "
+                    "longer carries any expression-carrying field — delete "
+                    "the entry"
+                )
+                assert len(canonical[key]) == 1, (
+                    f"`{key}` now carries {canonical[key]} — a class-level "
+                    "exemption would cover whichever field it grows next.  "
+                    "Split it into one `(class, field)` entry per field, each "
+                    "naming its own route."
+                )
+            else:
+                cls, field = key
+                assert cls in canonical and field in canonical[cls], (
+                    f"`{cls}.{field}` is exempted in `_JUSTIFIED_IGNORES` but "
+                    f"is not in the schema — delete the entry (`{cls}` "
+                    f"carries {canonical.get(cls)})"
+                )
+                assert cls not in _JUSTIFIED_IGNORES, (
+                    f"`{cls}` has both a class-level and a per-field "
+                    "exemption — the class-level one already covers every "
+                    "field, so the pair entry's reason is never read"
+                )
             assert len(reason) > 30 and reason.rstrip().endswith("."), (
-                f"the `{name}` exemption needs a reason naming where its "
+                f"the `{key}` exemption needs a reason naming where its "
                 f"expressions ARE reached, got: {reason!r}"
             )
 
-    def test_every_descendable_field_of_a_dispatched_class_is_read(
+    def test_the_gate_can_go_red_on_an_unwalked_field(
         self, pre_scan_walkers: dict[str, tuple[set, set, set]],
     ) -> None:
-        """FIELD granularity: a dispatched class's new field is loud too.
+        """A fabricated field on a DISPATCHED class must be reported.
 
-        The class-level gate above goes green the moment a class has ANY
-        `isinstance` branch, so a field added to an already-dispatched class
-        — the commonest way an AST grows — passed it silently.  This reads
-        the walker's own source and requires the field name to appear.
-        """
-        canonical = _canonical_classes()
-        for walker, (dispatched, _checklist, reads) in (
-                pre_scan_walkers.items()):
-            holes = sorted(
-                f"{name}.{field}"
-                for name in dispatched & set(canonical)
-                for field in canonical[name]
-                if field not in reads
-            )
-            assert not holes, (
-                f"`{walker}` dispatches on these classes but never reads "
-                + ", ".join(holes)
-                + " — the class has a branch, so the class-level gate is "
-                "green, while a live sub-expression goes unregistered and "
-                "the lowering emits its calls anyway (#1210).  Read the "
-                "field in the branch, or move the class to "
-                "`_JUSTIFIED_IGNORES`."
-            )
-
-    def test_the_field_gate_can_go_red(
-        self, pre_scan_walkers: dict[str, tuple[set, set, set]],
-    ) -> None:
-        """A fabricated field on a dispatched class must be reported.
-
-        The mutation the field gate exists to catch, run against the real
-        extraction: no walker reads `fake_extra`, so pretending `IfExpr`
-        declares one must produce exactly that hole.  Without this, an
-        `_attribute_reads` that returned everything (or a `canonical` that
-        returned nothing) would leave the gate green forever.
+        The mutation the field granularity exists to catch, run through
+        `_pair_holes` — the gate's own computation, not a restatement of it.
+        No walker reads `fake_extra`, so pretending `IfExpr` declares one
+        must produce exactly that hole even though `IfExpr` keeps its branch.
+        Under the class-keyed obligation this shape was invisible: the class
+        was dispatched, so the obligation discharged.
         """
         canonical = dict(_canonical_classes())
         assert "IfExpr" in canonical, "the fixture class must still exist"
@@ -598,13 +633,8 @@ class TestPreScanWalkerFieldCoverage:
         for walker, (dispatched, _checklist, reads) in (
                 pre_scan_walkers.items()):
             assert "IfExpr" in dispatched, walker
-            holes = sorted(
-                f"{name}.{field}"
-                for name in dispatched & set(canonical)
-                for field in canonical[name]
-                if field not in reads
-            )
-            assert holes == ["IfExpr.fake_extra"], (walker, holes)
+            assert _pair_holes(canonical, dispatched, reads) == [
+                "IfExpr.fake_extra"], walker
 
     def test_the_checklist_comments_stay_truthful(
         self, pre_scan_walkers: dict[str, tuple[set, set, set]],
@@ -628,23 +658,31 @@ class TestPreScanWalkerFieldCoverage:
                 "comment is the thing reviewers read"
             )
 
-    def test_the_gate_can_go_red(self) -> None:
-        """Drop a real branch from the canonical set and the gate must fire.
+    def test_the_gate_can_go_red_on_an_undispatched_class(
+        self, pre_scan_walkers: dict[str, tuple[set, set, set]],
+    ) -> None:
+        """Drop a real branch from the dispatched set and the gate must fire.
 
-        Proves the comparison is doing work: `LetDestruct` — one of the two
-        classes round 5 added — must be reported as a hole the moment it is
-        not among the dispatched classes.  Without this, an extraction that
+        Proves the comparison is doing work: `LetDestruct` and `ModuleCall` —
+        the two classes round 5 added — must be reported the moment they are
+        not among the dispatched classes, by their FIELDS, since that is what
+        the obligation is keyed on now.  Without this, an extraction that
         silently returned every class name would leave the gate green
-        forever.
+        forever.  Run through `_pair_holes` for the same reason the field
+        mutation is.
         """
         canonical = _canonical_classes()
-        assert "LetDestruct" in canonical and "ModuleCall" in canonical, (
+        dropped = {"LetDestruct", "ModuleCall"}
+        assert dropped <= set(canonical), (
             "the two round-5 classes must still carry descendable fields"
         )
-        pretend_dispatched = set(canonical) - {"LetDestruct", "ModuleCall"}
-        holes = sorted(
-            set(canonical) - pretend_dispatched - set(_JUSTIFIED_IGNORES))
-        assert holes == ["LetDestruct", "ModuleCall"], holes
+        expected = sorted(
+            f"{cls}.{field}" for cls in dropped for field in canonical[cls])
+        for walker, (dispatched, _checklist, reads) in (
+                pre_scan_walkers.items()):
+            assert dropped <= dispatched, walker
+            assert _pair_holes(
+                canonical, dispatched - dropped, reads) == expected, walker
 
 
 # =====================================================================

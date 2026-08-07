@@ -404,6 +404,92 @@ def test_refinement_predicates_break_the_order_tie() -> None:
     assert sorted(order) == ["BinOp.GT", "BinOp.LT"], order
 
 
+# The same two elisions, one level deeper (round-9 review).  A type argument
+# may itself be a FUNCTION type, and a function type carries its own effect
+# row — so the tiebreak's structural key reaches a NESTED row, and that leg
+# was rendered by `pretty_effect`, which renders each member through
+# `pretty_type`.  Two outer instances differing only inside the nested row
+# therefore tied again: by a refinement's predicate in the first payload
+# below, by a type variable's built-in marker in the second.  The effect name
+# is fictional on purpose — nothing here is registered or resolved, the
+# subject is the ORDERING of a row assigned without its companion order.
+_NESTED_ROW_FALLBACK_PROBE = """\
+import json
+from vera import ast
+from vera.environment import TypeEnv
+from vera.types import (
+    BOOL, BUILTIN_TYPEVAR_MARKER, INT, ConcreteEffectRow, EffectInstance,
+    FunctionType, RefinedType, TypeVar)
+
+
+def refined(op, bound):
+    return RefinedType(
+        base=INT,
+        predicate=ast.BinaryExpr(
+            op=op,
+            left=ast.SlotRef(type_name="Int", type_args=None, index=0),
+            right=ast.IntLit(value=bound)))
+
+
+def carrier(inner):
+    \"\"\"`fn(@Int -> @Bool) effects(<State<inner>>)` — a NESTED row.\"\"\"
+    return FunctionType(
+        params=(INT,), return_type=BOOL,
+        effect=ConcreteEffectRow(
+            frozenset({EffectInstance("State", (inner,))})))
+
+
+def order(left, right, read):
+    a = EffectInstance("Callback", (carrier(left),))
+    b = EffectInstance("Callback", (carrier(right),))
+    assert a != b
+    env = TypeEnv()
+    env.current_effect_row = ConcreteEffectRow(frozenset({a, b}))
+    env.current_effect_order = ()
+    return [
+        read(next(iter(e.type_args[0].effect.effects)).type_args[0])
+        for e in env.ordered_effect_row()
+    ]
+
+
+print(json.dumps({
+    "refined": order(refined(ast.BinOp.GT, 0), refined(ast.BinOp.LT, 0),
+                     lambda ty: str(ty.predicate.op)),
+    "marker": order(TypeVar(name="T"),
+                    TypeVar(name="T" + BUILTIN_TYPEVAR_MARKER),
+                    lambda ty: ty.name),
+}))
+"""
+
+
+def test_a_nested_effect_row_breaks_the_order_tie() -> None:
+    """A row reached THROUGH a function-typed argument is ordered too.
+
+    Both legs run in one sweep and are asserted separately, so a regression
+    names the elision that came back rather than "the probe moved".  As
+    above, the assertion is one outcome rather than a particular one: what is
+    pinned is that the order is a property of the two types, not of the
+    interpreter start.
+    """
+    per_leg: dict[str, set[tuple[str, ...]]] = {}
+    for raw in _sweep_python(_NESTED_ROW_FALLBACK_PROBE):
+        for leg, order in json.loads(raw).items():
+            per_leg.setdefault(leg, set()).add(tuple(order))
+
+    assert set(per_leg) == {"refined", "marker"}, sorted(per_leg)
+    for leg, elision in (
+        ("refined", "a nested row's refinement PREDICATE"),
+        ("marker", "a nested row's built-in type-var MARKER"),
+    ):
+        assert len(per_leg[leg]) == 1, (
+            f"{elision} is elided from the ordering key, so the two members "
+            f"tie and the frozenset's own order decides: {len(per_leg[leg])} "
+            f"distinct outcomes across seeds {_SEEDS}: {sorted(per_leg[leg])}"
+        )
+    assert sorted(per_leg["refined"].pop()) == ["BinOp.GT", "BinOp.LT"]
+    assert sorted(per_leg["marker"].pop()) == ["T", "T#b"]
+
+
 def test_qualified_lookup_is_unaffected_by_row_order() -> None:
     """A qualified `State.get` / `Http.get` never consults the row."""
     env = TypeEnv()
