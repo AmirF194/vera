@@ -732,7 +732,7 @@ Twenty-six scripts in `scripts/` validate cross-cutting concerns beyond unit tes
 | `check_licenses.py` | All installed packages have MIT-compatible licenses |
 | `build_site.py` | Regenerates the AI-readable site assets that `check_site_assets.py` verifies |
 
-Each runs in its relevant pre-commit hooks and CI jobs, so issues are caught locally before they reach the remote — `check_distribution.py` and `check_wheel_availability.py` are CI-only (the `package-distribution` and `wheel-preflight` jobs; they need built artifacts and registry access), and `build_site.py` is a generator invoked manually or by its checking twin.
+Each runs in its configured pre-commit hook or CI job, so issues are caught locally before they reach the remote; `build_site.py` is the generator whose output `check_site_assets.py` verifies.
 
 ### Spec validation pipeline
 
