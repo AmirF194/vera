@@ -100,7 +100,7 @@ Exit criterion: the LSP limitation rows are retired, and a fresh VeraBench run (
 | [#724](https://github.com/aallan/vera/issues/724) | LSP: buffer-aware module resolution (imports currently resolve from disk, not open buffers). |
 | [#725](https://github.com/aallan/vera/issues/725) | LSP: handler-aware `vera/addEffect` propagation bounding. |
 | [#181](https://github.com/aallan/vera/issues/181) | Slot go-to-definition and mechanical slot-index rewriting beyond parameters (`let`/`match` bindings). |
-| [#558](https://github.com/aallan/vera/issues/558) | `--explain-slots` beyond signatures — match arms, W001 holes. |
+| [#558](https://github.com/aallan/vera/issues/558) | `--explain-slots-at <line>:<col>` — query the slot table at any position, not only where a diagnostic already fires. |
 | [#523](https://github.com/aallan/vera/issues/523) | `vera context` — token-budgeted project export for agents. |
 | [#698](https://github.com/aallan/vera/issues/698) | `vera shape` — function-archetype histograms per module. |
 | [#224](https://github.com/aallan/vera/issues/224) | REPL — the shortest feedback path is currently `vera run` on a file. |
