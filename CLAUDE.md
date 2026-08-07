@@ -67,6 +67,7 @@ python scripts/check_readme_examples.py # Verify README code blocks parse
 python scripts/check_examples_doc.py  # Verify EXAMPLES.md code blocks parse
 python scripts/check_skill_examples.py # Verify SKILL.md code blocks parse
 python scripts/check_faq_examples.py  # Verify FAQ code blocks parse
+python scripts/check_debruijn_examples.py # Verify DE_BRUIJN.md code blocks parse
 python scripts/check_pypi_readme_examples.py # Verify PYPI_README code blocks parse + check + verify
 python scripts/check_html_examples.py # Verify HTML code blocks parse + check + verify
 python scripts/check_doc_builtin_shadowing.py # Verify no doc example redefines a built-in (E151; #819)

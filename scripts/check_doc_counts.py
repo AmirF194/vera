@@ -5,11 +5,13 @@ Checks filesystem-derivable counts (conformance programs, examples, test
 files, pre-commit hooks, CI jobs) and pytest-collection counts (total tests,
 per-file test counts and line counts) against the numbers written in
 TESTING.md, CONTRIBUTING.md, CLAUDE.md, README.md, SKILL.md, AGENTS.md,
-FAQ.md, and ROADMAP.md.  Also checks the KNOWN_ISSUES.md "Refactoring
+FAQ.md, and ROADMAP.md.  Also checks TESTING.md's passed/stress/skipped
+breakdown against the collected total, the KNOWN_ISSUES.md "Refactoring
 needed" line counts (±10% tolerance), the HISTORY.md version-row format
 (one issue link max, no " — " separator per row), the vera/README.md
-module map (#1150), the project facts hardcoded on the landing page
-(#528), and the cited corpus-program count.
+module map (#1150) and its Test Suite paragraph's four counts, the project
+facts hardcoded on the landing page (#528), and the cited corpus-program
+count.
 
 Intentionally excludes CHANGELOG.md: its counts are historical records
 (e.g. "64 programs, was 63") that are frozen snapshots of the project state
@@ -69,6 +71,95 @@ def check_refactoring_counts(known_issues_text: str, root: Path) -> list[str]:
             errors.append(
                 f"KNOWN_ISSUES.md refactoring table: {rel} cites"
                 f" {cited:,} lines, measured {live:,} (>10% drift)"
+            )
+    return errors
+
+
+_TESTS_BREAKDOWN = re.compile(
+    r"\*\*Tests\*\*\s*\|\s*[\d,]+\s+across.*?;\s*([\d,]+) passed"
+    r"\s*\+\s*([\d,]+) stress,\s*([\d,]+) skipped"
+)
+
+
+def check_tests_breakdown(testing_text: str, live_total: int) -> list[str]:
+    """Check that TESTING.md's tests breakdown sums to the gated total.
+
+    The overview row states the total *and* its parts — "9,382 across 143
+    files (…; 9,235 passed + 26 stress, 121 skipped)" — but only the total
+    was pinned, so a release that moved the parts without moving the sum,
+    or moved the sum and refreshed only the number the gate reads, left an
+    arithmetically impossible sentence behind.  Both halves are now
+    checked: each part against nothing (they are not independently
+    derivable without running the suite three ways) and their sum against
+    the collected total, which is exactly the internal consistency a
+    reader would check by hand.
+
+    A pattern that matches nothing is an error in its own right — rewording
+    the parenthetical would otherwise silently switch the check off, which
+    is the failure mode the gate exists to prevent.
+    """
+    m = _TESTS_BREAKDOWN.search(testing_text)
+    if m is None:
+        return [
+            "TESTING.md: no tests breakdown matched"
+            " ('N passed + N stress, N skipped') — the row moved or was"
+            " reworded, so the breakdown is no longer gated"
+        ]
+    parts = [int(g.replace(",", "")) for g in m.groups()]
+    total = sum(parts)
+    if total != live_total:
+        passed, stress, skipped = parts
+        return [
+            f"TESTING.md tests breakdown: {passed:,} passed"
+            f" + {stress:,} stress + {skipped:,} skipped = {total:,},"
+            f" but the collected total is {live_total:,}"
+        ]
+    return []
+
+
+_VERA_README_TESTS = re.compile(
+    r"\*\*pytest suite\*\* of ([\d,]+) tests across (\d+) files.*?"
+    r"\((\d+) programs in `tests/conformance/`.*?"
+    r"\((\d+) end-to-end demos\)",
+    re.DOTALL,
+)
+
+
+def check_vera_readme_test_counts(
+    readme_text: str,
+    live_total_tests: int,
+    live_test_files: int,
+    live_conformance: int,
+    live_examples: int,
+) -> list[str]:
+    """Pin the four counts in vera/README.md's "Test Suite" paragraph.
+
+    Only the module map was gated in that file, so this sentence drifted
+    unnoticed across many releases — it is the same class as FAQ.md's
+    headline line, and the same fix: read the numbers the way the oracle
+    reads every other citation of them.  A missing pattern is an error,
+    not a skip.
+    """
+    m = _VERA_README_TESTS.search(readme_text)
+    if m is None:
+        return [
+            "vera/README.md: the Test Suite paragraph's counts did not match"
+            " ('N tests across N files … (N programs in `tests/conformance/`"
+            " …) … (N end-to-end demos)') — it moved or was reworded, so it"
+            " is no longer gated"
+        ]
+    errors: list[str] = []
+    for label, cited_s, live in (
+        ("total tests", m.group(1), live_total_tests),
+        ("test file count", m.group(2), live_test_files),
+        ("conformance programs", m.group(3), live_conformance),
+        ("example programs", m.group(4), live_examples),
+    ):
+        cited = int(cited_s.replace(",", ""))
+        if cited != live:
+            errors.append(
+                f"vera/README.md Test Suite {label}: doc says {cited:,},"
+                f" live is {live:,}"
             )
     return errors
 
@@ -506,6 +597,7 @@ def main() -> int:
         live_examples,
         "example programs",
     )
+    errors.extend(check_tests_breakdown(testing_md, live_total_tests))
 
     # ------------------------------------------------------------------
     # 3. Check TESTING.md per-file test table
@@ -980,6 +1072,15 @@ def main() -> int:
 
     vera_readme_md = (root / "vera/README.md").read_text(encoding="utf-8")
     errors.extend(check_module_map(vera_readme_md, root))
+    errors.extend(
+        check_vera_readme_test_counts(
+            vera_readme_md,
+            live_total_tests,
+            live_test_files,
+            live_conformance,
+            live_examples,
+        )
+    )
 
     # ------------------------------------------------------------------
     # 18. Check the hardcoded project facts on the landing page
