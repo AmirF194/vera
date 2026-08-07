@@ -25,32 +25,18 @@ function ``fn foo(@Int, @Int -> @Int)``:
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 
 from vera import ast, naming
-
-# `substitute_named`, `resolve_alias_type_expr` and `AliasResolutionDepthError`
-# MOVED to `vera.naming` (#1208), which owns every type-expression naming and
-# resolution walk.  Re-exported here — unchanged, one implementation — so a
-# `from vera.slots import ...` of the old names keeps working; the State/Exn
-# family, which was the last of them inside the compiler, resolves through
-# `naming.family_name` since #1209.
-from vera.naming import (
-    AliasEnv,
-    AliasResolutionDepthError,
-    resolve_alias_type_expr,
-    substitute_named,
-)
+from vera.naming import AliasEnv
 
 __all__ = [
-    "AliasResolutionDepthError",
     "family_fallback_name",
+    "fn_scopes",
     "fn_slot_scope",
     "format_slot_table",
-    "resolve_alias_type_expr",
     "slot_table",
     "slot_table_dict",
-    "substitute_named",
     "type_expr_slot_name",
 ]
 
@@ -132,6 +118,39 @@ def fn_slot_scope(
     return naming.with_type_params(env, forall_vars) if forall_vars else env
 
 
+def fn_scopes(
+    decl: ast.FnDecl,
+    inherited: Iterable[str] = (),
+    _path: tuple[str, ...] = (),
+) -> Iterator[tuple[ast.FnDecl, tuple[str, ...], tuple[str, ...]]]:
+    """*decl* and every function nested in its ``where`` block, in source
+    order, as ``(fn, type parameters in scope OVER it, qualified name path)``.
+
+    A ``where`` helper sees its parent's ``forall`` variables as well as its
+    own: ``_check_fn`` saves and restores one shared type-parameter map
+    rather than replacing it, so entering a helper ADDS to the scope.  The
+    accumulated tuple is therefore what :func:`fn_slot_scope` has to be given
+    for a helper — narrowed by the parent's variables, a same-named module
+    alias stays shadowed all the way down, and rendering the helper against
+    the bare module environment silently merges parameter stacks the checker
+    keeps apart.
+
+    The path is the enclosing function names followed by this one, so its
+    length carries the nesting depth and its join is a name unique within the
+    module (helpers of two different functions may share a bare name).
+
+    One walk rather than one per consumer (``vera check --explain-slots`` and
+    the LSP's go-to-definition, #1217): both ask the same question about the
+    same nesting, and an accumulation that differed between them would put
+    the two surfaces' answers about one helper out of step.
+    """
+    in_scope = (*inherited, *(decl.forall_vars or ()))
+    path = (*_path, decl.name)
+    yield decl, in_scope, path
+    for helper in decl.where_fns or ():
+        yield from fn_scopes(helper, in_scope, path)
+
+
 def _label(tname: str, slot_idx: int, n: int) -> str:
     """Human-readable label for a slot entry, e.g. 'last @Int'."""
     if n == 1:
@@ -187,6 +206,7 @@ def format_slot_table(
     fn_name: str,
     params_str: str,
     table: dict[str, list[int]],
+    depth: int = 0,
 ) -> str:
     """Format a human-readable slot environment block for one function.
 
@@ -195,14 +215,21 @@ def format_slot_table(
         fn divide(@Int, @Int -> @Int)
           @Int.0  parameter 2 (last @Int)
           @Int.1  parameter 1 (first @Int)
+
+    *depth* is the ``where``-nesting level (#1217): a helper is indented one
+    step further than its parent and labelled ``where fn``, so the printed
+    tables carry the nesting that decides which parameters a ``@T.n`` inside
+    the helper can name.
     """
-    lines = [f"  fn {fn_name}({params_str})"]
+    indent = "  " * (depth + 1)
+    keyword = "where fn" if depth else "fn"
+    lines = [f"{indent}{keyword} {fn_name}({params_str})"]
     for tname in sorted(table):
         positions = table[tname]
         n = len(positions)
         for slot_idx, param_pos in enumerate(positions):
             lines.append(
-                f"    @{tname}.{slot_idx}  "
+                f"{indent}  @{tname}.{slot_idx}  "
                 f"parameter {param_pos} ({_label(tname, slot_idx, n)})"
             )
     return "\n".join(lines)
@@ -212,7 +239,13 @@ def slot_table_dict(
     fn_name: str,
     table: dict[str, list[int]],
 ) -> dict[str, object]:
-    """Return a JSON-serialisable slot table for a single function."""
+    """Return a JSON-serialisable slot table for a single function.
+
+    *fn_name* is the function's qualified name — ``parent.helper`` for a
+    ``where``-block helper (#1217) — because a helper may share its bare name
+    with a helper of another function, and a consumer keying on ``function``
+    would silently collapse the two.
+    """
     entries: list[dict[str, object]] = []
     for tname in sorted(table):
         for slot_idx, param_pos in enumerate(table[tname]):

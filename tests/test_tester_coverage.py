@@ -747,21 +747,90 @@ class TestTesterUnitFunctions:
         assert _type_expr_to_slot_name(te, env) == "Array<Int>"
         assert _type_expr_to_slot_name(te, EMPTY_ALIAS_ENV) == "Array<Cnt>"
 
-    def test_alias_typed_param_is_skipped_before_naming_applies(
+    def test_alias_typed_param_is_exercised(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
     ) -> None:
-        """The gate that bounds the reach of the test above.
+        """An alias-typed parameter is TRIALED, not skipped (#1216).
 
-        ``_get_param_types`` matches a parameter's SYNTACTIC head against
-        ``PRIMITIVES`` and never resolves aliases, so an alias-typed
-        parameter is classified unsupported and the function is skipped
-        (E701) before any Z3 variable is named.  Pinned because it is what
-        makes the tester's rendered names trivially consistent today — every
-        parameter it does reach has a primitive head — and because a future
-        change that teaches ``_get_param_types`` to resolve aliases must land
-        with the naming already correct, not discover it afterwards.
+        ``_get_param_types`` resolves each parameter through the threaded
+        naming environment before asking whether Z3 can encode it, so
+        ``type Cnt = Int`` reaches the Z3-supported ``Int`` instead of the
+        opaque syntactic head that used to classify it unsupported and skip
+        the function (E701) before any variable was named.  The companion of
+        the test above: the tester's rendered names are consistent BECAUSE
+        both the resolution and the naming come from :mod:`vera.naming`, not
+        because the parameters it reaches happen to have primitive heads.
         """
         source = (
+            "type Cnt = Int;\n"
+            "\n"
+            "public fn keep(@Cnt -> @Int)\n"
+            "  requires(@Cnt.0 > 100)\n"
+            "  ensures(@Int.result > 100)\n"
+            "  decreases(0)\n"
+            "  effects(pure)\n"
+            "{\n"
+            "  @Cnt.0\n"
+            "}\n"
+        )
+        path = _write_vera(tmp_path, source)
+        rc = cmd_test(path, trials=3)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "TESTED" in out.upper(), out
+        assert "SKIPPED" not in out.upper(), out
+
+    def test_alias_typed_fn_trials_run_and_its_ensures_holds(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The run-through: trials actually execute and the contract holds.
+
+        Reported through ``--json`` so the trial COUNTS are asserted rather
+        than inferred from a status word — "TESTED" with zero trials would
+        satisfy a text check while proving nothing ran.  The `requires` is
+        written against the alias slot ``@Cnt.0``, so a generator that named
+        its Z3 variable anything else would drop the constraint (translation
+        is best-effort) and feed the function values at or below 100, which
+        the runtime-checked `ensures` reports as failures.
+        """
+        source = (
+            "type Cnt = Int;\n"
+            "\n"
+            "public fn keep(@Cnt -> @Int)\n"
+            "  requires(@Cnt.0 > 100)\n"
+            "  ensures(@Int.result > 100)\n"
+            "  decreases(0)\n"
+            "  effects(pure)\n"
+            "{\n"
+            "  @Cnt.0\n"
+            "}\n"
+        )
+        path = _write_vera(tmp_path, source)
+        rc = cmd_test(path, as_json=True, trials=5)
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        fns = {f["name"]: f for f in payload["functions"]}
+        assert fns["keep"]["category"] == "tested", payload
+        assert fns["keep"]["trials_run"] > 0, payload
+        assert fns["keep"]["trials_failed"] == 0, payload
+
+    def test_alias_typed_requires_binds_under_the_alias_slot_name(
+        self, tmp_path: Path,
+    ) -> None:
+        """The generated inputs SATISFY the alias-spelled `requires` (#1216).
+
+        The direct proof behind the run-through above: every generated value
+        is > 100, which can only happen if `requires(@Cnt.0 > 100)` found the
+        Z3 variable the generator declared.  ``translate_expr`` returns None
+        for an unresolvable reference and the constraint is then silently
+        dropped, so a mis-keyed variable produces unconstrained inputs rather
+        than an error.
+        """
+        from vera.naming import alias_env_from_declarations
+        from vera.parser import parse_to_ast
+        from vera.tester import _generate_inputs, _get_param_types
+
+        program = parse_to_ast(
             "type Cnt = Int;\n"
             "\n"
             "public fn keep(@Cnt -> @Int)\n"
@@ -772,12 +841,112 @@ class TestTesterUnitFunctions:
             "  @Cnt.0\n"
             "}\n"
         )
+        env = alias_env_from_declarations(program.declarations)
+        decl = program.declarations[1].decl
+        param_types = _get_param_types(decl, env)
+        inputs = _generate_inputs(decl, param_types, 5, env)
+        assert inputs, "an alias-typed parameter must generate inputs"
+        assert all(row[0] > 100 for row in inputs), inputs
+
+    def test_refined_alias_param_is_generated_inside_its_refinement(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A refined alias reaches Z3 with its PREDICATE (#1216).
+
+        A refinement is unwritable in parameter position, so an alias is the
+        only way to have one — which means #1216 is what first brings refined
+        parameters to the generator.  Codegen guards them on entry, so an
+        unconstrained generator manufactures arguments the guard rejects and
+        every out-of-range trial is reported as a refinement violation
+        (measured: 96 of 100 trials, before the membership constraint).
+        """
+        source = (
+            "type Pos = { @Int | @Int.0 > 0 };\n"
+            "\n"
+            "public fn f(@Pos -> @Int)\n"
+            "  requires(true)\n"
+            "  ensures(@Int.result > 0)\n"
+            "  decreases(0)\n"
+            "  effects(pure)\n"
+            "{\n"
+            "  @Pos.0\n"
+            "}\n"
+        )
+        path = _write_vera(tmp_path, source)
+        rc = cmd_test(path, as_json=True, trials=20)
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        fn = {f["name"]: f for f in payload["functions"]}["f"]
+        assert fn["category"] == "tested", payload
+        assert fn["trials_run"] > 0, payload
+        assert fn["trials_failed"] == 0, payload
+
+    def test_unresolvable_alias_param_still_skips_cleanly(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The negative: a param that RESOLVES to something Z3 cannot encode.
+
+        Resolution is not a promise of encodability — an ADT resolves fine
+        and is still unsupported — so the E701-class skip has to survive the
+        #1216 flip with its reason intact, naming the resolved type.
+        """
+        source = (
+            "type Maybe = Option<Int>;\n"
+            "\n"
+            "public fn unwrap_or(@Maybe -> @Int)\n"
+            "  requires(true)\n"
+            "  ensures(@Int.result >= 0)\n"
+            "  decreases(0)\n"
+            "  effects(pure)\n"
+            "{\n"
+            "  match @Maybe.0 {\n"
+            "    Some(@Int) -> 0,\n"
+            "    None -> 0\n"
+            "  }\n"
+            "}\n"
+        )
         path = _write_vera(tmp_path, source)
         rc = cmd_test(path, trials=3)
         assert rc == 0
         out = capsys.readouterr().out
-        assert "SKIPPED" in out.upper()
-        assert "cannot generate" in out
+        assert "SKIPPED" in out.upper(), out
+        assert "cannot generate Option<Int> inputs" in out, out
+
+    def test_forall_var_shadowing_an_alias_stays_unsupported(self) -> None:
+        """A type PARAMETER resolves to a type variable, alias or no alias.
+
+        The shadowing scope is load-bearing for the resolution as well as for
+        the naming: with a module alias ``type T = Int`` in the environment, a
+        ``forall<T>`` parameter written ``@T`` would resolve to the encodable
+        ``Int`` if the function's own type parameters were not in scope — and
+        the tester would then generate Int inputs for a generic function.
+        """
+        import dataclasses
+
+        from vera.naming import alias_env_from_declarations
+        from vera.parser import parse_to_ast
+        from vera.tester import _get_param_types
+        from vera.types import INT, TypeVar
+
+        program = parse_to_ast(
+            "type T = Int;\n"
+            "\n"
+            "public forall<T> fn pick(@T -> @T)\n"
+            "  requires(true)\n"
+            "  ensures(true)\n"
+            "  effects(pure)\n"
+            "{\n"
+            "  @T.0\n"
+            "}\n"
+        )
+        env = alias_env_from_declarations(program.declarations)
+        decl = program.declarations[1].decl
+        assert _get_param_types(decl, env) == [TypeVar("T")]
+        # The alias is genuinely in the environment — without the function's
+        # own `forall` narrowing this same expression resolves to `Int`.
+        assert _get_param_types(
+            dataclasses.replace(decl, forall_vars=None), env,
+        ) == [INT]
 
     def test_get_source_line_no_span(self) -> None:
         """Cover line 751: _get_source_line returns '' when no span."""
@@ -800,9 +969,15 @@ class TestTesterUnitFunctions:
         assert result == ""
 
     def test_get_param_types_adt(self) -> None:
-        """Cover lines 477: non-primitive NamedType returns Type()."""
-        from vera.tester import _get_param_types
-        from vera.types import Type
+        """An ADT parameter resolves to its `AdtType` — and stays unsupported.
+
+        Since #1216 the answer is the CHECKER's semantic type rather than a
+        placeholder `Type()`, so the skip reason can name what the parameter
+        actually is; the encodability verdict is unchanged.
+        """
+        from vera.naming import EMPTY_ALIAS_ENV
+        from vera.tester import _get_param_types, _unsupported_type_names
+        from vera.types import AdtType
         from vera import ast as vera_ast
 
         decl = vera_ast.FnDecl(
@@ -817,14 +992,15 @@ class TestTesterUnitFunctions:
             where_fns=None,
             span=None,
         )
-        types = _get_param_types(decl)
-        assert len(types) == 1
-        assert types[0] == Type()
+        types = _get_param_types(decl, EMPTY_ALIAS_ENV)
+        assert types == [AdtType("MyADT", ())]
+        assert _unsupported_type_names(types) == ["MyADT"]
 
     def test_get_param_types_refinement_primitive(self) -> None:
-        """Cover line 482: RefinementType with primitive base returns RefinedType."""
+        """A refinement over a primitive keeps its `RefinedType` wrapper."""
+        from vera.naming import EMPTY_ALIAS_ENV
         from vera.tester import _get_param_types
-        from vera.types import RefinedType
+        from vera.types import INT, RefinedType, base_type
         from vera import ast as vera_ast
 
         pred = vera_ast.BoolLit(value=True)
@@ -843,14 +1019,16 @@ class TestTesterUnitFunctions:
             where_fns=None,
             span=None,
         )
-        types = _get_param_types(decl)
+        types = _get_param_types(decl, EMPTY_ALIAS_ENV)
         assert len(types) == 1
         assert isinstance(types[0], RefinedType)
+        assert base_type(types[0]) == INT
 
     def test_get_param_types_refinement_non_primitive(self) -> None:
-        """Cover line 484: RefinementType with non-primitive base returns Type()."""
-        from vera.tester import _get_param_types
-        from vera.types import Type
+        """A refinement over an ADT resolves through to the ADT base."""
+        from vera.naming import EMPTY_ALIAS_ENV
+        from vera.tester import _get_param_types, _unsupported_type_names
+        from vera.types import AdtType, base_type
         from vera import ast as vera_ast
 
         pred = vera_ast.BoolLit(value=True)
@@ -869,14 +1047,15 @@ class TestTesterUnitFunctions:
             where_fns=None,
             span=None,
         )
-        types = _get_param_types(decl)
-        assert len(types) == 1
-        assert types[0] == Type()
+        types = _get_param_types(decl, EMPTY_ALIAS_ENV)
+        assert base_type(types[0]) == AdtType("MyADT", ())
+        assert _unsupported_type_names(types) == ["MyADT"]
 
     def test_get_param_types_refinement_non_named_base(self) -> None:
-        """Cover line 486: RefinementType with non-NamedType base."""
-        from vera.tester import _get_param_types
-        from vera.types import Type
+        """A refinement over a function type resolves to a `FunctionType`."""
+        from vera.naming import EMPTY_ALIAS_ENV
+        from vera.tester import _get_param_types, _unsupported_type_names
+        from vera.types import FunctionType, base_type
         from vera import ast as vera_ast
 
         pred = vera_ast.BoolLit(value=True)
@@ -900,14 +1079,16 @@ class TestTesterUnitFunctions:
             where_fns=None,
             span=None,
         )
-        types = _get_param_types(decl)
-        assert len(types) == 1
-        assert types[0] == Type()
+        types = _get_param_types(decl, EMPTY_ALIAS_ENV)
+        assert isinstance(base_type(types[0]), FunctionType)
+        assert _unsupported_type_names(types) == [
+            "fn(Int -> Int) effects(pure)"]
 
     def test_get_param_types_fn_type(self) -> None:
-        """Cover line 488: FnType param returns Type()."""
+        """A function-typed parameter resolves to a `FunctionType`."""
+        from vera.naming import EMPTY_ALIAS_ENV
         from vera.tester import _get_param_types
-        from vera.types import Type
+        from vera.types import INT, FunctionType
         from vera import ast as vera_ast
 
         decl = vera_ast.FnDecl(
@@ -926,9 +1107,10 @@ class TestTesterUnitFunctions:
             where_fns=None,
             span=None,
         )
-        types = _get_param_types(decl)
+        types = _get_param_types(decl, EMPTY_ALIAS_ENV)
         assert len(types) == 1
-        assert types[0] == Type()
+        assert isinstance(types[0], FunctionType)
+        assert types[0].params == (INT,)
 
     def test_has_nontrivial_contracts_decreases(self) -> None:
         """Cover line 462: Decreases is non-trivial."""

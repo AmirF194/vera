@@ -17,13 +17,11 @@ from vera.checker.core import TypeChecker
 from vera.naming import (
     EMPTY_ALIAS_ENV,
     AliasEnv,
-    AliasResolutionDepthError,
     alias_env_from_declarations,
     alias_env_from_environment,
     family_name,
     is_ref_spellable,
     refinement_binder_parts,
-    resolve_alias_type_expr,
     slot_name,
     slot_ref_key,
     type_arg_name,
@@ -340,21 +338,6 @@ def test_deep_alias_chain_resolves_without_a_depth_bound() -> None:
         f"type F{i} = F{i + 1};\n" for i in range(depth)
     ) + f"type F{depth} = Int;\n"
     assert _name("@Option<F0>", prelude=forward) == "Option<F1>"
-
-
-def test_alias_walk_depth_bound_still_raises_for_its_own_callers() -> None:
-    """The moved-but-unchanged :func:`resolve_alias_type_expr` keeps its
-    loud overflow (the family-collapse callers must not degrade to an
-    opaque fallback, which would split the State/Exn family)."""
-    depth = 40
-    aliases: dict[str, ast.TypeExpr] = {
-        f"L{i}": ast.NamedType(name=f"L{i + 1}", type_args=None)
-        for i in range(depth)
-    }
-    aliases[f"L{depth}"] = ast.NamedType(name="Int", type_args=None)
-    with pytest.raises(AliasResolutionDepthError):
-        resolve_alias_type_expr(
-            ast.NamedType(name="L0", type_args=None), aliases, {})
 
 
 # =====================================================================

@@ -44,7 +44,7 @@ from vera.obligations.cache import walk_nodes
 from vera.obligations.core import ProofObligation
 from vera.obligations.session import VerificationSession
 from vera.naming import EMPTY_ALIAS_ENV, AliasEnv
-from vera.slots import fn_slot_scope, slot_table
+from vera.slots import fn_scopes, fn_slot_scope, slot_table
 
 _SEVERITY = {
     "error": lsp.DiagnosticSeverity.Error,
@@ -237,26 +237,27 @@ def definition_at(
     # parameters, not the enclosing top-level function's.
     enclosing: ast.FnDecl | None = None
     enclosing_size: tuple[int, int] | None = None
-    # Every FnDecl whose span contains the cursor is an ANCESTOR of it, so
-    # the union of their `forall` variables is the type-parameter scope the
-    # checker had in hand here: a `where` helper inside a generic sees the
-    # outer function's variables too (`_check_fn` saves and restores one
-    # shared map rather than replacing it).
-    in_scope_vars: set[str] = set()
+    # `fn_scopes` (vera/slots.py) pairs each function with the type
+    # parameters in scope OVER it — a `where` helper inside a generic sees
+    # the outer function's variables too (`_check_fn` saves and restores one
+    # shared map rather than replacing it) — so taking the INNERMOST function
+    # containing the cursor takes its accumulated scope with it.  Shared with
+    # `vera check --explain-slots` (#1217): the two surfaces answer the same
+    # question about the same helper, so they accumulate in one place.
+    in_scope_vars: tuple[str, ...] = ()
     for tld in analysis.program.declarations:
-        for node in walk_nodes(tld.decl):
-            if (
-                isinstance(node, ast.FnDecl)
-                and node.span is not None
-                and _span_contains(node.span, line1, col1)
-            ):
-                size = (
-                    node.span.end_line - node.span.line,
-                    node.span.end_column - node.span.column,
-                )
-                if enclosing_size is None or size < enclosing_size:
-                    enclosing, enclosing_size = node, size
-                in_scope_vars.update(node.forall_vars or ())
+        if not isinstance(tld.decl, ast.FnDecl):
+            continue
+        for fn, fn_vars, _path in fn_scopes(tld.decl):
+            if fn.span is None or not _span_contains(fn.span, line1, col1):
+                continue
+            size = (
+                fn.span.end_line - fn.span.line,
+                fn.span.end_column - fn.span.column,
+            )
+            if enclosing_size is None or size < enclosing_size:
+                enclosing, enclosing_size = fn, size
+                in_scope_vars = fn_vars
     if enclosing is None:
         return None
 

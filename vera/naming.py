@@ -94,19 +94,16 @@ from vera.types import (
 __all__ = [
     "EMPTY_ALIAS_ENV",
     "AliasEnv",
-    "AliasResolutionDepthError",
     "RefinementBinder",
     "alias_env_from_declarations",
     "alias_env_from_environment",
     "family_name",
     "is_ref_spellable",
     "refinement_binder_parts",
-    "resolve_alias_type_expr",
     "resolve_type_expr",
     "slot_name",
     "slot_name_or_none",
     "slot_ref_key",
-    "substitute_named",
     "type_arg_name",
     "with_type_params",
 ]
@@ -690,110 +687,3 @@ def refinement_binder_parts(
             right=predicate,
         )
     return RefinementBinder(predicate, name, base_node, False)
-
-
-# =====================================================================
-# The TypeExpr-level alias walk (moved here from `vera.slots`, #1208)
-# =====================================================================
-
-def substitute_named(
-    te: ast.TypeExpr, subst: dict[str, ast.TypeExpr],
-) -> ast.TypeExpr:
-    """Rewrite ``NamedType`` occurrences of *subst* keys inside *te* —
-    the minimal substitution the alias walk below needs (a parameterised
-    alias body mentions its params as bare or argument-position
-    ``NamedType``s).  Refinement predicates are left untouched: the walk
-    only ever *names* the result, never re-checks the predicate."""
-    if isinstance(te, ast.NamedType):
-        if not te.type_args and te.name in subst:
-            return subst[te.name]
-        if te.type_args:
-            return ast.NamedType(
-                name=te.name,
-                type_args=tuple(
-                    substitute_named(a, subst) for a in te.type_args),
-            )
-        return te
-    if isinstance(te, ast.RefinementType):
-        return ast.RefinementType(
-            base_type=substitute_named(te.base_type, subst),
-            predicate=te.predicate,
-        )
-    return te
-
-
-_RESOLVE_DEPTH_LIMIT = 32
-
-
-class AliasResolutionDepthError(Exception):
-    """An alias application nested past ``_RESOLVE_DEPTH_LIMIT`` — a
-    legal (acyclic, check-green) but absurd chain
-    :func:`resolve_alias_type_expr` refuses to resolve.  Raised rather
-    than silently returning ``None``, because a caller that treats
-    ``None`` as "keep the opaque spelling" would answer one way here and
-    another at a fully-resolving sibling site (round-5 review, F4).
-
-    Nothing in the pipeline raises it today: the State/Exn family, the
-    last caller with a ``None``-means-opaque fallback, moved to
-    :func:`family_name` (#1209), whose resolution is bounded by
-    DECLARATION ORDER and so needs no depth limit at all."""
-
-
-def resolve_alias_type_expr(
-    te: ast.TypeExpr,
-    aliases: Mapping[str, ast.TypeExpr],
-    alias_params: Mapping[str, tuple[str, ...] | None],
-    _depth: int = 0,
-) -> ast.NamedType | None:
-    """Walk *te* to its terminal ``NamedType`` through refinement
-    unwrapping, bare alias-chain follows, and PARAMETERISED alias
-    substitution (``type Id<T> = T`` applied at ``Id<Nat>`` — the
-    #630-era latent gap the PR #1202 adversarial rounds showed still
-    split the state family).  ``None`` when the walk lands on a
-    non-``NamedType`` (an ``FnType``-bodied alias, etc.).
-
-    The State/Exn family was its caller, on both the ``CodeGenerator``
-    registration side and the ``WasmContext`` lowering side, until the
-    family moved onto :func:`family_name` (#1209) — which resolves to a
-    semantic :class:`~vera.types.Type` rather than back to a
-    ``TypeExpr``, and is bounded by declaration order rather than by a
-    depth limit.  What remains here is the TypeExpr-to-TypeExpr walk,
-    exported for a consumer that needs the answer in that form.
-
-    Arguments resolve FIRST, mirroring the checker's order — a
-    seen-set head-follow truncated legitimate finite expansions
-    (``Id<Id<Nat>>`` substitutes to ``Id<Nat>``, whose head re-entry a
-    seen-set misreads as a cycle, stopping one level short: the round-3
-    review's silent handler-bypass and invalid-WASM shapes).  True
-    cycles are E132 at check; the depth bound is defence-in-depth so a
-    future upstream regression degrades to a loud
-    :class:`AliasResolutionDepthError` instead of a hang."""
-    if _depth > _RESOLVE_DEPTH_LIMIT:
-        raise AliasResolutionDepthError(
-            f"type alias application nested deeper than "
-            f"{_RESOLVE_DEPTH_LIMIT} levels"
-        )
-    while isinstance(te, ast.RefinementType):
-        te = te.base_type
-    if not isinstance(te, ast.NamedType):
-        return None
-    if te.type_args:
-        resolved_args: list[ast.TypeExpr] = []
-        for a in te.type_args:
-            ra = resolve_alias_type_expr(a, aliases, alias_params, _depth + 1)
-            resolved_args.append(ra if ra is not None else a)
-        te = ast.NamedType(name=te.name, type_args=tuple(resolved_args))
-    alias = aliases.get(te.name)
-    if alias is None:
-        return te
-    if not isinstance(alias, (ast.NamedType, ast.RefinementType)):
-        return None
-    params = alias_params.get(te.name)
-    if params and te.type_args and len(params) == len(te.type_args):
-        alias = substitute_named(alias, dict(zip(params, te.type_args)))
-    elif te.type_args:
-        # A parameterised application of a non-parameterised alias (or an
-        # arity mismatch) is ill-formed upstream — keep it opaque rather
-        # than resolving to something the application didn't mean.
-        return te
-    return resolve_alias_type_expr(alias, aliases, alias_params, _depth + 1)

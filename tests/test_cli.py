@@ -4135,6 +4135,108 @@ class TestExplainSlots:
         assert "@Option<Int>.0  parameter 1 (only @Option<Int>)" in out
         assert "@Option<T>.0  parameter 2 (only @Option<T>)" in out
 
+    _WHERE_HELPER = (
+        "public fn outer(@Int -> @Int)\n"
+        "  requires(true)\n"
+        "  ensures(true)\n"
+        "  effects(pure)\n"
+        "{\n"
+        "  helper(@Int.0, 2)\n"
+        "}\n"
+        "where {\n"
+        "  fn helper(@Int, @Int -> @Int)\n"
+        "    requires(true)\n"
+        "    ensures(true)\n"
+        "    effects(pure)\n"
+        "  {\n"
+        "    @Int.1 - @Int.0\n"
+        "  }\n"
+        "}\n"
+    )
+
+    def test_inprocess_where_helper_gets_its_own_table(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A `where`-block helper is tabled too (#1217).
+
+        A helper resets the slot namespace, so its De Bruijn ordering is a
+        separate question from its parent's — and the parent's table answers
+        nothing about it.  Printing only top-level functions left the shape
+        where De Bruijn confusion is MOST likely (two same-typed helper
+        parameters, read in the parent's mental model) with no table at all.
+        """
+        f = tmp_path / "where_helper.vera"
+        f.write_text(self._WHERE_HELPER, encoding="utf-8")
+        rc = cmd_check(str(f), explain_slots=True)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "fn outer(@Int -> @Int)" in out
+        assert "where fn helper(@Int, @Int -> @Int)" in out
+        # The helper's OWN stack: two @Int parameters, De Bruijn ordered.
+        assert "@Int.0  parameter 2 (last @Int)" in out
+        assert "@Int.1  parameter 1 (first @Int)" in out
+
+    def test_where_helper_table_is_in_the_json_too(
+        self, tmp_path: Path,
+    ) -> None:
+        """The JSON surface gains the helper, qualified by its parent."""
+        import io
+        from contextlib import redirect_stdout
+
+        f = tmp_path / "where_helper.vera"
+        f.write_text(self._WHERE_HELPER, encoding="utf-8")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = cmd_check(str(f), as_json=True, explain_slots=True)
+        assert rc == 0
+        envs = json.loads(buf.getvalue())["slot_environments"]
+        by_name = {e["function"]: e for e in envs}
+        assert set(by_name) == {"outer", "outer.helper"}
+        assert {"slot": "@Int.0", "type": "Int", "parameter": 2} in (
+            by_name["outer.helper"]["slots"])
+
+    def test_where_helper_inherits_the_parents_forall_vars(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The helper's table is narrowed by the ENCLOSING `forall` (#1217).
+
+        `T` is both a module alias (`= Int`) and the parent's type parameter,
+        and a helper sees its parent's type variables — the checker saves and
+        restores ONE type-parameter map rather than replacing it.  Rendered
+        against the bare module environment, `T` in the helper resolves to
+        `Int`, the helper's two parameters merge into one `Option<Int>` stack,
+        and the table reports `@Option<Int>.0` as parameter 2 where the
+        checker resolves it to parameter 1.
+        """
+        src = (
+            "type T = Int;\n"
+            "\n"
+            "public forall<T> fn outer(@Option<Int>, @Option<T> -> @Int)\n"
+            "  requires(true)\n"
+            "  ensures(true)\n"
+            "  effects(pure)\n"
+            "{\n"
+            "  helper(@Option<Int>.0, @Option<T>.0)\n"
+            "}\n"
+            "where {\n"
+            "  fn helper(@Option<Int>, @Option<T> -> @Int)\n"
+            "    requires(true)\n"
+            "    ensures(true)\n"
+            "    effects(pure)\n"
+            "  {\n"
+            "    0\n"
+            "  }\n"
+            "}\n"
+        )
+        f = tmp_path / "where_shadow.vera"
+        f.write_text(src, encoding="utf-8")
+        rc = cmd_check(str(f), explain_slots=True)
+        assert rc == 0
+        out = capsys.readouterr().out
+        helper_block = out.split("where fn helper")[1]
+        assert "@Option<Int>.0  parameter 1 (only @Option<Int>)" in helper_block
+        assert "@Option<T>.0  parameter 2 (only @Option<T>)" in helper_block
+
 
 class TestCmdServe:
     """#305: `vera serve file.vera [--port N]` — validation-error paths.

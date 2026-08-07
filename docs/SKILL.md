@@ -396,6 +396,15 @@ Slot environments (index 0 = last occurrence in signature):
     @Int.1  parameter 1 (first @Int)
 ```
 
+`where`-block helpers get their own table, indented under their parent:
+
+```text
+  fn is_even(@Nat -> @Bool)
+    @Nat.0  parameter 1 (only @Nat)
+    where fn is_odd(@Nat -> @Bool)
+      @Nat.0  parameter 1 (only @Nat)
+```
+
 **Read this table before writing any contract or recursive call.** The ordering only matters
 when a function has multiple parameters of the same type — but that is exactly when bugs occur.
 
@@ -479,6 +488,12 @@ match @Tuple<Int, String>.0 {
 type PosInt = { @Int | @Int.0 > 0 };
 type Name = String;
 ```
+
+An alias is **opaque as the head** of a slot name and **transparent inside type arguments**
+(spec §3.8.1). A parameter written `@PosInt` is referenced `@PosInt.0`, never `@Int.0` — the
+two are separate namespaces. A parameter written `@Option<Name>` binds `Option<String>`, so it
+is referenced `@Option<String>.0`. When in doubt, run `vera check --explain-slots`: it prints
+the resolved name of every parameter.
 
 ## Data Types (ADTs)
 
