@@ -96,7 +96,7 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `verifier.py` | 8,190 | Verify | Contract verification; owns the per-module `AliasEnv` registry every rendering goes through — an imported callee's contract and an imported generic's clone are both named in the module that **declared** them (#1208) | `verify()` |
 | `wasm/` | 25,941 | Compile | WASM translation layer (package) | `WasmContext`, `WasmSlotEnv`, `StringPool` |
 | ` ├ context.py` | 1,089 | | Composed WasmContext, expression dispatcher, block translation | |
-| ` ├ helpers.py` | 463 | | WasmSlotEnv, StringPool, type mapping, array element helpers | |
+| ` ├ helpers.py` | 541 | | WasmSlotEnv, StateClauseEntry, StringPool, type mapping, array element helpers | |
 | ` ├ inference.py` | 2,480 | | Type inference, slot/type utilities, operator tables | |
 | ` ├ operators.py` | 2,803 | | Binary/unary operators, if, quantifiers, assert/assume, old/new | |
 | ` ├ calls.py` | 1,146 | | Core dispatcher for `_translate_call` / `_translate_qualified_call`, generic resolution, shared element-type inference (domain mixins below) | |
@@ -751,7 +751,7 @@ The `ERROR_CODES` dict in `errors.py` maps every code to a short description (15
 
 ## Test Suite
 
-Testing spans a **pytest suite** of 9,398 tests across 144 files — compiler-internals unit tests plus a **conformance suite** (196 programs in `tests/conformance/` validating every language feature against the spec) and **example programs** (42 end-to-end demos). The conformance suite is the definitive specification artifact — each program tests one feature and serves as a minimal working example.
+Testing spans a **pytest suite** of 9,407 tests across 145 files — compiler-internals unit tests plus a **conformance suite** (196 programs in `tests/conformance/` validating every language feature against the spec) and **example programs** (42 end-to-end demos). The conformance suite is the definitive specification artifact — each program tests one feature and serves as a minimal working example.
 
 See **[TESTING.md](../TESTING.md)** for the comprehensive testing reference -- test file table, conformance suite details, compiler code coverage, language feature coverage, helper conventions, validation scripts, CI pipeline, and guidelines for adding tests.
 

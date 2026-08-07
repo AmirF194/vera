@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
 from vera.wasm.helpers import (  # noqa: F401 — re-exported for consumers
     _INLINE_I32_TYPES,
+    StateClauseEntry,
     StringPool,
     WasmSlotEnv,
     gc_shadow_push,
@@ -129,28 +130,17 @@ class WasmContext(
         self._effect_op_result_vera: dict[str, str | None] = (
             effect_op_result_vera or {}
         )
-        # #976 option C: op_name -> (HandlerClause, state type name,
-        # get import, put import) for the innermost enclosing
-        # ``handle[State<T>]``.  When a get/put call site has an entry here,
-        # the clause BODY is inlined at the site (intrinsic-hybrid
-        # semantics: intrinsic store/read, clause executes, ``resume(v)`` is
-        # the op's result, ``with`` overrides the store).  Empty for a
-        # declared-``effects(<State<T>>)`` function with no handler — those
-        # keep the bare host-cell call.  Saved/restored around each handler
-        # body exactly like ``_effect_ops`` (nested handlers).  Tuple
-        # fields, in order: the HandlerClause; the effect argument's
-        # source slot name; the resolved cell FAMILY name (import naming
-        # + WASM types); the state annotation's slot name (None
-        # for a stateless handler); the handler-DECLARATION scope's
-        # WasmSlotEnv (clause bodies compile against it, not the op
-        # call-site env); the get import; the put import.
-        self._state_clause_ops: dict[
-            str,
-            tuple[
-                ast.HandlerClause, str, str, str | None,
-                "WasmSlotEnv", str, str,
-            ],
-        ] = {}
+        # #976 option C: op_name -> :class:`StateClauseEntry` for the
+        # innermost enclosing ``handle[State<T>]``.  When a get/put call site
+        # has an entry here, the clause BODY is inlined at the site
+        # (intrinsic-hybrid semantics: intrinsic store/read, clause executes,
+        # ``resume(v)`` is the op's result, ``with`` overrides the store).
+        # Empty for a declared-``effects(<State<T>>)`` function with no
+        # handler — those keep the bare host-cell call.  Saved/restored
+        # around each handler body exactly like ``_effect_ops`` (nested
+        # handlers).  The entry carries the handler-DECLARATION scope the
+        # clause compiles in: see :class:`StateClauseEntry`.
+        self._state_clause_ops: dict[str, StateClauseEntry] = {}
         # True while translating an inlined State clause body/`with` expr —
         # gates the ``resume(v)`` lowering (v IS the op's result value).
         self._in_state_clause: bool = False
