@@ -70,6 +70,8 @@ effects(<Exn<String>, IO>)           -- may throw String errors and perform IO
 
 Effect rows are unordered sets. `<IO, State<Int>>` and `<State<Int>, IO>` are the same effect row. The canonical form (for the one-canonical-form rule) is alphabetical order by effect name.
 
+Set equality governs effect *containment* — whether a call site permits a callee's effects (§7.8). It does not govern the resolution of a bare operation name that more than one effect in the row declares: that reads the row in the order it is **written**, per §7.4.
+
 ### 7.3.3 Duplicate Effects
 
 The same effect with different type parameters may appear multiple times:
@@ -110,13 +112,15 @@ public fn hello(-> @Unit)
 
 Effect operations are resolved by the effect declared in the function's effect row. If `get` appears in a function with `effects(<State<Int>>)`, it refers to the `get` operation of `State<Int>`.
 
+**Resolution order.** More than one effect in scope may declare the same operation name — the built-in `State` and `Http` both declare `get`. A bare operation name binds to the **first** effect that declares it in this order: the innermost enclosing `handle[E]` (§7.5), then each enclosing handler outwards, then the function's declared effect row **in the order the row is written**, and finally the declared effects of the program in declaration order. So `effects(<State<Int>, Http>)` binds a bare `get` to `State`, `effects(<Http, State<Int>>)` binds it to `Http`, and a `handle[State<Int>]` around the call binds it to `State` whatever the row says. Every step of that list is an ordered sequence, so the binding is a property of the program text alone — never of the order an implementation happens to enumerate the row's members.
+
 **Bare operation calls and routing (`E217`).** A bare (unqualified) operation name is only well-formed when the compiler can route it to a concrete implementation. The built-in `State` and `Exn` operations (`get`, `put`, `throw`) are always routable — they are backed by intrinsic host cells — so they may be called bare, as in `increment` above. Every other operation — those of `IO`, `DB`, `Http`, `Inference`, `Random`, and any user-declared effect — is routable bare only inside a `handle[E]` block for its effect `E` (§7.5); outside such a block it has no bare route and MUST be called qualified as `E.op(...)`, the way `hello` calls `IO.print`. Calling one of these operations bare with no enclosing handler is a compile-time error (`E217`), reported by the checker so the backend never receives an operation it cannot lower.
 
 **Effect ordering.** Effect operations execute in program order.  The one sanctioned relaxation is `async(e)` (§9.5.4): when `e`'s effect row is commutative — its operations' completions cannot be observably reordered against any other effect in the program — an implementation MAY overlap `e`'s execution with subsequent computation, resolving at the corresponding `await`.  Effects outside that whitelist retain strict program order; the checker warns (`W002`) where this forces eager evaluation, so verified sequential semantics remain literally true for every Tier-1 claim.
 
 ### 7.4.1 Ambiguous Operations
 
-If two effects in scope define an operation with the same name, the call is ambiguous and MUST be qualified:
+If two effects in scope define an operation with the same name, the call is ambiguous to a reader and SHOULD be qualified. (The compiler does not reject the bare form: it binds by the resolution order in §7.4. Qualifying says which effect is meant without depending on that order.)
 
 <!-- vera:skip-parse category="FRAGMENT" reason="effect Logger + anonymous fn body" -->
 ```

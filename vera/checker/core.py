@@ -618,6 +618,7 @@ class TypeChecker(
         saved_params = dict(self.env.type_params)
         saved_return = self.env.current_return_type
         saved_effect = self.env.current_effect_row
+        saved_effect_order = self.env.current_effect_order
         # #991 checker leg: this function's frame joins the lexical scope
         # stack for the duration of its body, contracts, AND its where-helper
         # recursion (step 8) — a helper's body must see this function's
@@ -669,7 +670,10 @@ class TypeChecker(
         # 2. Resolve parameter and return types
         param_types = tuple(self._resolve_type(p) for p in decl.params)
         return_type = self._resolve_type(decl.return_type)
-        effect_row = self._resolve_effect_row(decl.effect)
+        # #1215: the row AND its source order, from one resolution — a bare op
+        # name declared by two effects in this row binds the first in SOURCE
+        # order, which the frozenset alone cannot say.
+        effect_row, effect_order = self._resolve_effect_row_ordered(decl.effect)
 
         # 2b. Check refinement predicates written directly in the signature —
         # a refinement can reach a param / return via a type argument, e.g.
@@ -682,6 +686,7 @@ class TypeChecker(
         # 3. Set context
         self.env.current_return_type = return_type
         self.env.current_effect_row = effect_row
+        self.env.current_effect_order = effect_order
         self._effect_ops_used = set()
 
         # 4. Push scope and bind parameters
@@ -768,6 +773,7 @@ class TypeChecker(
         self.env.type_params = saved_params
         self.env.current_return_type = saved_return
         self.env.current_effect_row = saved_effect
+        self.env.current_effect_order = saved_effect_order
 
     def _fn_info_for_decl(
         self, decl: ast.FnDecl, visibility: str | None = None,

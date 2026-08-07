@@ -250,6 +250,17 @@ class TypeEnv:
     refinement_bases: list[Type] = field(default_factory=list)
     current_return_type: Type | None = None
     current_effect_row: EffectRowType | None = None
+    # #1215: the RESOLUTION ORDER for a bare (unqualified) effect-op name —
+    # innermost handled effect first, then each enclosing handler, then the
+    # function's DECLARED row in SOURCE order.  `current_effect_row` carries
+    # the same effects as a `frozenset`, which is the right shape for
+    # subeffect containment but a hash-seed lottery to iterate; two effects
+    # in one row may declare the SAME op name (the built-in `State` and
+    # `Http` both declare `get`), and which signature bound flipped with
+    # PYTHONHASHSEED.  Set in lock-step with `current_effect_row` at both
+    # sites that assign it (checker/core.py `_check_fn`, checker/control.py's
+    # handler-body scope); `lookup_effect_op` orders the row by this tuple.
+    current_effect_order: tuple[EffectInstance, ...] = ()
 
     # #1208: the ONE per-module declaration counter that stamps
     # ``AdtInfo.decl_index`` and ``TypeAliasInfo.decl_index``.  Shared
@@ -2202,12 +2213,56 @@ class TypeEnv:
         """Look up an effect by name."""
         return self.effects.get(name)
 
+    def ordered_effect_row(self) -> tuple[EffectInstance, ...]:
+        """The current effect row as an ORDERED sequence (#1215).
+
+        ``current_effect_row.effects`` is a ``frozenset`` — the right shape
+        for subeffect containment, the wrong one to *iterate*, because two
+        effects in one row may declare the same op name and set iteration
+        order is a function of ``PYTHONHASHSEED``.  ``current_effect_order``
+        records the semantic order (innermost handled effect first, then each
+        enclosing handler, then the declared row in source order); this
+        returns the row sequenced by it.
+
+        The result is TOTAL over the row: a member the order tuple does not
+        mention (a row assigned without its companion order, e.g. by a
+        consumer outside the checker) is not dropped, it follows the ordered
+        prefix sorted by effect name — still independent of hash seed.
+        """
+        row = self.current_effect_row
+        if not isinstance(row, ConcreteEffectRow):
+            return ()
+        ordered: list[EffectInstance] = []
+        seen: set[EffectInstance] = set()
+        for ei in self.current_effect_order:
+            if ei in row.effects and ei not in seen:
+                seen.add(ei)
+                ordered.append(ei)
+        ordered.extend(
+            sorted(row.effects - seen, key=lambda e: e.name)
+        )
+        return tuple(ordered)
+
     def lookup_effect_op(self, op_name: str,
                          qualifier: str | None = None) -> OpInfo | None:
         """Look up an effect operation, optionally qualified.
 
-        If qualifier is given, look only in that effect.
-        Otherwise, search all effects in the current effect row.
+        If qualifier is given, look only in that effect — a deterministic,
+        single-candidate lookup.
+
+        A BARE op name can be declared by more than one effect in scope (the
+        built-in ``State`` and ``Http`` both declare ``get``), so resolution
+        walks ordered candidate lists rather than any set (#1215):
+
+        1. ``ordered_effect_row()`` — innermost handled effect first, then
+           each enclosing handler, then the function's DECLARED row in SOURCE
+           order (spec §7.4).
+        2. every registered effect, in REGISTRATION order.  ``self.effects``
+           is a ``dict``, so this is insertion order: the built-ins in the
+           order ``_register_builtins`` declares them, then any user
+           ``effect`` in source order.  It is the fallback for a clause body
+           checked outside its own handler's row, and is deterministic for
+           the same reason step 1 is — no set is iterated on either path.
         """
         if qualifier:
             eff = self.effects.get(qualifier)
@@ -2215,14 +2270,11 @@ class TypeEnv:
                 return eff.operations[op_name]
             return None
 
-        # Search effects in the current effect row
-        if isinstance(self.current_effect_row, ConcreteEffectRow):
-            for ei in self.current_effect_row.effects:
-                eff = self.effects.get(ei.name)
-                if eff and op_name in eff.operations:
-                    return eff.operations[op_name]
+        for ei in self.ordered_effect_row():
+            eff = self.effects.get(ei.name)
+            if eff and op_name in eff.operations:
+                return eff.operations[op_name]
 
-        # Also search all registered effects (for handler clauses)
         for eff in self.effects.values():
             if op_name in eff.operations:
                 return eff.operations[op_name]
