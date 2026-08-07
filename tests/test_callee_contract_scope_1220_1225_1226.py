@@ -588,3 +588,179 @@ class TestBothHalvesOfTheScopeRideTogether:
         assert "E501" in _codes(result), _codes(result)
         with pytest.raises(WasmTrapError):
             _run_mod(source, modules)
+
+
+# =====================================================================
+# #1226 — the refined-return binder is the key its predicate looks up
+# =====================================================================
+
+# `Box` is a PARAMETERISED alias, so the binder renders `Box<Nat>` while its
+# head identifier is `Box`.  The base resolves to `Nat`, which is a base the
+# SMT layer models, so nothing but the binder key decides whether the return
+# fact survives.
+_PARAM_BINDER = """\
+type Cnt = Nat;
+
+type Box<T> = Nat;
+
+type Grown = { @Box<Cnt> | @Box<Cnt>.0 >= 18 };
+
+private fn mk(@Nat -> @Grown)
+  requires(@Nat.0 >= 18)
+  ensures(true)
+  effects(pure)
+{
+  @Nat.0
+}
+
+private fn need18(@Nat -> @Nat)
+  requires(@Nat.0 >= 18)
+  ensures(true)
+  effects(pure)
+{
+  @Nat.0
+}
+
+public fn main(@Unit -> @Nat)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  need18(mk(20))
+}
+"""
+
+
+class TestParameterisedRefinedReturnBinder:
+    """A refined return over a parameterised base keeps its fact (#1226).
+
+    ``mk``'s result is a fresh variable constrained ONLY by the refinement
+    predicate — its `ensures` is `true` and the literal `20` tells the caller
+    nothing about it — so `need18(mk(20))` is provable exactly when the
+    refined-return fact survives.  It did not: the value was pushed under the
+    predicate's head identifier ``Box`` while ``@Box<Cnt>.0`` resolves
+    ``Box<Nat>``, the predicate failed to translate, and the fact was dropped
+    in silence.
+    """
+
+    def test_the_valid_program_is_accepted(self) -> None:
+        result = _verify_mod(_PARAM_BINDER, [])
+        assert not _codes(result), (
+            "the refined-return fact was dropped and a valid program "
+            f"rejected: {_codes(result)}"
+        )
+
+    def test_the_program_really_does_run(self) -> None:
+        """The oracle: `vera run` returns 20, so the E501 was spurious."""
+        assert _run_mod(_PARAM_BINDER, []) == 20
+
+    def test_the_producer_discharges_at_tier_1(self) -> None:
+        """The other side of the same key: ``mk``'s own return obligation.
+
+        The producing function must PROVE its refined return, and that proof
+        pushes the value under the same binder.  Missing, the predicate fell
+        outside the fragment and the obligation demoted to a Tier-3 runtime
+        guard (E506) — conservative rather than unsound, but a provable
+        refinement that no longer proves.
+        """
+        result = _verify_mod(_PARAM_BINDER, [])
+        assert not [
+            d for d in result.diagnostics if d.error_code == "E506"
+        ], [d.description[:90] for d in result.diagnostics]
+        assert result.summary.tier3_runtime == 0, result.summary
+
+    def test_the_bare_base_control_is_unchanged(self) -> None:
+        """The same program with an UNPARAMETERISED binder, which always
+        worked: head and key coincide when there are no type arguments."""
+        control = _PARAM_BINDER.replace(
+            "type Box<T> = Nat;\n\n", "",
+        ).replace("@Box<Cnt>", "@Cnt")
+        assert "Box" not in control
+        result = _verify_mod(control, [])
+        assert not _codes(result), _codes(result)
+        assert result.summary.tier3_runtime == 0, result.summary
+
+
+# The cross-module twin: `Cnt` is `Nat` in the module and `Int` in the
+# importer, so the binder key differs BETWEEN the two namespaces —
+# `Box<Nat>` against `Box<Int>`.
+_BINDER_LIB = """\
+module boxlib;
+
+type Cnt = Nat;
+
+type Box<T> = Nat;
+
+public fn mk(@Nat -> @{ @Box<Cnt> | @Box<Cnt>.0 >= 18 })
+  requires(@Nat.0 >= 18)
+  ensures(true)
+  effects(pure)
+{
+  @Nat.0
+}
+"""
+
+_BINDER_MAIN = """\
+import boxlib(mk);
+
+type Cnt = Int;
+
+private fn need18(@Nat -> @Nat)
+  requires(@Nat.0 >= 18)
+  ensures(true)
+  effects(pure)
+{
+  @Nat.0
+}
+
+public fn main(@Unit -> @Nat)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  need18(mk(20))
+}
+"""
+
+
+class TestRefinedReturnBinderIsKeyedInTheCalleeScope:
+    """The binder is derived INSIDE the callee's scope (#1208, #1226).
+
+    Now that the key renders its type arguments, it is env-dependent: the same
+    predicate binds ``Box<Nat>`` in ``boxlib`` and ``Box<Int>`` under the
+    importer's ``type Cnt = Int``.  The reference side has been translated in
+    the callee's namespace since #1208, so a binder derived OUTSIDE that scope
+    mints one key and looks up another — the exact miss this file's
+    single-module case is about, arriving through provenance instead of
+    through the head identifier.
+
+    Moving the derivation out of the scope leaves the single-module case above
+    green and turns this one red, which is what makes the wrap load-bearing
+    rather than defensive: ``TestRefinedReturnTranslatesInTheCalleeNamespace``
+    in the #1208 provenance suite recorded exactly that prediction while the
+    bare-headed binder still masked it.
+    """
+
+    def test_the_imported_refined_return_fact_survives(self) -> None:
+        modules = [_resolved(("boxlib",), _BINDER_LIB)]
+        result = _verify_mod(_BINDER_MAIN, modules)
+        assert not _codes(result), (
+            "the callee's refined-return binder was keyed in the IMPORTER's "
+            f"namespace: {_codes(result)}"
+        )
+        assert _run_mod(_BINDER_MAIN, modules) == 20
+
+    def test_the_control_without_a_conflicting_alias_is_clean_too(
+        self,
+    ) -> None:
+        """Control: the same import with the shadowing alias removed.
+
+        The two envs then agree, so this case turns on the KEY alone and not
+        on which env rendered it — it separates the two axes, and it is the
+        case a fix that simply stopped assuming imported refined returns would
+        also break.
+        """
+        control = _BINDER_MAIN.replace("type Cnt = Int;\n\n", "")
+        assert "type Cnt" not in control
+        result = _verify_mod(control, [_resolved(("boxlib",), _BINDER_LIB)])
+        assert not _codes(result), _codes(result)

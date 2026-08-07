@@ -2150,22 +2150,27 @@ class SmtContext:
             FLOAT64,
             STRING,
         ):
-            # Push the value under the predicate's ACTUAL binder name (alias-
-            # aware: `@Age.0` for `type Age = Nat; { @Age | @Age.0 >= 18 }`),
-            # not the resolved base name — otherwise the predicate's `@Age.0`
-            # won't resolve against `Nat` and `z3_pred` is None, silently
-            # dropping the refined-return fact so a caller can't rely on it (CR
-            # PR-review — the SMT analogue of the verifier/codegen binder fix).
+            # Push the value under the key the predicate's OWN binder reference
+            # resolves through (alias-aware: `@Age.0` for `type Age = Nat;
+            # { @Age | @Age.0 >= 18 }`), not the resolved base name — otherwise
+            # `@Age.0` won't resolve against `Nat`, `z3_pred` is None, and the
+            # refined-return fact is silently dropped so a caller cannot rely
+            # on it (CR PR-review — the SMT analogue of the verifier/codegen
+            # binder fix).  Through `naming.predicate_binder_key`, so the key
+            # is the WHOLE reference rendered, not its head identifier: a
+            # parameterised base binds `Box<Nat>` where the head alone said
+            # `Box`, and that miss rejected valid programs (#1226).
             # In the CALLEE's namespace, like the `requires` / `ensures`
             # translations above (#1208; PR #1224 review).  This predicate is
             # written in the DEFINING module's namespace, so an alias it names
             # has to resolve there — the importer's env is a different
             # namespace, and a name minted one way and looked up another misses
-            # SILENTLY.  The binder derivation is inside the scope too, so the
-            # push side and the reference side cannot end up scoped
-            # differently.
+            # SILENTLY.  The binder derivation is inside the scope too, and now
+            # reads the env directly, so the push side and the reference side
+            # cannot end up scoped differently.
             with self._callee_contract_scope(callee_info):
-                binder = (ast.predicate_binder_name(ret_type.predicate)
+                binder = (naming.predicate_binder_key(
+                              ret_type.predicate, self._alias_env)
                           or ret_type.base.name)
                 inner_env = SlotEnv().push(binder, ret_var)
                 z3_pred = self.translate_expr(ret_type.predicate, inner_env)

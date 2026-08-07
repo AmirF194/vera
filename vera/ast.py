@@ -775,22 +775,24 @@ def format_type_expr(te: TypeExpr) -> str:
     return "@?"
 
 
-def predicate_binder_name(predicate: "Expr") -> str | None:
-    """The slot type-name a refinement predicate's binder ACTUALLY uses — the
-    first ``SlotRef``'s ``type_name`` (a refinement predicate is closed over its
-    single binder).  Recovers a syntactic ALIAS binder: ``@Age.0`` for
-    ``type Age = Nat; { @Age | @Age.0 >= 18 }``, which differs from the resolved
-    primitive ``Nat`` (alias resolution erases it).  Pushing the value under
-    THIS name lets ``@Age.0`` resolve instead of the predicate falsely failing
-    to translate.  ``None`` if the predicate holds no ``SlotRef``.
+def predicate_binder_ref(predicate: "Expr") -> "SlotRef | None":
+    """A refinement predicate's binder REFERENCE — its first ``SlotRef``.
 
-    Shared by the verifier, codegen, and SMT refined-return paths so the binder
-    recovery can't drift between them (CR PR-review)."""
+    A refinement predicate is closed over its single binder, so the first
+    reference found is that binder, whole: head name and type arguments both.
+    ``None`` if the predicate holds no ``SlotRef``.
+
+    The reference rather than its name, because the binding-table key a
+    reference resolves under is not its head — ``@Box<Cnt>.0`` looks itself up
+    under ``Box<Nat>``, a rendering that needs the type arguments AND the
+    naming environment.  :func:`~vera.naming.predicate_binder_key` is that
+    derivation; this is the syntax it reads.  Both are shared, so the verifier,
+    codegen, and SMT refined-return paths cannot drift apart (CR PR-review)."""
     stack: list[object] = [predicate]
     while stack:
         node = stack.pop()
         if isinstance(node, SlotRef):
-            return node.type_name
+            return node
         if isinstance(node, Node) and is_dataclass(node):
             for fld in fields(node):
                 val = getattr(node, fld.name)

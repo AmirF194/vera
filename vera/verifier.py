@@ -8335,13 +8335,16 @@ class ContractVerifier:
         return None
 
     @staticmethod
-    def _predicate_binder_name(predicate: ast.Expr) -> str | None:
-        """The slot type-name the refinement predicate's binder ACTUALLY uses —
-        a syntactic ALIAS binder (``@Age.0`` for ``type Age = Nat; { @Age |
-        @Age.0 >= 18 }``) differs from the resolved ``Nat`` (CR e6f17b7).
-        Delegates to the shared ``ast.predicate_binder_name`` so the verifier,
-        codegen, and SMT refined-return paths can't drift."""
-        return ast.predicate_binder_name(predicate)
+    def _predicate_binder_key(
+        predicate: ast.Expr, env: AliasEnv,
+    ) -> str | None:
+        """The key the refinement predicate's binder must be bound under — a
+        syntactic ALIAS binder (``@Age.0`` for ``type Age = Nat; { @Age |
+        @Age.0 >= 18 }``) differs from the resolved ``Nat`` (CR e6f17b7), and a
+        PARAMETERISED one (``@Box<Cnt>.0``) differs from its head as well
+        (#1226).  Delegates to the shared ``naming.predicate_binder_key`` so
+        the verifier, codegen, and SMT refined-return paths can't drift."""
+        return naming.predicate_binder_key(predicate, env)
 
     @staticmethod
     def _translate_refined_predicate(
@@ -8376,11 +8379,18 @@ class ContractVerifier:
         inner_env = SlotEnv().push(base_name, value_term)
         # The predicate may reference its binder by a syntactic alias
         # (`@Age.0` for `type Age = Nat`) that differs from the resolved
-        # primitive `base_name`; bind the value under that name too so the
+        # primitive `base_name`; bind the value under that key too so the
         # predicate resolves instead of falsely falling to Tier 3 (CR e6f17b7).
-        binder_name = ContractVerifier._predicate_binder_name(predicate)
-        if binder_name is not None and binder_name != base_name:
-            inner_env = inner_env.push(binder_name, value_term)
+        # The key is the whole reference RENDERED — against the env the
+        # predicate is about to be translated in, so the push side and the
+        # lookup side are one derivation over one environment.  Its head alone
+        # is not the key for a parameterised binder (`@Box<Cnt>.0` resolves
+        # `Box<Nat>`), and the miss took a provable refinement to Tier 3
+        # (#1226).
+        binder_key = ContractVerifier._predicate_binder_key(
+            predicate, smt._alias_env)
+        if binder_key is not None and binder_key != base_name:
+            inner_env = inner_env.push(binder_key, value_term)
         translated = smt.translate_expr(predicate, inner_env)
         if translated is None:
             return None

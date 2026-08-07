@@ -132,6 +132,7 @@ __all__ = [
     "alias_env_from_environment",
     "family_base_name",
     "family_name",
+    "predicate_binder_key",
     "refinement_binder_parts",
     "resolve_type_expr",
     "slot_name",
@@ -610,6 +611,34 @@ def slot_ref_key(ref: ast.SlotRef, env: AliasEnv) -> str:
         ast.NamedType(name=ref.type_name, type_args=ref.type_args), env)
 
 
+def predicate_binder_key(predicate: ast.Expr, env: AliasEnv) -> str | None:
+    """The key a refinement predicate's BINDER must be pushed under (#1226).
+
+    Clause of THE RULE, from the reference side: a predicate is closed over one
+    binder, so the key the binder is bound under is by definition the key that
+    binder's own reference resolves through — :func:`slot_ref_key` over the
+    predicate's first ``@T.n``.  ``None`` when the predicate holds no
+    reference, in which case there is no binder to bind.
+
+    Derived here rather than from the refinement's TYPE EXPRESSION because the
+    consumers hold different things: the runtime guard has the type expression
+    (:func:`refinement_binder_parts`, which names its base through
+    :func:`slot_name`) while the SMT layer holds only the resolved type and the
+    predicate.  Both answers are one rendering of one name, so they agree —
+    what they must not do is what the pre-#1226 SMT push did, take the head
+    identifier alone: ``{ @Box<Cnt> | @Box<Cnt>.0 >= 18 }`` pushed ``Box``
+    where the reference resolves ``Box<Nat>``, the predicate silently failed to
+    translate, and the refined-return fact vanished from the caller's context —
+    rejecting a valid program with a spurious E501.
+
+    *env* is the environment the predicate is being TRANSLATED in, which for a
+    callee's refined return is the callee's module (its type arguments resolve
+    there, and ``Box<Cnt>`` names different types in two modules).
+    """
+    ref = ast.predicate_binder_ref(predicate)
+    return None if ref is None else slot_ref_key(ref, env)
+
+
 def family_name(
     te: ast.TypeExpr | None, env: AliasEnv, fallback: str,
 ) -> str:
@@ -748,7 +777,13 @@ def refinement_binder_parts(
     The binder itself is named by :func:`slot_name` (#1208), so the guard
     pushes the value under exactly the key a predicate's ``@Base.n``
     resolves to through :func:`slot_ref_key` — and under the key the checker
-    bound the predicate's binder to.  The pre-consolidation derivation named
+    bound the predicate's binder to.  :func:`predicate_binder_key` asks the
+    same question from the REFERENCE side, for a consumer that holds the
+    predicate but not the type expression; the two meet because both render
+    through :func:`slot_name`, and they are separate functions only because a
+    predicate may spell its binder differently from its base (``{ @Age |
+    @Nat.0 >= 18 }``), where the answers are honestly different names for one
+    value.  The pre-consolidation derivation named
     the base's type arguments SYNTACTICALLY (``Array<Txt>`` for
     ``type Txt = String``), which met its reference side only because that
     side was syntactic too; with both resolved they meet on
