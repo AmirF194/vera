@@ -15,7 +15,11 @@ from vera.codegen.tail_position import compute_tail_call_sites
 from vera.monomorphize import mangle_type_name
 from vera.slots import type_expr_slot_name
 from vera.wasm import WasmContext, WasmSlotEnv
-from vera.wasm.helpers import _is_host_handle_type, gc_shadow_push
+from vera.wasm.helpers import (
+    CellNames,
+    _is_host_handle_type,
+    gc_shadow_push,
+)
 
 if TYPE_CHECKING:
     from vera.types import SpanTypeTable
@@ -186,6 +190,7 @@ class FunctionCompilationMixin:
         effect_ops: dict[str, tuple[str, bool]] = {}
         effect_op_result_wt: dict[str, str | None] = {}
         effect_op_result_vera: dict[str, str | None] = {}
+        effect_op_cells: dict[str, CellNames] = {}
         if isinstance(decl.effect, ast.EffectSet):
             # SOURCE ORDER, first wins — the checker's rule for a bare op
             # (spec §7.4) and for its type arguments, so the two agree on
@@ -211,8 +216,16 @@ class FunctionCompilationMixin:
                         # clone-naming contract for a `get(())` array
                         # element driving a generic instantiation — see the
                         # tracked mono discovery desync).
-                        mangled = mangle_type_name(
-                            self._family_name_te(eff.type_args[0]))
+                        # IDENTITY names the import; REPRESENTATION is
+                        # recorded beside it so a `put` call site can
+                        # pick its #1203 write guard without slicing
+                        # the family back out of the mangled name
+                        # (#1218).
+                        cell = CellNames(
+                            family=self._family_name_te(eff.type_args[0]),
+                            base=self._family_base_te(eff.type_args[0]),
+                        )
+                        mangled = mangle_type_name(cell.family)
                         # Only map if no user-defined function shadows the op
                         if "get" not in self._fn_sigs and "get" not in effect_ops:
                             effect_ops["get"] = (
@@ -229,10 +242,12 @@ class FunctionCompilationMixin:
                             # needs it to type a `get(())` array-literal
                             # element (the WAT type above is layout-ambiguous).
                             effect_op_result_vera["get"] = type_name
+                            effect_op_cells["get"] = cell
                         if "put" not in self._fn_sigs and "put" not in effect_ops:
                             effect_ops["put"] = (
                                 f"$vera.state_put_{mangled}", True
                             )
+                            effect_op_cells["put"] = cell
                 elif (isinstance(eff, ast.EffectRef) and eff.name == "Exn"
                         and eff.type_args and len(eff.type_args) == 1):
                     type_name = type_expr_slot_name(eff.type_args[0])
@@ -260,6 +275,7 @@ class FunctionCompilationMixin:
             effect_ops=effect_ops,
             effect_op_result_wt=effect_op_result_wt,
             effect_op_result_vera=effect_op_result_vera,
+            effect_op_cells=effect_op_cells,
             ctor_layouts=ctor_layouts,
             adt_type_names=adt_type_names,
             generic_fn_info=getattr(self, "_generic_fn_info", None),

@@ -617,6 +617,18 @@ class CodeGenerator(
         return naming.family_name(
             te, self._alias_env, family_fallback_name(te))
 
+    def _family_base_te(self, te: ast.TypeExpr) -> str:
+        """The same cell's REPRESENTATION name (#1218) — the
+        ``WasmContext._family_base`` twin.
+
+        :func:`vera.naming.family_base_name` over the same environment: the
+        family with its refinements stripped, which is what decides
+        i32/i64/f64/pair and which write guard applies.  Never a symbol —
+        see the function's own docstring for why the two names are separate.
+        """
+        return naming.family_base_name(
+            te, self._alias_env, family_fallback_name(te))
+
     # -----------------------------------------------------------------
     # Diagnostics
     # -----------------------------------------------------------------

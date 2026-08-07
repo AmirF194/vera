@@ -250,11 +250,15 @@ class InferenceMixin:
         # i32 pointers (`expected i64, found i32`).  Resolve T's WAT type via
         # the shared canonical-slot-name → WASM map so the `==` picks i32.
         if isinstance(expr, (ast.OldExpr, ast.NewExpr)):
-            # The FAMILY, not the source spelling, before the WT map —
-            # `old(State<Count>)` over `type Count = Nat` is an i64 read,
-            # not the unknown-name i32 default (#1205).
+            # The cell's REPRESENTATION name, not the source spelling, before
+            # the WT map — `old(State<Count>)` over `type Count = Nat` is an
+            # i64 read, not the unknown-name i32 default (#1205).  The base
+            # rather than the family (#1218): a refined cell's identity
+            # carries its predicate and would miss every entry in the map,
+            # silently defaulting a refined `Int` cell's `old`/`new` read to
+            # i32 — the base is the width both sides of the comparison have.
             return self._type_name_to_wasm(
-                self._state_effect_family(expr.effect_ref))
+                self._state_effect_family_base(expr.effect_ref))
         return None
 
     _IO_WASM_TYPES: ClassVar[dict[str, str | None]] = {
@@ -2201,6 +2205,20 @@ class InferenceMixin:
         return naming.family_name(
             te, self._alias_env, family_fallback_name(te))
 
+    def _family_base(self, te: ast.TypeExpr) -> str:
+        """The same cell's REPRESENTATION name (#1218).
+
+        :func:`vera.naming.family_base_name` over this context's alias
+        environment: the family with its refinements stripped, which is what
+        decides i32/i64/f64/pair, pointer-ness for the GC shadow stack, and
+        which #1203 write guard applies.  A refined cell has its OWN family
+        (that is #1218) and its BASE's representation, so the two names are
+        derived side by side at every handle site and never substituted for
+        each other — this one is never a symbol and never compared against
+        another cell's."""
+        return naming.family_base_name(
+            te, self._alias_env, family_fallback_name(te))
+
     def _state_effect_family(self, effect_ref: ast.EffectRefNode) -> str:
         """The cell FAMILY named by a ``State<T>`` effect REFERENCE (#1209).
 
@@ -2215,6 +2233,15 @@ class InferenceMixin:
         that is not a one-argument ``State``.
         """
         return self._family_name(state_type_arg(effect_ref))
+
+    def _state_effect_family_base(
+        self, effect_ref: ast.EffectRefNode,
+    ) -> str:
+        """The REPRESENTATION name of the cell a ``State<T>`` effect
+        reference denotes (#1218) — :meth:`_state_effect_family`'s twin over
+        :meth:`_family_base`, for the width decisions rather than the
+        registry lookups."""
+        return self._family_base(state_type_arg(effect_ref))
 
     def _resolve_base_type_name(
         self,

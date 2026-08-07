@@ -70,6 +70,41 @@ class WasmSlotEnv:
 
 
 # =====================================================================
+# The two names one State cell answers to (#1218)
+# =====================================================================
+
+@dataclass(frozen=True)
+class CellNames:
+    """A State cell's IDENTITY and its REPRESENTATION, carried together.
+
+    *family* is :func:`vera.naming.family_name` — what the checker's cell
+    type renders to, what the host symbol is mangled from, and the ONLY
+    thing two cells are ever compared on.  *base* is
+    :func:`vera.naming.family_base_name` — the same type with its
+    refinements stripped, which decides the WASM value type, pointer-ness,
+    and which #1203 write guard applies.
+
+    They differ exactly when the cell type is refined (#1218): `State<Pos>`,
+    `State<Neg>` and `State<Int>` are three cells that are all i64.  Before
+    #1218 one string did both jobs, so making it discriminate the predicate
+    would have silently switched off every decision keyed on `"Nat"` /
+    `"Int"` / `"Byte"` / `"Bool"` / `"String"` — the guards would stop being
+    emitted while the verifier went on recording them as `tier3_runtime`.
+
+    Recorded per OP NAME in ``WasmContext._effect_op_cells``, in lock-step
+    with ``_effect_ops``, so a `get`/`put` call site can ask what cell it
+    dispatches to WITHOUT parsing the mangled import name back out of its
+    own dispatch target.  That parse was a second, independent derivation of
+    the family — the seam #1233's round-5 review found re-mangling an
+    already-mangled name at — and it is gone: one canonical family is
+    threaded to both consumers.
+    """
+
+    family: str
+    base: str
+
+
+# =====================================================================
 # State handler clause registry entry (#976 / #1211)
 # =====================================================================
 
@@ -96,15 +131,23 @@ class StateClauseEntry:
     effect argument's alias-opaque source spelling, which nothing unpacking
     it ever read):
         clause: the ``HandlerClause`` to inline.
-        family: the resolved cell family (import naming + WASM types).
+        family: the resolved cell family — the cell's IDENTITY, so import
+            naming and every comparison against another cell (#1218).
+        family_base: the same family with its refinements stripped — the
+            cell's REPRESENTATION, so WASM value type, pointer-ness, and
+            which #1203 write guard applies.  Both are carried because a
+            refined cell needs both and they differ: `State<Pos>` is its own
+            cell (identity) and is an i64 taking the plain `Int` guards
+            (representation).
         state_slot_name: the state annotation's slot name; ``None`` for a
             stateless handler, which binds no state slot in the checker.
         decl_env: the declaration scope's slot environment.
         get_import / put_import: this handler's own host-cell imports — the
             intrinsic read/store the clause refines, not a declaration-time
             value.
-        decl_effect_ops / decl_effect_op_result_wt / decl_effect_op_result_vera:
-            the three op registries as they stood at the declaration.
+        decl_effect_ops / decl_effect_op_result_wt / decl_effect_op_result_vera
+        / decl_effect_op_cells:
+            the four op registries as they stood at the declaration.
         decl_state_clause_ops: the clause registry as it stood at the
             declaration — the ENCLOSING handlers' clauses, never this
             handler's own, so re-entering an op from inside a clause body
@@ -119,6 +162,7 @@ class StateClauseEntry:
 
     clause: ast.HandlerClause
     family: str
+    family_base: str
     state_slot_name: str | None
     decl_env: WasmSlotEnv
     get_import: str
@@ -126,6 +170,7 @@ class StateClauseEntry:
     decl_effect_ops: dict[str, tuple[str, bool]]
     decl_effect_op_result_wt: dict[str, str | None]
     decl_effect_op_result_vera: dict[str, str | None]
+    decl_effect_op_cells: dict[str, CellNames]
     decl_state_clause_ops: dict[str, "StateClauseEntry"]
     decl_addressable_from: int
 

@@ -1,0 +1,36 @@
+-- Conformance: a REFINED cell is its own cell (Chapter 7, Section 7.5).
+-- Tests: two refinements of one base nested, with a callee bound to the
+-- OUTER one called from inside the inner handler.  The checker keeps
+-- `State<Pos>` and `State<Neg>` apart (E125 refuses to pass one where the
+-- other is required), so `touch_outer`'s `put` reaches the Pos cell and
+-- `main` returns 111 (#1218).  The value is the discriminator: collapsing
+-- both to the `Int` family sends the write to the inner Neg cell and the
+-- program returns the Pos cell's untouched 1.
+type Pos = { @Int | @Int.0 > 0 };
+
+type Neg = { @Int | @Int.0 < 0 };
+
+private fn touch_outer(@Unit -> @Unit)
+  requires(true)
+  ensures(true)
+  effects(<State<Pos>>)
+{
+  put(111)
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 111)
+  effects(pure)
+{
+  handle[State<Pos>](@Pos = 1) {
+    put(@Pos) -> { resume(()) }
+  } in {
+    handle[State<Neg>](@Neg = 0 - 1) {
+      put(@Neg) -> { resume(()) }
+    } in {
+      touch_outer(())
+    };
+    get(())
+  }
+}

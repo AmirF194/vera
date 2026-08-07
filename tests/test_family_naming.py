@@ -698,3 +698,284 @@ def test_moved_set_is_exactly_this_size() -> None:
     assert len({(d[0], d[1]) for d in _C8_DIVERGENT}) == 6
     for rel, *_ in _C8_DIVERGENT:
         assert (_CONFORMANCE / rel).is_file(), rel
+
+
+# =====================================================================
+# (8) A REFINED cell is its own cell (#1218)
+# =====================================================================
+
+# The checker keeps `State<Pos>`, `State<Neg>` and `State<Int>` apart over
+# one base — `EffectInstance` holds the `RefinedType`, and E125 refuses to
+# pass one where another is required.  Codegen collapsed all three to the
+# `Int` family, so three checker cells shared one host cell and a callee
+# bound to the OUTER one wrote whichever was innermost.  Each program below
+# has a value oracle whose wrong answer is the collapsed one.
+_REFINED_ALIASES = """\
+type Pos = { @Int | @Int.0 > 0 };
+type Neg = { @Int | @Int.0 < 0 };
+"""
+
+_POS_OUTSIDE_NEG_INSIDE = _REFINED_ALIASES + """
+private fn touch_outer(@Unit -> @Unit)
+  requires(true)
+  ensures(true)
+  effects(<State<Pos>>)
+{
+  put(111)
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Pos>](@Pos = 1) {
+    put(@Pos) -> { resume(()) }
+  } in {
+    handle[State<Neg>](@Neg = 0 - 1) {
+      put(@Neg) -> { resume(()) }
+    } in {
+      touch_outer(())
+    };
+    get(())
+  }
+}
+"""
+
+_NEG_OUTSIDE_POS_INSIDE = _REFINED_ALIASES + """
+private fn touch_outer(@Unit -> @Unit)
+  requires(true)
+  ensures(true)
+  effects(<State<Neg>>)
+{
+  put(0 - 222)
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Neg>](@Neg = 0 - 1) {
+    put(@Neg) -> { resume(()) }
+  } in {
+    handle[State<Pos>](@Pos = 1) {
+      put(@Pos) -> { resume(()) }
+    } in {
+      touch_outer(())
+    };
+    get(())
+  }
+}
+"""
+
+_REFINED_INSIDE_BARE = _REFINED_ALIASES + """
+private fn touch_outer(@Unit -> @Unit)
+  requires(true)
+  ensures(true)
+  effects(<State<Int>>)
+{
+  put(7)
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>](@Int = 0) {
+    put(@Int) -> { resume(()) }
+  } in {
+    handle[State<Pos>](@Pos = 33) {
+      put(@Pos) -> { resume(()) }
+    } in {
+      touch_outer(())
+    };
+    get(())
+  }
+}
+"""
+
+_THREE_DEEP_CLAUSE_BODY = _REFINED_ALIASES + """
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Pos>](@Pos = 1) {
+    get(@Unit) -> { resume(@Pos.0) }
+  } in {
+    handle[State<Neg>](@Neg = 0 - 1) {
+      put(@Neg) -> { put(42); resume(()) }
+    } in {
+      handle[State<Pos>](@Pos = 2) {
+        get(@Unit) -> { resume(@Pos.0) }
+      } in {
+        0
+      };
+      put(0 - 5)
+    };
+    get(())
+  }
+}
+"""
+
+
+@pytest.mark.parametrize(
+    ("source", "expected", "collapsed", "why"),
+    [
+        (_POS_OUTSIDE_NEG_INSIDE, 111, 1,
+         "a State<Pos> callee inside a State<Neg> handler writes the Pos cell"),
+        (_NEG_OUTSIDE_POS_INSIDE, -222, -1,
+         "and the mirror: a State<Neg> callee inside a State<Pos> handler"),
+        (_REFINED_INSIDE_BARE, 7, 0,
+         "same base, refined vs bare: State<Pos> inside State<Int> is two "
+         "cells, both addressable"),
+    ],
+    ids=["pos_outside_neg_inside", "neg_outside_pos_inside",
+         "refined_inside_bare"],
+)
+def test_nested_refinements_of_one_base_route_to_their_own_cells(
+    source: str, expected: int, collapsed: int, why: str, tmp_path: Path,
+) -> None:
+    """Each nesting writes the cell the CHECKER says it writes (#1218).
+
+    *collapsed* is the value the pre-fix single-`Int`-family lowering
+    produced — the inner cell's, or the outer's untouched initial — so the
+    assertion distinguishes right from wrong rather than merely observing
+    that the program runs.  None of the six values is a zero default.
+    """
+    result = _compile_ok(source, tmp_path)
+    assert len(_families(result.wat)) == 8, (
+        f"{why}: two cells means two four-import families, got "
+        f"{sorted(_families(result.wat))}"
+    )
+    ran = execute(result)
+    assert ran.value != collapsed, f"{why}: still the collapsed answer"
+    assert ran.value == expected, why
+
+
+def test_three_deep_refined_nest_routes_a_clause_body_op_outward(
+    tmp_path: Path,
+) -> None:
+    """The enclosing-context rule, through a Pos/Neg/Pos nest (#1218/#1233).
+
+    The MIDDLE (Neg) handler's clause body runs a bare `put(42)`, which
+    §7.5.2 routes to the ENCLOSING context — the outermost Pos handler.  The
+    innermost Pos handler has been popped by then, so the Pos family's
+    innermost cell IS the outer one and the write is addressable: 42.
+
+    Pre-fix all three cells were the `Int` family, so the #1233
+    addressability gate saw a same-family nest and refused the program
+    outright (E602).  Distinct refined families make the shape legal again
+    AND route it correctly, which is why this asserts a value rather than
+    the absence of a diagnostic.
+    """
+    result = _compile_ok(_THREE_DEEP_CLAUSE_BODY, tmp_path)
+    assert execute(result).value == 42
+
+
+# The #1203 write guards are keyed on the cell's REPRESENTATION, so a
+# refined cell keeps every guard its base gets.  Sharing one name for
+# identity and representation is what made this a hazard: a family that
+# discriminates the predicate matches no entry in the `"Nat"`/`"Int"`/
+# `"Byte"` tables, and the guards would stop being emitted while the
+# verifier went on recording them as `tier3_runtime`.
+_BARE_NAT_CELL = """\
+public fn main(@Unit -> @Nat)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@Nat = 0) {
+    put(@Nat) -> { resume(()) }
+  } in {
+    put(get(()) - 1);
+    get(())
+  }
+}
+"""
+
+_REFINED_NAT_CELL = """\
+type Small = { @Nat | @Nat.0 < 100 };
+
+public fn main(@Unit -> @Nat)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Small>](@Small = 0) {
+    put(@Small) -> { resume(()) }
+  } in {
+    put(get(()) - 1);
+    get(())
+  }
+}
+"""
+
+
+def test_refined_nat_cell_emits_the_same_write_guards_as_its_base(
+    tmp_path: Path,
+) -> None:
+    """A refined `@Nat` cell keeps every #1203 guard the bare cell gets.
+
+    A DIFFERENTIAL rather than a unit assertion, because the property is a
+    cross-component one: the verifier records these obligations as
+    `tier3_runtime` on the promise that codegen emits them, and a guard that
+    silently stops being emitted leaves the obligation stream claiming a
+    runtime check that does not exist.  Comparing the two programs' guard
+    counts is what catches that; asserting "the refined program has some
+    guards" would not.
+
+    Mutation-validated: routing the clause-path guard back onto the cell's
+    IDENTITY (`entry.family`) instead of its representation drops the
+    refined program from two guard sites to one while the bare program keeps
+    both.
+    """
+    bare = _compile_ok(_BARE_NAT_CELL, tmp_path, name="bare")
+    refined = _compile_ok(_REFINED_NAT_CELL, tmp_path, name="refined")
+    assert bare.wat.count("i64.lt_s") > 0
+    assert refined.wat.count("i64.lt_s") == bare.wat.count("i64.lt_s"), (
+        "the refined cell lost a #1203 narrowing guard its base still gets"
+    )
+    assert refined.wat.count("unreachable") == bare.wat.count("unreachable")
+
+
+_REFINED_STRING_EXN = """\
+type Short = { @String | string_length(@String.0) < 10 };
+
+private fn boom(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<Exn<Short>>)
+{
+  throw("abcde")
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[Exn<Short>] {
+    throw(@Short) -> { string_length(@Short.0) }
+  } in {
+    boom(())
+  }
+}
+"""
+
+
+def test_refined_string_exn_payload_is_still_a_pair(tmp_path: Path) -> None:
+    """A refined `String` tag keeps its (ptr, len) payload (#1218).
+
+    Pair-ness is a REPRESENTATION question, and the identity name a refined
+    cell now carries matches nothing in the pair table — so asking it would
+    declare a one-i32 tag and bind a single local against a two-i32 throw.
+    The length coming back proves both halves moved.
+    """
+    result = _compile_ok(_REFINED_STRING_EXN, tmp_path)
+    tags = {t for t in _families(result.wat) if t.startswith("exn_")}
+    assert len(tags) == 1, tags
+    assert "(param i32 i32)" in result.wat, "refined String tag lost its pair"
+    assert execute(result).value == 5

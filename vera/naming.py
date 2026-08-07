@@ -130,6 +130,7 @@ __all__ = [
     "AliasEnv",
     "RefinementBinder",
     "alias_env_from_environment",
+    "family_base_name",
     "family_name",
     "refinement_binder_parts",
     "resolve_type_expr",
@@ -621,8 +622,17 @@ def family_name(
     collapsed this way, #1205; composite ones splitting the family was
     #1209.)  This mirrors the checker, which resolves effect-instance type
     arguments in full (``_resolve_effect_ref``), so the family agrees with
-    the cell type the checker typed.  Refinements collapse to their base —
-    ``{@Int | P}`` and ``Int`` are one cell.
+    the cell type the checker typed.
+
+    A refinement is part of that cell type, NOT stripped from it (#1218).
+    The checker keeps ``State<Pos>``, ``State<Neg>`` and ``State<Int>``
+    apart over one base — ``EffectInstance`` holds the ``RefinedType``, and
+    E125 rejects passing one where another is required — so collapsing them
+    to ``Int`` gave three checker cells one host cell, and a callee bound to
+    the outer one wrote whichever was innermost.  This is the IDENTITY
+    question; a cell's REPRESENTATION (i32 / i64 / f64 / pair, which #1203
+    write guard applies) is the base's, and that is
+    :func:`family_base_name`.
 
     The rendering is :func:`~vera.types.structural_type_key`, not
     ``pretty_type`` (#1219).  A family names a cell, and two cells are one
@@ -657,10 +667,44 @@ def family_name(
     """
     if te is None:
         return fallback
+    ty = resolve_type_expr(te, env)
+    if isinstance(base_type(ty), (FunctionType, UnknownType)):
+        return fallback
+    return structural_type_key(ty)
+
+
+def family_base_name(
+    te: ast.TypeExpr | None, env: AliasEnv, fallback: str,
+) -> str:
+    """A cell's REPRESENTATION name — :func:`family_name`'s base (#1218).
+
+    The same resolution, with the refinement wrappers stripped and rendered
+    by ``pretty_type``: ``State<Pos>`` under ``type Pos = {@Int | P}``
+    answers ``Int``.  Two clauses of one rule, and the split is what #1218
+    is: a cell's IDENTITY must discriminate the predicate (three refinements
+    of one base are three cells), while its REPRESENTATION must not (all
+    three are i64, all three take the same ``@Nat``-narrowing guard, a
+    refined ``String`` payload is still a pointer/length pair).  Deriving
+    both from the same type expression is what keeps them from disagreeing —
+    the pre-#1218 code had ONE name doing both jobs, which is why making it
+    discriminate would otherwise have silently switched off every
+    representation decision keyed on ``"Nat"`` / ``"Int"`` / ``"Byte"`` /
+    ``"Bool"`` / ``"String"``.
+
+    Never a symbol, and never compared against another cell's: an import
+    name, a tag, ``_pushed_cell_families`` and the addressability gate all
+    take :func:`family_name`, because two cells sharing a base share
+    everything this answers and nothing that one answers.
+
+    Falls back exactly as :func:`family_name` does, so the two agree about
+    which type expressions have no cell at all.
+    """
+    if te is None:
+        return fallback
     ty = base_type(resolve_type_expr(te, env))
     if isinstance(ty, (FunctionType, UnknownType)):
         return fallback
-    return structural_type_key(ty)
+    return pretty_type(ty)
 
 
 # =====================================================================

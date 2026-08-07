@@ -17,6 +17,7 @@ from vera.naming import (
     EMPTY_ALIAS_ENV,
     AliasEnv,
     alias_env_from_environment,
+    family_base_name,
     family_name,
     refinement_binder_parts,
     slot_name,
@@ -38,6 +39,8 @@ type A2 = MyAlias;
 type Box<T> = Option<T>;
 type PosT<T> = { @T | @T.0 > 0 };
 type Pos = { @Int | @Int.0 > 0 };
+type Neg = { @Int | @Int.0 < 0 };
+type FnAlias = fn(Int -> Int) effects(pure);
 type Count = Nat;
 type Composite = Option<Int>;
 type BoxedComposite = Box<MyAlias>;
@@ -383,6 +386,11 @@ def _fam(name: str, fallback: str = "FALLBACK") -> str:
         ast.NamedType(name=name, type_args=None), _env(), fallback)
 
 
+def _fam_base(name: str, fallback: str = "FALLBACK") -> str:
+    return family_base_name(
+        ast.NamedType(name=name, type_args=None), _env(), fallback)
+
+
 def test_family_name_collapses_a_scalar_alias() -> None:
     assert _fam("Count") == "Nat"
 
@@ -401,8 +409,37 @@ def test_family_name_collapses_a_parameterised_composite_alias() -> None:
         _env(), "FALLBACK") == "Option<Int>"
 
 
-def test_family_name_collapses_a_refinement_to_its_base() -> None:
-    assert _fam("Pos") == "Int"
+def test_family_name_keeps_a_refinement_apart_from_its_base() -> None:
+    """#1218: a refined cell is its OWN cell, so its family carries the
+    predicate.  The checker keeps `State<Pos>` and `State<Int>` apart —
+    `EffectInstance` holds the `RefinedType` and E125 refuses to pass one
+    where the other is required — so collapsing them to `Int` gave two
+    checker cells one host cell."""
+    assert _fam("Pos") != "Int"
+    assert _fam("Pos").startswith("{Int|")
+    assert _fam("Pos") != _fam("Neg")
+
+
+def test_family_base_name_is_the_refinement_s_base() -> None:
+    """The REPRESENTATION half of the same rule (#1218).
+
+    Two refinements of one base are two cells and one width, so the base is
+    derived separately rather than recovered from the identity name — every
+    decision keyed on `"Nat"`/`"Int"`/`"Byte"`/`"String"` asks this one.
+    """
+    assert _fam_base("Pos") == "Int"
+    assert _fam_base("Neg") == "Int"
+    assert _fam_base("Count") == "Nat"
+    assert _fam_base("Composite") == "Option<Int>"
+
+
+def test_family_and_base_agree_about_having_no_family_at_all() -> None:
+    """Both halves fall back on exactly the same type expressions, so a
+    consumer can never get an identity for a cell whose representation it
+    cannot name, or the reverse."""
+    for name in ("Float", "FnAlias"):
+        assert _fam(name) == "FALLBACK"
+        assert _fam_base(name) == "FALLBACK"
 
 
 def test_family_name_falls_back_when_there_is_no_nameable_family() -> None:

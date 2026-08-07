@@ -12,6 +12,7 @@ the probes it dispositioned.
 
 The slot-naming and cell-family shapes ([#1208](https://github.com/aallan/vera/issues/1208),
 [#1209](https://github.com/aallan/vera/issues/1209),
+[#1218](https://github.com/aallan/vera/issues/1218),
 [#1219](https://github.com/aallan/vera/issues/1219)) have been through
 that cycle: they live in `tests/conformance/` as the `ch03_slot_alias_*`,
 `ch07_state_*alias*`, `ch07_exn_*alias*` and `ch08_state_alias_*`
@@ -30,9 +31,8 @@ differential in `tests/test_nested_handler_clause_ops.py`,
 
 **Not wired into CI.** These are probe programs, not curated fixtures:
 some deliberately fail (`check`, `verify`, or `run`) to demonstrate a
-defect that is now fixed, some pin the open issues [#1207](https://github.com/aallan/vera/issues/1207),
-[#1212](https://github.com/aallan/vera/issues/1212) and
-[#1218](https://github.com/aallan/vera/issues/1218), and some were
+defect that is now fixed, some pin the open issues [#1207](https://github.com/aallan/vera/issues/1207)
+and [#1212](https://github.com/aallan/vera/issues/1212), and some were
 superseded mid-round.  Two are **parse-broken** and flagged as such in
 the index below — they belong to the PRs that close their issues, and
 are counted by the differential sweep's `parse_skipped` allowance.  Each
@@ -70,7 +70,7 @@ comment; headerless files are summarised from the program itself.  Origin
 is the review-round directory the file lived in before the
 purpose-directory reorganisation.
 
-### alias_families/ (18 files)
+### alias_families/ (16 files)
 
 | File | What it probes | Origin |
 |---|---|---|
@@ -84,12 +84,10 @@ purpose-directory reorganisation.
 | `p16_family_split_crosstalk.vera` | Helper effects spelled `State<Id<Id<Nat>>>` vs `handle[State<Nat>]` — ops may silently bypass the cell | round3_naming |
 | `p16c_family_split_control.vera` | Single-`Id` control for p16 (`State<Id<Nat>>` spelling) — must join the handler's cell | round3_naming |
 | `p17_wrapper_alias.vera` | Wrapper alias `Two<T> = Id<Id<T>>` — head re-entry reached through one user application | round3_naming |
-| `p25_refined_cell.vera` | Refined-alias cell, in-bounds put — happy path | round2_family |
 | `p2b_chain_fwd.vera` | Forward-declared alias chain (`A = B` before `B = Nat`) — declaration-order robustness | round2_family |
 | `p2b_family_nested_alias_canonrefs.vera` | Same cell, refs spelled `Id<Nat>` (the both-sides key) — isolates the family-name/WASM-type question | round3_naming |
 | `p2c_family_param_alias_control.vera` | `State<Id<Nat>>` single application — the commit's headline fixed case, must run to 7 | round3_naming |
 | `p3b_byte_direct.vera` | Plain `State<Byte>` put/get roundtrip from a fn param — Byte width control | round2_family |
-| `p9_refined_state_minimal.vera` | Minimal `State<refined alias>` — does it compile at all? | round2_family |
 | `p_byte.vera` | `State<Byte>` fed via `int_to_byte` conversions — Byte roundtrip without bare int literals | session |
 | `xmod_lib2.vera` | Module fixture: `bump()` declaring plain `<State<Nat>>` effects (support for p10) | round3_naming |
 
