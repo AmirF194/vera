@@ -402,7 +402,7 @@ private fn pick(@Option<Cnt>, @Option<Int> -> @Option<Int>)
     @Option<Int>.1  parameter 1 (first @Option<Int>)
 ```
 
-The body returns parameter 1. Note what the two lines of the report are doing: the signature line echoes what you *wrote*, and the table rows say what was *bound*. When they differ, the table is the authority.
+The body returns parameter 1. Note what the two parts of the report are doing: the signature line re-prints the type names you *wrote* (`@Cnt`, unresolved), and the table rows report what was *bound*. When they differ, the rows are the authority — they are the keys the checker's binding table actually uses.
 
 ### 6.4 `forall` variables shadow aliases
 
@@ -411,7 +411,7 @@ A `forall<T>` variable shadows a module alias of the same name over the whole si
 ```vera
 type T = Int;
 
-private forall<T> fn split(@Option<T>, @Option<Int> -> @Int)
+private forall<T> fn split(@Option<Int>, @Option<T> -> @Int)
   requires(true)
   ensures(true)
   effects(pure)
@@ -424,12 +424,14 @@ private forall<T> fn split(@Option<T>, @Option<Int> -> @Int)
 ```
 
 ```text
-  fn split(@Option<@T>, @Option<@Int> -> @Int)
-    @Option<Int>.0  parameter 2 (only @Option<Int>)
-    @Option<T>.0  parameter 1 (only @Option<T>)
+  fn split(@Option<@Int>, @Option<@T> -> @Int)
+    @Option<Int>.0  parameter 1 (only @Option<Int>)
+    @Option<T>.0  parameter 2 (only @Option<T>)
 ```
 
-Two stacks, not one: the `T` inside `split` is the type parameter, not the module's `type T = Int`. Were the alias visible here, both parameters would render `Option<Int>` and `@Option<Int>.0` — most recent of a two-entry stack — would still land on parameter 2, silently, with no error to read. Passing `@Option<Int>.0` to a helper that declares `@Option<T>` is an `E202`: that is the shadowing being enforced, not a mistake in the table.
+Two stacks, not one: the `T` inside `split` is the type parameter, not the module's `type T = Int`. That is what makes `@Option<Int>.0` parameter 1. Were the alias visible here, both parameters would render `Option<Int>`, they would merge into one two-entry stack, and `@Option<Int>.0` — most recent — would land on parameter 2 instead: a different parameter, silently, with no error to read.
+
+Passing `@Option<Int>.0` to a helper that declares `@Option<T>` is an `E202`. That is the shadowing being enforced, not a mistake in the table.
 
 ### 6.5 Cell identity is not slot identity
 
