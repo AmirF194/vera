@@ -35,18 +35,26 @@ from vera.parser import parse_file, parse_to_ast
 from vera.resolver import ResolvedModule
 from vera.runtime.traps import WasmTrapError
 from vera.transform import transform
-from vera.verifier import VerifyResult, verify
+from vera.verifier import ContractVerifier, VerifyResult, verify
 
 
 # =====================================================================
 # Helpers
 # =====================================================================
 
-def _resolved(path: tuple[str, ...], source: str) -> ResolvedModule:
+def _resolved(
+    path: tuple[str, ...], source: str, direct: bool = True,
+) -> ResolvedModule:
     """A ``ResolvedModule`` from source text, via a real temp file.
 
     ``delete=False`` + explicit unlink is the Windows-safe pattern (an open
     ``NamedTemporaryFile`` cannot be reopened there).
+
+    *direct* is whether the ENTRY program imports this module (§8.6.4): a
+    module reached only through another module's imports must be marked
+    ``False``, or the verifier injects its public surface into the entry
+    program's namespace and a visibility assertion measures the fixture
+    instead of the compiler.
     """
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".vera", delete=False, encoding="utf-8",
@@ -57,7 +65,7 @@ def _resolved(path: tuple[str, ...], source: str) -> ResolvedModule:
     try:
         return ResolvedModule(
             path=path, file_path=Path(fp),
-            program=transform(parse_file(fp)), source=source,
+            program=transform(parse_file(fp)), source=source, direct=direct,
         )
     finally:
         os.unlink(fp)
@@ -764,3 +772,332 @@ class TestRefinedReturnBinderIsKeyedInTheCalleeScope:
         assert "type Cnt" not in control
         result = _verify_mod(control, [_resolved(("boxlib",), _BINDER_LIB)])
         assert not _codes(result), _codes(result)
+
+
+# =====================================================================
+# A module's pinned registry holds what its OWN file can call
+# =====================================================================
+
+_DEEP = """\
+module deep;
+
+public fn cap(@Int -> @Int)
+  requires(true)
+  ensures(@Int.result == 100)
+  effects(pure)
+{
+  100
+}
+
+public fn other(@Int -> @Int)
+  requires(true)
+  ensures(@Int.result == 7)
+  effects(pure)
+{
+  7
+}
+"""
+
+_MID_REQ = """\
+module mid;
+
+import deep(cap);
+
+public fn guarded(@Int -> @Int)
+  requires(@Int.0 < cap(0))
+  ensures(true)
+  effects(pure)
+{
+  @Int.0
+}
+"""
+
+_MID_ENS = """\
+module mid;
+
+import deep(cap);
+
+public fn get(@Int -> @Int)
+  requires(true)
+  ensures(@Int.result == cap(0))
+  effects(pure)
+{
+  cap(@Int.0)
+}
+"""
+
+_MAIN_REQ = """\
+import mid(guarded);
+import deep(cap);
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  guarded(5) + cap(0)
+}
+"""
+
+_MAIN_ENS = """\
+import mid(get);
+import deep(cap);
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 100)
+  effects(pure)
+{
+  get(1)
+}
+"""
+
+
+def _deep_chain(mid_source: str) -> list[ResolvedModule]:
+    return [_resolved(("mid",), mid_source), _resolved(("deep",), _DEEP)]
+
+
+class TestAModulesOwnImportsAreInItsRegistry:
+    """A module's contract can call what its own file IMPORTS (PR #1239).
+
+    The registry pinned as a module's ``CalleeScope`` was built by walking its
+    DECLARATIONS, so a bare name its own file imported resolved to nothing —
+    silently, and only for the bare spelling.  The corpus and this file's own
+    suite were single-level (a program importing leaf modules), which is why a
+    byte-identical corpus differential said nothing about it: the shape needs
+    a module that itself imports.
+
+    Both directions of the miss are asserted, because they fail differently:
+    a lost `requires` demotes an honest Tier-1 to E532 (a coverage loss), and
+    a lost `ensures` REJECTS a valid program (a correctness one).
+    """
+
+    def test_requires_calling_a_name_the_module_imported_stays_tier1(
+        self,
+    ) -> None:
+        result = _verify_mod(_MAIN_REQ, _deep_chain(_MID_REQ))
+        codes = {d.error_code for d in result.diagnostics}
+        assert "E532" not in codes, (
+            "the callee's requires calls `cap`, which its own module IMPORTS; "
+            f"the pinned module registry could not see it: {codes}"
+        )
+        assert not _codes(result), _codes(result)
+
+    def test_ensures_calling_a_name_the_module_imported_is_still_assumed(
+        self,
+    ) -> None:
+        """The correctness direction: `get`'s ensures is what proves `main`'s.
+
+        `main` returns exactly what its own `ensures` demands, and the run
+        agrees — so a rejection here is a rejection of a valid program.
+        """
+        modules = _deep_chain(_MID_ENS)
+        result = _verify_mod(_MAIN_ENS, modules)
+        assert not _codes(result), (
+            "valid program rejected: the callee's ensures references `cap`, "
+            f"which its own module IMPORTS: {_codes(result)}"
+        )
+        assert _run_mod(_MAIN_ENS, modules) == 100
+
+    def test_the_bare_and_qualified_spellings_agree(self) -> None:
+        """The tier stopped depending on how the call is SPELLED.
+
+        `deep::cap(0)` goes through the path-keyed module registry, which was
+        never missing, so the two spellings of one contract disagreed about
+        the tier — the asymmetry that dated the regression.
+        """
+        qualified_mid = _MID_REQ.replace(
+            "import deep(cap);", "import deep;",
+        ).replace("cap(0)", "deep::cap(0)")
+        bare = _verify_mod(_MAIN_REQ, _deep_chain(_MID_REQ))
+        qual = _verify_mod(_MAIN_REQ, _deep_chain(qualified_mid))
+        for result, label in ((bare, "bare"), (qual, "qualified")):
+            assert not [
+                d for d in result.diagnostics if d.error_code == "E532"
+            ], f"{label} spelling demoted: {[d.error_code for d in result.diagnostics]}"
+        assert (bare.summary.tier1_verified, bare.summary.tier3_runtime) == (
+            qual.summary.tier1_verified, qual.summary.tier3_runtime
+        ), (bare.summary, qual.summary)
+
+    def test_a_name_the_middle_module_did_not_import_still_misses(
+        self,
+    ) -> None:
+        """§8.5.1 is the rule, and the fix does not widen past it.
+
+        `mid` imports only `cap`, so `other` is NOT in scope inside `mid` —
+        `vera check mid.vera` rejects that file on its own with "Unresolved
+        function 'other'" (the checker applies §8.5.1 only to the file it is
+        given: reached as an import, `mid`'s own body is not re-checked under
+        its own import filter, so the program below checks clean).  The importer happens to import `other` itself, so
+        a registry that took the whole reachable set (or fell through to the
+        importer's, the pre-#1225 behaviour) would bind it and interpret the
+        callee's contract with a function the callee cannot name.  It must
+        miss instead — loudly, as an E532 demotion.
+        """
+        mid = _MID_REQ.replace("cap(0)", "other(0)")
+        main = _MAIN_REQ.replace("import deep(cap);", "import deep(other);")
+        main = main.replace("cap(0)", "other(0)")
+        result = _verify_mod(main, _deep_chain(mid))
+        assert [
+            d for d in result.diagnostics if d.error_code == "E532"
+        ], (
+            "`other` is not in `mid`'s scope, so its contract must not "
+            f"resolve: {[d.error_code for d in result.diagnostics]}"
+        )
+        assert not _codes(result), _codes(result)
+
+    def test_the_module_does_not_re_export_what_it_imports(self) -> None:
+        """The mirror gate: filling `mid`'s registry must not widen `main`'s.
+
+        What a module can CALL and what it EXPORTS are different sets — §8.6.4
+        gives the importer only `mid`'s own public declarations — so the
+        injection feeds the first and never the second.  Asserted on the
+        registries rather than through a program, because the checker does not
+        enforce this leg either (see the sibling test's note): a behavioural
+        assertion would be pinning the checker's gap, not this fix's invariant.
+        """
+        main = """\
+import mid(guarded);
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  guarded(5)
+}
+"""
+        prog = parse_to_ast(main)
+        # `deep` is transitive HERE — `main` imports only `mid`.
+        modules = [
+            _resolved(("mid",), _MID_REQ),
+            _resolved(("deep",), _DEEP, direct=False),
+        ]
+        typecheck(prog, main, resolved_modules=modules)
+        verifier = ContractVerifier(source=main, resolved_modules=modules)
+        verifier.register_program(prog)
+        exported = verifier._module_functions[("mid",)]
+        assert set(exported) == {"guarded"}, sorted(exported)
+        assert "cap" not in verifier.env.functions, (
+            "`mid` re-exported a name it merely imports"
+        )
+        # ... while the registry `mid`'s OWN contracts resolve in does have it.
+        mid_scope = verifier._pinned_scope(exported["guarded"])
+        assert mid_scope is not None
+        assert mid_scope.fn_lookup is not None
+        assert mid_scope.fn_lookup("cap") is not None, (
+            "`mid`'s own registry lost the name its file imports"
+        )
+
+
+# =====================================================================
+# The rest of the message points at the declaring file too
+# =====================================================================
+
+class TestDiagnosticLocationsFollowTheDeclaringModule:
+    """A diagnostic raised while an imported clone verifies names ITS file.
+
+    #1220 moved the QUOTED CLAUSE to the declaring module's buffer and left the
+    rest of the message on the entry program's: the excerpt under the caret was
+    sliced from `self.source` and the location named `self.file`, so a reader
+    was sent to the importer's line N for a clause that lives at another file's
+    line N — and where the importer is the shorter file, to an empty excerpt
+    with nothing to say it was missing (PR #1239 review).
+    """
+
+    def test_the_location_and_excerpt_come_from_the_module(self) -> None:
+        modules = [_resolved(("hlib",), _HELPER_LIB)]
+        result = _verify_mod(_HELPER_MAIN, modules)
+        raised_in_module = [
+            d for d in result.diagnostics
+            if "generic function 'f'" in d.description
+        ]
+        assert raised_in_module, [d.description[:70] for d in result.diagnostics]
+        lib_lines = _HELPER_LIB.splitlines()
+        for d in raised_in_module:
+            assert d.location.file is not None
+            assert d.location.file != "main.vera", d.location.file
+            assert d.source_line == lib_lines[d.location.line - 1], (
+                f"{d.error_code} at line {d.location.line} excerpted "
+                f"{d.source_line!r}, but that line of the module reads "
+                f"{lib_lines[d.location.line - 1]!r}"
+            )
+
+    def test_a_clause_past_the_importers_end_still_has_an_excerpt(
+        self,
+    ) -> None:
+        """The importer is 9 lines; the clause that raises sits at line 12+.
+
+        Sliced from the entry buffer the index simply falls off the end and the
+        excerpt is empty — a silent miss, which is the failure mode the whole
+        naming consolidation exists to remove.
+        """
+        modules = [_resolved(("hlib",), _HELPER_LIB)]
+        result = _verify_mod(_HELPER_MAIN, modules)
+        deep = [
+            d for d in result.diagnostics
+            if d.location.line > len(_HELPER_MAIN.splitlines())
+        ]
+        assert deep, [
+            (d.error_code, d.location.line) for d in result.diagnostics
+        ]
+        for d in deep:
+            assert d.source_line.strip(), (
+                f"{d.error_code} at line {d.location.line} has no excerpt"
+            )
+
+    def test_a_local_diagnostic_still_names_this_program(self) -> None:
+        """Control: nothing moves for a diagnostic raised in the entry file."""
+        result = _verify_mod(_QUOTE_MAIN, [_resolved(("qlib",), _QUOTE_LIB)])
+        local = [d for d in result.diagnostics if d.error_code == "E501"]
+        assert len(local) == 1
+        assert local[0].source_line == _QUOTE_MAIN.splitlines()[
+            local[0].location.line - 1
+        ]
+
+
+class TestMultiLineClauseIsQuotedWhole:
+    """A clause broken across lines is quoted whole, not to its first line.
+
+    The renderer sliced one physical line, so a wrapped `requires` was quoted
+    mid-expression with unbalanced parentheses — a message naming a condition
+    the program does not have (PR #1239 review).
+    """
+
+    _WRAPPED = """\
+private fn needs_both(@Int, @Int -> @Int)
+  requires(@Int.0 > 424242
+           && @Int.1 > 424242)
+  ensures(true)
+  effects(pure)
+{
+  @Int.0
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  needs_both(1, 2)
+}
+"""
+
+    def test_the_whole_clause_is_quoted(self) -> None:
+        message = _e501(_verify_mod(self._WRAPPED, []))
+        quoted = next(
+            line.split("Precondition:", 1)[1].strip()
+            for line in message.splitlines() if "Precondition:" in line
+        )
+        assert quoted == "requires(@Int.0 > 424242 && @Int.1 > 424242)", quoted
+        assert quoted.count("(") == quoted.count(")"), quoted
+
+    def test_a_single_line_clause_is_unchanged(self) -> None:
+        """Control: the common case renders exactly as it always did."""
+        single = self._WRAPPED.replace(
+            "  requires(@Int.0 > 424242\n           && @Int.1 > 424242)",
+            "  requires(@Int.0 > 424242 && @Int.1 > 424242)",
+        )
+        assert "\n           &&" not in single
+        assert "requires(@Int.0 > 424242 && @Int.1 > 424242)" in _e501(
+            _verify_mod(single, []))

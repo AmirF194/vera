@@ -221,6 +221,10 @@ class ContractVerifier:
     #: Class default for the same reason.
     _decl_source: str | None = None
 
+    #: ... and its file name, which every location raised over that scope
+    #: carries, so a line number and the file it numbers cannot disagree.
+    _decl_file: str | None = None
+
     def __init__(
         self,
         source: str = "",
@@ -264,6 +268,10 @@ class ContractVerifier:
         # `_register_modules` and read through the same origin walk — the
         # buffer a clause DECLARED in that module is quoted from.
         self._module_sources: dict[tuple[str, ...], str] = {}
+        # ... and its FILE NAME, which travels with the buffer: a location that
+        # named the entry file while carrying a line number from another one
+        # sent a reader to the wrong file's wrong line (PR #1239 review).
+        self._module_files: dict[tuple[str, ...], str | None] = {}
         # #1208/#1225: the scope a harvested `FunctionInfo`'s own contract is
         # READ in — its declaring module's naming env AND function registry —
         # keyed by object identity.  `FunctionInfo` is an unhashable mutable
@@ -286,10 +294,11 @@ class ContractVerifier:
         # here is a main-file generic.
         self._generic_origins: dict[str, tuple[str, ...]] = {}
         # See the class-level defaults: the DEFINING module's env (#1208) and
-        # source (#1220) while an imported generic's clone is verified, `None`
-        # otherwise.
+        # source + file (#1220) while an imported generic's clone is verified,
+        # `None` otherwise.
         self._decl_alias_env = None
         self._decl_source = None
+        self._decl_file = None
         self.source = source
         self.file = file
         self.timeout_ms = timeout_ms
@@ -517,7 +526,7 @@ class ContractVerifier:
         error_code: str = "",
     ) -> None:
         """Record a verification error."""
-        loc = SourceLocation(file=self.file)
+        loc = SourceLocation(file=self._current_file)
         if node.span:
             loc.line = node.span.line
             loc.column = node.span.column
@@ -543,7 +552,7 @@ class ContractVerifier:
         tier: int | None = None,
     ) -> None:
         """Record a verification warning (Tier 3 fallback)."""
-        loc = SourceLocation(file=self.file)
+        loc = SourceLocation(file=self._current_file)
         if node.span:
             loc.line = node.span.line
             loc.column = node.span.column
@@ -559,8 +568,16 @@ class ContractVerifier:
         ))
 
     def _get_source_line(self, line: int) -> str:
-        """Extract a line from the source text."""
-        lines = self.source.splitlines()
+        """Extract a line from the source of the module UNDER verification.
+
+        A diagnostic's span numbers lines in the file that declared what raised
+        it, so an imported generic's clone must be excerpted from ITS module's
+        buffer (#1220, PR #1239 review).  Indexing the entry program's instead
+        put the caret on an unrelated importer line, or — when the clone's span
+        ran past a shorter importer — produced an empty excerpt with no
+        indication anything was missing.
+        """
+        lines = self._current_source.splitlines()
         if 1 <= line <= len(lines):
             return lines[line - 1]
         return ""
@@ -830,10 +847,57 @@ class ContractVerifier:
         _builtins = TypeEnv()
         builtin_fn_names = set(_builtins.functions)
 
-        # 2. Register each module in isolation
+        # 2. Register each module in isolation.  Two passes, because a module's
+        # own registry is not complete until its OWN imports are in it and the
+        # module it imports may be registered after it.
+        temps: dict[tuple[str, ...], ContractVerifier] = {}
+        # What each module DECLARES, snapshotted before any import is injected
+        # below.  Everything downstream that asks "what is this module's own?"
+        # — what it exports, and what its scope is pinned to — reads this, not
+        # the registry: the registry deliberately grows names the module can
+        # CALL but does not OWN, and re-exporting or re-pinning those would
+        # both violate §8.6.4 and attribute another module's contract to this
+        # one's namespace.
+        own_fns: dict[tuple[str, ...], dict[str, FunctionInfo]] = {}
         for mod in self._resolved_modules:
             temp = ContractVerifier(source=mod.source)
             temp._register_all(mod.program)
+            temps[mod.path] = temp
+            # All module-declared functions (exclude builtins)
+            own_fns[mod.path] = {
+                k: v for k, v in temp.env.functions.items()
+                if k not in builtin_fn_names or v.span is not None
+            }
+
+        # A module's contract calls bare names, and a bare name it can call is
+        # one its OWN file declares *or imports* — `_register_all` walks
+        # declarations only, so an imported name was missing from the registry
+        # pinned as that module's `CalleeScope` (PR #1239 review, regression of
+        # #1225).  The miss is silent and spelling-dependent: the requires
+        # direction demoted an honest Tier-1 to E532 while the same call spelled
+        # `deep::cap(0)` stayed Tier-1, and the ensures direction REJECTED a
+        # valid program.  Each module therefore takes its imports' public
+        # surface exactly as the entry program does in step 4 — same
+        # import-name filter, same `setdefault` so the module's own
+        # declarations win a name clash.  A path this program never resolved is
+        # skipped: the resolver reaches every transitive import, so a missing
+        # one means the module was not reachable, and a name that stays
+        # unresolvable misses LOUDLY (E532) rather than binding something else.
+        for mod in self._resolved_modules:
+            temp = temps[mod.path]
+            for imp in mod.program.imports:
+                dep_path = tuple(imp.path)
+                if dep_path not in temps:
+                    continue
+                dep_names = set(imp.names) if imp.names is not None else None
+                for fn_name, fn_info in own_fns[dep_path].items():
+                    if fn_info.visibility != "public":
+                        continue
+                    if dep_names is None or fn_name in dep_names:
+                        temp.env.functions.setdefault(fn_name, fn_info)
+
+        for mod in self._resolved_modules:
+            temp = temps[mod.path]
             # #1208: capture this module's naming environment from the same
             # isolated registration the contracts are harvested from — the env
             # every rendering of one of ITS declarations has to happen under.
@@ -844,6 +908,7 @@ class ContractVerifier:
             mod_alias_env = alias_env_from_environment(temp.env)
             self._module_alias_envs[mod.path] = mod_alias_env
             self._module_sources[mod.path] = mod.source
+            self._module_files[mod.path] = str(mod.file_path)
             # #1220: pin every clause this module DECLARES to the module's own
             # source, so a message quoting one indexes the buffer its span
             # numbers.  Walked off the AST rather than off `all_fns` below so
@@ -856,19 +921,18 @@ class ContractVerifier:
                 for clause in fn_decl.contracts:
                     self._contract_sources[id(clause)] = (clause, mod.source)
 
-            # All module-declared functions (exclude builtins)
-            all_fns = {
-                k: v for k, v in temp.env.functions.items()
-                if k not in builtin_fn_names or v.span is not None
-            }
+            # What this module DECLARES (snapshotted above, before its own
+            # imports were injected) — what it can export, and what its scope
+            # can be pinned to.
+            all_fns = own_fns[mod.path]
             # #1208/#1225: the scope every contract this module declares is
             # READ in — its own naming env and its own function registry.  The
             # registry is the module's WHOLE registration, private helpers
-            # included and builtins behind them, because that is the namespace
-            # a bare name in one of its contracts resolves in; harvesting only
-            # the public surface would leave a contract's call to a private
-            # helper falling through to the importer's registry, which is the
-            # bug (#1225).
+            # included, its own imports beside them and builtins behind, because
+            # that is the namespace a bare name in one of its contracts resolves
+            # in; harvesting only the public surface would leave a contract's
+            # call to a private helper falling through to the importer's
+            # registry, which is the bug (#1225).
             mod_scope = CalleeScope(mod_alias_env, temp.env.lookup_function)
             # Pinned for every module-declared function, before the `direct`
             # gate and irrespective of visibility: a contract read in this
@@ -1044,25 +1108,37 @@ class ContractVerifier:
         """
         return self.source if self._decl_source is None else self._decl_source
 
+    @property
+    def _current_file(self) -> str | None:
+        """The file name of the module that DECLARED what is being verified.
+
+        Travels with :py:attr:`_current_source` so a diagnostic's line number
+        and the file it names always come from one buffer (#1220).
+        """
+        return self.file if self._decl_file is None else self._decl_file
+
     @contextlib.contextmanager
     def _declaring_module_scope(
         self, origin: tuple[str, ...] | None,
     ) -> Iterator[None]:
         """Verify the enclosed declarations as module *origin* wrote them.
 
-        Both halves of "which file is this?" ride this one scope: the naming
-        env its slots render against (#1208) and the source buffer its clauses
-        are quoted from (#1220).  ``None`` is a main-file declaration and keeps
-        this program's.  Entered and left together, so a clone named in one
-        module can never quote another's text.
+        Every half of "which file is this?" rides this one scope: the naming
+        env its slots render against (#1208), the source buffer its clauses are
+        quoted from, and the file name its diagnostics point at (#1220).
+        ``None`` is a main-file declaration and keeps this program's.  Entered
+        and left together, so a clone named in one module can never quote
+        another's text or send a reader to another's line number.
         """
-        saved = (self._decl_alias_env, self._decl_source)
+        saved = (self._decl_alias_env, self._decl_source, self._decl_file)
         self._decl_alias_env = self._alias_env_for_module(origin)
         self._decl_source = self._source_for_module(origin)
+        self._decl_file = self._file_for_module(origin)
         try:
             yield
         finally:
-            self._decl_alias_env, self._decl_source = saved
+            (self._decl_alias_env, self._decl_source,
+             self._decl_file) = saved
 
     def _alias_env_for_module(self, origin: tuple[str, ...] | None) -> AliasEnv:
         """Module *origin*'s naming env; this program's for ``None`` or an
@@ -1077,6 +1153,13 @@ class ContractVerifier:
         if origin is None:
             return self.source
         return self._module_sources.get(origin, self.source)
+
+    def _file_for_module(self, origin: tuple[str, ...] | None) -> str | None:
+        """Module *origin*'s file name; this program's for ``None`` or an
+        unregistered path (#1220)."""
+        if origin is None:
+            return self.file
+        return self._module_files.get(origin, self.file)
 
     @staticmethod
     def _fn_naming_scope(
@@ -8123,11 +8206,23 @@ class ContractVerifier:
         Some(3))` quoted `requires(true)`, and a reader has no way to tell the
         garbage from a real clause.  The buffer comes from
         :meth:`_declaring_source`, which is keyed by the clause itself.
+
+        The WHOLE clause, not its first physical line: a `requires` broken
+        across lines was quoted up to the first newline, so the message ended
+        mid-expression with unbalanced parentheses and named a condition the
+        program does not have (PR #1239 review).  Continuation lines are joined
+        on single spaces, since the message is one line.
         """
         if contract.span:
             lines = self._declaring_source(contract).splitlines()
-            if 1 <= contract.span.line <= len(lines):
-                return lines[contract.span.line - 1].strip()
+            first, last = contract.span.line, contract.span.end_line
+            if 1 <= first <= len(lines):
+                last = min(max(last, first), len(lines))
+                return " ".join(
+                    part for part in (
+                        raw.strip() for raw in lines[first - 1:last]
+                    ) if part
+                )
         return ""
 
     def _declaring_source(self, contract: ast.Contract) -> str:
