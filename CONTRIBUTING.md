@@ -89,11 +89,11 @@ dependencies. CI enforces that `uv.lock` stays current.
 
 ### Pre-commit Hooks
 
-Every push is checked by 34 configured hooks across two stages: 32 are configured at the commit stage (run after `pre-commit install`), and 2 (`check-changelog-updated` and `uv-lock-check`, described below) are configured at the push stage (run after `pre-commit install --hook-type pre-push`). Most commit-stage hooks have per-hook `files:` / `types:` filters — the `python` type-check only runs when Python files are staged; `check_readme_examples.py` only runs when `README.md` or Vera sources change, etc. A plain-text commit touching only one markdown file triggers a small subset; a compiler-level commit triggers most of them.
+The repository configures 35 hooks across two stages: 33 run at the commit stage (after `pre-commit install`), and 2 (`check-changelog-updated` and `uv-lock-check`, described below) run at the push stage (after `pre-commit install --hook-type pre-push`). Most commit-stage hooks have per-hook `files:` / `types:` filters — the `python` type-check only runs when Python files are staged; `check_readme_examples.py` only runs when `README.md` or Vera sources change, etc. A plain-text commit touching only one markdown file triggers a small subset; a compiler-level commit triggers most of them.
 
 ![The gate pipeline: file-filtered commit-stage hooks, the push-stage CHANGELOG and uv.lock gates, and CI re-running everything against the platform matrix before anything lands on protected main.](assets/diagrams/ci-gates.svg)
 
-The **commit-stage** hooks (32, each gated to relevant files) include:
+The **commit-stage** hooks (33, each gated to relevant files) include:
 
 - Trailing whitespace and file endings
 - YAML/TOML validity
@@ -108,6 +108,7 @@ The **commit-stage** hooks (32, each gated to relevant files) include:
 - Documentation counts match live codebase
 - Site assets (`docs/llms.txt`, `docs/llms-full.txt`, etc.) regenerated and up-to-date
 - Spec EBNF and Lark grammar agree on rule names
+- Editor grammars (vscode, TextMate, Vim) carry every built-in effect name
 - License compliance (all dependencies MIT-compatible)
 - Browser parity (JS runtime matches Python runtime)
 
