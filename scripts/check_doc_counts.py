@@ -84,15 +84,17 @@ _TESTS_BREAKDOWN = re.compile(
 def check_tests_breakdown(testing_text: str, live_total: int) -> list[str]:
     """Check that TESTING.md's tests breakdown sums to the gated total.
 
-    The overview row states the total *and* its parts — "9,382 across 143
-    files (…; 9,235 passed + 26 stress, 121 skipped)".  Pinning the total
-    alone leaves the parts free to drift, so a release that moves the
-    parts without moving the sum, or moves the sum and refreshes only the
-    number the gate reads, leaves an arithmetically impossible sentence
-    behind.  Both halves are checked: each part against nothing (they are
-    not independently derivable without running the suite three ways) and
-    their sum against the collected total, which is exactly the internal
-    consistency a reader would check by hand.
+    The overview row states the total *and* its parts, in the shape
+    "1,306 across 40 files (…; 1,234 passed + 5 stress, 67 skipped)" —
+    illustrative numbers, so this docstring does not itself become a
+    citation to keep in sync.  Pinning the total alone leaves the parts
+    free to drift, so a release that moves the parts without moving the
+    sum, or moves the sum and refreshes only the number the gate reads,
+    leaves an arithmetically impossible sentence behind.  Both halves are
+    checked: each part against nothing (they are not independently
+    derivable without running the suite three ways) and their sum against
+    the collected total, which is exactly the internal consistency a
+    reader would check by hand.
 
     A pattern that matches nothing is an error in its own right — rewording
     the parenthetical would otherwise silently switch the check off, which
@@ -124,6 +126,27 @@ _VERA_README_TESTS = re.compile(
     re.DOTALL,
 )
 
+_TEST_SUITE_HEADING = re.compile(r"^## Test Suite[ \t]*$", re.M)
+
+
+def _test_suite_section(readme_text: str) -> str | None:
+    """The body of vera/README.md's "## Test Suite" section, or ``None``.
+
+    The counts are spread over one long sentence, so the pattern above
+    spans them with ``DOTALL``.  Searched against the whole file that lets
+    the paragraph's head pair with digits from any LATER section: the
+    paragraph can be reworded until it no longer states the counts and the
+    check still greens off a decoy elsewhere in the file — the silent skip
+    this gate exists to prevent.  Slicing to the section first is what
+    keeps a rewording (or a renamed heading, which yields ``None``) loud.
+    """
+    m = _TEST_SUITE_HEADING.search(readme_text)
+    if m is None:
+        return None
+    rest = readme_text[m.end():]
+    nxt = re.search(r"^## ", rest, re.M)
+    return rest if nxt is None else rest[: nxt.start()]
+
 
 def check_vera_readme_test_counts(
     readme_text: str,
@@ -137,16 +160,20 @@ def check_vera_readme_test_counts(
     Only the module map is otherwise gated in that file, which leaves this
     sentence free to drift release after release — the same class as
     FAQ.md's headline line, and the same remedy: read the numbers the way
-    the oracle reads every other citation of them.  A missing pattern is
-    an error, not a skip.
+    the oracle reads every other citation of them.  The counts are read
+    from the "## Test Suite" section alone (see :func:`_test_suite_section`),
+    never from the file at large.  A missing heading or a missing pattern
+    is an error, not a skip.
     """
-    m = _VERA_README_TESTS.search(readme_text)
+    section = _test_suite_section(readme_text)
+    m = None if section is None else _VERA_README_TESTS.search(section)
     if m is None:
         return [
             "vera/README.md: the Test Suite paragraph's counts did not match"
             " ('N tests across N files … (N programs in `tests/conformance/`"
-            " …) … (N end-to-end demos)') — it moved or was reworded, so it"
-            " is no longer gated"
+            " …) … (N end-to-end demos)') under a '## Test Suite' heading —"
+            " the heading or the sentence moved or was reworded, so it is"
+            " no longer gated"
         ]
     errors: list[str] = []
     for label, cited_s, live in (

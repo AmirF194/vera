@@ -146,9 +146,10 @@ On error, each diagnostic includes `severity`, `description`, `location` (`file`
 
 ### Error codes
 
-Every diagnostic has a stable error code grouped by compiler phase:
+Every diagnostic has a stable code grouped by compiler phase — the `W` series is warnings, the `E` series errors:
 
 - **W001** — Typed hole (`?`) — expected type and available bindings reported (warning, not error)
+- **W002** — `async()` argument evaluates eagerly: its effects fall outside the commutative set (`Http`), so the future is computed sequentially at the `async()` site rather than concurrently (warning, not error)
 - **E001–E007** — Parse errors (missing contracts, unexpected tokens)
 - **E020, E021, E023** — Malformed comments: unterminated `{-` (E020) or `/*` (E021), or a `/*` nested inside another (E023 — only `{- -}` nests). Each names the delimiter at fault and how to close it.
 - **E010** — Transform errors (internal)

@@ -303,3 +303,34 @@ class TestVeraReadmeTestCounts:
         assert _MOD.check_vera_readme_test_counts(
             text, 12345, 1143, 1196, 1042
         ) == []
+
+    def test_counts_are_read_from_the_test_suite_section_only(self) -> None:
+        # The pattern spans several sentences, so it matches with DOTALL.
+        # Run against the whole file that lets the paragraph's head pair
+        # with digits from any LATER section: the Test Suite paragraph can
+        # be reworded — no longer stating the counts at all — and the gate
+        # still greens off a decoy elsewhere.  That is the silent skip this
+        # check exists to prevent, so it must fail loud instead.
+        text = (
+            "## Test Suite\n\n"
+            "Testing spans a **pytest suite** of 9,382 tests across 143"
+            " files — unit tests, 196 conformance programs and 42"
+            " examples.\n\n"
+            "## Current Limitations\n\n"
+            "Historic note: the suite once shipped (196 programs in"
+            " `tests/conformance/` validating every feature) and (42"
+            " end-to-end demos).\n"
+        )
+        errors = _MOD.check_vera_readme_test_counts(text, 9382, 143, 196, 42)
+        assert len(errors) == 1
+        assert "no longer gated" in errors[0]
+
+    def test_missing_test_suite_heading_is_an_error_not_a_skip(self) -> None:
+        # Renaming the heading moves the paragraph out of the slice; the
+        # counts must stop being "checked" loudly, not quietly.
+        text = _test_suite_para(9382, 143, 196, 42).replace(
+            "## Test Suite", "## Testing"
+        )
+        errors = _MOD.check_vera_readme_test_counts(text, 9382, 143, 196, 42)
+        assert len(errors) == 1
+        assert "no longer gated" in errors[0]
