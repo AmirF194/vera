@@ -8104,7 +8104,10 @@ class ContractVerifier:
                 f"The precondition will be checked at runtime.",
                 rationale="An argument or the callee's precondition contains "
                           "constructs that cannot be translated to SMT (e.g. "
-                          "an ADT field of a host-handle type such as Map).",
+                          "an ADT field of a host-handle type such as Map), or "
+                          "the callee is generic and its contract is written "
+                          "over type parameters, which have no Z3 sort until "
+                          "the call is monomorphized.",
                 spec_ref='Chapter 6, Section 6.8 "Summary of Verification Tiers"',
                 error_code="E532",
                 tier=3,

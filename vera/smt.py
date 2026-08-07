@@ -2006,14 +2006,6 @@ class SmtContext:
           5. Assume callee postconditions about the return variable
           6. Return the fresh variable
         """
-        # Generic functions can't be translated to Z3
-        if callee_info.forall_vars:
-            return None
-
-        # Must have matching arity
-        if len(args) != len(callee_info.param_type_exprs):
-            return None
-
         # Does the callee carry a real (non-trivial) precondition?  A callee
         # with only `requires(true)` has no obligation to demote — a failed
         # arg translation there is correctly silent (#882).
@@ -2022,6 +2014,40 @@ class SmtContext:
             and not (isinstance(c.expr, ast.BoolLit) and c.expr.value)
             for c in callee_info.contracts
         )
+
+        # A GENERIC callee's contract is written over its type parameters, so
+        # neither half of the summary can be built here: the precondition is
+        # not translatable to Z3 as written, and the postcondition is not
+        # assumable about the result.  The precondition is the half that
+        # carries an OBLIGATION, and returning None with nothing recorded made
+        # it vanish — `verify` reported all-Tier-1 clean while the run trapped
+        # on the callee's own entry guard, a false Tier 1 (#1236).  It demotes
+        # LOUDLY instead, exactly as the untranslatable-argument path does
+        # (#882): same E532 record, same gate (a callee with only
+        # `requires(true)` has no obligation to lose), same dedup.  The
+        # demotion is unconditional on whether the precondition would in fact
+        # HOLD — this is a "cannot check", not a "does not hold" — so the
+        # satisfied call demotes with the violating one; discharging either
+        # statically means translating the contract at each monomorphized
+        # INSTANCE, which is #732's per-instantiation machinery, not this
+        # call-summary path.  The postcondition half needs no record of its
+        # own: an unassumed fact is conservative, and it already surfaces
+        # wherever it mattered — the caller's own clause fails to translate
+        # and demotes (E520/E522), or a later call's argument does and demotes
+        # here.  Reifying it as a Tier-3 obligation would claim a runtime
+        # check the CALLER never performs (the callee's `ensures` is guarded
+        # in the callee, and counted there), which would make the tier
+        # bookkeeping less honest, not more.  Both drains see this, so a
+        # generic call written in the caller's `ensures` is disclosed as well
+        # as one in its body.
+        if callee_info.forall_vars:
+            if has_nontrivial_pre:
+                self._record_call_demotion(callee_info, callee_name, call_node)
+            return None
+
+        # Must have matching arity
+        if len(args) != len(callee_info.param_type_exprs):
+            return None
 
         # Translate actual arguments in the caller's env.  First WITHOUT
         # forcing any ADT sort — this is the exact pre-#882 attempt.  When it

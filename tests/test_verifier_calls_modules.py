@@ -6,11 +6,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+from vera.codegen import execute
 from vera.parser import parse_to_ast
 from vera.checker import typecheck
 from vera.resolver import ResolvedModule
+from vera.runtime.traps import WasmTrapError
 from vera.verifier import VerifyResult, verify
 
+from tests.codegen_helpers import _compile_ok, _run
 from tests.verifier_helpers import (
     _verify,
     _verify_err,
@@ -1292,6 +1297,166 @@ public fn caller(@String -> @Int)
             "statement-position and ensures-clause calls must report the same "
             f"number of E532 demotions: stmt={stmt_demoted} ens={ens_demoted}"
         )
+
+
+# =====================================================================
+# A GENERIC callee's call-site precondition (#1236)
+# =====================================================================
+
+def _e532_demotions(result: VerifyResult) -> list[object]:
+    return [
+        o for o in result.obligations
+        if o.kind == "call_pre" and o.error_code == "E532"
+    ]
+
+
+class TestGenericCalleeCallPreDemotes:
+    """A generic callee's precondition demotes loudly, never vanishes (#1236).
+
+    ``SmtContext._translate_call_with_info`` bails on any callee with
+    ``forall_vars`` — a contract written over type parameters has no Z3 sort
+    to build a summary from.  It bailed *silently*, so unlike every other arm
+    of this taxonomy the call-site obligation did not exist: `verify` reported
+    all-Tier-1 clean while the run trapped on the callee's own entry guard, a
+    false Tier 1.  It now records the same E532 Tier-3 demotion the
+    untranslatable-argument arm records.
+
+    The demotion is unconditional on whether the precondition would HOLD —
+    "cannot check", not "does not hold" — because discharging it means
+    translating the contract at each monomorphized INSTANCE, which is #732's
+    machinery rather than this call-summary path.  So the satisfied call
+    demotes beside the violating one, which is the conservative direction.
+    """
+
+    _GENERIC = """
+private forall<T> fn pick(@Array<T>, @Int -> @Int)
+  requires(@Int.0 > 10)
+  ensures(true)
+  effects(pure)
+{ @Int.0 }
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ pick([1, 2], %d) }
+"""
+
+    def test_violating_generic_precondition_demotes_instead_of_vanishing(
+        self,
+    ) -> None:
+        src = self._GENERIC % 3
+        result = _verify(src)
+        demoted = _e532_demotions(result)
+        assert len(demoted) == 1, (
+            "the generic callee's call-site precondition obligation vanished: "
+            f"{[(o.kind, o.error_code, o.status) for o in result.obligations]}"
+        )
+        assert demoted[0].status == "tier3"  # type: ignore[attr-defined]
+        warns = [
+            d for d in result.diagnostics
+            if d.severity == "warning" and d.error_code == "E532"
+        ]
+        assert len(warns) == 1, warns
+        assert "'pick'" in warns[0].description, warns[0].description
+        # Loud, not an error: the callee's entry guard enforces it at run time.
+        assert [d for d in result.diagnostics if d.severity == "error"] == []
+
+    def test_the_runtime_traps_where_the_demotion_says_it_will(self) -> None:
+        """The oracle for the false Tier 1.
+
+        Without this the demotion above could be pure noise — it is the run
+        trapping on `requires(@Int.0 > 10)` that makes the previous
+        all-Tier-1-clean verdict a false one rather than a true one.
+        """
+        result = _compile_ok(self._GENERIC % 3)
+        with pytest.raises(WasmTrapError) as exc:
+            execute(result, fn_name="main")
+        assert exc.value.kind == "contract_violation", exc.value.kind
+
+    def test_the_satisfied_generic_call_demotes_too(self) -> None:
+        """The mirror: `42 > 10` holds, and it still demotes (conservative).
+
+        Statically discharging this needs the contract translated at the
+        monomorphized instance (#732); until then, claiming Tier 1 here would
+        be claiming a check that was never made.
+        """
+        src = self._GENERIC % 42
+        result = _verify(src)
+        assert len(_e532_demotions(result)) == 1, _e532_demotions(result)
+        assert [d for d in result.diagnostics if d.severity == "error"] == []
+        assert _run(src) == 42
+
+    def test_a_generic_call_inside_ensures_demotes_too(self) -> None:
+        """The ensures-clause position, drained after postcondition
+        translation — the same GAP-1 re-drain the untranslatable arms rely on,
+        which a fix recording only during the body pass would miss."""
+        result = _verify("""
+private forall<T> fn pick(@Array<T>, @Int -> @Int)
+  requires(@Int.0 > 10)
+  ensures(true)
+  effects(pure)
+{ @Int.0 }
+
+public fn caller(@Unit -> @Int)
+  requires(true)
+  ensures(pick([1, 2], 3) == 3)
+  effects(pure)
+{ 3 }
+""")
+        assert len(_e532_demotions(result)) == 1, [
+            (o.kind, o.error_code, o.line) for o in result.obligations
+        ]
+
+    def test_the_non_generic_twin_is_still_checked_statically(self) -> None:
+        """Control: drop `forall<T>` and the obligation is discharged, not
+        demoted — a violating argument is a hard E501 and a satisfied one is
+        Tier-1 clean with no E532 anywhere.  A "fix" that demoted every call
+        would pass the tests above and fail here."""
+        concrete = """
+private fn pick(@Array<Int>, @Int -> @Int)
+  requires(@Int.0 > 10)
+  ensures(true)
+  effects(pure)
+{ @Int.0 }
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ pick([1, 2], %d) }
+"""
+        good = _verify(concrete % 42)
+        assert _e532_demotions(good) == [], _e532_demotions(good)
+        assert [d for d in good.diagnostics if d.severity == "error"] == []
+
+        bad = _verify(concrete % 3)
+        assert [
+            d for d in bad.diagnostics
+            if d.severity == "error" and d.error_code == "E501"
+        ], [(d.error_code, d.description[:70]) for d in bad.diagnostics]
+
+    def test_a_generic_callee_with_trivial_requires_stays_silent(self) -> None:
+        """The gate, as on every other arm: `requires(true)` is no obligation,
+        so there is nothing to lose and nothing to disclose."""
+        result = _verify("""
+private forall<T> fn pick(@Array<T>, @Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ @Int.0 }
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ pick([1, 2], 3) }
+""")
+        assert _e532_demotions(result) == [], _e532_demotions(result)
+        assert [
+            d for d in result.diagnostics
+            if d.severity == "warning" and d.error_code == "E532"
+        ] == []
 
 
 # =====================================================================
