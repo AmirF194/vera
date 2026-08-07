@@ -72,6 +72,12 @@ def _resolved(
         os.unlink(fp)
 
 
+#: The entry file name every helper here verifies under.  Named rather than
+#: defaulted to ``None``, so an assertion about WHICH file a location carries
+#: compares against a known value instead of only ruling out ``None``.
+_ENTRY_FILE = "main.vera"
+
+
 def _verify_mod(source: str, modules: list[ResolvedModule]) -> VerifyResult:
     """Type-check and verify *source* against *modules*, asserting check-clean.
 
@@ -79,13 +85,14 @@ def _verify_mod(source: str, modules: list[ResolvedModule]) -> VerifyResult:
     type-check would satisfy a "no errors" assertion trivially.
     """
     prog = parse_to_ast(source)
-    diags = typecheck(prog, source, resolved_modules=modules)
+    diags = typecheck(prog, source, resolved_modules=modules, file=_ENTRY_FILE)
     check_errors = [d for d in diags if d.severity == "error"]
     assert not check_errors, (
         "fixture must type-check cleanly, got: "
         f"{[(d.error_code, d.description[:70]) for d in check_errors]}"
     )
-    return verify(prog, source, resolved_modules=modules)
+    return verify(
+        prog, source, file=_ENTRY_FILE, resolved_modules=modules)
 
 
 def _codes(result: VerifyResult) -> set[str]:
@@ -209,6 +216,10 @@ public fn main(@Unit -> @Int)
         qualified = _QUOTE_MAIN.replace(
             "import qlib(need3);", "import qlib;",
         ).replace("need3(Some(9))", "qlib::need3(Some(9))")
+        # Both rewrites must have landed: a reworded fixture would make them
+        # no-ops and this would silently re-run the bare-import case above.
+        assert "import qlib;" in qualified, qualified
+        assert "qlib::need3(Some(9))" in qualified, qualified
         result = _verify_mod(qualified, [_resolved(("qlib",), _QUOTE_LIB)])
         message = _e501(result)
         assert "requires(@Option<Int>.0 == Some(3))" in message, message
@@ -682,6 +693,32 @@ class TestParameterisedRefinedReturnBinder:
         ], [d.description[:90] for d in result.diagnostics]
         assert result.summary.tier3_runtime == 0, result.summary
 
+    def test_the_fact_is_BOUNDED_by_what_the_refinement_grants(self) -> None:
+        """The over-correction direction: assuming the predicate is not the
+        same as assuming anything.
+
+        Every other test in this class and its cross-module sibling asserts
+        that the refined-return fact SURVIVES, so a regression that keyed the
+        binder correctly and then assumed the predicate unconditionally would
+        pass all of them.  Here the consumer wants `>= 100` and the refinement
+        grants `>= 18`, so the call must still be rejected — and the runtime
+        agrees, which is what distinguishes a correct rejection from the
+        spurious one this class exists to have removed.
+        """
+        bounded = _PARAM_BINDER.replace(
+            "private fn need18(@Nat -> @Nat)\n  requires(@Nat.0 >= 18)",
+            "private fn need18(@Nat -> @Nat)\n  requires(@Nat.0 >= 100)",
+        )
+        assert "requires(@Nat.0 >= 100)" in bounded, bounded
+        result = _verify_mod(bounded, [])
+        assert "E501" in _codes(result), (
+            "the refined return grants `>= 18`; a consumer wanting `>= 100` "
+            f"must not be discharged from it: {_codes(result)}"
+        )
+        with pytest.raises(WasmTrapError) as exc:
+            _run_mod(bounded, [])
+        assert exc.value.kind == "contract_violation", exc.value.kind
+
     def test_the_bare_base_control_is_unchanged(self) -> None:
         """The same program with an UNPARAMETERISED binder, which always
         worked: head and key coincide when there are no type arguments."""
@@ -915,6 +952,11 @@ class TestAModulesOwnImportsAreInItsRegistry:
         qualified_mid = _MID_REQ.replace(
             "import deep(cap);", "import deep;",
         ).replace("cap(0)", "deep::cap(0)")
+        # Without this the two sides could be the SAME spelling — a reworded
+        # `_MID_REQ` makes both replaces no-ops and the comparison compares
+        # the bare case against itself, which passes and measures nothing.
+        assert "import deep;" in qualified_mid, qualified_mid
+        assert "deep::cap(0)" in qualified_mid, qualified_mid
         bare = _verify_mod(_MAIN_REQ, _deep_chain(_MID_REQ))
         qual = _verify_mod(_MAIN_REQ, _deep_chain(qualified_mid))
         for result, label in ((bare, "bare"), (qual, "qualified")):
@@ -1016,8 +1058,8 @@ class TestDiagnosticLocationsFollowTheDeclaringModule:
     """
 
     def test_the_location_and_excerpt_come_from_the_module(self) -> None:
-        modules = [_resolved(("hlib",), _HELPER_LIB)]
-        result = _verify_mod(_HELPER_MAIN, modules)
+        module = _resolved(("hlib",), _HELPER_LIB)
+        result = _verify_mod(_HELPER_MAIN, [module])
         raised_in_module = [
             d for d in result.diagnostics
             if "generic function 'f'" in d.description
@@ -1025,8 +1067,10 @@ class TestDiagnosticLocationsFollowTheDeclaringModule:
         assert raised_in_module, [d.description[:70] for d in result.diagnostics]
         lib_lines = _HELPER_LIB.splitlines()
         for d in raised_in_module:
-            assert d.location.file is not None
-            assert d.location.file != "main.vera", d.location.file
+            # The module's EXACT path, not merely "not the entry file": the
+            # entry name is known (`_ENTRY_FILE`), so ruling it out would also
+            # accept any third file.
+            assert d.location.file == str(module.file_path), d.location.file
             assert d.source_line == lib_lines[d.location.line - 1], (
                 f"{d.error_code} at line {d.location.line} excerpted "
                 f"{d.source_line!r}, but that line of the module reads "
@@ -1151,11 +1195,15 @@ public fn main(@Unit -> @Nat)
 }
 """
 
-    def _predicate(self) -> object:
+    def _predicate(
+        self,
+    ) -> tuple[ContractVerifier, ast.RefinementType]:
         prog = parse_to_ast(self._CLOSURE_PREDICATE)
         verifier = ContractVerifier(source=self._CLOSURE_PREDICATE)
         verifier.register_program(prog)
-        return verifier, verifier.env.type_aliases["Grown"].body
+        body = verifier.env.type_aliases["Grown"].body
+        assert isinstance(body, ast.RefinementType), body
+        return verifier, body
 
     def test_the_closures_own_binder_is_found_first(self) -> None:
         from vera import naming

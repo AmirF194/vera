@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from vera.codegen import execute
+from vera.obligations.core import ProofObligation
 from vera.parser import parse_to_ast
 from vera.checker import typecheck
 from vera.resolver import ResolvedModule
@@ -1303,7 +1304,7 @@ public fn caller(@String -> @Int)
 # A GENERIC callee's call-site precondition (#1236)
 # =====================================================================
 
-def _e532_demotions(result: VerifyResult) -> list[object]:
+def _e532_demotions(result: VerifyResult) -> list[ProofObligation]:
     return [
         o for o in result.obligations
         if o.kind == "call_pre" and o.error_code == "E532"
@@ -1352,7 +1353,7 @@ public fn main(@Unit -> @Int)
             "the generic callee's call-site precondition obligation vanished: "
             f"{[(o.kind, o.error_code, o.status) for o in result.obligations]}"
         )
-        assert demoted[0].status == "tier3"  # type: ignore[attr-defined]
+        assert demoted[0].status == "tier3"
         warns = [
             d for d in result.diagnostics
             if d.severity == "warning" and d.error_code == "E532"
