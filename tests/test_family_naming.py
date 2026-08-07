@@ -1091,21 +1091,41 @@ def test_the_cap_refusal_reaches_the_browser_target_too(
 ) -> None:
     """The refusal happens at COMPILE, so every host sees it (F1 part 2).
 
-    The bug this backstops was a divergence — wasmtime could not parse the
+    The bug this backstops was a DIVERGENCE — wasmtime could not parse the
     module the browser host ran happily — so a cap enforced anywhere but at
     emission would reproduce it one cap later.  Refusing at family
     registration means the oversized import is never written, and the
-    browser bundle's own import synthesis has nothing to bind: same
-    diagnostic, same empty family set, whichever way the module is loaded.
+    browser bundle's own import synthesis has nothing to bind.
+
+    So this actually emits the bundle and reads it (PR #1238 review): a test
+    named for the second host that only re-read the first host's artefact
+    would record coverage that does not exist.  The module the browser is
+    handed carries no `state_*` import at all, which is what makes the two
+    hosts agree by construction rather than by a second cap.
     """
+    from vera.browser.emit import emit_browser_bundle
+
     result = _compile_source(_conjunct_program(200), tmp_path)
     assert "E607" in {d.error_code for d in result.diagnostics}
-    assert "state_get_" not in result.wat
-    assert "(func $main" not in result.wat
+    assert "(func $main" not in result.wat, "the enclosing function is dropped"
+
+    out_dir = tmp_path / "bundle"
+    emit_browser_bundle(result.wasm_bytes, out_dir)
+    module = (out_dir / "module.wasm").read_bytes()
+    # The runtime binds `state_*` by splitting import NAMES out of the
+    # module's own import section, so an absent import is an absent binding.
+    assert b"state_get_" not in module, "an oversized cell reached the bundle"
+    assert b"state_push_" not in module
+    runtime = (out_dir / "runtime.mjs").read_text(encoding="utf-8")
+    assert "state_get_" in runtime, (
+        "the runtime's import synthesis should still be present — this test "
+        "is about the module carrying nothing for it to bind, not about the "
+        "runtime losing the feature"
+    )
 
 
 def test_every_expression_kind_has_a_formatter_arm() -> None:
-    """`format_expr` is TOTAL over expressions, which its two users need.
+    """`format_expr_canonical` is TOTAL over expressions, which its two users need.
 
     `Formatter._fmt_expr` ends in a `return "<expr>"` catch-all.  For
     `vera fmt` that would be a broken emission caught by the formatter's own
@@ -1115,11 +1135,29 @@ def test_every_expression_kind_has_a_formatter_arm() -> None:
     check that typed them apart (#1218's failure mode, reintroduced through
     the renderer that fixed it).
 
-    Checked statically, the way `scripts/check_walker_coverage.py` checks
-    its walkers: every concrete `ast.Expr` subclass must be named in the
-    dispatch.  A new AST node without an arm fails here at the commit that
-    adds it, rather than in whichever refinement predicate first uses it.
+    Checked STRUCTURALLY, the way `scripts/check_walker_coverage.py` checks
+    its walkers: the classes `_fmt_expr` actually branches on, read off its
+    `isinstance` calls.  A raw substring search over the same source would
+    discharge an arm from a comment or a docstring that merely names the
+    class (PR #1238 review), which is a false green on the property that
+    two predicates never share a family name.
+
+    Abstract intermediates are excluded: an abstract class between `Expr`
+    and the concrete nodes has no arm to write and never reaches a
+    predicate.
+
+    Name presence is only half the gate — a class can be dispatched and
+    still render indistinguishably.  `test_format_expr_renders_every_kind
+    _distinctly` is the behavioural half.
+
+    SCOPE, stated rather than gated: `_fmt_type_bare`, `_fmt_pattern` and
+    `_fmt_effect_row` have catch-alls of their own (`"?"`, `"_"`), reached
+    through this dispatch from binding patterns and lambda signatures.
+    Every current subclass of each has an arm, and each catch-all is marked
+    `# pragma: no cover`; they are not enumerated here because their class
+    sets are closed by the grammar rather than open like `Expr`.
     """
+    import ast as py_ast
     import inspect
 
     from vera import ast as ast_mod
@@ -1127,12 +1165,23 @@ def test_every_expression_kind_has_a_formatter_arm() -> None:
     subclasses = sorted({
         c.__name__ for c in vars(ast_mod).values()
         if inspect.isclass(c) and issubclass(c, ast_mod.Expr)
-        and c is not ast_mod.Expr
+        and c is not ast_mod.Expr and not inspect.isabstract(c)
     })
     source = (_ROOT / "vera" / "formatter.py").read_text(encoding="utf-8")
-    start = source.index("def _fmt_expr")
-    dispatch = source[start:source.index("def _fmt_float", start)]
-    missing = [name for name in subclasses if name not in dispatch]
+    dispatched: set[str] = set()
+    for node in py_ast.walk(py_ast.parse(source)):
+        if not isinstance(node, py_ast.FunctionDef) or node.name != "_fmt_expr":
+            continue
+        for call in py_ast.walk(node):
+            if not isinstance(call, py_ast.Call):
+                continue
+            if getattr(call.func, "id", None) != "isinstance":
+                continue
+            target = call.args[1]
+            names = target.elts if isinstance(target, py_ast.Tuple) else [target]
+            dispatched.update(
+                n.id for n in names if isinstance(n, py_ast.Name))
+    missing = [name for name in subclasses if name not in dispatched]
     assert not missing, (
         f"ast.Expr subclasses with no _fmt_expr arm, so they would render "
         f"as the lossy '<expr>' catch-all: {missing}"
@@ -1140,7 +1189,83 @@ def test_every_expression_kind_has_a_formatter_arm() -> None:
     assert len(subclasses) >= 25, subclasses
 
 
-def test_format_expr_round_trips_adversarial_predicates() -> None:
+# One representative source expression per `ast.Expr` kind the grammar lets
+# a refinement predicate hold, plus the three shapes canonical form merges.
+# Every one must render to its own string: dispatching a class is not the
+# same as DISCRIMINATING it, and only the latter keeps two cells apart.
+_KIND_SAMPLES: tuple[str, ...] = (
+    "1 > @Int.0",                       # IntLit
+    "2 > @Int.0",                       # IntLit, another value
+    "1.5 > 0.0 && @Int.0 > 0",          # FloatLit
+    "true && @Int.0 > 0",               # BoolLit
+    "false || @Int.0 > 0",              # BoolLit, another value
+    'string_length("s") > @Int.0',      # StringLit
+    'string_length("\\(1)") > @Int.0',    # InterpolatedString
+    "array_length([1, 2]) > @Int.0",    # ArrayLit
+    "@Int.0 > 0",                       # SlotRef
+    "@Int.0 + 1 > 0",                   # BinaryExpr
+    "!(@Int.0 > 0)",                    # UnaryExpr
+    "[1, 2][0] > @Int.0",               # IndexExpr
+    "int_abs(@Int.0) > 0",              # FnCall
+    "if @Int.0 > 0 then { true } else { false }",   # IfExpr
+    "{ @Int.0 } > 0",                   # Block
+    "assert(@Int.0 > 0)",               # AssertExpr
+    "assume(@Int.0 > 0)",               # AssumeExpr
+    "?",                                # HoleExpr
+)
+
+_MERGE_SAMPLES: tuple[tuple[str, str], ...] = (
+    ("private data Col { Red, Green }\n\n",
+     "match Red { Red -> { true }, Green -> false }"),
+    ("private data Col { Red, Green }\n\n",
+     "match Red { Red -> true, Green -> false }"),
+    ("private data Col { Red, Green }\n\n",
+     "match Red { Red -> { { true } }, Green -> false }"),
+    ("private data Col { Red, Green }\n\n",
+     "match Red { Red -> { true }, Green -> { false } }"),
+)
+
+
+def test_format_expr_renders_every_kind_distinctly() -> None:
+    """The BEHAVIOURAL half of the coverage gate (PR #1238 review, G2).
+
+    The static gate above proves each class is dispatched.  It cannot
+    prove the dispatch DISCRIMINATES, and three mutants survive it: a class
+    named only in a comment, a catch-all that returns a constant, and two
+    arms collapsed onto one rendering.  All three are wrong in the same
+    direction — two predicates that render alike name one cell family.
+
+    So: format a representative of every kind, plus the arm-block shapes
+    canonical form deliberately merges, and require the renderings to be
+    pairwise distinct and free of the `<expr>` marker.  Structural mode,
+    because that is the mode `structural_type_key` uses and the one whose
+    injectivity is load-bearing.
+    """
+    from vera.formatter import format_expr_canonical
+
+    def predicate(text: str, prelude: str = ""):
+        program = parse_to_ast(f"{prelude}type Probe = {{ @Int | {text} }};\n")
+        for decl in program.declarations:
+            inner = getattr(decl, "decl", decl)
+            if getattr(inner, "name", None) == "Probe":
+                return inner.type_expr.predicate
+        raise AssertionError(f"no Probe in {text!r}")
+
+    samples = [("", text) for text in _KIND_SAMPLES] + list(_MERGE_SAMPLES)
+    seen: dict[str, str] = {}
+    for prelude, text in samples:
+        rendered = format_expr_canonical(predicate(text, prelude),
+                                         structural=True)
+        assert "<expr>" not in rendered, (
+            f"{text!r} hit the lossy catch-all: {rendered!r}")
+        assert rendered not in seen, (
+            f"two predicates render alike, so they would share a cell "
+            f"family: {text!r} and {seen[rendered]!r} both -> {rendered!r}")
+        seen[rendered] = text
+    assert len(seen) == len(samples)
+
+
+def test_format_expr_canonical_round_trips_adversarial_predicates() -> None:
     """`parse(format(e)) == e` — the property injectivity rests on.
 
     Associativity is where a canonical renderer would lose information if it
@@ -1151,7 +1276,7 @@ def test_format_expr_round_trips_adversarial_predicates() -> None:
     pair.  Each case below is checked BOTH ways — it round-trips, and no two
     of them collide.
     """
-    from vera.formatter import format_expr
+    from vera.formatter import format_expr_canonical
 
     def predicate(text: str) -> object:
         program = parse_to_ast(f"type T = {{ @Int | {text} }};\n")
@@ -1178,7 +1303,7 @@ def test_format_expr_round_trips_adversarial_predicates() -> None:
     seen: dict[str, str] = {}
     for text in cases:
         expr = predicate(text)
-        rendered = format_expr(expr)
+        rendered = format_expr_canonical(expr)
         assert predicate(rendered) == expr, (
             f"{text!r} rendered {rendered!r}, which parses to something else"
         )
@@ -1187,3 +1312,177 @@ def test_format_expr_round_trips_adversarial_predicates() -> None:
             f"{rendered!r}"
         )
         seen[rendered] = text
+
+
+# =====================================================================
+# (10) The KEY renders STRUCTURALLY, not canonically (PR #1238 round 2)
+# =====================================================================
+
+# `vera fmt` exists to CHOOSE between two spellings of one construct; the
+# cell-family key exists to tell two constructs apart.  Two formatter sites
+# make that choice over AST shapes the checker holds distinct, so the
+# canonical rendering merged them — and the merged family made the #1233
+# shadowing gate fire on a check-green program, dropping `main`.  The key
+# now renders in STRUCTURAL mode, where both sites follow the AST.
+_MERGE_PRELUDE = "private data Col { Red, Green }\n\n"
+_CLAUSE_PRELUDE = "private data C { R }\n\n"
+
+_STRUCTURE_PAIRS: tuple[tuple[str, str, str, str], ...] = (
+    ("match-arm-block-wrap", _MERGE_PRELUDE,
+     "match Red { Red -> { true }, Green -> false }",
+     "match Red { Red -> true, Green -> false }"),
+    ("match-arm-block-wrap-both", _MERGE_PRELUDE,
+     "match Red { Red -> { true }, Green -> { false } }",
+     "match Red { Red -> true, Green -> false }"),
+    ("match-arm-double-block", _MERGE_PRELUDE,
+     "match Red { Red -> { { true } }, Green -> false }",
+     "match Red { Red -> { true }, Green -> false }"),
+    # Found by READING every normalisation site rather than by probing: a
+    # bare handler-clause body parses, and the clause wrapper supplied its
+    # braces unconditionally, so `-> resume(())` and `-> { resume(()) }`
+    # rendered alike.
+    ("handler-clause-braces", _CLAUSE_PRELUDE,
+     "match R { R -> handle[State<Int>](@Int = 0) "
+     "{ put(@Int) -> resume(()) } in { true } }",
+     "match R { R -> handle[State<Int>](@Int = 0) "
+     "{ put(@Int) -> { resume(()) } } in { true } }"),
+    # Controls: already distinct, and must stay so.
+    ("if-branch-nested-block", "",
+     "if @Int.0 > 0 then { true } else { false }",
+     "if @Int.0 > 0 then { { true } } else { false }"),
+    ("block-operand", "", "{ @Int.0 } > 0", "@Int.0 > 0"),
+    ("lambda-body-block", "",
+     "apply(fn(@Int -> @Bool) effects(pure) { { @Int.0 > 0 } }, @Int.0)",
+     "apply(fn(@Int -> @Bool) effects(pure) { @Int.0 > 0 }, @Int.0)"),
+)
+
+
+def _probe_predicate(text: str, prelude: str = ""):
+    program = parse_to_ast(f"{prelude}type Probe = {{ @Int | {text} }};\n")
+    for decl in program.declarations:
+        inner = getattr(decl, "decl", decl)
+        if getattr(inner, "name", None) == "Probe":
+            return inner.type_expr.predicate
+    raise AssertionError(f"no Probe in {text!r}")
+
+
+@pytest.mark.parametrize(
+    ("label", "prelude", "left", "right"), _STRUCTURE_PAIRS,
+    ids=[p[0] for p in _STRUCTURE_PAIRS],
+)
+def test_cell_key_discriminates_every_shape_the_checker_does(
+    label: str, prelude: str, left: str, right: str,
+) -> None:
+    """The key agrees with `RefinedType` equality, shape for shape.
+
+    `RefinedType` equality is dataclass equality over the predicate AST, and
+    E125 enforces it across functions — so any pair the AST separates is a
+    pair the checker separates, and a key that merges them gives two cells
+    one host cell.  Asserting `key_eq == ast_eq` rather than `key_eq is
+    False` is what makes this a differential: it fails equally if the key
+    ever over-separates.
+    """
+    from vera.types import INT, RefinedType, structural_type_key
+
+    left_expr = _probe_predicate(left, prelude)
+    right_expr = _probe_predicate(right, prelude)
+    ast_eq = left_expr == right_expr
+    key_eq = (structural_type_key(RefinedType(INT, left_expr))
+              == structural_type_key(RefinedType(INT, right_expr)))
+    assert key_eq == ast_eq, (
+        f"{label}: the checker holds these {'equal' if ast_eq else 'apart'} "
+        f"and the cell key does not"
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "prelude", "left", "right"), _STRUCTURE_PAIRS,
+    ids=[p[0] for p in _STRUCTURE_PAIRS],
+)
+def test_structural_rendering_still_reparses_to_its_own_ast(
+    label: str, prelude: str, left: str, right: str,
+) -> None:
+    """Structural mode keeps the left-inverse property (PR #1238 round 2).
+
+    The whole injectivity argument is `parse(format(e)) == e`, so a
+    structural spelling that did not re-parse — or re-parsed to something
+    else — would buy discrimination with the very property that justifies
+    it.  Both members of every pair go out and come back unchanged.
+    """
+    from vera.formatter import format_expr_canonical
+
+    for text in (left, right):
+        expr = _probe_predicate(text, prelude)
+        rendered = format_expr_canonical(expr, structural=True)
+        assert _probe_predicate(rendered, prelude) == expr, (
+            f"{label}: {text!r} -> {rendered!r} -> a different AST"
+        )
+
+
+@pytest.mark.parametrize(
+    ("label", "prelude", "left", "right"), _STRUCTURE_PAIRS[:4],
+    ids=[p[0] for p in _STRUCTURE_PAIRS[:4]],
+)
+def test_canonical_mode_is_untouched_by_the_structural_split(
+    label: str, prelude: str, left: str, right: str,
+) -> None:
+    """`vera fmt` still CHOOSES — the split is key-only.
+
+    Structural mode exists because the two jobs disagree; if it leaked into
+    canonical output, `vera fmt` would stop normalising a redundant arm
+    block and every corpus file holding one would fall out of canonical
+    form.  The four shapes above are exactly the ones canonical mode is
+    supposed to merge, so this asserts that it still does.
+    """
+    from vera.formatter import format_expr_canonical
+
+    left_expr = _probe_predicate(left, prelude)
+    right_expr = _probe_predicate(right, prelude)
+    assert (format_expr_canonical(left_expr)
+            == format_expr_canonical(right_expr)), (
+        f"{label}: canonical form should still pick one spelling"
+    )
+
+
+_MERGE_GATE = _MERGE_PRELUDE + """
+type A = { @Int | match Red { Red -> { @Int.0 > 0 }, Green -> false } };
+
+type B = { @Int | match Red { Red -> @Int.0 > 0, Green -> false } };
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<A>](@A = 4) {
+    get(@Unit) -> { resume(@A.0) },
+    put(@A) -> { resume(()) }
+  } in {
+    let @B = handle[State<B>](@B = 1) {
+      get(@Unit) -> { resume(@B.0) },
+      put(@B) -> { resume(()) } with @B = get(()) * 10
+    } in {
+      put(7);
+      get(())
+    };
+    @B.0 * 100 + get(())
+  }
+}
+"""
+
+
+def test_arm_block_spelling_alone_makes_two_cells(tmp_path: Path) -> None:
+    """The end-to-end shape: two predicates differing ONLY in an arm's
+    redundant block wrapper are two cells, and the program runs.
+
+    Under the merged key both `State<A>` and `State<B>` were the same
+    family, so the #1233 gate saw a same-family nest and refused `main`
+    outright — check-green, verify-green, no exports.  With them distinct
+    the inner clause's `with @B = get(()) * 10` reads the OUTER `A` cell per
+    §7.5.2 (4), stores 40, and `main` returns `40 * 100 + 4`.  4004 is
+    therefore reachable only when the two cells are separate AND the
+    outward read lands on the right one.
+    """
+    result = _compile_ok(_MERGE_GATE, tmp_path)
+    assert len(_families(result.wat)) == 8, sorted(_families(result.wat))
+    assert execute(result).value == 4004

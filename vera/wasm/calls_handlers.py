@@ -1460,7 +1460,13 @@ class CallsHandlersMixin:
         # and is what every width / pointer-ness / write-guard decision
         # below uses, because all three refinements of one base share those.
         family = self._family_name(type_arg)
-        family_base = self._family_base(type_arg)
+        # Alias-resolved, matching the bare-`put` path's
+        # `_resolve_base_type_name(cell.base)` (PR #1238 review): both
+        # dispatch paths must classify one cell the same way, and
+        # `family_fallback_name`'s residue can leave a syntactic alias
+        # here.  A no-op on every resolved family.
+        family_base = self._resolve_base_type_name(
+            self._family_base(type_arg))
         mangled = mangle_type_name(family)
 
         put_import = f"$vera.state_put_{mangled}"
@@ -1499,12 +1505,14 @@ class CallsHandlersMixin:
             # @Int -> @Nat narrowing (and the @Nat -> @Int widen dual)
             # exactly like a `let` binding, so an unverified compile traps
             # instead of storing a negative through the @Nat cell.  Keyed
-            # off `type_name` — the effect's `State<T>` argument, the same
-            # source every other guard site and the host imports use — NOT
-            # the declared `with` annotation, which can diverge (#1206)
-            # and, as a RefinementType, has no `name` at all (PR #1202
-            # review: the getattr skipped both branches for refined
-            # binders while the verifier recorded the obligation).
+            # off `family_base` — the cell's REPRESENTATION (#1218), the
+            # same source every other guard site uses, derived from the
+            # effect's `State<T>` argument — NOT the declared `with`
+            # annotation, which can diverge (#1206) and, as a
+            # RefinementType, has no `name` at all (PR #1202 review: the
+            # getattr skipped both branches for refined binders while the
+            # verifier recorded the obligation).  `type_name` survives for
+            # the #1006 Vera-name mirror alone.
             if (family_base == "Nat"
                     and self._narrows_into_nat(expr.state.init_expr)):
                 init_instrs = self._emit_nat_bind_guard(init_instrs)
@@ -1798,7 +1806,7 @@ class CallsHandlersMixin:
         # decision below is a width, a pointer-ness, or a write guard,
         # and all of those are the base's.  The IDENTITY (`entry.family`)
         # is read by the addressability gate, which compares cells.
-        family_base = entry.family_base
+        family_base = self._resolve_base_type_name(entry.family_base)
         state_slot_name = entry.state_slot_name
         decl_env = entry.decl_env
         get_import = entry.get_import
@@ -2201,7 +2209,8 @@ class CallsHandlersMixin:
         # caught-value SLOT binding below stays source-level (the checker
         # binds the clause pattern's own name).
         family = self._family_name(type_arg)
-        family_base = self._family_base(type_arg)
+        family_base = self._resolve_base_type_name(
+            self._family_base(type_arg))
         tag_name = f"$exn_{mangle_type_name(family)}"
         # Pair-ness is the BASE's question (#1218): `Exn<Short>` under
         # `type Short = {@String | ...}` is its own tag and still carries a

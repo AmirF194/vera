@@ -2512,7 +2512,12 @@ class TestMangleInjectivity:
         import subprocess
         import sys
 
-        name = ("{Int|BinaryExpr\\n  op: >\\n  left:\\n    SlotRef\\n"
+        # A REAL newline, not the two characters `\` and `n` (PR #1238
+        # review): the mangler escapes those differently (`_Ua_` against
+        # `_U5c_` + `n`), and a newline is the character a
+        # newline-indented rendering actually carries.  The property
+        # holds either way; only the vector missed its target.
+        name = ("{Int|BinaryExpr\n  op: >\n  left:\n    SlotRef\n"
                 "      type_name: 'Int'}")
         prog = (
             "from vera.monomorphize import mangle_type_name;"

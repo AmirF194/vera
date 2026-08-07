@@ -313,7 +313,7 @@ def structural_type_key(ty: Type) -> str:
     effect row, which :func:`structural_effect_key` sorts on a key built the
     same structural way.
 
-    The predicate is rendered by :func:`vera.formatter.format_expr` — the
+    The predicate is rendered by :func:`vera.formatter.format_expr_canonical` — the
     single-line canonical source form ``vera fmt`` emits.  Two properties
     make it the right renderer, and they are the reason it is not
     ``ast.Node.pretty`` (which this used first):
@@ -352,9 +352,9 @@ def structural_type_key(ty: Type) -> str:
         # importer of a semantic type pay for the grammar.  Nothing in the
         # formatter's own import closure reaches back here, so this is a
         # cost decision, not a cycle break.
-        from vera.formatter import format_expr
+        from vera.formatter import format_expr_canonical
         return (f"{{{structural_type_key(ty.base)}"
-                f"|{format_expr(ty.predicate)}}}")
+                f"|{format_expr_canonical(ty.predicate, structural=True)}}}")
     if isinstance(ty, TypeVar):
         # The raw name, marker included.
         return f"'{ty.name}"
@@ -424,7 +424,15 @@ def structural_effect_key(eff: EffectRowType) -> str:
             for name, args in sorted(effect_sort_key(e) for e in eff.effects)
         ]
         if eff.row_var:
-            parts.append(eff.row_var)
+            # `'`-prefixed, exactly as :func:`structural_type_key`'s
+            # `TypeVar` branch marks a variable (PR #1238 review).  An open
+            # ROW VARIABLE and a zero-argument effect MEMBER of the same
+            # spelling both rendered bare `E`, so an open
+            # `effects(<E>)` under `forall<E>` tied with a closed
+            # `effects(<E>)` over a declared `effect E`.  This key names a
+            # cell, so a tie is two cells sharing one host cell — the same
+            # class as the elisions the key exists to avoid, one level out.
+            parts.append(f"'{eff.row_var}")
         return f"effects(<{', '.join(parts)}>)"
     return "effects(?)"
 

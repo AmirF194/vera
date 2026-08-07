@@ -490,13 +490,18 @@ class CallsMixin:
                 instructions.extend(arg_instrs)
             cell = self._effect_op_cells.get(call.name)
             if call.name == "put" and len(call.args) == 1 and cell is not None:
-                if (self._resolve_base_type_name(cell.base) == "Nat"
-                        and self._narrows_into_nat(call.args[0])):
+                # ONE normalisation for all three sibling decisions (PR
+                # #1238 review).  The Nat/Int guards resolved `cell.base`
+                # and the Byte width coercion did not, so a base that still
+                # needs alias resolution — which `family_fallback_name`'s
+                # residue can produce — would fire the guards and skip the
+                # coercion, putting an `i64.const` into an i32 cell.
+                base = self._resolve_base_type_name(cell.base)
+                if base == "Nat" and self._narrows_into_nat(call.args[0]):
                     instructions = self._emit_nat_bind_guard(instructions)
-                elif (self._resolve_base_type_name(cell.base) == "Int"
-                        and self._result_is_nat(call.args[0])):
+                elif base == "Int" and self._result_is_nat(call.args[0]):
                     instructions = self._emit_int_widen_guard(instructions)
-                byte_arg = self._state_byte_literal(call.args[0], cell.base)
+                byte_arg = self._state_byte_literal(call.args[0], base)
                 if byte_arg is not None:
                     instructions = byte_arg
             # throw uses WASM throw instruction, not call
