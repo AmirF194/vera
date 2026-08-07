@@ -101,7 +101,7 @@ pytest tests/ -v                  # Run the test suite
 
 Errors are natural language instructions explaining what went wrong and how to fix it. Feed them back into your context to correct the code.
 
-`vera test` generates Z3 inputs for `Int`, `Nat`, `Bool`, `Byte`, `String`, and `Float64` parameters. The decision is made on each parameter's **resolved** type, not its spelling: a type alias or refinement that resolves to one of those six is generated for like any other, so `type Count = Nat; public fn twice(@Count -> @Nat)` is tested rather than skipped, and an alias-spelled `requires` still constrains the inputs. Functions whose parameters resolve to an ADT, a function type, or a type variable are skipped with a message naming that resolved type — `type MaybeCount = Option<Nat>` skips with `cannot generate Option<Nat> inputs`. Float64 uses Z3's mathematical reals (NaN, ±∞, and subnormals are not generated). Strings are capped at 50 characters.
+`vera test` generates Z3 inputs for `Int`, `Nat`, `Bool`, `Byte`, `String`, and `Float64` parameters. The decision is made on each parameter's **resolved** type, not its spelling: a type alias or refinement that resolves to one of those six is generated for like any other, so `type Count = Nat; public fn twice(@Count -> @Nat)` is not skipped for its parameter type, and an alias-spelled `requires` still constrains the inputs. (Trials are what a *Tier 3* contract gets; a signature the verifier proves reports `VERIFIED (Tier 1)` instead, and one with only trivial contracts is skipped as `trivial contracts only`.) A parameter resolving to an ADT or a function type is skipped with a message naming that resolved type — `type MaybeCount = Option<Nat>` skips with `cannot generate Option<Nat> inputs`. A generic function is skipped as `generic function` before its parameter types are considered at all, so a `forall<T>` signature never reports a per-parameter reason even when every parameter is generable. Float64 uses Z3's mathematical reals (NaN, ±∞, and subnormals are not generated). Strings are capped at 50 characters.
 
 ### Browser compilation
 
@@ -2975,7 +2975,7 @@ At the **head** of a slot name an alias is opaque. `type Cnt = Int;` does not ma
 
 Inside a type **argument** an alias resolves. Under the same declaration, a parameter written `@Option<Cnt>` binds `Option<Int>` and is referenced `@Option<Int>.0` — because `Option<Cnt>` and `Option<Int>` are one type, and one type must not become two namespaces.
 
-A `State<T>` or `Exn<E>` **cell** resolves completely: identity ignores spelling, so a helper declaring `State<Option<Int>>` and a handler spelling `State<MaybeInt>` share their state.
+A `State<T>` or `Exn<E>` **cell** resolves through the head as well: identity is the *resolved* type, so a helper declaring `State<Option<Int>>` and a handler spelling `State<MaybeInt>` share their state. That holds wherever the resolved type has a mangle-safe family name — see [`DE_BRUIJN.md`](https://github.com/aallan/vera/blob/main/DE_BRUIJN.md) §6.5 for the one case where the compiler falls back to the spelling instead.
 
 The practical consequence is that an alias is how you give a parameter a name without reintroducing names. Two parameters of one underlying type become two stacks, so every reference is `.0` and there is no ordering to get wrong:
 
@@ -3210,7 +3210,7 @@ The reference compiler is under active development. The current release includes
 
 - A seven-stage pipeline: parse, transform, resolve, typecheck, verify, compile, execute
 - A 14-chapter formal specification
-- 9,390 tests, including a 196-program conformance suite
+- 9,391 tests, including a 196-program conformance suite
 - 42 working example programs
 - 164 built-in functions covering strings, arrays, math, parsing, and data types
 - Four built-in abilities (Eq, Ord, Hash, Show) with constrained generics and ADT auto-derivation

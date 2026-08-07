@@ -28,7 +28,7 @@ Technical decisions, rationale, and prior art. For the design philosophy and FAQ
 | Data types | Algebraic data types + exhaustive `match` | No classes, no inheritance; compiler enforces every case is handled |
 | Polymorphism | Monomorphized generics (`forall<T where Eq<T>>`) | No runtime dispatch; four built-in abilities (`Eq`, `Ord`, `Hash`, `Show`); types fully specialised at compile time |
 | Refinement types | `{ @T \| predicate }` checked by Z3 | Encode value-level constraints in the type system; rejected statically or at runtime |
-| Type aliases | Opaque at a slot name's head; resolved inside type arguments and in `State`/`Exn` cell identity | An alias names a binding, so a library adding one must not split a caller's namespace; a type argument is a structural component, so one type must not become two namespaces |
+| Type aliases | Opaque at a slot name's head; resolved inside type arguments, and in `State`/`Exn` cell identity wherever the resolved type has a mangle-safe family name ([`DE_BRUIJN.md`](DE_BRUIJN.md) §6.5) | An alias names a binding, so a library adding one must not split a caller's namespace; a type argument is a structural component, so one type must not become two namespaces |
 | Collections | `Array<T>`, `Map<K,V>`, `Set<T>` | Functional, immutable; no mutation, no loops; `array_map`/`filter`/`fold`/`slice` as built-ins |
 | Standard library | 164 built-in functions | Strings, arrays, maps, sets, decimals, math (log/trig/constants/utilities), JSON, HTML, Markdown, regex, base64, URL — no external deps |
 | Modules | `module`/`import` with explicit `public`/`private` visibility | Programs split across files; `vera check` resolves the module graph; re-exports are tracked in [#127](https://github.com/aallan/vera/issues/127) |

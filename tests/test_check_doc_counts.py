@@ -286,3 +286,20 @@ class TestVeraReadmeTestCounts:
         errors = _MOD.check_vera_readme_test_counts(text, 9382, 143, 196, 42)
         assert len(errors) == 1
         assert "no longer gated" in errors[0]
+
+    def test_thousands_separators_are_read_in_every_count(self) -> None:
+        # The prose writes counts with thousands separators once they cross
+        # a thousand.  A digits-only group for any of the four would stop
+        # matching at that point and report the paragraph as ungated —
+        # switching the check off exactly when the number it guards grows.
+        text = (
+            "## Test Suite\n\n"
+            "Testing spans a **pytest suite** of 12,345 tests across 1,143"
+            " files — compiler-internals unit tests plus a **conformance"
+            " suite** (1,196 programs in `tests/conformance/` validating"
+            " every language feature against the spec) and **example"
+            " programs** (1,042 end-to-end demos).\n"
+        )
+        assert _MOD.check_vera_readme_test_counts(
+            text, 12345, 1143, 1196, 1042
+        ) == []

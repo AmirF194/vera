@@ -246,7 +246,7 @@ In the else branch, after the `let`:
 
 ### 5.6 Closures and captured bindings
 
-A function type is written through a `type` alias, and a nullary closure takes `Unit`:
+Two spelling rules govern a function type in a signature: a return type expression always carries the `@` prefix, so an inline function type reads `@fn(Int -> Int) effects(pure)`; and a type-level `fn(...)` takes plain inner type names, never `@`-prefixed ones. Neither an alias nor a `Unit` parameter is required — `fn(-> Int) effects(pure)` is a legal nullary function type — but the alias is the form the conformance suite uses, and a `Unit` parameter is the conventional spelling for a thunk, so the examples below follow both:
 
 ```vera
 type UnitToInt = fn(Unit -> Int) effects(pure);
@@ -353,7 +353,7 @@ private fn wrap(@Option<Cnt>, @Cnt, @Int -> @Int)
 
 Three parameters, three separate stacks. Parameters 2 and 3 stay apart because the head is opaque; parameter 1 is reached by `@Option<Int>.0` rather than `@Option<Cnt>.0` because the argument resolved.
 
-**`State` and `Exn` cells resolve completely.** A cell's identity ignores spelling altogether — §6.5.
+**`State` and `Exn` cells resolve through the head too.** A cell's identity is its *resolved* type rather than its spelling — §6.5, which also carries the one exception.
 
 ### 6.2 Naming your parameters with aliases
 
@@ -377,7 +377,20 @@ Each type has exactly one binding, so every reference is `.0` and there is no or
 Aliases turn a positional question into a named one without reintroducing names the model can misspell. A misspelled `@Metres.0` does not quietly resolve to something else — there are no `Metres` bindings, so it fails to type-check:
 
 ```text
-[E130] Cannot resolve @Metres.0: no Metres bindings in scope.
+[E130] Error at main.vera, line 9, column 3:
+
+      @Metres.0 - @Feet.0 / 3
+      ^
+
+  Cannot resolve @Metres.0: no Metres bindings in scope.
+
+  Slot reference @Metres.0 requires at least 1 binding(s) of type Metres.
+
+  Fix:
+
+    Ensure enough Metres bindings are in scope, or use a lower index.
+
+  See: Chapter 3, Section 3.4 "Reference Resolution"
 ```
 
 ### 6.3 When two spellings share a stack
@@ -435,7 +448,7 @@ Passing `@Option<Int>.0` to a helper that declares `@Option<T>` is an `E202`. Th
 
 ### 6.5 Cell identity is not slot identity
 
-A `State<T>` or `Exn<E>` cell is identified by the *resolved* `T`, spelling ignored entirely. `State<MaybeInt>` under `type MaybeInt = Option<Int>` is the same cell as `State<Option<Int>>`, so a helper declaring one and a handler spelling the other share their state:
+A `State<T>` or `Exn<E>` cell is identified by the *resolved* `T`, not by its spelling. `State<MaybeInt>` under `type MaybeInt = Option<Int>` is the same cell as `State<Option<Int>>`, so a helper declaring one and a handler spelling the other share their state:
 
 ```vera
 type MaybeInt = Option<Int>;
@@ -469,6 +482,8 @@ public fn main(@Unit -> @Int)
 `vera run` prints `7` — the value `bump` put through its own spelling, read back through the handler's. Two cells would leave the handler reading its own untouched `None` and printing `-1`.
 
 Note the contrast with the head rule inside that same handler. The clause binder is still `@MaybeInt`, because that is a *slot name* and slot names keep their head. The *cell* it reads is shared, because cell identity is not a naming question at all.
+
+**The one exception, and it runs in the safe direction.** The resolved type names the cell wherever that type has a **mangle-safe family name** — the canonical `Head<arg, arg>` grammar a `@Name.n` reference can spell, which is what the emitted cell symbol is mangled from. A resolution outside that grammar has no such family (`State<Handler>` under `type Handler = Option<fn(Int -> Int) effects(pure)>`), and the reference compiler falls back to the alias-opaque spelling — so there, and only there, two spellings of one type name two cells rather than sharing one. The fallback can leave split a cell the resolution would have merged; it never merges two the checker keeps apart. [`spec/07-effects.md`](spec/07-effects.md) §7.5.1 states the rule, and [#1219](https://github.com/aallan/vera/issues/1219) tracks extending the mangler so it holds without exception.
 
 ---
 
@@ -568,7 +583,7 @@ A helper's scope is closed and parameter-rooted: only its own parameters and its
 
 ### Aliases
 
-`type Cnt = Int` gives `@Cnt` its own stack: `@Int.0` does not reach a `@Cnt` parameter, and vice versa. But an alias used as a type *argument* resolves, so a parameter written `@Option<Cnt>` binds `Option<Int>` and is referenced `@Option<Int>.0`. `State<T>`/`Exn<E>` cells resolve completely — spelling never splits a cell. Full rule in §6.
+`type Cnt = Int` gives `@Cnt` its own stack: `@Int.0` does not reach a `@Cnt` parameter, and vice versa. But an alias used as a type *argument* resolves, so a parameter written `@Option<Cnt>` binds `Option<Int>` and is referenced `@Option<Int>.0`. `State<T>`/`Exn<E>` cell identity is the *resolved* type, so spelling does not split a cell wherever that type has a mangle-safe family name (§6.5). Full rule in §6.
 
 ### The result reference
 

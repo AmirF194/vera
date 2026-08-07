@@ -85,14 +85,14 @@ def check_tests_breakdown(testing_text: str, live_total: int) -> list[str]:
     """Check that TESTING.md's tests breakdown sums to the gated total.
 
     The overview row states the total *and* its parts — "9,382 across 143
-    files (…; 9,235 passed + 26 stress, 121 skipped)" — but only the total
-    was pinned, so a release that moved the parts without moving the sum,
-    or moved the sum and refreshed only the number the gate reads, left an
-    arithmetically impossible sentence behind.  Both halves are now
-    checked: each part against nothing (they are not independently
-    derivable without running the suite three ways) and their sum against
-    the collected total, which is exactly the internal consistency a
-    reader would check by hand.
+    files (…; 9,235 passed + 26 stress, 121 skipped)".  Pinning the total
+    alone leaves the parts free to drift, so a release that moves the
+    parts without moving the sum, or moves the sum and refreshes only the
+    number the gate reads, leaves an arithmetically impossible sentence
+    behind.  Both halves are checked: each part against nothing (they are
+    not independently derivable without running the suite three ways) and
+    their sum against the collected total, which is exactly the internal
+    consistency a reader would check by hand.
 
     A pattern that matches nothing is an error in its own right — rewording
     the parenthetical would otherwise silently switch the check off, which
@@ -118,9 +118,9 @@ def check_tests_breakdown(testing_text: str, live_total: int) -> list[str]:
 
 
 _VERA_README_TESTS = re.compile(
-    r"\*\*pytest suite\*\* of ([\d,]+) tests across (\d+) files.*?"
-    r"\((\d+) programs in `tests/conformance/`.*?"
-    r"\((\d+) end-to-end demos\)",
+    r"\*\*pytest suite\*\* of ([\d,]+) tests across ([\d,]+) files.*?"
+    r"\(([\d,]+) programs in `tests/conformance/`.*?"
+    r"\(([\d,]+) end-to-end demos\)",
     re.DOTALL,
 )
 

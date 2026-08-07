@@ -93,7 +93,7 @@ Every push is checked by 33 configured hooks across two stages: 31 are configure
 
 ![The gate pipeline: file-filtered commit-stage hooks, the push-stage CHANGELOG and uv.lock gates, and CI re-running everything against the platform matrix before anything lands on protected main.](assets/diagrams/ci-gates.svg)
 
-The **commit-stage** hooks (30, each gated to relevant files) include:
+The **commit-stage** hooks (31, each gated to relevant files) include:
 
 - Trailing whitespace and file endings
 - YAML/TOML validity
