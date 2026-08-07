@@ -12,7 +12,7 @@ For other documentation:
 
 The compiler is a seven-stage pipeline. Each stage consumes the output of the previous one. Each stage has a single public entry point and is independently testable.
 
-![The compiler pipeline and module map: parse, transform and resolve feed the two-pass type checker; after checking, vera verify proves each contract obligation (Tier 1) or defers it to a runtime guard (Tier 3) with a warm-verification sidecar for the LSP, while vera compile emits WAT and WASM for the wasmtime host, the browser bundle, or a WASI 0.2 component.](../assets/diagrams/architecture.svg)
+![The compiler pipeline and module map: parse, transform and resolve feed the two-pass type checker, where naming.py answers what any type expression is called for every later stage; after checking, vera verify proves each contract obligation (Tier 1) or defers it to a runtime guard (Tier 3) with a warm-verification sidecar for the LSP, while vera compile emits WAT and WASM for the wasmtime host, the browser bundle, or a WASI 0.2 component.](../assets/diagrams/architecture.svg)
 
 <details>
 <summary>Text version</summary>
@@ -24,7 +24,7 @@ Source (.vera)
 1   Parse        grammar.lark + parser.py     -> Lark parse tree (LALR(1))
 2   Transform    transform.py + ast.py        -> typed AST
 2b  Resolve      resolver.py                  -> transitive module closure
-3   Type Check   checker/ + environment.py    -> list[Diagnostic]
+3   Type Check   checker/ + naming.py + environment.py -> list[Diagnostic]
   |              (two passes: register every signature, then check bodies)
   |
   +--- vera verify ------------->  4  Verify   verifier.py + smt.py (Z3)
@@ -43,6 +43,9 @@ Source (.vera)
 
 Cross-cutting: cli.py (orchestrates every stage) / errors.py (Diagnostic,
 E-codes) / formatter.py (vera fmt) / tester.py (vera test).
+naming.py answers "what is this type expression called?" once -- stages 4
+and 5, tester.py and lsp/ all render slot names and State/Exn cell families
+through it, never their own.
 Nothing exits early -- every stage accumulates diagnostics, so an agent
 gets all feedback in one pass.
 ```
@@ -162,7 +165,7 @@ Total: ~72,000 lines of Python + 343 lines of grammar + 3,378 lines of JavaScrip
 
 ## Parsing
 
-**Files:** `grammar.lark` (343 lines), `parser.py` (147 lines)
+**Files:** `grammar.lark`, `parser.py` (sizes in the module map above)
 
 The grammar is a Lark LALR(1) grammar derived from the formal EBNF in spec Chapter 10. It uses:
 
@@ -177,7 +180,7 @@ The parser is **lazily constructed and cached** — `_get_parser()` builds the L
 
 ## AST
 
-**Files:** `ast.py` (690 lines), `transform.py` (1,000 lines)
+**Files:** `ast.py`, `transform.py` (sizes in the module map above)
 
 ### Node hierarchy
 
@@ -244,7 +247,7 @@ Node
 
 ## Type Checking
 
-**Files:** `checker/` (2,248 lines across 8 modules), `types.py` (307 lines), `environment.py` (302 lines)
+**Files:** `checker/`, `naming.py`, `types.py`, `environment.py` (sizes in the module map above)
 
 This is the most architecturally complex stage.
 
@@ -284,7 +287,9 @@ The compiler maintains two distinct type representations:
 
 `_resolve_type()` in the checker bridges them: it looks up type aliases, expands parameterised types, and resolves type variables from `forall` bindings.
 
-**Why this matters:** Type aliases are **opaque** for slot reference matching. If `type PosInt = { @Int | @Int.0 > 0 }`, then `@PosInt.0` counts `PosInt` bindings and `@Int.0` counts `Int` bindings — they are separate namespaces. But for type compatibility, `PosInt` resolves to a refined `Int` and subtypes accordingly.
+**Why this matters:** Type aliases are **opaque at the head** of a slot name. If `type PosInt = { @Int | @Int.0 > 0 }`, then `@PosInt.0` counts `PosInt` bindings and `@Int.0` counts `Int` bindings — they are separate namespaces. But for type compatibility, `PosInt` resolves to a refined `Int` and subtypes accordingly.
+
+A slot name's type **arguments** are the other half of the rule: they resolve in full, so under `type Cnt = Int` a parameter written `@Option<Cnt>` binds `Option<Int>` — one namespace with `@Option<Int>` — where `@Cnt` and `@Int` remain two ([spec §3.8.1](../spec/03-slot-references.md)). The head is the name the programmer chose for a binding, so leaving it opaque keeps a library's new alias from splitting a caller's namespace; an argument is a *component* of a structural type, so resolving it keeps one type from becoming two namespaces. A *refinement* alias resolves in argument position too, but to the predicate-elided `{@Int | ...}` form, which stays distinct from plain `Int`. `naming.py` implements all of it (Design Pattern 8).
 
 ### De Bruijn slot resolution
 
@@ -431,7 +436,7 @@ Additionally, `resume` is bound as a temporary function inside handler clause bo
 
 ## Contract Verification
 
-**Files:** `verifier.py` (703 lines), `smt.py` (547 lines)
+**Files:** `verifier.py`, `smt.py` (sizes in the module map above)
 
 ### Tiered model
 
@@ -530,7 +535,7 @@ Error at line 3, column 3:
 
 ## Code Generation
 
-**Files:** `codegen/` (12,991 lines across 13 modules), `wasm/` (20,716 lines across 19 modules, split into domain mixins — see the module table above)
+**Files:** `codegen/`, `wasm/` (split into domain mixins; sizes and the mixin split in the module map above)
 
 ### Compilation pipeline
 
@@ -683,7 +688,7 @@ All AST nodes, type objects, and environment data structures are frozen dataclas
 
 ### 2. Syntactic vs semantic type separation
 
-`ast.TypeExpr` nodes represent what the programmer wrote. `types.Type` objects represent the resolved canonical form. The `_resolve_type()` method in the checker bridges them. This distinction enables **alias opacity**: `@PosInt.0` matches `PosInt` bindings syntactically, while `PosInt` resolves to `Int` semantically for type compatibility.
+`ast.TypeExpr` nodes represent what the programmer wrote. `types.Type` objects represent the resolved canonical form. The `_resolve_type()` method in the checker bridges them. This distinction is what makes **head opacity** expressible: `@PosInt.0` matches `PosInt` bindings syntactically, while `PosInt` resolves to `Int` semantically for type compatibility. The bridge is crossed *within* a single slot name too — a name's head stays syntactic while its type arguments are resolved and rendered from the semantic side ([spec §3.8.1](../spec/03-slot-references.md)), which is why one renderer owns both halves (Design Pattern 8).
 
 ### 3. Error accumulation
 
@@ -709,11 +714,23 @@ De Bruijn slot references and generic monomorphization interact non-trivially. W
 
 The WASM type inference system (`inference.py`) must also handle all expression types that can appear as arguments to builtins. Missing cases (e.g. `IndexExpr`, `IfExpr`, `apply_fn` calls) return `None`, which cascades to E602 (unsupported expressions) or incorrect type inference. When adding new builtins or inference paths, check `_infer_vera_type`, `_infer_fncall_vera_type`, and `_infer_expr_wasm_type` for completeness.
 
-### 8. LLM-oriented diagnostics
+### 8. One renderer for slot names
+
+"What is the name of this type expression?" was answered independently by six subsystems, and they disagreed about aliases. A name minted one way and looked up another misses silently, and the miss reads as "not statically known" — a dangling `E699`, a false Tier 1, a split `State` cell (#1208, #1209). `naming.py` is the single answer, as a total pure function of an `AliasEnv`.
+
+**The rule is the checker's rendering**, because the binding table is keyed by it: a slot name's head is syntactic (`@PosInt` renders `PosInt`, never `Int`), its type arguments are fully resolved (`@Option<MyAlias>` renders `Option<Int>`), a refinement renders its base at top level and the elided `{@Int | ...}` form in argument position, a function type renders `Fn` at top level and its full `fn(...) effects(...)` spelling (effect row sorted) in argument position, and nothing is unnameable — an unresolvable expression renders `?`, matching the checker's `UnknownType`. `family_name` is the one deliberate divergence: a `State`/`Exn` family names a *cell*, not a spelling, so its head resolves too, gated on the resolved name being mangle-safe as a WAT symbol.
+
+**The environment is the other half of the contract, and getting it wrong fails just as silently.** An `AliasEnv` is module-scoped (spec §8.4.1), so every consumer renders against the env of the module that **declared** the enclosing function, narrowed by that function's `forall` variables (`slots.fn_slot_scope` — they shadow same-named module aliases): codegen through `_module_alias_scope`, the monomorphizer against each clone's origin module, the verifier from its own per-module registration, so an imported callee's contract is rendered in *its* namespace rather than the importer's. Rendering against a neighbouring module's namespace is the same failure as rendering with a different renderer.
+
+Two derivations stay behind in `slots.py`, and both are about a type's **representation** rather than its name: `type_expr_slot_name` (the alias-opaque spelling the WASM width/erasure walks and the structural-`Eq` derivability oracle want) and `family_fallback_name` (the last-resort name for a family whose type expression resolves to none). `slots.py` is otherwise presentation — the tables `--explain-slots`, the LSP, and the verifier read.
+
+The proof that the two sides agree is a differential, not a unit test: `tests/test_slot_naming_differential.py` instruments the checker's naming entry points, sweeps the whole `.vera` corpus plus a targeted battery, and requires zero divergence between the module's answer and a test-local statement of the rule.
+
+### 9. LLM-oriented diagnostics
 
 Every diagnostic includes a description (what went wrong), rationale (which language rule), fix (corrected code), spec reference, and a stable error code (`E001`–`E702`). The compiler's output is designed to be fed directly back to the model as corrective context. See spec Chapter 0, Section 0.5 "Diagnostics as Instructions" for the philosophy.
 
-### 9. Stable error code taxonomy
+### 10. Stable error code taxonomy
 
 Every diagnostic has a unique code grouped by compiler phase:
 

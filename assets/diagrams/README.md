@@ -67,7 +67,7 @@ reuse the arrow marker, and update the `<title>` and any paired
 
 | File | Embedded in | Depicts |
 |---|---|---|
-| `architecture.svg` | `vera/README.md`, `README.md` | full pipeline + module map, verify/compile fork, warm-verification sidecar, three targets |
+| `architecture.svg` | `vera/README.md`, `README.md` | full pipeline + module map, verify/compile fork, warm-verification sidecar, three targets, the one-renderer note for `naming.py` |
 | `workflow.svg` | `README.md` | the agent loop: write → check/verify → diagnostics feed back → run |
 | `pipeline.svg` | `spec/11` | five compile stages and their artifacts |
 | `tiers.svg` | `spec/06` | three-tier verification decision flow |
