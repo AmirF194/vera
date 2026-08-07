@@ -16,14 +16,76 @@ here too, because "converge the derivations" must not quietly drop them.
 """
 from __future__ import annotations
 
+import os
+import tempfile
+from pathlib import Path
+
 import pytest
 
 from vera import ast, naming
-from vera.codegen import CodeGenerator
-from vera.parser import parse_to_ast
+from vera.checker import typecheck
+from vera.codegen import CodeGenerator, CompileResult
+from vera.codegen import compile as codegen_compile
+from vera.parser import parse_file, parse_to_ast
+from vera.resolver import ResolvedModule
 from vera.runtime.traps import WasmTrapError
+from vera.transform import transform
 
 from tests.codegen_helpers import _compile, _compile_ok, _run
+
+
+def _resolved(path: tuple[str, ...], source: str) -> ResolvedModule:
+    """A ``ResolvedModule`` from source text, via a real temp file.
+
+    ``delete=False`` + explicit unlink is the Windows-safe pattern (an open
+    ``NamedTemporaryFile`` cannot be reopened there).
+    """
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".vera", delete=False, encoding="utf-8",
+    ) as f:
+        f.write(source)
+        f.flush()
+        fp = f.name
+    try:
+        return ResolvedModule(
+            path=path, file_path=Path(fp),
+            program=transform(parse_file(fp)), source=source,
+        )
+    finally:
+        os.unlink(fp)
+
+
+def _compile_mod(
+    source: str, modules: list[ResolvedModule],
+) -> CompileResult:
+    """Compile *source* against *modules*, asserting it type-checks first.
+
+    Check-clean is the premise: a fixture rejected before codegen would never
+    reach the emission path under test, and an assertion about which codegen
+    diagnostics came out would pass vacuously.
+    """
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".vera", delete=False, encoding="utf-8",
+    ) as f:
+        f.write(source)
+        f.flush()
+        fp = f.name
+    try:
+        program = transform(parse_file(fp))
+        check_errors = [
+            d for d in typecheck(
+                program, source=source, file=fp, resolved_modules=modules)
+            if d.severity == "error"
+        ]
+        assert not check_errors, (
+            "fixture must type-check cleanly, got: "
+            f"{[(d.error_code, d.description[:70]) for d in check_errors]}"
+        )
+        return codegen_compile(
+            program, source=source, file=fp, resolved_modules=modules,
+        )
+    finally:
+        os.unlink(fp)
 
 
 _PRELUDE = """\
@@ -196,6 +258,78 @@ public fn f(@Tiny -> @Tiny)
              for d in _compile(two_sites).diagnostics
              if d.error_code == "E618"}
     assert len(sites) == 2, sites
+
+
+def test_two_modules_at_one_coordinate_each_report() -> None:
+    """The dedup key is a location, so the location must carry its own file.
+
+    ``_e618_sites`` keys on ``(file, line, column)`` on the premise that a
+    resolved location names the file it belongs to.  That premise held at
+    three of the four places codegen works on an imported module's
+    declarations; the mono-clone body pass entered the defining module's
+    ALIAS scope without its SOURCE scope, so a clone of an IMPORTED generic
+    stamped the importer's path onto module-local coordinates.  Two library
+    modules of identical shape — ordinary, since a library template gets
+    copied — then produced the same key from different declarations and the
+    second was swallowed.
+
+    Both halves are asserted, because the location was wrong in two ways at
+    once and either alone under-specifies the fix: the COUNT (one diagnostic
+    per declaration, not one for both) and the ATTRIBUTION (each names its own
+    module's file and quotes its own module's line).  The two declarations are
+    pinned to identical line/column first — that coincidence is what makes the
+    file the only discriminator, so a fixture edit that de-aligned them would
+    leave this test green for the wrong reason.
+    """
+    def lib(mod: str, fn: str) -> str:
+        return f"""module {mod};
+
+type Pos = {{ @Int | @Int.0 > 0 }};
+type Tiny = {{ @Pos | @Pos.0 < 10 }};
+public forall<T> fn {fn}(@T, @Tiny -> @Int)
+  requires(true) ensures(true) effects(pure)
+{{ 0 }}
+"""
+
+    main = """import alib(ga);
+import blib(gb);
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ ga(1, 5) + gb(1, 5) }
+"""
+    modules = [
+        _resolved(("alib",), lib("alib", "ga")),
+        _resolved(("blib",), lib("blib", "gb")),
+    ]
+    errs = [d for d in _compile_mod(main, modules).diagnostics
+            if d.error_code == "E618"]
+
+    assert len({(d.location.line, d.location.column) for d in errs}) <= 1, (
+        "the two declarations must sit at ONE coordinate for this fixture to "
+        f"discriminate on file: {[(d.location.line, d.location.column) for d in errs]}"
+    )
+    assert len(errs) == 2, [
+        (d.location.file, d.location.line, d.location.column) for d in errs
+    ]
+    assert len({d.location.file for d in errs}) == 2, (
+        "both diagnostics were attributed to one file: "
+        f"{[d.location.file for d in errs]}"
+    )
+
+    # Attribution, not merely distinctness: each diagnostic must quote the
+    # declaration it is about.  A location naming the importer pointed past
+    # that file's last line, which renders an empty `source_line`.
+    by_file = {d.location.file: d for d in errs}
+    quoted = sorted(d.source_line.strip() for d in errs)
+    assert all(q for q in quoted), f"empty source_line: {quoted!r}"
+    assert [q.split("fn ")[1].split("(")[0] for q in quoted] == ["ga", "gb"], (
+        f"a diagnostic quoted the wrong declaration: {quoted!r}"
+    )
+    assert {str(m.file_path) for m in modules} == set(by_file), (
+        "diagnostics were not attributed to the defining modules' files: "
+        f"{sorted(by_file)}"
+    )
 
 
 @pytest.mark.parametrize(

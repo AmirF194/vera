@@ -1630,7 +1630,20 @@ class CodeGenerator(
             origin = self._mono_clone_origins.get(mdecl.name)
             # #1111: the clone's alias references resolve against its
             # defining module's namespace (no-op for a local clone).
-            with self._module_alias_scope(origin):
+            # #1189 (PR #1224 review): and its spans are that module's
+            # coordinates, so the source scope is paired here exactly as at
+            # the Pass-1.5 registration above and in Passes 2.5/2.6 — this
+            # was the one emission door that entered the alias scope alone,
+            # stamping the IMPORTER's path onto module-local line/column.
+            # Beyond the misleading location (a line past the importer's EOF
+            # renders an empty `source_line`), the E618 dedup keys on the
+            # resolved location precisely because it carries the owning file,
+            # so two modules declaring a nested refinement at coinciding
+            # coordinates collapsed to ONE diagnostic.
+            with (
+                self._module_alias_scope(origin),
+                self._module_source_scope(origin),
+            ):
                 fn_wat = self._compile_fn_tracked(
                     mdecl, export=is_public,
                     imported=origin is not None,
