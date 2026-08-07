@@ -7,9 +7,9 @@ for State handler expressions.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 
-from vera import ast, naming
+from vera import ast
 from vera.wasm.async_fusion import await_needs_check, fused_async_target
 
 
@@ -54,35 +54,37 @@ def contract_exprs(
 class CompilabilityMixin:
     """Methods for checking if functions are compilable to WASM."""
 
-    def _signature_refinement_predicates(
-        self, decl: ast.FnDecl,
-    ) -> Iterator[ast.Expr]:
-        """Every refinement predicate LOWERED as a boundary guard for *decl*.
+    def _scan_anon_fn_signature(
+        self, node: ast.AnonFn, scan: Callable[[ast.Node], None],
+    ) -> None:
+        """Walk the boundary-guard predicates of a closure's SIGNATURE (#1210
+        round 7), shared by both pre-scan walkers.
 
-        The third position the pre-scans missed (#1210 round 5), and the same
-        shape as `contract_exprs`: a parameter or return type that resolves to
-        a `{ @Base | P }` refinement has `P` emitted as a runtime guard in this
-        function's prologue/epilogue, so a `handle[State<T>]` or a host-imported
-        builtin written in `P` is LOWERED here — `type Big = { @Int |
-        nat_to_int(handle[State<Nat>] … ) > 0 && @Int.0 > 5 }` used as a
-        parameter type died at whole-module WAT with `unknown func
-        $vera.state_push_Nat`, from a check-green program.  The predicate is
-        reached through the ALIAS table rather than structurally from the
-        signature's `TypeExpr`, which is why no amount of walking the AST from
-        the body finds it.
+        The walkers descend an `AnonFn`'s BODY because the closure compile
+        pipeline runs no scan of its own on lifted bodies.  Its SIGNATURE is
+        lowered there too: `closures.py` emits a runtime guard for every
+        refined formal and for a refined return, so `fn(@Big -> @Int)` behind
+        an `apply_fn` — with `Big` a refinement whose predicate contains a
+        `handle[State<Nat>]` — emitted `state_push_Nat` against an import
+        nothing declared.  `_signature_refinement_predicates` is the ONE
+        derivation of what those guards check; this walks what it yields.
 
-        The two bails mirror `_refinement_guard_parts` (contracts.py) exactly,
-        because registration must equal what is emitted, not exceed it: a
-        nested-refinement base is an E618 with NO guard, and an erased base
-        (`@Unit`, `Future<Unit>`) emits no guard either.
+        Cycle-guarded, because a refinement predicate may contain a closure
+        whose own formal is refined by the same alias: `type R = { @Int | …
+        fn(@R -> @Int) … }` type-checks, and expanding R's predicate reaches
+        that closure, whose signature expands R's predicate again.  The stack
+        is popped on the way out, so this suppresses only genuine re-entry —
+        a later function meeting the same closure still gets its own
+        registration verdict (and, for the handler walk, its own E607/E612).
         """
-        for te in (*decl.params, decl.return_type):
-            parts = naming.refinement_binder_parts(te, self._alias_env)
-            if parts is None or parts.base_is_refinement:
-                continue
-            if self._type_expr_to_wasm_type(parts.base) is None:
-                continue
-            yield parts.predicate
+        if id(node) in self._anon_sig_scan_stack:
+            return
+        self._anon_sig_scan_stack.add(id(node))
+        try:
+            for pred in self._signature_refinement_predicates(node):
+                scan(pred)
+        finally:
+            self._anon_sig_scan_stack.discard(id(node))
 
     def _is_compilable(self, decl: ast.FnDecl) -> bool:
         """Check if a function can be compiled to WASM.
@@ -404,6 +406,11 @@ class CompilabilityMixin:
         #                       so without this branch IO ops
         #                       inside a closure body would silently
         #                       miss their host-import registration)
+        #                       AND into the SIGNATURE's refinement
+        #                       predicates (#1210 round 7, via
+        #                       `_scan_anon_fn_signature`): a refined
+        #                       formal / return is guarded in that
+        #                       same lifted body
         #   AssertExpr        → recurses into the condition (#1210
         #                       round 2 — pure ≠ host-import-free: an
         #                       `md_*` / `regex_*` builtin, or a
@@ -569,6 +576,11 @@ class CompilabilityMixin:
                 if not isinstance(part, str):
                     self._scan_io_ops(part)
         elif isinstance(node, ast.AnonFn):
+            # Body AND signature (#1210 round 7): a refined formal / return
+            # has its predicate lowered as a boundary guard in the lifted
+            # body, so an `md_*` / `regex_*` builtin written in one is
+            # emitted from here and registered by nobody else.
+            self._scan_anon_fn_signature(node, self._scan_io_ops)
             self._scan_io_ops(node.body)
         # #1210 round 2 — symmetrical with `_scan_expr_for_handlers`.  The
         # handler walk now descends these positions, so a handler reached
@@ -598,11 +610,14 @@ class CompilabilityMixin:
         Covers the body, every contract predicate (``requires`` / ``ensures``
         / ``decreases``) which ``contract_exprs`` enumerates, AND every
         signature refinement predicate which
-        ``_signature_refinement_predicates`` enumerates.  Runtime-checked
+        ``_signature_refinement_predicates`` enumerates — for this function's
+        own signature here, and for every closure signature met on the way
+        through the body (``_scan_anon_fn_signature``).  Runtime-checked
         contracts and refinement boundary guards are lowered into the function
         like any other code, so a ``handle[State<Nat>]`` written in a
-        ``requires`` predicate (#1210 round 2) or in a parameter type's
-        ``{ @Int | … }`` refinement (round 5) emits ``call
+        ``requires`` predicate (#1210 round 2), in a parameter type's
+        ``{ @Int | … }`` refinement (round 5), in a tuple COMPONENT's
+        refinement, or in a closure formal's (round 7) emits ``call
         $vera.state_push_Nat`` — the body-only walk registered nothing for it
         and the module failed to compile with ``unknown func``, from a
         check-green, verify-clean program.
@@ -720,7 +735,14 @@ class CompilabilityMixin:
         #                       without this branch HandleExprs inside
         #                       a closure body would silently miss
         #                       their State/Exn host-import
-        #                       registration)
+        #                       registration) AND into the SIGNATURE's
+        #                       refinement predicates (#1210 round 7,
+        #                       via `_scan_anon_fn_signature`): the
+        #                       closure path guards a refined formal /
+        #                       return in that same lifted body, so
+        #                       `fn(@Big -> @Int)` behind an `apply_fn`
+        #                       emitted `state_push_Nat` against an
+        #                       import nothing declared
         #   AssertExpr        → recurses into the condition (#1210
         #                       round 2 — "pure" is not "handler-free":
         #                       `assert(handle[State<Nat>] … > 0)` is
@@ -822,6 +844,11 @@ class CompilabilityMixin:
                 if not isinstance(part, str):
                     self._scan_expr_for_handlers(part)
         elif isinstance(node, ast.AnonFn):
+            # Body AND signature (#1210 round 7) — the closure path emits a
+            # boundary guard for every refined formal and for a refined
+            # return, so a `handle[State<Nat>]` in one of those predicates is
+            # lowered into the lifted body with nothing else to register it.
+            self._scan_anon_fn_signature(node, self._scan_expr_for_handlers)
             self._scan_expr_for_handlers(node.body)
         # #1210 round 2 — the contract-predicate positions.  These are not
         # "cannot occur": a handle expression is an ordinary Bool-valued

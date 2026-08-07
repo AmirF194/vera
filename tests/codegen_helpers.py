@@ -42,15 +42,19 @@ _TABLE_DECL_RE = re.compile(r"(?m)^\s*\(table\b")
 def exceptions_engine() -> wasmtime.Engine:
     """A wasmtime engine configured the way ``execute()`` configures its own.
 
-    ``vera/codegen/api.py`` enables ``wasm_exceptions``, and the supported
-    wasmtime range includes versions where the proposal is NOT on by default
-    (PR #1192 review).  A bare ``wasmtime.Engine()`` therefore rejects every
-    valid ``Exn`` module on those versions while passing on others — a test
-    that loads or validates emitted WAT must use this, not the default, or it
-    is testing the runner's wasmtime build rather than the compiler.  Measured
-    on this corpus: 10 of the 31 handler-bearing modules
+    ``vera/codegen/api.py`` enables ``wasm_exceptions`` explicitly, and the
+    SUPPORTED wasmtime range includes versions where the proposal is not on by
+    default (PR #1192 review).  A test that loads or validates emitted WAT has
+    to configure it the same way, or on those versions it rejects every valid
+    ``Exn`` module and is measuring the runner's wasmtime build rather than
+    the compiler.
+
+    That is a claim about the range, not about today's runner: on wasmtime
+    47.0.1 exceptions default ON, so a bare ``wasmtime.Engine()`` currently
+    loads the whole corpus.  What the proposal being off costs is measured
+    directly instead — 10 of the 30 handler-bearing modules
     ``test_state_exn_registration`` validates fail to load with
-    ``wasm_exceptions=False``.
+    ``wasm_exceptions=False``, which is what a supported older runner sees.
     """
     config = wasmtime.Config()
     config.wasm_exceptions = True

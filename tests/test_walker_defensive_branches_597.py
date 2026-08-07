@@ -43,6 +43,7 @@ disposition onto all thirteen marked walkers.
 
 from __future__ import annotations
 
+import ast as pyast
 import dataclasses
 import importlib.util
 import inspect
@@ -363,9 +364,13 @@ _JUSTIFIED_IGNORES: dict[str, str] = {
         "point, same as the other three clause kinds.",
     "RefinementType":
         "signature refinement predicate — enumerated by "
-        "`_signature_refinement_predicates()` at the entry point (#1210 "
-        "round 5); reached through the alias table, so no structural walk "
-        "can find it.",
+        "`_signature_refinement_predicates()` (#1210 rounds 5 and 7), the "
+        "ONE derivation of what the boundary-guard emitters lower, covering "
+        "all four of their routes: a param's or a return's own refinement, "
+        "a tuple component's (both consume `_tuple_component_guard_sites`), "
+        "and a closure signature's (off the AnonFn branch, via "
+        "`_scan_anon_fn_signature`).  Reached through the alias table, so no "
+        "structural walk can find it.",
     "HandlerState":
         "reached through the HandleExpr branch, which walks "
         "`node.state.init_expr`.",
@@ -429,9 +434,23 @@ def coverage_script() -> object:
     return mod
 
 
+def _attribute_reads(fn_node: pyast.AST) -> set[str]:
+    """Every attribute NAME read anywhere in a walker function.
+
+    `node.state.init_expr`, `clause.body`, `stmt.value` — the receivers are
+    untyped locals, so this is a name set, not a per-class one.  That is the
+    limit of the field gate below and is stated on it.
+    """
+    return {
+        n.attr for n in pyast.walk(fn_node) if isinstance(n, pyast.Attribute)
+    }
+
+
 @pytest.fixture(scope="module")
-def pre_scan_walkers(coverage_script: object) -> dict[str, tuple[set, set]]:
-    """`{walker name: (isinstance-dispatched, checklist-named)}`."""
+def pre_scan_walkers(
+    coverage_script: object,
+) -> dict[str, tuple[set, set, set]]:
+    """`{walker: (isinstance-dispatched, checklist-named, fields-read)}`."""
     path = Path(inspect.getfile(compilability))
     found = coverage_script.find_walker_functions(path)  # type: ignore[attr-defined]
     by_name = {node.name: (node, src) for node, src in found}
@@ -446,6 +465,7 @@ def pre_scan_walkers(coverage_script: object) -> dict[str, tuple[set, set]]:
         name: (
             coverage_script.extract_isinstance_classes(by_name[name][0]),  # type: ignore[attr-defined]
             coverage_script.extract_checklist_classes(by_name[name][1]),  # type: ignore[attr-defined]
+            _attribute_reads(by_name[name][0]),
         )
         for name in _PRE_SCANS
     }
@@ -459,8 +479,27 @@ class TestPreScanWalkerFieldCoverage:
     program contains; round 5's two holes had no corpus instance, so they
     survived a green suite for as long as nobody wrote the shape.  This gate
     is schema-driven instead: it reads the dataclass fields of `vera/ast.py`,
-    so a new class or a new expression-carrying field is a loud failure at
-    the commit that adds it, whether or not anyone writes a program using it.
+    so a new class — or a new expression-carrying field on a class the
+    walkers already dispatch on — is a loud failure at the commit that adds
+    it, whether or not anyone writes a program using it.
+
+    Two granularities, because they fail differently:
+
+    * CLASS — a canonical class must be `isinstance`-dispatched or justified
+      in `_JUSTIFIED_IGNORES`.
+    * FIELD — every descendable field of a dispatched class must be READ
+      somewhere in that walker's source.  Adding `IfExpr.finally_branch` and
+      not walking it leaves the class dispatched and the class-level check
+      green, which is exactly how a live sub-expression goes unregistered.
+
+    The field check compares NAMES, not (class, field) pairs: a walker reads
+    `node.body` / `clause.body` off untyped locals, so it cannot be attributed
+    to a class without typing the receivers.  A new field that reuses a name
+    some other branch already reads (`body`, `expr`, `value`, `args`)
+    therefore passes it.  Narrowing that would mean type-inferring the
+    walkers' locals — the check as it stands catches every NEW name, which is
+    the ordinary case, and the class-level gate plus the corpus differential
+    cover the rest.
 
     Deliberately STRONGER than `scripts/check_walker_coverage.py`: a
     checklist disposition alone does not count as coverage here, only an
@@ -471,7 +510,7 @@ class TestPreScanWalkerFieldCoverage:
     """
 
     def test_every_expression_carrying_class_is_walked_or_justified(
-        self, pre_scan_walkers: dict[str, tuple[set, set]],
+        self, pre_scan_walkers: dict[str, tuple[set, set, set]],
     ) -> None:
         canonical = _canonical_classes()
         assert len(canonical) > 20, (
@@ -479,7 +518,8 @@ class TestPreScanWalkerFieldCoverage:
             "the schema scan has stopped matching, and this gate would pass "
             "vacuously"
         )
-        for walker, (dispatched, _checklist) in pre_scan_walkers.items():
+        for walker, (dispatched, _checklist, _reads) in (
+                pre_scan_walkers.items()):
             holes = sorted(
                 set(canonical) - dispatched - set(_JUSTIFIED_IGNORES))
             assert not holes, (
@@ -512,8 +552,62 @@ class TestPreScanWalkerFieldCoverage:
                 f"expressions ARE reached, got: {reason!r}"
             )
 
+    def test_every_descendable_field_of_a_dispatched_class_is_read(
+        self, pre_scan_walkers: dict[str, tuple[set, set, set]],
+    ) -> None:
+        """FIELD granularity: a dispatched class's new field is loud too.
+
+        The class-level gate above goes green the moment a class has ANY
+        `isinstance` branch, so a field added to an already-dispatched class
+        — the commonest way an AST grows — passed it silently.  This reads
+        the walker's own source and requires the field name to appear.
+        """
+        canonical = _canonical_classes()
+        for walker, (dispatched, _checklist, reads) in (
+                pre_scan_walkers.items()):
+            holes = sorted(
+                f"{name}.{field}"
+                for name in dispatched & set(canonical)
+                for field in canonical[name]
+                if field not in reads
+            )
+            assert not holes, (
+                f"`{walker}` dispatches on these classes but never reads "
+                + ", ".join(holes)
+                + " — the class has a branch, so the class-level gate is "
+                "green, while a live sub-expression goes unregistered and "
+                "the lowering emits its calls anyway (#1210).  Read the "
+                "field in the branch, or move the class to "
+                "`_JUSTIFIED_IGNORES`."
+            )
+
+    def test_the_field_gate_can_go_red(
+        self, pre_scan_walkers: dict[str, tuple[set, set, set]],
+    ) -> None:
+        """A fabricated field on a dispatched class must be reported.
+
+        The mutation the field gate exists to catch, run against the real
+        extraction: no walker reads `fake_extra`, so pretending `IfExpr`
+        declares one must produce exactly that hole.  Without this, an
+        `_attribute_reads` that returned everything (or a `canonical` that
+        returned nothing) would leave the gate green forever.
+        """
+        canonical = dict(_canonical_classes())
+        assert "IfExpr" in canonical, "the fixture class must still exist"
+        canonical["IfExpr"] = [*canonical["IfExpr"], "fake_extra"]
+        for walker, (dispatched, _checklist, reads) in (
+                pre_scan_walkers.items()):
+            assert "IfExpr" in dispatched, walker
+            holes = sorted(
+                f"{name}.{field}"
+                for name in dispatched & set(canonical)
+                for field in canonical[name]
+                if field not in reads
+            )
+            assert holes == ["IfExpr.fake_extra"], (walker, holes)
+
     def test_the_checklist_comments_stay_truthful(
-        self, pre_scan_walkers: dict[str, tuple[set, set]],
+        self, pre_scan_walkers: dict[str, tuple[set, set, set]],
     ) -> None:
         """Every dispatched class is documented in the walker's checklist.
 
@@ -524,7 +618,8 @@ class TestPreScanWalkerFieldCoverage:
         line the moment its branch landed.
         """
         canonical = _canonical_classes()
-        for walker, (dispatched, checklist) in pre_scan_walkers.items():
+        for walker, (dispatched, checklist, _reads) in (
+                pre_scan_walkers.items()):
             undocumented = sorted(
                 (dispatched & set(canonical)) - checklist)
             assert not undocumented, (
@@ -550,6 +645,119 @@ class TestPreScanWalkerFieldCoverage:
         holes = sorted(
             set(canonical) - pretend_dispatched - set(_JUSTIFIED_IGNORES))
         assert holes == ["LetDestruct", "ModuleCall"], holes
+
+
+# =====================================================================
+# ONE boundary-guard derivation, consumed by both sides (#1210 round 7)
+# =====================================================================
+
+
+def _self_calls(path: Path, fn: str) -> set[str]:
+    """Method names *fn* calls on `self`, anywhere in its body."""
+    tree = pyast.parse(path.read_text(encoding="utf-8"))
+    for node in pyast.walk(tree):
+        if isinstance(node, pyast.FunctionDef) and node.name == fn:
+            return {
+                c.func.attr
+                for c in pyast.walk(node)
+                if isinstance(c, pyast.Call)
+                and isinstance(c.func, pyast.Attribute)
+                and isinstance(c.func.value, pyast.Name)
+                and c.func.value.id == "self"
+            }
+    raise AssertionError(f"{fn} not found in {path.name} — has it moved?")
+
+
+_CONTRACTS = Path(inspect.getfile(compilability)).parent / "contracts.py"
+_COMPILABILITY = Path(inspect.getfile(compilability))
+
+
+class TestBoundaryGuardDerivationIsShared:
+    """The pre-scan reads the emitters' own decomposition, not a copy of it.
+
+    Round 5 registered a named function's params and return by RE-DERIVING
+    the emitter's two bails ("mirror `_refinement_guard_parts` exactly" was
+    the comment).  It was a faithful copy of one route and unaware of three
+    others — tuple components on the way in, tuple components on the way out,
+    and closure signatures — each of which lowered predicates nothing
+    registered, and each of which was a check-green program that died at
+    whole-module WAT with `unknown func $vera.state_push_Nat`.
+
+    A behavioural test can only pin the shapes someone thought to write; the
+    reason round 5's fix was incomplete is that three shapes went unwritten.
+    So this asserts the STRUCTURE that makes the classes converge: exactly
+    one function classifies, and every consumer calls it.  Divergence now
+    requires editing that function — or deleting an edge here.
+    """
+
+    def test_every_consumer_reads_the_one_decomposition(self) -> None:
+        for consumer in (
+            "_emit_component_refinement_guards",   # the emitter
+            "_has_guardable_tuple_components",     # the epilogue gate
+            "_component_guard_predicates",         # the pre-scan's enumeration
+        ):
+            calls = _self_calls(_CONTRACTS, consumer)
+            assert "_tuple_component_guard_sites" in calls, (
+                f"`{consumer}` no longer reads the shared tuple "
+                "decomposition — it is classifying components itself again, "
+                f"which is the round-5 shape.  Calls: {sorted(calls)}"
+            )
+
+    def test_no_consumer_reclassifies_behind_the_decomposition(self) -> None:
+        """The negative half: a consumer that re-derives has diverged.
+
+        `_refinement_guard_parts` / `_resolve_tuple_type` / `_resolve_type_
+        alias` are how a component is classified.  Called from a consumer
+        rather than from `_tuple_component_guard_sites`, they are a second
+        opinion — and a second opinion is what the pre-scan and the emitter
+        having was.
+        """
+        for consumer in (
+            "_emit_component_refinement_guards",
+            "_has_guardable_tuple_components",
+            "_component_guard_predicates",
+        ):
+            calls = _self_calls(_CONTRACTS, consumer)
+            reclassified = calls & {
+                "_refinement_guard_parts",
+                "_resolve_tuple_type",
+                "_resolve_type_alias",
+            }
+            assert not reclassified, (
+                f"`{consumer}` classifies components with "
+                f"{sorted(reclassified)} instead of reading "
+                "`_tuple_component_guard_sites` — put the decision in the "
+                "decomposition, where all three consumers see it"
+            )
+
+    def test_the_pre_scan_walks_closure_signatures(self) -> None:
+        """Both walkers reach the closure leg, and it reads the derivation."""
+        assert "_signature_refinement_predicates" in _self_calls(
+            _COMPILABILITY, "_scan_anon_fn_signature")
+        for walker in _PRE_SCANS:
+            assert "_scan_anon_fn_signature" in _self_calls(
+                _COMPILABILITY, walker), (
+                f"`{walker}` no longer walks an AnonFn's SIGNATURE — a "
+                "refined closure formal / return is guarded in the lifted "
+                "body, and nothing else registers what its predicate needs"
+            )
+
+    def test_the_named_entry_point_reads_the_same_derivation(self) -> None:
+        """The handler walk's entry point enumerates a `FnDecl`'s signature."""
+        assert "_signature_refinement_predicates" in _self_calls(
+            _COMPILABILITY, "_scan_body_for_state_handlers")
+
+    def test_the_callgraph_probe_can_go_red(self) -> None:
+        """The extraction finds real edges, and misses ones that are absent."""
+        calls = _self_calls(_CONTRACTS, "_signature_refinement_predicates")
+        assert {"_refinement_guard_parts", "_component_guard_predicates"} <= (
+            calls), sorted(calls)
+        assert "_emit_refinement_check" not in calls, (
+            "the derivation must not EMIT anything — it is read by the "
+            "import pre-scan, which runs before any instruction is built"
+        )
+        with pytest.raises(AssertionError):
+            _self_calls(_CONTRACTS, "_no_such_method_anywhere")
 
 
 # =====================================================================

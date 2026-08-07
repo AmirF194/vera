@@ -335,13 +335,25 @@ class CodeGenerator(
         # wherever the maps change.
         self._alias_env: AliasEnv = EMPTY_ALIAS_ENV
 
-        # E618 sites already reported (PR #1224 review).  The nested-refinement
-        # rejection in `_refinement_guard_parts` fires from several call sites
-        # per declaration and once per monomorphized clone, all from the same
+        # Diagnostics already reported by `_error_once` (PR #1224 review).  The
+        # boundary-guard layer's errors fire from several call sites per
+        # declaration and once per monomorphized clone, all from the same
         # spans; the set keeps one declaration to one diagnostic.  Keyed by
-        # resolved (file, line, column), so a same-position declaration in a
-        # different module still reports.
-        self._e618_sites: set[tuple[str, int, int]] = set()
+        # (code, message, resolved file, line, column), so a same-position
+        # declaration in a different module — or a genuinely different error at
+        # one position — still reports.
+        self._error_once_sites: set[
+            tuple[str, str, str | None, int, int]] = set()
+
+        # #1210 round 7: AnonFn signatures currently being expanded by
+        # `_scan_anon_fn_signature`.  A refinement's predicate may itself
+        # contain a closure whose formal is refined by the SAME alias
+        # (`type R = { @Int | … fn(@R -> @Int) … }` type-checks), so the
+        # signature leg of the pre-scan walkers is cycle-guarded the way
+        # every other alias walk here is.  A stack, not a memo: entries are
+        # discarded on the way out, so a second function meeting the same
+        # closure still gets its own registration verdict.
+        self._anon_sig_scan_stack: set[int] = set()
 
         # #1172: runtime decreases-guard state.  ``_dec_guard_fns`` maps
         # each guarded function's WAT name -> lexicographic component
@@ -698,6 +710,39 @@ class CodeGenerator(
             severity="error",
             error_code=error_code,
         ))
+
+    def _error_once(
+        self,
+        node: ast.Node,
+        description: str,
+        *,
+        rationale: str = "",
+        error_code: str = "",
+    ) -> None:
+        """`_error`, but at most one such diagnostic per source position.
+
+        For the errors raised by a helper the compile CONSULTS repeatedly —
+        the boundary-guard layer's nested-refinement rejection (E618) and its
+        tuple-depth fail-closed (E617).  Both are properties of a
+        DECLARATION, and both are now derived once and read by three
+        consumers (the guard emitters, the has-guardable predicate, and the
+        host-import pre-scan), plus once more per monomorphized clone — every
+        one of them from the same spans.  Reporting per visit turned one
+        declaration into three identical diagnostics.
+
+        Keyed on the resolved location AND the message, so the dedup can only
+        ever swallow a repeat of the same finding: two library modules whose
+        declarations share a line/column still report (the location carries
+        its own file, PR #1224 review), and two DIFFERENT errors that happen
+        to land on one span both survive.
+        """
+        loc, _source_line = self._diag_location(node)
+        key = (error_code, description, loc.file, loc.line, loc.column)
+        if key in self._error_once_sites:
+            return
+        self._error_once_sites.add(key)
+        self._error(
+            node, description, rationale=rationale, error_code=error_code)
 
     def _get_source_line(self, line: int) -> str:
         """Extract a line from the source text."""

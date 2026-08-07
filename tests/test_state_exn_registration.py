@@ -59,11 +59,12 @@ import wasmtime
 from tests.codegen_helpers import _compile, _run, exceptions_engine
 from tests.checker_helpers import _check_ok
 from tests.verifier_helpers import _verify_ok
+from vera import ast
 from vera.errors import VeraError
 from vera.parser import parse_file, parse_to_ast
 from vera.resolver import ResolvedModule
 from vera.transform import transform
-from vera.codegen import compile as codegen_compile, execute
+from vera.codegen import CodeGenerator, compile as codegen_compile, execute
 
 _MAIN = """
 public fn main(@Unit -> @Int)
@@ -307,6 +308,130 @@ private fn probe(@Unit -> @Int)
 }
 """
 
+# --- the same predicate, reached through a TUPLE COMPONENT --------------
+# Round 5 enumerated a named function's own params and return.  A tuple
+# parameter carries no top-level refinement, so `Big` is reached only by
+# DECOMPOSING it — `_emit_component_refinement_guards` lowers the same
+# predicate per component, and nothing registered it.
+#   the component guard runs, 3 > 0 and 10 > 5 hold, the component is 10
+# => 10.
+_HANDLE_IN_TUPLE_PARAM_COMPONENT = """
+type Big = { @Int | nat_to_int(handle[State<Nat>](@Nat = 3) {
+  get(@Unit) -> { resume(@Nat.0) },
+  put(@Nat) -> { resume(()) }
+} in {
+  get(())
+}) > 0 && @Int.0 > 5 };
+
+private fn refined(@Tuple<Big, Int> -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let Tuple<@Big, @Int> = @Tuple<Big, Int>.0;
+  @Big.0
+}
+
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  refined(Tuple(10, 2))
+}
+"""
+
+# The RETURN half of the component decomposition — a different emission site
+# (`_compile_postconditions`) reached from the same enumeration.
+_HANDLE_IN_TUPLE_RETURN_COMPONENT = """
+type Big = { @Int | nat_to_int(handle[State<Nat>](@Nat = 3) {
+  get(@Unit) -> { resume(@Nat.0) },
+  put(@Nat) -> { resume(()) }
+} in {
+  get(())
+}) > 0 && @Int.0 > 5 };
+
+private fn refined(@Unit -> @Tuple<Big, Int>)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  Tuple(10, 2)
+}
+
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let Tuple<@Big, @Int> = refined(());
+  @Big.0
+}
+"""
+
+# --- and through a CLOSURE's signature ---------------------------------
+# `closures.py` guards a refined formal in the lifted body's prologue.  The
+# walkers descend an AnonFn's BODY (#597) but not its signature, so this
+# predicate was lowered into a lifted closure with nothing registering it.
+#   the formal guard runs, `@Big.0 * 2` with 10 => 20.
+_HANDLE_IN_CLOSURE_PARAM_REFINEMENT = """
+type Big = { @Int | nat_to_int(handle[State<Nat>](@Nat = 3) {
+  get(@Unit) -> { resume(@Nat.0) },
+  put(@Nat) -> { resume(()) }
+} in {
+  get(())
+}) > 0 && @Int.0 > 5 };
+
+type BigToInt = fn(Big -> Int) effects(pure);
+
+private fn make(@Unit -> @BigToInt)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  fn(@Big -> @Int) effects(pure) { @Big.0 * 2 }
+}
+
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @BigToInt = make(());
+  apply_fn(@BigToInt.0, 10)
+}
+"""
+
+# The closure RETURN half — the #1032 refined-return guard, appended to the
+# lifted body rather than emitted in its prologue.
+_HANDLE_IN_CLOSURE_RETURN_REFINEMENT = """
+type Big = { @Int | nat_to_int(handle[State<Nat>](@Nat = 3) {
+  get(@Unit) -> { resume(@Nat.0) },
+  put(@Nat) -> { resume(()) }
+} in {
+  get(())
+}) > 0 && @Int.0 > 5 };
+
+type IntToBig = fn(Int -> Big) effects(pure);
+
+private fn make(@Unit -> @IntToBig)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  fn(@Int -> @Big) effects(pure) { @Int.0 * 2 }
+}
+
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @IntToBig = make(());
+  apply_fn(@IntToBig.0, 10)
+}
+"""
+
 _SHAPES = [
     ("handle_in_clause_body", _HANDLE_IN_CLAUSE_BODY, 119),
     ("handle_in_state_init", _HANDLE_IN_STATE_INIT, 9),
@@ -316,6 +441,14 @@ _SHAPES = [
     ("exn_in_letdestruct", _EXN_IN_LETDESTRUCT, 42),
     ("handle_in_param_refinement", _HANDLE_IN_PARAM_REFINEMENT, 10),
     ("handle_in_return_refinement", _HANDLE_IN_RETURN_REFINEMENT, 10),
+    ("handle_in_tuple_param_component",
+     _HANDLE_IN_TUPLE_PARAM_COMPONENT, 10),
+    ("handle_in_tuple_return_component",
+     _HANDLE_IN_TUPLE_RETURN_COMPONENT, 10),
+    ("handle_in_closure_param_refinement",
+     _HANDLE_IN_CLOSURE_PARAM_REFINEMENT, 20),
+    ("handle_in_closure_return_refinement",
+     _HANDLE_IN_CLOSURE_RETURN_REFINEMENT, 20),
 ]
 
 # --- the i32_pair cell the walk skipped in silence --------------------
@@ -357,6 +490,201 @@ def test_handler_family_reached_only_off_the_body_is_registered(
     _check_ok(program)
     _verify_ok(program)
     assert _run(program) == expected
+
+
+# =====================================================================
+# Registration EQUALS emission (#1210 round 7)
+# =====================================================================
+#
+# The shapes above pin the under-registration direction: a predicate that is
+# lowered must be registered.  The tests below pin the other one — a
+# predicate that is NOT lowered must NOT be registered, because an import
+# declared for a guard nobody emits is a host obligation nothing calls.  Both
+# directions come off ONE derivation
+# (`ContractsMixin._signature_refinement_predicates`), so they are properties
+# of a single function rather than of two that happen to agree.
+
+# A closure formal typed as a refined TUPLE.  The closure path emits
+# top-level formal / return guards only — it never calls
+# `_emit_component_refinement_guards` — so `Big`'s predicate is not lowered
+# anywhere here and its `State<Nat>` family must not be declared.  Measured:
+# enumerating components for an AnonFn too declares 4 spurious state imports.
+_CLOSURE_TUPLE_FORMAL = """
+type Big = { @Int | nat_to_int(handle[State<Nat>](@Nat = 3) {
+  get(@Unit) -> { resume(@Nat.0) },
+  put(@Nat) -> { resume(()) }
+} in {
+  get(())
+}) > 0 && @Int.0 > 5 };
+
+type BigPair = Tuple<Big, Int>;
+type PairToInt = fn(BigPair -> Int) effects(pure);
+
+private fn make(@Unit -> @PairToInt)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  fn(@BigPair -> @Int) effects(pure) { 1 }
+}
+
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @PairToInt = make(());
+  apply_fn(@PairToInt.0, Tuple(10, 2))
+}
+"""
+
+# The two bails the derivation inherits from `_refinement_guard_parts`, each
+# with a handler in the predicate so an over-registration would show.  A
+# nested refinement base is an E618 with NO guard; an erased (`@Unit`) base
+# emits no guard either.  Both were `continue`s in the round-5 enumeration
+# and are now the emitter's own decisions, reached through the same helper —
+# this pins that the behaviour did not move.
+_NESTED_REFINEMENT_BASE = """
+type Inner = { @Int | @Int.0 > 0 };
+type Outer = { @Inner | nat_to_int(handle[State<Nat>](@Nat = 3) {
+  get(@Unit) -> { resume(@Nat.0) },
+  put(@Nat) -> { resume(()) }
+} in {
+  get(())
+}) > 0 };
+
+private fn probe(@Outer -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  @Outer.0
+}
+"""
+
+_ERASED_REFINEMENT_BASE = """
+type BigU = { @Unit | nat_to_int(handle[State<Nat>](@Nat = 3) {
+  get(@Unit) -> { resume(@Nat.0) },
+  put(@Nat) -> { resume(()) }
+} in {
+  get(())
+}) > 0 };
+
+private fn refined(@BigU -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  7
+}
+
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  refined(())
+}
+"""
+
+
+def test_a_closure_tuple_formal_registers_nothing_spurious() -> None:
+    """A guard the closure path does not emit must not be registered.
+
+    Component decomposition is a `FnDecl`-only leg of the derivation because
+    it is a `FnDecl`-only leg of the EMITTERS.  Enumerating a closure's tuple
+    components would declare a `State<Nat>` import quadruple that no
+    instruction in the module ever calls — the mirror-image of the bug this
+    round fixes, and the reason the derivation is written against what is
+    emitted rather than against what could be.
+    """
+    program = _CLOSURE_TUPLE_FORMAL + _MAIN
+    _check_ok(program)
+    assert _run(program) == 1
+    wat = _compile(program).wat or ""
+    assert not _STATE_DECL.findall(wat), (
+        "no guard lowers `Big`'s predicate in this program, so no State "
+        "family may be declared: "
+        f"{sorted(set(_STATE_DECL.findall(wat)))}"
+    )
+
+
+def test_the_nested_refinement_bail_registers_nothing() -> None:
+    """E618 rejects the guard, so nothing about it may be registered."""
+    result = _compile(_NESTED_REFINEMENT_BASE + _MAIN)
+    codes = [d.error_code for d in result.diagnostics if d.severity == "error"]
+    assert "E618" in codes, (
+        f"expected the nested-refinement rejection, got: {result.diagnostics}"
+    )
+    assert not _STATE_DECL.findall(result.wat or ""), (
+        "a rejected guard emits no calls, so it must declare no imports"
+    )
+
+
+def test_the_erased_base_bail_registers_nothing() -> None:
+    """A `@Unit`-based refinement has no local to check, so no guard, so no
+    import — and the program still runs."""
+    program = _ERASED_REFINEMENT_BASE + _MAIN
+    _check_ok(program)
+    _verify_ok(program)
+    assert _run(program) == 7
+    assert not _STATE_DECL.findall(_compile(program).wat or ""), (
+        "an erased base emits no guard, so it must declare no imports"
+    )
+
+
+_SELF_REFERENTIAL_REFINEMENT = """
+type SelfRef = { @Int | @Int.0 > 0 && apply_fn(fn(@SelfRef -> @Int)
+  effects(pure) { @SelfRef.0 }, 3) > 0 };
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  1
+}
+"""
+
+
+def test_the_closure_signature_leg_is_cycle_guarded() -> None:
+    """A refinement whose predicate contains a closure refined by ITSELF.
+
+    `type SelfRef = { @Int | … fn(@SelfRef -> @Int) … }` type-checks, and the
+    signature leg added in round 7 walks that closure's formals — which
+    resolve back to `SelfRef`, whose predicate contains the same closure.
+    Unguarded, the pre-scan walks that cycle until the interpreter stops it,
+    turning a check-green program into a raw `RecursionError` traceback.
+
+    Both halves are asserted: the walk TERMINATES, and the guard is what
+    terminates it (with the stack neutered, the same walk blows the Python
+    recursion limit).  A cycle-guard test that only asserts termination
+    passes just as well when the cycle was never reachable.
+    """
+    gen = CodeGenerator(
+        source=_SELF_REFERENTIAL_REFINEMENT, file="<cycle>")
+    gen.compile_program(parse_to_ast(_SELF_REFERENTIAL_REFINEMENT))
+    parts = gen._refinement_guard_parts(
+        ast.NamedType(name="SelfRef", type_args=None))
+    assert parts is not None, (
+        "the fixture must resolve to a refinement, or the cycle is not "
+        "reachable and this test is vacuous"
+    )
+    predicate = parts[0]
+
+    gen._unregistrable_state_cells = []
+    gen._unregistrable_exn_tags = []
+    gen._scan_expr_for_handlers(predicate)  # must terminate
+
+    class _NoGuard(set):  # type: ignore[type-arg]
+        """The cycle-guard stack, neutered: nothing is ever recorded."""
+
+        def add(self, value: object) -> None:
+            pass
+
+    gen._anon_sig_scan_stack = _NoGuard()
+    with pytest.raises(RecursionError):
+        gen._scan_expr_for_handlers(predicate)
 
 
 def test_uncompilable_cell_type_in_a_handled_body_is_loud() -> None:
@@ -763,17 +1091,18 @@ def test_every_referenced_state_exn_symbol_is_declared() -> None:
     Two legs, because the name comparison alone is not the invariant.  The
     symbol-set leg catches an UNDECLARED symbol, over every program in the
     sweep.  The validation leg — handing the HANDLER-BEARING modules (the
-    ones that reference a `state_*` / `exn_*` symbol at all, currently 31 of
-    them) to `wasmtime.Module`, which type-checks the whole thing — catches a
-    symbol declared at the WRONG TYPE, which the name comparison reports as
+    ones that reference a `state_*` / `exn_*` symbol at all, currently 30 of
+    them; the 31 in the floors below counts distinct SYMBOLS, not modules) to
+    `wasmtime.Module`, which type-checks the whole thing — catches a symbol
+    declared at the WRONG TYPE, which the name comparison reports as
     perfectly balanced: the #1231 shape declared `state_get_Bool` (i32) for a
     call the checker had typed `Int` (i64), and a Byte-literal-into-an-`Int`-
     cell shape declared the right names with mismatched value types.  Both
     passed a name-only differential while being invalid WASM.  The engine is
-    `exceptions_engine()`, not a default one: 10 of those 31 modules fail to
+    `exceptions_engine()`, not a default one: 10 of those 30 modules fail to
     load when `wasm_exceptions` is off, which is a supported wasmtime
-    configuration, so a bare engine would make this leg a property of the
-    runner rather than of the compiler.
+    configuration (see that helper for why the current runner, where the
+    proposal defaults on, does not settle the question).
 
     TWO LIMITS, stated rather than implied.  First, this builds each module
     through `transform` → `codegen_compile` — a CHECKER-LESS shortcut.  The
