@@ -756,9 +756,13 @@ def _generate_inputs(
         if bt not in _Z3_SUPPORTED:
             return None
 
-    # 2. Declare Z3 variables
+    # 2. Declare Z3 variables.  The SMT context gets the SAME narrowed scope
+    # the names above are minted in (#1208): it is what `_translate_slot_ref`
+    # resolves a `requires` clause's `@T.n` against, so handing it the
+    # un-narrowed env would look up under a key the bind side never pushed —
+    # exactly once a `forall` variable shadows a same-named module alias.
     scope = fn_slot_scope(alias_env, decl.forall_vars)
-    smt = SmtContext(timeout_ms=5000, alias_env=alias_env)
+    smt = SmtContext(timeout_ms=5000, alias_env=scope)
     slot_env = SlotEnv()
     z3_vars: list[z3.ExprRef] = []
     var_types: list[Type] = []  # base types for each var

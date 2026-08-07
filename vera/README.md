@@ -90,7 +90,7 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `resolver.py` | 332 | Resolve | Module path resolution, parse cache | `ModuleResolver` |
 | `monomorphize.py` | 2,438 | Resolve | Shared generic instantiation discovery + AST substitution (verifier and codegen) | `substitute_type_vars()`, `resolve_type_alias()`, `canonicalize_type_aliases()` |
 | `smt.py` | 2,877 | Verify | Z3 translation layer | `SmtContext`, `SlotEnv` |
-| `verifier.py` | 7,321 | Verify | Contract verification | `verify()` |
+| `verifier.py` | 8,190 | Verify | Contract verification | `verify()` |
 | `wasm/` | 25,941 | Compile | WASM translation layer (package) | `WasmContext`, `WasmSlotEnv`, `StringPool` |
 | ` ├ context.py` | 1,089 | | Composed WasmContext, expression dispatcher, block translation | |
 | ` ├ helpers.py` | 463 | | WasmSlotEnv, StringPool, type mapping, array element helpers | |

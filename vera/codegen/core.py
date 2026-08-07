@@ -15,8 +15,10 @@ each handle a specific concern:
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import re
+from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
 import wasmtime
@@ -789,10 +791,13 @@ class CodeGenerator(
         diags_before = len(self.diagnostics)
         closures_before = len(self._closure_fns_wat)
         self._fn_decl_by_wat_name[decl.name] = decl
-        fn_wat = self._compile_fn(
-            decl, export=export, module_renames=module_renames,
-            imported=imported, module_tables=module_tables,
-        )
+        # #1208: the one door every emission passes, so the function's own
+        # type-parameter narrowing is applied here rather than at each caller.
+        with self._fn_alias_scope(decl):
+            fn_wat = self._compile_fn(
+                decl, export=export, module_renames=module_renames,
+                imported=imported, module_tables=module_tables,
+            )
         if fn_wat is None:
             # The LAST codegen diagnostic emitted during this compile is
             # the one that explains the drop (a closure-level skip is
@@ -1102,6 +1107,35 @@ class CodeGenerator(
     # Compilation entry point
     # -----------------------------------------------------------------
 
+    @contextlib.contextmanager
+    def _fn_alias_scope(self, decl: ast.FnDecl) -> Iterator[None]:
+        """Name *decl*'s own scope for the duration of its compile (#1208).
+
+        A ``forall`` variable SHADOWS a same-named module alias over the whole
+        signature and body — the checker binds it before it binds any slot — so
+        the parameter names, refinement binders and slot-reference keys emitted
+        for a generic TEMPLATE have to be rendered with it in scope.  Almost
+        every function codegen compiles is already concrete (a mono clone
+        carries ``forall_vars=None``, and this is then the identity), but the
+        uninstantiated template is emitted and EXPORTED too: named against the
+        bare module env, ``forall<T> fn f(@Option<T>, @Option<Int>)`` under
+        ``type T = Int`` collapses two parameter stacks the checker kept apart,
+        and the exported body reads the wrong parameter.
+
+        Narrows only ``_alias_env`` — the flat alias maps are unchanged, since
+        a type parameter is not an alias — so it composes with
+        ``_module_alias_scope``, which the emission doors enter outside it.
+        """
+        if not decl.forall_vars:
+            yield
+            return
+        saved = self._alias_env
+        self._alias_env = naming.with_type_params(saved, decl.forall_vars)
+        try:
+            yield
+        finally:
+            self._alias_env = saved
+
     def _sync_alias_env(self) -> None:
         """Re-derive ``_alias_env`` from the flat alias maps (#1208).
 
@@ -1111,6 +1145,10 @@ class CodeGenerator(
         ends of ``_module_alias_scope``'s swap.  A new mutation site must call
         this too — a stale env renders a name against the wrong namespace, and
         a name minted one way and looked up another misses SILENTLY.
+
+        The type-parameter narrowing a generic TEMPLATE needs is layered on top
+        per function by ``_fn_alias_scope``, not stored here: it belongs to one
+        declaration, while this describes the module.
         """
         order = self._decl_order
         self._alias_env = AliasEnv(

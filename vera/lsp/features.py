@@ -68,9 +68,6 @@ class Analysis:
     # alias table.  Empty when the pipeline stopped at parse/transform — there
     # is no check, so there are no aliases to name against.
     alias_env: AliasEnv = EMPTY_ALIAS_ENV
-    # #1208: the same, per imported module (`CheckArtifacts.module_alias_envs`).
-    module_alias_envs: dict[tuple[str, ...], AliasEnv] = field(
-        default_factory=dict)
 
 
 def analyze(
@@ -98,7 +95,6 @@ def analyze(
     check_diags, artifacts = typecheck_with_artifacts(program, text, file=uri)
     analysis.artifacts = artifacts
     analysis.alias_env = artifacts.alias_env
-    analysis.module_alias_envs = artifacts.module_alias_envs
     analysis.diagnostics = list(check_diags)
 
     if not any(d.severity == "error" for d in check_diags):

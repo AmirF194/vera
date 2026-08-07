@@ -9,8 +9,9 @@ instantiation set codegen emits, or a missed instantiation becomes a false
 Tier-1 — ``vera verify`` reports clean while a runtime obligation is left
 unproven.
 
-This module is deliberately codegen-free.  Its only imports are :mod:`vera.ast`
-and the pure :func:`substitute_type_vars` ``TypeExpr`` walk (relocated here from
+This module is deliberately codegen-free.  It imports :mod:`vera.ast`, the ONE
+naming renderer (:mod:`vera.naming` / :mod:`vera.slots`, #1208), and the pure
+:func:`substitute_type_vars` ``TypeExpr`` walk (relocated here from
 ``vera/wasm/inference.py`` so importing the monomorphizer doesn't pull in the
 ``vera.wasm`` backend).  WASM/layout-specific concerns — ability-constraint
 checking (E613) and layout-derived ``Eq`` auto-derivation — stay in
@@ -34,6 +35,7 @@ from typing import Any, cast
 
 from vera import ast, naming
 from vera.naming import EMPTY_ALIAS_ENV, AliasEnv
+from vera.slots import fn_slot_scope
 
 
 def substitute_type_vars(
@@ -2109,7 +2111,10 @@ class Monomorphizer:
         under the defining module's scope, so a recount done against the
         importer's would be a recount against a scope nobody has.  Defaults
         to ``ctx.alias_env``, which is right whenever the caller has only
-        one namespace in play.
+        one namespace in play.  ``_compute_scoped_reindex`` narrows it by
+        *decl*'s own ``forall`` variables for the pre-substitution side of
+        the recount, so a type parameter shadowing a same-named alias renders
+        as the checker rendered it.
         """
         assert decl.forall_vars is not None  # noqa: S101
         env = self.ctx.alias_env if alias_env is None else alias_env
@@ -2203,18 +2208,39 @@ class Monomorphizer:
         exists to prevent.  A reference that does not resolve against the
         walked scope keeps its index — the consumers surface dangling refs
         (hard E699 in codegen) exactly as they would have pre-substitution.
+
+        TWO environments, because the recount spans a scope change.  The
+        PRE-substitution side (the old name a ``push`` records and the key a
+        ``resolve`` looks up) is rendered against *scope* — the module env
+        NARROWED by the ``forall`` variables in scope over the function being
+        walked (:func:`~vera.slots.fn_slot_scope`), which is what the CHECKER
+        rendered the generic's own signature and body against: a type
+        parameter shadows a same-named module alias for the whole signature
+        (``type T = Int;`` + ``forall<T>``), so rendering the pre-substitution
+        side against the bare module env collapses ``@Option<T>`` and
+        ``@Option<Int>`` into one stack the checker kept apart, and every
+        reference into that stack silently resolves onto the wrong parameter
+        (#1208 review, probes ``m01``/``m03``/``v01``).  The POST-substitution
+        side keeps the bare *env*: the clone carries ``forall_vars=None``, so
+        the consumers rebuild its scope un-narrowed and a name minted under a
+        narrowing they do not apply would be a name nobody looks up.  A
+        ``where`` helper extends the narrowing with its OWN parameters on top
+        of its ancestors' — the same accumulation :func:`~vera.slots.fn_scopes`
+        performs, because ``_check_fn`` adds to one shared type-parameter map
+        rather than replacing it.
         """
         out: dict[int, int] = {}
         stack: list[tuple[str | None, str | None]] = []
+        scope = fn_slot_scope(env, decl.forall_vars)
 
         def push(te: ast.TypeExpr) -> None:
             stack.append((
-                naming.slot_name_or_none(te, env),
+                naming.slot_name_or_none(te, scope),
                 self._substituted_slot_name(te, mapping, env),
             ))
 
         def resolve(ref: ast.SlotRef) -> None:
-            name = naming.slot_ref_key(ref, env)
+            name = naming.slot_ref_key(ref, scope)
             seen = 0
             for pos in range(len(stack) - 1, -1, -1):
                 if stack[pos][0] != name:
@@ -2317,6 +2343,7 @@ class Monomorphizer:
                     walk(item)
 
         def walk_fn_scope(fn_decl: ast.FnDecl) -> None:
+            nonlocal scope
             del stack[:]
             for param_te in fn_decl.params:
                 push(param_te)
@@ -2328,7 +2355,12 @@ class Monomorphizer:
             # collect_calls_in_node walk (PR #972 review; a depth-1 walk left
             # nested helpers' collapsed indices stale).
             for nested in fn_decl.where_fns or ():
-                walk_fn_scope(nested)
+                saved = scope
+                scope = fn_slot_scope(scope, nested.forall_vars)
+                try:
+                    walk_fn_scope(nested)
+                finally:
+                    scope = saved
 
         walk_fn_scope(decl)
         return out

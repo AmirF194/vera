@@ -9,7 +9,9 @@ See spec/06-contracts.md, Section 6.4 "Verification Conditions".
 
 from __future__ import annotations
 
+import contextlib
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -294,6 +296,13 @@ class SmtContext:
         # which builds one context before any program is known and rebinds
         # this per program exactly as it rebinds `_fn_lookup`.
         self._alias_env = alias_env
+        # #1208: given a callee's registered info, the naming env that callee's
+        # OWN contract renders against.  Bound by the verifier to
+        # `ContractVerifier._callee_alias_env`; ``None`` (a bare SmtContext, or
+        # a driver with a single namespace) keeps `_alias_env` for every callee.
+        self._callee_alias_env_lookup: (
+            Callable[[Any], AliasEnv] | None
+        ) = None
         self.solver.set("timeout", timeout_ms)
         # Retained so reset() can re-apply it on warm-session reuse.
         self._timeout_ms = timeout_ms
@@ -1811,6 +1820,34 @@ class SmtContext:
             z3_args.append(z3_arg)
         return z3_args
 
+    @contextlib.contextmanager
+    def _callee_naming_scope(self, callee_info: Any) -> Iterator[None]:
+        """Render *callee_info*'s own contract in ITS module's namespace (#1208).
+
+        A callee's parameter list and its ``requires`` / ``ensures`` are written
+        against the aliases of the module that DECLARED it (spec §8.4.1), so the
+        parameter stack this obligation pushes and the ``@T.n`` references that
+        read it both have to be rendered there.  Rendered against the IMPORTER's
+        env instead — the pre-fix behaviour — two modules that declare the same
+        alias name over different bodies make the obligation attach to the wrong
+        argument: it either merges two of the callee's parameter stacks (the
+        precondition silently vanishes, a false Tier-1) or splits one (a
+        spurious E501).
+
+        Scoped exactly to the callee-contract translation: the ACTUAL arguments
+        are translated before this is entered, in the caller's own env, because
+        they are the caller's expressions.
+        """
+        if self._callee_alias_env_lookup is None:
+            yield
+            return
+        saved = self._alias_env
+        self._alias_env = self._callee_alias_env_lookup(callee_info)
+        try:
+            yield
+        finally:
+            self._alias_env = saved
+
     def _build_callee_env(
         self,
         callee_info: Any,
@@ -1819,15 +1856,20 @@ class SmtContext:
         """Build the callee's SlotEnv by pushing each parameter's Z3 argument
         in declaration order (#882 helper).
 
+        The parameter names are rendered in the CALLEE's namespace (#1208, see
+        :meth:`_callee_naming_scope`) — they key the stack every reference in
+        the callee's contract resolves against.
+
         Returns None if a parameter type expression has no slot name (a shape
         the checker rules out; guarded for safety).
         """
         callee_env = SlotEnv()
-        for param_te, z3_arg in zip(callee_info.param_type_exprs, z3_args):
-            slot_name = self._type_expr_to_slot_name(param_te)
-            if slot_name is None:  # pragma: no cover
-                return None
-            callee_env = callee_env.push(slot_name, z3_arg)
+        with self._callee_naming_scope(callee_info):
+            for param_te, z3_arg in zip(callee_info.param_type_exprs, z3_args):
+                slot_name = self._type_expr_to_slot_name(param_te)
+                if slot_name is None:  # pragma: no cover
+                    return None
+                callee_env = callee_env.push(slot_name, z3_arg)
         return callee_env
 
     def _check_call_preconditions(
@@ -1855,7 +1897,11 @@ class SmtContext:
             # Skip trivial requires(true)
             if isinstance(contract.expr, ast.BoolLit) and contract.expr.value:
                 continue
-            z3_pre = self.translate_expr(contract.expr, callee_env)
+            # #1208: the precondition is the CALLEE's expression, so its
+            # `@T.n` references resolve in the callee's namespace — the same
+            # one `_build_callee_env` keyed the stack under.
+            with self._callee_naming_scope(callee_info):
+                z3_pre = self.translate_expr(contract.expr, callee_env)
             if z3_pre is None:
                 # The precondition itself uses a construct outside the
                 # decidable fragment.  Demote loudly to Tier-3 rather than
@@ -2038,7 +2084,10 @@ class SmtContext:
                 continue
             if isinstance(contract.expr, ast.BoolLit) and contract.expr.value:
                 continue
-            z3_post = self.translate_expr(contract.expr, callee_env)
+            # #1208: the postcondition is the CALLEE's expression too — same
+            # namespace as the precondition above and the stack it reads.
+            with self._callee_naming_scope(callee_info):
+                z3_post = self.translate_expr(contract.expr, callee_env)
             if z3_post is not None:
                 self.solver.add(self._guard_fact(z3_post))
         self._result_var = saved_result
