@@ -11,11 +11,12 @@ from __future__ import annotations
 import wasmtime
 
 from vera.monomorphize import mangle_type_name
+from vera.wasm.helpers import CellNames
 
 
 def register_state(
     linker: wasmtime.Linker,
-    state_types: list[tuple[str, str]],
+    state_types: list[tuple[CellNames, str]],
     initial_state: dict[str, int | float] | None,
     state_store: dict[str, list[int | float]],
 ) -> None:
@@ -33,15 +34,15 @@ def register_state(
     # This allows nested handle[State<T>] of the same type to have independent
     # state cells (#417).
 
-    for type_name, wasm_t in state_types:
+    for cell, wasm_t in state_types:
         # State cell key stays the human-readable full name (the
         # `ExecuteResult.state` dict is keyed `State_<type_name>` and is a
         # public surface — tests read `state["State_Int"]`).  The IMPORT field
         # names, however, must match the mangled WAT identifiers emitted by
         # `assembly.py` for composite T (`Tuple<Int, Int>` →
         # `Tuple_LInt_C_Int_R`; #914/#775), so register those mangled.
-        state_key = f"State_{type_name}"
-        import_suffix = mangle_type_name(type_name)
+        state_key = f"State_{cell.family}"
+        import_suffix = mangle_type_name(cell.family)
         state_store[state_key] = [_DEFAULT_STATE[wasm_t]]
         val_type = _WASM_VAL_TYPE[wasm_t]
 

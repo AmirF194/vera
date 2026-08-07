@@ -874,8 +874,8 @@ class ContractsMixin:
 
     def _state_type_to_wasm(self, type_name: str) -> str | None:
         """Map a State type name (e.g. 'Int') to its WASM type."""
-        for registered_name, wasm_t in self._state_types:
-            if registered_name == type_name:
+        for cell, wasm_t in self._state_types:
+            if cell.family == type_name:
                 return wasm_t
         return None
 

@@ -32,6 +32,7 @@ from vera.naming import EMPTY_ALIAS_ENV, AliasEnv
 from vera.prelude import PRELUDE_FILE, mentioned_fn_names
 from vera.slots import family_fallback_name
 from vera.wasm import StringPool
+from vera.wasm.helpers import CellNames
 from vera.wasm.async_fusion import (
     compute_future_ret_fns,
     compute_future_ret_module_fns,
@@ -197,7 +198,13 @@ class CodeGenerator(
         # so assembly.py declares the host import.
         self._needs_overflow_trap: bool = False
         self._needs_memory: bool = False
-        self._state_types: list[tuple[str, str]] = []  # (type_name, wasm_type)
+        # (cell, wasm_type).  `CellNames` rather than a bare family
+        # (#1238 review F2): the wasi target names the unsupported
+        # families in a user-facing error, and since #1218 a refined
+        # cell's IDENTITY carries its whole predicate — a
+        # discriminator, not something to read.  The base travels
+        # with it so a message can say `state (Byte)`.
+        self._state_types: list[tuple[CellNames, str]] = []
         self._exn_types: list[tuple[str, str]] = []  # (type_name, wasm_type)
         # #1210: State cell types and Exn payload types the handler walk
         # found and could NOT register.  Reset by
@@ -206,8 +213,8 @@ class CodeGenerator(
         # so neither list outlives one function.  Declared here as well so
         # the two siblings are visible together and neither depends on the
         # walk having run for the attribute to exist.
-        self._unregistrable_state_cells: list[ast.TypeExpr] = []
-        self._unregistrable_exn_tags: list[ast.TypeExpr] = []
+        self._unregistrable_state_cells: list[tuple[ast.TypeExpr, str]] = []
+        self._unregistrable_exn_tags: list[tuple[ast.TypeExpr, str]] = []
         self._md_ops_used: set[str] = set()  # Markdown host-import builtins
         self._regex_ops_used: set[str] = set()  # Regex host-import builtins
         self._map_ops_used: set[str] = set()  # Map host-import builtins

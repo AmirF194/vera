@@ -350,8 +350,8 @@ class AssemblyMixin:
         # too mangles — matched by one consistent name).  Handler-body calls
         # (`wasm/calls_handlers.py`, `codegen/functions.py`) mangle the same
         # way, so import decl and call site never drift.
-        for type_name, wasm_t in self._state_types:
-            m = mangle_type_name(type_name)
+        for cell, wasm_t in self._state_types:
+            m = mangle_type_name(cell.family)
             parts.append(
                 f'  (import "vera" "state_get_{m}" '
                 f"(func $vera.state_get_{m} (result {wasm_t})))"

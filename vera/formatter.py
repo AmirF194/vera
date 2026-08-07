@@ -1932,6 +1932,40 @@ def _check_postconditions(
         )
 
 
+def format_expr(expr: Expr) -> str:
+    """One expression, in canonical single-line source form.
+
+    The expression half of :func:`format_source`, reached without a source
+    buffer: the same :meth:`Formatter._fmt_expr` that formats a contract
+    clause or a `let` value, over an empty comment attachment (an expression
+    rendered in isolation has no comments to place, and none of them are
+    part of the expression anyway).
+
+    **A left inverse of parsing, which is what makes it usable as a
+    discriminator** (#1218 / PR #1238 review).  Parenthesisation is not
+    copied from the source — the parser discards it — but RE-DERIVED from
+    precedence and associativity by :func:`_needs_parens`, precisely so the
+    output re-parses to the expression it came from.  So ``parse(format(e))
+    == e``, and therefore ``format(a) == format(b)`` implies ``a == b``:
+    ``(a + b) + c`` renders ``a + b + c`` while ``a + (b + c)`` keeps its
+    parentheses, and the two never collide.  ``vera fmt``'s idempotence
+    postcondition and ``scripts/check_corpus_canonical.py`` exercise that
+    round trip over the whole corpus on every commit, so the property is a
+    maintained gate rather than an argument.
+
+    :func:`vera.types.structural_type_key` uses this to render a refinement
+    predicate, which is what keeps a refined cell's family name LINEAR in
+    the predicate's source length.  ``ast.Node.pretty`` — the obvious
+    alternative, and what the key used first — is a newline-indented tree
+    whose size grows quadratically in nesting depth: 44 left-nested ``&&``
+    conjuncts render 56,604 characters there against 646 here, and mangled
+    that crossed the WASM name-section limit.
+    """
+    return Formatter(
+        _Attached(before={}, inline=[], header=[], footer=[]),
+    )._fmt_expr(expr)
+
+
 def format_source(source: str, file: str | None = None) -> str:
     """Format Vera source code to canonical form.
 

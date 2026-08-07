@@ -2345,11 +2345,14 @@ class TestMangleInjectivity:
     # =================================================================
 
     # Every rendering a cell family can now carry, harvested from what
-    # `vera.types.pretty_type` and `vera.environment.structural_type_key`
+    # `vera.types.pretty_type` and `vera.types.structural_type_key`
     # actually emit: function types (parentheses, the `->` arrow, effect
-    # rows), refinement structural keys (braces, the `|` bar, `@`, the
-    # newline-indented `ast.Node.pretty` tree, quoted reprs), and the
-    # non-ASCII a string literal inside a predicate can carry.
+    # rows), refinement keys (braces, the `|` bar, and a predicate in
+    # `vera fmt`'s canonical single-line form), and the non-ASCII a
+    # string literal inside such a predicate can carry.  The two
+    # `ast.Node.pretty` shapes below are kept deliberately: that tree
+    # was the renderer until PR #1238, so they pin the escape over
+    # newline- and quote-bearing input that nothing else supplies.
     _TOTALITY_NAMES = (
         "Int",
         "Option<Int>",

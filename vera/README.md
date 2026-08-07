@@ -138,7 +138,7 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `  closures.py` | 875 | | Closure lifting, GC instrumentation | |
 | `  contracts.py` | 1,332 | | Runtime pre/postconditions, old state snapshots, decreases termination guard (entry check-and-set, per-function chain state, ADT rank helpers, self-tail site checks); the refinement boundary guard derives its binder from `naming.refinement_binder_parts` and layers the erased-base skip and the nested-base E618 on top.  Also the ONE derivation of what that guard layer lowers — `_tuple_component_guard_sites` decomposes a boundary tuple for the emitter, the return-epilogue gate and the host-import pre-scan alike, and `_signature_refinement_predicates` enumerates every predicate a signature will be guarded by (#1210) | |
 | `  assembly.py` | 1,472 | | WAT module assembly, `$alloc`, `$gc_collect` | |
-| `  compilability.py` | 868 | | Compilability checks; the two host-import pre-scans (State/Exn families and IO/Markdown/Regex builtins), walking each function's body, its contract predicates and every signature the guard layer will check — including closures', cycle-guarded | |
+| `  compilability.py` | 1,002 | | Compilability checks; the two host-import pre-scans (State/Exn families and IO/Markdown/Regex builtins), walking each function's body, its contract predicates and every signature the guard layer will check — including closures', cycle-guarded | |
 | `  wasi.py` | 4,820 | | WASI Preview 2 component/adapter emitter — `--target wasi-p2` / `--world server` (#237, #853) | |
 | `runtime/` | 4,785 | Execute | wasmtime host layer (#421): traps + per-effect host-binding families | `register_*()`, `WasmTrapError` |
 | `  traps.py` | 493 | | `WasmTrapError`, `_classify_trap`, source-backtrace resolution | |
@@ -751,7 +751,7 @@ The `ERROR_CODES` dict in `errors.py` maps every code to a short description (15
 
 ## Test Suite
 
-Testing spans a **pytest suite** of 9,552 tests across 146 files — compiler-internals unit tests plus a **conformance suite** (201 programs in `tests/conformance/` validating every language feature against the spec) and **example programs** (42 end-to-end demos). The conformance suite is the definitive specification artifact — each program tests one feature and serves as a minimal working example.
+Testing spans a **pytest suite** of 9,559 tests across 146 files — compiler-internals unit tests plus a **conformance suite** (201 programs in `tests/conformance/` validating every language feature against the spec) and **example programs** (42 end-to-end demos). The conformance suite is the definitive specification artifact — each program tests one feature and serves as a minimal working example.
 
 See **[TESTING.md](../TESTING.md)** for the comprehensive testing reference -- test file table, conformance suite details, compiler code coverage, language feature coverage, helper conventions, validation scripts, CI pipeline, and guidelines for adding tests.
 

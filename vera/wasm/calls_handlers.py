@@ -1738,11 +1738,11 @@ class CallsHandlersMixin:
         if target_family not in shadowed:
             return
         # The message names the cell's BASE, not its identity: since #1218 a
-        # refined family's canonical rendering carries the whole predicate as
-        # an `ast.Node.pretty` tree, which is a discriminator rather than
-        # something to read.  The base is what the user wrote a handler over,
-        # and the shadowing cell shares it — the gate only fires when the two
-        # identities are EQUAL, so one name describes both.
+        # refined family's canonical rendering carries the whole predicate,
+        # which is a discriminator rather than something to read at the
+        # width a diagnostic has.  The base is what a handler is written
+        # over, and the shadowing cell shares it — the gate only fires when
+        # the two identities are EQUAL, so one name describes both.
         raise CodegenSkip(
             call,
             # Wording covers BOTH spellings: `State.put(x)` delegates to this

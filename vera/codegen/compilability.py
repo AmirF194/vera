@@ -10,7 +10,70 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator, Sequence
 
 from vera import ast
+from vera.monomorphize import mangle_type_name
+from vera.wasm.helpers import CellNames
 from vera.wasm.async_fusion import await_needs_check, fused_async_target
+
+MAX_CELL_FAMILY_SYMBOL = 4096
+"""Longest mangled State/Exn cell family symbol the compiler will emit.
+
+A State cell family becomes the module AND field string of four WASM
+imports, and the binary format caps a single name string at 100,000
+bytes -- wasmparser rejects the module with ``string size out of
+bounds`` before any host sees it.  Nothing bounded the family, so a
+refinement predicate could produce one past that: check, verify and
+compile all passed and ``vera run`` then failed to PARSE the module the
+compiler had just emitted, while the browser host -- which reads the
+same bytes through a different parser -- ran it (PR #1238 review).
+
+Since #1238 the family renders through ``vera fmt``'s canonical
+expression form, so its length is LINEAR in the predicate a user wrote:
+the reviewer's 44-conjunct shape mangles to 1,578 characters, against
+112,626 under the newline-indented tree it replaced.  This is the
+backstop for the residue, not the fix.
+
+Why 4,096 and not the hard limit.  The binding constraint is on the
+FIELD string, ``state_get_`` plus the symbol, so ~99,990 is what the
+format actually permits.  Refusing two dozen times earlier is deliberate:
+
+* the compiler's own diagnostic should be what a user meets, not a
+  host's parse error, and only a margin makes that true across the
+  encoder, the three runtimes, and whatever a future one adds;
+* the symbol appears about a dozen times in the emitted text (four
+  imports, each a module/field pair, plus the identifiers and every call
+  site), so the cap bounds the WAT roughly a dozen times over.
+
+The measured band this can fire in is narrow and entirely pathological.
+100 left-nested conjuncts mangle to 3,594 and pass; 200 reach 7,294 and
+are refused; the PARSER itself recursion-errors around 500, so nothing
+beyond ~400 arrives here at all.  No predicate a person writes is close.
+"""
+
+UNSUPPORTED_CELL_TYPE = ""
+"""The refusal reason meaning "this type has no cell at all".
+
+The registration methods return a reason string rather than a bool so the
+caller's diagnostic can say WHICH refusal happened; this empty one selects
+the long-standing E607/E612 wording, and a non-empty one replaces it.  A
+sentinel rather than ``None`` because ``None`` already means "registered".
+"""
+
+
+def _oversized_family_reason(family: str) -> str | None:
+    """The refusal reason for a family whose symbol is past the cap.
+
+    ``None`` when it fits.  Measured on the MANGLED form, because that is
+    what reaches the name string — the canonical family is shorter, and
+    checking it would let an escape-heavy predicate through.  See
+    :data:`MAX_CELL_FAMILY_SYMBOL` for why this exists and why 4,096.
+    """
+    n = len(mangle_type_name(family))
+    if n <= MAX_CELL_FAMILY_SYMBOL:
+        return None
+    return (
+        f"a cell family symbol of {n:,} characters, past the "
+        f"{MAX_CELL_FAMILY_SYMBOL:,}-character limit"
+    )
 
 
 def contract_exprs(
@@ -198,12 +261,15 @@ class CompilabilityMixin:
             )
             return False
         type_arg = eff.type_args[0]
-        if not self._register_state_cell(type_arg):
-            self._warn_unsupported_state_cell(decl, decl.name)
+        reason = self._register_state_cell(type_arg)
+        if reason is not None:
+            self._warn_unsupported_state_cell(decl, decl.name, reason)
             return False
         return True
 
-    def _register_state_cell(self, type_arg: ast.TypeExpr) -> bool:
+    def _register_state_cell(
+        self, type_arg: ast.TypeExpr,
+    ) -> str | None:
         """Register the `State<type_arg>` host-cell family; False if it has none.
 
         The ONE place a State cell's compilability is decided and its family
@@ -223,16 +289,49 @@ class CompilabilityMixin:
         """
         wt = self._type_expr_to_wasm_type(type_arg)
         if wt is None or wt in ("unsupported", "i32_pair"):
-            return False
-        type_name = self._family_name_te(type_arg)
-        if type_name and (type_name, wt) not in self._state_types:
-            self._state_types.append((type_name, wt))
-        return True
+            return UNSUPPORTED_CELL_TYPE
+        cell = CellNames(
+            family=self._family_name_te(type_arg),
+            base=self._family_base_te(type_arg),
+        )
+        oversized = _oversized_family_reason(cell.family)
+        if oversized is not None:
+            return oversized
+        if cell.family and (cell, wt) not in self._state_types:
+            self._state_types.append((cell, wt))
+        return None
 
     def _warn_unsupported_state_cell(
         self, node: ast.Node, fn_name: str,
+        reason: str = UNSUPPORTED_CELL_TYPE,
     ) -> None:
-        """The E607 both State-cell paths emit — one wording, one code."""
+        """The E607 both State-cell paths emit — one wording, one code.
+
+        *reason* selects between the two refusals `_register_state_cell`
+        can make: the empty :data:`UNSUPPORTED_CELL_TYPE` is the cell type
+        with no WASM representation, and a non-empty one is the oversized
+        family symbol (#1238 review), which needs to name the length and
+        the cap or the user cannot tell what to shorten.
+        """
+        if reason:
+            self._warning(
+                node,
+                f"Function '{fn_name}' uses State with {reason} — skipped.",
+                rationale=(
+                    "A State<T> cell family becomes the module and field "
+                    "string of its four WASM imports, and the binary format "
+                    "caps a name string at 100,000 bytes; the compiler "
+                    f"refuses past {MAX_CELL_FAMILY_SYMBOL:,} characters so "
+                    "the module is never emitted in a form a host cannot "
+                    "load.  A refined cell type carries its predicate into "
+                    "the family, so the length is the predicate's: "
+                    "shorten it, or move the condition into the "
+                    "function's contracts and leave the cell type "
+                    "unrefined."
+                ),
+                error_code="E607",
+            )
+            return
         self._warning(
             node,
             f"Function '{fn_name}' uses State with "
@@ -259,13 +358,15 @@ class CompilabilityMixin:
             )
             return False
         type_arg = eff.type_args[0]
-        if not self._register_exn_tag(type_arg):
-            self._warn_unsupported_exn_tag(decl, decl.name)
+        reason = self._register_exn_tag(type_arg)
+        if reason is not None:
+            self._warn_unsupported_exn_tag(decl, decl.name, reason)
             return False
         return True
 
     def _warn_unsupported_exn_tag(
         self, node: ast.Node, fn_name: str,
+        reason: str = UNSUPPORTED_CELL_TYPE,
     ) -> None:
         """The E612 both Exn-tag paths emit — one wording, one code.
 
@@ -275,7 +376,33 @@ class CompilabilityMixin:
         inside a `pure` function registers no tag while its lowering emits
         `throw $exn_E` / `catch $exn_E` regardless — `unknown tag $exn_Unit`
         at whole-module WAT compilation, from a check-green program (#1210).
+
+        *reason* selects between the two refusals exactly as the State twin
+        does.  The oversized-family one applies here for symmetry rather
+        than for the same hazard: a tag name is a WAT-text identifier that
+        the encoder resolves to an index, so it never becomes a name string
+        and cannot cross the 100,000-byte cap.  Refusing both keeps ONE
+        answer to "is this family emittable?" — the two registration paths
+        already have to agree (#1210), and a rule that held for State and
+        not for Exn is the shape of that bug.
         """
+        if reason:
+            self._warning(
+                node,
+                f"Function '{fn_name}' uses Exn with {reason} — skipped.",
+                rationale=(
+                    "An Exn<E> tag family and a State<T> cell family are "
+                    "emitted from one derivation and refused by one rule; "
+                    f"past {MAX_CELL_FAMILY_SYMBOL:,} characters the family "
+                    "is not emitted.  A refined payload type carries its "
+                    "predicate into the family, so the length is the "
+                    "predicate's: shorten it, or move the condition into "
+                    "the function's contracts and leave the payload type "
+                    "unrefined."
+                ),
+                error_code="E612",
+            )
+            return
         self._warning(
             node,
             f"Function '{fn_name}' uses Exn with "
@@ -285,7 +412,7 @@ class CompilabilityMixin:
             error_code="E612",
         )
 
-    def _register_exn_tag(self, type_arg: ast.TypeExpr) -> bool:
+    def _register_exn_tag(self, type_arg: ast.TypeExpr) -> str | None:
         """Register the `Exn<type_arg>` WASM tag; False if it has none.
 
         The State twin (`_register_state_cell`): one derivation shared by the
@@ -303,12 +430,15 @@ class CompilabilityMixin:
         """
         wt = self._type_expr_to_wasm_type(type_arg)
         if wt is None or wt == "unsupported":
-            return False
+            return UNSUPPORTED_CELL_TYPE
         wasm_tag_t = "i32 i32" if wt == "i32_pair" else wt
         type_name = self._family_name_te(type_arg)
+        oversized = _oversized_family_reason(type_name)
+        if oversized is not None:
+            return oversized
         if type_name and (type_name, wasm_tag_t) not in self._exn_types:
             self._exn_types.append((type_name, wasm_tag_t))
-        return True
+        return None
 
     _MD_BUILTINS = frozenset({
         "md_parse", "md_render", "md_has_heading",
@@ -629,8 +759,8 @@ class CompilabilityMixin:
         to be skipped in SILENCE while the lowering emitted ``state_push_…``
         / ``throw $exn_…`` for them regardless.
         """
-        self._unregistrable_state_cells: list[ast.TypeExpr] = []
-        self._unregistrable_exn_tags: list[ast.TypeExpr] = []
+        self._unregistrable_state_cells: list[tuple[ast.TypeExpr, str]] = []
+        self._unregistrable_exn_tags: list[tuple[ast.TypeExpr, str]] = []
         self._scan_expr_for_handlers(node)
         if decl is not None:
             for pred in contract_exprs(decl.contracts):
@@ -639,19 +769,21 @@ class CompilabilityMixin:
                 self._scan_expr_for_handlers(refined)
         fn_name = decl.name if decl is not None else "<unknown>"
         if self._unregistrable_state_cells:
-            offender = self._unregistrable_state_cells[0]
+            offender, reason = self._unregistrable_state_cells[0]
             self._warn_unsupported_state_cell(
                 offender if getattr(offender, "span", None)
                 else (decl or offender),
                 fn_name,
+                reason,
             )
             return False
         if self._unregistrable_exn_tags:
-            offender = self._unregistrable_exn_tags[0]
+            offender, reason = self._unregistrable_exn_tags[0]
             self._warn_unsupported_exn_tag(
                 offender if getattr(offender, "span", None)
                 else (decl or offender),
                 fn_name,
+                reason,
             )
             return False
         return True
@@ -679,11 +811,13 @@ class CompilabilityMixin:
             return
         type_arg = node.effect.type_args[0]
         if node.effect.name == "State":
-            if not self._register_state_cell(type_arg):
-                self._unregistrable_state_cells.append(type_arg)
+            reason = self._register_state_cell(type_arg)
+            if reason is not None:
+                self._unregistrable_state_cells.append((type_arg, reason))
         elif node.effect.name == "Exn":
-            if not self._register_exn_tag(type_arg):
-                self._unregistrable_exn_tags.append(type_arg)
+            reason = self._register_exn_tag(type_arg)
+            if reason is not None:
+                self._unregistrable_exn_tags.append((type_arg, reason))
 
     def _scan_expr_for_handlers(self, node: ast.Node) -> None:
         """Recurse into expressions looking for HandleExpr nodes.

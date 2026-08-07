@@ -40,6 +40,7 @@ from pathlib import Path
 import pytest
 
 from vera.checker import typecheck_with_artifacts
+from vera.codegen.compilability import MAX_CELL_FAMILY_SYMBOL
 from vera.codegen import CompileResult, compile as codegen_compile, execute
 from vera.parser import parse_to_ast
 from vera.resolver import ModuleResolver
@@ -979,3 +980,210 @@ def test_refined_string_exn_payload_is_still_a_pair(tmp_path: Path) -> None:
     assert len(tags) == 1, tags
     assert "(param i32 i32)" in result.wat, "refined String tag lost its pair"
     assert execute(result).value == 5
+
+
+# =====================================================================
+# (9) Symbol length is LINEAR in the predicate (PR #1238 review, F1)
+# =====================================================================
+
+# `structural_type_key` rendered the predicate with `ast.Node.pretty`, a
+# newline-indented tree whose size is quadratic in nesting depth: a
+# left-nested `&&` chain of 44 conjuncts produced a 112,626-character
+# mangled symbol, past wasmparser's 100,000-byte name-string cap.  Check,
+# verify and compile were all green; `vera run` failed to PARSE the module
+# it had just emitted, while the same module ran under the browser host —
+# a runtime divergence on a check-green program.  The predicate now renders
+# through `vera fmt`'s own canonical expression form, so growth is linear
+# in the source the user wrote.
+
+
+def _conjunct_program(n: int) -> str:
+    """A refined cell whose predicate is a left-nested `&&` chain."""
+    conj = " && ".join(f"@Int.0 > {i}" for i in range(n))
+    return (
+        f"type Deep = {{ @Int | {conj} }};\n"
+        "\n"
+        "public fn main(@Unit -> @Int)\n"
+        "  requires(true)\n"
+        "  ensures(true)\n"
+        "  effects(pure)\n"
+        "{\n"
+        "  handle[State<Deep>](@Deep = 100) {\n"
+        "    put(@Deep) -> { resume(()) }\n"
+        "  } in {\n"
+        "    put(101);\n"
+        "    get(())\n"
+        "  }\n"
+        "}\n"
+    )
+
+
+@pytest.mark.parametrize("n", [20, 44])
+def test_deeply_conjoined_predicate_compiles_and_runs(
+    n: int, tmp_path: Path,
+) -> None:
+    """The reviewer's shape compiles AND runs, at 20 and at 44 conjuncts.
+
+    44 is the depth that crossed the name-string cap before the renderer
+    changed; 20 is the depth the reviewer measured at 26,178 characters,
+    under the cap but already growing quadratically.  Both must reach a
+    module wasmtime can parse, and both must produce 101 — the value only a
+    correctly-addressed cell can give.
+    """
+    result = _compile_ok(_conjunct_program(n), tmp_path)
+    assert execute(result).value == 101
+
+
+def test_predicate_symbol_length_is_linear_in_the_predicate() -> None:
+    """Doubling the conjunct count roughly doubles the symbol (not squares).
+
+    Measured on the rendering rather than on a compiled module, so the
+    property is pinned independently of whatever the current cap is: a
+    quadratic renderer fails this at any cap, it just fails LOUDLY at a
+    different depth.
+    """
+    from vera.monomorphize import mangle_type_name
+    from vera.types import INT, RefinedType, structural_type_key
+
+    def mangled_len(n: int) -> int:
+        conj = " && ".join(f"@Int.0 > {i}" for i in range(n))
+        program = parse_to_ast(f"type T = {{ @Int | {conj} }};\n")
+        te = program.declarations[0].decl.type_expr
+        key = structural_type_key(RefinedType(INT, te.predicate))
+        return len(mangle_type_name(key))
+
+    at20, at40, at80 = mangled_len(20), mangled_len(40), mangled_len(80)
+    # Linear: each doubling multiplies by ~2.  Quadratic would be ~4, and
+    # the pre-fix renderer measured 3.9x and 3.95x across these two steps.
+    assert 1.8 < at40 / at20 < 2.6, (at20, at40)
+    assert 1.8 < at80 / at40 < 2.6, (at40, at80)
+    # And the absolute size at the depth that used to break wasmtime.
+    assert mangled_len(44) < 2_000, mangled_len(44)
+
+
+def test_a_predicate_past_the_cap_is_refused_loudly(tmp_path: Path) -> None:
+    """Past the backstop cap the cell is REFUSED, never silently emitted.
+
+    The renderer makes the symbol linear, so reaching the cap now needs a
+    predicate of roughly the cap's own size — but "roughly" is not "never",
+    and an unloadable module is the one outcome that must be impossible.
+    `_register_state_cell` refuses the cell exactly as it refuses one with
+    no WASM representation (E607), and the enclosing function is dropped
+    loudly rather than compiled against an import that cannot be named.
+
+    200 conjuncts is chosen over something larger because the PARSER
+    recursion-errors on a left-nested chain around 500, so the band where
+    this cap is what refuses runs from ~110 conjuncts to ~400 — this sits
+    inside it (7,294 mangled characters against the 4,096 cap) and stays
+    inside it if either bound moves a little.
+    """
+    result = _compile_source(_conjunct_program(200), tmp_path)
+    codes = {d.error_code for d in result.diagnostics}
+    assert "E607" in codes, codes
+    assert _families(result.wat) == set(), sorted(_families(result.wat))
+    note = next(d for d in result.diagnostics if d.error_code == "E607")
+    assert "cell family symbol" in note.description, note.description
+    assert f"{MAX_CELL_FAMILY_SYMBOL:,}" in note.rationale, note.rationale
+
+
+def test_the_cap_refusal_reaches_the_browser_target_too(
+    tmp_path: Path,
+) -> None:
+    """The refusal happens at COMPILE, so every host sees it (F1 part 2).
+
+    The bug this backstops was a divergence — wasmtime could not parse the
+    module the browser host ran happily — so a cap enforced anywhere but at
+    emission would reproduce it one cap later.  Refusing at family
+    registration means the oversized import is never written, and the
+    browser bundle's own import synthesis has nothing to bind: same
+    diagnostic, same empty family set, whichever way the module is loaded.
+    """
+    result = _compile_source(_conjunct_program(200), tmp_path)
+    assert "E607" in {d.error_code for d in result.diagnostics}
+    assert "state_get_" not in result.wat
+    assert "(func $main" not in result.wat
+
+
+def test_every_expression_kind_has_a_formatter_arm() -> None:
+    """`format_expr` is TOTAL over expressions, which its two users need.
+
+    `Formatter._fmt_expr` ends in a `return "<expr>"` catch-all.  For
+    `vera fmt` that would be a broken emission caught by the formatter's own
+    re-parse postcondition; for `vera.types.structural_type_key` it would be
+    worse and quieter — two structurally distinct predicates both rendering
+    `<expr>` share a cell FAMILY, which is a shared State cell behind a
+    check that typed them apart (#1218's failure mode, reintroduced through
+    the renderer that fixed it).
+
+    Checked statically, the way `scripts/check_walker_coverage.py` checks
+    its walkers: every concrete `ast.Expr` subclass must be named in the
+    dispatch.  A new AST node without an arm fails here at the commit that
+    adds it, rather than in whichever refinement predicate first uses it.
+    """
+    import inspect
+
+    from vera import ast as ast_mod
+
+    subclasses = sorted({
+        c.__name__ for c in vars(ast_mod).values()
+        if inspect.isclass(c) and issubclass(c, ast_mod.Expr)
+        and c is not ast_mod.Expr
+    })
+    source = (_ROOT / "vera" / "formatter.py").read_text(encoding="utf-8")
+    start = source.index("def _fmt_expr")
+    dispatch = source[start:source.index("def _fmt_float", start)]
+    missing = [name for name in subclasses if name not in dispatch]
+    assert not missing, (
+        f"ast.Expr subclasses with no _fmt_expr arm, so they would render "
+        f"as the lossy '<expr>' catch-all: {missing}"
+    )
+    assert len(subclasses) >= 25, subclasses
+
+
+def test_format_expr_round_trips_adversarial_predicates() -> None:
+    """`parse(format(e)) == e` — the property injectivity rests on.
+
+    Associativity is where a canonical renderer would lose information if it
+    simply dropped parentheses: `(a + b) + c` and `a + (b + c)` are distinct
+    expressions, hence distinct refinement types, hence cells the checker
+    keeps apart.  `_needs_parens` re-derives the brackets from precedence
+    and associativity, so the first renders bare and the second keeps its
+    pair.  Each case below is checked BOTH ways — it round-trips, and no two
+    of them collide.
+    """
+    from vera.formatter import format_expr
+
+    def predicate(text: str) -> object:
+        program = parse_to_ast(f"type T = {{ @Int | {text} }};\n")
+        return program.declarations[0].decl.type_expr.predicate
+
+    cases = [
+        "@Int.0 > 0",
+        "@Int.0 < 0",
+        "(@Int.0 + 1) + 2 > 0",
+        "@Int.0 + (1 + 2) > 0",
+        "@Int.0 - 1 - 2 > 0",
+        "@Int.0 - (1 - 2) > 0",
+        "@Int.0 > 0 && @Int.0 < 5 && @Int.0 != 3",
+        "@Int.0 > 0 && (@Int.0 < 5 && @Int.0 != 3)",
+        "(@Int.0 > 0 && @Int.0 < 5) || @Int.0 == 9",
+        "@Int.0 > 0 && (@Int.0 < 5 || @Int.0 == 9)",
+        "!(@Int.0 > 0)",
+        "!(!(@Int.0 > 0))",
+        "@Int.0 * 2 + 1 > 0",
+        "@Int.0 * (2 + 1) > 0",
+        "if @Int.0 > 0 then { true } else { false }",
+        "match @Int.0 { 0 -> true, _ -> false }",
+    ]
+    seen: dict[str, str] = {}
+    for text in cases:
+        expr = predicate(text)
+        rendered = format_expr(expr)
+        assert predicate(rendered) == expr, (
+            f"{text!r} rendered {rendered!r}, which parses to something else"
+        )
+        assert rendered not in seen, (
+            f"collision: {text!r} and {seen[rendered]!r} both render "
+            f"{rendered!r}"
+        )
+        seen[rendered] = text

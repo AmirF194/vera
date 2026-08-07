@@ -311,13 +311,50 @@ def structural_type_key(ty: Type) -> str:
     Deterministic by construction: every branch is a fixed-shape recursion
     over dataclass fields, and the only set this touches is a function type's
     effect row, which :func:`structural_effect_key` sorts on a key built the
-    same structural way.  The predicate is rendered by `ast.Node.pretty`,
-    which walks declared field order and skips spans, so the same predicate
-    always renders the same way.
+    same structural way.
+
+    The predicate is rendered by :func:`vera.formatter.format_expr` — the
+    single-line canonical source form ``vera fmt`` emits.  Two properties
+    make it the right renderer, and they are the reason it is not
+    ``ast.Node.pretty`` (which this used first):
+
+    * It DISCRIMINATES, because it is a left inverse of parsing.
+      Parenthesisation is re-derived from precedence and associativity
+      rather than copied, precisely so the text re-parses to the same
+      expression — ``(a + b) + c`` renders ``a + b + c`` while
+      ``a + (b + c)`` keeps its parentheses.  ``parse(format(e)) == e``
+      therefore gives ``format(a) == format(b) => a == b``, and ``vera
+      fmt``'s idempotence postcondition plus
+      ``scripts/check_corpus_canonical.py`` exercise that round trip over
+      the whole corpus on every commit.
+    * It is LINEAR in the predicate's source length.  This key names a
+      State/Exn cell FAMILY (:func:`vera.naming.family_name`), which is
+      mangled into a WASM import name, and ``Node.pretty``'s
+      newline-indented tree grows QUADRATICALLY in nesting depth: 44
+      left-nested ``&&`` conjuncts rendered 56,604 characters there against
+      646 here, and mangled that crossed wasmparser's 100,000-byte
+      name-string cap.  Check, verify and compile all passed; ``vera run``
+      then failed to parse the module it had just emitted, while the
+      browser host ran the same bytes — a runtime divergence on a
+      check-green program (PR #1238 review).
+      ``vera/codegen/compilability.py``'s
+      :data:`~vera.codegen.compilability.MAX_CELL_FAMILY_SYMBOL` backstops
+      the residue loudly.
+
+    One derivation, still: the checker's effect-row ordering and the cell
+    family read the SAME key, so a predicate that discriminates two rows
+    discriminates two cells, by construction rather than by agreement.
     """
     if isinstance(ty, RefinedType):
+        # Imported here rather than at module scope: `vera.formatter` pulls
+        # in the parser and the transformer, and `vera.types` is imported by
+        # most of the compiler — a module-level edge would make every
+        # importer of a semantic type pay for the grammar.  Nothing in the
+        # formatter's own import closure reaches back here, so this is a
+        # cost decision, not a cycle break.
+        from vera.formatter import format_expr
         return (f"{{{structural_type_key(ty.base)}"
-                f"|{ty.predicate.pretty()}}}")
+                f"|{format_expr(ty.predicate)}}}")
     if isinstance(ty, TypeVar):
         # The raw name, marker included.
         return f"'{ty.name}"

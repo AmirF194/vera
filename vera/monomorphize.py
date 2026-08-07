@@ -448,9 +448,9 @@ def mangle_type_name(type_name: str) -> str:
     (#1219): a cell family is no longer restricted to the ``Head<arg, arg>``
     grammar, so a family name can now carry a function type's parentheses
     and arrow, an effect row, a refinement's braces and ``|`` bar, the
-    newline-indented ``ast.Node.pretty`` tree a refinement predicate renders
-    as (#1218), and any character a string literal inside such a predicate
-    spells — non-ASCII included.  Output is ``[A-Za-z0-9_]`` only, which is
+    canonical source form a refinement predicate renders as (#1218), and
+    any character a string literal inside such a predicate spells —
+    non-ASCII included.  Output is ``[A-Za-z0-9_]`` only, which is
     inside the WAT ``idchar`` set, inside the SMT-LIB simple-symbol set, and
     unchanged by the browser runtime's ``/^state_get_(.+)$/`` split.
 
@@ -2148,17 +2148,31 @@ class Monomorphizer:
 
         INJECTIVE over (name, type-arg vector), #775.  Each component is
         escaped by :func:`mangle_type_name` (itself injective — see its
-        docstring) and the vector is joined with ``_J``.  ``_J`` can never
-        be *produced* by the escape: every ``_`` in escaped output starts
-        one of the codes ``__``/``_L``/``_R``/``_C``/``_S``, so during the
-        left-to-right decode a ``_J`` at a code boundary is unambiguously a
-        separator (a literal ``_J`` in a type name escapes to ``__J``,
-        whose leading ``__`` is consumed as one code first).  Splitting on
-        boundary-``_J`` therefore recovers the exact component vector, and
-        each component un-escapes uniquely — no two distinct instantiation
-        vectors share a symbol.  ``name`` never contains ``$`` (Vera
-        identifiers can't lex it), so the prefix splits off unambiguously
-        at the first ``$``.
+        docstring) and the vector is joined with ``_J``.
+
+        The separator is safe because of a property of the escape, not
+        because of a list of its codes: **no mangler unit begins with**
+        ``J``.  A unit is either a single ``[A-Za-z0-9]`` character or a
+        ``_``-led escape, and ``J`` is not one of the escape letters — so
+        during the left-to-right decode, a ``_J`` at a unit boundary can
+        only be the separator.  A literal ``_J`` inside a type name is not
+        that: its ``_`` escapes to ``__``, whose two characters are
+        consumed as one unit first, leaving the ``J`` as an ordinary
+        character mid-unit-stream.  Splitting on boundary-``_J`` therefore
+        recovers the exact component vector, and each component un-escapes
+        uniquely — no two distinct instantiation vectors share a symbol.
+
+        Stating it as the property rather than as an enumeration is what
+        keeps it true as the escape grows: the #1219 widening added the
+        variable-length ``_U<hex>_`` unit, whose TERMINATOR is a ``_`` that
+        can sit immediately before a literal ``J``, and an argument phrased
+        as "the codes are ``__``/``_L``/``_R``/``_C``/``_S``" would have
+        silently stopped covering the alphabet it describes.  It is still
+        sound: that ``_`` closes its unit, so the ``J`` after it begins a
+        new one as an ordinary character, never a ``_J`` boundary.
+
+        ``name`` never contains ``$`` (Vera identifiers can't lex it), so
+        the prefix splits off unambiguously at the first ``$``.
 
         Collision classes this kills (both produced duplicate WAT ``func``
         identifiers pre-fix): parameterized built-in vs flat user ADT
