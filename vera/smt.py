@@ -205,6 +205,14 @@ class CalleeScope:
     :meth:`SmtContext._callee_contract_scope`, whose saved record is also the
     fallback for a callee nothing pins — so an unpinned callee reads in the
     scope currently in force, never in a mix of two.
+
+    One lookup deliberately stays outside this record: ``_module_fn_lookup``,
+    which resolves a ``mod::fn`` call.  It is keyed by module PATH, so it
+    already carries the dimension this record exists to supply and cannot
+    resolve to the wrong module's function.  What it can do is MISS — a
+    qualified call to a module this program did not resolve returns ``None``,
+    the call summary is not built, and the obligation demotes loudly (E532)
+    rather than binding something else (PR #1239 review).
     """
 
     alias_env: AliasEnv
@@ -2039,7 +2047,10 @@ class SmtContext:
         # in the callee, and counted there), which would make the tier
         # bookkeeping less honest, not more.  Both drains see this, so a
         # generic call written in the caller's `ensures` is disclosed as well
-        # as one in its body.
+        # as one in its body — with one qualifier: a call in BOTH positions is
+        # disclosed once, from the body, because a body that did not translate
+        # leaves no term to check the postcondition against and the clause
+        # never reaches translation (it demotes as E522 instead).
         if callee_info.forall_vars:
             if has_nontrivial_pre:
                 self._record_call_demotion(callee_info, callee_name, call_node)

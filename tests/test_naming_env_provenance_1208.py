@@ -1536,8 +1536,11 @@ class TestRefinedReturnTranslatesInTheCalleeNamespace:
             naming_mod.predicate_binder_key = orig_binder  # type: ignore[assignment]
             smt_module.SmtContext.translate_expr = orig_translate  # type: ignore[method-assign]
 
-        # Floor first: an observation list that stayed empty would satisfy any
-        # `all(...)` below without the site having run at all.
+        # Floor first: an empty observation list would satisfy the
+        # set-equality assertion below vacuously — `set() == {"Nat"}` is
+        # False, but only because the floor makes it so; without it a spy
+        # patched onto a function the code no longer calls measures
+        # nothing and says so with a green tick.
         assert seen, (
             "the refined-return translation never ran — this test is "
             "measuring nothing"

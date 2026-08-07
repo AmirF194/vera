@@ -618,7 +618,10 @@ def predicate_binder_key(predicate: ast.Expr, env: AliasEnv) -> str | None:
     binder, so the key the binder is bound under is by definition the key that
     binder's own reference resolves through — :func:`slot_ref_key` over the
     predicate's first ``@T.n``.  ``None`` when the predicate holds no
-    reference, in which case there is no binder to bind.
+    reference, in which case there is no binder to bind.  "First" is
+    :func:`~vera.ast.predicate_binder_ref`'s traversal order, whose one
+    documented exception (a closure inside the predicate contributing its own
+    binder) costs a Tier-3 demotion, never a wrong assumption.
 
     Derived here rather than from the refinement's TYPE EXPRESSION because the
     consumers hold different things: the runtime guard has the type expression

@@ -29,6 +29,7 @@ from pathlib import Path
 
 import pytest
 
+from vera import ast
 from vera.checker import typecheck
 from vera.codegen import compile, execute
 from vera.parser import parse_file, parse_to_ast
@@ -605,7 +606,11 @@ class TestBothHalvesOfTheScopeRideTogether:
 # `Box` is a PARAMETERISED alias, so the binder renders `Box<Nat>` while its
 # head identifier is `Box`.  The base resolves to `Nat`, which is a base the
 # SMT layer models, so nothing but the binder key decides whether the return
-# fact survives.
+# fact survives.  The `= Nat` body is load-bearing for that isolation, NOT
+# incidental: `type Box<T> = T;` resolves the base to the alias's own
+# parameter instead of substituting the argument (#1237), which fails the
+# modelled-primitive gate and drops the fact for an unrelated reason —
+# these tests would then pass or fail without touching the binder at all.
 _PARAM_BINDER = """\
 type Cnt = Nat;
 
@@ -691,7 +696,8 @@ class TestParameterisedRefinedReturnBinder:
 
 # The cross-module twin: `Cnt` is `Nat` in the module and `Int` in the
 # importer, so the binder key differs BETWEEN the two namespaces —
-# `Box<Nat>` against `Box<Int>`.
+# `Box<Nat>` against `Box<Int>`.  `type Box<T> = Nat;` for the same reason
+# as its single-module sibling above — do not simplify it to `= T` (#1237).
 _BINDER_LIB = """\
 module boxlib;
 
@@ -1101,3 +1107,78 @@ public fn main(@Unit -> @Int)
         assert "\n           &&" not in single
         assert "requires(@Int.0 > 424242 && @Int.1 > 424242)" in _e501(
             _verify_mod(single, []))
+
+
+class TestClosureInAPredicateTakesTheBinderSlot:
+    """Characterization: a closure inside a predicate owns the first ``@T.n``.
+
+    ``predicate_binder_ref`` documents "the first ``SlotRef`` in traversal
+    order", and that is genuinely not the outermost one: a closure passed to a
+    quantifier-like builtin introduces a binder of its own and the stack walk
+    reaches it first.  The key derived from it therefore names the CLOSURE's
+    parameter type, not the refinement's base (PR #1239 review).
+
+    Pinned rather than fixed because the consequence is conservative: a value
+    pushed under a key no reference resolves leaves the predicate
+    untranslatable — a Tier-3 demotion, never a fact assumed about the wrong
+    term — and the SMT refined-return path does not reach this shape at all (an
+    ``Array`` base is outside its five modelled bases).  The test exists so the
+    day someone makes the derivation outermost-first, this records what
+    changed.
+    """
+
+    _CLOSURE_PREDICATE = """\
+type Grown = { @Array<Nat> | array_all(@Array<Nat>.0, fn(@Nat -> @Bool) effects(pure) { @Nat.0 >= 18 }) };
+
+private fn mk(@Array<Nat> -> @Grown)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  @Array<Nat>.0
+}
+
+public fn main(@Unit -> @Nat)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  array_length(mk(array_range(0, 0)))
+}
+"""
+
+    def _predicate(self) -> object:
+        prog = parse_to_ast(self._CLOSURE_PREDICATE)
+        verifier = ContractVerifier(source=self._CLOSURE_PREDICATE)
+        verifier.register_program(prog)
+        return verifier, verifier.env.type_aliases["Grown"].body
+
+    def test_the_closures_own_binder_is_found_first(self) -> None:
+        from vera import naming
+        from vera.naming import alias_env_from_environment
+
+        verifier, refinement = self._predicate()
+        ref = ast.predicate_binder_ref(refinement.predicate)
+        assert ref is not None and ref.type_name == "Nat", ref
+        env = alias_env_from_environment(verifier.env)
+        assert naming.predicate_binder_key(refinement.predicate, env) == "Nat"
+        # ... while the refinement's BASE — what the binder actually is —
+        # renders differently, which is the whole point.
+        assert naming.slot_name(refinement.base_type, env) == "Array<Nat>"
+
+    def test_the_consequence_is_a_demotion_not_a_wrong_fact(self) -> None:
+        """The direction that matters: nothing is claimed, nothing is rejected.
+
+        No runtime oracle here: codegen cannot lower this predicate to a
+        boundary guard, so the program compiles to no exports (a loud E617/E620
+        chain, pre-existing and unrelated to the binder).  What the verifier
+        must not do is either half of a wrong answer — reject the program, or
+        claim a Tier-1 for a refinement it never translated.
+        """
+        result = _verify_mod(self._CLOSURE_PREDICATE, [])
+        assert not _codes(result), _codes(result)
+        refine = [o for o in result.obligations if o.kind == "refine_bind"]
+        assert refine, [o.kind for o in result.obligations]
+        assert all(o.status != "verified" for o in refine), [
+            (o.fn_name, o.status, o.error_code) for o in refine
+        ]
