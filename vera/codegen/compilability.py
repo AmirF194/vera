@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
 
-from vera import ast
+from vera import ast, naming
 from vera.wasm.async_fusion import await_needs_check, fused_async_target
 
 
@@ -23,22 +23,66 @@ def contract_exprs(
     and `decreases` becomes the termination guard's measure, so anything in
     one that needs a host import or a State/Exn family needs it registered.
 
-    `Decreases` is why this is a function rather than a `getattr(c, "expr")`:
-    it carries `exprs` (a tuple — a lexicographic measure is several
-    expressions), so the attribute-name shortcut silently skipped it and a
-    `handle[State<Nat>]` in a `decreases` measure emitted `state_push_Nat`
-    against an import that was never declared.
+    `Decreases` is why this exists at all: it carries `exprs` (a tuple — a
+    lexicographic measure is several expressions) where the other kinds carry
+    `expr`, so the `getattr(c, "expr")` shortcut this replaced silently
+    skipped it and a `handle[State<Nat>]` in a `decreases` measure emitted
+    `state_push_Nat` against an import that was never declared.
+
+    The dispatch is EXPLICIT rather than attribute-probing (round-5 review).
+    A `getattr` fallback treats an unrecognised contract kind as "carries
+    nothing", which is the silent-skip failure this function was written to
+    fix — and it hides the field accesses from mypy, so a renamed field would
+    typecheck.  A new `ast.Contract` subclass now raises here instead, at the
+    commit that adds it.
     """
     for contract in contracts:
-        expr = getattr(contract, "expr", None)
-        if expr is not None:
-            yield expr
-        for sub in getattr(contract, "exprs", ()):
-            yield sub
+        if isinstance(contract, (ast.Requires, ast.Ensures, ast.Invariant)):
+            yield contract.expr
+        elif isinstance(contract, ast.Decreases):
+            yield from contract.exprs
+        else:
+            raise TypeError(
+                f"contract_exprs does not know how to enumerate the "
+                f"predicates of {type(contract).__name__} — a new "
+                f"ast.Contract subclass must be added here (and to the "
+                f"walkers' WALKER_COVERAGE checklists), or its expressions "
+                f"go unregistered while codegen lowers them"
+            )
 
 
 class CompilabilityMixin:
     """Methods for checking if functions are compilable to WASM."""
+
+    def _signature_refinement_predicates(
+        self, decl: ast.FnDecl,
+    ) -> Iterator[ast.Expr]:
+        """Every refinement predicate LOWERED as a boundary guard for *decl*.
+
+        The third position the pre-scans missed (#1210 round 5), and the same
+        shape as `contract_exprs`: a parameter or return type that resolves to
+        a `{ @Base | P }` refinement has `P` emitted as a runtime guard in this
+        function's prologue/epilogue, so a `handle[State<T>]` or a host-imported
+        builtin written in `P` is LOWERED here — `type Big = { @Int |
+        nat_to_int(handle[State<Nat>] … ) > 0 && @Int.0 > 5 }` used as a
+        parameter type died at whole-module WAT with `unknown func
+        $vera.state_push_Nat`, from a check-green program.  The predicate is
+        reached through the ALIAS table rather than structurally from the
+        signature's `TypeExpr`, which is why no amount of walking the AST from
+        the body finds it.
+
+        The two bails mirror `_refinement_guard_parts` (contracts.py) exactly,
+        because registration must equal what is emitted, not exceed it: a
+        nested-refinement base is an E618 with NO guard, and an erased base
+        (`@Unit`, `Future<Unit>`) emits no guard either.
+        """
+        for te in (*decl.params, decl.return_type):
+            parts = naming.refinement_binder_parts(te, self._alias_env)
+            if parts is None or parts.base_is_refinement:
+                continue
+            if self._type_expr_to_wasm_type(parts.base) is None:
+                continue
+            yield parts.predicate
 
     def _is_compilable(self, decl: ast.FnDecl) -> bool:
         """Check if a function can be compiled to WASM.
@@ -323,7 +367,16 @@ class CompilabilityMixin:
         #                       then recurses into args
         #   FnCall            → registers Markdown/Regex/Map/Set/Decimal/
         #                       Json/Html/Math builtin then recurses args
-        #   Block             → recurses into each stmt + trailing expr
+        #   Block             → recurses into each statement (LetStmt,
+        #                       LetDestruct, ExprStmt) + the trailing expr
+        #   LetStmt           → recurses into the bound value
+        #   LetDestruct       → recurses into the destructured value
+        #                       (#1210 round 5 — a destructuring `let` was
+        #                       absent from this walk ENTIRELY, so
+        #                       `let Tuple<@String, @String> =
+        #                       pairs(md_to_html("# hi"))` reached the
+        #                       lowering with no import registered)
+        #   ExprStmt          → recurses into the statement's expr
         #   ConstructorCall   → recurses into each arg
         #   BinaryExpr        → recurses into left + right
         #   UnaryExpr         → recurses into operand
@@ -359,6 +412,13 @@ class CompilabilityMixin:
         #   AssumeExpr        → recurses into the condition
         #   ForallExpr        → recurses into domain + predicate
         #   ExistsExpr        → recurses into domain + predicate
+        #   ModuleCall        → recurses into each arg (#1210 round 5).
+        #                       The CALLEE is the imported module's own
+        #                       scan to register; the ARGUMENTS are this
+        #                       module's expressions and are lowered
+        #                       here, so the previous "tracked by that
+        #                       module's scan" disposition covered only
+        #                       half the node
         #
         # Intentionally ignored (leaves — no sub-exprs to recurse into):
         #   IntLit            → leaf
@@ -369,8 +429,6 @@ class CompilabilityMixin:
         #   SlotRef           → leaf
         #   ResultRef         → leaf
         #   NullaryConstructor → zero-arg, no sub-exprs
-        #   ModuleCall        → cross-module IO tracked separately
-        #                       via the imported module's own scan
         #   OldExpr           → names an EffectRef, not an expression
         #   NewExpr           → names an EffectRef, not an expression
         #
@@ -398,7 +456,10 @@ class CompilabilityMixin:
             return
         if isinstance(node, ast.Block):
             for stmt in node.statements:
-                if isinstance(stmt, ast.LetStmt):
+                # #1210 round 5: `LetDestruct` — a destructuring `let` — was
+                # missing here, so its value expression was never walked while
+                # codegen lowered it like any other.
+                if isinstance(stmt, (ast.LetStmt, ast.LetDestruct)):
                     self._scan_io_ops(stmt.value)
                 elif isinstance(stmt, ast.ExprStmt):
                     self._scan_io_ops(stmt.expr)
@@ -518,6 +579,13 @@ class CompilabilityMixin:
         elif isinstance(node, (ast.ForallExpr, ast.ExistsExpr)):
             self._scan_io_ops(node.domain)
             self._scan_io_ops(node.predicate)
+        # #1210 round 5 — the CALLEE crosses a module boundary, the ARGUMENTS
+        # do not: they are this module's expressions, lowered into this
+        # module's body.  Both coverage tables used to dismiss the whole node
+        # as the imported module's business.
+        elif isinstance(node, ast.ModuleCall):
+            for arg in node.args:
+                self._scan_io_ops(arg)
 
     def _scan_body_for_state_handlers(
         self, node: ast.Node, decl: ast.FnDecl | None = None,
@@ -527,14 +595,17 @@ class CompilabilityMixin:
         The ENTRY POINT for the handler walk — ``_scan_expr_for_handlers``
         does the recursion, this owns the per-function verdict.
 
-        Covers the body AND every contract predicate (``requires`` /
-        ``ensures`` / ``decreases``), which ``contract_exprs`` enumerates.
-        Runtime-checked contracts are lowered into the function like any
-        other code, so a ``handle[State<Nat>]`` written in a ``requires``
-        predicate emits ``call $vera.state_push_Nat`` — the body-only walk
-        registered nothing for it and the module failed to compile with
-        ``unknown func``, from a check-green, verify-clean program (#1210
-        round 2).
+        Covers the body, every contract predicate (``requires`` / ``ensures``
+        / ``decreases``) which ``contract_exprs`` enumerates, AND every
+        signature refinement predicate which
+        ``_signature_refinement_predicates`` enumerates.  Runtime-checked
+        contracts and refinement boundary guards are lowered into the function
+        like any other code, so a ``handle[State<Nat>]`` written in a
+        ``requires`` predicate (#1210 round 2) or in a parameter type's
+        ``{ @Int | … }`` refinement (round 5) emits ``call
+        $vera.state_push_Nat`` — the body-only walk registered nothing for it
+        and the module failed to compile with ``unknown func``, from a
+        check-green, verify-clean program.
 
         Returns ``False`` when a ``handle[State<T>]`` / ``handle[Exn<E>]``
         reached from *node* names a cell or payload type the backend cannot
@@ -549,6 +620,8 @@ class CompilabilityMixin:
         if decl is not None:
             for pred in contract_exprs(decl.contracts):
                 self._scan_expr_for_handlers(pred)
+            for refined in self._signature_refinement_predicates(decl):
+                self._scan_expr_for_handlers(refined)
         fn_name = decl.name if decl is not None else "<unknown>"
         if self._unregistrable_state_cells:
             offender = self._unregistrable_state_cells[0]
@@ -615,7 +688,18 @@ class CompilabilityMixin:
         #                       its calls — `unknown func
         #                       $vera.state_push_Nat` at whole-module WAT
         #                       compilation, from a check-green program.
-        #   Block             → recurses into stmts + trailing expr
+        #   Block             → recurses into each statement (LetStmt,
+        #                       LetDestruct, ExprStmt) + the trailing expr
+        #   LetStmt           → recurses into the bound value
+        #   LetDestruct       → recurses into the destructured value
+        #                       (#1210 round 5 — a destructuring `let` was
+        #                       absent from this walk ENTIRELY, so
+        #                       `let Tuple<@Nat, @Nat> =
+        #                       pairn(handle[State<Nat>] … )` emitted
+        #                       `state_push_Nat` against no import, and
+        #                       an `Exn<Unit>` payload there bypassed the
+        #                       round-3 E612 gate outright)
+        #   ExprStmt          → recurses into the statement's expr
         #   FnCall            → recurses into each arg
         #   ConstructorCall   → recurses into each arg
         #   BinaryExpr        → recurses into left + right
@@ -647,6 +731,15 @@ class CompilabilityMixin:
         #                       the two cannot drift)
         #   ForallExpr        → recurses into domain + predicate
         #   ExistsExpr        → recurses into domain + predicate
+        #   ModuleCall        → recurses into each arg (#1210 round 5).
+        #                       Only the CALLEE is the imported module's
+        #                       to register; the ARGUMENTS are this
+        #                       module's expressions, lowered here.  The
+        #                       old "tracked by that module's own scan"
+        #                       disposition was true of the callee and
+        #                       false of the args, and
+        #                       `vera.math::identn(handle[State<Nat>] … )`
+        #                       compiled to `unknown func`
         #
         # Intentionally ignored (leaves — no sub-exprs to walk):
         #   IntLit            → leaf
@@ -657,8 +750,6 @@ class CompilabilityMixin:
         #   SlotRef           → leaf
         #   ResultRef         → leaf
         #   NullaryConstructor → zero-arg, no sub-exprs
-        #   ModuleCall        → handlers in imported module tracked
-        #                       by that module's own scan
         #   OldExpr           → names an EffectRef, not an expression
         #   NewExpr           → names an EffectRef, not an expression
         #
@@ -677,7 +768,13 @@ class CompilabilityMixin:
             return
         if isinstance(node, ast.Block):
             for stmt in node.statements:
-                if isinstance(stmt, ast.LetStmt):
+                # #1210 round 5: `LetDestruct` — a destructuring `let` — was
+                # missing here, so a handler in its value registered nothing
+                # while the lowering emitted the family's calls, AND the
+                # round-3 uncompilable-payload gate never saw the handler at
+                # all (`handle[Exn<Unit>]` there compiled to `unknown tag`
+                # where its `LetStmt` twin is a clean E612 function drop).
+                if isinstance(stmt, (ast.LetStmt, ast.LetDestruct)):
                     self._scan_expr_for_handlers(stmt.value)
                 elif isinstance(stmt, ast.ExprStmt):
                     self._scan_expr_for_handlers(stmt.expr)
@@ -736,3 +833,9 @@ class CompilabilityMixin:
         elif isinstance(node, (ast.ForallExpr, ast.ExistsExpr)):
             self._scan_expr_for_handlers(node.domain)
             self._scan_expr_for_handlers(node.predicate)
+        # #1210 round 5 — symmetrical with `_scan_io_ops`: a module call's
+        # ARGUMENTS are this module's expressions, however the callee is
+        # registered.
+        elif isinstance(node, ast.ModuleCall):
+            for arg in node.args:
+                self._scan_expr_for_handlers(arg)

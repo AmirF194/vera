@@ -1617,6 +1617,16 @@ public fn go(@Int -> @Bool) requires(true) ensures(true) effects(<State<Nat>>)
     def test_clause_body_put_non_negative_passes(self) -> None:
         assert _run(self._PUT_IN_CLAUSE_BODY, "go", 9) == 0
 
+    def test_clause_body_put_zero_survives(self) -> None:
+        """Zero is the guard's boundary, and every sibling pair pins it.
+
+        `@Nat`'s range starts AT zero, so a guard written `<= 0` instead of
+        `< 0` traps here while both the negative and the positive case above
+        stay green — the one input that separates the correct comparison from
+        the off-by-one (round-5 review; this pair was the only boundary
+        differential in the class missing it)."""
+        assert _run(self._PUT_IN_CLAUSE_BODY, "go", 0) == 0
+
 
 class TestHandlerStateWidenDifferential1203:
     """The widen DUAL of the boundary differentials: a `State<Int>` cell

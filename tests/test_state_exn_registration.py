@@ -20,34 +20,50 @@ Its Exn twin discarded the registration verdict outright, so
 `handle[Exn<Unit>]` in a `pure` function compiled to a `throw` against an
 undeclared tag where the declared-row spelling was a clean `E612`.
 
+Round 5 found three more positions of the same shape, none of which the
+corpus contained: a destructuring `let`'s value (`LetDestruct` was absent
+from the `Block` dispatch of BOTH walkers), a module call's ARGUMENTS
+(`ModuleCall` was dismissed as the imported module's business — true of the
+callee, false of the args), and a signature refinement predicate (reached
+through the alias table, so nothing structural finds it).  The first also
+disarmed the round-3 uncompilable-payload gate: `handle[Exn<Unit>]` in a
+destructuring let compiled to `unknown tag` where its `LetStmt` twin is a
+clean E612 drop.
+
 Two kinds of test here.  The shape tests pin each gap on a program whose
 value is derived from the language rules, so a fix that registers the
 family but lowers it wrongly still fails.  The differential is the
 cross-component invariant itself — for every corpus program that compiles,
 every `state_*` / `exn_*` symbol the emitted WAT REFERENCES has a matching
-import or tag DECLARATION, **and the module validates** — which is the shape
-of check this bug class needs: a green unit suite cannot see a desync
-between the registration pass and the lowering pass, only running both and
-comparing can.  The validation leg exists because the name comparison alone
-is blind to a symbol declared at the WRONG TYPE, which is invalid WASM the
-set difference reports as perfectly balanced.
+import or tag DECLARATION, and every HANDLER-BEARING module validates —
+which is the shape of check this bug class needs: a green unit suite cannot
+see a desync between the registration pass and the lowering pass, only
+running both and comparing can.  The validation leg exists because the name
+comparison alone is blind to a symbol declared at the WRONG TYPE, which is
+invalid WASM the set difference reports as perfectly balanced.  Its scope
+and its two limits are stated on the test itself; the walkers' own
+completeness is gated by a field-coverage test in
+`tests/test_walker_defensive_branches_597.py`, because a corpus-anchored
+differential cannot flag a position no corpus program contains.
 """
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
 import pytest
 import wasmtime
 
-from tests.codegen_helpers import _compile, _run
+from tests.codegen_helpers import _compile, _run, exceptions_engine
 from tests.checker_helpers import _check_ok
 from tests.verifier_helpers import _verify_ok
 from vera.errors import VeraError
-from vera.parser import parse_file
+from vera.parser import parse_file, parse_to_ast
+from vera.resolver import ResolvedModule
 from vera.transform import transform
-from vera.codegen import compile as codegen_compile
+from vera.codegen import compile as codegen_compile, execute
 
 _MAIN = """
 public fn main(@Unit -> @Int)
@@ -172,11 +188,134 @@ private fn probe(@Unit -> @Int)
 }
 """
 
+# --- a handler inside a DESTRUCTURING let's value ---------------------
+# `LetDestruct` was absent from both walkers entirely (round 5): the `Block`
+# branch dispatched `LetStmt` and `ExprStmt` only, so a destructuring let's
+# value was never walked while codegen lowered it like any other statement.
+#   the nested handler's get clause resumes 3 + 100 = 103; pairn(103) is
+#   Tuple(103, 4), and `@Nat.1` is the FIRST-bound component (De Bruijn)
+# => 103.
+_HANDLE_IN_LETDESTRUCT = """
+private fn pairn(@Nat -> @Tuple<Nat, Nat>)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  Tuple(@Nat.0, 4)
+}
+
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let Tuple<@Nat, @Nat> = pairn(handle[State<Nat>](@Nat = 3) {
+    get(@Unit) -> { resume(@Nat.0 + 100) },
+    put(@Nat) -> { resume(()) }
+  } in {
+    get(())
+  });
+  nat_to_int(@Nat.1)
+}
+"""
+
+# The Exn twin of the same position: `unknown tag $exn_Int`.
+#   the handler catches throw(2) and returns 2 + 40 = 42; pair(42) is
+#   Tuple(42, 4), and `@Int.1` is the first-bound component
+# => 42.
+_EXN_IN_LETDESTRUCT = """
+private fn pair(@Int -> @Tuple<Int, Int>)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  Tuple(@Int.0, 4)
+}
+
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let Tuple<@Int, @Int> = pair(handle[Exn<Int>] {
+    throw(@Int) -> { @Int.0 + 40 }
+  } in {
+    throw(2);
+    999
+  });
+  @Int.1
+}
+"""
+
+# --- a handler inside a SIGNATURE REFINEMENT predicate ----------------
+# The third position (round 5): a `{ @Base | P }` parameter or return type has
+# `P` emitted as a boundary guard in this function's prologue/epilogue, so a
+# handler written in `P` is lowered here.  The predicate is reached through
+# the ALIAS table, not structurally from the body, so no amount of walking
+# the AST from `decl.body` finds it — `unknown func $vera.state_push_Nat`.
+#   the guard runs, the handler resumes 3 > 0 holds, `refined(10)` returns 10
+# => 10.
+_HANDLE_IN_PARAM_REFINEMENT = """
+type Big = { @Int | nat_to_int(handle[State<Nat>](@Nat = 3) {
+  get(@Unit) -> { resume(@Nat.0) },
+  put(@Nat) -> { resume(()) }
+} in {
+  get(())
+}) > 0 && @Int.0 > 5 };
+
+private fn refined(@Big -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  @Big.0
+}
+
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  refined(10)
+}
+"""
+
+# The RETURN-type half of the same position — a different emission site
+# (epilogue rather than prologue) reached from the same enumeration.
+_HANDLE_IN_RETURN_REFINEMENT = """
+type Big = { @Int | nat_to_int(handle[State<Nat>](@Nat = 3) {
+  get(@Unit) -> { resume(@Nat.0) },
+  put(@Nat) -> { resume(()) }
+} in {
+  get(())
+}) > 0 && @Int.0 > 5 };
+
+private fn refined(@Unit -> @Big)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  10
+}
+
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  refined(())
+}
+"""
+
 _SHAPES = [
     ("handle_in_clause_body", _HANDLE_IN_CLAUSE_BODY, 119),
     ("handle_in_state_init", _HANDLE_IN_STATE_INIT, 9),
     ("handle_in_with_expr", _HANDLE_IN_WITH_EXPR, 15),
     ("exn_in_clause_body", _EXN_IN_CLAUSE_BODY, 47),
+    ("handle_in_letdestruct", _HANDLE_IN_LETDESTRUCT, 103),
+    ("exn_in_letdestruct", _EXN_IN_LETDESTRUCT, 42),
+    ("handle_in_param_refinement", _HANDLE_IN_PARAM_REFINEMENT, 10),
+    ("handle_in_return_refinement", _HANDLE_IN_RETURN_REFINEMENT, 10),
 ]
 
 # --- the i32_pair cell the walk skipped in silence --------------------
@@ -271,12 +410,41 @@ private fn probe(@Unit -> @Int)
 }
 """
 
+# And the round-5 bypass: the identical payload in a DESTRUCTURING let's
+# value.  The gate is driven by the same walk, so an unwalked position does
+# not merely miss a registration — it silently disarms the gate too, and
+# `handle[Exn<Unit>]` here compiled to `unknown tag $exn_Unit` where its
+# `LetStmt` twin (above) is a clean E612 function drop.
+_EXN_UNIT_IN_LETDESTRUCT = """
+private fn pair(@Int -> @Tuple<Int, Int>)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  Tuple(@Int.0, 4)
+}
+
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let Tuple<@Int, @Int> = pair(handle[Exn<Unit>] {
+    throw(@Unit) -> { 0 - 1 }
+  } in {
+    7
+  });
+  @Int.1
+}
+"""
+
 
 @pytest.mark.parametrize(
     "source",
     [
         pytest.param(_EXN_UNIT_IN_PURE_FN, id="handler_walk"),
         pytest.param(_EXN_UNIT_DECLARED_ROW, id="declared_row"),
+        pytest.param(_EXN_UNIT_IN_LETDESTRUCT, id="letdestruct_value"),
     ],
 )
 def test_uncompilable_exn_payload_is_the_same_verdict_either_way(
@@ -296,6 +464,99 @@ def test_uncompilable_exn_payload_is_the_same_verdict_either_way(
     )
     # The tag is never declared, so it must never be referenced either.
     assert "$exn_Unit" not in (result.wat or "")
+
+
+# --- handlers in a MODULE CALL's arguments -----------------------------
+# `ModuleCall` sat in both walkers' "intentionally ignored" list with the
+# rationale "tracked by the imported module's own scan" — true of the CALLEE
+# and false of the ARGUMENTS, which are this module's expressions and are
+# lowered into this module's body.  Needs a real resolved module: the shape
+# under test is a genuine cross-module call, not a qualified spelling that
+# falls back to a local function.
+_MODULE_LIB = """\
+public fn identn(@Nat -> @Nat)
+  requires(true)
+  ensures(@Nat.result == @Nat.0)
+  effects(pure)
+{ @Nat.0 }
+
+public fn identi(@Int -> @Int)
+  requires(true)
+  ensures(@Int.result == @Int.0)
+  effects(pure)
+{ @Int.0 }
+"""
+
+_MODULECALL_STATE = """\
+import lib(identn);
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  nat_to_int(lib::identn(handle[State<Nat>](@Nat = 3) {
+    get(@Unit) -> { resume(@Nat.0 + 100) },
+    put(@Nat) -> { resume(()) }
+  } in {
+    get(())
+  }))
+}
+"""
+
+_MODULECALL_EXN = """\
+import lib(identi);
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  lib::identi(handle[Exn<Int>] {
+    throw(@Int) -> { @Int.0 + 40 }
+  } in {
+    throw(2);
+    999
+  })
+}
+"""
+
+
+def _lib_module() -> ResolvedModule:
+    """A resolved `lib` module with one identity function per family."""
+    return ResolvedModule(
+        path=("lib",),
+        file_path=Path("/fake/lib.vera"),
+        program=parse_to_ast(_MODULE_LIB),
+        source=_MODULE_LIB,
+    )
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        pytest.param(_MODULECALL_STATE, 103, id="state"),
+        pytest.param(_MODULECALL_EXN, 42, id="exn"),
+    ],
+)
+def test_handler_in_a_module_call_argument_is_registered(
+    source: str, expected: int,
+) -> None:
+    """A module call's ARGUMENTS are this module's code, so they are walked.
+
+    Pre-fix: `unknown func $vera.state_push_Nat` / `unknown tag $exn_Int` at
+    whole-module WAT compilation, from a check-green program — the handler was
+    lowered here while the walk dismissed the whole `ModuleCall` node as the
+    imported module's business.  The values are derived from the language
+    rules (the get clause resumes 3 + 100; the Exn handler catches throw(2)
+    and returns 2 + 40), so a fix that registers the family but lowers the
+    argument wrongly still fails.
+    """
+    result = codegen_compile(
+        parse_to_ast(source), source=source,
+        resolved_modules=[_lib_module()],
+    )
+    errors = [d for d in result.diagnostics if d.severity == "error"]
+    assert not errors, [d.description for d in errors]
+    assert execute(result, fn_name="main", args=[]).value == expected
 
 
 # --- handlers in CONTRACT predicates ----------------------------------
@@ -451,11 +712,41 @@ _EXN_REF = re.compile(r"(?:catch|throw)\s+(\$exn_[^\s)]+)")
 _EXN_DECL = re.compile(r"\(tag\s+(\$exn_[^\s)]+)")
 
 
-def _corpus_programs() -> list[Path]:
+def _conformance_negatives() -> frozenset[str]:
+    """File names of the conformance suite's DELIBERATE negatives.
+
+    A manifest entry carrying `expected_error` is a fixture written to FAIL
+    `vera check`, so the toolchain never reaches codegen for it and its
+    emitted WAT is not a thing any user can obtain.  Feeding one to a
+    registration-invariant sweep measures the compiler on input it is
+    contractually not compiling: three of them produce modules that do not
+    even load (round-5 review measured `ch06_quantifier_array_domain_rejected`
+    and `ch09_builtin_effect_redefinition_rejected` among them), which is
+    correct behaviour for a rejected program and noise here.
+    """
     root = Path(__file__).parent.parent
+    manifest = json.loads(
+        (root / "tests" / "conformance" / "manifest.json").read_text(
+            encoding="utf-8"))
+    return frozenset(
+        entry["file"] for entry in manifest if entry.get("expected_error"))
+
+
+def _corpus_programs() -> list[Path]:
+    """Every corpus program the toolchain is expected to compile.
+
+    The conformance suite's negatives are filtered out (see
+    `_conformance_negatives`) — they never reach codegen through `vera
+    check`, so they are not part of any registration invariant.
+    """
+    root = Path(__file__).parent.parent
+    negatives = _conformance_negatives()
     files: list[Path] = []
     for d in _CORPUS_DIRS:
-        files.extend(sorted((root / d).glob("*.vera")))
+        files.extend(
+            p for p in sorted((root / d).glob("*.vera"))
+            if p.name not in negatives
+        )
     return files
 
 
@@ -470,27 +761,46 @@ def test_every_referenced_state_exn_symbol_is_declared() -> None:
     #1210 was — a family emitted but never declared.
 
     Two legs, because the name comparison alone is not the invariant.  The
-    symbol-set leg catches an UNDECLARED symbol.  The validation leg —
-    handing each swept module to `wasmtime.Module`, which type-checks the
-    whole thing — catches a symbol declared at the WRONG TYPE, which the
-    name comparison reports as perfectly balanced: the #1231 shape declared
-    `state_get_Bool` (i32) for a call the checker had typed `Int` (i64), and
-    a Byte-literal-into-an-`Int`-cell shape declared the right names with
-    mismatched value types.  Both passed a name-only differential while
-    being invalid WASM.
+    symbol-set leg catches an UNDECLARED symbol, over every program in the
+    sweep.  The validation leg — handing the HANDLER-BEARING modules (the
+    ones that reference a `state_*` / `exn_*` symbol at all, currently 31 of
+    them) to `wasmtime.Module`, which type-checks the whole thing — catches a
+    symbol declared at the WRONG TYPE, which the name comparison reports as
+    perfectly balanced: the #1231 shape declared `state_get_Bool` (i32) for a
+    call the checker had typed `Int` (i64), and a Byte-literal-into-an-`Int`-
+    cell shape declared the right names with mismatched value types.  Both
+    passed a name-only differential while being invalid WASM.  The engine is
+    `exceptions_engine()`, not a default one: 10 of those 31 modules fail to
+    load when `wasm_exceptions` is off, which is a supported wasmtime
+    configuration, so a bare engine would make this leg a property of the
+    runner rather than of the compiler.
 
-    Anchored, not exploratory: this sweeps `examples/` and
-    `tests/conformance/`, so it holds the invariant over the programs the
-    suite deliberately PLANTS there (including this PR's three
-    `ch07_*` handler programs).  It is a regression guard on a corpus we
-    curate, not an independent search for new violations.  Programs that do
-    not compile are counted, not asserted on: the conformance suite's
-    negatives are supposed to fail.
+    TWO LIMITS, stated rather than implied.  First, this builds each module
+    through `transform` → `codegen_compile` — a CHECKER-LESS shortcut.  The
+    real toolchain threads the resolver and the checker's artifacts
+    (`expr_semantic_types`, `expr_target_types`, `module_artifacts`), and the
+    WAT it produces is not always the same text: measured on this corpus, 52
+    of the 201 programs the toolchain compiles differ from their shortcut
+    build.  The invariant under test (registration ⊇ lowering) is a property
+    of the codegen pass both share, but a divergence in the shortcut's favour
+    is possible in principle and this sweep would not see it.  Second, it is
+    anchored, not exploratory: it holds the invariant over the programs the
+    suite deliberately PLANTS in `examples/` and `tests/conformance/`, a
+    corpus we curate, not an independent search for new violations — the two
+    positions round 5 closed (`LetDestruct.value`, `ModuleCall.args`) had no
+    corpus instance at all, which is why the shape tests above exist and why
+    the walkers now carry a field-coverage gate
+    (`tests/test_walker_defensive_branches_597.py`).
+
+    The conformance suite's deliberate negatives are FILTERED OUT rather than
+    swept-and-ignored (`_corpus_programs`): a program written to fail `vera
+    check` never reaches codegen through the toolchain, so its emitted WAT is
+    not a thing this invariant is about.
     """
     programs = _corpus_programs()
     assert programs, "corpus is empty — the sweep would pass vacuously"
 
-    engine = wasmtime.Engine()
+    engine = exceptions_engine()
     swept = 0
     validated = 0
     symbol_refs = 0
@@ -546,17 +856,24 @@ def test_every_referenced_state_exn_symbol_is_declared() -> None:
     # contributes once per distinct symbol, per program); the number of
     # globally distinct symbols across the corpus is much smaller, and both
     # are floored so neither reading can be quietly gamed.
+    #
+    # Re-measured at round 5, after the conformance negatives were filtered
+    # out of the sweep: swept 201, symbol_refs 128, distinct 31, validated 30
+    # (the filter removed 25 programs and one handler-bearing module — a
+    # deliberately-rejected fixture that referenced a family).  Each floor
+    # sits below its measurement with room for ordinary corpus churn, and far
+    # enough above zero that an emptied regex or a vanished corpus fails.
     assert swept >= 150, f"only {swept} programs compiled — sweep too small"
-    assert symbol_refs >= 50, (
+    assert symbol_refs >= 90, (
         f"only {symbol_refs} state/exn symbol references summed across "
         "programs — the extraction regexes are probably no longer matching "
         "the emitted WAT"
     )
-    assert len(distinct_symbols) >= 15, (
+    assert len(distinct_symbols) >= 22, (
         f"only {len(distinct_symbols)} globally distinct state/exn symbols "
         "— the corpus has stopped covering the families"
     )
-    assert validated >= 20, (
+    assert validated >= 22, (
         f"only {validated} handler-bearing modules validated — the "
         "wrong-type leg is nearly vacuous"
     )
@@ -607,11 +924,14 @@ def test_the_validation_leg_can_go_red() -> None:
     type — is reported as balanced.  Retyping one `state_get_*` import from
     i64 to i32 in an otherwise-good module must fail the new leg while the
     name comparison stays green.
+
+    Uses the same `exceptions_engine()` the leg itself uses, so the red-proof
+    and the thing it proves red cannot disagree about what a valid module is.
     """
     result = _compile(_HANDLE_IN_STATE_INIT + _MAIN)
     wat = result.wat
     assert wat, "fixture produced no WAT"
-    engine = wasmtime.Engine()
+    engine = exceptions_engine()
     wasmtime.Module(engine, wat)  # the unmutated fixture validates
 
     mutated = wat.replace(

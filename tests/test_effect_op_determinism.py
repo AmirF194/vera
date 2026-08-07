@@ -349,6 +349,61 @@ def test_unmentioned_row_members_order_structurally() -> None:
     assert only["mapping"] == {"T": "Bool"}, only
 
 
+# The same fallback over two REFINEMENT aliases of one base.  `pretty_type`
+# is a presentation renderer: it prints a refinement as `{@Int | ...}` with
+# the predicate elided, and strips the built-in type-var marker (`T#b` → `T`).
+# Keying the structural tiebreak on it therefore reintroduced the tie one
+# level down — `State<Pos>` and `State<Neg>` rendered identically, so the
+# stable sort handed back frozenset order again (round-5 review).
+_REFINED_ORDER_FALLBACK_PROBE = """\
+import json
+from vera import ast
+from vera.environment import TypeEnv
+from vera.types import INT, ConcreteEffectRow, EffectInstance, RefinedType
+
+
+def refined(op, bound):
+    return RefinedType(
+        base=INT,
+        predicate=ast.BinaryExpr(
+            op=op,
+            left=ast.SlotRef(type_name="Int", type_args=None, index=0),
+            right=ast.IntLit(value=bound)))
+
+
+pos = EffectInstance("State", (refined(ast.BinOp.GT, 0),))
+neg = EffectInstance("State", (refined(ast.BinOp.LT, 0),))
+assert pos != neg
+
+env = TypeEnv()
+env.current_effect_row = ConcreteEffectRow(frozenset({pos, neg}))
+env.current_effect_order = ()
+print(json.dumps([
+    str(e.type_args[0].predicate.op) for e in env.ordered_effect_row()
+]))
+"""
+
+
+def test_refinement_predicates_break_the_order_tie() -> None:
+    """Two refinement aliases of one base are ordered, not left to the seed.
+
+    The type-argument tiebreak was rendered with `pretty_type`, which elides
+    a refinement's predicate — so this row's two members produced the same
+    key and the fallback fell straight back into frozenset iteration order,
+    the exact failure the tiebreak exists to remove.  Same seeds as the
+    sweeps above; the assertion is a single outcome, not a particular one, so
+    it pins determinism rather than an arbitrary choice of winner.
+    """
+    results = _sweep_python(_REFINED_ORDER_FALLBACK_PROBE)
+    assert len(results) == 1, (
+        "two refinement-typed instantiations of one effect are not hash-seed "
+        f"stable: {len(results)} distinct outcomes across seeds {_SEEDS}:\n"
+        + "\n--\n".join(sorted(results))
+    )
+    order = json.loads(results.pop())
+    assert sorted(order) == ["BinOp.GT", "BinOp.LT"], order
+
+
 def test_qualified_lookup_is_unaffected_by_row_order() -> None:
     """A qualified `State.get` / `Http.get` never consults the row."""
     env = TypeEnv()

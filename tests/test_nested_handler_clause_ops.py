@@ -623,11 +623,188 @@ public fn main(@Unit -> @Int)
 }
 """
 
+# The QUALIFIED spelling of the same clause-body operation.  `State.put(x)`
+# is routed through `_translate_call` exactly like the bare `put(x)`, so one
+# gate covers both — but the matrix had no qualified case, which left the
+# claim in `calls.py`'s comment ("and so is the qualified `State.get` /
+# `State.put` spelling, which delegates here") untested.
+_SAME_FAMILY_QUALIFIED = _SAME_FAMILY_NESTING.replace(
+    "get(@Unit) -> { put(42); resume(@Int.0) }",
+    "get(@Unit) -> { State.put(42); resume(@Int.0) }",
+)
+assert _SAME_FAMILY_QUALIFIED != _SAME_FAMILY_NESTING, (
+    "the qualified-spelling fixture no longer derives from the bare one — "
+    "the bare clause body's spelling changed"
+)
+
+# A COMPOSITE cell of the same family, both handlers declaring clauses — the
+# gate's clause-registry branch, where both sides of the comparison are the
+# canonical family name.
+_SAME_FAMILY_COMPOSITE_CLAUSE = """
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Option<Int>>](@Option<Int> = Some(100)) {
+    get(@Unit) -> { resume(@Option<Int>.0) },
+    put(@Option<Int>) -> { resume(()) }
+  } in {
+    let @Option<Int> = handle[State<Option<Int>>](@Option<Int> = Some(5)) {
+      get(@Unit) -> { put(Some(42)); resume(@Option<Int>.0) },
+      put(@Option<Int>) -> { resume(()) }
+    } in {
+      get(())
+    };
+    match @Option<Int>.0 {
+      Some(@Int) -> @Int.0 * 1000 + (match get(()) {
+        Some(@Int) -> @Int.0,
+        None -> 0
+      }),
+      None -> 0 - 1
+    }
+  }
+}
+"""
+
+# The same composite nest with NO `put` clause on the outer handler, so the
+# outward-routed `put` resolves to the outer handler's BARE INTRINSIC and the
+# gate reads its family off the IMPORT NAME — which is mangled
+# (`Option_LInt_R`) where the pushed-cell stack is canonical (`Option<Int>`).
+# Mangling is not idempotent, so re-mangling the already-mangled side made
+# every composite family compare unequal to itself: this program compiled and
+# ran, returning 5100 where the enclosing-context rule says 5042 (round-5
+# review).  Its scalar twin (`Int`, whose mangling IS a fixed point) was
+# refused correctly the whole time, which is why nothing caught it.
+_SAME_FAMILY_COMPOSITE_IMPORT = """
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Option<Int>>](@Option<Int> = Some(100)) {
+    get(@Unit) -> { resume(@Option<Int>.0) }
+  } in {
+    let @Option<Int> = handle[State<Option<Int>>](@Option<Int> = Some(5)) {
+      get(@Unit) -> { put(Some(42)); resume(@Option<Int>.0) },
+      put(@Option<Int>) -> { resume(()) }
+    } in {
+      get(())
+    };
+    match @Option<Int>.0 {
+      Some(@Int) -> @Int.0 * 1000 + (match get(()) {
+        Some(@Int) -> @Int.0,
+        None -> 0
+      }),
+      None -> 0 - 1
+    }
+  }
+}
+"""
+
+# Its scalar twin, which takes the same import-name branch and was always
+# refused — the differential that localises the bug to the mangling, not to
+# the branch.
+_SAME_FAMILY_SCALAR_IMPORT = """
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>](@Int = 100) {
+    get(@Unit) -> { resume(@Int.0) }
+  } in {
+    let @Int = handle[State<Int>](@Int = 5) {
+      get(@Unit) -> { put(42); resume(@Int.0) },
+      put(@Int) -> { resume(()) }
+    } in {
+      get(())
+    };
+    @Int.0 * 1000 + get(())
+  }
+}
+"""
+
+# Four levels, alternating Int / Nat / Int / Nat.  The innermost `put(40)`
+# runs the FOURTH handler's put clause, whose own bare `put(300)` is an
+# operation of the THIRD (Int, unshadowed — so far so good) and inlines its
+# clause; the `put(30)` written THERE is an operation of the SECOND (Nat),
+# and the cell that shadows it is the FOURTH's, two levels in.  The
+# shadowing cell is not the adjacent one — the at-a-distance claim
+# `KNOWN_ISSUES.md`'s #1233 row makes, pinned here rather than asserted.
+_SAME_FAMILY_AT_A_DISTANCE = """
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>](@Int = 1) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) }
+  } in {
+    let @Int = handle[State<Nat>](@Nat = 2) {
+      get(@Unit) -> { resume(@Nat.0) },
+      put(@Nat) -> { resume(()) }
+    } in {
+      let @Int = handle[State<Int>](@Int = 3) {
+        get(@Unit) -> { resume(@Int.0) },
+        put(@Int) -> { put(30); resume(()) }
+      } in {
+        let @Int = handle[State<Nat>](@Nat = 4) {
+          get(@Unit) -> { resume(@Nat.0) },
+          put(@Nat) -> { put(300); resume(()) }
+        } in {
+          put(40);
+          nat_to_int(get(()))
+        };
+        put(3000);
+        @Int.0 + get(())
+      };
+      @Int.0 + nat_to_int(get(()))
+    };
+    @Int.0 + get(())
+  }
+}
+"""
+
 _SAME_FAMILY_CASES = [
     ("nested_get_clause", _SAME_FAMILY_NESTING + _MAIN),
     ("nested_with_expr", _SAME_FAMILY_WITH_EXPR + _MAIN),
     ("declared_row", _SAME_FAMILY_DECLARED_ROW),
+    ("qualified_spelling", _SAME_FAMILY_QUALIFIED + _MAIN),
+    ("composite_clause_branch", _SAME_FAMILY_COMPOSITE_CLAUSE + _MAIN),
+    ("composite_import_branch", _SAME_FAMILY_COMPOSITE_IMPORT + _MAIN),
+    ("scalar_import_branch", _SAME_FAMILY_SCALAR_IMPORT + _MAIN),
+    ("at_a_distance", _SAME_FAMILY_AT_A_DISTANCE + _MAIN),
 ]
+
+# A composite cell nested under a DIFFERENT family: the gate must not fire,
+# and the enclosing-context rule must produce its own value — the inner
+# clause's `put(Some(42))` writes the OUTER `Option<Int>` cell, so the outer
+# `get` reads 42.  The negative control for the composite rows above.
+_DIFFERENT_FAMILY_COMPOSITE = """
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Option<Int>>](@Option<Int> = Some(100)) {
+    get(@Unit) -> { resume(@Option<Int>.0) },
+    put(@Option<Int>) -> { resume(()) }
+  } in {
+    let @Nat = handle[State<Nat>](@Nat = 5) {
+      get(@Unit) -> { put(Some(42)); resume(@Nat.0) },
+      put(@Nat) -> { resume(()) }
+    } in {
+      get(())
+    };
+    nat_to_int(@Nat.0) * 1000 + (match get(()) {
+      Some(@Int) -> @Int.0,
+      None -> 0
+    })
+  }
+}
+"""
 
 
 @pytest.mark.parametrize(
@@ -662,6 +839,20 @@ def test_different_family_nesting_is_untouched_by_the_same_family_gate() -> None
     produces the checker's value.
     """
     assert _run(_PUT_IN_GET_CLAUSE + _MAIN) == 9077
+
+
+def test_a_composite_cell_under_a_different_family_still_lowers() -> None:
+    """The composite rows' negative control, with a value only the rule gives.
+
+    Round 5's mangling fix normalises both sides of the family comparison, so
+    it could in principle have gone the other way and started refusing every
+    composite nest.  Here the two families differ, so the gate must stay
+    silent AND the enclosing-context rule must hold: the inner `Nat` clause's
+    `put(Some(42))` is an operation of the ENCLOSING context, so it writes the
+    outer `Option<Int>` cell and the outer `get` reads 42, not the initial
+    100.  5 * 1000 + 42.
+    """
+    assert _run(_DIFFERENT_FAMILY_COMPOSITE + _MAIN) == 5042
 
 
 # =====================================================================
@@ -731,6 +922,30 @@ def test_outward_reentry_at_the_cap_emits_a_bounded_module() -> None:
         f"{lines} WAT lines at depth {STATE_CLAUSE_INLINE_DEPTH_CAP} — the "
         "expansion is meant to be bounded well below this"
     )
+
+
+def test_outward_reentry_one_past_the_cap_is_the_first_refusal() -> None:
+    """CAP + 1 is the boundary: the first depth the cap actually rejects.
+
+    The pair below pinned CAP (accepted) and CAP + 2 (refused), leaving the
+    exact transition unpinned — an off-by-one in the comparison would move
+    the boundary by one level and both of those would still pass.  This also
+    pins the CALLER's fate: the dropped `probe` takes `main` with it, so the
+    program surfaces E602 **and** the E620 dropped-caller diagnostic rather
+    than silently exporting a `main` that cannot run.
+    """
+    source = _deep_nest(STATE_CLAUSE_INLINE_DEPTH_CAP + 1)
+    _check_ok(source)
+    result = _compile(source)
+    codes = {d.error_code for d in result.diagnostics}
+    assert {"E602", "E620"} <= codes, (
+        f"expected the depth-cap skip AND the dropped-caller diagnostic at "
+        f"depth {STATE_CLAUSE_INLINE_DEPTH_CAP + 1}, got: "
+        f"{[(d.error_code, d.description[:90]) for d in result.diagnostics]}"
+    )
+    joined = " ".join(d.description for d in result.diagnostics)
+    assert str(STATE_CLAUSE_INLINE_DEPTH_CAP) in joined, joined
+    assert "exponential" in joined, joined
 
 
 def test_outward_reentry_past_the_cap_is_a_loud_skip() -> None:

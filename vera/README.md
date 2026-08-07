@@ -138,7 +138,7 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `  closures.py` | 876 | | Closure lifting, GC instrumentation | |
 | `  contracts.py` | 1,196 | | Runtime pre/postconditions, old state snapshots, decreases termination guard (entry check-and-set, per-function chain state, ADT rank helpers, self-tail site checks); the refinement boundary guard derives its binder from `naming.refinement_binder_parts` and layers the erased-base skip and the nested-base E618 on top | |
 | `  assembly.py` | 1,447 | | WAT module assembly, `$alloc`, `$gc_collect` | |
-| `  compilability.py` | 738 | | Compilability checks, state handler scanning | |
+| `  compilability.py` | 841 | | Compilability checks, state handler scanning | |
 | `  wasi.py` | 4,820 | | WASI Preview 2 component/adapter emitter — `--target wasi-p2` / `--world server` (#237, #853) | |
 | `runtime/` | 4,784 | Execute | wasmtime host layer (#421): traps + per-effect host-binding families | `register_*()`, `WasmTrapError` |
 | `  traps.py` | 493 | | `WasmTrapError`, `_classify_trap`, source-backtrace resolution | |
@@ -751,7 +751,7 @@ The `ERROR_CODES` dict in `errors.py` maps every code to a short description (15
 
 ## Test Suite
 
-Testing spans a **pytest suite** of 9,465 tests across 146 files — compiler-internals unit tests plus a **conformance suite** (199 programs in `tests/conformance/` validating every language feature against the spec) and **example programs** (42 end-to-end demos). The conformance suite is the definitive specification artifact — each program tests one feature and serves as a minimal working example.
+Testing spans a **pytest suite** of 9,490 tests across 146 files — compiler-internals unit tests plus a **conformance suite** (199 programs in `tests/conformance/` validating every language feature against the spec) and **example programs** (42 end-to-end demos). The conformance suite is the definitive specification artifact — each program tests one feature and serves as a minimal working example.
 
 See **[TESTING.md](../TESTING.md)** for the comprehensive testing reference -- test file table, conformance suite details, compiler code coverage, language feature coverage, helper conventions, validation scripts, CI pipeline, and guidelines for adding tests.
 

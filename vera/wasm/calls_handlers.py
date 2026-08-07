@@ -1693,28 +1693,55 @@ class CallsHandlersMixin:
         unaddressable case is refused loudly here instead of compiling to
         hybrid semantics; true outward addressing needs depth-indexed host
         access across all three runtimes and is tracked as #1233.
+
+        Both spellings reach this gate: `State.put(x)` is routed through
+        `_translate_call` like the bare `put(x)`, so the refusal is one gate
+        over one rule, and the message names both forms.
         """
         shadowed = self._pushed_cell_families[self._addressable_from:]
         if not shadowed:
             return
+        # ONE representation on both sides of the comparison, each side
+        # mangled EXACTLY ONCE (round-5 review).  `_pushed_cell_families` and
+        # a clause entry both carry the CANONICAL family (`Option<Int>`); an
+        # import name carries the MANGLED one (`Option_LInt_R`).  Mangling is
+        # not idempotent — `mangle_type_name("Option_LInt_R")` is
+        # `"Option__LInt__R"` — so re-mangling the already-mangled side made
+        # every COMPOSITE family compare unequal to itself, and the gate
+        # returned instead of refusing.  `handle[State<Option<Int>>]` nested
+        # in `handle[State<Option<Int>>]`, with the outer declaring no `put`
+        # clause (the branch that reads the import name), compiled and ran:
+        # 5100, where the enclosing-context rule says 5042 — the silent wrong
+        # value this whole gate exists to prevent, on the exact shape a
+        # scalar `Int` nest was correctly refusing.
         entry = self._state_clause_ops.get(call.name)
         if entry is not None:
-            target_family = entry.family
+            target_mangled: str | None = mangle_type_name(entry.family)
         else:
             op = self._effect_ops.get(call.name)
             if op is None:
                 return
-            mangled = self._state_import_family(op[0])
-            if mangled is None:
+            target_mangled = self._state_import_family(op[0])
+            if target_mangled is None:
                 return
-            target_family = mangled
-        if mangle_type_name(target_family) not in {
-            mangle_type_name(f) for f in shadowed
-        }:
+        # The canonical spelling of the shadowing cell, for the message: it
+        # comes from the pushed-cell stack, so a mangled import name is never
+        # what the user reads.
+        shadowing = next(
+            (f for f in shadowed if mangle_type_name(f) == target_mangled),
+            None,
+        )
+        if shadowing is None:
             return
+        target_family = shadowing
         raise CodegenSkip(
             call,
-            f"a bare '{call.name}' in a handler clause body resolves to a "
+            # Wording covers BOTH spellings: `State.put(x)` delegates to this
+            # same gate (calls.py routes the qualified form through
+            # `_translate_call`), so naming only the bare form described the
+            # refusal a user reading a `State.put` diagnostic did not write.
+            f"a bare or qualified State operation '{call.name}' in a handler "
+            f"clause body resolves to a "
             f"State<{target_family}> handler (or a declared State<"
             f"{target_family}> row) that an enclosing State<{target_family}> "
             "handler shadows: the host cell intrinsics address only the "
@@ -1786,6 +1813,32 @@ class CallsHandlersMixin:
                 "single-shot continuation) — move the resume to the "
                 "clause body and keep the 'with' expression pure",
             )
+        # #1211: bound the outward re-entry.  Each nested clause body is a
+        # fresh expansion of another clause, so the emitted code is
+        # exponential in this depth; past the cap the function is a loud
+        # [E602] skip rather than a multi-megabyte module.
+        #
+        # CHECK BEFORE MUTATE (round-5 review): this used to sit below the
+        # six registry replacements, so its own raise left `_effect_ops`,
+        # the two result-type maps, `_state_clause_ops`, `_in_state_clause`
+        # and `_state_clause_family` at THIS clause's values — the one
+        # `CodegenSkip` path out of this method that did not restore them.
+        # Unobservable today (the skip unwinds to a per-function boundary
+        # that rebuilds the registries), but it is the invariant every other
+        # exit here keeps, and a future caller that recovers closer in would
+        # inherit a clause scope it never entered.
+        if self._clause_inline_depth >= STATE_CLAUSE_INLINE_DEPTH_CAP:
+            raise CodegenSkip(
+                call,
+                "handler clause bodies nest more than "
+                f"{STATE_CLAUSE_INLINE_DEPTH_CAP} deep in outward operation "
+                "re-entry: a bare get/put in a clause body is the ENCLOSING "
+                "handler's operation (spec 7.5.2), so each one inlines "
+                "another clause and the emitted code grows exponentially in "
+                "the nesting depth — reduce the handler nesting, or move the "
+                "clause-body operations into the handled body",
+            )
+
         # WASM type and pointer-ness derive from the threaded FAMILY name
         # (computed once at the handle site — matching the import decls),
         # never the source alias spelling (#1205/#1209).
@@ -1919,22 +1972,6 @@ class CallsHandlersMixin:
         # reads exactly this index at each bare-op site inside the body.
         saved_addressable = self._addressable_from
         self._addressable_from = entry.decl_addressable_from
-        # #1211: bound the outward re-entry.  Each nested clause body is a
-        # fresh expansion of another clause, so the emitted code is
-        # exponential in this depth; past the cap the function is a loud
-        # [E602] skip rather than a multi-megabyte module.
-        if self._clause_inline_depth >= STATE_CLAUSE_INLINE_DEPTH_CAP:
-            self._addressable_from = saved_addressable
-            raise CodegenSkip(
-                call,
-                "handler clause bodies nest more than "
-                f"{STATE_CLAUSE_INLINE_DEPTH_CAP} deep in outward operation "
-                "re-entry: a bare get/put in a clause body is the ENCLOSING "
-                "handler's operation (spec 7.5.2), so each one inlines "
-                "another clause and the emitted code grows exponentially in "
-                "the nesting depth — reduce the handler nesting, or move the "
-                "clause-body operations into the handled body",
-            )
         self._clause_inline_depth += 1
         try:
             body_instrs = self.translate_expr(clause.body, clause_env)

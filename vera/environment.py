@@ -26,11 +26,49 @@ from vera.types import (
     EffectRowType,
     FunctionType,
     PureEffectRow,
+    RefinedType,
     Type,
     TypeVar,
+    pretty_effect,
     pretty_type,
     substitute,
 )
+
+
+def _structural_type_key(ty: Type) -> str:
+    """A rendering of *ty* that DISCRIMINATES, rather than one that reads well.
+
+    :func:`vera.types.pretty_type` is a presentation renderer, and two of its
+    choices are deliberate elisions: a `RefinedType` prints `{@Int | ...}`
+    with its predicate replaced by an ellipsis, and a `TypeVar` prints with
+    :data:`BUILTIN_TYPEVAR_MARKER` stripped (`T#b` → `T`).  Both are right for
+    an error message and wrong for an ORDERING key — distinct types render
+    identically, so they tie, and a stable `sorted` then falls back to the
+    input's own order.  Fed from a `frozenset` that is the `PYTHONHASHSEED`
+    dependence the ordering exists to remove.
+
+    Deterministic by construction: every branch is a fixed-shape recursion
+    over dataclass fields, and the only set this touches is a function type's
+    effect row, which :func:`vera.types.pretty_effect` already sorts.  The
+    predicate is rendered by `ast.Node.pretty`, which walks declared field
+    order and skips spans, so the same predicate always renders the same way.
+    """
+    if isinstance(ty, RefinedType):
+        return (f"{{{_structural_type_key(ty.base)}"
+                f"|{ty.predicate.pretty()}}}")
+    if isinstance(ty, TypeVar):
+        # The raw name, marker included.
+        return f"'{ty.name}"
+    if isinstance(ty, AdtType):
+        if not ty.type_args:
+            return ty.name
+        args = ", ".join(_structural_type_key(a) for a in ty.type_args)
+        return f"{ty.name}<{args}>"
+    if isinstance(ty, FunctionType):
+        params = ", ".join(_structural_type_key(p) for p in ty.params)
+        return (f"fn({params} -> {_structural_type_key(ty.return_type)}) "
+                f"{pretty_effect(ty.effect)}")
+    return pretty_type(ty)
 
 
 def _effect_sort_key(ei: EffectInstance) -> tuple[str, str]:
@@ -44,8 +82,18 @@ def _effect_sort_key(ei: EffectInstance) -> tuple[str, str]:
     then preserves the `frozenset`'s own iteration order, reintroducing the
     exact `PYTHONHASHSEED` dependence the ordering exists to remove.
     Rendering the arguments makes the key discriminate them.
+
+    The rendering is :func:`_structural_type_key`, not `pretty_type` (round-5
+    review): the human-readable renderer elides a refinement's predicate and
+    a type variable's built-in marker, so `effects(<State<Pos>, State<Neg>>)`
+    over two refinement aliases of one base tied on the key exactly as the
+    name-only version tied `State<Int>` against `State<Bool>` — the same bug
+    one level down, in the fix for it.
     """
-    return (ei.name, ", ".join(pretty_type(a) for a in ei.type_args))
+    return (
+        ei.name,
+        ", ".join(_structural_type_key(a) for a in ei.type_args),
+    )
 
 
 # =====================================================================

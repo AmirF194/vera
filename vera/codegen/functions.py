@@ -478,6 +478,12 @@ class FunctionCompilationMixin:
         # whose measure lives in `exprs`.
         for _pred in contract_exprs(decl.contracts):
             self._scan_io_ops(_pred)
+        # #1210 round 5: and the SIGNATURE's refinement predicates, which are
+        # lowered as boundary guards in this function's prologue/epilogue.
+        # They are reached through the alias table, not structurally from the
+        # body, so nothing the recursion does can find them.
+        for _pred in self._signature_refinement_predicates(decl):
+            self._scan_io_ops(_pred)
 
         # #517 — configure tail-call optimization for this function.
         # The analyzer marks `id(FnCall)` for every call in syntactic
