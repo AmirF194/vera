@@ -28,7 +28,7 @@ from vera.codegen import CodeGenerator, CompileResult
 from vera.codegen import compile as codegen_compile
 from vera.parser import parse_file, parse_to_ast
 from vera.resolver import ResolvedModule
-from vera.runtime.traps import WasmTrapError
+from vera.codegen.api import WasmTrapError
 from vera.transform import transform
 
 from tests.codegen_helpers import _compile, _compile_ok, _run
