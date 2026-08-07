@@ -117,7 +117,7 @@ def _run_mod(source: str, modules: list[ResolvedModule]) -> object:
         os.unlink(fp)
     errors = [d for d in result.diagnostics if d.severity == "error"]
     assert not errors, f"unexpected codegen errors: {errors}"
-    return execute(result, fn_name="main")
+    return execute(result, fn_name="main").value
 
 
 # =====================================================================
@@ -272,3 +272,319 @@ class TestImportedGenericHelperClauseIsQuoted:
         with pytest.raises(WasmTrapError) as exc:
             _run_mod(_HELPER_MAIN, modules)
         assert exc.value.kind == "contract_violation", exc.value.kind
+
+
+# =====================================================================
+# #1225 — a bare name in the callee's contract resolves in ITS module
+# =====================================================================
+
+# `cap` is PRIVATE, so nothing the importer writes can be the same function —
+# and `guarded`'s precondition is written entirely in terms of it.
+_CAP_LIB = """\
+module caplib;
+
+private fn cap(@Int -> @Int)
+  requires(true)
+  ensures(@Int.result == 100)
+  effects(pure)
+{
+  100
+}
+
+public fn guarded(@Int -> @Int)
+  requires(@Int.0 < cap(0))
+  ensures(true)
+  effects(pure)
+{
+  @Int.0
+}
+"""
+
+
+def _cap_main(local_cap: int, argument: int) -> str:
+    """An importer declaring its OWN ``cap`` and calling ``guarded``."""
+    return f"""\
+import caplib(guarded);
+
+private fn cap(@Int -> @Int)
+  requires(true)
+  ensures(@Int.result == {local_cap})
+  effects(pure)
+{{
+  {local_cap}
+}}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{{
+  guarded({argument}) + cap(0)
+}}
+"""
+
+
+class TestCalleeContractCallsResolveInItsModule:
+    """The callee's ``requires`` is read against the callee's own ``cap``."""
+
+    def test_the_false_tier1_is_reported_and_the_run_agrees(self) -> None:
+        """`guarded(500)` violates `500 < 100`; the importer's cap is 1000.
+
+        Read through the importer's registry the precondition is `500 < 1000`
+        and verification reported all-Tier-1 clean on a program whose run traps
+        — a false Tier 1, the direction that matters.
+        """
+        modules = [_resolved(("caplib",), _CAP_LIB)]
+        source = _cap_main(local_cap=1000, argument=500)
+        result = _verify_mod(source, modules)
+        assert "E501" in _codes(result), (
+            "the callee's precondition was proved against the IMPORTER's "
+            f"`cap`: {_codes(result)}"
+        )
+        with pytest.raises(WasmTrapError) as exc:
+            _run_mod(source, modules)
+        assert exc.value.kind == "contract_violation", exc.value.kind
+
+    def test_the_mirror_correct_program_is_accepted(self) -> None:
+        """The other direction: `guarded(50)` satisfies `50 < 100`.
+
+        The importer's cap is 0, so reading the precondition through its
+        registry made it `50 < 0` and rejected a program that runs fine.  A fix
+        that merely stopped checking imported preconditions would pass here and
+        fail the test above, and vice versa.
+        """
+        modules = [_resolved(("caplib",), _CAP_LIB)]
+        source = _cap_main(local_cap=0, argument=50)
+        result = _verify_mod(source, modules)
+        assert not _codes(result), (
+            f"valid cross-module call spuriously rejected: {_codes(result)}"
+        )
+        assert _run_mod(source, modules) == 50
+
+    def test_no_collision_control_discharges_and_violates_honestly(
+        self,
+    ) -> None:
+        """Control: an importer with no ``cap`` of its own, both directions.
+
+        The name is then absent from the importer's registry entirely, so the
+        precondition did not translate at all and the obligation was a loud
+        Tier-3 demotion (E532) — including for the call that violates it.  Both
+        calls now get a static verdict, and each matches its runtime.
+        """
+        modules = [_resolved(("caplib",), _CAP_LIB)]
+        template = """\
+import caplib(guarded);
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  guarded(%d)
+}
+"""
+        satisfied = template % 50
+        ok = _verify_mod(satisfied, modules)
+        assert not _codes(ok), _codes(ok)
+        assert not [
+            d for d in ok.diagnostics if d.error_code == "E532"
+        ], "the callee's precondition still is not translated"
+        assert _run_mod(satisfied, modules) == 50
+
+        violated = template % 500
+        bad = _verify_mod(violated, modules)
+        assert "E501" in _codes(bad), _codes(bad)
+        with pytest.raises(WasmTrapError):
+            _run_mod(violated, modules)
+
+
+# The ENSURES path: `bounded`'s postcondition is written in terms of the same
+# private `cap`, and the importer relies on it to prove its own.
+_ENS_LIB = """\
+module enslib;
+
+private fn cap(@Int -> @Int)
+  requires(true)
+  ensures(@Int.result == 1000)
+  effects(pure)
+{
+  1000
+}
+
+public fn bounded(@Int -> @Int)
+  requires(true)
+  ensures(@Int.result < cap(0))
+  effects(pure)
+{
+  700
+}
+"""
+
+_ENS_MAIN = """\
+import enslib(bounded);
+
+private fn cap(@Int -> @Int)
+  requires(true)
+  ensures(@Int.result == 5)
+  effects(pure)
+{
+  5
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result < 5)
+  effects(pure)
+{
+  bounded(0) + cap(0) - cap(0)
+}
+"""
+
+
+class TestCalleeEnsuresIsReadInItsModuleToo:
+    """The postcondition ASSUMED at a call site is the callee's own (#1225).
+
+    Not a refined-return special case: the plain ``ensures`` path carries the
+    same defect, and it fails the other way round — a postcondition read too
+    STRONGLY proves the caller's own contract, so the caller is what traps.
+    """
+
+    def test_the_assumed_postcondition_cannot_prove_a_false_caller_contract(
+        self,
+    ) -> None:
+        modules = [_resolved(("enslib",), _ENS_LIB)]
+        result = _verify_mod(_ENS_MAIN, modules)
+        assert "E500" in _codes(result), (
+            "main's `ensures(@Int.result < 5)` was proved from the IMPORTER's "
+            f"`cap`, which the callee's contract never names: {_codes(result)}"
+        )
+        with pytest.raises(WasmTrapError) as exc:
+            _run_mod(_ENS_MAIN, modules)
+        assert exc.value.kind == "contract_violation", exc.value.kind
+
+
+# Both dimensions of the scope in ONE contract: `both`'s precondition names an
+# alias-typed parameter AND calls a private helper.  `Cnt` is `Bool` here, so
+# the two parameters are two stacks and `@Array<Int>.0` is the FIRST.
+_BOTH_LIB = """\
+module bothlib;
+
+type Cnt = Bool;
+
+private fn cap(@Int -> @Int)
+  requires(true)
+  ensures(@Int.result == 3)
+  effects(pure)
+{
+  3
+}
+
+public fn both(@Array<Int>, @Array<Cnt> -> @Nat)
+  requires(array_length(@Array<Int>.0) < cap(0))
+  ensures(@Nat.result >= 0)
+  effects(pure)
+{
+  0
+}
+"""
+
+_BOTH_ALIAS_CONFLICT = "type Cnt = Int;\n\n"
+
+_BOTH_CAP_CONFLICT = """\
+private fn cap(@Int -> @Int)
+  requires(true)
+  ensures(@Int.result == 100)
+  effects(pure)
+{
+  100
+}
+
+"""
+
+# The call is made from a function whose OWN parameters are the arrays, with
+# their lengths as its precondition: an array LITERAL argument does not
+# translate, so a call site spelled `both([...], [...])` demotes to Tier 3
+# before either half of the scope is consulted and would measure nothing.
+_BOTH_MAIN = """\
+import bothlib(both);
+
+""" + _BOTH_ALIAS_CONFLICT + _BOTH_CAP_CONFLICT + """\
+private fn go(@Array<Int>, @Array<Bool> -> @Nat)
+  requires(array_length(@Array<Int>.0) == 5 && array_length(@Array<Bool>.0) == 2)
+  ensures(true)
+  effects(pure)
+{
+  both(@Array<Int>.0, @Array<Bool>.0)
+}
+
+public fn main(@Unit -> @Nat)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  go(array_range(0, 5), [true, false])
+}
+"""
+
+
+class TestBothHalvesOfTheScopeRideTogether:
+    """The naming env and the function registry are ONE swap (#1208, #1225).
+
+    ``both``'s precondition is ``array_length(@Array<Int>.0) < cap(0)``, and
+    each half of the scope decides one side of that comparison:
+
+    * the naming env decides WHICH argument ``@Array<Int>.0`` is — the
+      length-5 ``Array<Int>`` in ``bothlib`` (``Cnt = Bool``, two stacks), the
+      length-2 ``Array<Bool>`` under the importer's ``type Cnt = Int`` (one
+      merged stack, so ``.0`` is the most recent);
+    * the function registry decides what ``cap(0)`` is — 3 in ``bothlib``, 100
+      in the importer.
+
+    Only ``5 < 3`` is false.  Each of the other three combinations — either
+    half read in the importer, or both — proves the precondition and returns a
+    verify-clean verdict on a program that traps, so this one program's E501
+    can only be produced by swapping both halves together.  The two isolating
+    controls below then show each half is separately load-bearing, so the pair
+    test cannot be passing on one of them alone.
+    """
+
+    def test_the_violation_needs_both_halves(self) -> None:
+        modules = [_resolved(("bothlib",), _BOTH_LIB)]
+        result = _verify_mod(_BOTH_MAIN, modules)
+        assert "E501" in _codes(result), (
+            "at least one half of the callee's scope was read in the "
+            f"importer: {_codes(result)}"
+        )
+        with pytest.raises(WasmTrapError) as exc:
+            _run_mod(_BOTH_MAIN, modules)
+        assert exc.value.kind == "contract_violation", exc.value.kind
+
+    def test_the_registry_half_alone_decides_a_verdict(self) -> None:
+        """Drop the alias conflict: only ``cap`` still differs.
+
+        ``@Array<Int>.0`` is the length-5 array under either env now, so the
+        verdict turns purely on which ``cap`` the contract's call resolves to
+        — 5 < 3 (violated) against 5 < 100 (clean).
+        """
+        source = _BOTH_MAIN.replace(_BOTH_ALIAS_CONFLICT, "")
+        assert "type Cnt" not in source
+        modules = [_resolved(("bothlib",), _BOTH_LIB)]
+        result = _verify_mod(source, modules)
+        assert "E501" in _codes(result), _codes(result)
+        with pytest.raises(WasmTrapError):
+            _run_mod(source, modules)
+
+    def test_the_naming_half_alone_decides_a_verdict(self) -> None:
+        """Drop the ``cap`` conflict: only the alias still differs.
+
+        ``cap(0)`` is 3 either way now (the importer has no ``cap`` at all), so
+        the verdict turns purely on which argument ``@Array<Int>.0`` names —
+        5 < 3 (violated) against 2 < 3 (clean).
+        """
+        source = _BOTH_MAIN.replace(_BOTH_CAP_CONFLICT, "")
+        assert "ensures(@Int.result == 100)" not in source
+        modules = [_resolved(("bothlib",), _BOTH_LIB)]
+        result = _verify_mod(source, modules)
+        assert "E501" in _codes(result), _codes(result)
+        with pytest.raises(WasmTrapError):
+            _run_mod(source, modules)

@@ -1386,7 +1386,7 @@ class TestUnpinnedCalleeRendersInTheDeclaringModule:
     """``_callee_alias_env``'s fallback is the module UNDER verification.
 
     Only PUBLIC functions of DIRECTLY imported modules are pinned into
-    ``_fn_origin_envs`` (``_register_modules``), so an imported generic's own
+    ``_fn_origins`` (``_register_modules``), so an imported generic's own
     ``where``-helper — resolved through ``_fn_info_for_decl`` while the
     generic's clone verifies inside ``_declaring_module_scope`` — always
     reaches the fallback.  Falling back to ``_alias_env`` rendered that

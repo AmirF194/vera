@@ -43,7 +43,7 @@ from vera.obligations.core import (
 )
 from vera.naming import EMPTY_ALIAS_ENV, AliasEnv, alias_env_from_environment
 from vera.slots import fn_slot_scope, slot_table
-from vera.smt import SlotEnv, SmtContext
+from vera.smt import CalleeScope, SlotEnv, SmtContext
 from vera.types import (
     erases_to_unit,
     BOOL,
@@ -264,15 +264,16 @@ class ContractVerifier:
         # `_register_modules` and read through the same origin walk — the
         # buffer a clause DECLARED in that module is quoted from.
         self._module_sources: dict[tuple[str, ...], str] = {}
-        # #1208: which module a harvested `FunctionInfo` came from, keyed by
-        # object identity.  `FunctionInfo` is an unhashable mutable dataclass
-        # and carries no origin of its own, so identity is the join — sound
-        # because the value pins the info object itself, keeping it (and hence
-        # its id) alive for as long as the map is.  A callee absent from here
-        # is local to THIS program and renders against `self._alias_env`.
-        self._fn_origin_envs: dict[int, tuple[FunctionInfo, AliasEnv]] = {}
+        # #1208/#1225: the scope a harvested `FunctionInfo`'s own contract is
+        # READ in — its declaring module's naming env AND function registry —
+        # keyed by object identity.  `FunctionInfo` is an unhashable mutable
+        # dataclass and carries no origin of its own, so identity is the join
+        # — sound because the value pins the info object itself, keeping it
+        # (and hence its id) alive for as long as the map is.  A callee absent
+        # from here is declared in whatever module is under verification.
+        self._fn_origins: dict[int, tuple[FunctionInfo, CalleeScope]] = {}
         # #1220: the SOURCE TEXT each imported contract clause was WRITTEN in,
-        # keyed by clause identity on the same reasoning as `_fn_origin_envs`
+        # keyed by clause identity on the same reasoning as `_fn_origins`
         # above.  A clause's span numbers lines in the file that declared it,
         # so a message quoting an imported callee's `requires` has to index
         # that module's buffer — indexing this program's returns whatever text
@@ -860,6 +861,21 @@ class ContractVerifier:
                 k: v for k, v in temp.env.functions.items()
                 if k not in builtin_fn_names or v.span is not None
             }
+            # #1208/#1225: the scope every contract this module declares is
+            # READ in — its own naming env and its own function registry.  The
+            # registry is the module's WHOLE registration, private helpers
+            # included and builtins behind them, because that is the namespace
+            # a bare name in one of its contracts resolves in; harvesting only
+            # the public surface would leave a contract's call to a private
+            # helper falling through to the importer's registry, which is the
+            # bug (#1225).
+            mod_scope = CalleeScope(mod_alias_env, temp.env.lookup_function)
+            # Pinned for every module-declared function, before the `direct`
+            # gate and irrespective of visibility: a contract read in this
+            # scope resolves to the module's OWN infos, and each of those is a
+            # callee whose contract must be read in the same scope in turn.
+            for fn_info in all_fns.values():
+                self._fn_origins[id(fn_info)] = (fn_info, mod_scope)
 
             # #890: a transitively-reached module (imported by an imported
             # module, not by this program) is in ``_resolved_modules`` so the
@@ -880,12 +896,6 @@ class ContractVerifier:
             }
 
             self._module_functions[mod.path] = mod_fns
-            # #1208: pin each harvested contract to its defining module's env,
-            # so a call obligation renders the CALLEE's slots in the callee's
-            # namespace whichever way the call is spelled (bare after a named
-            # import, or `mod::fn` — both resolve to these same info objects).
-            for fn_info in mod_fns.values():
-                self._fn_origin_envs[id(fn_info)] = (fn_info, mod_alias_env)
 
             # 4. Inject into self.env for bare calls
             name_filter = self._import_names.get(mod.path)
@@ -934,36 +944,77 @@ class ContractVerifier:
             return None
         return mod_fns.get(name)
 
+    def _bind_smt_scope(self, smt: SmtContext, scope: CalleeScope) -> None:
+        """Hand *smt* the scope the declaration under verification is read in.
+
+        The one place the verifier tells the SMT layer where it is: the naming
+        env and the function registry go over together, as the :class:`~vera.
+        smt.CalleeScope` pair a callee swap also travels as, and the callee
+        hook goes with them.  A warm ``VerificationSession`` context outlives
+        the program that built it, so this is per function on that path as much
+        as on the cold one — and being one call, the two paths cannot come to
+        bind different halves.
+        """
+        smt._alias_env = scope.alias_env
+        smt._fn_lookup = scope.fn_lookup
+        smt._module_fn_lookup = self._lookup_module_function
+        smt._callee_scope_lookup = self._callee_scope
+
+    def _pinned_scope(self, callee_info: object) -> CalleeScope | None:
+        """The scope pinned to *callee_info* at module registration, or None.
+
+        THE read of ``_fn_origins`` — both consumers below go through it, so
+        the naming env one of them takes and the whole scope the other takes
+        can never come from different entries.  Identity is only meaningful for
+        the very object that was pinned; the ``is`` re-check rules out an id
+        reused after a collection.
+        """
+        found = self._fn_origins.get(id(callee_info))
+        if found is not None and found[0] is callee_info:
+            return found[1]
+        return None
+
+    def _callee_scope(
+        self, callee_info: object, current: CalleeScope,
+    ) -> CalleeScope:
+        """How *callee_info*'s own contract is READ (#1208, #1225).
+
+        The SMT layer's hook (``SmtContext._callee_scope_lookup``): the
+        declaring module's naming env and function registry for a callee this
+        importer harvested, *current* — the scope in force at the call — for
+        one it did not.
+
+        A callee's ``requires`` / ``ensures`` is written in ITS module, so both
+        lookups belong there.  Rendered in the importer's namespace, an
+        obligation either merges two parameter stacks the callee kept apart
+        (the precondition attaches to the wrong argument, or vanishes: a false
+        Tier-1) or splits one it merged (a spurious E501).  Resolved through
+        the importer's registry, a bare name the contract CALLS picks up the
+        importer's same-named function and the contract is interpreted against
+        a body the callee never mentions — verify-clean, and the run traps.
+
+        The unpinned fallback is the scope in force rather than the entry
+        program's (PR #1224 review), and that is why the SMT layer passes it
+        in: a callee reached from INSIDE another callee's contract — a module's
+        private helper, or a builtin — is declared in the module being read,
+        not in whatever function the verifier happens to be walking.
+        """
+        pinned = self._pinned_scope(callee_info)
+        return current if pinned is None else pinned
+
     def _callee_alias_env(self, callee_info: object) -> AliasEnv:
         """The naming env *callee_info*'s own contract renders against (#1208).
 
-        The defining module's env for an IMPORTED callee, this program's for a
-        local one.  A callee's ``requires`` / ``ensures`` is written in ITS
-        module's namespace, so the parameter stack the obligation pushes and the
-        ``@T.n`` references that read it must both be rendered there — the
-        importer's env is a different namespace, and where the two modules
-        declare the same alias name over different bodies, an obligation
-        rendered in the wrong one either merges two parameter stacks the callee
-        kept apart (the precondition silently attaches to the wrong argument, or
-        vanishes: a false Tier-1) or splits one it merged (a spurious E501).
+        The RENDERING-side read of the same pin the translation scope rides:
+        the E501 message substitutes the callee's slots with the call's actual
+        arguments, and a table keyed in the wrong namespace silently misses, so
+        the message falls back to its generic wording.  Outside any translation
+        there is no scope in force to fall back to, so an unpinned callee takes
+        the module under verification — where, its clone being what is under
+        verification, an imported generic's own `where`-helper is declared.
         """
-        found = self._fn_origin_envs.get(id(callee_info))
-        # Identity is only meaningful for the very object that was pinned;
-        # `found[0] is callee_info` rules out an id reused after a collection.
-        if found is not None and found[0] is callee_info:
-            return found[1]
-        # Unpinned: the env of whatever module is UNDER verification, not the
-        # entry program's (PR #1224 review).  Only public functions of directly
-        # imported modules are pinned (`_register_modules`), so an imported
-        # generic's own `where`-helper — resolved through `_fn_info_for_decl`
-        # while its clone verifies inside `_declaring_module_scope` — reaches
-        # here, and `_alias_env` would render its contract in the IMPORTER's
-        # namespace.  That is exactly the merge this method exists to prevent:
-        # a helper whose parameters are two stacks in its own module and ONE in
-        # the importer's discharged a violated precondition as true (a false
-        # Tier-1 that traps at run time), and the mirror shape rejected a valid
-        # call with a spurious E501.
-        return self._current_alias_env
+        pinned = self._pinned_scope(callee_info)
+        return self._current_alias_env if pinned is None else pinned.alias_env
 
     @property
     def _current_alias_env(self) -> AliasEnv:
@@ -2477,25 +2528,13 @@ class ContractVerifier:
             # Warm session (#222 Phase A): reuse one z3.Solver across
             # functions.  reset() clears all per-function state (vars,
             # assertions, sorts, path conditions, uninterpreted-fn
-            # caches) while the ADT registry persists; the lookups are
-            # rebound because they close over this verifier's env.
+            # caches) while the ADT registry persists; the scope is rebound
+            # because it closes over this verifier's env.
             smt = self._shared_smt
             smt.reset()
-            smt._fn_lookup = fn_lookup
-            smt._module_fn_lookup = self._lookup_module_function
-            # #1208: the warm context outlives the program that built it, so
-            # its naming environment is rebound per function exactly as the
-            # lookups above are.
-            smt._alias_env = fn_env
-            smt._callee_alias_env_lookup = self._callee_alias_env
         else:
-            smt = SmtContext(
-                timeout_ms=self.timeout_ms,
-                fn_lookup=fn_lookup,
-                module_fn_lookup=self._lookup_module_function,
-                alias_env=fn_env,
-            )
-            smt._callee_alias_env_lookup = self._callee_alias_env
+            smt = SmtContext(timeout_ms=self.timeout_ms)
+        self._bind_smt_scope(smt, CalleeScope(fn_env, fn_lookup))
         # CR PR-review: let the SMT match translation assume a constructor
         # pattern's refined / @Nat sub-pattern SOURCE facts while checking the
         # arm body's call PRECONDITIONS — the E501 path the narrowing-walk fact
@@ -6099,13 +6138,9 @@ class ContractVerifier:
         # `_fn_naming_scope` calls from disagreeing if that ever changes.
         fn_env = self._fn_naming_scope(
             self._current_alias_env, decl, enclosing)
-        smt = SmtContext(
-            timeout_ms=self.timeout_ms,
-            fn_lookup=self.env.lookup_function,
-            module_fn_lookup=self._lookup_module_function,
-            alias_env=fn_env,
-        )
-        smt._callee_alias_env_lookup = self._callee_alias_env
+        smt = SmtContext(timeout_ms=self.timeout_ms)
+        self._bind_smt_scope(
+            smt, CalleeScope(fn_env, self.env.lookup_function))
         for adt_info in self.env.data_types.values():
             smt.register_adt(adt_info)
         # CR PR-review: the generic refined-return fast path translates the body

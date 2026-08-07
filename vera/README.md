@@ -92,8 +92,8 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `  control.py` | 735 | | If/match, patterns, effect handlers | |
 | `resolver.py` | 332 | Resolve | Module path resolution, parse cache | `ModuleResolver` |
 | `monomorphize.py` | 2,542 | Resolve | Shared generic instantiation discovery + AST substitution (verifier and codegen); each clone's De Bruijn recount renders its binder names under the **origin module's** `AliasEnv`, the one its consumers rebuild the clone's scope with (#1208) | `substitute_type_vars()`, `resolve_type_alias()`, `canonicalize_type_aliases()` |
-| `smt.py` | 3,141 | Verify | Z3 translation layer; rebinds its naming env per callee (`_callee_alias_env_lookup`) so an imported callee's contract is rendered in *its* module's namespace (#1208) | `SmtContext`, `SlotEnv` |
-| `verifier.py` | 8,250 | Verify | Contract verification; owns the per-module `AliasEnv` registry every rendering goes through — an imported callee's contract and an imported generic's clone are both named in the module that **declared** them (#1208) | `verify()` |
+| `smt.py` | 3,141 | Verify | Z3 translation layer; reads each callee's contract in the module that declared it (`_callee_contract_scope`), swapping the naming env its slots render against and the registry its bare-name calls resolve in as one `CalleeScope` (#1208, #1225) | `SmtContext`, `SlotEnv`, `CalleeScope` |
+| `verifier.py` | 8,250 | Verify | Contract verification; owns the per-module registries every rendering goes through — an imported callee's contract and an imported generic's clone are named, resolved, and quoted in the module that **declared** them (#1208, #1220, #1225) | `verify()` |
 | `wasm/` | 26,604 | Compile | WASM translation layer (package) | `WasmContext`, `WasmSlotEnv`, `StringPool` |
 | ` ├ context.py` | 1,118 | | Composed WasmContext, expression dispatcher, block translation | |
 | ` ├ helpers.py` | 548 | | WasmSlotEnv, StateClauseEntry, StringPool, type mapping, array element helpers | |
