@@ -284,14 +284,34 @@ class CodeGenerator(
         # (a NEGATIVE block, because `inject_prelude` PREPENDS its
         # declarations while codegen registers the main file before injecting
         # them — without the block a main-file alias over a prelude alias
-        # would resolve opaquely here and fully at check), then user
-        # declarations from 0 up: the main file, then each module as it is
-        # captured.  Relative order within one namespace is exact, which is
-        # all the bound reads.  Unscoped, like ``_adt_layouts``: a name is
-        # only ever looked up when it is in the active alias / layout maps.
+        # would resolve opaquely here and fully at check), then that
+        # namespace's own declarations from 0 up.
+        #
+        # PER NAMESPACE, exactly like ``_type_aliases`` and for the same
+        # reason (§8.4.1, #1111): ``_decl_order`` holds the ACTIVE namespace
+        # — the main file's — and ``_module_alias_scope`` swaps in the
+        # compiling module's own space beside its alias maps.  A single
+        # shared space was a silent MISCOMPILE (PR #1224 review): modules
+        # register at Pass 0.5 and the main file at Pass 1, and
+        # ``_stamp_decl_order`` is idempotent by name, so a name a module had
+        # already stamped kept that EARLIER index inside the main file's
+        # namespace — turning the main file's forward reference into a
+        # backward one.  `import lib;` (declaring `data X`) + `type Z = X;
+        # type X = Nat;` then resolved `Z` to `Nat` here and to the opaque
+        # ADT `X` at check, merging two parameter stacks the checker kept
+        # apart, and a check-clean verify-clean program read the wrong
+        # parameter.  Only names in the ACTIVE namespace are stamped, so
+        # relative order within it is exact — which is all the bound reads.
         self._decl_order: dict[str, int] = {}
         self._decl_order_next: int = 0
         self._prelude_decl_order_next: int = _PRELUDE_DECL_BASE
+        # The prelude's negative block, kept separately so a module's
+        # namespace can be rebuilt as {prelude, **module_own} — the same
+        # overlay ``_module_alias_scope`` performs on the alias maps.
+        self._prelude_decl_order: dict[str, int] = {}
+        # Each imported module's OWN 0-based space, captured at absorb time
+        # (`_register_modules`) and installed by ``_module_alias_scope``.
+        self._module_decl_order: dict[tuple[str, ...], dict[str, int]] = {}
         # #1208: the naming environment the ONE renderer (:mod:`vera.naming`)
         # resolves against, held as the single value the flat maps above
         # describe.  DERIVED from those maps rather than adopted from another
@@ -305,6 +325,14 @@ class CodeGenerator(
         # look-up-another split #1208 closes.  `_sync_alias_env` re-derives it
         # wherever the maps change.
         self._alias_env: AliasEnv = EMPTY_ALIAS_ENV
+
+        # E618 sites already reported (PR #1224 review).  The nested-refinement
+        # rejection in `_refinement_guard_parts` fires from several call sites
+        # per declaration and once per monomorphized clone, all from the same
+        # spans; the set keeps one declaration to one diagnostic.  Keyed by
+        # resolved (file, line, column), so a same-position declaration in a
+        # different module still reports.
+        self._e618_sites: set[tuple[str, int, int]] = set()
 
         # #1172: runtime decreases-guard state.  ``_dec_guard_fns`` maps
         # each guarded function's WAT name -> lexicographic component
@@ -1167,19 +1195,27 @@ class CodeGenerator(
         )
 
     def _stamp_decl_order(self, name: str, *, prelude: bool = False) -> None:
-        """Record *name*'s position in the shared declaration-index space.
+        """Record *name*'s position in the ACTIVE declaration-index space.
 
         Called once per ``type`` / ``data`` registration, in source order.
-        Idempotent by name — a name is stamped where it FIRST registers, and
-        a later re-registration (the prelude pass revisits declarations, a
-        second module reuses a name) does not move it.  *prelude* draws from
-        the negative block instead, so injected declarations precede the
-        main file's whatever order codegen happens to walk them in.
+        Idempotent by name WITHIN one namespace — a name is stamped where it
+        first registers there, and a later re-registration (the prelude pass
+        revisits declarations) does not move it.  A module's declarations are
+        never stamped here: they are captured into ``_module_decl_order`` in
+        the module's own 0-based space and installed by
+        ``_module_alias_scope``, so one namespace's stamp can never decide
+        another's forward/backward question (PR #1224 review).
+
+        *prelude* draws from the negative block instead, so injected
+        declarations precede the main file's whatever order codegen happens to
+        walk them in — and, being recorded in ``_prelude_decl_order`` too,
+        precede every module's as well.
         """
         if name in self._decl_order:
             return
         if prelude:
             self._decl_order[name] = self._prelude_decl_order_next
+            self._prelude_decl_order[name] = self._prelude_decl_order_next
             self._prelude_decl_order_next += 1
         else:
             self._decl_order[name] = self._decl_order_next

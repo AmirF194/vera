@@ -901,7 +901,18 @@ class ContractVerifier:
         # `found[0] is callee_info` rules out an id reused after a collection.
         if found is not None and found[0] is callee_info:
             return found[1]
-        return self._alias_env
+        # Unpinned: the env of whatever module is UNDER verification, not the
+        # entry program's (PR #1224 review).  Only public functions of directly
+        # imported modules are pinned (`_register_modules`), so an imported
+        # generic's own `where`-helper — resolved through `_fn_info_for_decl`
+        # while its clone verifies inside `_declaring_module_scope` — reaches
+        # here, and `_alias_env` would render its contract in the IMPORTER's
+        # namespace.  That is exactly the merge this method exists to prevent:
+        # a helper whose parameters are two stacks in its own module and ONE in
+        # the importer's discharged a violated precondition as true (a false
+        # Tier-1 that traps at run time), and the mirror shape rejected a valid
+        # call with a spurious E501.
+        return self._current_alias_env
 
     @property
     def _current_alias_env(self) -> AliasEnv:
@@ -2346,7 +2357,8 @@ class ContractVerifier:
             if (decl.body is not None
                     and self._is_refined_type(generic_ret)
                     and not contains_typevar(generic_ret)):
-                self._check_generic_refined_return(decl, generic_ret)
+                self._check_generic_refined_return(
+                    decl, generic_ret, enclosing)
             return
 
         # #991: resolve bare calls in this body through the lexically-scoped
@@ -5959,6 +5971,7 @@ class ContractVerifier:
 
     def _check_generic_refined_return(
         self, decl: ast.FnDecl, ret_type: Type,
+        enclosing: tuple[ast.FnDecl, ...] = (),
     ) -> None:
         """Discharge a *concrete* refined return on a generic function (#746).
 
@@ -5974,8 +5987,16 @@ class ContractVerifier:
         # #1208: the ONE path that renders a still-GENERIC signature, so the
         # forall narrowing is load-bearing here — `type T = Int;` shadowed by
         # `forall<T>` would otherwise merge `@T` and `@Int` parameters into one
-        # stack the checker kept apart.
-        fn_env = self._fn_naming_scope(self._current_alias_env, decl)
+        # stack the checker kept apart.  The ancestor chain rides along for the
+        # same reason the main path (`_verify_fn` step 3) threads it: a
+        # `where`-helper inherits its ancestors' type parameters, which is the
+        # accumulation `slots.fn_scopes` performs.  Every ancestor that reaches
+        # this site today is already monomorphized (a still-generic parent
+        # returns before step 9, so only its clones recurse into `where_fns`),
+        # so the chain contributes nothing yet; passing it keeps the two
+        # `_fn_naming_scope` calls from disagreeing if that ever changes.
+        fn_env = self._fn_naming_scope(
+            self._current_alias_env, decl, enclosing)
         smt = SmtContext(
             timeout_ms=self.timeout_ms,
             fn_lookup=self.env.lookup_function,

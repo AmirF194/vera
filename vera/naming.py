@@ -246,6 +246,14 @@ def with_type_params(env: AliasEnv, params: Iterable[str]) -> AliasEnv:
         type_params=env.type_params | frozenset(params),
         data_types=env.data_types,
         _order=env._order,
+        # Sharing the memo across the narrowing is sound because what it
+        # caches is keyed by each ALIAS's own parameters, not by
+        # ``env.type_params``: an alias body resolves under the parameters
+        # its own declaration binds, and the shadowing set only decides
+        # whether a name is looked up as an alias at all — a decision taken
+        # before the memo is consulted.  Revisit this if a memo entry ever
+        # becomes sensitive to the enclosing shadowing set; then the memo has
+        # to be keyed by it, or dropped here.
         _memo=env._memo,
     )
 

@@ -2223,19 +2223,31 @@ class Monomorphizer:
         reference into that stack silently resolves onto the wrong parameter
         (#1208 review, probes ``m01``/``m03``/``v01``).
 
-        The POST-substitution side is narrowed by the variables that SURVIVE
-        the substitution — the scope the consumers rebuild on the CLONE.  For
-        the function being cloned that is none of them (``monomorphize_fn``
-        clears its ``forall_vars``), which is why the bare env was right for
-        the top-level walk.  It is NOT right one level down: substitution
-        clears only the cloned function's own variables, so a ``where``
-        helper declared ``forall<U>`` still carries ``forall_vars=('U',)`` in
-        the clone, and both consumers narrow by it when they re-render the
-        helper.  Minting the helper's post-substitution names against the
-        bare env instead resolves ``U`` through a same-named module alias
-        (``type U = Int;`` → ``Option<Int>``) — a recount whose new names are
-        names nobody looks up.  A ``where`` helper extends BOTH narrowings
-        with its own parameters on top of its ancestors' — the same
+        The POST-substitution side is narrowed by the ``forall`` variables the
+        CLONE declares — which is what the consumers rebuild from, so matching
+        them is by construction rather than by argument.  For the function
+        being cloned that is none of them (``monomorphize_fn`` clears its
+        ``forall_vars``), which is why the bare env is right for the top-level
+        walk.  It is NOT right one level down: substitution clears only the
+        cloned function's own variables, so a ``where`` helper declared
+        ``forall<U>`` still carries ``forall_vars=('U',)`` in the clone, and
+        both consumers narrow by it when they re-render the helper.  Minting
+        the helper's post-substitution names against the bare env instead
+        resolves ``U`` through a same-named module alias (``type U = Int;`` →
+        ``Option<Int>``) — a recount whose new names are names nobody looks
+        up.  Narrowing by the variables that merely SURVIVE the substitution
+        (``v not in mapping``) is not the same rule and was the same bug one
+        case further out: it dropped a helper variable that shares a name with
+        the parent's, and under an identity mapping (``forall<T>``
+        instantiated at a module alias spelled ``T``) that variable is still
+        written in the clone, so the post side minted ``Option<Int>`` where
+        the consumers rebuild ``Option<T>`` (PR #1224 round-3).  Every
+        currently-reachable instance of that shape is blocked upstream by
+        `#1223 <https://github.com/aallan/vera/issues/1223>`_ — codegen drops
+        a generic ``where``-helper under a generic parent before it can be
+        run — so the rule is pinned as a differential against the consumers'
+        own rebuild rather than end to end.  A ``where`` helper extends BOTH
+        narrowings with its own parameters on top of its ancestors' — the same
         accumulation :func:`~vera.slots.fn_scopes` performs, because
         ``_check_fn`` adds to one shared type-parameter map rather than
         replacing it.  One environment per side, used by every rendering on
@@ -2246,12 +2258,11 @@ class Monomorphizer:
         out: dict[int, int] = {}
         stack: list[tuple[str | None, str | None]] = []
 
-        def surviving(forall_vars: tuple[str, ...] | None) -> tuple[str, ...]:
-            """The declared variables substitution does NOT consume."""
-            return tuple(v for v in forall_vars or () if v not in mapping)
-
         scope = fn_slot_scope(env, decl.forall_vars)
-        post_scope = fn_slot_scope(env, surviving(decl.forall_vars))
+        # The clone this walk is minting names for declares NO type parameters
+        # — `monomorphize_fn` clears them — so the consumers rebuild its scope
+        # from the bare env, and so does the post side.
+        post_scope = env
 
         def push(te: ast.TypeExpr) -> None:
             stack.append((
@@ -2377,8 +2388,17 @@ class Monomorphizer:
             for nested in fn_decl.where_fns or ():
                 saved = (scope, post_scope)
                 scope = fn_slot_scope(scope, nested.forall_vars)
-                post_scope = fn_slot_scope(
-                    post_scope, surviving(nested.forall_vars))
+                # AS DECLARED on both sides.  Substitution clears only the
+                # cloned function's own variables, so the helper carries its
+                # `forall_vars` unchanged into the clone and the consumers
+                # narrow by exactly them.  Narrowing the post side by the
+                # SURVIVING ones instead dropped any helper variable that
+                # shared a name with the parent's — under an identity mapping
+                # (`forall<T>` instantiated at a module alias spelled `T`) the
+                # variable is still written in the clone, so the post side
+                # minted `Option<Int>` through the alias where the consumers
+                # rebuild `Option<T>` (PR #1224 round-3).
+                post_scope = fn_slot_scope(post_scope, nested.forall_vars)
                 try:
                     walk_fn_scope(nested)
                 finally:

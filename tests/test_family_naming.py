@@ -532,7 +532,13 @@ def test_moved_corpus_file_lands_where_it_was_measured(
 
 
 def test_moved_set_is_exactly_this_size() -> None:
-    """The pinned set is the WHOLE measured radius, not a sample."""
+    """Every pinned entry is distinct, and each names a file that exists.
+
+    A count alone would pass on a table that repeated one entry six times, or
+    that named a program since renamed away; this pins the shape of the table
+    itself.  That the table is the WHOLE measured radius rather than a sample
+    is the corpus sweep's claim, not this test's (PR #1224 review).
+    """
     assert len(_C8_DIVERGENT) == 6
     assert len({(d[0], d[1]) for d in _C8_DIVERGENT}) == 6
     for rel, *_ in _C8_DIVERGENT:

@@ -261,7 +261,9 @@ class RegistrationMixin:
 
     def _register_data(self, decl: ast.DataDecl) -> None:
         """Register an ADT and precompute constructor layouts."""
-        self._stamp_decl_order(decl.name)  # #1208: shared with the aliases
+        # #1208: one index space with the aliases, so the bound can order the
+        # two registries against each other — per NAMESPACE, never across.
+        self._stamp_decl_order(decl.name)
         layouts: dict[str, ConstructorLayout] = {}
         for tag, ctor in enumerate(decl.constructors):
             layout = self._compute_constructor_layout(tag, ctor, decl)

@@ -2692,6 +2692,13 @@ public fn go(@Nat -> @Int)
                 "the chain must join the base family, not mint its own: "
                 f"{result.wat[:400]}"
             )
+            # JOINED, not merely present alongside: a renderer that minted the
+            # chain's own family would satisfy the positive above while still
+            # splitting the cell in two (PR #1224 review).
+            assert "state_get_A33" not in result.wat, (
+                "the chain minted its own family beside the base one: "
+                f"{result.wat[:400]}"
+            )
         assert _run(self._DEEP_CHAIN, "go", 7) == 7
 
     _QUAL_USER_SHADOW = """\

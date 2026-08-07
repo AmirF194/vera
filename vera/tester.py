@@ -811,12 +811,22 @@ def _generate_inputs(
     # and report the trap as a contract failure.  The binder comes from
     # `vera.naming`, so the predicate's own `@Base.n` resolves onto this
     # variable under exactly the name codegen's guard pushes it under.
+    #
+    # The binder is the SOLE slot in scope (spec §2.6): the checker isolates
+    # the scope stack for the predicate rather than pushing onto it
+    # (`_check_one_refinement_predicate`), so translating against a FRESH
+    # `SlotEnv` rather than the accumulated one keeps this side to the same
+    # rule.  Pushing onto the accumulated env instead let a `@Base.1` in the
+    # predicate capture a sibling parameter's variable — a constraint the
+    # emitted guard never checks.  The checker rejects such a predicate
+    # (E130) so no check-clean program reaches it; isolating here means a
+    # future scoping change cannot turn that into a silent wrong constraint.
     for param_te, var in zip(decl.params, z3_vars):
         parts = naming.refinement_binder_parts(param_te, scope)
         if parts is None or parts.base_is_refinement:
             continue
         membership = smt.translate_expr(
-            parts.predicate, slot_env.push(parts.binder_name, var),
+            parts.predicate, SlotEnv().push(parts.binder_name, var),
         )
         if membership is not None:
             smt.solver.add(membership)

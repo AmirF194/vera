@@ -36,6 +36,7 @@ import pytest
 
 from vera.codegen import compile as codegen_compile
 from vera.codegen import execute
+from vera.codegen.api import CompileResult
 from vera.parser import parse_to_ast
 from vera.resolver import ModuleResolver
 from vera.checker import typecheck_with_artifacts
@@ -102,7 +103,7 @@ _SENTINELS: tuple[str, ...] = (
 )
 
 
-def _compile_file(path: Path) -> object:
+def _compile_file(path: Path) -> CompileResult:
     """Parse + resolve + check + compile *path* through the CLI's pipeline."""
     source = path.read_text(encoding="utf-8")
     program = parse_to_ast(source)

@@ -210,7 +210,10 @@ def format_slot_table(
 ) -> str:
     """Format a human-readable slot environment block for one function.
 
-    Returns a multi-line string suitable for printing to stdout, e.g.::
+    Returns a multi-line string suitable for printing to stdout.  EVERY line
+    carries a leading indent — at ``depth=0`` the ``fn`` line is indented two
+    spaces and its slot rows four, two more of each per ``where`` level — so
+    the block below is what the caller prints, shifted right by two::
 
         fn divide(@Int, @Int -> @Int)
           @Int.0  parameter 2 (last @Int)

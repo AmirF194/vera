@@ -3002,8 +3002,8 @@ public fn use_alias(@MyInt -> @Int)
 
         ctx = WasmContext(string_pool=StringPool())
         ctx.set_alias_env(_aliases({
-            "A": ast.NamedType(name="B", type_args=[]),
-            "B": ast.NamedType(name="A", type_args=[]),
+            "A": ast.NamedType(name="B", type_args=None),
+            "B": ast.NamedType(name="A", type_args=None),
         }))
         # Pre-guard, this would recurse A → B → A → … forever.
         # Post-guard, it stops on second visit and returns the
@@ -3014,9 +3014,9 @@ public fn use_alias(@MyInt -> @Int)
 
         # Three-cycle: A → B → C → A
         ctx.set_alias_env(_aliases({
-            "A": ast.NamedType(name="B", type_args=[]),
-            "B": ast.NamedType(name="C", type_args=[]),
-            "C": ast.NamedType(name="A", type_args=[]),
+            "A": ast.NamedType(name="B", type_args=None),
+            "B": ast.NamedType(name="C", type_args=None),
+            "C": ast.NamedType(name="A", type_args=None),
         }))
         assert ctx._resolve_base_type_name("A") == "A"
         assert ctx._resolve_base_type_name("B") == "B"
@@ -3024,7 +3024,7 @@ public fn use_alias(@MyInt -> @Int)
 
         # Self-loop: type X = X
         ctx.set_alias_env(_aliases({
-            "X": ast.NamedType(name="X", type_args=[]),
+            "X": ast.NamedType(name="X", type_args=None),
         }))
         assert ctx._resolve_base_type_name("X") == "X"
 
@@ -3037,9 +3037,9 @@ public fn use_alias(@MyInt -> @Int)
         # `_root_name` parameter through the recursion so cycles
         # always return the caller's original input.
         ctx.set_alias_env(_aliases({
-            "A": ast.NamedType(name="B", type_args=[]),
-            "B": ast.NamedType(name="C", type_args=[]),
-            "C": ast.NamedType(name="B", type_args=[]),
+            "A": ast.NamedType(name="B", type_args=None),
+            "B": ast.NamedType(name="C", type_args=None),
+            "C": ast.NamedType(name="B", type_args=None),
         }))
         assert ctx._resolve_base_type_name("A") == "A", (
             "Prefix-chain cycle (A → B → C → B): caller asked about "

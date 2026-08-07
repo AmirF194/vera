@@ -23,8 +23,11 @@ Four provenance failures, each with the adversarial probe that exhibited it:
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 from pathlib import Path
+
+import pytest
 
 from vera import ast
 from vera.checker import typecheck
@@ -32,6 +35,7 @@ from vera.codegen import compile, execute
 from vera.monomorphize import Monomorphizer
 from vera.parser import parse_file, parse_to_ast
 from vera.resolver import ResolvedModule
+from vera.runtime.traps import WasmTrapError
 from vera.transform import transform
 from vera.verifier import ContractVerifier, VerifyResult, verify
 
@@ -120,6 +124,51 @@ def _compile_mod(source: str, modules: list[ResolvedModule]) -> object:
         os.unlink(fp)
 
 
+_LOCAL_GET_RE = re.compile(r"local\.get\s+(\d+)")
+
+
+def _local_gets(body: str) -> set[int]:
+    """Every ``local.get N`` operand in *body*, as integers.
+
+    Substring matching is not boundary-safe (PR #1224 review): ``"local.get
+    2"`` is a prefix of ``local.get 20``, so a positive assertion can pass on
+    a local that was never read and a negative one can go red on an unrelated
+    read.
+    """
+    return {int(m.group(1)) for m in _LOCAL_GET_RE.finditer(body)}
+
+
+def _fn_body(wat: str, symbol: str) -> str:
+    """The WAT body of ``(func $symbol …)``, matched on the WHOLE symbol.
+
+    ``wat.split("(func $pick")`` also lands on ``(func $pick$Int`` — the
+    mangled clone — and on any longer name sharing the prefix, so the split
+    can silently return a different function's body (PR #1224 review).
+    """
+    m = re.search(r"\(func \$" + re.escape(symbol) + r"(?![\w$])", wat)
+    if m is None:
+        raise AssertionError(f"no `(func ${symbol}` in the emitted WAT:\n{wat}")
+    rest = wat[m.end():]
+    nxt = rest.find("(func ")
+    return rest if nxt < 0 else rest[:nxt]
+
+
+def _te_spelling(te: object) -> str:
+    """A type expression's source spelling, RECURSIVELY (PR #1224 review).
+
+    A one-level ``getattr(te, "name", "?")`` renders ``Array<Option<Int>>``
+    and ``Array<Option<Bool>>`` identically (both ``Array<Option>``), so a
+    recount that swapped one for the other would read as agreement.
+    """
+    name = getattr(te, "name", None)
+    if name is None:
+        return "?"
+    args = getattr(te, "type_args", None)
+    if not args:
+        return str(name)
+    return f"{name}<" + ", ".join(_te_spelling(a) for a in args) + ">"
+
+
 def _slot_refs(node: object) -> list[str]:
     """Every ``@Type<args>.n`` in *node*, in walk order, as source spellings."""
     out: list[str] = []
@@ -128,7 +177,7 @@ def _slot_refs(node: object) -> list[str]:
         if isinstance(v, ast.SlotRef):
             args = (
                 "<" + ", ".join(
-                    getattr(a, "name", "?") for a in v.type_args
+                    _te_spelling(a) for a in v.type_args
                 ) + ">" if v.type_args else ""
             )
             out.append(f"@{v.type_name}{args}.{v.index}")
@@ -462,11 +511,16 @@ class TestImportedGenericCloneEnv:
             if d.severity == "error"
         ]
         assert not errors, f"unexpected codegen errors: {errors}"
+        # `WasmTrapError.kind` is the classification, not the message text
+        # (PR #1224 review): matching on substrings would also accept a
+        # divide-by-zero or an out-of-bounds trap that happened to mention
+        # them, and would go red on a message rewording that changes nothing.
         try:
             execute(result, fn_name="main")  # type: ignore[arg-type]
-        except RuntimeError as exc:
-            assert "ensures" in str(exc) or "ostcondition" in str(exc), (
-                f"expected the clone's postcondition guard to fail: {exc}"
+        except WasmTrapError as exc:
+            assert exc.kind == "contract_violation", (
+                f"expected the clone's postcondition guard to fail, "
+                f"got kind={exc.kind!r}: {exc}"
             )
         else:  # pragma: no cover — a pass here would contradict the E500
             raise AssertionError(
@@ -734,8 +788,8 @@ public fn main(@Unit -> @Int)
   0
 }
 """).wat
-        body = wat.split("(func $pick")[1].split("(func ")[0]
-        assert "local.get 0" in body and "local.get 1" not in body, (
+        body = _fn_body(wat, "pick")
+        assert _local_gets(body) == {0}, (
             "the exported template returns the wrong parameter:\n" + body
         )
 
@@ -750,11 +804,21 @@ class TestVerifierScopeIsTheSlotTableScope:
     verifier proves a self-consistent story about parameters the checker
     never bound, and nothing inside the verifier can see it.
 
-    What sees it is a second component that answers the same question
-    independently: :func:`vera.slots.slot_table` is the binding table
-    ``vera check --explain-slots`` and the LSP report, and it is pinned to the
-    checker by ``test_slot_naming_differential.py``.  So the assertion is
-    equality between the two, not the plausibility of either.
+    What sees it is a second component that answers the same question:
+    :func:`vera.slots.slot_table` is the binding table ``vera check
+    --explain-slots`` and the LSP report, and it is pinned to the checker by
+    ``test_slot_naming_differential.py``.
+
+    The two are independent on the axis under test — whether each component
+    NARROWS by the ``forall`` variables, and by which ones — but NOT
+    end-to-end: both bottom out in :func:`vera.slots.fn_slot_scope` and
+    :func:`vera.naming.slot_name`, so a defect in the shared renderer moves
+    both sides together and the equality still holds (PR #1224 round-3).  The
+    hand-derived LITERAL assertion beside each comparison is what closes that:
+    it names the exact strings the checker's rule produces, so a
+    both-sides-wrong rendering fails on the literal even when the differential
+    agrees.  Neither assertion is redundant — the equality catches a
+    one-sided narrowing, the literal catches a shared one.
     """
 
     _SHADOWED_GENERIC = """\
@@ -864,6 +928,11 @@ public forall<T> fn g(@Option<Int>, @Option<T> -> @Pos)
         :func:`vera.slots.fn_scopes` accumulates for it.  Drop the
         accumulation and the helper's ``@Option<T>`` renders ``Option<Int>``,
         merging with the sibling parameter the checker kept apart.
+
+        Independent on the ACCUMULATION axis, shared below it: both sides
+        reach :func:`vera.slots.fn_slot_scope`, so the two literal renderings
+        asserted at the end are the half of this test that a shared-renderer
+        defect cannot satisfy (PR #1224 round-3).
         """
         from vera import naming
         from vera.slots import fn_scopes, fn_slot_scope
@@ -913,7 +982,7 @@ where {
 
 
 class TestMonoPostSubstitutionScope:
-    """The De Bruijn recount's POST side narrows by the SURVIVING vars.
+    """The recount's POST side narrows by the vars the CLONE declares.
 
     ``_compute_scoped_reindex`` narrowed only the pre-substitution side, on
     the stated ground that "the clone carries ``forall_vars=None``".  That is
@@ -923,6 +992,17 @@ class TestMonoPostSubstitutionScope:
     and both consumers narrow by them when they re-render it.  The names the
     recount minted for that helper were therefore names nobody looks up
     (#1208 round 2).
+
+    Narrowing instead by the vars that merely SURVIVE the substitution
+    (``v not in mapping``) is a different rule, and wrong in the same
+    direction one case further out — see
+    ``test_post_side_matches_consumers_under_an_identity_mapping``.
+
+    Independent of the consumers on the SCOPE axis (which variables the two
+    sides narrow by), shared below it: both call
+    :func:`vera.slots.fn_slot_scope` and :func:`vera.naming.slot_name`.  The
+    literal assertion beside the comparison is what a shared-renderer defect
+    cannot satisfy (PR #1224 round-3).
     """
 
     _SRC = """\
@@ -1006,6 +1086,105 @@ where {
         # Named outright: under `type U = Int` the un-narrowed post side
         # rendered `Option<Int>`, merging the helper's first two parameters.
         assert observed == ["Option<U>", "Option<Int>", "U"], observed
+
+    # The helper SHADOWS its parent's type variable, so the parent's mapping
+    # has a key with the helper's variable's name.  `surviving` (`v not in
+    # mapping`) drops it; the clone still declares it, so the consumers do
+    # not.
+    _SHADOW_SRC = """\
+type T = Int;
+
+private forall<T> fn parent(@Option<T>, @Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  helper(None, 0)
+}
+where {
+  forall<T> fn helper(@Option<T>, @Int -> @Int)
+    requires(true)
+    ensures(true)
+    effects(pure)
+  {
+    0
+  }
+}
+"""
+
+    def test_post_side_matches_consumers_under_an_identity_mapping(
+        self,
+    ) -> None:
+        """The post side is the CLONE's declared vars, not the surviving ones.
+
+        A generic instantiated at a type spelled with its OWN type variable's
+        name — a module alias called ``T``, so ``forall<T> fn parent`` is
+        cloned at ``T`` — makes the mapping the identity.  Every declared
+        variable is a key of ``mapping`` whatever it maps to, so ``v not in
+        mapping`` drops the helper's shadowing ``T``; substitution leaves the
+        helper's ``@Option<T>`` textually alone, so the post side resolved
+        ``T`` through the module alias and minted ``Option<Int>`` where the
+        consumers, narrowing by the clone's own ``forall_vars=('T',)``,
+        rebuild ``Option<T>`` (PR #1224 round-3).
+
+        Pinned here rather than end to end: every program that reaches this
+        shape has a generic ``where``-helper under a generic parent, which
+        codegen drops before it can run
+        (`#1223 <https://github.com/aallan/vera/issues/1223>`_).
+        """
+        from vera import naming
+        from vera.monomorphize import MonoContext, Monomorphizer
+        from vera.slots import fn_slot_scope
+
+        from tests.naming_helpers import alias_env_from_declarations
+
+        program = parse_to_ast(self._SHADOW_SRC)
+        parent = next(
+            tld.decl for tld in program.declarations
+            if isinstance(tld.decl, ast.FnDecl) and tld.decl.name == "parent"
+        )
+        helper = (parent.where_fns or ())[0]
+        env = alias_env_from_declarations(program.declarations)
+
+        minted: dict[int, str | None] = {}
+        original = Monomorphizer._substituted_slot_name
+
+        def patched(
+            self: Monomorphizer, te: ast.TypeExpr,
+            mapping: dict[str, str], scope: object,
+        ) -> str | None:
+            name = original(self, te, mapping, scope)  # type: ignore[arg-type]
+            minted[id(te)] = name
+            return name
+
+        Monomorphizer._substituted_slot_name = patched  # type: ignore[method-assign]
+        try:
+            mono = Monomorphizer(MonoContext(
+                generic_decls={}, ctor_to_adt={}, ctor_tp_indices={},
+                adt_tp_counts={}, type_aliases={}, type_alias_params={},
+                fn_ret_types={},
+            ))
+            # The IDENTITY instantiation: `T` names the module alias here.
+            clone = mono.monomorphize_fn(parent, ("T",), env)
+        finally:
+            Monomorphizer._substituted_slot_name = original  # type: ignore[method-assign]
+
+        clone_helper = (clone.where_fns or ())[0]
+        assert clone_helper.forall_vars == ("T",), clone_helper.forall_vars
+
+        observed = [minted[id(te)] for te in helper.params]
+        expected = [
+            naming.slot_name(te, fn_slot_scope(env, clone_helper.forall_vars))
+            for te in clone_helper.params
+        ]
+        assert observed == expected, (
+            "under an identity mapping the recount minted names the "
+            f"consumers do not rebuild: recount={observed} "
+            f"consumers={expected}"
+        )
+        # Named outright, so a both-sides-collapsed rendering cannot pass:
+        # `T` is the helper's OWN type parameter, not the module alias.
+        assert observed == ["Option<T>", "Int"], observed
 
 
 # =====================================================================
@@ -1159,6 +1338,328 @@ public fn main(@Unit -> @Int)
 
 
 # =====================================================================
+# Finding 1e — an UNPINNED callee renders in the module under verification
+# =====================================================================
+
+_UNPINNED_HELPER_LIB = """\
+module blib;
+
+type Cnt = Bool;
+
+public forall<T> fn f(@Array<Bool>, @Array<Int>, @T -> @Nat)
+  requires(array_length(@Array<Bool>.0) == 3 && array_length(@Array<Int>.0) == 2)
+  ensures(@Nat.result >= 0)
+  effects(pure)
+{
+  help(@Array<Bool>.0, @Array<Int>.0)
+}
+where {
+  fn help(@Array<Cnt>, @Array<Int> -> @Nat)
+    requires(array_length(@Array<Cnt>.0) == 2)
+    ensures(@Nat.result >= 0)
+    effects(pure)
+  {
+    array_length(@Array<Int>.0)
+  }
+}
+"""
+
+_UNPINNED_HELPER_MAIN = """\
+import blib(f);
+
+type Cnt = Int;
+
+public fn main(@Unit -> @Nat)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  f([true, false, true], array_range(0, 2), 9)
+}
+"""
+
+
+class TestUnpinnedCalleeRendersInTheDeclaringModule:
+    """``_callee_alias_env``'s fallback is the module UNDER verification.
+
+    Only PUBLIC functions of DIRECTLY imported modules are pinned into
+    ``_fn_origin_envs`` (``_register_modules``), so an imported generic's own
+    ``where``-helper — resolved through ``_fn_info_for_decl`` while the
+    generic's clone verifies inside ``_declaring_module_scope`` — always
+    reaches the fallback.  Falling back to ``_alias_env`` rendered that
+    helper's contract in the IMPORTER's namespace (PR #1224 review).
+
+    Here ``help``'s two parameters are two stacks in ``blib`` (``Cnt = Bool``)
+    and ONE merged stack in the importer (``Cnt = Int``), so
+    ``@Array<Cnt>.0`` denotes the length-3 array whose precondition is FALSE
+    under the correct env and the length-2 array whose precondition is TRUE
+    under the importer's.  The wrong env therefore discharged a violated
+    precondition — a false Tier 1, which the runtime oracle below catches.
+    """
+
+    def test_verify_reports_the_violation_the_runtime_traps_on(self) -> None:
+        module = _resolved(("blib",), _UNPINNED_HELPER_LIB)
+        result = _verify_mod(_UNPINNED_HELPER_MAIN, [module])
+        assert "E501" in _codes(result), (
+            "the helper's violated precondition was discharged as true — the "
+            "unpinned callee rendered in the importer's namespace: "
+            f"{[(d.error_code, d.description[:80]) for d in result.diagnostics]}"
+        )
+
+    def test_the_runtime_oracle_agrees_the_precondition_fails(self) -> None:
+        """The other half: the emitted code really does trap there.
+
+        Without this the E501 above could be a spurious rejection rather than
+        a caught violation — the two failure directions of a wrong namespace
+        look identical from inside the verifier.
+        """
+        module = _resolved(("blib",), _UNPINNED_HELPER_LIB)
+        result = _compile_mod(_UNPINNED_HELPER_MAIN, [module])
+        errors = [
+            d for d in result.diagnostics  # type: ignore[attr-defined]
+            if d.severity == "error"
+        ]
+        assert not errors, f"unexpected codegen errors: {errors}"
+        with pytest.raises(WasmTrapError) as exc:
+            execute(result, fn_name="main")  # type: ignore[arg-type]
+        assert exc.value.kind == "contract_violation", exc.value.kind
+
+    def test_the_control_without_a_conflicting_alias_is_unchanged(
+        self,
+    ) -> None:
+        """The same program with the importer's shadowing alias removed.
+
+        A fix that simply started reporting more would move this too.
+        """
+        module = _resolved(("blib",), _UNPINNED_HELPER_LIB)
+        control = _UNPINNED_HELPER_MAIN.replace("type Cnt = Int;\n\n", "")
+        assert "type Cnt" not in control
+        result = _verify_mod(control, [module])
+        assert "E501" in _codes(result)
+
+
+_REFINED_RETURN_LIB = """\
+module rlib;
+
+type Cnt = Nat;
+
+public fn mk(@Nat -> @{ @Cnt | @Cnt.0 >= 18 })
+  requires(@Nat.0 >= 18)
+  ensures(true)
+  effects(pure)
+{
+  @Nat.0
+}
+"""
+
+_REFINED_RETURN_MAIN = """\
+import rlib(mk);
+
+type Cnt = Int;
+
+public fn main(@Unit -> @Nat)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  mk(20)
+}
+"""
+
+
+class TestRefinedReturnTranslatesInTheCalleeNamespace:
+    """A callee's refined-RETURN predicate is the callee's own text.
+
+    ``requires`` and ``ensures`` are translated inside
+    ``SmtContext._callee_naming_scope``; the refined-return predicate the same
+    call site ASSUMES was not, so an alias it names resolved in the IMPORTER's
+    namespace (PR #1224 review).  Here ``Cnt`` is ``Nat`` in ``rlib`` and
+    ``Int`` in the importer.
+
+    Asserted on the ENVIRONMENT rather than on a diagnostic, because today the
+    binder pushed beside the translation comes from
+    ``ast.predicate_binder_name`` — a bare ``UPPER_IDENT`` that reads no env at
+    all — so the push key and the lookup key miss under BOTH namespaces for a
+    parameterised base, and agree under both for a bare one.  That masking is
+    exactly why the wrap has to be pinned by provenance: the moment the binder
+    becomes env-dependent (as every other consumer's already is, via
+    ``naming.refinement_binder_parts``), a translation left in the importer's
+    namespace mints one key and looks up another.
+    """
+
+    def test_the_predicate_is_translated_under_the_defining_modules_env(
+        self,
+    ) -> None:
+        from vera import naming as naming_mod
+        from vera import smt as smt_module
+
+        module = _resolved(("rlib",), _REFINED_RETURN_LIB)
+        # `ast.predicate_binder_name` has exactly one caller in the SMT layer
+        # — the refined-return site — so it opens a window that isolates THAT
+        # translation from the `requires` / `ensures` ones (which are wrapped
+        # already, and would otherwise supply the observation on their own).
+        window = {"open": False}
+        seen: list[str] = []
+        orig_binder = ast.predicate_binder_name
+        orig_translate = smt_module.SmtContext.translate_expr
+
+        def binder_spy(predicate: object) -> object:
+            window["open"] = True
+            return orig_binder(predicate)  # type: ignore[arg-type]
+
+        def translate_spy(
+            self: object, expr: object, env: object = None,
+        ) -> object:
+            if window["open"]:
+                window["open"] = False
+                # How the ACTIVE env renders the conflicting alias — inspected
+                # through the RENDERING, not by object identity.
+                resolved = naming_mod.resolve_type_expr(
+                    ast.NamedType(name="Cnt", type_args=None),
+                    self._alias_env,  # type: ignore[attr-defined]
+                )
+                seen.append(naming_mod.pretty_type(resolved))
+            return orig_translate(self, expr, env)  # type: ignore[arg-type]
+
+        ast.predicate_binder_name = binder_spy  # type: ignore[assignment]
+        smt_module.ast.predicate_binder_name = binder_spy  # type: ignore[assignment]
+        smt_module.SmtContext.translate_expr = translate_spy  # type: ignore[method-assign]
+        try:
+            _verify_mod(_REFINED_RETURN_MAIN, [module])
+        finally:
+            ast.predicate_binder_name = orig_binder  # type: ignore[assignment]
+            smt_module.ast.predicate_binder_name = orig_binder  # type: ignore[assignment]
+            smt_module.SmtContext.translate_expr = orig_translate  # type: ignore[method-assign]
+
+        # Floor first: an observation list that stayed empty would satisfy any
+        # `all(...)` below without the site having run at all.
+        assert seen, (
+            "the refined-return translation never ran — this test is "
+            "measuring nothing"
+        )
+        assert set(seen) == {"Nat"}, (
+            "the callee's refined-return predicate was translated in the "
+            f"IMPORTER's namespace (`Cnt` = Int), not its own: {seen}"
+        )
+
+
+# =====================================================================
+# Finding 1f — the declaration-index space is PER NAMESPACE
+# =====================================================================
+
+_DECL_ORDER_LIB = """\
+public data X {
+  MkX(Int)
+}
+"""
+
+_DECL_ORDER_MAIN = """\
+import dolib;
+
+type Z = X;
+type X = Nat;
+
+private fn pick(@Option<Nat>, @Option<Z> -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  nat_to_int(option_unwrap_or(@Option<Nat>.0, 0))
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  pick(Some(7), Some(MkX(99)))
+}
+"""
+
+
+class TestDeclOrderIsPerNamespace:
+    """Codegen's declaration-index space is keyed to its owning namespace.
+
+    The index answers "was this name already declared when this alias body
+    was registered?" — a question about ONE namespace (§8.4.1: aliases are
+    module-local).  Codegen shared a single first-wins space across every
+    absorbed namespace, and modules register at Pass 0.5 while the main file
+    registers at Pass 1, so a name a module had already stamped kept that
+    EARLIER index inside the main file — turning the main file's FORWARD
+    reference into a backward one (PR #1224 review).
+
+    ``type Z = X;`` precedes ``type X = Nat;`` here, so ``Z``'s body sees only
+    the imported ADT ``X``, and the checker keeps ``@Option<Nat>`` and
+    ``@Option<Z>`` as two stacks.  With the shared space codegen resolved
+    ``Z`` through the LATER ``type X = Nat``, merged the two stacks, and
+    ``@Option<Nat>.0`` became parameter 2 — a check-clean, verify-clean
+    program that reads the wrong parameter and returns a garbage value from
+    valid WASM (both parameters erase to ``i32``, so nothing traps).
+    """
+
+    def test_the_program_returns_its_first_parameter(self) -> None:
+        module = _resolved(("dolib",), _DECL_ORDER_LIB)
+        result = _compile_mod(_DECL_ORDER_MAIN, [module])
+        errors = [
+            d for d in result.diagnostics  # type: ignore[attr-defined]
+            if d.severity == "error"
+        ]
+        assert not errors, f"unexpected codegen errors: {errors}"
+        ran = execute(result, fn_name="main")  # type: ignore[arg-type]
+        assert ran.value == 7, (
+            "codegen merged two parameter stacks the checker kept apart — a "
+            f"module's declaration index leaked into the main file's: got "
+            f"{ran.value}"
+        )
+
+    def test_codegen_reads_the_parameter_the_checker_names(self) -> None:
+        """The same claim in the instruction stream, so a coincidence of
+        values cannot satisfy it."""
+        module = _resolved(("dolib",), _DECL_ORDER_LIB)
+        result = _compile_mod(_DECL_ORDER_MAIN, [module])
+        body = _fn_body(result.wat, "pick")  # type: ignore[attr-defined]
+        assert 0 in _local_gets(body), (
+            "the emitted body does not read parameter 1:\n" + body
+        )
+
+    def test_the_control_without_the_shadowing_alias_is_unchanged(
+        self,
+    ) -> None:
+        """The identical program minus the ``type X = Nat;`` line.
+
+        It differs from the repro by exactly the declaration whose index was
+        leaking, and it was green throughout — so this pins that the fix did
+        not simply disable the ordering bound.
+        """
+        module = _resolved(("dolib",), _DECL_ORDER_LIB)
+        control = _DECL_ORDER_MAIN.replace("type X = Nat;\n", "")
+        result = _compile_mod(control, [module])
+        ran = execute(result, fn_name="main")  # type: ignore[arg-type]
+        assert ran.value == 7
+
+    def test_a_module_keeps_its_own_space(self) -> None:
+        """The stored spaces are per module, and the main file is not in them.
+
+        Structural, so a future change that reinstates one shared dict fails
+        here as well as end to end.
+        """
+        from vera.codegen.core import CodeGenerator
+
+        module = _resolved(("dolib",), _DECL_ORDER_LIB)
+        gen = CodeGenerator(
+            source=_DECL_ORDER_MAIN, file="main.vera",
+            resolved_modules=[module],
+        )
+        gen.compile_program(parse_to_ast(_DECL_ORDER_MAIN))
+        assert ("dolib",) in gen._module_decl_order
+        assert "X" in gen._module_decl_order[("dolib",)]
+        assert "Z" not in gen._module_decl_order[("dolib",)]
+        # The main file's own space orders its two aliases as written, and
+        # the module's `X` is NOT what stamped the main file's.
+        assert gen._decl_order["Z"] < gen._decl_order["X"], gen._decl_order
+
+
+# =====================================================================
 # The one env asymmetry that is NOT a naming bug (#1208 review, probe x01)
 # =====================================================================
 
@@ -1239,8 +1740,9 @@ public fn main(@Unit -> @Int)
         """
         wat = _compile_ok(self._SRC).wat
         body = wat.split('(func $f (export "f")')[1].split("(func ")[0]
-        assert "local.get 2" in body and "local.get 3" in body, body
-        assert "local.get 0" not in body, (
+        reads = _local_gets(body)
+        assert {2, 3} <= reads, body
+        assert 0 not in reads, (
             "codegen now reads parameter 1 — the prelude-alias asymmetry has "
             "been closed; delete this characterization test"
         )

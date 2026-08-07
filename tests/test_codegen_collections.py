@@ -1088,7 +1088,15 @@ class TestMapTagFutureStripTermination1097:
 
         ctx = object.__new__(wasm_context.WasmContext)
         # #1208: the alias table reaches the context as ONE naming env.
-        ctx._alias_env = AliasEnv(aliases=aliases, alias_params={})
+        # Every alias carries an `alias_params` entry, as the real env
+        # builders produce — `None` for a non-parameterised alias (PR #1224
+        # review).  Behaviourally identical to omitting them (resolution
+        # reads `alias_params.get(name) or ()`), so this is shape-consistency
+        # with the envs under test, not a fix to what the fixture exercises.
+        ctx._alias_env = AliasEnv(
+            aliases=aliases,
+            alias_params=dict.fromkeys(aliases),
+        )
         return ctx
 
     def test_future_cycle_alias_terminates(self) -> None:

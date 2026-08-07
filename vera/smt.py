@@ -2117,10 +2117,19 @@ class SmtContext:
             # won't resolve against `Nat` and `z3_pred` is None, silently
             # dropping the refined-return fact so a caller can't rely on it (CR
             # PR-review — the SMT analogue of the verifier/codegen binder fix).
-            binder = (ast.predicate_binder_name(ret_type.predicate)
-                      or ret_type.base.name)
-            inner_env = SlotEnv().push(binder, ret_var)
-            z3_pred = self.translate_expr(ret_type.predicate, inner_env)
+            # In the CALLEE's namespace, like the `requires` / `ensures`
+            # translations above (#1208; PR #1224 review).  This predicate is
+            # written in the DEFINING module's namespace, so an alias it names
+            # has to resolve there — the importer's env is a different
+            # namespace, and a name minted one way and looked up another misses
+            # SILENTLY.  The binder derivation is inside the scope too, so the
+            # push side and the reference side cannot end up scoped
+            # differently.
+            with self._callee_naming_scope(callee_info):
+                binder = (ast.predicate_binder_name(ret_type.predicate)
+                          or ret_type.base.name)
+                inner_env = SlotEnv().push(binder, ret_var)
+                z3_pred = self.translate_expr(ret_type.predicate, inner_env)
             if z3_pred is not None:
                 self.solver.add(self._guard_fact(z3_pred))
 

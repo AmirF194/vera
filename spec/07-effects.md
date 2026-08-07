@@ -201,6 +201,8 @@ public fn main(@Unit -> @Int)
 
 `main` returns `7` — `stash` writes to the cell the handler established. The same rule governs `Exn<E>` payloads: `Exn<Msg>` under `type Msg = String` catches a `throw` from a function declaring `effects(<Exn<String>>)`. Two cells are distinct exactly when their resolved types are (`State<Option<Int>>` and `State<Option<Bool>>` are two cells; a handler for one does not handle the other).
 
+Resolved-type identity governs the cell wherever the resolved type has a **nameable, mangle-safe family** — the canonical `Head<arg, arg>` grammar a `@Name.n` slot reference can spell, since the family name is what the emitted cell symbol is mangled from. A resolution outside that grammar has no such family (`State<Handler>` under `type Handler = Option<fn(Int -> Int) effects(pure)>`), and the reference compiler falls back to the alias-opaque **spelling**, so two spellings of one such type name two cells rather than sharing one. The fallback runs in the conservative direction only: it can leave split a cell the resolution would have merged, never merge two the checker keeps apart. Extending the mangler over these renderings, so the resolved-type rule holds without exception, is tracked as [#1219](https://github.com/aallan/vera/issues/1219).
+
 ### 7.5.2 Handler Semantics
 
 When an effect operation is performed in the handled body:

@@ -143,9 +143,13 @@ def test_head_arity_mismatch_still_renders_the_head_syntactically() -> None:
 def test_refinement_at_top_level_renders_its_base() -> None:
     assert _name("@{ @Int | @Int.0 > 0 }") == "Int"
     # The base is a head, so ITS arguments resolve: `Array<String>`, not the
-    # source-spelled `Array<Txt>` codegen's refinement binder produces (see
-    # `test_refinement_binder_names_parameterised_bases_syntactically`) —
-    # the exact split #1208 records.
+    # source spelling `Array<Txt>`.  Codegen's refinement binder gives the
+    # SAME answer — #1208 made it `slot_name`'s — which is what
+    # `test_refinement_binder_names_parameterised_bases_through_slot_name`
+    # closes: it asserts the same `Array<String>` and that a predicate's
+    # `@Array<Txt>.0` resolves onto it.  (The comment here used to claim the
+    # binder still produced the source spelling, and cited a test that does
+    # not exist; PR #1224 review.)
     assert _name("@{ @Array<Txt> | array_length(@Array<Txt>.0) > 0 }") \
         == "Array<String>"
 
@@ -732,9 +736,11 @@ def test_sibling_dependency_graph_nests_a_constant_depth() -> None:
     original = naming_module._resolve_alias
     depth = 0
     max_depth = 0
+    calls = 0
 
     def counting(name: str, alias_env: AliasEnv) -> object:
-        nonlocal depth, max_depth
+        nonlocal depth, max_depth, calls
+        calls += 1
         depth += 1
         max_depth = max(max_depth, depth)
         try:
@@ -750,6 +756,16 @@ def test_sibling_dependency_graph_nests_a_constant_depth() -> None:
     finally:
         naming_module._resolve_alias = original  # type: ignore[assignment]
 
+    # The floor comes FIRST: `max_depth <= 2` is trivially true of a wrapper
+    # that never fired at all — a rendering that stopped consulting
+    # `_resolve_alias`, or a patch that missed the name the renderer calls,
+    # would read as the strongest possible pass (PR #1224 round-3).  One call
+    # per level is the floor the walk cannot go below and still have resolved
+    # a 1000-level graph.
+    assert calls >= 1000, (
+        f"the instrumented `_resolve_alias` fired only {calls} times over a "
+        "1000-level graph — the depth assertion below is measuring nothing"
+    )
     assert max_depth <= 2, (
         f"_resolve_alias nested {max_depth} deep over a 1000-level graph — "
         "the walk is recursing per level again, which is a RecursionError "

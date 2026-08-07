@@ -1138,8 +1138,12 @@ class TestObligationKinds:
         v = ContractVerifier.__new__(ContractVerifier)
         # #1208: `slot_table` is named against the verifier's alias env; this
         # fixture bypasses `__init__`, so supply the empty one it declares no
-        # aliases against.
+        # aliases against.  `_decl_alias_env` too: the call site reads
+        # `_current_alias_env`, which consults it (PR #1224 review) — without
+        # it the fixture raises `AttributeError` instead of exercising the
+        # unmappable-slot branch.
         v._alias_env = EMPTY_ALIAS_ENV
+        v._decl_alias_env = None
         pre = A.Requires(
             expr=A.SlotRef(
                 type_name="String", type_args=None, index=5, span=None,

@@ -72,6 +72,19 @@ class ContractsMixin:
                 if isinstance(parts.base, ast.RefinementType)
                 else parts.base
             )
+            # Once per SITE, not once per visit (PR #1224 review).  This
+            # helper is consulted from several places per declaration, and a
+            # generic carrying a concrete nested-refinement parameter is
+            # compiled once per instantiation from the SAME spans, so
+            # `forall<T> fn g(@T, @Tiny -> @Int)` used at two types reported
+            # the one declaration twice.  Keyed on the resolved diagnostic
+            # location, which carries the owning file — two modules whose
+            # declarations happen to share a line/column stay distinct.
+            loc, _src = self._diag_location(te)
+            site = (loc.file, loc.line, loc.column)
+            if site in self._e618_sites:
+                return None
+            self._e618_sites.add(site)
             self._error(
                 te,
                 f"Refinement base '{parts.binder_name}' resolves to another "

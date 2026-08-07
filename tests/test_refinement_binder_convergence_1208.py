@@ -21,6 +21,7 @@ import pytest
 from vera import ast, naming
 from vera.codegen import CodeGenerator
 from vera.parser import parse_to_ast
+from vera.runtime.traps import WasmTrapError
 
 from tests.codegen_helpers import _compile, _compile_ok, _run
 
@@ -140,6 +141,61 @@ public fn f(@Tiny -> @Int) requires(true) ensures(true) effects(pure) { 0 }
             if d.severity == "error" and d.error_code == "E618"]
     assert errs, f"expected E618; diagnostics: {result.diagnostics}"
     assert "resolves to another refinement" in errs[0].description
+    # ONE per declaration: `_refinement_guard_parts` is consulted from several
+    # places per function, so a per-visit report would already double here.
+    assert len(errs) == 1, [d.description for d in errs]
+
+
+def test_nested_refinement_base_reports_once_per_declaration() -> None:
+    """One declaration, one E618 — across monomorphized clones too.
+
+    A generic carrying a CONCRETE nested-refinement parameter is compiled once
+    per instantiation from the same spans, so the two clones of ``g`` below
+    reported the single ``@Tiny`` parameter twice, at identical file/line/
+    column (PR #1224 review).  Distinct sites must still each report, which is
+    what the second half pins — a fix that deduped by error code alone would
+    swallow the second declaration's diagnostic.
+    """
+    two_clones = """
+type Pos = { @Int | @Int.0 > 0 };
+type Tiny = { @Pos | @Pos.0 < 10 };
+
+public forall<T> fn g(@T, @Tiny -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  0
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  g(1, 5) + g(true, 5)
+}
+"""
+    errs = [d for d in _compile(two_clones).diagnostics
+            if d.error_code == "E618"]
+    assert len(errs) == 1, [
+        (d.location.line, d.location.column, d.description[:60]) for d in errs
+    ]
+
+    # Two genuinely distinct sites (parameter and return) still report twice.
+    two_sites = """
+type Pos = { @Int | @Int.0 > 0 };
+type Tiny = { @Pos | @Pos.0 < 10 };
+public fn f(@Tiny -> @Tiny)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{ @Tiny.0 }
+"""
+    sites = {(d.location.line, d.location.column)
+             for d in _compile(two_sites).diagnostics
+             if d.error_code == "E618"}
+    assert len(sites) == 2, sites
 
 
 @pytest.mark.parametrize(
@@ -186,8 +242,13 @@ public fn f(@BigByte -> @Byte)
 { @BigByte.0 }
 """
     result = _compile_ok(source)
-    with pytest.raises(RuntimeError, match=r"@Byte\.0 <= 255"):
+    # The `match=` regex is the discrimination — it names the exact conjunct
+    # that has to reach the emitted check — and `kind` is what rules out an
+    # unrelated trap wearing the same words (PR #1224 review).  Both, not
+    # either.
+    with pytest.raises(WasmTrapError, match=r"@Byte\.0 <= 255") as exc:
         execute(result, fn_name="f", args=[300])
+    assert exc.value.kind == "contract_violation", exc.value.kind
     assert _run(source, fn="f", args=[7]) == 7
 
 
@@ -211,8 +272,11 @@ public fn f(@SmallNat -> @Nat)
 { @SmallNat.0 }
 """
     result = _compile_ok(source)
-    with pytest.raises(RuntimeError, match=r"@Nat\.0 >= 0"):
+    # Same pairing as the `@Byte` twin: the regex pins the implicit conjunct,
+    # `kind` pins that it is the contract guard that rejected the value.
+    with pytest.raises(WasmTrapError, match=r"@Nat\.0 >= 0") as exc:
         execute(result, fn_name="f", args=[-1])
+    assert exc.value.kind == "contract_violation", exc.value.kind
     assert _run(source, fn="f", args=[7]) == 7
 
 

@@ -4205,8 +4205,13 @@ class TestExplainSlots:
         restores ONE type-parameter map rather than replacing it.  Rendered
         against the bare module environment, `T` in the helper resolves to
         `Int`, the helper's two parameters merge into one `Option<Int>` stack,
-        and the table reports `@Option<Int>.0` as parameter 2 where the
-        checker resolves it to parameter 1.
+        and neither `@Option<T>` row exists at all.
+
+        The helper declares its two parameters in the OPPOSITE order from its
+        parent (PR #1224 review), so its table is DISTINGUISHABLE from the
+        parent's: a printer that echoed the enclosing function's table under
+        the helper's heading would satisfy assertions written against the same
+        order, and fails these.
         """
         src = (
             "type T = Int;\n"
@@ -4216,10 +4221,10 @@ class TestExplainSlots:
             "  ensures(true)\n"
             "  effects(pure)\n"
             "{\n"
-            "  helper(@Option<Int>.0, @Option<T>.0)\n"
+            "  helper(@Option<T>.0, @Option<Int>.0)\n"
             "}\n"
             "where {\n"
-            "  fn helper(@Option<Int>, @Option<T> -> @Int)\n"
+            "  fn helper(@Option<T>, @Option<Int> -> @Int)\n"
             "    requires(true)\n"
             "    ensures(true)\n"
             "    effects(pure)\n"
@@ -4233,9 +4238,13 @@ class TestExplainSlots:
         rc = cmd_check(str(f), explain_slots=True)
         assert rc == 0
         out = capsys.readouterr().out
-        helper_block = out.split("where fn helper")[1]
-        assert "@Option<Int>.0  parameter 1 (only @Option<Int>)" in helper_block
-        assert "@Option<T>.0  parameter 2 (only @Option<T>)" in helper_block
+        parent_block, helper_block = out.split("where fn helper")
+        # The parent's own order, as the control the helper must differ from.
+        assert "@Option<Int>.0  parameter 1 (only @Option<Int>)" in parent_block
+        assert "@Option<T>.0  parameter 2 (only @Option<T>)" in parent_block
+        # The helper's, reversed.
+        assert "@Option<T>.0  parameter 1 (only @Option<T>)" in helper_block
+        assert "@Option<Int>.0  parameter 2 (only @Option<Int>)" in helper_block
 
 
 class TestCmdServe:
