@@ -263,8 +263,8 @@ public fn f(@Tiny -> @Tiny)
 def test_two_modules_at_one_coordinate_each_report() -> None:
     """The dedup key is a location, so the location must carry its own file.
 
-    ``_e618_sites`` keys on ``(file, line, column)`` on the premise that a
-    resolved location names the file it belongs to.  That premise held at
+    ``_error_once`` keys on the resolved ``(file, line, column)`` on the
+    premise that a resolved location names the file it belongs to.  That premise held at
     three of the four places codegen works on an imported module's
     declarations; the mono-clone body pass entered the defining module's
     ALIAS scope without its SOURCE scope, so a clone of an IMPORTED generic

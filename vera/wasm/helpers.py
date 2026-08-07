@@ -70,6 +70,67 @@ class WasmSlotEnv:
 
 
 # =====================================================================
+# State handler clause registry entry (#976 / #1211)
+# =====================================================================
+
+@dataclass(frozen=True)
+class StateClauseEntry:
+    """One ``handle[State<T>]`` clause, plus the scope it compiles in.
+
+    Registered per op name by ``_translate_handle_state`` and consumed by
+    ``_translate_state_clause_op``, which inlines the clause body at each
+    get/put call site in the handled body (#976 intrinsic-hybrid semantics).
+
+    Everything after ``put_import`` is the handler-DECLARATION scope — the
+    context that existed at the ``handle`` expression, before this handler
+    installed its own bindings and op registries.  The checker checks clause
+    bodies THERE (§7.5.2): a clause is not part of the body it refines, so
+    both an outer slot reference and a bare ``get``/``put`` in a clause body
+    resolve against the enclosing context, not against this handler.  Keeping
+    the whole declaration-time scope in one record is what stops the two
+    halves drifting — ``decl_env`` alone was threaded first (#1202) and the
+    op registries were left at the innermost handler's, so a bare op in a
+    nested handler's clause body wrote the WRONG CELL (#1211).
+
+    Fields (each has a consumer — the tuple this replaced also carried the
+    effect argument's alias-opaque source spelling, which nothing unpacking
+    it ever read):
+        clause: the ``HandlerClause`` to inline.
+        family: the resolved cell family (import naming + WASM types).
+        state_slot_name: the state annotation's slot name; ``None`` for a
+            stateless handler, which binds no state slot in the checker.
+        decl_env: the declaration scope's slot environment.
+        get_import / put_import: this handler's own host-cell imports — the
+            intrinsic read/store the clause refines, not a declaration-time
+            value.
+        decl_effect_ops / decl_effect_op_result_wt / decl_effect_op_result_vera:
+            the three op registries as they stood at the declaration.
+        decl_state_clause_ops: the clause registry as it stood at the
+            declaration — the ENCLOSING handlers' clauses, never this
+            handler's own, so re-entering an op from inside a clause body
+            walks strictly outwards and terminates.
+        decl_addressable_from: how many host cells were pushed at the
+            declaration — the index into ``_pushed_cell_families`` from which
+            this clause body's cells are SHADOWS.  A bare op in the clause
+            body resolves into the declaration scope, but the host intrinsics
+            address only the innermost cell of a family, so an op whose family
+            appears at or after this index cannot reach its cell (#1233).
+    """
+
+    clause: ast.HandlerClause
+    family: str
+    state_slot_name: str | None
+    decl_env: WasmSlotEnv
+    get_import: str
+    put_import: str
+    decl_effect_ops: dict[str, tuple[str, bool]]
+    decl_effect_op_result_wt: dict[str, str | None]
+    decl_effect_op_result_vera: dict[str, str | None]
+    decl_state_clause_ops: dict[str, "StateClauseEntry"]
+    decl_addressable_from: int
+
+
+# =====================================================================
 # String pool — deduplicated string constants
 # =====================================================================
 

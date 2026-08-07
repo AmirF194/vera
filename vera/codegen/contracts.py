@@ -6,6 +6,9 @@ postcondition checks with informative failure messages.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from dataclasses import dataclass
+
 from vera import ast, naming
 from vera.monomorphize import mangle_type_name
 from vera.skip import CodegenSkip
@@ -19,6 +22,31 @@ from vera.wasm.inference import substitute_type_vars
 # recursive type aliases (which the checker currently accepts) and is failed
 # CLOSED, never silently skipped — see `_emit_component_refinement_guards`.
 _MAX_COMPONENT_GUARD_DEPTH = 16
+
+
+@dataclass(frozen=True)
+class _ComponentGuardSite:
+    """One component of a boundary tuple the guard layer acts on (#1210).
+
+    Yielded by :meth:`ContractsMixin._tuple_component_guard_sites`, which is
+    the ONE decomposition three consumers read: the guard EMITTER, the
+    has-guardable predicate that decides whether the return epilogue runs at
+    all, and the host-import PRE-SCAN.  Carrying the layout (*field_offset*,
+    *load_wt*) alongside the classification (*guard*, *nested*) is what lets
+    the emitter consume the same enumeration rather than re-deriving it: a
+    component this record does not describe is one no guard is emitted for,
+    and one the pre-scan therefore need not register.
+    """
+
+    field_offset: int
+    load_wt: str
+    #: `(predicate, base slot-name)` — the pair `_refinement_guard_parts`
+    #: returns, or the synthesized `@Nat.0 >= 0` for a bare-`@Nat` component.
+    #: None when the component is guarded only through its inner components.
+    guard: tuple[ast.Expr, str] | None
+    #: The component's own type expression when it wraps a further tuple, so
+    #: the caller can recurse; None otherwise.
+    nested: ast.TypeExpr | None
 
 
 class ContractsMixin:
@@ -73,19 +101,15 @@ class ContractsMixin:
                 else parts.base
             )
             # Once per SITE, not once per visit (PR #1224 review).  This
-            # helper is consulted from several places per declaration, and a
-            # generic carrying a concrete nested-refinement parameter is
+            # helper is consulted from several places per declaration — and,
+            # since round 7, from the import pre-scan's derivation as well —
+            # and a generic carrying a concrete nested-refinement parameter is
             # compiled once per instantiation from the SAME spans, so
             # `forall<T> fn g(@T, @Tiny -> @Int)` used at two types reported
-            # the one declaration twice.  Keyed on the resolved diagnostic
-            # location, which carries the owning file — two modules whose
-            # declarations happen to share a line/column stay distinct.
-            loc, _src = self._diag_location(te)
-            site = (loc.file, loc.line, loc.column)
-            if site in self._e618_sites:
-                return None
-            self._e618_sites.add(site)
-            self._error(
+            # the one declaration twice.  `_error_once` keys on the resolved
+            # diagnostic location, which carries the owning file — two modules
+            # whose declarations happen to share a line/column stay distinct.
+            self._error_once(
                 te,
                 f"Refinement base '{parts.binder_name}' resolves to another "
                 f"refinement ({{ {inner} | ... }}); a refinement base "
@@ -222,6 +246,111 @@ class ContractsMixin:
             return node
         return None
 
+    def _tuple_component_guard_sites(
+        self, te: ast.TypeExpr, _depth: int = 0,
+    ) -> Iterator[_ComponentGuardSite]:
+        """Decompose ONE level of a boundary tuple into its guarded components.
+
+        THE tuple decomposition (#1210 round 7).  Every consumer that needs to
+        know what the boundary-guard layer does to a tuple reads it from here:
+        the emitter (`_emit_component_refinement_guards`), the return-epilogue
+        gate (`_has_guardable_tuple_components`), and the host-import pre-scan
+        (`_signature_refinement_predicates`).  They used to carry three
+        hand-kept copies of the same classification, and the pre-scan's copy
+        did not exist at all — a `handle[State<Nat>]` written in the
+        refinement of a tuple COMPONENT was lowered as a guard here and
+        registered by nobody, so a check-green program died at whole-module
+        WAT with `unknown func $vera.state_push_Nat`.  A component that is not
+        described by a yielded `_ComponentGuardSite` is one no guard is
+        emitted for; that equivalence is the invariant, and it now holds by
+        construction rather than by three functions agreeing.
+
+        Laziness matters: the emitter allocates a local per yielded site, so
+        the sites must be produced one at a time, interleaved with the
+        caller's `ctx.alloc_local` calls, to keep the local numbering (and the
+        E618 report order) exactly as it was.
+
+        The depth limit is enforced HERE, once, for all three consumers.  It
+        fails CLOSED: a tuple nested deeper than the limit is almost always an
+        infinite type via mutually-recursive aliases (`type A = Tuple<B, Int>;
+        type B = Tuple<A, Int>`, which the checker currently accepts), so
+        whichever consumer reaches the bound first records the loud E617 and
+        the compile fails — never a silent `return []` that drops the guards
+        for every component past the limit (CR PR-review).  `_error_once`
+        keeps the three consumers from tripling the one diagnostic.
+        """
+        if _depth > _MAX_COMPONENT_GUARD_DEPTH:
+            self._error_once(
+                te,
+                "Tuple nesting in this boundary type exceeds the runtime-guard "
+                f"depth limit ({_MAX_COMPONENT_GUARD_DEPTH}); the type is most "
+                "likely infinitely recursive (mutually-recursive type aliases), "
+                "so its refined components cannot be fully guarded.",
+                rationale="A refined tuple component is guarded by decomposing "
+                "the type at the boundary.  A type nested past the depth limit "
+                "cannot be fully decomposed, so codegen fails closed rather than "
+                "emitting partial guards that would let a deep component cross "
+                "the boundary unchecked.",
+                error_code="E617",
+            )
+            return
+        node = self._resolve_tuple_type(te)
+        if node is None:
+            return
+
+        _sizes = {"i32": 4, "i64": 8, "f64": 8, "i32_pair": 8}
+        _aligns = {"i32": 4, "i64": 8, "f64": 8, "i32_pair": 4}
+        offset = 4  # after the tag (i32, 4 bytes) — as construction lays it out
+        for comp_te in (node.type_args or ()):  # _resolve_tuple_type: non-empty
+            wt = self._type_expr_to_wasm_type(comp_te)
+            if wt is None or wt == "unsupported":
+                # @Unit component: zero-size, occupies no slot and is erased —
+                # no value to guard and no offset advance (matching how
+                # construction / extraction skip a Unit field).
+                continue
+            align = _aligns.get(wt, 8)
+            offset = (offset + align - 1) & ~(align - 1)
+            field_offset = offset
+            offset += _sizes.get(wt, 8)
+
+            parts = self._refinement_guard_parts(comp_te)
+            resolved = self._resolve_type_alias(comp_te)
+            is_nat = (parts is None
+                      and isinstance(resolved, ast.NamedType)
+                      and resolved.name == "Nat")
+            # A nested component may be a tuple OR a refinement over a tuple
+            # (`Tuple<Pair, Int>` where `Pair = { @Tuple<PosInt, Int> | P }`) —
+            # `_resolve_tuple_type` unwraps both, so its inner components are
+            # guarded recursively (CR PR-review).  When the component IS a
+            # refinement, `parts` is non-None (its top-level predicate is
+            # guarded by the caller) yet it is still yielded as nested so the
+            # caller reaches the inner tuple.
+            is_nested = (not is_nat
+                         and self._resolve_tuple_type(comp_te) is not None)
+            if parts is None and not is_nat and not is_nested:
+                continue
+
+            guard: tuple[ast.Expr, str] | None = parts
+            if guard is None and is_nat:
+                guard = (
+                    ast.BinaryExpr(
+                        op=ast.BinOp.GE,
+                        left=ast.SlotRef(
+                            type_name="Nat", type_args=None, index=0),
+                        right=ast.IntLit(value=0)),
+                    "Nat",
+                )
+            yield _ComponentGuardSite(
+                field_offset=field_offset,
+                # A pair component (String / Array) loads its ptr half — the
+                # length is read from memory by the predicate, exactly as the
+                # i32_pair return guard does (a Vera string / array is
+                # self-describing from its pointer).
+                load_wt="i32" if wt == "i32_pair" else wt,
+                guard=guard,
+                nested=comp_te if is_nested else None,
+            )
+
     def _emit_component_refinement_guards(
         self,
         ctx: WasmContext,
@@ -245,10 +374,12 @@ class ContractsMixin:
         ``Tuple<PosInt, Int>`` boundary would otherwise launder a violating
         component into a Tier-1-clean callee.
 
-        This descends the tuple layout, loads each refined / ``@Nat`` component
-        from the heap value, and guards it with the same
-        ``$vera.contract_fail`` predicate check the top-level guard uses, so the
-        violating component traps at the boundary.  Recurses into nested tuples.
+        This descends the tuple layout — via ``_tuple_component_guard_sites``,
+        the ONE decomposition the has-guardable predicate and the host-import
+        pre-scan read too — loads each refined / ``@Nat`` component from the
+        heap value, and guards it with the same ``$vera.contract_fail``
+        predicate check the top-level guard uses, so the violating component
+        traps at the boundary.  Recurses into nested tuples.
 
         Only ``Tuple`` is handled: its component types are recoverable directly
         from the declared ``type_args``.  A user ADT's refined field types need
@@ -263,91 +394,20 @@ class ContractsMixin:
         the loaded components need no separate GC rooting.  Mirrors the offset
         algorithm in ``_translate_constructor_call`` exactly — the layout this
         decomposes is the one construction built."""
-        if _depth > _MAX_COMPONENT_GUARD_DEPTH:
-            # Fail CLOSED, not silent: a tuple nested deeper than the limit is
-            # almost always an infinite type via mutually-recursive aliases
-            # (`type A = Tuple<B, Int>; type B = Tuple<A, Int>`, which the
-            # checker currently accepts) — that recursion would never terminate,
-            # and a bare `return []` would silently drop the guards for every
-            # component past the limit.  Emit a loud diagnostic so the compile
-            # fails rather than shipping partial boundary guards (CR PR-review).
-            self._error(
-                te,
-                "Tuple nesting in this boundary type exceeds the runtime-guard "
-                f"depth limit ({_MAX_COMPONENT_GUARD_DEPTH}); the type is most "
-                "likely infinitely recursive (mutually-recursive type aliases), "
-                "so its refined components cannot be fully guarded.",
-                rationale="A refined tuple component is guarded by decomposing "
-                "the type at the boundary.  A type nested past the depth limit "
-                "cannot be fully decomposed, so codegen fails closed rather than "
-                "emitting partial guards that would let a deep component cross "
-                "the boundary unchecked.",
-                error_code="E617",
-            )
-            return []
-        node = self._resolve_tuple_type(te)
-        if node is None:
-            return []
-
-        _sizes = {"i32": 4, "i64": 8, "f64": 8, "i32_pair": 8}
-        _aligns = {"i32": 4, "i64": 8, "f64": 8, "i32_pair": 4}
-        offset = 4  # after the tag (i32, 4 bytes) — as construction lays it out
         instrs: list[str] = []
-        for comp_te in (node.type_args or ()):  # _resolve_tuple_type: non-empty
-            wt = self._type_expr_to_wasm_type(comp_te)
-            if wt is None or wt == "unsupported":
-                # @Unit component: zero-size, occupies no slot and is erased —
-                # no value to guard and no offset advance (matching how
-                # construction / extraction skip a Unit field).
-                continue
-            align = _aligns.get(wt, 8)
-            offset = (offset + align - 1) & ~(align - 1)
-            field_offset = offset
-            offset += _sizes.get(wt, 8)
-
-            parts = self._refinement_guard_parts(comp_te)
-            resolved = self._resolve_type_alias(comp_te)
-            is_nat = (parts is None
-                      and isinstance(resolved, ast.NamedType)
-                      and resolved.name == "Nat")
-            # A nested component may be a tuple OR a refinement over a tuple
-            # (`Tuple<Pair, Int>` where `Pair = { @Tuple<PosInt, Int> | P }`) —
-            # `_resolve_tuple_type` unwraps both, so its inner components are
-            # guarded recursively (CR PR-review).  When the component IS a
-            # refinement, `parts` is non-None (its top-level predicate is
-            # guarded below) yet we still recurse to reach the inner tuple.
-            is_nested = (not is_nat
-                         and self._resolve_tuple_type(comp_te) is not None)
-            if parts is None and not is_nat and not is_nested:
-                continue
-
-            # Load the component from the heap into a fresh local.  A pair
-            # component (String / Array) loads its ptr half — the length is read
-            # from memory by the predicate, exactly as the i32_pair return guard
-            # does (a Vera string / array is self-describing from its pointer).
-            load_wt = "i32" if wt == "i32_pair" else wt
-            comp_local = ctx.alloc_local(load_wt)
+        for site in self._tuple_component_guard_sites(te, _depth):
+            # Load the component from the heap into a fresh local.
+            comp_local = ctx.alloc_local(site.load_wt)
             instrs.append(f"local.get {value_local}")
-            instrs.append(f"{'i32' if wt == 'i32_pair' else wt}.load "
-                          f"offset={field_offset}")
+            instrs.append(f"{site.load_wt}.load offset={site.field_offset}")
             instrs.append(f"local.set {comp_local}")
 
             # Guard the component's OWN predicate (a refined component) or the
             # bare-@Nat `>= 0`, THEN — if it also wraps a tuple — recurse into
             # its inner components.  A refinement OVER a tuple does both: its
             # top-level predicate here, its inner components via the recursion.
-            pred_parts: tuple[ast.Expr, str] | None = parts
-            if pred_parts is None and is_nat:
-                pred_parts = (
-                    ast.BinaryExpr(
-                        op=ast.BinOp.GE,
-                        left=ast.SlotRef(
-                            type_name="Nat", type_args=None, index=0),
-                        right=ast.IntLit(value=0)),
-                    "Nat",
-                )
-            if pred_parts is not None:
-                predicate, base_name = pred_parts
+            if site.guard is not None:
+                predicate, base_name = site.guard
                 msg = (
                     f"Refinement violation in {ast.format_fn_signature(decl)}\n"
                     f"  {role} (tuple component): "
@@ -357,9 +417,9 @@ class ContractsMixin:
                     ctx, predicate, base_name, comp_local, msg, env)
                 if guard is not None:
                     instrs.extend(guard)
-            if is_nested:
+            if site.nested is not None:
                 instrs.extend(self._emit_component_refinement_guards(
-                    ctx, decl, comp_te, comp_local, env, role, _depth + 1))
+                    ctx, decl, site.nested, comp_local, env, role, _depth + 1))
         return instrs
 
     def _has_guardable_tuple_components(
@@ -371,33 +431,96 @@ class ContractsMixin:
 
         Used to keep ``_compile_postconditions`` from early-returning ``[]`` for
         a tuple *return* that carries no top-level refinement but does have
-        guardable components — mirrors the per-component classification in the
-        emit helper (kept a pure predicate so the early-return decision needs no
-        ``ctx``)."""
-        if _depth > _MAX_COMPONENT_GUARD_DEPTH:
-            # Conservatively report "guardable" so a deep *return* is NOT
-            # short-circuited away by `_compile_postconditions` — it flows into
-            # `_emit_component_refinement_guards`, whose matching depth check
-            # fails closed with a loud diagnostic.  Routing the failure through
-            # the one emit-side error keeps the fail-closed behaviour single-
-            # sourced (CR PR-review).
-            return True
-        node = self._resolve_tuple_type(te)
-        if node is None:
-            return False
-        for comp_te in (node.type_args or ()):  # _resolve_tuple_type: non-empty
-            if self._refinement_guard_parts(comp_te) is not None:
+        guardable components.  Reads the SAME decomposition the emitter does
+        (``_tuple_component_guard_sites``) rather than mirroring its
+        classification, so the early-return decision cannot disagree with what
+        the epilogue would emit; it stays a pure predicate, needing no ``ctx``,
+        because the sites carry the classification without emitting anything.
+
+        A type nested past the depth limit yields no sites and reports the
+        decomposition's own fail-closed E617, so this returns False for one —
+        and the compile fails on that error rather than on a missing guard.
+        """
+        for site in self._tuple_component_guard_sites(te, _depth):
+            if site.guard is not None:
                 return True
-            resolved = self._resolve_type_alias(comp_te)
-            if isinstance(resolved, ast.NamedType) and resolved.name == "Nat":
-                return True
-            # A nested tuple OR refinement-over-tuple component (unwrapped by
-            # `_resolve_tuple_type`) may carry guardable inner components.
-            if (self._resolve_tuple_type(comp_te) is not None
+            if (site.nested is not None
                     and self._has_guardable_tuple_components(
-                        comp_te, _depth + 1)):
+                        site.nested, _depth + 1)):
                 return True
         return False
+
+    def _signature_refinement_predicates(
+        self, sig: ast.FnDecl | ast.AnonFn,
+    ) -> Iterator[ast.Expr]:
+        """Every refinement predicate LOWERED as a boundary guard for *sig*.
+
+        THE derivation the host-import pre-scans consume (#1210 rounds 5 and
+        7), stated once against the emitters it must equal and living beside
+        them.  A parameter or return type that resolves to a `{ @Base | P }`
+        refinement has `P` emitted as a runtime guard in the prologue /
+        epilogue, so a `handle[State<T>]` or a host-imported builtin written
+        in `P` is LOWERED here — `type Big = { @Int | nat_to_int(
+        handle[State<Nat>] … ) > 0 && @Int.0 > 5 }` used as a parameter type
+        died at whole-module WAT with `unknown func $vera.state_push_Nat`,
+        from a check-green program.  The predicate is reached through the
+        ALIAS table rather than structurally from the signature's `TypeExpr`,
+        which is why no amount of walking the AST from the body finds it.
+
+        Round 5 enumerated only a named `FnDecl`'s own params and return.  The
+        guard emitters are reached from three further routes, all of which
+        lowered predicates this never registered:
+
+        * a TUPLE PARAMETER's components (`functions.py` ->
+          `_emit_component_refinement_guards`) — `fn f(@Tuple<Big, Int> …)`;
+        * a TUPLE RETURN's components (`_compile_postconditions`) —
+          `fn f(… -> @Tuple<Big, Int>)`;
+        * an `AnonFn`'s refined params and return (`closures.py`) —
+          `fn(@Big -> @Int)` and `fn(@Int -> @Big)` behind an `apply_fn`.
+
+        All four routes are enumerated here now, through the same helpers the
+        emitters call: `_refinement_guard_parts` for a top-level refinement
+        (so the two bails below are ITS bails, not a copy of them — a
+        nested-refinement base is an E618 with no guard, an erased base emits
+        no guard) and `_tuple_component_guard_sites` for the decomposition (so
+        the depth cap, the `@Unit`-component skip and the nested recursion are
+        the emitter's own).  Registration must equal what is emitted, not
+        exceed it: an import declared for a guard that is never emitted is a
+        host obligation nothing calls.
+
+        Which is why COMPONENT decomposition is a `FnDecl`-only leg.  The
+        closure path emits top-level formal / return guards only — it never
+        calls `_emit_component_refinement_guards` — so enumerating a closure's
+        tuple components here would register families no lowering asks for.
+        (That asymmetry is the closure path's, not this derivation's, and is
+        tracked as #1235: when the closure path consumes the same
+        `_tuple_component_guard_sites` decomposition the named path does,
+        emitter and registration flip together and this leg drops its
+        `FnDecl`-only condition.)
+        """
+        decompose = isinstance(sig, ast.FnDecl)
+        for te in (*sig.params, sig.return_type):
+            parts = self._refinement_guard_parts(te)
+            if parts is not None:
+                yield parts[0]
+            if decompose:
+                yield from self._component_guard_predicates(te)
+
+    def _component_guard_predicates(
+        self, te: ast.TypeExpr, _depth: int = 0,
+    ) -> Iterator[ast.Expr]:
+        """The predicates `_emit_component_refinement_guards` would lower for
+        *te*, in its own order — the enumeration half of that emitter, walking
+        the same `_tuple_component_guard_sites` decomposition to the same depth
+        cap.  A bare-`@Nat` component's synthesized `>= 0` is included: it
+        registers nothing, but it IS lowered, and enumerating exactly the
+        emitted set is what makes the two provably co-extensive."""
+        for site in self._tuple_component_guard_sites(te, _depth):
+            if site.guard is not None:
+                yield site.guard[0]
+            if site.nested is not None:
+                yield from self._component_guard_predicates(
+                    site.nested, _depth + 1)
 
     def _format_contract_message(
         self,

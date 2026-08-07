@@ -7,12 +7,84 @@ for State handler expressions.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator, Sequence
+
 from vera import ast
 from vera.wasm.async_fusion import await_needs_check, fused_async_target
 
 
+def contract_exprs(
+    contracts: Sequence[ast.Contract],
+) -> Iterator[ast.Expr]:
+    """Every predicate expression carried by a function's contracts.
+
+    One enumeration shared by both import pre-scans (#1210 round 2), because
+    a contract is LOWERED code: `requires` / `ensures` become runtime checks
+    and `decreases` becomes the termination guard's measure, so anything in
+    one that needs a host import or a State/Exn family needs it registered.
+
+    `Decreases` is why this exists at all: it carries `exprs` (a tuple — a
+    lexicographic measure is several expressions) where the other kinds carry
+    `expr`, so the `getattr(c, "expr")` shortcut this replaced silently
+    skipped it and a `handle[State<Nat>]` in a `decreases` measure emitted
+    `state_push_Nat` against an import that was never declared.
+
+    The dispatch is EXPLICIT rather than attribute-probing (round-5 review).
+    A `getattr` fallback treats an unrecognised contract kind as "carries
+    nothing", which is the silent-skip failure this function was written to
+    fix — and it hides the field accesses from mypy, so a renamed field would
+    typecheck.  A new `ast.Contract` subclass now raises here instead, at the
+    commit that adds it.
+    """
+    for contract in contracts:
+        if isinstance(contract, (ast.Requires, ast.Ensures, ast.Invariant)):
+            yield contract.expr
+        elif isinstance(contract, ast.Decreases):
+            yield from contract.exprs
+        else:
+            raise TypeError(
+                f"contract_exprs does not know how to enumerate the "
+                f"predicates of {type(contract).__name__} — a new "
+                f"ast.Contract subclass must be added here (and to the "
+                f"walkers' WALKER_COVERAGE checklists), or its expressions "
+                f"go unregistered while codegen lowers them"
+            )
+
+
 class CompilabilityMixin:
     """Methods for checking if functions are compilable to WASM."""
+
+    def _scan_anon_fn_signature(
+        self, node: ast.AnonFn, scan: Callable[[ast.Node], None],
+    ) -> None:
+        """Walk the boundary-guard predicates of a closure's SIGNATURE (#1210
+        round 7), shared by both pre-scan walkers.
+
+        The walkers descend an `AnonFn`'s BODY because the closure compile
+        pipeline runs no scan of its own on lifted bodies.  Its SIGNATURE is
+        lowered there too: `closures.py` emits a runtime guard for every
+        refined formal and for a refined return, so `fn(@Big -> @Int)` behind
+        an `apply_fn` — with `Big` a refinement whose predicate contains a
+        `handle[State<Nat>]` — emitted `state_push_Nat` against an import
+        nothing declared.  `_signature_refinement_predicates` is the ONE
+        derivation of what those guards check; this walks what it yields.
+
+        Cycle-guarded, because a refinement predicate may contain a closure
+        whose own formal is refined by the same alias: `type R = { @Int | …
+        fn(@R -> @Int) … }` type-checks, and expanding R's predicate reaches
+        that closure, whose signature expands R's predicate again.  The stack
+        is popped on the way out, so this suppresses only genuine re-entry —
+        a later function meeting the same closure still gets its own
+        registration verdict (and, for the handler walk, its own E607/E612).
+        """
+        if id(node) in self._anon_sig_scan_stack:
+            return
+        self._anon_sig_scan_stack.add(id(node))
+        try:
+            for pred in self._signature_refinement_predicates(node):
+                scan(pred)
+        finally:
+            self._anon_sig_scan_stack.discard(id(node))
 
     def _is_compilable(self, decl: ast.FnDecl) -> bool:
         """Check if a function can be compiled to WASM.
@@ -126,27 +198,49 @@ class CompilabilityMixin:
             )
             return False
         type_arg = eff.type_args[0]
+        if not self._register_state_cell(type_arg):
+            self._warn_unsupported_state_cell(decl, decl.name)
+            return False
+        return True
+
+    def _register_state_cell(self, type_arg: ast.TypeExpr) -> bool:
+        """Register the `State<type_arg>` host-cell family; False if it has none.
+
+        The ONE place a State cell's compilability is decided and its family
+        recorded, shared by the declared-effect gate (`_check_state_type`)
+        and the handler walk (`_scan_expr_for_handlers`) — the two paths must
+        accept exactly the same cell types, or a handler discharging the
+        effect inside a `pure` function registers nothing while its lowering
+        emits the calls anyway (#1210: `handle[State<String>]` was
+        check-green invalid WASM).
+
+        The import FAMILY is the cell the CHECKER typed (#1209), so every
+        alias spelling that resolves to it — scalar (#1205), composite,
+        parameterised — registers ONE family.  `wt` is derived from the
+        RESOLVED type, so registering an unresolved name split the family
+        (`state_put_Count` typed i64) from the name the per-function lowering
+        derives; resolving both keeps them one.
+        """
         wt = self._type_expr_to_wasm_type(type_arg)
         if wt is None or wt in ("unsupported", "i32_pair"):
-            self._warning(
-                decl,
-                f"Function '{decl.name}' uses State with "
-                f"unsupported type — skipped.",
-                rationale="State<T> requires a compilable primitive type "
-                "(Int, Nat, Bool, Float64).",
-                error_code="E607",
-            )
             return False
-        # The import FAMILY: the cell the CHECKER typed (#1209), so every
-        # alias spelling that resolves to it — scalar (#1205), composite,
-        # parameterised — registers ONE family.  `wt` above is derived from
-        # the RESOLVED type, so registering an unresolved name split the
-        # family (`state_put_Count` typed i64) from the name the
-        # per-function lowering derives; resolving both keeps them one.
         type_name = self._family_name_te(type_arg)
         if type_name and (type_name, wt) not in self._state_types:
             self._state_types.append((type_name, wt))
         return True
+
+    def _warn_unsupported_state_cell(
+        self, node: ast.Node, fn_name: str,
+    ) -> None:
+        """The E607 both State-cell paths emit — one wording, one code."""
+        self._warning(
+            node,
+            f"Function '{fn_name}' uses State with "
+            "unsupported type — skipped.",
+            rationale="State<T> requires a compilable primitive type "
+            "(Int, Nat, Bool, Float64).",
+            error_code="E607",
+        )
 
     def _check_exn_type(
         self, decl: ast.FnDecl, eff: ast.EffectRef
@@ -165,25 +259,52 @@ class CompilabilityMixin:
             )
             return False
         type_arg = eff.type_args[0]
+        if not self._register_exn_tag(type_arg):
+            self._warn_unsupported_exn_tag(decl, decl.name)
+            return False
+        return True
+
+    def _warn_unsupported_exn_tag(
+        self, node: ast.Node, fn_name: str,
+    ) -> None:
+        """The E612 both Exn-tag paths emit — one wording, one code.
+
+        The `_warn_unsupported_state_cell` twin.  Both registration paths
+        (the declared-effect gate and the handler walk) must reach the same
+        verdict on the same payload type, or a handler discharging `Exn<E>`
+        inside a `pure` function registers no tag while its lowering emits
+        `throw $exn_E` / `catch $exn_E` regardless — `unknown tag $exn_Unit`
+        at whole-module WAT compilation, from a check-green program (#1210).
+        """
+        self._warning(
+            node,
+            f"Function '{fn_name}' uses Exn with "
+            f"unsupported type — skipped.",
+            rationale="Exn<E> requires a compilable type "
+            "(Int, Nat, Bool, Float64, String).",
+            error_code="E612",
+        )
+
+    def _register_exn_tag(self, type_arg: ast.TypeExpr) -> bool:
+        """Register the `Exn<type_arg>` WASM tag; False if it has none.
+
+        The State twin (`_register_state_cell`): one derivation shared by the
+        declared-effect gate and the handler walk, so a tag reached only from
+        a handler nested in a clause body is declared rather than emitted
+        undeclared (#1210).
+
+        The tag FAMILY resolves exactly like the State import family —
+        `Exn<Code>` with `type Code = Int` otherwise declares an i64 tag the
+        i32-typed catch sites of the unresolved-name derivation cannot match,
+        and `Exn<Payload>` with `type Payload = Option<Int>` declares a
+        second tag beside the `Option<Int>` one its throw sites target
+        (#1209).  Unlike a State cell, an `i32_pair` payload IS compilable:
+        the tag takes two i32 params.
+        """
         wt = self._type_expr_to_wasm_type(type_arg)
         if wt is None or wt == "unsupported":
-            self._warning(
-                decl,
-                f"Function '{decl.name}' uses Exn with "
-                f"unsupported type — skipped.",
-                rationale="Exn<E> requires a compilable type "
-                "(Int, Nat, Bool, Float64, String).",
-                error_code="E612",
-            )
             return False
-        # i32_pair (String, Array<T>) → WASM exception tag uses two i32 params
         wasm_tag_t = "i32 i32" if wt == "i32_pair" else wt
-        # The tag FAMILY resolves exactly like the State import family (see
-        # `_check_state_type`) — `Exn<Code>` with `type Code = Int`
-        # otherwise declares an i64 tag the i32-typed catch sites of the
-        # unresolved-name derivation cannot match, and `Exn<Payload>` with
-        # `type Payload = Option<Int>` declares a second tag beside the
-        # `Option<Int>` one its throw sites target (#1209).
         type_name = self._family_name_te(type_arg)
         if type_name and (type_name, wasm_tag_t) not in self._exn_types:
             self._exn_types.append((type_name, wasm_tag_t))
@@ -248,7 +369,16 @@ class CompilabilityMixin:
         #                       then recurses into args
         #   FnCall            → registers Markdown/Regex/Map/Set/Decimal/
         #                       Json/Html/Math builtin then recurses args
-        #   Block             → recurses into each stmt + trailing expr
+        #   Block             → recurses into each statement (LetStmt,
+        #                       LetDestruct, ExprStmt) + the trailing expr
+        #   LetStmt           → recurses into the bound value
+        #   LetDestruct       → recurses into the destructured value
+        #                       (#1210 round 5 — a destructuring `let` was
+        #                       absent from this walk ENTIRELY, so
+        #                       `let Tuple<@String, @String> =
+        #                       pairs(md_to_html("# hi"))` reached the
+        #                       lowering with no import registered)
+        #   ExprStmt          → recurses into the statement's expr
         #   ConstructorCall   → recurses into each arg
         #   BinaryExpr        → recurses into left + right
         #   UnaryExpr         → recurses into operand
@@ -276,6 +406,26 @@ class CompilabilityMixin:
         #                       so without this branch IO ops
         #                       inside a closure body would silently
         #                       miss their host-import registration)
+        #                       AND into the SIGNATURE's refinement
+        #                       predicates (#1210 round 7, via
+        #                       `_scan_anon_fn_signature`): a refined
+        #                       formal / return is guarded in that
+        #                       same lifted body
+        #   AssertExpr        → recurses into the condition (#1210
+        #                       round 2 — pure ≠ host-import-free: an
+        #                       `md_*` / `regex_*` builtin, or a
+        #                       handler clause reached through one,
+        #                       registers its import only here)
+        #   AssumeExpr        → recurses into the condition
+        #   ForallExpr        → recurses into domain + predicate
+        #   ExistsExpr        → recurses into domain + predicate
+        #   ModuleCall        → recurses into each arg (#1210 round 5).
+        #                       The CALLEE is the imported module's own
+        #                       scan to register; the ARGUMENTS are this
+        #                       module's expressions and are lowered
+        #                       here, so the previous "tracked by that
+        #                       module's scan" disposition covered only
+        #                       half the node
         #
         # Intentionally ignored (leaves — no sub-exprs to recurse into):
         #   IntLit            → leaf
@@ -286,16 +436,10 @@ class CompilabilityMixin:
         #   SlotRef           → leaf
         #   ResultRef         → leaf
         #   NullaryConstructor → zero-arg, no sub-exprs
-        #   ModuleCall        → cross-module IO tracked separately
-        #                       via the imported module's own scan
+        #   OldExpr           → names an EffectRef, not an expression
+        #   NewExpr           → names an EffectRef, not an expression
         #
-        # Cannot occur (contract-only or pure-by-construction):
-        #   AssertExpr        → predicate is pure, no IO
-        #   AssumeExpr        → predicate is pure, no IO
-        #   ForallExpr        → quantifier body is pure
-        #   ExistsExpr        → quantifier body is pure
-        #   OldExpr           → contract-only
-        #   NewExpr           → contract-only
+        # Cannot occur:
         #   HoleExpr          → parser placeholder, check-time rejects
         """
         if isinstance(node, ast.QualifiedCall):
@@ -319,7 +463,10 @@ class CompilabilityMixin:
             return
         if isinstance(node, ast.Block):
             for stmt in node.statements:
-                if isinstance(stmt, ast.LetStmt):
+                # #1210 round 5: `LetDestruct` — a destructuring `let` — was
+                # missing here, so its value expression was never walked while
+                # codegen lowered it like any other.
+                if isinstance(stmt, (ast.LetStmt, ast.LetDestruct)):
                     self._scan_io_ops(stmt.value)
                 elif isinstance(stmt, ast.ExprStmt):
                     self._scan_io_ops(stmt.expr)
@@ -396,6 +543,17 @@ class CompilabilityMixin:
             for arm in node.arms:
                 self._scan_io_ops(arm.body)
         elif isinstance(node, ast.HandleExpr):
+            # All four sub-expression positions, matching
+            # `_scan_expr_for_handlers` (#1210): a host-imported builtin
+            # reached only from a state-init expression, a clause body, or a
+            # clause's `with` update would otherwise emit an orphaned
+            # `call $vera.<name>` with no import declaration.
+            if node.state is not None:
+                self._scan_io_ops(node.state.init_expr)
+            for clause in node.clauses:
+                self._scan_io_ops(clause.body)
+                if clause.state_update is not None:
+                    self._scan_io_ops(clause.state_update[1])
             self._scan_io_ops(node.body)
         # Defensive sub-expr recursion (#597) — three of the four
         # branches below (IndexExpr, ArrayLit, InterpolatedString)
@@ -418,43 +576,114 @@ class CompilabilityMixin:
                 if not isinstance(part, str):
                     self._scan_io_ops(part)
         elif isinstance(node, ast.AnonFn):
+            # Body AND signature (#1210 round 7): a refined formal / return
+            # has its predicate lowered as a boundary guard in the lifted
+            # body, so an `md_*` / `regex_*` builtin written in one is
+            # emitted from here and registered by nobody else.
+            self._scan_anon_fn_signature(node, self._scan_io_ops)
             self._scan_io_ops(node.body)
+        # #1210 round 2 — symmetrical with `_scan_expr_for_handlers`.  The
+        # handler walk now descends these positions, so a handler reached
+        # through one is lowered; anything its clause bodies call has to be
+        # registered from here or the module references an undeclared import.
+        elif isinstance(node, (ast.AssertExpr, ast.AssumeExpr)):
+            self._scan_io_ops(node.expr)
+        elif isinstance(node, (ast.ForallExpr, ast.ExistsExpr)):
+            self._scan_io_ops(node.domain)
+            self._scan_io_ops(node.predicate)
+        # #1210 round 5 — the CALLEE crosses a module boundary, the ARGUMENTS
+        # do not: they are this module's expressions, lowered into this
+        # module's body.  Both coverage tables used to dismiss the whole node
+        # as the imported module's business.
+        elif isinstance(node, ast.ModuleCall):
+            for arg in node.args:
+                self._scan_io_ops(arg)
 
-    def _scan_body_for_state_handlers(self, node: ast.Node) -> None:
-        """Walk a function body looking for handle expressions.
+    def _scan_body_for_state_handlers(
+        self, node: ast.Node, decl: ast.FnDecl | None = None,
+    ) -> bool:
+        """Walk a function registering every handler's State/Exn family.
 
-        Registers State<T> types for host import generation and
-        Exn<E> types for exception tag generation.
+        The ENTRY POINT for the handler walk — ``_scan_expr_for_handlers``
+        does the recursion, this owns the per-function verdict.
+
+        Covers the body, every contract predicate (``requires`` / ``ensures``
+        / ``decreases``) which ``contract_exprs`` enumerates, AND every
+        signature refinement predicate which
+        ``_signature_refinement_predicates`` enumerates — for this function's
+        own signature here, and for every closure signature met on the way
+        through the body (``_scan_anon_fn_signature``).  Runtime-checked
+        contracts and refinement boundary guards are lowered into the function
+        like any other code, so a ``handle[State<Nat>]`` written in a
+        ``requires`` predicate (#1210 round 2), in a parameter type's
+        ``{ @Int | … }`` refinement (round 5), in a tuple COMPONENT's
+        refinement, or in a closure formal's (round 7) emits ``call
+        $vera.state_push_Nat`` — the body-only walk registered nothing for it
+        and the module failed to compile with ``unknown func``, from a
+        check-green, verify-clean program.
+
+        Returns ``False`` when a ``handle[State<T>]`` / ``handle[Exn<E>]``
+        reached from *node* names a cell or payload type the backend cannot
+        compile, having emitted the same ``E607`` / ``E612`` the
+        declared-effect gate emits; the caller drops the function.  Both used
+        to be skipped in SILENCE while the lowering emitted ``state_push_…``
+        / ``throw $exn_…`` for them regardless.
         """
-        if isinstance(node, ast.HandleExpr):
-            if isinstance(node.effect, ast.EffectRef):
-                if node.effect.name == "State":
-                    if node.effect.type_args and len(node.effect.type_args) == 1:
-                        type_arg = node.effect.type_args[0]
-                        wt = self._type_expr_to_wasm_type(type_arg)
-                        if wt and wt not in ("unsupported", "i32_pair"):
-                            # Same resolved FAMILY as `_check_state_type`
-                            # (#1209) — the two registration paths must key
-                            # one family, or a handler declared in a body
-                            # registers an import its own lowering never
-                            # calls.
-                            type_name = self._family_name_te(type_arg)
-                            if type_name and (type_name, wt) not in self._state_types:
-                                self._state_types.append((type_name, wt))
-                elif node.effect.name == "Exn":
-                    if node.effect.type_args and len(node.effect.type_args) == 1:
-                        type_arg = node.effect.type_args[0]
-                        wt = self._type_expr_to_wasm_type(type_arg)
-                        if wt and wt != "unsupported":
-                            wasm_tag_t = "i32 i32" if wt == "i32_pair" else wt
-                            # Same resolved FAMILY as `_check_exn_type`
-                            # (#1209) — see the State scan above.
-                            type_name = self._family_name_te(type_arg)
-                            if type_name and (type_name, wasm_tag_t) not in self._exn_types:
-                                self._exn_types.append((type_name, wasm_tag_t))
-            self._scan_expr_for_handlers(node.body)
-            return
+        self._unregistrable_state_cells: list[ast.TypeExpr] = []
+        self._unregistrable_exn_tags: list[ast.TypeExpr] = []
         self._scan_expr_for_handlers(node)
+        if decl is not None:
+            for pred in contract_exprs(decl.contracts):
+                self._scan_expr_for_handlers(pred)
+            for refined in self._signature_refinement_predicates(decl):
+                self._scan_expr_for_handlers(refined)
+        fn_name = decl.name if decl is not None else "<unknown>"
+        if self._unregistrable_state_cells:
+            offender = self._unregistrable_state_cells[0]
+            self._warn_unsupported_state_cell(
+                offender if getattr(offender, "span", None)
+                else (decl or offender),
+                fn_name,
+            )
+            return False
+        if self._unregistrable_exn_tags:
+            offender = self._unregistrable_exn_tags[0]
+            self._warn_unsupported_exn_tag(
+                offender if getattr(offender, "span", None)
+                else (decl or offender),
+                fn_name,
+            )
+            return False
+        return True
+
+    def _register_scanned_handler(self, node: ast.HandleExpr) -> None:
+        """Register the State/Exn family of one ``handle`` expression.
+
+        Shares `_register_state_cell` / `_register_exn_tag` with the
+        declared-effect gate, so both registration paths key ONE family
+        (#1209) and accept exactly one set of cell types (#1210) — a handler
+        declared in a body must not register an import its own lowering never
+        calls, nor emit calls to one it never registered.
+
+        The two arms are symmetric on purpose: each records the type it could
+        NOT register so the entry point can emit the declared-effect gate's
+        own diagnostic and drop the function.  The Exn arm used to discard the
+        verdict, so `handle[Exn<Unit>]` in a `pure` function registered no tag
+        and still compiled — `unknown tag $exn_Unit` at WAT, where the
+        declared-row twin was a clean E612 function drop.
+        """
+        if not isinstance(node.effect, ast.EffectRef):
+            return
+        if not node.effect.type_args or len(node.effect.type_args) != 1:
+            # Arity is the checker's E337; nothing to register either way.
+            return
+        type_arg = node.effect.type_args[0]
+        if node.effect.name == "State":
+            if not self._register_state_cell(type_arg):
+                self._unregistrable_state_cells.append(type_arg)
+        elif node.effect.name == "Exn":
+            if not self._register_exn_tag(type_arg):
+                self._unregistrable_exn_tags.append(type_arg)
 
     def _scan_expr_for_handlers(self, node: ast.Node) -> None:
         """Recurse into expressions looking for HandleExpr nodes.
@@ -463,8 +692,29 @@ class CompilabilityMixin:
         # disposition; check_walker_coverage.py enforces completeness.)
         #
         # Handled (recurses into sub-exprs that may contain HandleExpr):
-        #   HandleExpr        → registers State<T>/Exn<E> types + recurses
-        #   Block             → recurses into stmts + trailing expr
+        #   HandleExpr        → registers State<T>/Exn<E> types, then
+        #                       recurses into ALL FOUR sub-expression
+        #                       positions: the state-init expression, each
+        #                       clause body, each clause's `with` update,
+        #                       and the handled body.  The walk used to
+        #                       descend the body ALONE (#1210), so a family
+        #                       reached only from one of the other three was
+        #                       never registered while the lowering emitted
+        #                       its calls — `unknown func
+        #                       $vera.state_push_Nat` at whole-module WAT
+        #                       compilation, from a check-green program.
+        #   Block             → recurses into each statement (LetStmt,
+        #                       LetDestruct, ExprStmt) + the trailing expr
+        #   LetStmt           → recurses into the bound value
+        #   LetDestruct       → recurses into the destructured value
+        #                       (#1210 round 5 — a destructuring `let` was
+        #                       absent from this walk ENTIRELY, so
+        #                       `let Tuple<@Nat, @Nat> =
+        #                       pairn(handle[State<Nat>] … )` emitted
+        #                       `state_push_Nat` against no import, and
+        #                       an `Exn<Unit>` payload there bypassed the
+        #                       round-3 E612 gate outright)
+        #   ExprStmt          → recurses into the statement's expr
         #   FnCall            → recurses into each arg
         #   ConstructorCall   → recurses into each arg
         #   BinaryExpr        → recurses into left + right
@@ -485,7 +735,33 @@ class CompilabilityMixin:
         #                       without this branch HandleExprs inside
         #                       a closure body would silently miss
         #                       their State/Exn host-import
-        #                       registration)
+        #                       registration) AND into the SIGNATURE's
+        #                       refinement predicates (#1210 round 7,
+        #                       via `_scan_anon_fn_signature`): the
+        #                       closure path guards a refined formal /
+        #                       return in that same lifted body, so
+        #                       `fn(@Big -> @Int)` behind an `apply_fn`
+        #                       emitted `state_push_Nat` against an
+        #                       import nothing declared
+        #   AssertExpr        → recurses into the condition (#1210
+        #                       round 2 — "pure" is not "handler-free":
+        #                       `assert(handle[State<Nat>] … > 0)` is
+        #                       check-green and LOWERED, so refusing to
+        #                       descend left `state_push_Nat` undeclared)
+        #   AssumeExpr        → recurses into the condition (same shape;
+        #                       verifier-only today, kept symmetric so
+        #                       the two cannot drift)
+        #   ForallExpr        → recurses into domain + predicate
+        #   ExistsExpr        → recurses into domain + predicate
+        #   ModuleCall        → recurses into each arg (#1210 round 5).
+        #                       Only the CALLEE is the imported module's
+        #                       to register; the ARGUMENTS are this
+        #                       module's expressions, lowered here.  The
+        #                       old "tracked by that module's own scan"
+        #                       disposition was true of the callee and
+        #                       false of the args, and
+        #                       `vera.math::identn(handle[State<Nat>] … )`
+        #                       compiled to `unknown func`
         #
         # Intentionally ignored (leaves — no sub-exprs to walk):
         #   IntLit            → leaf
@@ -496,24 +772,31 @@ class CompilabilityMixin:
         #   SlotRef           → leaf
         #   ResultRef         → leaf
         #   NullaryConstructor → zero-arg, no sub-exprs
-        #   ModuleCall        → handlers in imported module tracked
-        #                       by that module's own scan
+        #   OldExpr           → names an EffectRef, not an expression
+        #   NewExpr           → names an EffectRef, not an expression
         #
-        # Cannot occur (contract-only or pure):
-        #   AssertExpr        → predicate is pure; no handle in pred
-        #   AssumeExpr        → predicate is pure
-        #   ForallExpr        → quantifier body is pure
-        #   ExistsExpr        → quantifier body is pure
-        #   OldExpr           → contract-only
-        #   NewExpr           → contract-only
+        # Cannot occur:
         #   HoleExpr          → parser placeholder, check-time rejects
         """
         if isinstance(node, ast.HandleExpr):
-            self._scan_body_for_state_handlers(node)
+            self._register_scanned_handler(node)
+            if node.state is not None:
+                self._scan_expr_for_handlers(node.state.init_expr)
+            for clause in node.clauses:
+                self._scan_expr_for_handlers(clause.body)
+                if clause.state_update is not None:
+                    self._scan_expr_for_handlers(clause.state_update[1])
+            self._scan_expr_for_handlers(node.body)
             return
         if isinstance(node, ast.Block):
             for stmt in node.statements:
-                if isinstance(stmt, ast.LetStmt):
+                # #1210 round 5: `LetDestruct` — a destructuring `let` — was
+                # missing here, so a handler in its value registered nothing
+                # while the lowering emitted the family's calls, AND the
+                # round-3 uncompilable-payload gate never saw the handler at
+                # all (`handle[Exn<Unit>]` there compiled to `unknown tag`
+                # where its `LetStmt` twin is a clean E612 function drop).
+                if isinstance(stmt, (ast.LetStmt, ast.LetDestruct)):
                     self._scan_expr_for_handlers(stmt.value)
                 elif isinstance(stmt, ast.ExprStmt):
                     self._scan_expr_for_handlers(stmt.expr)
@@ -561,4 +844,25 @@ class CompilabilityMixin:
                 if not isinstance(part, str):
                     self._scan_expr_for_handlers(part)
         elif isinstance(node, ast.AnonFn):
+            # Body AND signature (#1210 round 7) — the closure path emits a
+            # boundary guard for every refined formal and for a refined
+            # return, so a `handle[State<Nat>]` in one of those predicates is
+            # lowered into the lifted body with nothing else to register it.
+            self._scan_anon_fn_signature(node, self._scan_expr_for_handlers)
             self._scan_expr_for_handlers(node.body)
+        # #1210 round 2 — the contract-predicate positions.  These are not
+        # "cannot occur": a handle expression is an ordinary Bool-valued
+        # expression, so it type-checks inside an `assert` condition or a
+        # quantifier predicate, and codegen lowers it there.  Refusing to
+        # descend registered nothing while the lowering emitted the calls.
+        elif isinstance(node, (ast.AssertExpr, ast.AssumeExpr)):
+            self._scan_expr_for_handlers(node.expr)
+        elif isinstance(node, (ast.ForallExpr, ast.ExistsExpr)):
+            self._scan_expr_for_handlers(node.domain)
+            self._scan_expr_for_handlers(node.predicate)
+        # #1210 round 5 — symmetrical with `_scan_io_ops`: a module call's
+        # ARGUMENTS are this module's expressions, however the callee is
+        # registered.
+        elif isinstance(node, ast.ModuleCall):
+            for arg in node.args:
+                self._scan_expr_for_handlers(arg)

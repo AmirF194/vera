@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
 from vera.wasm.helpers import (  # noqa: F401 — re-exported for consumers
     _INLINE_I32_TYPES,
+    StateClauseEntry,
     StringPool,
     WasmSlotEnv,
     gc_shadow_push,
@@ -129,28 +130,17 @@ class WasmContext(
         self._effect_op_result_vera: dict[str, str | None] = (
             effect_op_result_vera or {}
         )
-        # #976 option C: op_name -> (HandlerClause, state type name,
-        # get import, put import) for the innermost enclosing
-        # ``handle[State<T>]``.  When a get/put call site has an entry here,
-        # the clause BODY is inlined at the site (intrinsic-hybrid
-        # semantics: intrinsic store/read, clause executes, ``resume(v)`` is
-        # the op's result, ``with`` overrides the store).  Empty for a
-        # declared-``effects(<State<T>>)`` function with no handler — those
-        # keep the bare host-cell call.  Saved/restored around each handler
-        # body exactly like ``_effect_ops`` (nested handlers).  Tuple
-        # fields, in order: the HandlerClause; the effect argument's
-        # source slot name; the resolved cell FAMILY name (import naming
-        # + WASM types); the state annotation's slot name (None
-        # for a stateless handler); the handler-DECLARATION scope's
-        # WasmSlotEnv (clause bodies compile against it, not the op
-        # call-site env); the get import; the put import.
-        self._state_clause_ops: dict[
-            str,
-            tuple[
-                ast.HandlerClause, str, str, str | None,
-                "WasmSlotEnv", str, str,
-            ],
-        ] = {}
+        # #976 option C: op_name -> :class:`StateClauseEntry` for the
+        # innermost enclosing ``handle[State<T>]``.  When a get/put call site
+        # has an entry here, the clause BODY is inlined at the site
+        # (intrinsic-hybrid semantics: intrinsic store/read, clause executes,
+        # ``resume(v)`` is the op's result, ``with`` overrides the store).
+        # Empty for a declared-``effects(<State<T>>)`` function with no
+        # handler — those keep the bare host-cell call.  Saved/restored
+        # around each handler body exactly like ``_effect_ops`` (nested
+        # handlers).  The entry carries the handler-DECLARATION scope the
+        # clause compiles in: see :class:`StateClauseEntry`.
+        self._state_clause_ops: dict[str, StateClauseEntry] = {}
         # True while translating an inlined State clause body/`with` expr —
         # gates the ``resume(v)`` lowering (v IS the op's result value).
         self._in_state_clause: bool = False
@@ -159,6 +149,28 @@ class WasmContext(
         # coercion (`resume(0)` in a `State<Byte>` get clause is the
         # op's i32 result).
         self._state_clause_family: str | None = None
+        # #1233: the host cell stack, as FAMILIES, at the current emission
+        # point — one entry per enclosing `handle[State<T>]` whose
+        # `state_push_T` has run, innermost last.  Maintained by
+        # `_translate_handle_state` around its handled body.
+        self._pushed_cell_families: list[str] = []
+        # The index into `_pushed_cell_families` from which the cells are
+        # SHADOWS of the scope the current op registries belong to.  Equal to
+        # `len(_pushed_cell_families)` inside a handled body (an op there
+        # reaches the innermost cell, which is its own handler's); rolled back
+        # to the handler's DECLARATION-time value while an inlined clause body
+        # is translated, because a bare op there resolves into that
+        # declaration scope (#1211) while the intrinsics still address the
+        # innermost cell of the family.  A family occurring in
+        # `_pushed_cell_families[_addressable_from:]` is therefore
+        # unreachable — refused loudly rather than compiled to hybrid
+        # semantics (see `_reject_unaddressable_clause_op`).
+        self._addressable_from: int = 0
+        # #1211: how many clause bodies are being inlined into one another
+        # right now.  Each outward re-entry re-expands another clause, so the
+        # emitted code is exponential in this depth — bounded by
+        # `STATE_CLAUSE_INLINE_DEPTH_CAP`.
+        self._clause_inline_depth: int = 0
         # Constructor layout mapping: ctor_name -> ConstructorLayout
         self._ctor_layouts: dict[str, ConstructorLayout] = ctor_layouts or {}
         # ADT type names for slot/param type resolution

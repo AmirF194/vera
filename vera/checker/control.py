@@ -670,6 +670,7 @@ class ControlFlowMixin:
         # Check handler body — temporarily add handled effect to context
         # so effect operations resolve correctly inside the body
         saved_effect = self.env.current_effect_row
+        saved_effect_order = self.env.current_effect_order
         saved_ops = self._effect_ops_used
 
         # Add the handled effect to the current effect row
@@ -680,6 +681,20 @@ class ControlFlowMixin:
                 handler_effects, self.env.current_effect_row.row_var)
         else:
             self.env.current_effect_row = ConcreteEffectRow(handler_effects)
+        # #1215: this handler goes to the FRONT of the resolution order, so a
+        # bare op name declared both by this effect and by something already
+        # in the row binds THIS one inside the body — the innermost handler
+        # governs, exactly as `_effect_type_mapping` resolves an op's type
+        # arguments against the innermost enclosing handler (§7.5.2).  The
+        # rest of the order is preserved, so the enclosing handlers and then
+        # the function's declared row follow in their own order.  Note the
+        # CLAUSE bodies are checked above, outside this scope: a bare op in a
+        # clause body resolves against the ENCLOSING context, not this
+        # handler (§7.5.2, the rule codegen mirrors for #1211).
+        self.env.current_effect_order = (
+            effect_inst,
+            *(e for e in saved_effect_order if e != effect_inst),
+        )
 
         # Track ops used inside handler body separately (they're discharged)
         self._effect_ops_used = set()
@@ -714,6 +729,7 @@ class ControlFlowMixin:
 
         # Restore — the handler discharges its effect
         self.env.current_effect_row = saved_effect
+        self.env.current_effect_order = saved_effect_order
         self._effect_ops_used = saved_ops
 
         return body_type

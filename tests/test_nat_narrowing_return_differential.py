@@ -1587,25 +1587,45 @@ public fn go(@Int -> @Bool) requires(true) ensures(true) effects(pure)
     def test_bare_put_zero_survives(self) -> None:
         assert _run(self._PUT_NO_CLAUSE, "go", 0) == 0
 
+    # The handler is `State<Bool>` while the DECLARED row is `State<Nat>`, so
+    # the get clause's bare `put(@Int.0)` resolves outward to the declared
+    # `State<Nat>` row (#1211) and takes the bare intrinsic dispatch path —
+    # which is what this pair pins, on the @Nat cell whose narrowing guard is
+    # the subject.  It used to handle `State<Nat>` here, i.e. the SAME family
+    # as the row it routes to; that shape is unaddressable by construction
+    # (the intrinsics reach only the innermost cell of a family, so the store
+    # would land in the handler's own cell rather than the caller's) and is
+    # now a loud codegen skip — see #1233.  Two families keep the routing
+    # honest AND the boundary under test unchanged.
     _PUT_IN_CLAUSE_BODY = """\
 public fn go(@Int -> @Bool) requires(true) ensures(true) effects(<State<Nat>>)
 {
-  handle[State<Nat>](@Nat = 0) {
-    get(@Unit) -> { put(@Int.0); resume(@Nat.0) },
-    put(@Nat) -> { resume(()) }
+  handle[State<Bool>](@Bool = false) {
+    get(@Unit) -> { put(@Int.0); resume(@Bool.0) },
+    put(@Bool) -> { resume(()) }
   } in {
-    get(());
-    get(()) < 0
+    get(())
   }
 }
 """
 
     def test_clause_body_put_negative_traps(self) -> None:
         """A put INSIDE another clause's body takes the bare path too
-        (`_state_clause_ops` is cleared in clauses) — same guard."""
+        (the clause body compiles against the handler's DECLARATION scope,
+        whose `put` here is the declared row's) — same guard."""
         assert _run(self._PUT_IN_CLAUSE_BODY, "go", -5) is None
     def test_clause_body_put_non_negative_passes(self) -> None:
         assert _run(self._PUT_IN_CLAUSE_BODY, "go", 9) == 0
+
+    def test_clause_body_put_zero_survives(self) -> None:
+        """Zero is the guard's boundary, and every sibling pair pins it.
+
+        `@Nat`'s range starts AT zero, so a guard written `<= 0` instead of
+        `< 0` traps here while both the negative and the positive case above
+        stay green — the one input that separates the correct comparison from
+        the off-by-one (round-5 review; this pair was the only boundary
+        differential in the class missing it)."""
+        assert _run(self._PUT_IN_CLAUSE_BODY, "go", 0) == 0
 
 
 class TestHandlerStateWidenDifferential1203:

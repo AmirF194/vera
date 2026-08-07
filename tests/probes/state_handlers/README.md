@@ -14,17 +14,26 @@ The slot-naming and cell-family shapes ([#1208](https://github.com/aallan/vera/i
 [#1209](https://github.com/aallan/vera/issues/1209)) have been through
 that cycle: they live in `tests/conformance/` as the `ch03_slot_alias_*`,
 `ch07_state_*alias*`, `ch07_exn_*alias*` and `ch08_state_alias_*`
-programs, plus the `ch02_alias_cycle_rejected` negative.
+programs, plus the `ch02_alias_cycle_rejected` negative.  So have the
+handler-semantics shapes ([#1210](https://github.com/aallan/vera/issues/1210),
+[#1211](https://github.com/aallan/vera/issues/1211),
+[#1215](https://github.com/aallan/vera/issues/1215)): the clause-body
+operation scope, the four handler sub-expression positions, and the
+bare-op resolution order live in `tests/conformance/` as
+`ch07_clause_body_op_enclosing`, `ch07_handler_registration_positions`
+and `ch07_effect_op_source_order`, with the nested-handler semantics
+matrix, the hash-seed sweep, and the registration-completeness
+differential in `tests/test_nested_handler_clause_ops.py`,
+`tests/test_effect_op_determinism.py` and
+`tests/test_state_exn_registration.py`.
 
 **Not wired into CI.** These are probe programs, not curated fixtures:
 some deliberately fail (`check`, `verify`, or `run`) to demonstrate a
 defect that is now fixed, some pin the open issues [#1207](https://github.com/aallan/vera/issues/1207),
-[#1210](https://github.com/aallan/vera/issues/1210),
-[#1211](https://github.com/aallan/vera/issues/1211),
 [#1212](https://github.com/aallan/vera/issues/1212),
 [#1218](https://github.com/aallan/vera/issues/1218) and
 [#1219](https://github.com/aallan/vera/issues/1219), and some were
-superseded mid-round.  Five are **parse-broken** and flagged as such in
+superseded mid-round.  Two are **parse-broken** and flagged as such in
 the index below — they belong to the PRs that close their issues, and
 are counted by the differential sweep's `parse_skipped` allowance.  Each
 file's leading comment states what it probes and what the
@@ -46,7 +55,7 @@ review-round directory it came from.
 | `write_guards/` | The #1203 write-boundary guards: `@Nat` narrowing and `@Nat`→`@Int` widening at init/put/resume/with, Byte literal widths at every boundary, refined-boundary disclosure, guard-obligation Tier-1 precision |
 | `checker_gates/` | Diagnostic gates: E128 quantifier bounds, E336/E533 state-declaration divergence (incl. the generic-handler lie/honest pairs and their lib fixtures), E337 arity, E331/E335 interactions, builtin-effect redefinition, unresolvable-type diagnostics |
 | `generic_handlers/` | `forall<T>` + `handle[State<T>]` shapes beyond the E533 gate probes: generic wrappers, instantiation-driving arguments, mono clones reaching codegen's per-family arms |
-| `nested_handlers/` | Handler nesting: cell isolation and push/pop, per-family save/restore, registration-walk gaps, clause-body handles, cross-spelled nesting |
+| `nested_handlers/` | Handler nesting: cell isolation and push/pop, per-family save/restore, clause-body handles, cross-spelled nesting |
 | `old_state/` | `old(State<T>)`/`new(State<T>)` snapshot probes in `ensures` |
 
 Module fixtures (`xmod_lib2.vera`, `e533lib.vera`, `loclib.vera`) sit in
@@ -61,11 +70,10 @@ comment; headerless files are summarised from the program itself.  Origin
 is the review-round directory the file lived in before the
 purpose-directory reorganisation.
 
-### alias_families/ (21 files)
+### alias_families/ (19 files)
 
 | File | What it probes | Origin |
 |---|---|---|
-| `g1_array.vera` | `Array<Int>` state cell: put `[5, 6]`, read an element back — heap-value cell baseline | round2_family |
 | `p10_xmod_importer_alias.vera` | Importer-declared alias: `handle[State<Nid<Nat>>]` around a module fn declared plain `State<Nat>` | round3_naming |
 | `p1205.vera` | #1205 repro: `State<Count>` (`Count = Nat`) canonical handler — the scalar-alias cell must collapse to Nat | session |
 | `p12a_verify_nat_cell.vera` | Obligation-parity baseline: plain Nat cell + a narrowing `let` in the handled body | round3_naming |
@@ -76,7 +84,6 @@ purpose-directory reorganisation.
 | `p16_family_split_crosstalk.vera` | Helper effects spelled `State<Id<Id<Nat>>>` vs `handle[State<Nat>]` — ops may silently bypass the cell | round3_naming |
 | `p16c_family_split_control.vera` | Single-`Id` control for p16 (`State<Id<Nat>>` spelling) — must join the handler's cell | round3_naming |
 | `p17_wrapper_alias.vera` | Wrapper alias `Two<T> = Id<Id<T>>` — head re-entry reached through one user application | round3_naming |
-| `p17b_state_string_minimal.vera` | Minimal `State<String>` in a pure fn — pair-family registration refusal vs the emitted calls | round3_clause_env |
 | `p25_refined_cell.vera` | Refined-alias cell, in-bounds put — happy path | round2_family |
 | `p2b_chain_fwd.vera` | Forward-declared alias chain (`A = B` before `B = Nat`) — declaration-order robustness | round2_family |
 | `p2b_family_nested_alias_canonrefs.vera` | Same cell, refs spelled `Id<Nat>` (the both-sides key) — isolates the family-name/WASM-type question | round3_naming |
@@ -87,14 +94,13 @@ purpose-directory reorganisation.
 | `p_byte.vera` | `State<Byte>` fed via `int_to_byte` conversions — Byte roundtrip without bare int literals | session |
 | `xmod_lib2.vera` | Module fixture: `bump()` declaring plain `<State<Nat>>` effects (support for p10) | round3_naming |
 
-### clause_scoping/ (58 files)
+### clause_scoping/ (57 files)
 
 | File | What it probes | Origin |
 |---|---|---|
 | `a10a.vera` | Patternless `put()` + alias decl + fn `@Nat` param: with-expr `@Nat.0` = fn param vs codegen's arg fallback | round2_family |
 | `a10b.vera` | Patternless `put()` with no outer Nat binding — with-expr `@Nat.0` must be E130 | round2_family |
 | `a10c_stateless_patternless.vera` | Patternless `put()` under a stateless handler — fn param vs arg fallback, observed via division trap | round2_family |
-| `a11_refined_pattern.vera` | Refinement-typed clause pattern `@Nat{self >= 0}` — both sides must erase to the base name — **parse-broken**, pending the PR that closes its issue | round2_family |
 | `a1a.vera` | All names split: `State<Nat>` cell, `@Count` decl, `put(@Nat)` pattern, cross-name with-update | round2_family |
 | `a1b.vera` | Swapped spellings: `State<Count>` cell, `@Nat` decl, `put(@Count)` pattern | round2_family |
 | `a1c.vera` | Full collision under the alias (`Count` everywhere): `@Count.0` = state, `.1` = put arg | round2_family |
@@ -150,7 +156,7 @@ purpose-directory reorganisation.
 | `p_exnpat.vera` | `Exn<Code>` with the pattern spelled at the resolved base (`throw(@Int)`) | session |
 | `p_putpat.vera` | Put pattern spelled `@Count` under a `State<Nat>` cell — the alias pattern must bind canonically | session |
 
-### dispatch_paths/ (12 files)
+### dispatch_paths/ (11 files)
 
 | File | What it probes | Origin |
 |---|---|---|
@@ -159,7 +165,6 @@ purpose-directory reorganisation.
 | `p20_closure_put.vera` | Closure in the handled body performing `put` — inlining in the lifted fn would bind the wrong decl-env | round3_clause_env |
 | `p20b_applyfn_put.vera` | Let-bound effectful closure applied via `apply_fn` inside the handled body — admitted at all? | round3_clause_env |
 | `p3_put_in_clause_body.vera` | `put` inside a get-clause body — clause-op env cleared, bare path despite an existing put clause | round2_family |
-| `p9_cross_family.vera` | Bare `put` inside the nested handler's put clause — checker types it against the OUTER handler | round3_clause_env |
 | `p_qualput.vera` | Qualified `State.put(4)` dispatching through a doubling with-clause — qualified/bare parity | session |
 | `p_skew.vera` | Stateless put-clause handler asserting the arg (== 7) then `get` — stateless dispatch + uninit read | session |
 | `p_stateless.vera` | Stateless `State<Int>` put/get: `put(7)` then `get` — minimal stateless baseline | session |
@@ -232,7 +237,7 @@ purpose-directory reorganisation.
 | `pr_update.vera` | `with @Nat =` a Tier-3 Random negative — with-update narrowing guard | round2_family |
 | `widen_ok.vera` | `@Nat` value into a `State<Int>` cell — the widen dual must not false-trap | round2_family |
 
-### checker_gates/ (78 files)
+### checker_gates/ (76 files)
 
 | File | What it probes | Origin |
 |---|---|---|
@@ -240,7 +245,6 @@ purpose-directory reorganisation.
 | `diverge.vera` | Divergent `@Int` decl on a `State<Nat>` cell (get-only, resumes 0) — decl/effect-arg split | round2_family |
 | `diverge2.vera` | Divergent `@Int` decl; get clause resumes the state slot — echoes a negative init through the Nat cell | round2_family |
 | `diverge3.vera` | Divergent `@Int` decl with a put-clause-only handler — bare `get` under a negative Int init | round2_family |
-| `e128_array.vera` | E128 gate: `forall` over an `@Array<Int>` domain, predicate lambda carrying contract clauses — **parse-broken**, pending the PR that closes its issue | round2_family |
 | `e128_bool.vera` | E128 gate: `@Bool` quantifier domain | round2_family |
 | `e128_byte.vera` | E128 gate: `@Byte` quantifier domain | round2_family |
 | `e128_byte_run.vera` | E128 gate: `@Byte` domain with a real predicate and `main` — runnable variant | round2_family |
@@ -257,7 +261,6 @@ purpose-directory reorganisation.
 | `e337_bare_state_decl.vera` | Bare `handle[State]` with a state declaration — arity gate for State | round3_gates |
 | `e337_exn_two.vera` | `Exn<String, Int>` — two type arguments on Exn | round3_gates |
 | `e337_twoargs_badclause.vera` | `State<Int, Nat>` plus bogus clause refs (`@Int.5`, `@Bogus.0`) — arity gate before clause errors | round3_gates |
-| `e337_user_effect_exn.vera` | User-declared `effect Exn` — builtin-effect redefinition gate — **parse-broken**, pending the PR that closes its issue | round3_gates |
 | `e533_import.vera` | Generic state-decl lie imported cross-module — E533 must fire at the importer's instantiation | round3_gates |
 | `e533_indirect.vera` | The lie reached through an intermediate generic fn — E533 through instantiation indirection | round3_gates |
 | `e533_match_arm.vera` | The lying handler inside a match arm of the generic — the E533 walker must descend match arms | round3_gates |
@@ -323,16 +326,12 @@ purpose-directory reorganisation.
 | `p4e_generic_with.vera` | Generic `with @T = 201` at Byte — does the generic site skip E335 into codegen's byte-update arm? | round3_clause_env |
 | `p_generic.vera` | Honest generic cell handler (`@T = @T.0`) used at Int — generic-handler acceptance control | session |
 
-### nested_handlers/ (13 files)
+### nested_handlers/ (9 files)
 
 | File | What it probes | Origin |
 |---|---|---|
 | `a5a.vera` | Nested same-family handlers (`Nat` outer, `Count = Nat` inner): save/restore + cell push/pop | round2_family |
 | `a5b.vera` | Stateless inner handler inside a stateful outer of the same type — inner clauses must see no state slot | round2_family |
-| `p11_init_nested.vera` | Full nested handler inside the OUTER state INIT expr — the import walker only descends the body | round3_clause_env |
-| `p13_exn_in_clause.vera` | Full nested `Exn` handler inside a State get-clause body — the walker misses clauses, tag unregistered? | round3_clause_env |
-| `p17_string_outer.vera` | Which instantiation types a bare `get` in a NESTED handler's clause? outer String vs nested Nat | round3_clause_env |
-| `p17c_option_outer.vera` | p17 with a registerable `Option<Int>` outer — i32 vs i64 typing clash on the nested routing | round3_clause_env |
 | `p18_byte_in_byte_clause.vera` | Byte handler nested in a Byte get clause — clause-family save/restore must keep both at i32 | round3_clause_env |
 | `p19_seq_byte_int.vera` | Int handler nested in the Byte handler's BODY — per-clause family switch and restore | round3_clause_env |
 | `p27_nested_cross.vera` | Nested handlers: `Count` outer, `Nat` inner (same family via the alias) — cross-spelled isolation | round2_family |

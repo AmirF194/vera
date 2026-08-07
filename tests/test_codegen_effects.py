@@ -4,6 +4,8 @@ Split from tests/test_codegen.py (#419). Shared helpers live in tests/codegen_he
 """
 from __future__ import annotations
 
+import re
+
 
 from vera.codegen import (
     compile,
@@ -2560,3 +2562,104 @@ public fn main(@Unit -> @Int)
         assert "$exn_Option_LTuple_LInt_CInt_R_R" in wat, wat[:400]
         assert "$exn_Option_LTuple_LBool_CBool_R_R" in wat, wat[:400]
         assert _run(src, fn="main") == 6  # a→2, b→4
+
+
+# =====================================================================
+# The declared-row State op registry: shadow-respecting, first-valid-wins
+# =====================================================================
+
+_SHADOWED_OP_ROW = """
+private fn %s
+
+public fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<State<Int>, State<Bool>>)
+{
+  put(1);
+  get(())
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Bool>](@Bool = false) {
+    get(@Unit) -> { resume(@Bool.0) }
+  } in {
+    handle[State<Int>](@Int = 5) {
+      get(@Unit) -> { resume(@Int.0) }
+    } in {
+      probe(())
+    }
+  }
+}
+"""
+
+_SHADOW_GET = """get(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  77
+}"""
+
+_SHADOW_PUT = """put(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  @Int.0
+}"""
+
+
+@pytest.mark.parametrize(
+    ("shadow_fn", "shadowed", "intrinsic"),
+    [
+        pytest.param(
+            _SHADOW_GET, "get", "$vera.state_put_Int", id="user_get"),
+        pytest.param(
+            _SHADOW_PUT, "put", "$vera.state_get_Int", id="user_put"),
+    ],
+)
+def test_a_user_fn_shadows_one_state_op_without_disturbing_its_sibling(
+    shadow_fn: str, shadowed: str, intrinsic: str,
+) -> None:
+    """Shadowing is decided per op and survives every instance in the row.
+
+    `emit_function` populates the declared-row State op registry by walking
+    the row, and `effects(<State<Int>, State<Bool>>)` walks it twice — so the
+    question is whether the second instantiation can re-register or remap an
+    op the first one skipped because a user function shadows it, and whether
+    `get` and `put` answer that question the same way (round-5 review).  They
+    do: each op is registered only when no user function of that name exists
+    AND no earlier instantiation registered it, so the shadowed name compiles
+    to the user function while its sibling keeps the FIRST instantiation's
+    `Int` intrinsic — never the second's `Bool` one.
+    """
+    wat = _compile_ok(_SHADOWED_OP_ROW % shadow_fn).wat or ""
+    # Scoped to `probe`'s own body: the module legitimately declares the
+    # `Bool` imports for `main`'s handler, so a whole-module search would
+    # confirm nothing about which family `probe` calls.
+    body = re.search(r"\(func \$probe\b.*?\n  \)", wat, re.S)
+    assert body is not None, f"no $probe function in the emitted WAT:\n{wat[:400]}"
+    calls = [
+        line.strip() for line in body.group(0).splitlines()
+        if "call " in line
+    ]
+    assert any(c.endswith(f"${shadowed}") for c in calls), (
+        f"the user-defined `{shadowed}` is not called from probe — the "
+        f"declared row re-registered the shadowed op: {calls}"
+    )
+    assert not any(f"$vera.state_{shadowed}_" in c for c in calls), (
+        f"a State intrinsic for `{shadowed}` was emitted despite the user "
+        f"function shadowing it: {calls}"
+    )
+    assert any(intrinsic in c for c in calls), (
+        "the sibling op lost its registration, or took the SECOND "
+        f"instantiation's Bool family instead of the first's Int: {calls}"
+    )
+    assert not any("_Bool" in c for c in calls), (
+        f"the second State instantiation overwrote the first's: {calls}"
+    )

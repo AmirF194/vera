@@ -252,8 +252,23 @@ class ResolutionMixin:
 
     def _resolve_effect_row(self, er: ast.EffectRow) -> EffectRowType:
         """Convert an AST EffectRow into a semantic EffectRowType."""
+        return self._resolve_effect_row_ordered(er)[0]
+
+    def _resolve_effect_row_ordered(
+        self, er: ast.EffectRow,
+    ) -> tuple[EffectRowType, tuple[EffectInstance, ...]]:
+        """Resolve an AST EffectRow to its row type AND its SOURCE order.
+
+        One derivation, two views (#1215).  The row type carries a
+        ``frozenset`` — the shape subeffect containment wants — which loses
+        the declaration order a bare op name needs to resolve deterministically
+        when two effects in the row declare it.  The second element is that
+        order: the ``ast.EffectSet``'s own sequence, minus the row variable,
+        with each instance resolved exactly once here so the two views can
+        never describe different effects.
+        """
         if isinstance(er, ast.PureEffect):
-            return PureEffectRow()
+            return PureEffectRow(), ()
         if isinstance(er, ast.EffectSet):
             instances = []
             row_var = None
@@ -273,8 +288,9 @@ class ResolutionMixin:
                     ) if ref.type_args else ()
                     instances.append(
                         EffectInstance(f"{ref.module}.{ref.name}", args))
-            return ConcreteEffectRow(frozenset(instances), row_var)
-        return PureEffectRow()
+            return (ConcreteEffectRow(frozenset(instances), row_var),
+                    tuple(instances))
+        return PureEffectRow(), ()
 
     def _resolve_effect_ref(self, ref: ast.EffectRefNode) -> EffectInstance | None:
         """Resolve a single effect reference."""

@@ -26,10 +26,108 @@ from vera.types import (
     EffectRowType,
     FunctionType,
     PureEffectRow,
+    RefinedType,
     Type,
     TypeVar,
+    pretty_type,
     substitute,
 )
+
+
+def _structural_type_key(ty: Type) -> str:
+    """A rendering of *ty* that DISCRIMINATES, rather than one that reads well.
+
+    :func:`vera.types.pretty_type` is a presentation renderer, and two of its
+    choices are deliberate elisions: a `RefinedType` prints `{@Int | ...}`
+    with its predicate replaced by an ellipsis, and a `TypeVar` prints with
+    :data:`BUILTIN_TYPEVAR_MARKER` stripped (`T#b` → `T`).  Both are right for
+    an error message and wrong for an ORDERING key — distinct types render
+    identically, so they tie, and a stable `sorted` then falls back to the
+    input's own order.  Fed from a `frozenset` that is the `PYTHONHASHSEED`
+    dependence the ordering exists to remove.
+
+    Deterministic by construction: every branch is a fixed-shape recursion
+    over dataclass fields, and the only set this touches is a function type's
+    effect row, which :func:`_structural_effect_key` sorts on a key built the
+    same structural way.  The predicate is rendered by `ast.Node.pretty`,
+    which walks declared field order and skips spans, so the same predicate
+    always renders the same way.
+    """
+    if isinstance(ty, RefinedType):
+        return (f"{{{_structural_type_key(ty.base)}"
+                f"|{ty.predicate.pretty()}}}")
+    if isinstance(ty, TypeVar):
+        # The raw name, marker included.
+        return f"'{ty.name}"
+    if isinstance(ty, AdtType):
+        if not ty.type_args:
+            return ty.name
+        args = ", ".join(_structural_type_key(a) for a in ty.type_args)
+        return f"{ty.name}<{args}>"
+    if isinstance(ty, FunctionType):
+        params = ", ".join(_structural_type_key(p) for p in ty.params)
+        return (f"fn({params} -> {_structural_type_key(ty.return_type)}) "
+                f"{_structural_effect_key(ty.effect)}")
+    return pretty_type(ty)
+
+
+def _effect_sort_key(ei: EffectInstance) -> tuple[str, str]:
+    """A STRUCTURAL total order on effect instances (#1215 / #1231).
+
+    Used as the deterministic tiebreak for row members
+    :attr:`TypeEnv.current_effect_order` does not mention.  Keying on the
+    effect NAME alone is not a total order: spec §7.3.3 permits one effect
+    twice with different type arguments (`effects(<State<Int>, State<Bool>>)`
+    is two independent cells), so those two tie, and `sorted` — being stable —
+    then preserves the `frozenset`'s own iteration order, reintroducing the
+    exact `PYTHONHASHSEED` dependence the ordering exists to remove.
+    Rendering the arguments makes the key discriminate them.
+
+    The rendering is :func:`_structural_type_key`, not `pretty_type` (round-5
+    review): the human-readable renderer elides a refinement's predicate and
+    a type variable's built-in marker, so `effects(<State<Pos>, State<Neg>>)`
+    over two refinement aliases of one base tied on the key exactly as the
+    name-only version tied `State<Int>` against `State<Bool>` — the same bug
+    one level down, in the fix for it.
+    """
+    return (
+        ei.name,
+        ", ".join(_structural_type_key(a) for a in ei.type_args),
+    )
+
+
+def _structural_effect_key(eff: EffectRowType) -> str:
+    """A rendering of an effect ROW that DISCRIMINATES (round-9 review).
+
+    The type-argument tiebreak reaches an effect row whenever a type argument
+    is a function type — `effects(<Cb<fn(@Int -> @Bool) effects(<State<Pos>>)>>)`
+    — and that leg was rendered by :func:`vera.types.pretty_effect`, which
+    renders each member through `pretty_type`.  So the two elisions
+    :func:`_structural_type_key` exists to avoid came back at the NESTED
+    depth: two outer instances differing only inside a nested row (by a
+    refinement's predicate, or by a type variable's built-in marker) rendered
+    identically, tied, and a stable `sorted` handed back the `frozenset`'s own
+    order — the `PYTHONHASHSEED` dependence, three levels into its own fix.
+
+    Rendering members through :func:`_effect_sort_key` closes it and makes the
+    two mutually recursive, which is what "structural all the way down" means
+    here: a nested row's own function-typed arguments recurse back through
+    this.  Deterministic despite reading a `frozenset`, because the members
+    are sorted on that structural key rather than on a presentation string —
+    a total order, so the sort's stability is never consulted.  The open row
+    variable is part of the row's identity, so it is rendered too.
+    """
+    if isinstance(eff, PureEffectRow):
+        return "effects(pure)"
+    if isinstance(eff, ConcreteEffectRow):
+        parts = [
+            f"{name}<{args}>" if args else name
+            for name, args in sorted(_effect_sort_key(e) for e in eff.effects)
+        ]
+        if eff.row_var:
+            parts.append(eff.row_var)
+        return f"effects(<{', '.join(parts)}>)"
+    return "effects(?)"
 
 
 # =====================================================================
@@ -250,6 +348,17 @@ class TypeEnv:
     refinement_bases: list[Type] = field(default_factory=list)
     current_return_type: Type | None = None
     current_effect_row: EffectRowType | None = None
+    # #1215: the RESOLUTION ORDER for a bare (unqualified) effect-op name —
+    # innermost handled effect first, then each enclosing handler, then the
+    # function's DECLARED row in SOURCE order.  `current_effect_row` carries
+    # the same effects as a `frozenset`, which is the right shape for
+    # subeffect containment but a hash-seed lottery to iterate; two effects
+    # in one row may declare the SAME op name (the built-in `State` and
+    # `Http` both declare `get`), and which signature bound flipped with
+    # PYTHONHASHSEED.  Set in lock-step with `current_effect_row` at both
+    # sites that assign it (checker/core.py `_check_fn`, checker/control.py's
+    # handler-body scope); `lookup_effect_op` orders the row by this tuple.
+    current_effect_order: tuple[EffectInstance, ...] = ()
 
     # #1208: the ONE per-module declaration counter that stamps
     # ``AdtInfo.decl_index`` and ``TypeAliasInfo.decl_index``.  Shared
@@ -2202,12 +2311,59 @@ class TypeEnv:
         """Look up an effect by name."""
         return self.effects.get(name)
 
+    def ordered_effect_row(self) -> tuple[EffectInstance, ...]:
+        """The current effect row as an ORDERED sequence (#1215).
+
+        ``current_effect_row.effects`` is a ``frozenset`` — the right shape
+        for subeffect containment, the wrong one to *iterate*, because two
+        effects in one row may declare the same op name and set iteration
+        order is a function of ``PYTHONHASHSEED``.  ``current_effect_order``
+        records the semantic order (innermost handled effect first, then each
+        enclosing handler, then the declared row in source order); this
+        returns the row sequenced by it.
+
+        The result is TOTAL over the row: a member the order tuple does not
+        mention (a row assigned without its companion order, e.g. by a
+        consumer outside the checker) is not dropped, it follows the ordered
+        prefix under a STRUCTURAL tiebreak — still independent of hash seed.
+        The tiebreak keys on the effect name AND its rendered type arguments,
+        because §7.3.3 lets one effect appear twice with different arguments:
+        `State<Int>` and `State<Bool>` tie on name alone, and a stable sort
+        then leaves them in the frozenset's own iteration order, which is the
+        `PYTHONHASHSEED` dependence this method exists to remove.
+        """
+        row = self.current_effect_row
+        if not isinstance(row, ConcreteEffectRow):
+            return ()
+        ordered: list[EffectInstance] = []
+        seen: set[EffectInstance] = set()
+        for ei in self.current_effect_order:
+            if ei in row.effects and ei not in seen:
+                seen.add(ei)
+                ordered.append(ei)
+        ordered.extend(sorted(row.effects - seen, key=_effect_sort_key))
+        return tuple(ordered)
+
     def lookup_effect_op(self, op_name: str,
                          qualifier: str | None = None) -> OpInfo | None:
         """Look up an effect operation, optionally qualified.
 
-        If qualifier is given, look only in that effect.
-        Otherwise, search all effects in the current effect row.
+        If qualifier is given, look only in that effect — a deterministic,
+        single-candidate lookup.
+
+        A BARE op name can be declared by more than one effect in scope (the
+        built-in ``State`` and ``Http`` both declare ``get``), so resolution
+        walks ordered candidate lists rather than any set (#1215):
+
+        1. ``ordered_effect_row()`` — innermost handled effect first, then
+           each enclosing handler, then the function's DECLARED row in SOURCE
+           order (spec §7.4).
+        2. every registered effect, in REGISTRATION order.  ``self.effects``
+           is a ``dict``, so this is insertion order: the built-ins in the
+           order ``_register_builtins`` declares them, then any user
+           ``effect`` in source order.  It is the fallback for a clause body
+           checked outside its own handler's row, and is deterministic for
+           the same reason step 1 is — no set is iterated on either path.
         """
         if qualifier:
             eff = self.effects.get(qualifier)
@@ -2215,14 +2371,11 @@ class TypeEnv:
                 return eff.operations[op_name]
             return None
 
-        # Search effects in the current effect row
-        if isinstance(self.current_effect_row, ConcreteEffectRow):
-            for ei in self.current_effect_row.effects:
-                eff = self.effects.get(ei.name)
-                if eff and op_name in eff.operations:
-                    return eff.operations[op_name]
+        for ei in self.ordered_effect_row():
+            eff = self.effects.get(ei.name)
+            if eff and op_name in eff.operations:
+                return eff.operations[op_name]
 
-        # Also search all registered effects (for handler clauses)
         for eff in self.effects.values():
             if op_name in eff.operations:
                 return eff.operations[op_name]
