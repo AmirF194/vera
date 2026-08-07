@@ -1142,9 +1142,21 @@ def test_every_expression_kind_has_a_formatter_arm() -> None:
     class (PR #1238 review), which is a false green on the property that
     two predicates never share a family name.
 
-    Abstract intermediates are excluded: an abstract class between `Expr`
-    and the concrete nodes has no arm to write and never reaches a
-    predicate.
+    `_EXPR_BASES` is excluded, and the exclusion is an explicit LIST rather
+    than a predicate, because no predicate is true (PR #1238 review).
+    `ast.Expr` is a plain frozen dataclass with a documentation convention,
+    not an ABC — `inspect.isabstract` is False for every class in the
+    module, so filtering on it excluded nothing at all.  Nor does "declares
+    no dataclass fields of its own" work: `UnitLit` and `HoleExpr` declare
+    none either, and both are concrete nodes that need an arm.
+
+    The list is cross-checked in both directions so it cannot rot silently.
+    A class listed here must HAVE subclasses, which no concrete leaf does,
+    so a concrete node can never be quietly excluded; and a class that has
+    subclasses and is NOT listed fails loudly, naming itself, which is what
+    a future convention-only intermediate would do.  A red gate demanding a
+    human decision is the right failure for a base-class question that
+    Python cannot answer here.
 
     Name presence is only half the gate — a class can be dispatched and
     still render indistinguishably.  `test_format_expr_renders_every_kind
@@ -1162,10 +1174,34 @@ def test_every_expression_kind_has_a_formatter_arm() -> None:
 
     from vera import ast as ast_mod
 
-    subclasses = sorted({
-        c.__name__ for c in vars(ast_mod).values()
+    # The convention-only base classes.  A new intermediate between `Expr`
+    # and the concrete nodes must be ADDED here; until it is, the
+    # cross-check below fails and names it.
+    expr_bases = (ast_mod.Expr,)
+
+    every = [
+        c for c in vars(ast_mod).values()
         if inspect.isclass(c) and issubclass(c, ast_mod.Expr)
-        and c is not ast_mod.Expr and not inspect.isabstract(c)
+    ]
+    has_subclasses = {
+        c.__name__ for c in every
+        if any(o is not c and issubclass(o, c) for o in every)
+    }
+    excluded = {c.__name__ for c in expr_bases}
+    assert excluded <= has_subclasses, (
+        f"listed as a base but has no subclasses, so it is a concrete node "
+        f"whose arm this gate would stop requiring: "
+        f"{sorted(excluded - has_subclasses)}"
+    )
+    assert has_subclasses <= excluded, (
+        f"new intermediate class(es) between ast.Expr and the concrete "
+        f"nodes: {sorted(has_subclasses - excluded)}.  Add to `expr_bases` "
+        f"if they are convention-only bases with no `_fmt_expr` arm; "
+        f"otherwise give each one an arm."
+    )
+
+    subclasses = sorted({
+        c.__name__ for c in every if c.__name__ not in excluded
     })
     source = (_ROOT / "vera" / "formatter.py").read_text(encoding="utf-8")
     dispatched: set[str] = set()
@@ -1354,6 +1390,23 @@ _STRUCTURE_PAIRS: tuple[tuple[str, str, str, str], ...] = (
     ("lambda-body-block", "",
      "apply(fn(@Int -> @Bool) effects(pure) { { @Int.0 > 0 } }, @Int.0)",
      "apply(fn(@Int -> @Bool) effects(pure) { @Int.0 > 0 }, @Int.0)"),
+    # The EQUALITY direction (PR #1238 review).  Every row above has two
+    # different sides, so `key_eq == ast_eq` only ever asserted `False ==
+    # False` — a key that separated everything, `id()` included, would pass
+    # all of them.  These two sides are the SAME TEXT parsed twice, so they
+    # are dataclass-equal and distinct objects with distinct spans: the
+    # checker holds them EQUAL and the key must too.  Spans are
+    # `compare=False` on `ast.Node`, which is exactly the property at risk
+    # if a rendering ever reaches for one.
+    ("same-text-simple", "", "@Int.0 > 0", "@Int.0 > 0"),
+    ("same-text-arm-block", _MERGE_PRELUDE,
+     "match Red { Red -> { true }, Green -> false }",
+     "match Red { Red -> { true }, Green -> false }"),
+    ("same-text-handler-clause", _CLAUSE_PRELUDE,
+     "match R { R -> handle[State<Int>](@Int = 0) "
+     "{ put(@Int) -> resume(()) } in { true } }",
+     "match R { R -> handle[State<Int>](@Int = 0) "
+     "{ put(@Int) -> resume(()) } in { true } }"),
 )
 
 
@@ -1381,6 +1434,12 @@ def test_cell_key_discriminates_every_shape_the_checker_does(
     one host cell.  Asserting `key_eq == ast_eq` rather than `key_eq is
     False` is what makes this a differential: it fails equally if the key
     ever over-separates.
+
+    Both directions are LIVE, which took saying: while every row had two
+    different sides, the equality half was vacuous and a key returning a
+    fresh `id()` per call would have passed the lot.  The `same-text-*`
+    rows parse one text twice, so the two predicates are dataclass-equal
+    objects with different spans and identities.
     """
     from vera.types import INT, RefinedType, structural_type_key
 
@@ -1392,6 +1451,42 @@ def test_cell_key_discriminates_every_shape_the_checker_does(
     assert key_eq == ast_eq, (
         f"{label}: the checker holds these {'equal' if ast_eq else 'apart'} "
         f"and the cell key does not"
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "prelude", "left", "right"), _STRUCTURE_PAIRS[-3:],
+    ids=[p[0] for p in _STRUCTURE_PAIRS[-3:]],
+)
+def test_the_key_ignores_where_the_predicate_was_written(
+    label: str, prelude: str, left: str, right: str,
+) -> None:
+    """Equality survives a change of SOURCE POSITION (PR #1238 review).
+
+    The `same-text-*` rows above parse one text twice, which catches an
+    identity or a counter leaking into the key — but not a SPAN, because
+    two parses of the same source put the predicate at the same line and
+    column.  Here the second parse is displaced by padding the prelude, so
+    the two predicates are dataclass-equal with different spans.
+
+    `ast.Node.span` is `compare=False`, so the checker holds them equal and
+    two such refinement aliases are one cell.  A key that reached for a
+    span would split that cell — and every alias-spelling collapse this
+    file pins would come apart with it, silently, since a split family is
+    only visible in a value.
+    """
+    from vera.types import INT, RefinedType, structural_type_key
+
+    here = _probe_predicate(left, prelude)
+    displaced = _probe_predicate(right, "-- padding\n\n\n" + prelude)
+    assert here == displaced, f"{label}: the fixture itself is not equal"
+    assert (getattr(here, "span", None) is None
+            or here.span != displaced.span), (
+        f"{label}: the two parses share a span, so this proves nothing"
+    )
+    assert (structural_type_key(RefinedType(INT, here))
+            == structural_type_key(RefinedType(INT, displaced))), (
+        f"{label}: the key moved with the predicate's source position"
     )
 
 
