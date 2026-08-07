@@ -10,7 +10,6 @@ written-down expectation rather than silently re-baseline.
 
 from __future__ import annotations
 
-import pytest
 
 from vera import ast
 from vera.checker.core import TypeChecker
@@ -19,7 +18,6 @@ from vera.naming import (
     AliasEnv,
     alias_env_from_environment,
     family_name,
-    is_ref_spellable,
     refinement_binder_parts,
     slot_name,
     slot_ref_key,
@@ -412,27 +410,6 @@ def test_family_name_falls_back_when_there_is_no_nameable_family() -> None:
     assert _fam("Float") == "FALLBACK"  # removed alias -> unresolvable
     fn_te, env = _probe("@fn(Int -> Int) effects(pure)")
     assert family_name(fn_te, env, "FALLBACK") == "FALLBACK"
-
-
-# =====================================================================
-# Spellability
-# =====================================================================
-
-@pytest.mark.parametrize("name", [
-    "Int", "MyAlias", "Fn", "Option<Int>", "Map<Int, Option<Int>>",
-    "Array<Option<Tuple<Int, Bool>>>", "Vera_Thing2",
-])
-def test_spellable_names(name: str) -> None:
-    assert is_ref_spellable(name)
-
-
-@pytest.mark.parametrize("name", [
-    "?", "", "Option<?>", "{@Int | ...}", "Option<{@Int | ...}>",
-    "fn(Int -> Int) effects(pure)", "Option<fn(Int -> Int) effects(pure)>",
-    "lower", "Option<Int", "Option<Int>>", "Option<Int,Bool>",
-])
-def test_unspellable_names(name: str) -> None:
-    assert not is_ref_spellable(name)
 
 
 # =====================================================================

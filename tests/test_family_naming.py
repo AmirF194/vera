@@ -367,23 +367,178 @@ public fn main(@Unit -> @Int)
 }
 """
 
+# The #1219 flip made observable: a callee declares the cell by its RESOLVED
+# spelling, the handler by the alias.  Pre-flip those were two families, so
+# the callee's `put` landed in a cell nothing read and `main` returned the
+# handler's initial `0 - 1`; post-flip they are one cell and it returns 5.
+_MIXED_FN_CELL = """\
+type Handler = Option<fn(Int -> Int) effects(pure)>;
 
-def test_unmanglable_resolution_keeps_the_opaque_spelling(
+private fn stash(@Unit -> @Unit)
+  requires(true)
+  ensures(true)
+  effects(<State<Option<fn(Int -> Int) effects(pure)>>>)
+{
+  put(Some(fn(@Int -> @Int) effects(pure) { @Int.0 + 1 }))
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Handler>](@Handler = None) {
+    get(@Unit) -> { resume(@Handler.0) },
+    put(@Handler) -> { resume(()) }
+  } in {
+    stash(());
+    match get(()) {
+      Some(@Fn) -> 5,
+      None -> 0 - 1
+    }
+  }
+}
+"""
+
+# The elision the spellability gate had been masking.  `Option<Pos>` and
+# `Option<Neg>` are two checker instances, and both render
+# `Option<{@Int | ...}>` through `pretty_type` — so dropping the gate
+# WITHOUT moving to the structural key would have merged them.
+_TWO_REFINED_ARG_CELLS = """\
+type Pos = { @Int | @Int.0 > 0 };
+type Neg = { @Int | @Int.0 < 0 };
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Option<Pos>>](@Option<Pos> = None) {
+    put(@Option<Pos>) -> { resume(()) }
+  } in {
+    handle[State<Option<Neg>>](@Option<Neg> = None) {
+      put(@Option<Neg>) -> { resume(()) }
+    } in {
+      0
+    };
+    0
+  }
+}
+"""
+
+
+def test_fn_type_composite_cell_takes_its_resolved_family(
     tmp_path: Path,
 ) -> None:
-    """A cell whose resolution renders outside the canonical grammar does
-    NOT take the resolved name.
+    """A cell whose resolution carries a function type DOES take it (#1219).
 
-    ``Option<fn(Int) -> Int>`` renders with parentheses, which are not WAT
-    identifier characters and which ``mangle_type_name`` does not escape —
-    emitting it produced an import name the WAT parser rejects, so the
-    module could not even be instantiated.  ``family_name`` gates on
-    :func:`vera.naming.is_ref_spellable` and keeps ``Handler``: a family
-    that stays split is recoverable, an unparseable module is not.
+    ``Option<fn(Int -> Int) effects(pure)>`` renders with parentheses and an
+    arrow, which the pre-#1219 escape did not cover — emitting it produced
+    an import name the WAT parser rejects, so ``family_name`` gated on the
+    spellable ``Head<arg, arg>`` grammar and kept the alias-opaque
+    ``Handler``.  With the mangler total, the resolved rendering IS the
+    family and the symbol is its mangling: the ``_U28_``/``_U29_`` are the
+    parentheses, ``_U2d__R`` the arrow.
     """
     result = _compile_ok(_NESTED_FN_CELL, tmp_path)
-    assert _STATE_GET_RE.findall(result.wat) == ["state_get_Handler"]
+    assert _STATE_GET_RE.findall(result.wat) == [
+        "state_get_Option_Lfn_U28_Int_S_U2d__R_SInt_U29__Seffects"
+        "_U28_pure_U29__R"
+    ]
     assert execute(result).value == 0
+
+
+def test_mixed_spelling_fn_type_cell_is_one_cell(tmp_path: Path) -> None:
+    """The alias and its resolution name ONE cell, proved by the value.
+
+    ``0 - 1`` is what a split family produces — the handler's ``None``
+    survives because ``stash``'s ``put`` went to a second cell — and ``5``
+    is reachable only when the handler's ``get`` observes the ``Some`` the
+    differently-spelled callee wrote.  This is the run-level half of #1219:
+    the symbol assertion above says the two names agree, this says the two
+    SITES do.  Neither outcome is a zero default.
+    """
+    result = _compile_ok(_MIXED_FN_CELL, tmp_path)
+    assert len(set(_STATE_GET_RE.findall(result.wat))) == 1, result.wat[:600]
+    assert execute(result).value == 5
+
+
+_BARE_FN_CELL = """\
+type F = fn(Int -> Int) effects(pure);
+
+public fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<F>](@F = fn(@Int -> @Int) effects(pure) { @Int.0 + 1 }) {
+    get(@Unit) -> { resume(@F.0) },
+    put(@F) -> { resume(()) }
+  } in {
+    apply_fn(get(()), 41)
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(())
+}
+"""
+
+
+def test_bare_fn_type_cell_still_takes_the_fallback_and_is_refused(
+    tmp_path: Path,
+) -> None:
+    """What is LEFT for ``family_fallback_name`` after #1219, pinned.
+
+    #1219 removed the mangle-safety gate, not the fallback: a type
+    expression whose resolution IS a bare function type has no cell type to
+    name at all, so ``family_name`` returns the fallback and the cell keeps
+    its alias-opaque spelling — ``F``, never ``fn(Int -> Int)
+    effects(pure)``.  The other survivor is an unresolvable type expression
+    (a removed alias, an alias applied at the wrong arity), which renders
+    ``?``; keeping the spelling there stops two unrelated broken cells from
+    merging onto one ``?`` family.
+
+    Inert either way, and this pins that too: the shape is refused
+    downstream, the enclosing function dropped loudly (E616 for the closure
+    read, then E602/E620), so the fallback name reaches an import
+    declaration and nothing that calls it.  Splitting it is therefore free,
+    and merging it would be the only thing with a cost.
+
+    Promoted from ``tests/probes/state_handlers/alias_families/
+    p7_fn_alias_state_arg.vera``, which asked this question and was deleted
+    with the #1219 disposition.
+    """
+    result = _compile_source(_BARE_FN_CELL, tmp_path)
+    assert _families(result.wat) == {
+        "state_get_F", "state_put_F", "state_push_F", "state_pop_F",
+    }, result.wat[:400]
+    codes = {d.error_code for d in result.diagnostics}
+    assert {"E602", "E620"} <= codes, codes
+    assert "(func $probe" not in result.wat
+    assert "(func $main" not in result.wat
+
+
+def test_two_refinements_of_one_base_in_argument_position_stay_apart(
+    tmp_path: Path,
+) -> None:
+    """Dropping the gate must not merge what ``pretty_type`` elides (#1219).
+
+    ``Option<Pos>`` and ``Option<Neg>`` are two checker instances that
+    ``pretty_type`` renders identically (``Option<{@Int | ...}>``), because
+    a refinement in argument position prints its predicate as ``...``.  The
+    spellability gate refused that rendering and both cells fell back to
+    their alias spellings, so the elision never reached a symbol; removing
+    the gate without moving to the structural key would have merged them.
+    Two families here is the assertion that the move happened.
+    """
+    result = _compile_ok(_TWO_REFINED_ARG_CELLS, tmp_path)
+    families = set(_STATE_GET_RE.findall(result.wat))
+    assert len(families) == 2, families
 
 
 # =====================================================================

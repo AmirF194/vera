@@ -11,7 +11,8 @@ own shapes into `tests/conformance/` with manifest entries and deletes
 the probes it dispositioned.
 
 The slot-naming and cell-family shapes ([#1208](https://github.com/aallan/vera/issues/1208),
-[#1209](https://github.com/aallan/vera/issues/1209)) have been through
+[#1209](https://github.com/aallan/vera/issues/1209),
+[#1219](https://github.com/aallan/vera/issues/1219)) have been through
 that cycle: they live in `tests/conformance/` as the `ch03_slot_alias_*`,
 `ch07_state_*alias*`, `ch07_exn_*alias*` and `ch08_state_alias_*`
 programs, plus the `ch02_alias_cycle_rejected` negative.  So have the
@@ -30,9 +31,8 @@ differential in `tests/test_nested_handler_clause_ops.py`,
 **Not wired into CI.** These are probe programs, not curated fixtures:
 some deliberately fail (`check`, `verify`, or `run`) to demonstrate a
 defect that is now fixed, some pin the open issues [#1207](https://github.com/aallan/vera/issues/1207),
-[#1212](https://github.com/aallan/vera/issues/1212),
-[#1218](https://github.com/aallan/vera/issues/1218) and
-[#1219](https://github.com/aallan/vera/issues/1219), and some were
+[#1212](https://github.com/aallan/vera/issues/1212) and
+[#1218](https://github.com/aallan/vera/issues/1218), and some were
 superseded mid-round.  Two are **parse-broken** and flagged as such in
 the index below — they belong to the PRs that close their issues, and
 are counted by the differential sweep's `parse_skipped` allowance.  Each
@@ -70,7 +70,7 @@ comment; headerless files are summarised from the program itself.  Origin
 is the review-round directory the file lived in before the
 purpose-directory reorganisation.
 
-### alias_families/ (19 files)
+### alias_families/ (18 files)
 
 | File | What it probes | Origin |
 |---|---|---|
@@ -89,7 +89,6 @@ purpose-directory reorganisation.
 | `p2b_family_nested_alias_canonrefs.vera` | Same cell, refs spelled `Id<Nat>` (the both-sides key) — isolates the family-name/WASM-type question | round3_naming |
 | `p2c_family_param_alias_control.vera` | `State<Id<Nat>>` single application — the commit's headline fixed case, must run to 7 | round3_naming |
 | `p3b_byte_direct.vera` | Plain `State<Byte>` put/get roundtrip from a fn param — Byte width control | round2_family |
-| `p7_fn_alias_state_arg.vera` | FnType-bodied alias as the State type argument — alias resolution returns None, opaque family fallback | round3_naming |
 | `p9_refined_state_minimal.vera` | Minimal `State<refined alias>` — does it compile at all? | round2_family |
 | `p_byte.vera` | `State<Byte>` fed via `int_to_byte` conversions — Byte roundtrip without bare int literals | session |
 | `xmod_lib2.vera` | Module fixture: `bump()` declaring plain `<State<Nat>>` effects (support for p10) | round3_naming |

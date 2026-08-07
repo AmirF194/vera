@@ -1,0 +1,33 @@
+-- Conformance: a cell whose resolution carries a FUNCTION TYPE is named by
+-- that resolution (Chapter 7, Section 7.5).  Tests: a helper declares its
+-- effect `<State<Option<fn(Int -> Int) effects(pure)>>>` while the handler
+-- around it spells `handle[State<Handler>]` over the alias — one cell, so
+-- the helper's `put` is visible to the handler's `get` (#1219).  The value
+-- is the discriminator: a split family leaves the handler reading its own
+-- untouched `None` and the program returns -1 instead of 5.
+type Handler = Option<fn(Int -> Int) effects(pure)>;
+
+private fn install(@Unit -> @Unit)
+  requires(true)
+  ensures(true)
+  effects(<State<Option<fn(Int -> Int) effects(pure)>>>)
+{
+  put(Some(fn(@Int -> @Int) effects(pure) { @Int.0 + 1 }))
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 5)
+  effects(pure)
+{
+  handle[State<Handler>](@Handler = None) {
+    get(@Unit) -> { resume(@Handler.0) },
+    put(@Handler) -> { resume(()) }
+  } in {
+    install(());
+    match get(()) {
+      Some(@Fn) -> 5,
+      None -> 0 - 1
+    }
+  }
+}
