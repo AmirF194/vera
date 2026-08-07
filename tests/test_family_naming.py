@@ -437,23 +437,28 @@ def test_family_symbols_are_stable(rel: str, expected: frozenset[str]) -> None:
 # (7) The measured radius: every corpus file the flip moved
 # =====================================================================
 
-# The whole `.vera` corpus (examples, conformance, the PR #1202 probe corpus
-# — 510 files) was captured before and after: `vera check --json` for every
-# program, `vera run` for every probe, and the emitted `state_*` / `exn_*`
-# symbols for everything that compiles.  SIX files differ, all in
-# `tests/probes/state_handlers/alias_families/`, in two classes:
+# The whole `.vera` corpus (examples, conformance, the PR #1202 probe corpus)
+# was captured before and after: `vera check --json` for every program,
+# `vera run` for every probe, and the emitted `state_*` / `exn_*` symbols for
+# everything that compiles.  SIX shapes differ, in two classes:
 #
 #   (a) two spellings of one cell now SHARE it, so the program computes a
 #       different — and correct — value;
 #   (b) the family symbol RENAMES from the source spelling to the resolved
 #       cell (and, where both spellings appear, two families become one).
 #
-# No `check` diagnostic moved anywhere, and no example or conformance
-# program is touched.  Pinning the whole set (not a sample) is what makes
-# "something else also moved" a finding rather than noise.
-_C8_DIVERGENT: tuple[tuple[str, int | str, frozenset[str], str], ...] = (
+# No `check` diagnostic moved anywhere.  Pinning the whole set (not a sample)
+# is what makes "something else also moved" a finding rather than noise.
+#
+# Each shape was measured on a probe program and now lives in the conformance
+# suite, which is where the promotion put it; the entry point named here is
+# the one whose value the probe pinned, so the assertions are the measured
+# ones and not a re-baseline.
+_C8_DIVERGENT: tuple[
+    tuple[str, str | None, int | str, frozenset[str], str], ...
+] = (
     (
-        "f1_cross_spelling.vera", 7, frozenset({
+        "ch07_state_composite_alias_cross_spelling.vera", None, 7, frozenset({
             "state_get_Option_LInt_R", "state_put_Option_LInt_R",
             "state_push_Option_LInt_R", "state_pop_Option_LInt_R"}),
         "(a)+(b) `State<MaybeInt>` handler around a `State<Option<Int>>` "
@@ -461,20 +466,20 @@ _C8_DIVERGENT: tuple[tuple[str, int | str, frozenset[str], str], ...] = (
         "program goes -1 -> 7 — the callee's write is now visible",
     ),
     (
-        "p7c_composite_alias.vera", 3, frozenset({
+        "ch07_state_composite_alias.vera", "roundtrip", 3, frozenset({
             "state_get_Option_LInt_R", "state_put_Option_LInt_R",
             "state_push_Option_LInt_R", "state_pop_Option_LInt_R"}),
         "(b) `state_*_MaybeInt` -> `state_*_Option_LInt_R`; single spelling, "
         "so the value is unchanged",
     ),
     (
-        "p9_composite.vera", 42, frozenset({
+        "ch07_state_composite_alias.vera", "put_then_read", 42, frozenset({
             "state_get_Option_LInt_R", "state_put_Option_LInt_R",
             "state_push_Option_LInt_R", "state_pop_Option_LInt_R"}),
         "(b) the same rename with a `match get(())` scrutinee",
     ),
     (
-        "p11_xmod_alias_collision.vera", 16, frozenset({
+        "ch08_state_alias_per_module.vera", None, 16, frozenset({
             "state_get_Nat", "state_put_Nat",
             "state_push_Nat", "state_pop_Nat",
             "state_get_Option_LInt_R", "state_put_Option_LInt_R",
@@ -484,47 +489,51 @@ _C8_DIVERGENT: tuple[tuple[str, int | str, frozenset[str], str], ...] = (
         "`Hid<Int>` to `Option<Int>`: each resolved in ITS OWN namespace",
     ),
     (
-        "p8_exn_string.vera", "caught: negative", frozenset({"exn_String"}),
+        "ch07_exn_string_alias.vera", "catch_text", "caught: negative",
+        frozenset({"exn_String"}),
         "(b) `exn_Name` -> `exn_String` for `type Name = String`; the "
         "two-i32 payload still arrives intact",
     ),
     (
-        "x1_exn_string_alias.vera", 3, frozenset({"exn_String"}),
+        "ch07_exn_string_alias.vera", "catch_length", 3,
+        frozenset({"exn_String"}),
         "(b) `exn_Msg` -> `exn_String`, same pair payload through "
         "`string_length`",
     ),
 )
 
-_PROBES = _ROOT / "tests" / "probes" / "state_handlers" / "alias_families"
+_CONFORMANCE = _ROOT / "tests" / "conformance"
 
 
 @pytest.mark.parametrize(
-    ("rel", "expected", "families", "why"),
+    ("rel", "fn", "expected", "families", "why"),
     _C8_DIVERGENT,
-    ids=[d[0] for d in _C8_DIVERGENT],
+    ids=[f"{d[0]}::{d[1] or 'main'}" for d in _C8_DIVERGENT],
 )
 def test_moved_corpus_file_lands_where_it_was_measured(
-    rel: str, expected: int | str, families: frozenset[str], why: str,
+    rel: str, fn: str | None, expected: int | str, families: frozenset[str],
+    why: str,
 ) -> None:
-    """Each file the flip moved, at the symbols AND the value it moved to.
+    """Each shape the flip moved, at the symbols AND the value it moved to.
 
     Asserting the value as well as the symbol set is what separates "the
     families collapsed" from "the families collapsed onto the right cell":
     a merge into the WRONG family also produces one symbol set.
     """
-    result = _compile_path(_PROBES / rel)
+    result = _compile_path(_CONFORMANCE / rel)
     hard = [d for d in result.diagnostics if d.severity == "error"]
     assert not hard, (
         f"{rel} should compile clean — {why}\n"
         f"got: {[(d.error_code, d.description[:90]) for d in hard]}"
     )
     assert _families(result.wat) == set(families), why
-    assert execute(result).value == expected, why
+    ran = execute(result) if fn is None else execute(result, fn_name=fn)
+    assert ran.value == expected, why
 
 
 def test_moved_set_is_exactly_this_size() -> None:
     """The pinned set is the WHOLE measured radius, not a sample."""
     assert len(_C8_DIVERGENT) == 6
-    assert len({d[0] for d in _C8_DIVERGENT}) == 6
+    assert len({(d[0], d[1]) for d in _C8_DIVERGENT}) == 6
     for rel, *_ in _C8_DIVERGENT:
-        assert (_PROBES / rel).is_file(), rel
+        assert (_CONFORMANCE / rel).is_file(), rel

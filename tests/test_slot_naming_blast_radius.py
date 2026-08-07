@@ -9,22 +9,23 @@ checker renders.  What changed is WHO renders, and this file pins what that
 moved.
 
 The whole `.vera` corpus (examples, conformance programs, the PR #1202 probe
-corpus — 510 files) was captured before and after: ``vera check --json``
-diagnostics for every program, plus ``vera run`` for every probe.  SIX files
-differ, all in ``tests/probes/``, all one class:
+corpus) was captured before and after: ``vera check --json`` diagnostics for
+every program, plus ``vera run`` for every probe.  SIX shapes differ, all one
+class:
 
     (a) a program that died with a dangling-slot ``[E699]`` now resolves and
         runs, with the value the CHECKER's binding rule gives.
 
 No ``check`` diagnostic moved anywhere in the corpus — the checker was already
 delegating (commit 1ae8b368), so its answers were the fixed point the others
-moved onto.  No example and no conformance program is affected: the shapes
-that diverged need an alias in TYPE-ARGUMENT position, which the probe corpus
-was written to reach and the rest of the corpus does not contain.
+moved onto.  Every one of the six needs an alias in TYPE-ARGUMENT position,
+which only the probe corpus reached at the time of the capture; each has since
+been promoted into ``tests/conformance/``, and the entry points named below
+are the ones whose values the probes pinned.
 
 The tests below re-run only those six plus five sentinels.  A regression that
-re-splits the naming is caught here as a named file going back to ``[E699]``,
-not as a diffuse failure somewhere in the suite.
+re-splits the naming is caught here as a named program going back to
+``[E699]``, not as a diffuse failure somewhere in the suite.
 """
 
 from __future__ import annotations
@@ -40,7 +41,7 @@ from vera.resolver import ModuleResolver
 from vera.checker import typecheck_with_artifacts
 
 _ROOT = Path(__file__).resolve().parent.parent
-_PROBES = _ROOT / "tests" / "probes" / "state_handlers"
+_CONFORMANCE = _ROOT / "tests" / "conformance"
 
 
 # =====================================================================
@@ -53,35 +54,35 @@ _PROBES = _ROOT / "tests" / "probes" / "state_handlers"
 # otherwise.
 _DIVERGENT: tuple[tuple[str, str, tuple[int, ...], int, str], ...] = (
     (
-        "alias_families/p2_family_nested_alias.vera", "main", (), 7,
+        "ch07_state_nested_param_alias.vera", "main", (), 7,
         "(a) `State<Id<Id<Nat>>>`: the twice-applied alias cell dangled at "
-        "[E699]; now runs, and `main`'s own `ensures(@Int.result == 7)` is "
-        "the value oracle",
+        "[E699]; now runs, and the program's own `ensures(@Int.result == 7)` "
+        "is the value oracle",
     ),
     (
-        "alias_families/p_nested_app.vera", "go", (5,), 5,
+        "ch07_state_nested_param_alias.vera", "go", (5,), 5,
         "(a) the same nested application as a bare handler round-trip: "
         "[E699] -> the cell returns what was put",
     ),
     (
-        "clause_scoping/p1b_nested_alias_clause_value.vera", "main", (), 5,
+        "ch07_state_clause_alias_slots.vera", "nested_alias_reference", (), 5,
         "(a) pattern `@Option<Id<Id<Int>>>`, `with`-ref `@Option<Id<Int>>.0`: "
-        "[E699] -> 5, the STATE, which is what the file's header records the "
-        "checker as meaning (9 would be the put argument)",
+        "[E699] -> 5, the STATE, which is what the checker means (9 would be "
+        "the put argument)",
     ),
     (
-        "clause_scoping/p1d_single_alias_ref.vera", "main", (), 5,
-        "(a) an alias-SPELLED reference to a canonically-spelled binding: "
-        "[E699] -> 5, the value the file's header predicted for the checker",
+        "ch07_state_clause_alias_slots.vera", "alias_in_reference", (), 5,
+        "(a) an alias-SPELLED clause pattern read by a canonically-spelled "
+        "reference: [E699] -> 5, the value predicted for the checker",
     ),
     (
-        "clause_scoping/p4b_alias_arg_pattern.vera", "main", (), 100,
+        "ch07_state_clause_alias_slots.vera", "alias_in_pattern", (), 100,
         "(a) alias inside a composite clause pattern: [E699] -> 100, the "
-        "STATE (bound last, so index 0), per the file's header; codegen's old "
-        "separate stack would have given the put argument 7",
+        "STATE (bound last, so index 0); codegen's old separate stack would "
+        "have given the put argument 7",
     ),
     (
-        "clause_scoping/p4e_fn_param_baseline.vera", "main", (), 5,
+        "ch03_slot_alias_type_argument.vera", "read_some", (), 5,
         "(a) the same split on an ordinary fn parameter, no handler: a "
         "parameter written `@Option<Cnt>` read as `@Option<Int>.0` was "
         "[E699]; `--explain-slots` names that parameter `@Option<Int>` and it "
@@ -124,7 +125,7 @@ def _compile_file(path: Path) -> object:
 @pytest.mark.parametrize(
     ("rel", "fn", "args", "expected", "why"),
     _DIVERGENT,
-    ids=[d[0] for d in _DIVERGENT],
+    ids=[f"{d[0]}::{d[1]}" for d in _DIVERGENT],
 )
 def test_divergent_file_now_runs_with_the_checkers_semantics(
     rel: str, fn: str, args: tuple[int, ...], expected: int, why: str,
@@ -137,7 +138,7 @@ def test_divergent_file_now_runs_with_the_checkers_semantics(
     is asserted, not merely the absence of the error — a program that
     resolves to the WRONG member of a merged class also stops dangling.
     """
-    result = _compile_file(_PROBES / rel)
+    result = _compile_file(_CONFORMANCE / rel)
     hard = [d for d in result.diagnostics if d.severity == "error"]
     assert not hard, (
         f"{rel} should compile clean now — {why}\n"
@@ -154,9 +155,9 @@ def test_divergent_set_is_exactly_this_size() -> None:
     the set is that "something else also moved" is a finding, not noise.
     """
     assert len(_DIVERGENT) == 6
-    assert len({d[0] for d in _DIVERGENT}) == 6
+    assert len({(d[0], d[1]) for d in _DIVERGENT}) == 6
     for rel, *_ in _DIVERGENT:
-        assert (_PROBES / rel).is_file(), rel
+        assert (_CONFORMANCE / rel).is_file(), rel
 
 
 @pytest.mark.parametrize("rel", _SENTINELS)
@@ -181,22 +182,25 @@ def test_explain_slots_names_the_merged_parameter_stack() -> None:
     """``--explain-slots`` is the user-facing oracle for the merge, and it
     reports the checker's names (#1208).
 
-    ``p4e_fn_param_baseline`` is the corpus's only SIGNATURE-level rename: a
-    parameter written ``@Option<Cnt>`` under ``type Cnt = Int``.  The table
-    must name it ``Option<Int>`` — the key the body's ``@Option<Int>.0``
-    looks up and the key codegen now binds — because a table that still said
-    ``Option<Cnt>`` would be telling the user something no consumer agrees
-    with, which is how this bug class stayed invisible.
+    ``ch03_slot_alias_type_argument`` carries the corpus's SIGNATURE-level
+    rename: a parameter written ``@Option<Cnt>`` under ``type Cnt = Int``,
+    beside one written ``@Cnt``.  The table must name the first
+    ``Option<Int>`` — the key the body's ``@Option<Int>.0`` looks up and the
+    key codegen now binds — while the second stays the opaque ``Cnt``, because
+    a table that said ``Option<Cnt>`` (or resolved the head to ``Int``) would
+    be telling the user something no consumer agrees with, which is how this
+    bug class stayed invisible.
     """
     from vera.naming import alias_env_from_declarations
     from vera.slots import slot_table
 
-    path = _PROBES / "clause_scoping/p4e_fn_param_baseline.vera"
+    path = _CONFORMANCE / "ch03_slot_alias_type_argument.vera"
     program = parse_to_ast(path.read_text(encoding="utf-8"))
     env = alias_env_from_declarations(program.declarations)
     fn = next(t.decl for t in program.declarations
-              if getattr(t.decl, "name", None) == "f")
-    assert slot_table(fn.params, env, fn.forall_vars) == {"Option<Int>": [1]}
+              if getattr(t.decl, "name", None) == "unwrap")
+    assert slot_table(fn.params, env, fn.forall_vars) == {
+        "Option<Int>": [1], "Cnt": [2]}
 
 
 # =====================================================================

@@ -1,0 +1,17 @@
+-- Conformance NEGATIVE: a cyclic type alias is a check-time error (Chapter
+-- 2).  Tests: `type A = B; type B = A;` has no terminating resolution, so
+-- E132 rejects the declaration instead of letting a naming or resolution
+-- walk loop on it.  Alias visibility follows DECLARATION ORDER — an alias
+-- body sees only the aliases declared before it — so the second declaration
+-- is what closes the cycle and is where the diagnostic lands.
+type A = B;
+
+type B = A;
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  0
+}

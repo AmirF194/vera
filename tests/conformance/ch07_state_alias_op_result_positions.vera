@@ -1,0 +1,63 @@
+-- Conformance: an effect op's result type under an ALIAS cell (Chapter 7,
+-- Section 7.5).  Tests: `get(())` on a `State<Count>` cell with
+-- `type Count = Nat` is typed by the resolved family, so its i64 result
+-- lands correctly in the three positions that read the operand stack
+-- directly — an array-literal element, an equality operand, and a match
+-- scrutinee.  A result typed from the SOURCE alias spelling has no known
+-- width at these sites (#1205/#1209).
+type Count = Nat;
+
+private fn as_array_element(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Count>](@Count = 21) {
+    get(@Unit) -> { resume(@Count.0) },
+    put(@Count) -> { resume(()) }
+  } in {
+    let @Array<Nat> = [get(()), get(())];
+    nat_to_int(@Array<Nat>.0[0] + @Array<Nat>.0[1])
+  }
+}
+
+private fn as_equality_operand(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Count>](@Count = 5) {
+    get(@Unit) -> { resume(@Count.0) },
+    put(@Count) -> { resume(()) }
+  } in {
+    if get(()) == get(()) then {
+      1
+    } else {
+      0
+    }
+  }
+}
+
+private fn as_match_scrutinee(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Count>](@Count = 2) {
+    get(@Unit) -> { resume(@Count.0) },
+    put(@Count) -> { resume(()) }
+  } in {
+    match get(()) {
+      2 -> 222,
+      _ -> 0 - 1
+    }
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 0)
+  effects(pure)
+{
+  as_array_element(()) - 42 + (as_equality_operand(()) - 1) + (as_match_scrutinee(()) - 222)
+}
