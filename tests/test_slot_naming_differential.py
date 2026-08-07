@@ -58,6 +58,7 @@ import pytest
 
 from vera import ast, naming
 from vera.checker.core import TypeChecker
+from vera.errors import VeraError
 from vera.parser import parse_to_ast
 from vera.types import canonical_type_name
 
@@ -122,6 +123,11 @@ class Sweep:
     observations: list[Observation] = field(default_factory=list)
     parse_skipped: list[str] = field(default_factory=list)
     files_seen: list[str] = field(default_factory=list)
+    #: Programs whose CHECK raised a `VeraError` instead of reporting
+    #: diagnostics.  Recorded rather than silently swallowed: a swallowed
+    #: raise makes the entry contribute nothing, and an entry that
+    #: contributes nothing is indistinguishable from an entry that agrees.
+    check_raised: list[tuple[str, str]] = field(default_factory=list)
 
     @property
     def divergences(self) -> list[Observation]:
@@ -134,6 +140,22 @@ class Sweep:
     @property
     def alias_in_arg(self) -> list[Observation]:
         return [o for o in self.observations if o.alias_in_arg]
+
+    @property
+    def corpus(self) -> list[Observation]:
+        """Observations from real ``.vera`` files, excluding the battery.
+
+        The floors below are about the CORPUS not decaying; counted over
+        everything, adding a battery entry would let a corpus that stopped
+        reaching a corner still clear its floor.
+        """
+        return [o for o in self.observations
+                if not o.origin.startswith("<battery:")]
+
+    @property
+    def battery(self) -> list[Observation]:
+        return [o for o in self.observations
+                if o.origin.startswith("<battery:")]
 
 
 def _mentions_alias(
@@ -242,8 +264,18 @@ def _sweep_source(origin: str, source: str, sweep: Sweep) -> None:
         return
     checker = TypeChecker(source=source, file=origin)
     with _record(origin, sweep):
-        with contextlib.suppress(Exception):
+        try:
             checker.check_program(program)
+        except VeraError as exc:
+            # A `VeraError` is the checker's own diagnostic-carrying family,
+            # so a malformed program raising one is a program-level failure
+            # and the observations recorded before it still count.  Anything
+            # else — a `RecursionError`, a `KeyError` — is a COMPILER bug and
+            # must surface: the blanket `contextlib.suppress(Exception)` this
+            # replaces swallowed exactly that, and a battery entry that
+            # self-destructs before it is observed is silently inert (#1208
+            # review).  Recorded either way, and floored below.
+            sweep.check_raised.append((origin, type(exc).__name__))
 
 
 # =====================================================================
@@ -405,8 +437,23 @@ public forall<T> fn b15(@Option<T>, @Wrap<T> -> @Int)
   1
 }
 """),
-    ("cycle_and_forward_refs", """\
-public fn b16(@Option<Cyc1>, @Option<Fwd>, @Option<Later> -> @Int)
+    # SPLIT from one entry (#1208 review): a single program carrying both
+    # corners is a single point of failure — under an alias-visibility mutant
+    # the cycle blew the stack and took the forward-reference observations
+    # down with it, leaving the entry silently inert.  Two programs fail
+    # independently, and `test_inline_battery_reaches_the_alias_corners`
+    # asserts each one's RENDERED NAME rather than a count.
+    ("alias_cycle", """\
+public fn b16(@Option<Cyc1>, @Option<Cyc2> -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  1
+}
+"""),
+    ("forward_reference", """\
+public fn b16b(@Option<Fwd>, @Option<Later> -> @Int)
   requires(true)
   ensures(true)
   effects(pure)
@@ -560,6 +607,26 @@ where {
     # pinned: it is the one every naming consumer keyed off, and codegen's
     # differing view of the same spelling is a separate, checker-level gap (see
     # `test_prelude_alias_split_is_a_checker_level_gap`).
+    # The effect-row corners of the argument-position rendering (#1208
+    # review): a QUALIFIED effect reference (`Module.Effect`, the
+    # `qualified_effect_ref` grammar rule) and an effect ROW VARIABLE, both
+    # inside a function type in argument position — where the whole
+    # `fn(...) effects(...)` spelling is what gets rendered, sorted.  Both
+    # branches of `_resolve_effect_row` were zero-covered by the corpus.
+    ("effect_row_corners_in_arg", """\
+public forall<E> fn b26(
+  @Option<fn(MyAlias -> Int) effects(<Log.Write>)>,
+  @Option<fn(MyAlias -> Int) effects(<E>)>,
+  @Option<fn(Txt -> Int) effects(<E, Log.Write, IO>)>,
+  @Array<fn(Count -> Bool) effects(<Log.Write>)>
+  -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  1
+}
+"""),
     ("prelude_alias_in_arg", """\
 public fn b25(
   @Option<ArrayMapFn<Int, Bool>>,
@@ -658,7 +725,17 @@ def test_corpus_sweep_is_not_vacuous(sweep: Sweep) -> None:
     """
     assert len(sweep.observations) > 2000, len(sweep.observations)
     assert len(sweep.with_aliases) > 200, len(sweep.with_aliases)
-    assert len(sweep.alias_in_arg) >= 40, len(sweep.alias_in_arg)
+    # CORPUS-ONLY (#1208 review): counted over everything, growing the inline
+    # battery would let the real `.vera` corpus stop reaching this corner and
+    # still clear the floor — the floor would then be measuring the battery,
+    # which the battery's own reach test already floors at 40.  Separating
+    # the populations exposed that the corpus contributes 34 of the combined
+    # count, not the 40 the old shared floor implied; the number below is the
+    # measured corpus, with headroom, and the way to raise it is to add a
+    # `.vera` program that names an alias in argument position — extending
+    # the battery deliberately does NOT move it any more.
+    corpus_alias_in_arg = [o for o in sweep.corpus if o.alias_in_arg]
+    assert len(corpus_alias_in_arg) >= 30, len(corpus_alias_in_arg)
     # Both entry points must actually be exercised — `_slot_ref_key` routes
     # through `_slot_type_name`, so this is also the reference-side cover.
     entries = {o.entry for o in sweep.observations}
@@ -671,10 +748,23 @@ def test_corpus_is_almost_entirely_parseable(sweep: Sweep) -> None:
     assert len(sweep.parse_skipped) <= 10, sweep.parse_skipped
 
 
+def test_no_program_raises_out_of_the_check(sweep: Sweep) -> None:
+    """A swept program that RAISES contributes nothing after that point.
+
+    Non-`VeraError` exceptions now propagate and fail the sweep outright — a
+    compiler bug must not read as agreement.  A `VeraError` is still absorbed
+    (the observations before it stand), but it is recorded here so the count
+    cannot drift upward unnoticed: an entry that stops being observed is
+    indistinguishable from an entry that agrees.  Currently zero across the
+    whole corpus and battery; raise this deliberately if a program is ever
+    added that legitimately raises one.
+    """
+    assert not sweep.check_raised, sweep.check_raised
+
+
 def test_inline_battery_reaches_the_alias_corners(sweep: Sweep) -> None:
     """The battery is what pins the corners in place if the corpus drifts."""
-    battery = [o for o in sweep.observations
-               if o.origin.startswith("<battery:")]
+    battery = sweep.battery
     assert len(battery) > 100, len(battery)
     assert sum(1 for o in battery if o.alias_in_arg) >= 40
     # The corners themselves, by rendered shape.
@@ -684,6 +774,27 @@ def test_inline_battery_reaches_the_alias_corners(sweep: Sweep) -> None:
     assert "Fn" in rendered                    # function type at top level
     assert "Option<?>" in rendered             # arity mismatch / removed
     assert any(r.startswith("Option<fn(") for r in rendered)
+    # #1208 review: the two ORDERING corners named, not merely counted.  A
+    # battery entry that self-destructs (or is silently dropped) contributes
+    # no observations at all, which a count-based floor reads as agreement —
+    # so each corner asserts the exact string it must render.  `Cyc1`'s body
+    # sees only the declarations before it, so the cycle terminates on the
+    # opaque `Cyc2`; `Fwd`'s forward reference stays opaque as `Later`.
+    assert {"Option<Cyc2>", "Option<Later>"} <= rendered, sorted(rendered)
+    # The effect-row corners: a qualified reference keeps its `Module.Effect`
+    # spelling, a row VARIABLE renders as its name, and a row carrying both
+    # renders sorted.
+    assert "Option<fn(Int -> Int) effects(<Log.Write>)>" in rendered
+    assert "Option<fn(Int -> Int) effects(<E>)>" in rendered
+    assert any(
+        r.startswith("Option<fn(String -> Int) effects(<")
+        and "Log.Write" in r and "E" in r
+        for r in rendered
+    ), sorted(r for r in rendered if "effects" in r)
+    # The prelude-alias split, pinned on the CHECKER's side (see
+    # `TestPreludeAliasEnvAsymmetry` for why codegen's differs).
+    assert "Option<ArrayMapFn<Int, Bool>>" in rendered
+    assert "Option<fn(Int -> Bool) effects(pure)>" in rendered
     # #1208: the declaration-ORDER corner, in both directions.  An ADT
     # declared below the alias that names it is invisible to that body (the
     # built-in `Decimal` branch, arguments dropped; `?` for the removed

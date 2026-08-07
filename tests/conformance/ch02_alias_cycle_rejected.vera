@@ -1,9 +1,13 @@
 -- Conformance NEGATIVE: a cyclic type alias is a check-time error (Chapter
 -- 2).  Tests: `type A = B; type B = A;` has no terminating resolution, so
 -- E132 rejects the declaration instead of letting a naming or resolution
--- walk loop on it.  Alias visibility follows DECLARATION ORDER — an alias
--- body sees only the aliases declared before it — so the second declaration
--- is what closes the cycle and is where the diagnostic lands.
+-- walk loop on it.  The cycle is reported against the FIRST declaration
+-- (line 7, `type A = B;`): the checker's cycle detector walks the reference
+-- graph from each alias it registers and names the one it started from,
+-- `A -> B -> A`.  A naming walk, by contrast, resolves `A`'s body against
+-- only the aliases declared BEFORE it, so it terminates on the opaque `B`
+-- rather than looping — the two agree that this is rejected, and E132 is
+-- what the user sees.
 type A = B;
 
 type B = A;

@@ -191,7 +191,7 @@ def test_explain_slots_names_the_merged_parameter_stack() -> None:
     be telling the user something no consumer agrees with, which is how this
     bug class stayed invisible.
     """
-    from vera.naming import alias_env_from_declarations
+    from tests.naming_helpers import alias_env_from_declarations
     from vera.slots import slot_table
 
     path = _CONFORMANCE / "ch03_slot_alias_type_argument.vera"

@@ -550,6 +550,58 @@ class TestDefinition:
             "forall shadow was invisible and the two stacks merged"
         )
 
+    def test_where_helper_inherits_the_parents_forall_shadow(self) -> None:
+        """A helper INSIDE a generic parent is narrowed by the parent's vars.
+
+        `fn_scopes` accumulates rather than replaces — the checker saves and
+        restores ONE type-parameter map, so a `where` helper sees its parent's
+        `forall<T>` as well as its own.  With `type T = Int` also in scope, a
+        helper rendered against the bare module environment merges its two
+        `@Option` parameters into one stack and go-to-definition lands on
+        parameter 2 where the checker resolves parameter 1.
+
+        The CLI side of this shape is pinned
+        (`test_where_helper_inherits_the_parents_forall_vars`); this is its
+        LSP twin, added because dropping the accumulation in
+        `definition_at` survived the LSP suite while failing the CLI one
+        (#1208 review, M9) — one narrowing, two surfaces, and only one of
+        them was watching.
+        """
+        src = (
+            "type T = Int;\n"
+            "\n"
+            "public forall<T> fn outer(@Option<Int>, @Option<T> -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{\n"
+            "  helper(@Option<Int>.0, @Option<T>.0)\n"
+            "}\n"
+            "where {\n"
+            "  fn helper(@Option<Int>, @Option<T> -> @Int)\n"
+            "    requires(true) ensures(true) effects(pure)\n"
+            "  {\n"
+            "    match @Option<Int>.0 {\n"
+            "      Some(@Int) -> @Int.0,\n"
+            "      None -> 0 - 1\n"
+            "    }\n"
+            "  }\n"
+            "}\n"
+        )
+        a = analyze(VerificationSession(), "file:///where_shadow.vera", src)
+        # `@Option<Int>.0` inside the HELPER's body, line 12 (0-based 11).
+        loc = definition_at(a, lsp.Position(line=11, character=14))
+        assert loc is not None, (
+            "a helper's own parameter must be reachable from its body"
+        )
+        assert loc.range.start.line == 8, (
+            "must land on the helper's signature (line 9), not the parent's"
+        )
+        sig = "  fn helper("
+        assert loc.range.start.character == len(sig) + 1, (
+            "must land on the helper's parameter 1 (@Option<Int>); parameter "
+            "2 means the parent's forall shadow did not reach the helper and "
+            "its two stacks merged"
+        )
+
 
 class TestHoleCompletion:
     def test_completion_inside_hole_lists_bindings(self) -> None:

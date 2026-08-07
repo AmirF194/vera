@@ -733,7 +733,8 @@ class TestTesterUnitFunctions:
         nothing.  Contrasted against the alias-free environment, which is
         the answer a syntactic rebuild gives.
         """
-        from vera.naming import alias_env_from_declarations, EMPTY_ALIAS_ENV
+        from tests.naming_helpers import alias_env_from_declarations
+        from vera.naming import EMPTY_ALIAS_ENV
         from vera.parser import parse_to_ast
         from vera.tester import _type_expr_to_slot_name
         from vera import ast as vera_ast
@@ -826,7 +827,7 @@ class TestTesterUnitFunctions:
         dropped, so a mis-keyed variable produces unconstrained inputs rather
         than an error.
         """
-        from vera.naming import alias_env_from_declarations
+        from tests.naming_helpers import alias_env_from_declarations
         from vera.parser import parse_to_ast
         from vera.tester import _generate_inputs, _get_param_types
 
@@ -923,7 +924,7 @@ class TestTesterUnitFunctions:
         """
         import dataclasses
 
-        from vera.naming import alias_env_from_declarations
+        from tests.naming_helpers import alias_env_from_declarations
         from vera.parser import parse_to_ast
         from vera.tester import _get_param_types
         from vera.types import INT, TypeVar

@@ -567,7 +567,7 @@ class TestTesterSmtScope:
     """
 
     def test_smt_context_holds_the_narrowed_scope(self) -> None:
-        from vera import naming
+        from tests.naming_helpers import alias_env_from_declarations
         from vera.smt import SmtContext
         from vera.tester import _generate_inputs
         from vera.types import INT
@@ -588,7 +588,7 @@ public forall<T> fn f(@Int -> @Int)
             tld.decl for tld in prog.declarations
             if isinstance(tld.decl, ast.FnDecl)
         )
-        env = naming.alias_env_from_declarations(prog.declarations)
+        env = alias_env_from_declarations(prog.declarations)
         seen: list[object] = []
         original = SmtContext.__init__
 

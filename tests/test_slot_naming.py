@@ -17,7 +17,6 @@ from vera.checker.core import TypeChecker
 from vera.naming import (
     EMPTY_ALIAS_ENV,
     AliasEnv,
-    alias_env_from_declarations,
     alias_env_from_environment,
     family_name,
     is_ref_spellable,
@@ -28,6 +27,8 @@ from vera.naming import (
     with_type_params,
 )
 from vera.parser import parse_to_ast
+
+from tests.naming_helpers import alias_env_from_declarations
 
 # =====================================================================
 # Helpers

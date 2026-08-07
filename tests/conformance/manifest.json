@@ -2758,7 +2758,7 @@
     "file": "ch08_state_alias_per_module_lib.vera",
     "chapter": 8,
     "title": "Per-module alias table library (private Hid<T> = T)",
-    "level": "check",
+    "level": "verify",
     "spec_ref": "Section 8.4.1",
     "features": [
       "cross_module",
@@ -2787,7 +2787,7 @@
     "file": "ch08_state_alias_module_table_lib.vera",
     "chapter": 8,
     "title": "Same-name alias library (Count = Nat)",
-    "level": "check",
+    "level": "verify",
     "spec_ref": "Section 8.4.1",
     "features": [
       "cross_module",

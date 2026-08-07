@@ -17,13 +17,15 @@ The State/Exn cell FAMILY renders here too (:func:`family_name`, #1209):
 one cell per checker is one cell per codegen, so a composite alias joins
 the family its resolution names instead of minting a second one.
 
-One derivation deliberately stays behind, and it is about a type's
-REPRESENTATION rather than about naming anything:
-:func:`~vera.slots.type_expr_slot_name` still answers the alias-opaque
-syntactic spelling for the WASM width / erasure walks and the
-structural-``Eq`` derivability oracle.  It also supplies
-:func:`~vera.slots.family_fallback_name`, the name a family falls back on
-when its type expression has no nameable family at all.
+TWO derivations deliberately stay behind in :mod:`vera.slots`, and both are
+about a type's REPRESENTATION rather than about naming anything:
+:func:`~vera.slots.type_expr_slot_name` answers the alias-opaque syntactic
+spelling for the WASM width / erasure walks and the structural-``Eq``
+derivability oracle, and :func:`~vera.slots.family_fallback_name` supplies
+the name a family falls back on when its type expression has no nameable
+family at all.  Nothing else derives a name of its own: codegen's refinement
+boundary guard consumed the last copy — :func:`refinement_binder_parts` — in
+#1208 review, and layers only its erasure and E618 decisions on top.
 
 THE RULE, and this module implements exactly it, is **the checker's current
 rendering** — because the checker's rendering is what the binding table is
@@ -39,21 +41,45 @@ keyed by, so everything downstream must match it or it matches nothing:
   ``fn(...) effects(...)`` spelling (effect row SORTED) in argument
   position;
 * every renderer is TOTAL — an unresolvable type renders ``?``, matching
-  the checker's ``UnknownType``, and none of them raise.
+  the checker's ``UnknownType``, and none of them raise, at any input the
+  parser accepts.  Totality is a property to defend, not to assume: alias
+  resolution is ITERATIVE (see :func:`_resolve_alias`) precisely because a
+  recursive descent raised ``RecursionError`` on a legal 340-hop alias
+  chain, and the alias branch checks ``env.aliases`` membership so an
+  environment carrying an index without a body falls through rather than
+  raising.
 
 Argument resolution is done by rebuilding the checker's own semantic
 :class:`~vera.types.Type` and handing it to the checker's own
-:func:`~vera.types.pretty_type` / :func:`~vera.types.canonical_type_name`,
-rather than by re-implementing the rendering.  Byte-identity with the
-checker is therefore structural, not a coincidence to be maintained; the
-differential in ``tests/test_slot_naming_differential.py`` pins it.
+:func:`~vera.types.pretty_type`, rather than by re-implementing the
+rendering; :func:`slot_name` reaches it through :func:`type_arg_name` so
+there is one per-argument answer rather than two compositions of the same
+steps.  Only the ``Head<a, b>`` JOIN is restated here, and the differential
+in ``tests/test_slot_naming_differential.py`` compares against
+``canonical_type_name`` directly, so a drift in the separator or the
+bracketing goes red across the whole corpus.  Byte-identity with the checker
+is therefore structural, not a coincidence to be maintained.
+
+One renderer is only half the contract; the other half is the ENVIRONMENT it
+is handed, and getting that wrong fails exactly as silently.  Two rules:
 
 An :class:`AliasEnv` is MODULE-scoped (spec §8.4.1), so every consumer must
 render a type expression against the env of the module that DECLARED the
 enclosing function — codegen's ``_module_alias_scope``-current env, the
 clone's ORIGIN module env in the monomorphizer, the verifier's own
-registration.  Rendering against a neighbouring module's namespace is the
-same failure as rendering with a different renderer.
+per-module registration (``ContractVerifier._module_alias_envs``, which is
+also what an IMPORTED callee's contract renders against).  Rendering against
+a neighbouring module's namespace is the same failure as rendering with a
+different renderer.
+
+And a ``forall`` variable SHADOWS a same-named module alias for the whole
+signature and body it is declared over — the checker binds it before it
+binds any slot — so a function-scoped type expression renders against the
+module env NARROWED by :func:`~vera.slots.fn_slot_scope`, accumulating a
+``where`` helper's ancestors' variables as well as its own.  Un-narrowed,
+``forall<T> fn f(@Option<T>, @Option<Int>)`` under ``type T = Int`` collapses
+two parameter stacks the checker keeps apart, and every reference into them
+resolves onto the wrong parameter.
 
 Alias visibility follows the checker's REGISTRATION ORDER: an alias body is
 resolved against only the aliases declared before it, exactly as
@@ -61,7 +87,8 @@ resolved against only the aliases declared before it, exactly as
 that point.  A forward reference (``type A = B;`` before ``type B = Int;``)
 therefore stays opaque as ``B``, and a cycle (``type A = B; type B = A;``)
 terminates with the same placeholder the checker produces rather than
-looping — the ordering restriction is well-founded by construction.
+looping — the ordering restriction is well-founded by construction, and it
+is what makes the iterative resolution's dependency graph a DAG.
 """
 
 from __future__ import annotations
@@ -86,7 +113,6 @@ from vera.types import (
     TypeVar,
     UnknownType,
     base_type,
-    canonical_type_name,
     pretty_type,
     substitute,
 )
@@ -95,7 +121,6 @@ __all__ = [
     "EMPTY_ALIAS_ENV",
     "AliasEnv",
     "RefinementBinder",
-    "alias_env_from_declarations",
     "alias_env_from_environment",
     "family_name",
     "is_ref_spellable",
@@ -201,54 +226,6 @@ def alias_env_from_environment(env: object) -> AliasEnv:
         aliases=aliases,
         alias_params=alias_params,
         type_params=frozenset(getattr(env, "type_params", {})),
-        data_types=data_types,
-        _order=order,
-    )
-
-
-def alias_env_from_declarations(
-    decls: Iterable[object],
-    base: AliasEnv | None = None,
-) -> AliasEnv:
-    """Build the naming env by walking declarations, in source order.
-
-    For the subsystems that have an AST but no checker environment (codegen
-    registration, ``--explain-slots``).  Accepts either ``TopLevelDecl``
-    wrappers or bare ``Decl`` nodes.  *base* layers an outer environment
-    UNDER these declarations — prelude aliases first, then the module's —
-    preserving the declaration order the alias-visibility rule needs.
-
-    Declared ADTs are collected too, and stamped with the SAME shared
-    declaration index the aliases get (#1208) — a walk in source order is
-    exactly the order the checker's registration pass allocates them in.  The
-    BUILT-IN ADTs (``Option``, ``Result``, ``Json``, …) are deliberately not
-    seeded: data-type membership only changes a rendering for a name the
-    resolver treats specially (``Decimal``, a ``REMOVED_ALIASES`` entry), and
-    no built-in ADT takes one of those names — every other ADT reaches the
-    same opaque ``AdtType`` either way.
-    """
-    aliases: dict[str, ast.TypeExpr] = dict(base.aliases) if base else {}
-    alias_params: dict[str, tuple[str, ...] | None] = (
-        dict(base.alias_params) if base else {})
-    data_types: dict[str, int] = dict(base.data_types) if base else {}
-    order: dict[str, int] = dict(base._order) if base else {}
-    # Layered declarations continue the base's index space rather than
-    # restarting it, so "the prelude was declared first" survives the merge.
-    idx = max((*order.values(), *data_types.values(), -1)) + 1
-    for item in decls:
-        decl = getattr(item, "decl", item)
-        if isinstance(decl, ast.TypeAliasDecl):
-            aliases[decl.name] = decl.type_expr
-            alias_params[decl.name] = decl.type_params
-            order[decl.name] = idx
-            idx += 1
-        elif isinstance(decl, ast.DataDecl):
-            data_types[decl.name] = idx
-            idx += 1
-    return AliasEnv(
-        aliases=aliases,
-        alias_params=alias_params,
-        type_params=base.type_params if base else frozenset(),
         data_types=data_types,
         _order=order,
     )
@@ -443,9 +420,16 @@ def _resolve_alias(name: str, env: AliasEnv) -> Type:
     if cached is not None:
         return cached
     stack: list[str] = [name]
+    # Defence in depth, and provably inert on any environment this module
+    # builds: the visibility bound strictly decreases along a dependency edge,
+    # so an alias can never be its own ancestor here.  Should that invariant
+    # ever be broken, skipping an in-progress name terminates on the same
+    # opaque placeholder the checker produces instead of spinning.
+    in_progress: set[str] = {name}
     while stack:
         cur = stack[-1]
         if cur in memo:
+            in_progress.discard(cur)
             stack.pop()
             continue
         limit = env._order[cur]
@@ -454,6 +438,7 @@ def _resolve_alias(name: str, env: AliasEnv) -> Type:
         pending = [
             ref for ref in mentioned
             if ref not in memo
+            and ref not in in_progress
             and ref in env.aliases
             and env._order.get(ref, _UNBOUNDED) < limit
         ]
@@ -461,10 +446,12 @@ def _resolve_alias(name: str, env: AliasEnv) -> Type:
             # Strictly smaller indices, so the stack cannot cycle and each
             # alias is resolved at most once (later pushes hit the memo).
             stack.extend(pending)
+            in_progress.update(pending)
             continue
         memo[cur] = _resolve(
             env.aliases[cur], env,
             frozenset(env.alias_params.get(cur) or ()), limit)
+        in_progress.discard(cur)
         stack.pop()
     return memo[name]
 
@@ -520,11 +507,22 @@ def slot_name(te: ast.TypeExpr, env: AliasEnv) -> str:
     """
     if isinstance(te, ast.NamedType):
         if te.type_args:
-            # `canonical_type_name` performs the join (", " between
-            # `pretty_type`-rendered arguments) — the same join the checker
-            # uses, reached the same way, so the two cannot drift.
-            return canonical_type_name(te.name, tuple(
-                resolve_type_expr(a, env) for a in te.type_args))
+            # Each argument through :func:`type_arg_name`, then the checker's
+            # own join shape (``Head<a, b>``, ", "-separated).  Routed through
+            # the argument renderer rather than handing resolved
+            # :class:`~vera.types.Type` values straight to
+            # ``canonical_type_name``, so the two ways of asking "what does
+            # this type argument render as?" are ONE way — the docstring
+            # below promised that composition and it has to be real.  The join
+            # is the only thing restated here, and it cannot drift silently:
+            # the corpus differential's reference side calls
+            # ``canonical_type_name`` directly, so a divergence in either the
+            # separator or the bracketing goes red across every parameterised
+            # rendering in the corpus.
+            return "{}<{}>".format(
+                te.name,
+                ", ".join(type_arg_name(a, env) for a in te.type_args),
+            )
         return te.name
     if isinstance(te, ast.RefinementType):
         return slot_name(te.base_type, env)
@@ -557,7 +555,9 @@ def type_arg_name(te: ast.TypeExpr, env: AliasEnv) -> str:
     predicate-elided ``{@Int | ...}`` form, a function type its full
     ``fn(...) effects(...)`` spelling with a SORTED effect row, and anything
     unresolvable renders ``?``.  This is exactly the per-argument rendering
-    :func:`slot_name`'s join performs.
+    :func:`slot_name`'s join performs — literally, since #1208 review:
+    ``slot_name`` calls this per argument rather than composing the same two
+    steps itself, so the two answers are one answer by construction.
     """
     return pretty_type(resolve_type_expr(te, env))
 
