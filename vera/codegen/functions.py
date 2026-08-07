@@ -186,6 +186,16 @@ class FunctionCompilationMixin:
         effect_op_result_wt: dict[str, str | None] = {}
         effect_op_result_vera: dict[str, str | None] = {}
         if isinstance(decl.effect, ast.EffectSet):
+            # SOURCE ORDER, first wins — the checker's rule for a bare op
+            # (spec §7.4) and for its type arguments, so the two agree on
+            # which cell a bare `get`/`put` names.  A row may legitimately
+            # carry two instantiations of one effect (§7.3.3:
+            # `effects(<State<Int>, State<Bool>>)` is two independent
+            # cells); this loop used to let the LAST one overwrite the
+            # first, emitting `state_get_Bool` (i32) where the checker had
+            # typed the call `Int` (i64) — invalid WASM from a check-green
+            # program.  Every assignment below is therefore guarded on the
+            # op name not already being mapped.
             for eff in decl.effect.effects:
                 if (isinstance(eff, ast.EffectRef) and eff.name == "State"
                         and eff.type_args and len(eff.type_args) == 1):
@@ -203,7 +213,7 @@ class FunctionCompilationMixin:
                         mangled = mangle_type_name(
                             self._family_name_te(eff.type_args[0]))
                         # Only map if no user-defined function shadows the op
-                        if "get" not in self._fn_sigs:
+                        if "get" not in self._fn_sigs and "get" not in effect_ops:
                             effect_ops["get"] = (
                                 f"$vera.state_get_{mangled}", False
                             )
@@ -218,14 +228,15 @@ class FunctionCompilationMixin:
                             # needs it to type a `get(())` array-literal
                             # element (the WAT type above is layout-ambiguous).
                             effect_op_result_vera["get"] = type_name
-                        if "put" not in self._fn_sigs:
+                        if "put" not in self._fn_sigs and "put" not in effect_ops:
                             effect_ops["put"] = (
                                 f"$vera.state_put_{mangled}", True
                             )
                 elif (isinstance(eff, ast.EffectRef) and eff.name == "Exn"
                         and eff.type_args and len(eff.type_args) == 1):
                     type_name = type_expr_slot_name(eff.type_args[0])
-                    if type_name and "throw" not in self._fn_sigs:
+                    if (type_name and "throw" not in self._fn_sigs
+                            and "throw" not in effect_ops):
                         # The tag name resolves like the State import
                         # family (matching `_check_exn_type`, #1205/#1209).
                         effect_ops["throw"] = (

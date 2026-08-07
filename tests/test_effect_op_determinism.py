@@ -95,6 +95,45 @@ public fn main(@Unit -> @Int)
 """
 
 
+# Spec §7.3.3: the same effect MAY appear twice with different type
+# arguments — two independent cells.  Which one a bare `get` names is the
+# type-ARGUMENT sibling of the op-NAME question above, and it was the same
+# frozenset lottery (`_effect_type_mapping`'s row leg): the checker typed
+# `get(())` as Int on some seeds and Bool on others, so the identical source
+# was check-clean or E121 depending on the interpreter start.  Codegen
+# meanwhile took the LAST instantiation in the row, so even once the checker
+# settled the two disagreed — `state_get_Bool` (i32) for a call the checker
+# typed Int (i64).  Both sides now take the FIRST in source order.
+#   outer Bool cell = true, inner Int cell = 33; probe reads the Int cell
+_TWO_INSTANTIATIONS = """\
+private fn probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<State<Int>, State<Bool>>)
+{
+  get(())
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Bool>](@Bool = true) {
+    get(@Unit) -> { resume(@Bool.0) },
+    put(@Bool) -> { resume(()) }
+  } in {
+    handle[State<Int>](@Int = 33) {
+      get(@Unit) -> { resume(@Int.0) },
+      put(@Int) -> { resume(()) }
+    } in {
+      probe(())
+    }
+  }
+}
+"""
+
+
 def _run_seeded(
     path: Path, seed: str, *argv: str,
 ) -> subprocess.CompletedProcess[str]:
@@ -173,6 +212,27 @@ def test_handled_effect_beats_the_declared_row(tmp_path: Path) -> None:
     only = results.pop()
     assert only.startswith("rc=0"), only
     assert only.splitlines()[1].strip() == "90", only
+
+
+def test_two_instantiations_of_one_effect_bind_source_order(
+    tmp_path: Path,
+) -> None:
+    """`effects(<State<Int>, State<Bool>>)` names the Int cell, every seed.
+
+    Found while fixing the op-NAME lottery: the type-ARGUMENT leg of effect
+    resolution had the identical frozenset dependence, and codegen's own
+    per-row loop disagreed with it (last in the row rather than first).  The
+    value 33 is the source-order-first cell's; the Bool cell holds `true`,
+    which is neither 33 nor a plausible default.
+    """
+    results = _sweep(tmp_path, "two_inst.vera", _TWO_INSTANTIATIONS, "run")
+    assert len(results) == 1, (
+        f"type-argument resolution is not hash-seed stable: {len(results)} "
+        f"distinct outcomes:\n" + "\n--\n".join(sorted(results))
+    )
+    only = results.pop()
+    assert only.startswith("rc=0"), only
+    assert only.splitlines()[1].strip() == "33", only
 
 
 def test_lookup_effect_op_returns_the_ordered_row_head() -> None:
