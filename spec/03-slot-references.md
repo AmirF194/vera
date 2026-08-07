@@ -359,7 +359,7 @@ private fn apply_to_array(@Array<Int>, @IntTransform -> @Array<Int>)
 
 ## 3.8 Type Alias and Reference Resolution
 
-Type aliases are **not transparent** for reference resolution. This is a critical rule:
+At the **head** of a slot name, type aliases are **not transparent** for reference resolution. This is a critical rule (§3.8.1 gives the complementary rule for type *arguments*, which do resolve):
 
 <!-- vera:skip-parse category="FRAGMENT" reason="fn(@PosInt, @Int -> @Int) — no name" -->
 ```
@@ -376,7 +376,7 @@ fn(@PosInt, @Int -> @Int)
 
 Here `@PosInt.0` refers to the first parameter and `@Int.0` refers to the second parameter. They are in separate reference namespaces despite `PosInt` being a refinement of `Int`.
 
-Rationale: If aliases were transparent, adding a type alias to a library could silently change the meaning of `@Int.0` in user code by splitting the `Int` namespace. Opaque alias resolution prevents this class of errors.
+Rationale: If heads were transparent, adding a type alias to a library could silently change the meaning of `@Int.0` in user code by splitting the `Int` namespace. An opaque head prevents this class of errors.
 
 ### 3.8.1 Head versus arguments
 

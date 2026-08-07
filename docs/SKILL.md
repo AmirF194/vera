@@ -95,7 +95,7 @@ pytest tests/ -v                  # Run the test suite
 
 Errors are natural language instructions explaining what went wrong and how to fix it. Feed them back into your context to correct the code.
 
-`vera test` generates Z3 inputs for `Int`, `Nat`, `Bool`, `Byte`, `String`, and `Float64` parameters. Functions with ADT or function-type parameters are skipped with a message naming the specific type. Float64 uses Z3's mathematical reals (NaN, ±∞, and subnormals are not generated). Strings are capped at 50 characters.
+`vera test` generates Z3 inputs for `Int`, `Nat`, `Bool`, `Byte`, `String`, and `Float64` parameters. The decision is made on each parameter's **resolved** type, not its spelling: a type alias or refinement that resolves to one of those six is generated for like any other, so `type Count = Nat; public fn twice(@Count -> @Nat)` is tested rather than skipped, and an alias-spelled `requires` still constrains the inputs. Functions whose parameters resolve to an ADT, a function type, or a type variable are skipped with a message naming that resolved type — `type MaybeCount = Option<Nat>` skips with `cannot generate Option<Nat> inputs`. Float64 uses Z3's mathematical reals (NaN, ±∞, and subnormals are not generated). Strings are capped at 50 characters.
 
 ### Browser compilation
 

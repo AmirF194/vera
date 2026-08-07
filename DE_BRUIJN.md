@@ -426,9 +426,21 @@ Slot environments (index 0 = last occurrence in signature):
     @Int.1  parameter 1 (first @Int)
 
   fn repeat(@String, @Int -> @String)
-    @Int.0    parameter 2 (only @Int)
+    @Int.0  parameter 2 (only @Int)
     @String.0  parameter 1 (only @String)
+
+  fn scale(@Int, @Nat -> @Int)
+    @Int.0  parameter 1 (only @Int)
+    @Nat.0  parameter 2 (only @Nat)
+    where fn step(@Int, @Nat -> @Int)
+      @Int.0  parameter 1 (only @Int)
+      @Nat.0  parameter 2 (only @Nat)
 ```
+
+A `where` helper gets its own indented block under its parent. The helper's
+indices start over because its scope is *closed*: unlike a closure, it cannot
+read the parent's bindings, and a reference to one is `E130`, not a capture.
+The block is the direct way to confirm which parameter a helper's `@T.n` names.
 
 **Use this before writing non-commutative operations.** For `fn subtract(@Int, @Int -> @Int)`,
 the body `@Int.1 - @Int.0` computes parameter1 − parameter2 (first minus second). The body
