@@ -219,7 +219,7 @@ vera lsp                                 # serve the Language Server Protocol ov
 vera version                             # print the installed version
 vera builtins --json                     # list the built-in function registry (no file needed)
 vera effects --json                      # list the effect and ability registry (no file needed)
-vera errors --json                       # list the diagnostic error-code registry E001–E702 (no file needed)
+vera errors --json                       # list the diagnostic-code registry: E001–E702 + W001/W002 (no file needed)
 ```
 
 `vera compile --target browser` produces a self-contained bundle (wasm + JS runtime + HTML) that runs in any browser — no build step, no bundler. Mandatory parity tests ensure identical behaviour between the command-line and browser runtimes for the pure-language surface (arithmetic, ADTs, pattern matching, closures, contracts, effects-as-host-imports, etc.).  The IO surface is the documented exception: terminal Vera programs that rely on `IO.sleep` for animation pacing or ANSI escape codes for cursor control compile cleanly to `--target browser` but render the escapes as literal text and freeze the tab while sleeping — the browser target expects Vera to be the pure simulation core and JavaScript to drive timing and rendering ([SKILL.md §Browser compilation](SKILL.md#browser-compilation) has the recommended pattern).
@@ -263,7 +263,7 @@ cp /path/to/vera/SKILL.md ~/.claude/skills/vera-language/SKILL.md
 
 ## Project status
 
-Vera is in **active development** at v0.1.9: 2,000+ commits, 205 releases, 9,382 tests, 95% code coverage, 196 conformance programs, 42 examples, and a 14-chapter specification. Known bugs and limitations are tracked in **[KNOWN_ISSUES.md](KNOWN_ISSUES.md)**. See **[HISTORY.md](HISTORY.md)** for how the compiler was built.
+Vera is in **active development** at v0.1.9: 2,000+ commits, 205 releases, 9,393 tests, 95% code coverage, 196 conformance programs, 42 examples, and a 14-chapter specification. Known bugs and limitations are tracked in **[KNOWN_ISSUES.md](KNOWN_ISSUES.md)**. See **[HISTORY.md](HISTORY.md)** for how the compiler was built.
 
 The reference compiler — parser, AST, type checker, contract verifier (Z3), WASM code generator, module system, browser runtime, and runtime contract insertion — is working. The language specification is in draft across [14 chapters](spec/).
 
@@ -275,7 +275,7 @@ Known bugs and open issues are tracked on the **[issue tracker](https://github.c
 
 The compiler is a seven-stage pipeline — see [vera/README.md](vera/README.md) for the architecture in depth:
 
-![The compiler pipeline and module map: parse, transform and resolve feed the two-pass type checker; vera verify proves each contract obligation or defers it to a runtime guard, with a warm-verification sidecar for the LSP, while vera compile emits WAT and WASM for the wasmtime host, the browser bundle, or a WASI 0.2 component.](assets/diagrams/architecture.svg)
+![The compiler pipeline and module map: parse, transform and resolve feed the two-pass type checker, where naming.py answers what any type expression is called for every later stage; after checking, vera verify proves each contract obligation or defers it to a runtime guard, with a warm-verification sidecar for the LSP, while vera compile emits WAT and WASM for the wasmtime host, the browser bundle, or a WASI 0.2 component.](assets/diagrams/architecture.svg)
 
 <details>
 <summary><strong>Project structure</strong></summary>

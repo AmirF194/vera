@@ -88,7 +88,14 @@ included) and publishes:
 - **Go-to-definition on slot references** — `@T.n` under the cursor
   jumps to the parameter it names under De Bruijn resolution
   (most-recent-first), which is exactly the lookup humans find
-  hardest to do in their head.
+  hardest to do in their head. Both sides of the lookup — the
+  parameter's name and the reference's — are rendered by the same
+  function the checker keys its binding table with, so a
+  parameterised reference (`@Option<Int>.0`) resolves, an
+  alias-spelled parameter (`@Option<Cnt>` under `type Cnt = Int`) is
+  reachable from its canonical spelling, and a reference inside a
+  `where` helper resolves against that helper's own scope, including
+  any `forall` variables it inherits from its parent.
 - **Typed-hole completion** — with the cursor at a `?` hole,
   completion lists the in-scope bindings that fit, innermost first,
   each with its type.

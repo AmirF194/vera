@@ -137,8 +137,13 @@ class AbilityInfo:
 class Binding:
     """A single binding in the type environment.
 
-    type_name is the *syntactic* name used for slot reference matching.
-    Type aliases are OPAQUE: @PosInt.0 counts PosInt bindings, not Int.
+    ``type_name`` is the name slot references match against, rendered by
+    :func:`vera.naming.slot_name` — and alias opacity applies to the HEAD
+    of that name only.  ``@PosInt.0`` counts ``PosInt`` bindings and never
+    ``Int`` ones; but a parameter written ``@Option<Cnt>`` under
+    ``type Cnt = Int`` binds ``Option<Int>``, because a type ARGUMENT is a
+    component of a structural type and one type must not become two
+    namespaces.  Spec §3.8 and §3.8.1.
     """
     type_name: str       # canonical name for slot matching
     resolved_type: Type  # fully resolved semantic type

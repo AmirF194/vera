@@ -273,7 +273,7 @@ type Byte = { @Int | @Int.0 >= 0 && @Int.0 <= 255 };
 
 Type aliases are transparent for refinement subtyping: `PosInt` and `{ @Int | @Int.0 > 0 }` are the same type for subtyping purposes.
 
-However, type aliases create distinct namespaces for slot references (see Chapter 3): `@PosInt.0` counts only `PosInt` bindings, not `Int` bindings.
+However, at the **head** of a slot name a type alias creates a distinct namespace for slot references (see §3.8): `@PosInt.0` counts only `PosInt` bindings, not `Int` bindings. Inside a type **argument** the alias resolves instead, so under `type Cnt = Int` a parameter written `@Option<Cnt>` binds `Option<Int>` and is referenced `@Option<Int>.0` (§3.8.1).
 
 A type alias MUST eventually resolve to a concrete type — the chain of alias definitions MUST be acyclic. The requirement is structural over every representation-expanding position of the definition: the target's own name, references nested inside type arguments at any depth (`type F = Future<F>`, `type L = Array<L>`, `type A = Future<Array<B>>`) — including arguments the generic alias does not use — and refinement bases. A cyclic alias is rejected with error `E132`. (Recursion *is* permitted where an indirection bounds the expansion: through an `ADT` declared via `data` — a heap pointer — and through function-type parameter or return positions — a function value is a table index, so `type FA = fn(FA -> Int) effects(pure);` is accepted.)
 

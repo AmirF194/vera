@@ -12,7 +12,7 @@ For other documentation:
 
 The compiler is a seven-stage pipeline. Each stage consumes the output of the previous one. Each stage has a single public entry point and is independently testable.
 
-![The compiler pipeline and module map: parse, transform and resolve feed the two-pass type checker; after checking, vera verify proves each contract obligation (Tier 1) or defers it to a runtime guard (Tier 3) with a warm-verification sidecar for the LSP, while vera compile emits WAT and WASM for the wasmtime host, the browser bundle, or a WASI 0.2 component.](../assets/diagrams/architecture.svg)
+![The compiler pipeline and module map: parse, transform and resolve feed the two-pass type checker, where naming.py answers what any type expression is called for every later stage; after checking, vera verify proves each contract obligation (Tier 1) or defers it to a runtime guard (Tier 3) with a warm-verification sidecar for the LSP, while vera compile emits WAT and WASM for the wasmtime host, the browser bundle, or a WASI 0.2 component.](../assets/diagrams/architecture.svg)
 
 <details>
 <summary>Text version</summary>
@@ -24,7 +24,7 @@ Source (.vera)
 1   Parse        grammar.lark + parser.py     -> Lark parse tree (LALR(1))
 2   Transform    transform.py + ast.py        -> typed AST
 2b  Resolve      resolver.py                  -> transitive module closure
-3   Type Check   checker/ + environment.py    -> list[Diagnostic]
+3   Type Check   checker/ + naming.py + environment.py -> list[Diagnostic]
   |              (two passes: register every signature, then check bodies)
   |
   +--- vera verify ------------->  4  Verify   verifier.py + smt.py (Z3)
@@ -43,6 +43,9 @@ Source (.vera)
 
 Cross-cutting: cli.py (orchestrates every stage) / errors.py (Diagnostic,
 E-codes) / formatter.py (vera fmt) / tester.py (vera test).
+naming.py answers "what is this type expression called?" once -- stages 4
+and 5, tester.py and lsp/ all render slot names and State/Exn cell families
+through it, never their own.
 Nothing exits early -- every stage accumulates diagnostics, so an agent
 gets all feedback in one pass.
 ```
@@ -88,9 +91,9 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `  calls.py` | 1,556 | | Function/constructor/module/ability calls | |
 | `  control.py` | 709 | | If/match, patterns, effect handlers | |
 | `resolver.py` | 332 | Resolve | Module path resolution, parse cache | `ModuleResolver` |
-| `monomorphize.py` | 2,438 | Resolve | Shared generic instantiation discovery + AST substitution (verifier and codegen) | `substitute_type_vars()`, `resolve_type_alias()`, `canonicalize_type_aliases()` |
-| `smt.py` | 2,877 | Verify | Z3 translation layer | `SmtContext`, `SlotEnv` |
-| `verifier.py` | 8,190 | Verify | Contract verification | `verify()` |
+| `monomorphize.py` | 2,438 | Resolve | Shared generic instantiation discovery + AST substitution (verifier and codegen); each clone's De Bruijn recount renders its binder names under the **origin module's** `AliasEnv`, the one its consumers rebuild the clone's scope with (#1208) | `substitute_type_vars()`, `resolve_type_alias()`, `canonicalize_type_aliases()` |
+| `smt.py` | 2,877 | Verify | Z3 translation layer; rebinds its naming env per callee (`_callee_alias_env_lookup`) so an imported callee's contract is rendered in *its* module's namespace (#1208) | `SmtContext`, `SlotEnv` |
+| `verifier.py` | 8,190 | Verify | Contract verification; owns the per-module `AliasEnv` registry every rendering goes through — an imported callee's contract and an imported generic's clone are both named in the module that **declared** them (#1208) | `verify()` |
 | `wasm/` | 25,941 | Compile | WASM translation layer (package) | `WasmContext`, `WasmSlotEnv`, `StringPool` |
 | ` ├ context.py` | 1,089 | | Composed WasmContext, expression dispatcher, block translation | |
 | ` ├ helpers.py` | 463 | | WasmSlotEnv, StringPool, type mapping, array element helpers | |
@@ -119,7 +122,7 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `lsp/` | 1,397 | Serve | Language Server Protocol over stdio (#222 C/D/E/F) | `create_server()`, `vera lsp` |
 | `  convert.py` | 144 | | Span/SourceLocation/LSP coordinate conversions, UTF-16 transcoding | |
 | `  documents.py` | 69 | | URI-keyed document store, full-text sync | |
-| `  features.py` | 327 | | Diagnostics + tier hints, hover, slot goto, hole completion | |
+| `  features.py` | 327 | | Diagnostics + tier hints, hover, slot goto (keyed through `naming.slot_ref_key`, so parameterised and alias-spelled references resolve, and a `where` helper resolves in its own accumulated scope), hole completion | |
 | `  extensions.py` | 146 | | vera/speculativeEdit proof-delta | |
 | `  server.py` | 287 | | pygls wiring, single-session serialisation | |
 | `  workflows.py` | 442 | | Skill-layer workflows: enforced edit sequences (#222 F) | |
@@ -127,7 +130,7 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `  api.py` | 1,341 | | Public API, dataclasses, `compile()`/`execute()` orchestration, core IO host bindings (#421) | |
 | `  memory.py` | 105 | | Compile-time ADT layout helpers (`ConstructorLayout`, alignment) (#421) | |
 | `  core.py` | 2,561 | | CodeGenerator class, orchestration, ability op rewriting (Pass 1.6), skip propagation to callers (#1100) | |
-| `  modules.py` | 1,017 | | Cross-module registration + call detection (C7e), per-module alias + source scopes (#1111/#1186) | |
+| `  modules.py` | 1,017 | | Cross-module registration + call detection (C7e), per-module alias + source scopes (#1111/#1186) — `_module_alias_scope` swaps the alias maps *and* the `AliasEnv` every codegen rendering goes through as one pair (#1208) | |
 | `  registration.py` | 479 | | Pass 1 forward declarations, ADT layout | |
 | `  monomorphize.py` | 1,369 | | Generic instantiation, type inference, ability constraint checking (Pass 1.5) | |
 | `  functions.py` | 1,202 | | Function body compilation, GC prologue/epilogue (Pass 2) | |
@@ -162,7 +165,7 @@ Total: ~72,000 lines of Python + 343 lines of grammar + 3,378 lines of JavaScrip
 
 ## Parsing
 
-**Files:** `grammar.lark` (343 lines), `parser.py` (147 lines)
+**Files:** `grammar.lark`, `parser.py` (sizes in the module map above)
 
 The grammar is a Lark LALR(1) grammar derived from the formal EBNF in spec Chapter 10. It uses:
 
@@ -177,7 +180,7 @@ The parser is **lazily constructed and cached** — `_get_parser()` builds the L
 
 ## AST
 
-**Files:** `ast.py` (690 lines), `transform.py` (1,000 lines)
+**Files:** `ast.py`, `transform.py` (sizes in the module map above)
 
 ### Node hierarchy
 
@@ -244,7 +247,7 @@ Node
 
 ## Type Checking
 
-**Files:** `checker/` (2,248 lines across 8 modules), `types.py` (307 lines), `environment.py` (302 lines)
+**Files:** `checker/`, `naming.py`, `types.py`, `environment.py` (sizes in the module map above)
 
 This is the most architecturally complex stage.
 
@@ -284,7 +287,9 @@ The compiler maintains two distinct type representations:
 
 `_resolve_type()` in the checker bridges them: it looks up type aliases, expands parameterised types, and resolves type variables from `forall` bindings.
 
-**Why this matters:** Type aliases are **opaque** for slot reference matching. If `type PosInt = { @Int | @Int.0 > 0 }`, then `@PosInt.0` counts `PosInt` bindings and `@Int.0` counts `Int` bindings — they are separate namespaces. But for type compatibility, `PosInt` resolves to a refined `Int` and subtypes accordingly.
+**Why this matters:** Type aliases are **opaque at the head** of a slot name. If `type PosInt = { @Int | @Int.0 > 0 }`, then `@PosInt.0` counts `PosInt` bindings and `@Int.0` counts `Int` bindings — they are separate namespaces. But for type compatibility, `PosInt` resolves to a refined `Int` and subtypes accordingly.
+
+A slot name's type **arguments** are the other half of the rule: they resolve in full, so under `type Cnt = Int` a parameter written `@Option<Cnt>` binds `Option<Int>` — one namespace with `@Option<Int>` — where `@Cnt` and `@Int` remain two ([spec §3.8.1](../spec/03-slot-references.md)). The head is the name the programmer chose for a binding, so leaving it opaque keeps a library's new alias from splitting a caller's namespace; an argument is a *component* of a structural type, so resolving it keeps one type from becoming two namespaces. A *refinement* alias resolves in argument position too, but to the predicate-elided `{@Int | ...}` form, which stays distinct from plain `Int`. `naming.py` implements all of it (Design Pattern 8).
 
 ### De Bruijn slot resolution
 
@@ -319,7 +324,7 @@ resolve("Int", 2) → param₁         (index 2 = two before)
 
 The resolver walks scopes **innermost to outermost**, counting backwards within each scope. This is implemented in `TypeEnv.resolve_slot()`.
 
-Each binding tracks its **source** (`"param"`, `"let"`, `"match"`, `"handler"`, `"destruct"`) and its **canonical type name** — the syntactic name used for slot reference matching, which respects alias opacity.
+Each binding tracks its **source** (`"param"`, `"let"`, `"match"`, `"handler"`, `"destruct"`) and its **canonical type name** — the name slot references match against, rendered by `naming.py`. Alias opacity applies to that name's **head** only: `@PosInt.0` never counts `Int` bindings, while a parameter written `@Option<Cnt>` under `type Cnt = Int` binds `Option<Int>` and is reached by `@Option<Int>.0` (spec §3.8.1).
 
 ### Subtyping
 
@@ -431,7 +436,7 @@ Additionally, `resume` is bound as a temporary function inside handler clause bo
 
 ## Contract Verification
 
-**Files:** `verifier.py` (703 lines), `smt.py` (547 lines)
+**Files:** `verifier.py`, `smt.py` (sizes in the module map above)
 
 ### Tiered model
 
@@ -530,7 +535,7 @@ Error at line 3, column 3:
 
 ## Code Generation
 
-**Files:** `codegen/` (12,991 lines across 13 modules), `wasm/` (20,716 lines across 19 modules, split into domain mixins — see the module table above)
+**Files:** `codegen/`, `wasm/` (split into domain mixins; sizes and the mixin split in the module map above)
 
 ### Compilation pipeline
 
@@ -683,7 +688,7 @@ All AST nodes, type objects, and environment data structures are frozen dataclas
 
 ### 2. Syntactic vs semantic type separation
 
-`ast.TypeExpr` nodes represent what the programmer wrote. `types.Type` objects represent the resolved canonical form. The `_resolve_type()` method in the checker bridges them. This distinction enables **alias opacity**: `@PosInt.0` matches `PosInt` bindings syntactically, while `PosInt` resolves to `Int` semantically for type compatibility.
+`ast.TypeExpr` nodes represent what the programmer wrote. `types.Type` objects represent the resolved canonical form. The `_resolve_type()` method in the checker bridges them. This distinction is what makes **head opacity** expressible: `@PosInt.0` matches `PosInt` bindings syntactically, while `PosInt` resolves to `Int` semantically for type compatibility. The bridge is crossed *within* a single slot name too — a name's head stays syntactic while its type arguments are resolved and rendered from the semantic side ([spec §3.8.1](../spec/03-slot-references.md)), which is why one renderer owns both halves (Design Pattern 8).
 
 ### 3. Error accumulation
 
@@ -705,15 +710,27 @@ The type system includes open effect rows (`row_var` field in `ConcreteEffectRow
 
 ### 7. De Bruijn indices and monomorphization
 
-De Bruijn slot references and generic monomorphization interact non-trivially. When type-variable substitution merges formerly separate slot namespaces — distinct vars collapsing to one concrete type (`A→Int, B→Int`), or a var's namespace merging with an already-concrete one (a body `let @Int` next to `@A.0` at `A=Int`) — De Bruijn indices must be recomputed. The `_compute_scoped_reindex` walker in `monomorphize.py` (#769) resolves every `SlotRef` against the full binding scope at its reference site (parameters, `let`/destructuring bindings, match-arm binders, closure parameters, handler clauses — with contracts as a params-only scope and full-depth slot names from `vera/slots.py`) and computes its index in the collapsed namespace, so `@Array<Option<A>>.0` correctly becomes `@Array<Option<Int>>.1` even when the shift depends on bindings the parameter list alone cannot see. Without this, the monomorphized clone silently reads the wrong slot — a correctness bug that compiles, verifies, and runs but produces wrong results (both consumers share the substitution, so verify and codegen agree on the wrong answer).
+De Bruijn slot references and generic monomorphization interact non-trivially. When type-variable substitution merges formerly separate slot namespaces — distinct vars collapsing to one concrete type (`A→Int, B→Int`), or a var's namespace merging with an already-concrete one (a body `let @Int` next to `@A.0` at `A=Int`) — De Bruijn indices must be recomputed. The `_compute_scoped_reindex` walker in `monomorphize.py` (#769) resolves every `SlotRef` against the full binding scope at its reference site (parameters, `let`/destructuring bindings, match-arm binders, closure parameters, handler clauses — with contracts as a params-only scope, and every binder name rendered by `naming.slot_name` against the clone's **origin module** `AliasEnv`, narrowed by the `forall` variables in scope on each side of the recount) and computes its index in the collapsed namespace, so `@Array<Option<A>>.0` correctly becomes `@Array<Option<Int>>.1` even when the shift depends on bindings the parameter list alone cannot see. Without this, the monomorphized clone silently reads the wrong slot — a correctness bug that compiles, verifies, and runs but produces wrong results (both consumers share the substitution, so verify and codegen agree on the wrong answer).
 
 The WASM type inference system (`inference.py`) must also handle all expression types that can appear as arguments to builtins. Missing cases (e.g. `IndexExpr`, `IfExpr`, `apply_fn` calls) return `None`, which cascades to E602 (unsupported expressions) or incorrect type inference. When adding new builtins or inference paths, check `_infer_vera_type`, `_infer_fncall_vera_type`, and `_infer_expr_wasm_type` for completeness.
 
-### 8. LLM-oriented diagnostics
+### 8. One renderer for slot names
 
-Every diagnostic includes a description (what went wrong), rationale (which language rule), fix (corrected code), spec reference, and a stable error code (`E001`–`E702`). The compiler's output is designed to be fed directly back to the model as corrective context. See spec Chapter 0, Section 0.5 "Diagnostics as Instructions" for the philosophy.
+"What is the name of this type expression?" was answered independently by six subsystems, and they disagreed about aliases. A name minted one way and looked up another misses silently, and the miss reads as "not statically known" — a dangling `E699`, a false Tier 1, a split `State` cell (#1208, #1209). `naming.py` is the single answer, as a total pure function of an `AliasEnv`.
 
-### 9. Stable error code taxonomy
+**The rule is the checker's rendering**, because the binding table is keyed by it: a slot name's head is syntactic (`@PosInt` renders `PosInt`, never `Int`), its type arguments are fully resolved (`@Option<MyAlias>` renders `Option<Int>`), a refinement renders its base at top level and the elided `{@Int | ...}` form in argument position, a function type renders `Fn` at top level and its full `fn(...) effects(...)` spelling (effect row sorted) in argument position, and nothing is unnameable — an unresolvable expression renders `?`, matching the checker's `UnknownType`. `family_name` is the one deliberate divergence: a `State`/`Exn` family names a *cell*, not a spelling, so its head resolves too, gated on the resolved name being mangle-safe as a WAT symbol.
+
+**The environment is the other half of the contract, and getting it wrong fails just as silently.** An `AliasEnv` is module-scoped (spec §8.4.1), so every consumer renders against the env of the module that **declared** the enclosing function, narrowed by that function's `forall` variables (`slots.fn_slot_scope` — they shadow same-named module aliases): codegen through `_module_alias_scope`, the monomorphizer against each clone's origin module, the verifier from its own per-module registration, so an imported callee's contract is rendered in *its* namespace rather than the importer's. Rendering against a neighbouring module's namespace is the same failure as rendering with a different renderer.
+
+Two derivations stay behind in `slots.py`, and both are about a type's **representation** rather than its name: `type_expr_slot_name` (the alias-opaque spelling the WASM width/erasure walks and the structural-`Eq` derivability oracle want) and `family_fallback_name` (the last-resort name for a family whose type expression resolves to none). `slots.py` is otherwise presentation — the tables `--explain-slots`, the LSP, and the verifier read — plus the shared `forall`-narrowing scope helper `fn_slot_scope`, which the tester and the monomorphizer import so their slot scopes narrow exactly the way the checker's do.
+
+The proof that the two sides agree is a differential, not a unit test: `tests/test_slot_naming_differential.py` instruments the checker's naming entry points, sweeps the whole `.vera` corpus plus a targeted battery, and requires zero divergence between the module's answer and a test-local statement of the rule.
+
+### 9. LLM-oriented diagnostics
+
+Every diagnostic includes a description (what went wrong), rationale (which language rule), fix (corrected code), spec reference, and a stable code — errors `E001`–`E702`, warnings `W001` (typed holes) and `W002` (an eagerly evaluated `async` argument). The compiler's output is designed to be fed directly back to the model as corrective context. See spec Chapter 0, Section 0.5 "Diagnostics as Instructions" for the philosophy.
+
+### 10. Stable error code taxonomy
 
 Every diagnostic has a unique code grouped by compiler phase:
 
@@ -730,11 +747,11 @@ Every diagnostic has a unique code grouped by compiler phase:
 | E5xx | Verification | `verifier.py` |
 | E6xx | Codegen | `codegen/` |
 
-The `ERROR_CODES` dict in `errors.py` maps every code to a short description (147 entries). Codes are stable across versions — they can be used for programmatic filtering, suppression, and documentation lookups. Formatted output shows the code in brackets: `[E130] Error at line 5, column 3:`.
+The `ERROR_CODES` dict in `errors.py` maps every code to a short description (156 entries — 154 `E` codes and the two `W` warning codes). Codes are stable across versions — they can be used for programmatic filtering, suppression, and documentation lookups. Formatted output shows the code in brackets: `[E130] Error at line 5, column 3:`.
 
 ## Test Suite
 
-Testing spans a **pytest suite** of 6,821 tests across 104 files — compiler-internals unit tests plus a **conformance suite** (143 programs in `tests/conformance/` validating every language feature against the spec) and **example programs** (37 end-to-end demos). The conformance suite is the definitive specification artifact — each program tests one feature and serves as a minimal working example.
+Testing spans a **pytest suite** of 9,393 tests across 143 files — compiler-internals unit tests plus a **conformance suite** (196 programs in `tests/conformance/` validating every language feature against the spec) and **example programs** (42 end-to-end demos). The conformance suite is the definitive specification artifact — each program tests one feature and serves as a minimal working example.
 
 See **[TESTING.md](../TESTING.md)** for the comprehensive testing reference -- test file table, conformance suite details, compiler code coverage, language feature coverage, helper conventions, validation scripts, CI pipeline, and guidelines for adding tests.
 

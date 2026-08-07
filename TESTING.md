@@ -6,13 +6,13 @@ This is the single source of truth for Vera's testing infrastructure, coverage d
 
 | Metric | Value |
 |--------|-------|
-| **Tests** | 9,382 across 143 files (~108,000 lines of test code; 9,235 passed + 26 stress, 121 skipped) |
+| **Tests** | 9,393 across 143 files (~108,000 lines of test code; 9,246 passed + 26 stress, 121 skipped) |
 | **Compiler code coverage** | 95% Python, 61% JavaScript — 91% combined (CI minimum: 80%) |
 | **Conformance programs** | 196 programs across 9 spec chapters, validating every language feature |
 | **Example programs** | 42, all validated through `vera check` + `vera verify` |
 | **Spec code blocks** | 189 parseable blocks from 14 spec chapters: 92 parse, 86 type-check, 85 verify (the rest carry inline `vera:skip` annotations, #538) |
 | **README code blocks** | 4 Vera blocks (4 validated, 0 annotated) |
-| **FAQ code blocks** | 2 Vera blocks in FAQ.md (1 validated, 1 annotated snippet) |
+| **FAQ code blocks** | 3 Vera blocks in FAQ.md (2 validated, 1 annotated snippet) |
 | **HTML code blocks** | 5 Vera blocks in docs/index.html (5 validated: parse + check + verify) |
 | **Contract verification** | 357 of 462 obligations (77.3%) across the 42 examples verified statically (Tier 1) — the denominator grew with the auto-synthesised primitive-op obligations of the soundness campaign |
 | **CI matrix** | 13 combinations (Python 3.11/3.12/3.13 × ubuntu-latest/macos-15/macos-26/windows-latest, plus an advisory ubuntu-24.04-arm × 3.12 cell) + browser parity (Node.js 22) + wheel-availability preflight |
@@ -190,7 +190,7 @@ python scripts/check_wheel_availability.py           # pre-flight: every runtime
 | `test_builtin_typevar_collision_970.py` | 61 | 811 | #970 a user `forall` type-var name colliding with a built-in generic's internal name (`T`/`E`/`A`/`B`/`K`/`U`/`V`): focused check/verify pins for the compound-argument shapes (`@Array<Option<T>>`, `@Result<Int, Option<E>>`, `@Map<K, Option<V>>`) plus a collide-vs-control differential battery over every generic-builtin family and contract/where-helper position.  Also pins marker-strip (the `#b` namespacing marker must never reach an E205/E202 diagnostic), a registry-consistency pin (every built-in ability-constraint `type_var` stays a member of its `forall_vars`), the dual completeness-gap pinned in both argument orders, a tier-split equality pin, and the #1069 leaked-placeholder message-rendering sweep (a stripped built-in var renders as `?`, not a bare letter, at every reachable actual-type slot: the mismatch sites plus the operator/index/interpolation family, `assert`/`assume`, `if` condition and branches, and the contract/refinement predicates — one parametrized row per converted render slot, with the provably-unreachable sites documented in the class docstring) |
 | `test_check_changelog_updated.py` | 68 | 712 | `check_changelog_updated.py` unit + end-to-end tests: file classification (incl. file-style exact-match vs directory-style prefix-match), CHANGELOG diff parsing with `[Unreleased]` section tracking, bare-heading rejection, and full-file context (regression test for bullets far below the heading), `Skip-changelog:` trailer detection, temp-repo integration covering substantive/exempt/label/trailer paths, and `GIT_*`-env hermeticity of the temp-repo fixtures (regression for the pre-commit-hook env leak) |
 | `test_release.py` | 47 | 566 | Release policy and registry verification (#481): strict project-name and version parsing/comparison, version-bump/TestPyPI/recovery planning, exact confirmation and immutable-tag guards, first-parent version-introduction discovery, package-change recovery refusal, non-empty CHANGELOG extraction, one-wheel/one-sdist SHA-256 manifests, malformed registry-response handling, missing/filename/hash propagation retries, exact filename/hash verification, and CLI dispatch/GitHub-output wiring.  An autouse fixture scrubs hook-exported `GIT_*` variables so the tmp-repo git calls (fixture helpers and `release.py`'s own) never resolve to the developer's repository when the suite runs inside a pre-commit hook. |
-| `test_check_doc_counts.py` | 19 | 187 | `check_doc_counts.py` planning-document checks: KNOWN_ISSUES refactoring line counts (±10% tolerance band incl. the exact-boundary case, drift detection, empty-file citation, hyphenated paths, missing file/section/rows, the #419 empty-section sentinel + its cannot-mask-a-malformed-table dual) and HISTORY version-row format (issue-link limit, ` — ` separator rejection, dateless-row and prose exemption, line-number reporting) |
+| `test_check_doc_counts.py` | 30 | 336 | `check_doc_counts.py`'s pure per-document checks: KNOWN_ISSUES refactoring line counts (±10% tolerance band incl. the exact-boundary case, drift detection, empty-file citation, hyphenated paths, missing file/section/rows, the #419 empty-section sentinel + its cannot-mask-a-malformed-table dual), HISTORY version-row format (issue-link limit, ` — ` separator rejection, dateless-row and prose exemption, line-number reporting), the TESTING.md tests breakdown (parts summing to the collected total, a self-consistent-but-stale row, and the reworded-row error), and vera/README.md's Test Suite counts (all four checked independently — mutation-validated by dropping each citation in turn — plus the reworded-paragraph error, a thousands-separator case pinning that every one of the four counts is read comma-tolerantly, and the two section-anchoring cases — a reworded paragraph with decoy counts in a later section, and a renamed heading, both of which must fail loud rather than match across the section boundary).  The reworded case is a test in its own right for both new checks: a pattern that matches nothing must be an error, or rewording the sentence silently switches the gate off |
 | `test_check_explicit_encoding.py` | 54 | 254 | `check_explicit_encoding.py` gate (#645): flags text-mode `open()` / `read_text()` / `write_text()` **and** `subprocess.run/Popen/check_output(..., text=True)` captures missing an `encoding="utf-8"` literal (rejects non-literal / non-UTF-8 values), skips binary/bytes-mode calls, honours the `# encoding-exempt` opt-out, and asserts the shipped repo is clean |
 | `test_check_limitations_sync.py` | 6 | 108 | `check_limitations_sync.py` section extraction: table-rows-only issue harvesting, prose-link exemption, bounding at the next second-level heading, `None` for absent or sub-level headings so renamed sections fail loudly; plus the #852 fail-loud rule: an UNKNOWN issue state under `--check-states` (gh missing / auth failure / timeout) is an error, never a silent pass |
 | `test_doc_annotations.py` | 23 | 340 | `scripts/doc_annotations.py` — the inline `vera:skip-<stage>` fence-annotation reader and shared `run_parse_only_gate` used by the doc-block gates ([#538](https://github.com/aallan/vera/issues/538)): markdown/HTML scanning (annotation attached to the following fence / `<pre>`, stacked directives), hard problems (malformed, dangling incl. EOF, duplicate-stage, unknown-stage, unterminated fence / unclosed `<pre>`; prose mentions without comment syntax are fine), the gate round-trip semantics via `evaluate_block` (unannotated failure fails, annotated failure skips, annotated PASS is a stale annotation, skip-check still runs parse first and stops the pipeline), unsupported-stage detection for parse-only gates, and `strip_annotations` (annotation lines removed, other HTML comments survive) |
@@ -701,7 +701,7 @@ When extending the compiler, add tests following the existing patterns:
 
 ## Validation Scripts
 
-Twenty-two scripts in `scripts/` validate cross-cutting concerns beyond unit tests (one of them — `build_site.py` — generates rather than checks; the doc-block gates share the fence-annotation reader `scripts/doc_annotations.py`, a helper module rather than a gate):
+Twenty-six scripts in `scripts/` validate cross-cutting concerns beyond unit tests (one of them — `build_site.py` — generates rather than checks; the doc-block gates share the fence-annotation reader `scripts/doc_annotations.py`, a helper module rather than a gate):
 
 | Script | What it validates |
 |--------|-------------------|
@@ -713,6 +713,7 @@ Twenty-two scripts in `scripts/` validate cross-cutting concerns beyond unit tes
 | `check_readme_examples.py` | All Vera code blocks in README.md parse correctly |
 | `check_skill_examples.py` | All Vera code blocks in SKILL.md parse correctly |
 | `check_faq_examples.py` | All Vera code blocks in FAQ.md parse correctly |
+| `check_debruijn_examples.py` | All Vera code blocks in DE_BRUIJN.md parse correctly |
 | `check_pypi_readme_examples.py` | All Vera code blocks in PYPI_README.md parse, check, and verify |
 | `check_examples_doc.py` | All Vera code blocks in EXAMPLES.md parse correctly |
 | `check_html_examples.py` | All Vera code blocks in docs/index.html pass parse + check + verify |
@@ -723,13 +724,15 @@ Twenty-two scripts in `scripts/` validate cross-cutting concerns beyond unit tes
 | `check_changelog_updated.py` | CHANGELOG.md gains an entry when substantive files change (`Skip-changelog:` trailer to bypass) |
 | `check_walker_coverage.py` | Every walker function in `vera/` covers every `Expr` subclass via `isinstance` dispatch or `# WALKER_COVERAGE:` checklist comment (#597) |
 | `check_diagnostic_fields.py` | Every diagnostic in `vera/` carries rationale + spec_ref, and errors also a `fix` (warnings exempt); every present spec_ref resolves to a real spec section; every literal `error_code` is registered in `ERROR_CODES` (#828); `# diag-fields-exempt: <reason>` waives missing/unresolvable fields only — never a wrong-but-resolving spec_ref or an unregistered error_code (#682, #955) |
+| `check_explicit_encoding.py` | Every text-mode `open()` / `read_text()` / `write_text()`, `subprocess.run/Popen/check_output` text capture, and text-mode `tempfile.NamedTemporaryFile` under `vera/`, `scripts/` and `tests/` passes an explicit `encoding="utf-8"`; `# encoding-exempt: <reason>` opts a deliberate non-UTF-8 site out (#645) |
 | `check_e602_clean.py` | No unexpected E602/E604 silent-skip sites outside the explicit allowlist |
 | `check_doc_builtin_shadowing.py` | No documentation example defines a function named after an opaque verifier-modelled built-in (would fail `vera check` with E151); the `spec/09` signature reference is exempt ([#819](https://github.com/aallan/vera/issues/819)) |
+| `check_distribution.py` | The built wheel and sdist carry the project's own name and version, ship the files the installed package needs plus a packaged LICENSE, and exclude `tests/` and generated Python files |
 | `check_wheel_availability.py` | Every runtime dependency ships wheels for all supported platforms |
 | `check_licenses.py` | All installed packages have MIT-compatible licenses |
 | `build_site.py` | Regenerates the AI-readable site assets that `check_site_assets.py` verifies |
 
-These run in both pre-commit hooks and CI, so issues are caught locally before they reach the remote.
+Each runs in its configured pre-commit hook or CI job, so issues are caught locally before they reach the remote; `build_site.py` is the generator whose output `check_site_assets.py` verifies.
 
 ### Spec validation pipeline
 
@@ -794,7 +797,7 @@ Per `spec/00-introduction.md` §0.5.8: fields MAY be added (consumers MUST toler
 
 ## Pre-commit Hooks
 
-Every push is checked by 32 configured hooks across two stages: 30 are configured at the commit stage (after `pre-commit install`), and 2 (`check-changelog-updated`, `uv-lock-check`) are configured at the push stage (after `pre-commit install --hook-type pre-push`). Many commit-stage hooks use per-hook `files:` / `types:` filters and only fire when matching files are staged — a docs-only commit triggers a small subset, a compiler-level commit triggers most. Full list:
+Every push is checked by 33 configured hooks across two stages: 31 are configured at the commit stage (after `pre-commit install`), and 2 (`check-changelog-updated`, `uv-lock-check`) are configured at the push stage (after `pre-commit install --hook-type pre-push`). Many commit-stage hooks use per-hook `files:` / `types:` filters and only fire when matching files are staged — a docs-only commit triggers a small subset, a compiler-level commit triggers most. Full list:
 
 | Hook | What it does |
 |------|-------------|
@@ -816,6 +819,7 @@ Every push is checked by 32 configured hooks across two stages: 30 are configure
 | `check_examples_doc.py` | EXAMPLES.md code blocks parse correctly |
 | `check_skill_examples.py` | SKILL.md code blocks parse correctly |
 | `check_faq_examples.py` | FAQ.md code blocks parse correctly |
+| `check_debruijn_examples.py` | DE_BRUIJN.md code blocks parse correctly |
 | `check_pypi_readme_examples.py` | PYPI_README.md code blocks parse, check, and verify |
 | `check_html_examples.py` | HTML landing page code blocks pass parse + check + verify |
 | `check_doc_builtin_shadowing.py` | No doc example defines a function named after an opaque built-in (would fail `vera check` with E151); `spec/09` signature reference exempt ([#819](https://github.com/aallan/vera/issues/819)) |
@@ -846,10 +850,11 @@ GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the
 | **test** | Python 3.11, 3.12, 3.13 × ubuntu-latest, macos-15, macos-26, windows-latest, plus advisory ubuntu-24.04-arm × 3.12 (13 combos) | `pytest -v` passes on all combinations |
 | **test** (coverage) | Python 3.12 x Ubuntu only | `pytest --cov=vera --cov-fail-under=80` |
 | **typecheck** | Python 3.12 x Ubuntu | `mypy vera/` clean in strict mode |
-| **lint** | Python 3.12 x Ubuntu | `check_changelog_updated.py`, `check_conformance.py`, `check_examples.py`, `check_corpus_canonical.py`, `check_examples_readme.py`, `check_version_sync.py`, `check_spec_examples.py`, `check_readme_examples.py`, `check_skill_examples.py`, `check_faq_examples.py`, `check_pypi_readme_examples.py`, `check_html_examples.py`, `check_e602_clean.py`, `check_doc_builtin_shadowing.py`, `check_diagnostic_fields.py`, `check_site_assets.py`, `check_licenses.py`, `check_doc_counts.py`, `check_limitations_sync.py`, `ruff check --select S vera/` (security rules) |
+| **lint** | Python 3.12 x Ubuntu | `check_changelog_updated.py`, `check_conformance.py`, `check_examples.py`, `check_corpus_canonical.py`, `check_examples_readme.py`, `check_version_sync.py`, `check_spec_examples.py`, `check_readme_examples.py`, `check_skill_examples.py`, `check_faq_examples.py`, `check_debruijn_examples.py`, `check_pypi_readme_examples.py`, `check_html_examples.py`, `check_doc_builtin_shadowing.py`, `check_e602_clean.py`, `check_diagnostic_fields.py`, `check_explicit_encoding.py`, `check_site_assets.py`, `check_licenses.py`, `check_doc_counts.py`, `check_limitations_sync.py`, `ruff check .`, `ruff check --select S vera/` (security rules), `uv lock --check` |
 | **security** | Ubuntu | [Gitleaks](https://github.com/gitleaks/gitleaks-action) secret scanning on full history |
-| **dependency-audit** | Python 3.12 x Ubuntu | `pip-audit --skip-editable --ignore-vuln CVE-2026-4539` — checks all installed packages against the OSV vulnerability database (skips the local editable `vera` package; `CVE-2026-4539` suppressed pending a pygments fix release) |
+| **dependency-audit** | Python 3.12 x Ubuntu | `pip-audit --skip-editable` — checks all installed packages against the OSV vulnerability database (skips the local editable `vera` package) |
 | **wheel-preflight** | Python 3.12 x Ubuntu | `python scripts/check_wheel_availability.py` — verifies every runtime dep has prebuilt wheels for every (platform, python-version) tuple documented in README §Supported platforms; structural backstop for #691-class install regressions |
+| **package-distribution** | Python 3.12 x Ubuntu | `python -m build`, `twine check dist/*`, and `python scripts/check_distribution.py dist` on the artifacts that will ship under the `veralang` name, then a wheel smoke-test: install `dist/*.whl` into a fresh venv outside the checkout and run `vera version` / `vera check` / `vera run` over `hello_world.vera`. PR CI validates the archives and publishes nothing (#737) |
 | **sbom** | Python 3.12 x Ubuntu | `cyclonedx-py environment` — generates a [CycloneDX](https://cyclonedx.org) JSON SBOM of the full installed dependency tree and uploads it as a 90-day CI artifact |
 | **browser-parity** | Python 3.12 + Node.js 22 x Ubuntu | `pytest tests/test_browser.py -v` — verifies JS runtime matches Python runtime; collects V8 coverage via `NODE_V8_COVERAGE` and uploads to Codecov |
 

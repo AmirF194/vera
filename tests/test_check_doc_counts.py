@@ -1,11 +1,20 @@
-"""Tests for the KNOWN_ISSUES / HISTORY checks in scripts/check_doc_counts.py.
+"""Tests for the pure per-document checks in scripts/check_doc_counts.py.
 
-Covers the two checks added in the June 2026 planning-document rework:
+Each of these is a function of text (plus, for one, the filesystem), so it
+is testable without a pytest collection run:
 
 - ``check_refactoring_counts`` — KNOWN_ISSUES.md "Refactoring needed"
   line counts must stay within ±10% of the measured file sizes.
 - ``check_history_row_format`` — HISTORY.md version rows carry at most
   one issue link and no " — " separator.
+- ``check_tests_breakdown`` — TESTING.md's passed/stress/skipped parts
+  must sum to the collected total.
+- ``check_vera_readme_test_counts`` — the four counts in vera/README.md's
+  Test Suite paragraph.
+
+The last two share a failure mode with every other check here and it is
+tested for both: a reworded sentence must be an ERROR, not a silent skip,
+or rewording switches the gate off.
 """
 
 from __future__ import annotations
@@ -185,3 +194,143 @@ class TestHistoryRowFormat:
         text = "line one\n| v0.0.9 | 2 Mar | Bad — row — twice. |\n"
         errors = _MOD.check_history_row_format(text)
         assert "line 2" in errors[0]
+
+
+def _overview(passed: int, stress: int, skipped: int, total: int) -> str:
+    return (
+        "| Metric | Value |\n"
+        "|--------|-------|\n"
+        f"| **Tests** | {total:,} across 143 files (~108,000 lines of test"
+        f" code; {passed:,} passed + {stress} stress, {skipped} skipped) |\n"
+    )
+
+
+class TestTestsBreakdown:
+    def test_parts_summing_to_the_total_pass(self) -> None:
+        text = _overview(9235, 26, 121, 9382)
+        assert _MOD.check_tests_breakdown(text, 9382) == []
+
+    def test_parts_not_summing_to_the_total_fail(self) -> None:
+        # The shape that motivated the check: the total is refreshed at
+        # release time because a gate reads it, the parts are not.
+        text = _overview(9230, 26, 121, 9382)
+        errors = _MOD.check_tests_breakdown(text, 9382)
+        assert len(errors) == 1
+        assert "9,377" in errors[0]
+        assert "9,382" in errors[0]
+
+    def test_a_right_total_with_wrong_parts_still_fails(self) -> None:
+        # The row's own total is NOT what the parts are checked against —
+        # the collected count is — so a self-consistent but stale row is
+        # caught by the existing total check, and an inconsistent one here.
+        text = _overview(9000, 26, 121, 9147)
+        errors = _MOD.check_tests_breakdown(text, 9382)
+        assert len(errors) == 1
+
+    def test_reworded_row_is_an_error_not_a_skip(self) -> None:
+        text = (
+            "| **Tests** | 9,382 across 143 files (~108,000 lines of test"
+            " code; 9,235 green, 26 stress and 121 skipped) |\n"
+        )
+        errors = _MOD.check_tests_breakdown(text, 9382)
+        assert len(errors) == 1
+        assert "no longer gated" in errors[0]
+
+
+def _test_suite_para(
+    tests: int, files: int, conformance: int, examples: int
+) -> str:
+    return (
+        "## Test Suite\n\n"
+        f"Testing spans a **pytest suite** of {tests:,} tests across {files}"
+        " files — compiler-internals unit tests plus a **conformance suite**"
+        f" ({conformance} programs in `tests/conformance/` validating every"
+        " language feature against the spec) and **example programs**"
+        f" ({examples} end-to-end demos).\n"
+    )
+
+
+class TestVeraReadmeTestCounts:
+    def test_matching_counts_pass(self) -> None:
+        text = _test_suite_para(9382, 143, 196, 42)
+        assert _MOD.check_vera_readme_test_counts(
+            text, 9382, 143, 196, 42
+        ) == []
+
+    def test_every_count_is_checked_independently(self) -> None:
+        text = _test_suite_para(1, 2, 3, 4)
+        errors = _MOD.check_vera_readme_test_counts(text, 9382, 143, 196, 42)
+        # Four separate citations, four separate errors — a single
+        # aggregate would let three stay wrong after one is fixed.
+        assert len(errors) == 4
+        joined = " ".join(errors)
+        for label in (
+            "total tests",
+            "test file count",
+            "conformance programs",
+            "example programs",
+        ):
+            assert label in joined
+
+    def test_stale_example_count_alone_fails(self) -> None:
+        text = _test_suite_para(9382, 143, 196, 37)
+        errors = _MOD.check_vera_readme_test_counts(text, 9382, 143, 196, 42)
+        assert len(errors) == 1
+        assert "example programs" in errors[0]
+
+    def test_reworded_paragraph_is_an_error_not_a_skip(self) -> None:
+        text = (
+            "## Test Suite\n\nTesting spans 9,382 tests in 143 modules,"
+            " 196 conformance programs and 42 demos.\n"
+        )
+        errors = _MOD.check_vera_readme_test_counts(text, 9382, 143, 196, 42)
+        assert len(errors) == 1
+        assert "no longer gated" in errors[0]
+
+    def test_thousands_separators_are_read_in_every_count(self) -> None:
+        # The prose writes counts with thousands separators once they cross
+        # a thousand.  A digits-only group for any of the four would stop
+        # matching at that point and report the paragraph as ungated —
+        # switching the check off exactly when the number it guards grows.
+        text = (
+            "## Test Suite\n\n"
+            "Testing spans a **pytest suite** of 12,345 tests across 1,143"
+            " files — compiler-internals unit tests plus a **conformance"
+            " suite** (1,196 programs in `tests/conformance/` validating"
+            " every language feature against the spec) and **example"
+            " programs** (1,042 end-to-end demos).\n"
+        )
+        assert _MOD.check_vera_readme_test_counts(
+            text, 12345, 1143, 1196, 1042
+        ) == []
+
+    def test_counts_are_read_from_the_test_suite_section_only(self) -> None:
+        # The pattern spans several sentences, so it matches with DOTALL.
+        # Run against the whole file that lets the paragraph's head pair
+        # with digits from any LATER section: the Test Suite paragraph can
+        # be reworded — no longer stating the counts at all — and the gate
+        # still greens off a decoy elsewhere.  That is the silent skip this
+        # check exists to prevent, so it must fail loud instead.
+        text = (
+            "## Test Suite\n\n"
+            "Testing spans a **pytest suite** of 9,382 tests across 143"
+            " files — unit tests, 196 conformance programs and 42"
+            " examples.\n\n"
+            "## Current Limitations\n\n"
+            "Historic note: the suite once shipped (196 programs in"
+            " `tests/conformance/` validating every feature) and (42"
+            " end-to-end demos).\n"
+        )
+        errors = _MOD.check_vera_readme_test_counts(text, 9382, 143, 196, 42)
+        assert len(errors) == 1
+        assert "no longer gated" in errors[0]
+
+    def test_missing_test_suite_heading_is_an_error_not_a_skip(self) -> None:
+        # Renaming the heading moves the paragraph out of the slice; the
+        # counts must stop being "checked" loudly, not quietly.
+        text = _test_suite_para(9382, 143, 196, 42).replace(
+            "## Test Suite", "## Testing"
+        )
+        errors = _MOD.check_vera_readme_test_counts(text, 9382, 143, 196, 42)
+        assert len(errors) == 1
+        assert "no longer gated" in errors[0]

@@ -95,13 +95,13 @@ vera lsp                          # Serve LSP over stdio: live diagnostics, hove
                                   #   hole completion + agent proof-delta methods (LSP_SERVER.md)
 vera builtins [--json]            # List the built-in function registry (no file needed)
 vera effects [--json]             # List the effect and ability registry (no file needed)
-vera errors [--json]              # List the diagnostic-code registry: E001–E702 + W001 (no file needed)
+vera errors [--json]              # List the diagnostic-code registry: E001–E702 + W001/W002 (no file needed)
 pytest tests/ -v                  # Run the test suite
 ```
 
 Errors are natural language instructions explaining what went wrong and how to fix it. Feed them back into your context to correct the code.
 
-`vera test` generates Z3 inputs for `Int`, `Nat`, `Bool`, `Byte`, `String`, and `Float64` parameters. Functions with ADT or function-type parameters are skipped with a message naming the specific type. Float64 uses Z3's mathematical reals (NaN, ±∞, and subnormals are not generated). Strings are capped at 50 characters.
+`vera test` generates Z3 inputs for `Int`, `Nat`, `Bool`, `Byte`, `String`, and `Float64` parameters. The decision is made on each parameter's **resolved** type, not its spelling: a type alias or refinement that resolves to one of those six is generated for like any other, so `type Count = Nat; public fn twice(@Count -> @Nat)` is not skipped for its parameter type, and an alias-spelled `requires` still constrains the inputs. (Trials are what a *Tier 3* contract gets; a signature the verifier proves reports `VERIFIED (Tier 1)` instead, and one with only trivial contracts is skipped as `trivial contracts only`.) A parameter resolving to an ADT or a function type is skipped with a message naming that resolved type — `type MaybeCount = Option<Nat>` skips with `cannot generate Option<Nat> inputs`. A generic function is skipped as `generic function` before its parameter types are considered at all, so a `forall<T>` signature never reports a per-parameter reason even when every parameter is generable. Float64 uses Z3's mathematical reals (NaN, ±∞, and subnormals are not generated). Strings are capped at 50 characters.
 
 ### Browser compilation
 
@@ -152,9 +152,10 @@ On error, each diagnostic includes `severity`, `description`, `location` (`file`
 
 ### Error codes
 
-Every diagnostic has a stable error code grouped by compiler phase:
+Every diagnostic has a stable code grouped by compiler phase — the `W` series is warnings, the `E` series errors:
 
 - **W001** — Typed hole (`?`) — expected type and available bindings reported (warning, not error)
+- **W002** — `async()` argument evaluates eagerly: its effects fall outside the commutative set (`Http`), so the future is computed sequentially at the `async()` site rather than concurrently (warning, not error)
 - **E001–E007** — Parse errors (missing contracts, unexpected tokens)
 - **E020, E021, E023** — Malformed comments: unterminated `{-` (E020) or `/*` (E021), or a `/*` nested inside another (E023 — only `{- -}` nests). Each names the delimiter at fault and how to close it.
 - **E010** — Transform errors (internal)
@@ -2515,7 +2516,7 @@ vera version                      # Print the installed version (also --version,
 vera lsp                          # Serve LSP over stdio (needs the [lsp] extra; see LSP_SERVER.md)
 vera builtins [--json]            # List the built-in function registry (no file needed)
 vera effects [--json]             # List the effect and ability registry (no file needed)
-vera errors [--json]              # List the diagnostic error-code registry E001–E702 (no file needed)
+vera errors [--json]              # List the diagnostic-code registry: E001–E702 + W001/W002 (no file needed)
 ```
 
 See [TOOLCHAIN.md](https://github.com/aallan/vera/blob/main/TOOLCHAIN.md) for the CLI cookbook — driving the toolchain to write, verify, test, run, and debug Vera, including the `builtins`/`effects`/`errors` introspection commands.
@@ -2770,7 +2771,14 @@ included) and publishes:
 - **Go-to-definition on slot references** — `@T.n` under the cursor
   jumps to the parameter it names under De Bruijn resolution
   (most-recent-first), which is exactly the lookup humans find
-  hardest to do in their head.
+  hardest to do in their head. Both sides of the lookup — the
+  parameter's name and the reference's — are rendered by the same
+  function the checker keys its binding table with, so a
+  parameterised reference (`@Option<Int>.0`) resolves, an
+  alias-spelled parameter (`@Option<Cnt>` under `type Cnt = Int`) is
+  reachable from its canonical spelling, and a reference inside a
+  `where` helper resolves against that helper's own scope, including
+  any `forall` variables it inherits from its parent.
 - **Typed-hole completion** — with the cursor at a `?` hole,
   completion lists the in-scope bindings that fit, innermost first,
   each with its type.
@@ -2960,6 +2968,34 @@ Vera's answer is that the contracts *are* the link between implementation and re
 The bet is that contracts are a better surface for capturing intent than variable names scattered through an implementation. A function signature with `requires(@Int.1 != 0)` and `ensures(@Int.result == @Int.0 / @Int.1)` communicates what the function does more precisely than any variable name could.
 
 
+## How do type aliases interact with `@T.n` references?
+
+A slot reference names a type, so `type` declarations are how a program shapes its own slot namespaces. Three rules apply, and they differ deliberately.
+
+At the **head** of a slot name an alias is opaque. `type Cnt = Int;` does not make `@Cnt` and `@Int` interchangeable — a parameter declared `@Cnt` is reached only by `@Cnt.0`. That opacity is what stops a library adding an alias and silently splitting a caller's `Int` stack.
+
+Inside a type **argument** an alias resolves. Under the same declaration, a parameter written `@Option<Cnt>` binds `Option<Int>` and is referenced `@Option<Int>.0` — because `Option<Cnt>` and `Option<Int>` are one type, and one type must not become two namespaces.
+
+A `State<T>` or `Exn<E>` **cell** resolves through the head as well: identity is the *resolved* type, so a helper declaring `State<Option<Int>>` and a handler spelling `State<MaybeInt>` share their state. That holds wherever the resolved type has a mangle-safe family name — see [`DE_BRUIJN.md`](https://github.com/aallan/vera/blob/main/DE_BRUIJN.md) §6.5 for the one case where the compiler falls back to the spelling instead.
+
+The practical consequence is that an alias is how you give a parameter a name without reintroducing names. Two parameters of one underlying type become two stacks, so every reference is `.0` and there is no ordering to get wrong:
+
+```vera
+type Meters = Int;
+type Feet = Int;
+
+private fn excess(@Meters, @Feet -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  @Meters.0 - @Feet.0 / 3
+}
+```
+
+`vera check --explain-slots` prints what each parameter actually bound, and spec [§3.8 and §3.8.1](https://github.com/aallan/vera/blob/main/spec/03-slot-references.md) are the formal statement.
+
+
 ## What actually gets verified?
 
 There are three layers, and they cover different things.
@@ -3087,7 +3123,7 @@ Mandatory parity tests enforce that the browser runtime produces identical resul
 
 The process works in three steps:
 
-1. **Input generation**: The compiler reads each function's `requires()` clause and uses Z3 to generate concrete values that satisfy the precondition. For example, if a function requires `@Int.1 != 0`, Z3 produces pairs of integers where the second is non-zero. It generates up to 100 trials per function by default (configurable with `--trials`).
+1. **Input generation**: The compiler reads each function's `requires()` clause and uses Z3 to generate concrete values that satisfy the precondition. For example, if a function requires `@Int.1 != 0`, Z3 produces pairs of integers where the second is non-zero. It generates up to 100 trials per function by default (configurable with `--trials`). Whether a parameter can be generated for is decided on its *resolved* type, not its spelling, so an alias of a generatable type (`type Cnt = Int;`) is trialled rather than skipped, and an alias-spelled precondition still constrains the inputs.
 
 2. **Execution**: Each generated input is compiled to WASM and executed via wasmtime. The function runs with real values, not symbolic ones.
 
@@ -3175,7 +3211,7 @@ The reference compiler is under active development. The current release includes
 
 - A seven-stage pipeline: parse, transform, resolve, typecheck, verify, compile, execute
 - A 14-chapter formal specification
-- 9,382 tests, including a 196-program conformance suite
+- 9,393 tests, including a 196-program conformance suite
 - 42 working example programs
 - 164 built-in functions covering strings, arrays, math, parsing, and data types
 - Four built-in abilities (Eq, Ord, Hash, Show) with constrained generics and ADT auto-derivation

@@ -51,7 +51,7 @@ vera lsp                          # Serve LSP over stdio (needs the [lsp] extra;
 vera version                      # Print the installed version (also --version, -V)
 vera builtins [--json]            # List the built-in function registry (no file needed)
 vera effects [--json]             # List the effect and ability registry (no file needed)
-vera errors [--json]              # List the diagnostic error-code registry E001–E702 (no file needed)
+vera errors [--json]              # List the diagnostic code registry E001–E702 + W001/W002 (no file needed)
 
 pytest tests/ -v                  # Run the test suite (see TESTING.md)
 VERA_JS_COVERAGE=1 pytest tests/test_browser.py -v  # Browser tests with JS coverage
@@ -67,6 +67,7 @@ python scripts/check_readme_examples.py # Verify README code blocks parse
 python scripts/check_examples_doc.py  # Verify EXAMPLES.md code blocks parse
 python scripts/check_skill_examples.py # Verify SKILL.md code blocks parse
 python scripts/check_faq_examples.py  # Verify FAQ code blocks parse
+python scripts/check_debruijn_examples.py # Verify DE_BRUIJN.md code blocks parse
 python scripts/check_pypi_readme_examples.py # Verify PYPI_README code blocks parse + check + verify
 python scripts/check_html_examples.py # Verify HTML code blocks parse + check + verify
 python scripts/check_doc_builtin_shadowing.py # Verify no doc example redefines a built-in (E151; #819)
@@ -158,7 +159,7 @@ Each diagnostic includes: `severity`, `description`, `location` (`file`, `line`,
 
 ### Error codes
 
-Every diagnostic has a stable error code (`E001`–`E702`). Codes are grouped by compiler phase:
+Every diagnostic has a stable code — errors `E001`–`E702`, warnings `W001`/`W002`. Codes are grouped by compiler phase:
 
 | Range | Phase |
 |-------|-------|

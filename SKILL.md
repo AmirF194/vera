@@ -89,13 +89,13 @@ vera lsp                          # Serve LSP over stdio: live diagnostics, hove
                                   #   hole completion + agent proof-delta methods (LSP_SERVER.md)
 vera builtins [--json]            # List the built-in function registry (no file needed)
 vera effects [--json]             # List the effect and ability registry (no file needed)
-vera errors [--json]              # List the diagnostic-code registry: E001–E702 + W001 (no file needed)
+vera errors [--json]              # List the diagnostic-code registry: E001–E702 + W001/W002 (no file needed)
 pytest tests/ -v                  # Run the test suite
 ```
 
 Errors are natural language instructions explaining what went wrong and how to fix it. Feed them back into your context to correct the code.
 
-`vera test` generates Z3 inputs for `Int`, `Nat`, `Bool`, `Byte`, `String`, and `Float64` parameters. Functions with ADT or function-type parameters are skipped with a message naming the specific type. Float64 uses Z3's mathematical reals (NaN, ±∞, and subnormals are not generated). Strings are capped at 50 characters.
+`vera test` generates Z3 inputs for `Int`, `Nat`, `Bool`, `Byte`, `String`, and `Float64` parameters. The decision is made on each parameter's **resolved** type, not its spelling: a type alias or refinement that resolves to one of those six is generated for like any other, so `type Count = Nat; public fn twice(@Count -> @Nat)` is not skipped for its parameter type, and an alias-spelled `requires` still constrains the inputs. (Trials are what a *Tier 3* contract gets; a signature the verifier proves reports `VERIFIED (Tier 1)` instead, and one with only trivial contracts is skipped as `trivial contracts only`.) A parameter resolving to an ADT or a function type is skipped with a message naming that resolved type — `type MaybeCount = Option<Nat>` skips with `cannot generate Option<Nat> inputs`. A generic function is skipped as `generic function` before its parameter types are considered at all, so a `forall<T>` signature never reports a per-parameter reason even when every parameter is generable. Float64 uses Z3's mathematical reals (NaN, ±∞, and subnormals are not generated). Strings are capped at 50 characters.
 
 ### Browser compilation
 
@@ -146,9 +146,10 @@ On error, each diagnostic includes `severity`, `description`, `location` (`file`
 
 ### Error codes
 
-Every diagnostic has a stable error code grouped by compiler phase:
+Every diagnostic has a stable code grouped by compiler phase — the `W` series is warnings, the `E` series errors:
 
 - **W001** — Typed hole (`?`) — expected type and available bindings reported (warning, not error)
+- **W002** — `async()` argument evaluates eagerly: its effects fall outside the commutative set (`Http`), so the future is computed sequentially at the `async()` site rather than concurrently (warning, not error)
 - **E001–E007** — Parse errors (missing contracts, unexpected tokens)
 - **E020, E021, E023** — Malformed comments: unterminated `{-` (E020) or `/*` (E021), or a `/*` nested inside another (E023 — only `{- -}` nests). Each names the delimiter at fault and how to close it.
 - **E010** — Transform errors (internal)
