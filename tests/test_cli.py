@@ -4061,6 +4061,80 @@ class TestExplainSlots:
         assert "2 from last @Int" in captured.out
         assert "first @Int" in captured.out
 
+    def test_inprocess_alias_argument_is_resolved(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A parameter written `@Option<Cnt>` is tabled as `Option<Int>`.
+
+        The table is a NAMING answer, so it reports what the CHECKER bound
+        (#1208): THE renderer keeps the head syntactic and RESOLVES the type
+        arguments, so an alias in argument position collapses.  A table that
+        still said `Option<Cnt>` would be naming a stack no other subsystem
+        agrees with — the body's `@Option<Int>.0` resolves against
+        `Option<Int>`, and that is what the user has to be told.
+        """
+        src = (
+            "type Cnt = Int;\n"
+            "\n"
+            "public fn f(@Option<Cnt> -> @Int)\n"
+            "  requires(true)\n"
+            "  ensures(true)\n"
+            "  effects(pure)\n"
+            "{\n"
+            "  match @Option<Int>.0 {\n"
+            "    Some(@Int) -> @Int.0,\n"
+            "    None -> 0 - 1\n"
+            "  }\n"
+            "}\n"
+        )
+        f = tmp_path / "alias_arg.vera"
+        f.write_text(src, encoding="utf-8")
+        rc = cmd_check(str(f), explain_slots=True)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "@Option<Int>.0  parameter 1 (only @Option<Int>)" in out
+        # The signature line echoes the SOURCE spelling (what was written);
+        # the slot lines must not offer it as a key, because it is not one.
+        assert "@Option<Cnt>.0" not in out
+
+    def test_inprocess_forall_var_shadows_a_module_alias(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A `forall<T>` parameter is named in the FUNCTION's scope (#1208).
+
+        `T` here is both a module alias (`= Int`) and the function's own type
+        parameter, and the type parameter SHADOWS the alias — that is the
+        checker's branch order, so the checker binds two distinct stacks,
+        `Option<Int>` (parameter 1) and `Option<T>` (parameter 2).  Named
+        against the bare module environment the shadow is invisible: `T`
+        resolves to `Int`, the two parameters merge into one `Option<Int>`
+        stack, and the table tells the user `@Option<Int>.0` is parameter 2
+        when the checker resolves it to parameter 1.  Wrong, not merely
+        vague — which is why the function's own type parameters have to
+        enter the environment the table is rendered against.
+        """
+        src = (
+            "type T = Int;\n"
+            "\n"
+            "public forall<T> fn g(@Option<Int>, @Option<T> -> @Int)\n"
+            "  requires(true)\n"
+            "  ensures(true)\n"
+            "  effects(pure)\n"
+            "{\n"
+            "  match @Option<Int>.0 {\n"
+            "    Some(@Int) -> @Int.0,\n"
+            "    None -> 0 - 1\n"
+            "  }\n"
+            "}\n"
+        )
+        f = tmp_path / "shadow.vera"
+        f.write_text(src, encoding="utf-8")
+        rc = cmd_check(str(f), explain_slots=True)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "@Option<Int>.0  parameter 1 (only @Option<Int>)" in out
+        assert "@Option<T>.0  parameter 2 (only @Option<T>)" in out
+
 
 class TestCmdServe:
     """#305: `vera serve file.vera [--port N]` — validation-error paths.

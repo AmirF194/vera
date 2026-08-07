@@ -40,7 +40,7 @@ from vera.obligations.core import (
     expr_text_for,
 )
 from vera.naming import EMPTY_ALIAS_ENV, AliasEnv, alias_env_from_environment
-from vera.slots import slot_table
+from vera.slots import fn_slot_scope, slot_table
 from vera.smt import SlotEnv, SmtContext
 from vera.types import (
     erases_to_unit,
@@ -7501,6 +7501,7 @@ class ContractVerifier:
     def _pre_at_call_site(
         self,
         callee_params: tuple[ast.TypeExpr, ...],
+        callee_forall: tuple[str, ...] | None,
         call_node: ast.FnCall | ast.ModuleCall,
         precondition: ast.Requires,
     ) -> str | None:
@@ -7515,17 +7516,31 @@ class ContractVerifier:
         any slot cannot be mapped (unknown type in the table, index
         out of range, arity mismatch), in which case the caller keeps
         the generic wording.
+
+        Both sides of the lookup render through :mod:`vera.naming` (#1208),
+        in the CALLEE's scope: this module's env (a module-qualified callee
+        is excluded by the caller, so the callee is local) narrowed by
+        *callee_forall*, its own type parameters.  The table is keyed by
+        :func:`~vera.naming.slot_name` and the reference by
+        :func:`~vera.naming.slot_ref_key`, the same renderer the checker
+        binds and resolves with.  Keying by the reference's bare HEAD instead
+        — the pre-#1208 bug — meant a PARAMETERISED reference
+        (``@Wrap<Int>.0`` against a ``Wrap<Int>`` entry) never matched, so
+        the substitution was abandoned and the message fell back to its
+        generic wording on exactly the signatures the concrete rendering
+        helps most.  It failed closed, which is why it stayed invisible.
         """
         import dataclasses as _dc
 
-        table = slot_table(callee_params, self._alias_env)
+        table = slot_table(callee_params, self._alias_env, callee_forall)
+        scope = fn_slot_scope(self._alias_env, callee_forall)
 
         class _NoSubstitution(Exception):
             pass
 
         def rebuild(node: ast.Expr) -> ast.Expr:
             if isinstance(node, ast.SlotRef):
-                positions = table.get(node.type_name)
+                positions = table.get(naming.slot_ref_key(node, scope))
                 if not positions or node.index >= len(positions):
                     raise _NoSubstitution
                 pos = positions[node.index]
@@ -7595,6 +7610,7 @@ class ContractVerifier:
                     "tuple[ast.TypeExpr, ...]",
                     callee_info.param_type_exprs,
                 ),
+                callee_info.forall_vars,
                 call_node,
                 precondition,
             )

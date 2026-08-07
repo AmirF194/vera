@@ -723,6 +723,62 @@ class TestTesterUnitFunctions:
         result = _type_expr_to_slot_name(te, EMPTY_ALIAS_ENV)
         assert result == "Fn"
 
+    def test_slot_name_canonicalizes_an_alias_type_argument(self) -> None:
+        """The threaded env is LOAD-BEARING, not decoration (#1208).
+
+        A Z3 variable is declared under `@{slot name}.{index}` and the
+        function's own `requires` clauses look themselves up under the key
+        the CHECKER bound — so an alias in type-argument position has to
+        resolve on the tester's side too, or the generated constraint binds
+        nothing.  Contrasted against the alias-free environment, which is
+        the answer a syntactic rebuild gives.
+        """
+        from vera.naming import alias_env_from_declarations, EMPTY_ALIAS_ENV
+        from vera.parser import parse_to_ast
+        from vera.tester import _type_expr_to_slot_name
+        from vera import ast as vera_ast
+
+        env = alias_env_from_declarations(
+            parse_to_ast("type Cnt = Int;\n").declarations)
+        te = vera_ast.NamedType(
+            name="Array",
+            type_args=(vera_ast.NamedType(name="Cnt", type_args=()),),
+        )
+        assert _type_expr_to_slot_name(te, env) == "Array<Int>"
+        assert _type_expr_to_slot_name(te, EMPTY_ALIAS_ENV) == "Array<Cnt>"
+
+    def test_alias_typed_param_is_skipped_before_naming_applies(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The gate that bounds the reach of the test above.
+
+        ``_get_param_types`` matches a parameter's SYNTACTIC head against
+        ``PRIMITIVES`` and never resolves aliases, so an alias-typed
+        parameter is classified unsupported and the function is skipped
+        (E701) before any Z3 variable is named.  Pinned because it is what
+        makes the tester's rendered names trivially consistent today — every
+        parameter it does reach has a primitive head — and because a future
+        change that teaches ``_get_param_types`` to resolve aliases must land
+        with the naming already correct, not discover it afterwards.
+        """
+        source = (
+            "type Cnt = Int;\n"
+            "\n"
+            "public fn keep(@Cnt -> @Int)\n"
+            "  requires(@Cnt.0 > 100)\n"
+            "  ensures(@Int.result > 100)\n"
+            "  effects(pure)\n"
+            "{\n"
+            "  @Cnt.0\n"
+            "}\n"
+        )
+        path = _write_vera(tmp_path, source)
+        rc = cmd_test(path, trials=3)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "SKIPPED" in out.upper()
+        assert "cannot generate" in out
+
     def test_get_source_line_no_span(self) -> None:
         """Cover line 751: _get_source_line returns '' when no span."""
         from vera.tester import _get_source_line

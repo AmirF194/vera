@@ -196,7 +196,7 @@ def test_explain_slots_names_the_merged_parameter_stack() -> None:
     env = alias_env_from_declarations(program.declarations)
     fn = next(t.decl for t in program.declarations
               if getattr(t.decl, "name", None) == "f")
-    assert slot_table(fn.params, env) == {"Option<Int>": [1]}
+    assert slot_table(fn.params, env, fn.forall_vars) == {"Option<Int>": [1]}
 
 
 # =====================================================================

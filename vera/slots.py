@@ -24,7 +24,7 @@ function ``fn foo(@Int, @Int -> @Int)``:
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 
 from vera import ast, naming
 
@@ -43,6 +43,7 @@ from vera.naming import (
 __all__ = [
     "AliasResolutionDepthError",
     "family_fallback_name",
+    "fn_slot_scope",
     "format_slot_table",
     "resolve_alias_type_expr",
     "resolve_scalar_alias_te",
@@ -147,6 +148,22 @@ def _te_slot_name(te: ast.TypeExpr, env: AliasEnv) -> str:
     return naming.slot_name(te, env)
 
 
+def fn_slot_scope(
+    env: AliasEnv, forall_vars: Iterable[str] | None,
+) -> AliasEnv:
+    """*env* as seen from INSIDE a function with those type parameters.
+
+    A ``forall<T>`` variable shadows a same-named module alias for the whole
+    signature — the checker binds it in ``_check_fn`` step 1, before it
+    renders any parameter or reference — so both sides of a slot lookup have
+    to be rendered here, never against the bare module environment.  One
+    helper rather than a ``with_type_params`` call per consumer, so the
+    binding side (:func:`slot_table`) and the reference side
+    (:func:`vera.naming.slot_ref_key`) cannot end up scoped differently.
+    """
+    return naming.with_type_params(env, forall_vars) if forall_vars else env
+
+
 def _label(tname: str, slot_idx: int, n: int) -> str:
     """Human-readable label for a slot entry, e.g. 'last @Int'."""
     if n == 1:
@@ -165,6 +182,7 @@ def _label(tname: str, slot_idx: int, n: int) -> str:
 def slot_table(
     params: tuple[ast.TypeExpr, ...],
     env: AliasEnv,
+    forall_vars: Iterable[str] | None,
 ) -> dict[str, list[int]]:
     """Return the slot resolution table for a function's parameter list.
 
@@ -178,10 +196,22 @@ def slot_table(
     syntactically.  Required rather than defaulted — an empty environment
     silently renders every alias opaquely, which is the failure mode the
     consolidation exists to close.
+
+    *forall_vars* is the owning function's own type parameters (``None`` for
+    a non-generic one), which SHADOW same-named module aliases for the whole
+    signature — the checker binds its parameters with them already in scope
+    (``_check_fn`` step 1, before step 4's slot binding), so a table rendered
+    without them can disagree.  Concretely, under ``type T = Int`` the
+    signature ``forall<T> fn g(@Option<Int>, @Option<T>)`` binds two stacks
+    for the checker and ONE for a module-only rendering — which then reports
+    ``@Option<Int>.0`` as parameter 2 where the checker resolves it to
+    parameter 1.  Required, not defaulted, for the same reason *env* is: the
+    omission has no symptom of its own.
     """
+    scope = fn_slot_scope(env, forall_vars)
     by_type: dict[str, list[int]] = defaultdict(list)
     for i, te in enumerate(params, 1):
-        by_type[_te_slot_name(te, env)].append(i)
+        by_type[_te_slot_name(te, scope)].append(i)
     return {tname: list(reversed(pos)) for tname, pos in by_type.items()}
 
 

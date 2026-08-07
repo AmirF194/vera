@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 
 from lsprotocol import types as lsp
 
-from vera import ast
+from vera import ast, naming
 from vera.checker.core import CheckArtifacts
 from vera.errors import Diagnostic, ParseError, TransformError
 from vera.lsp.convert import (
@@ -44,7 +44,7 @@ from vera.obligations.cache import walk_nodes
 from vera.obligations.core import ProofObligation
 from vera.obligations.session import VerificationSession
 from vera.naming import EMPTY_ALIAS_ENV, AliasEnv
-from vera.slots import slot_table
+from vera.slots import fn_slot_scope, slot_table
 
 _SEVERITY = {
     "error": lsp.DiagnosticSeverity.Error,
@@ -237,6 +237,12 @@ def definition_at(
     # parameters, not the enclosing top-level function's.
     enclosing: ast.FnDecl | None = None
     enclosing_size: tuple[int, int] | None = None
+    # Every FnDecl whose span contains the cursor is an ANCESTOR of it, so
+    # the union of their `forall` variables is the type-parameter scope the
+    # checker had in hand here: a `where` helper inside a generic sees the
+    # outer function's variables too (`_check_fn` saves and restores one
+    # shared map rather than replacing it).
+    in_scope_vars: set[str] = set()
     for tld in analysis.program.declarations:
         for node in walk_nodes(tld.decl):
             if (
@@ -250,6 +256,7 @@ def definition_at(
                 )
                 if enclosing_size is None or size < enclosing_size:
                     enclosing, enclosing_size = node, size
+                in_scope_vars.update(node.forall_vars or ())
     if enclosing is None:
         return None
 
@@ -265,8 +272,16 @@ def definition_at(
     if slot is None:
         return None
 
-    table = slot_table(enclosing.params, analysis.alias_env)
-    positions = table.get(slot.type_name, [])
+    # #1208: BOTH sides render through :mod:`vera.naming`, in ONE scope —
+    # this module's env (the document being analysed owns `enclosing`)
+    # narrowed by `fn_slot_scope`, the same narrowing `slot_table` applies to
+    # the binding side, so the two cannot be scoped differently.  The
+    # reference used to be keyed by its bare HEAD, so `@Option<Int>.0` looked
+    # up `Option` in a table keyed `Option<Int>` and go-to-definition
+    # silently returned nothing for every parameterised slot.
+    scope = fn_slot_scope(analysis.alias_env, in_scope_vars)
+    table = slot_table(enclosing.params, analysis.alias_env, in_scope_vars)
+    positions = table.get(naming.slot_ref_key(slot, scope), [])
     if slot.index >= len(positions):
         return None  # binds to a let/match binding, not a parameter
     param = enclosing.params[positions[slot.index] - 1]

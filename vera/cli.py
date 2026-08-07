@@ -162,7 +162,13 @@ def cmd_check(
                 if not isinstance(top.decl, FnDecl):
                     continue
                 decl = top.decl
-                table = slot_table(decl.params, artifacts.alias_env)
+                # The ENTRY module's env (these are its own top-level
+                # declarations), plus this function's own type parameters —
+                # which shadow same-named module aliases, exactly as they do
+                # for the checker that bound these slots.
+                table = slot_table(
+                    decl.params, artifacts.alias_env, decl.forall_vars,
+                )
                 params_str = (
                     ", ".join(format_type_expr(te) for te in decl.params)
                     + " -> "
