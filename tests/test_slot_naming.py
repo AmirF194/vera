@@ -532,3 +532,125 @@ def test_with_type_params_does_not_mutate_its_input() -> None:
     extended = with_type_params(env, ["MyAlias"])
     assert env.type_params == frozenset()
     assert extended.type_params == frozenset({"MyAlias"})
+
+
+# =====================================================================
+# Clause: TOTAL — no renderer raises, at any legal chain length
+# =====================================================================
+
+def _chain_program(hops: int) -> str:
+    """``type A0 = Int; type A1 = A0; …`` plus a function naming the top.
+
+    Generated rather than stored: the point is the LENGTH, and a stored
+    fixture of this shape is 7 KB of noise.
+    """
+    lines = ["type A0 = Int;"]
+    lines += [f"type A{i} = A{i - 1};" for i in range(1, hops)]
+    lines.append(f"""
+public fn deep(@Option<A{hops - 1}> -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{{
+  option_unwrap_or(@Option<A{hops - 1}>.0, 0)
+}}
+""")
+    return "\n".join(lines)
+
+
+def test_deep_alias_chain_renders_without_recursing_per_hop() -> None:
+    """A 400-hop alias chain RESOLVES, rather than raising ``RecursionError``.
+
+    The checker stores each alias's ``resolved_type`` at registration, so its
+    own cost is O(1) per hop and a chain this long is a perfectly legal
+    program.  The naming module resolved by recursive descent and died at
+    ~340 hops — from inside a renderer its own docstring calls TOTAL (#1208
+    review, probe ``d01_deep_chain``).
+
+    The assertion is the RENDERING, not merely the absence of a crash: a
+    depth bound that answered ``Option<?>`` would also "not raise", and would
+    break both the checker-equivalence rule and the 41-hop
+    ``ch07_state_alias_chain`` conformance program.
+    """
+    source = _chain_program(400)
+    program = parse_to_ast(source)
+    checker = TypeChecker(source=source, file="<deep>")
+    checker.check_program(program)
+    assert not [d for d in checker.errors if d.severity == "error"]
+
+    fn = next(d.decl for d in program.declarations
+              if isinstance(d.decl, ast.FnDecl))
+    env = alias_env_from_environment(checker.env)
+    assert slot_name(fn.params[0], env) == "Option<Int>"
+    # The reference side too — it is the half that silently misses.
+    ref = ast.SlotRef(
+        type_name="Option",
+        type_args=(ast.NamedType(name="A399", type_args=None),),
+        index=0,
+    )
+    assert slot_ref_key(ref, env) == "Option<Int>"
+
+
+def test_deep_alias_chain_agrees_with_the_checker() -> None:
+    """The same chain, compared against the CHECKER's own rendering.
+
+    ``_type_expr_to_slot_name`` delegates to :mod:`vera.naming`, so this is
+    the equivalence the depth fix has to preserve: same answer, no truncation.
+    """
+    source = _chain_program(400)
+    program = parse_to_ast(source)
+    checker = TypeChecker(source=source, file="<deep>")
+    checker.check_program(program)
+    fn = next(d.decl for d in program.declarations
+              if isinstance(d.decl, ast.FnDecl))
+    assert checker._type_expr_to_slot_name(fn.params[0]) == "Option<Int>"
+
+
+def test_deep_alias_chain_of_composites_renders() -> None:
+    """The chain need not be bare names: each hop may WRAP the next.
+
+    ``type A1 = Option<A0>`` grows the resolved type as well as the chain, so
+    it exercises the dependency ordering rather than a bare-name fast path.
+    Kept shorter than the bare chain because the resulting ``Type`` really is
+    that deeply nested, and rendering it is inherently proportional — still
+    long enough that the pre-fix per-hop descent overflowed.
+    """
+    hops = 250
+    lines = ["type A0 = Int;"]
+    lines += [f"type A{i} = Option<A{i - 1}>;" for i in range(1, hops)]
+    source = "\n".join(lines) + f"""
+public fn deep(@Box<A{hops - 1}> -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{{
+  1
+}}
+"""
+    program = parse_to_ast("type Box<T> = Option<T>;\n" + source)
+    checker = TypeChecker(source=source, file="<deep2>")
+    checker.check_program(program)
+    fn = next(d.decl for d in program.declarations
+              if isinstance(d.decl, ast.FnDecl))
+    env = alias_env_from_environment(checker.env)
+    rendered = slot_name(fn.params[0], env)
+    assert rendered.startswith("Box<Option<Option<"), rendered[:60]
+    assert rendered == checker._type_expr_to_slot_name(fn.params[0])
+
+
+def test_alias_with_an_order_entry_but_no_body_falls_through() -> None:
+    """An env whose ``_order`` names an alias it has no body for is TOTAL.
+
+    Every environment this module builds keeps the two maps in step, so this
+    is insurance rather than a live path — but the branch used to index
+    ``env.aliases`` unconditionally, which is a raise inside a renderer
+    documented as raising nothing.
+    """
+    env = AliasEnv(
+        aliases={},
+        alias_params={"Ghost": None},
+        _order={"Ghost": 0},
+    )
+    assert slot_name(ast.NamedType(name="Ghost", type_args=None), env) == "Ghost"
+    assert type_arg_name(
+        ast.NamedType(name="Ghost", type_args=None), env) == "Ghost"

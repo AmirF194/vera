@@ -666,3 +666,91 @@ public fn main(@Unit -> @Int)
         assert v._alias_env_for_generic("twolen") is v._module_alias_envs[("blib",)]
         # A main-file generic has no origin and keeps this program's env.
         assert v._alias_env_for_generic("no_such_generic") is v._alias_env
+
+
+# =====================================================================
+# The one env asymmetry that is NOT a naming bug (#1208 review, probe x01)
+# =====================================================================
+
+class TestPreludeAliasEnvAsymmetry:
+    """Codegen sees prelude type aliases; the checker never does.
+
+    ``inject_prelude`` runs at CODEGEN (and at the verifier's mono discovery),
+    not at check — so ``ArrayMapFn<Int, Bool>`` is an opaque ADT to the checker
+    and a resolved ``fn(Int -> Bool) effects(pure)`` to codegen.  In ARGUMENT
+    position (where naming resolves) the two therefore render one spelling
+    differently, and codegen merges two parameter stacks the checker keeps
+    apart.
+
+    This is CHARACTERIZED here, not fixed.  Both naming envs faithfully report
+    their own side, so it is not a renderer bug: closing it means registering
+    the prelude's aliases in the CHECKER, which changes what the checker
+    resolves (and therefore `--explain-slots`, LSP hovers, and the binding
+    table itself) — a language-semantics change, out of scope for a naming
+    consolidation.  The affected parameter is also uninhabited from Vera
+    source: the checker rejects any argument for an opaque ``ArrayMapFn<…>``,
+    so the wrong-parameter read is reachable only by a HOST calling the
+    exported symbol.
+
+    Delete this test when the gap is closed — its failure is the signal that
+    someone did.
+    """
+
+    _SRC = """\
+public fn f(@Array<ArrayMapFn<Int, Bool>>,
+            @Array<fn(Int -> Bool) effects(pure)> -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  nat_to_int(array_length(@Array<ArrayMapFn<Int, Bool>>.0))
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Array<Int> = array_map([1], fn(@Int -> @Int) effects(pure) { @Int.0 });
+  nat_to_int(array_length(@Array<Int>.0))
+}
+"""
+
+    def test_checker_keeps_the_two_stacks_apart(self) -> None:
+        from vera import naming
+        from vera.checker.core import TypeChecker
+
+        prog = parse_to_ast(self._SRC)
+        checker = TypeChecker(source=self._SRC, file="<x01>")
+        checker.check_program(prog)
+        fn = next(
+            tld.decl for tld in prog.declarations
+            if isinstance(tld.decl, ast.FnDecl) and tld.decl.name == "f"
+        )
+        env = naming.alias_env_from_environment(checker.env)
+        assert "ArrayMapFn" not in env.aliases, (
+            "the checker now registers prelude type aliases — the asymmetry "
+            "this test characterizes is gone; delete it and align the "
+            "codegen-side expectation below"
+        )
+        names = [naming.slot_name(te, env) for te in fn.params]
+        assert names == [
+            "Array<ArrayMapFn<Int, Bool>>",
+            "Array<fn(Int -> Bool) effects(pure)>",
+        ], names
+
+    def test_codegen_merges_them_and_reads_the_second(self) -> None:
+        """The measured consequence, in the emitted WAT.
+
+        ``@Array<ArrayMapFn<Int, Bool>>.0`` is parameter 1 for the checker and
+        parameter 2 for codegen, so the exported body loads the wrong pair of
+        locals.  Asserted on the instruction stream because no Vera caller can
+        reach it — only a host can.
+        """
+        wat = _compile_ok(self._SRC).wat
+        body = wat.split('(func $f (export "f")')[1].split("(func ")[0]
+        assert "local.get 2" in body and "local.get 3" in body, body
+        assert "local.get 0" not in body, (
+            "codegen now reads parameter 1 — the prelude-alias asymmetry has "
+            "been closed; delete this characterization test"
+        )

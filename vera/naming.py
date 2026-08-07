@@ -363,7 +363,11 @@ def _resolve_named(
     if name in PRIMITIVES and not te.type_args:
         return PRIMITIVES[name]
     idx = env._order.get(name)
-    if idx is not None and idx < limit:
+    # ``name in env.aliases`` is what makes the branch TOTAL: the two maps
+    # agree for every environment this module builds, but an env assembled
+    # elsewhere with an ``_order`` entry and no body must fall through to the
+    # ADT branch rather than raise.
+    if idx is not None and idx < limit and name in env.aliases:
         params = env.alias_params.get(name) or ()
         n_supplied = len(te.type_args) if te.type_args else 0
         if n_supplied != len(params):
@@ -385,24 +389,84 @@ def _resolve_named(
     ) if te.type_args else ())
 
 
+def _mentioned_names(te: ast.TypeExpr, out: list[str]) -> None:
+    """Every type NAME written anywhere in *te*, deliberately over-approximated.
+
+    Used only to order alias resolution (see :func:`_resolve_alias`), never to
+    decide a rendering — so it collects names a resolution would skip (a
+    shadowing type parameter, an arity mismatch, a primitive) rather than
+    re-deciding :func:`_resolve_named`'s branch order.  Over-approximating is
+    what keeps it from drifting: resolving one extra alias early is inert,
+    since an alias's own resolution does not depend on who asked for it.
+    """
+    if isinstance(te, ast.NamedType):
+        out.append(te.name)
+        for arg in te.type_args or ():
+            _mentioned_names(arg, out)
+    elif isinstance(te, ast.FnType):
+        for param in te.params:
+            _mentioned_names(param, out)
+        _mentioned_names(te.return_type, out)
+        if isinstance(te.effect, ast.EffectSet):
+            for ref in te.effect.effects:
+                for arg in getattr(ref, "type_args", None) or ():
+                    _mentioned_names(arg, out)
+    elif isinstance(te, ast.RefinementType):
+        _mentioned_names(te.base_type, out)
+
+
 def _resolve_alias(name: str, env: AliasEnv) -> Type:
     """The alias's registration-time ``resolved_type``, recomputed.
 
     Resolved against only the aliases DECLARED BEFORE it and with only its
     own type parameters in scope — the state ``_register_alias`` had when it
     resolved that body.  The strictly-decreasing visibility bound makes the
-    recursion well-founded, so a cyclic or forward-referencing alias
+    resolution well-founded, so a cyclic or forward-referencing alias
     terminates on the opaque placeholder the checker also produces.
+
+    ITERATIVE, dependency-first, because the chain length is the user's to
+    choose and the checker's is O(1) per hop (it stores each alias's
+    ``resolved_type`` at registration).  A recursive descent spent Python
+    frames per hop and died on a legal program — ``type A1 = A0; type A2 =
+    A1; …`` at ~340 hops raised an uncaught ``RecursionError`` from inside a
+    renderer this module's docstring calls TOTAL (#1208 review, probe
+    ``d01_deep_chain``).  Every alias a body mentions has a strictly smaller
+    declaration index, so the mention graph is a DAG; memoizing the deepest
+    first leaves each ``_resolve`` below recursing no further than its own
+    body's syntactic nesting, whatever the chain length.  Equivalence with
+    the checker is preserved exactly — this is an evaluation ORDER, not a
+    depth bound, so a long chain still renders its real resolution rather
+    than a truncated ``?``.
     """
     memo = env._memo
     cached = memo.get(name)
     if cached is not None:
         return cached
-    params = env.alias_params.get(name) or ()
-    ty = _resolve(
-        env.aliases[name], env, frozenset(params), env._order[name])
-    memo[name] = ty
-    return ty
+    stack: list[str] = [name]
+    while stack:
+        cur = stack[-1]
+        if cur in memo:
+            stack.pop()
+            continue
+        limit = env._order[cur]
+        mentioned: list[str] = []
+        _mentioned_names(env.aliases[cur], mentioned)
+        pending = [
+            ref for ref in mentioned
+            if ref not in memo
+            and ref in env.aliases
+            and env._order.get(ref, _UNBOUNDED) < limit
+        ]
+        if pending:
+            # Strictly smaller indices, so the stack cannot cycle and each
+            # alias is resolved at most once (later pushes hit the memo).
+            stack.extend(pending)
+            continue
+        memo[cur] = _resolve(
+            env.aliases[cur], env,
+            frozenset(env.alias_params.get(cur) or ()), limit)
+        stack.pop()
+    return memo[name]
 
 
 def _resolve_effect_row(
@@ -615,10 +679,16 @@ def refinement_binder_parts(
 ) -> RefinementBinder | None:
     """The binder a refinement's runtime guard uses, or ``None``.
 
-    Clause of THE RULE, replicating codegen's ``_refinement_guard_parts``
-    derivation as a pure function: chase the alias chain (bare-name follows
-    only, cycle-guarded) to a ``RefinementType``, then name its base as the
-    predicate's binder.
+    Clause of THE RULE, and THE derivation both consumers use: chase the
+    alias chain (bare-name follows only, cycle-guarded) to a
+    ``RefinementType``, then name its base as the predicate's binder.  It was
+    a second copy of codegen's ``_refinement_guard_parts`` walk until #1208
+    converged them; codegen now calls this and layers its two WASM-specific
+    decisions on top (reject a nested refinement base with E618, emit no
+    guard for a base that erases), because a type's REPRESENTATION is not a
+    naming question and this module must not import the backend.
+    ``tests/test_refinement_binder_convergence_1208.py`` is the differential
+    that keeps the two from drifting apart again.
 
     The binder itself is named by :func:`slot_name` (#1208), so the guard
     pushes the value under exactly the key a predicate's ``@Base.n``

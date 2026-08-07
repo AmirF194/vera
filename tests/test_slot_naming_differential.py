@@ -552,6 +552,28 @@ where {
   }
 }
 """),
+    # A PRELUDE alias name in argument position (#1208 review, probe x01).
+    # The checker never registers the prelude's type aliases — `inject_prelude`
+    # runs at codegen and at the verifier's mono discovery, not at check — so
+    # `ArrayMapFn<Int, Bool>` is an opaque ADT here and stays apart from the
+    # spelled-out function type beside it.  Swept so the CHECKER-side answer is
+    # pinned: it is the one every naming consumer keyed off, and codegen's
+    # differing view of the same spelling is a separate, checker-level gap (see
+    # `test_prelude_alias_split_is_a_checker_level_gap`).
+    ("prelude_alias_in_arg", """\
+public fn b25(
+  @Option<ArrayMapFn<Int, Bool>>,
+  @Array<ArrayMapFn<Int, Bool>>,
+  @Option<OptionMapFn<Int, Bool>>,
+  @Option<fn(Int -> Bool) effects(pure)>
+  -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  1
+}
+"""),
 )
 
 

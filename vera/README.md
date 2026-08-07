@@ -74,7 +74,7 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `ast.py` | 895 | Transform | Frozen dataclass AST nodes, source formatting | `Program`, `Node`, `Expr`, `format_expr` |
 | `types.py` | 662 | Type check | Semantic type representation | `Type`, `is_subtype()` |
 | `prelude.py` | 927 | Type check | Standard prelude — built-in ADT and combinator injection | `inject_prelude()`, `overridable_builtin_names()` |
-| `naming.py` | 689 | Type check | The ONE slot / slot-reference-key / State-Exn-family renderer (#1208, #1209) — the checker's rendering, as a total pure function over an `AliasEnv`, consumed by the checker, the monomorphizer, the verifier, the SMT layer, codegen, the tester, the LSP, and `vera check --explain-slots` | `slot_name()`, `slot_ref_key()`, `family_name()`, `resolve_type_expr()`, `AliasEnv` |
+| `naming.py` | 759 | Type check | The ONE slot / slot-reference-key / State-Exn-family renderer (#1208, #1209) — the checker's rendering, as a total pure function over an `AliasEnv`, consumed by the checker, the monomorphizer, the verifier, the SMT layer, codegen, the tester, the LSP, and `vera check --explain-slots`.  Also the ONE refinement-binder derivation codegen's runtime guard consumes (`refinement_binder_parts`), and each consumer is handed the env of the module that DECLARED what it is rendering | `slot_name()`, `slot_ref_key()`, `family_name()`, `resolve_type_expr()`, `AliasEnv` |
 | `slots.py` | 280 | Type check | Presentation over `naming.py`: slot resolution tables and their text/JSON rendering, plus the two scope walks the tables need (`forall` narrowing, `where`-helper nesting).  The two walks here that are NOT naming say so in their docstrings — the alias-opaque syntactic spelling for WASM representation questions, and the last-resort name for a State/Exn cell family that resolves to none | `slot_table()`, `format_slot_table()`, `fn_slot_scope()`, `fn_scopes()`, `type_expr_slot_name()`, `family_fallback_name()` |
 | `environment.py` | 2,167 | Type check | Type environment, scope stacks, ability registry, all built-in registrations | `TypeEnv`, `AbilityInfo` |
 | `checker/` | 6,620 | Type check | Two-pass type checker (mixin package) | `typecheck()` |
@@ -133,7 +133,7 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `  functions.py` | 1,202 | | Function body compilation, GC prologue/epilogue (Pass 2) | |
 | `  tail_position.py` | 106 | | Tail-position analysis for the function body compiler | |
 | `  closures.py` | 876 | | Closure lifting, GC instrumentation | |
-| `  contracts.py` | 1,262 | | Runtime pre/postconditions, old state snapshots, decreases termination guard (entry check-and-set, per-function chain state, ADT rank helpers, self-tail site checks) | |
+| `  contracts.py` | 1,196 | | Runtime pre/postconditions, old state snapshots, decreases termination guard (entry check-and-set, per-function chain state, ADT rank helpers, self-tail site checks); the refinement boundary guard derives its binder from `naming.refinement_binder_parts` and layers the erased-base skip and the nested-base E618 on top | |
 | `  assembly.py` | 1,447 | | WAT module assembly, `$alloc`, `$gc_collect` | |
 | `  compilability.py` | 606 | | Compilability checks, state handler scanning | |
 | `  wasi.py` | 4,820 | | WASI Preview 2 component/adapter emitter — `--target wasi-p2` / `--world server` (#237, #853) | |
