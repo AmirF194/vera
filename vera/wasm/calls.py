@@ -450,9 +450,9 @@ class CallsMixin:
         # enforced before inlining).  resume(()) is a UnitLit: no value,
         # matching put's void result.
         if call.name == "resume" and self._in_state_clause:
-            if self._state_clause_family is not None:
+            if self._state_clause_family_base is not None:
                 byte_val = self._state_byte_literal(
-                    call.args[0], self._state_clause_family)
+                    call.args[0], self._state_clause_family_base)
                 if byte_val is not None:
                     return byte_val
             return self.translate_expr(call.args[0], env)
@@ -465,27 +465,43 @@ class CallsMixin:
             # general unguarded here — `_effect_ops` carries only the
             # dispatch target, not the op's formal types (#754 tracks the
             # general registry).  The builtin State `put` is the exception
-            # (#1203, PR #1202 adversarial round): its cell type IS the
-            # dispatch target's suffix, so the same nat/widen guard pair
-            # the clause-inlined path emits wraps the argument on the bare
-            # path too — a handler with no `put` clause, a `put` inside
-            # another clause's body, and a delegated bare `put` (handler in
-            # the caller) all previously stored a negative silently.
+            # (#1203, PR #1202 adversarial round): the cell it writes is
+            # recorded beside the dispatch target, so the same nat/widen
+            # guard pair the clause-inlined path emits wraps the argument on
+            # the bare path too — a handler with no `put` clause, a `put`
+            # inside another clause's body, and a delegated bare `put`
+            # (handler in the caller) all previously stored a negative
+            # silently.
+            #
+            # The cell's REPRESENTATION name, read from `_effect_op_cells`
+            # (#1218).  This used to SLICE the family back out of the
+            # dispatch target (`target_name[len("$vera.state_put_"):]`) and
+            # hand the MANGLED result to `_resolve_base_type_name`, which
+            # expects a canonical one — a second derivation of the family
+            # that worked only because `Nat`/`Int`/`Byte` mangle to
+            # themselves.  A refined `Nat` cell does not (its family carries
+            # the predicate), so the slice would have matched nothing and
+            # switched this guard off silently, while the verifier went on
+            # recording the obligation as `tier3_runtime`.
             for arg in call.args:
                 arg_instrs = self.translate_expr(arg, env)
                 if arg_instrs is None:
                     return None
                 instructions.extend(arg_instrs)
-            if (call.name == "put" and len(call.args) == 1
-                    and target_name.startswith("$vera.state_put_")):
-                cell_tn = target_name[len("$vera.state_put_"):]
-                if (self._resolve_base_type_name(cell_tn) == "Nat"
-                        and self._narrows_into_nat(call.args[0])):
+            cell = self._effect_op_cells.get(call.name)
+            if call.name == "put" and len(call.args) == 1 and cell is not None:
+                # ONE normalisation for all three sibling decisions (PR
+                # #1238 review).  The Nat/Int guards resolved `cell.base`
+                # and the Byte width coercion did not, so a base that still
+                # needs alias resolution — which `family_fallback_name`'s
+                # residue can produce — would fire the guards and skip the
+                # coercion, putting an `i64.const` into an i32 cell.
+                base = self._resolve_base_type_name(cell.base)
+                if base == "Nat" and self._narrows_into_nat(call.args[0]):
                     instructions = self._emit_nat_bind_guard(instructions)
-                elif (self._resolve_base_type_name(cell_tn) == "Int"
-                        and self._result_is_nat(call.args[0])):
+                elif base == "Int" and self._result_is_nat(call.args[0]):
                     instructions = self._emit_int_widen_guard(instructions)
-                byte_arg = self._state_byte_literal(call.args[0], cell_tn)
+                byte_arg = self._state_byte_literal(call.args[0], base)
                 if byte_arg is not None:
                     instructions = byte_arg
             # throw uses WASM throw instruction, not call

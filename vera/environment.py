@@ -26,108 +26,11 @@ from vera.types import (
     EffectRowType,
     FunctionType,
     PureEffectRow,
-    RefinedType,
     Type,
     TypeVar,
-    pretty_type,
+    effect_sort_key,
     substitute,
 )
-
-
-def _structural_type_key(ty: Type) -> str:
-    """A rendering of *ty* that DISCRIMINATES, rather than one that reads well.
-
-    :func:`vera.types.pretty_type` is a presentation renderer, and two of its
-    choices are deliberate elisions: a `RefinedType` prints `{@Int | ...}`
-    with its predicate replaced by an ellipsis, and a `TypeVar` prints with
-    :data:`BUILTIN_TYPEVAR_MARKER` stripped (`T#b` → `T`).  Both are right for
-    an error message and wrong for an ORDERING key — distinct types render
-    identically, so they tie, and a stable `sorted` then falls back to the
-    input's own order.  Fed from a `frozenset` that is the `PYTHONHASHSEED`
-    dependence the ordering exists to remove.
-
-    Deterministic by construction: every branch is a fixed-shape recursion
-    over dataclass fields, and the only set this touches is a function type's
-    effect row, which :func:`_structural_effect_key` sorts on a key built the
-    same structural way.  The predicate is rendered by `ast.Node.pretty`,
-    which walks declared field order and skips spans, so the same predicate
-    always renders the same way.
-    """
-    if isinstance(ty, RefinedType):
-        return (f"{{{_structural_type_key(ty.base)}"
-                f"|{ty.predicate.pretty()}}}")
-    if isinstance(ty, TypeVar):
-        # The raw name, marker included.
-        return f"'{ty.name}"
-    if isinstance(ty, AdtType):
-        if not ty.type_args:
-            return ty.name
-        args = ", ".join(_structural_type_key(a) for a in ty.type_args)
-        return f"{ty.name}<{args}>"
-    if isinstance(ty, FunctionType):
-        params = ", ".join(_structural_type_key(p) for p in ty.params)
-        return (f"fn({params} -> {_structural_type_key(ty.return_type)}) "
-                f"{_structural_effect_key(ty.effect)}")
-    return pretty_type(ty)
-
-
-def _effect_sort_key(ei: EffectInstance) -> tuple[str, str]:
-    """A STRUCTURAL total order on effect instances (#1215 / #1231).
-
-    Used as the deterministic tiebreak for row members
-    :attr:`TypeEnv.current_effect_order` does not mention.  Keying on the
-    effect NAME alone is not a total order: spec §7.3.3 permits one effect
-    twice with different type arguments (`effects(<State<Int>, State<Bool>>)`
-    is two independent cells), so those two tie, and `sorted` — being stable —
-    then preserves the `frozenset`'s own iteration order, reintroducing the
-    exact `PYTHONHASHSEED` dependence the ordering exists to remove.
-    Rendering the arguments makes the key discriminate them.
-
-    The rendering is :func:`_structural_type_key`, not `pretty_type` (round-5
-    review): the human-readable renderer elides a refinement's predicate and
-    a type variable's built-in marker, so `effects(<State<Pos>, State<Neg>>)`
-    over two refinement aliases of one base tied on the key exactly as the
-    name-only version tied `State<Int>` against `State<Bool>` — the same bug
-    one level down, in the fix for it.
-    """
-    return (
-        ei.name,
-        ", ".join(_structural_type_key(a) for a in ei.type_args),
-    )
-
-
-def _structural_effect_key(eff: EffectRowType) -> str:
-    """A rendering of an effect ROW that DISCRIMINATES (round-9 review).
-
-    The type-argument tiebreak reaches an effect row whenever a type argument
-    is a function type — `effects(<Cb<fn(@Int -> @Bool) effects(<State<Pos>>)>>)`
-    — and that leg was rendered by :func:`vera.types.pretty_effect`, which
-    renders each member through `pretty_type`.  So the two elisions
-    :func:`_structural_type_key` exists to avoid came back at the NESTED
-    depth: two outer instances differing only inside a nested row (by a
-    refinement's predicate, or by a type variable's built-in marker) rendered
-    identically, tied, and a stable `sorted` handed back the `frozenset`'s own
-    order — the `PYTHONHASHSEED` dependence, three levels into its own fix.
-
-    Rendering members through :func:`_effect_sort_key` closes it and makes the
-    two mutually recursive, which is what "structural all the way down" means
-    here: a nested row's own function-typed arguments recurse back through
-    this.  Deterministic despite reading a `frozenset`, because the members
-    are sorted on that structural key rather than on a presentation string —
-    a total order, so the sort's stability is never consulted.  The open row
-    variable is part of the row's identity, so it is rendered too.
-    """
-    if isinstance(eff, PureEffectRow):
-        return "effects(pure)"
-    if isinstance(eff, ConcreteEffectRow):
-        parts = [
-            f"{name}<{args}>" if args else name
-            for name, args in sorted(_effect_sort_key(e) for e in eff.effects)
-        ]
-        if eff.row_var:
-            parts.append(eff.row_var)
-        return f"effects(<{', '.join(parts)}>)"
-    return "effects(?)"
 
 
 # =====================================================================
@@ -2341,7 +2244,7 @@ class TypeEnv:
             if ei in row.effects and ei not in seen:
                 seen.add(ei)
                 ordered.append(ei)
-        ordered.extend(sorted(row.effects - seen, key=_effect_sort_key))
+        ordered.extend(sorted(row.effects - seen, key=effect_sort_key))
         return tuple(ordered)
 
     def lookup_effect_op(self, op_name: str,

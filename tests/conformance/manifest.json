@@ -2673,6 +2673,36 @@
     ]
   },
   {
+    "id": "ch07_state_fn_type_alias_cross_spelling",
+    "file": "ch07_state_fn_type_alias_cross_spelling.vera",
+    "chapter": 7,
+    "title": "A function-type-carrying composite cell is named by its resolution",
+    "level": "run",
+    "spec_ref": "Section 7.5",
+    "features": [
+      "state_effect",
+      "type_alias",
+      "cell_family",
+      "composite_type",
+      "function_type"
+    ]
+  },
+  {
+    "id": "ch07_state_refined_cell_family",
+    "file": "ch07_state_refined_cell_family.vera",
+    "chapter": 7,
+    "title": "Two refinements of one base are two State cells",
+    "level": "run",
+    "spec_ref": "Section 7.5",
+    "features": [
+      "state_effect",
+      "type_alias",
+      "cell_family",
+      "refinement_type",
+      "nested_handlers"
+    ]
+  },
+  {
     "id": "ch07_state_scalar_alias_cross_spelling",
     "file": "ch07_state_scalar_alias_cross_spelling.vera",
     "chapter": 7,

@@ -483,7 +483,7 @@ public fn main(@Unit -> @Int)
 
 Note the contrast with the head rule inside that same handler. The clause binder is still `@MaybeInt`, because that is a *slot name* and slot names keep their head. The *cell* it reads is shared, because cell identity is not a naming question at all.
 
-**The one exception, and it runs in the safe direction.** The resolved type names the cell wherever that type has a **mangle-safe family name** — the canonical `Head<arg, arg>` grammar a `@Name.n` reference can spell, which is what the emitted cell symbol is mangled from. A resolution outside that grammar has no such family (`State<Handler>` under `type Handler = Option<fn(Int -> Int) effects(pure)>`), and the reference compiler falls back to the alias-opaque spelling — so there, and only there, two spellings of one type name two cells rather than sharing one. The fallback can leave split a cell the resolution would have merged; it never merges two the checker keeps apart. [`spec/07-effects.md`](spec/07-effects.md) §7.5.1 states the rule, and [#1219](https://github.com/aallan/vera/issues/1219) tracks extending the mangler so it holds without exception.
+**The one exception, and it runs in the safe direction.** The resolved type names the cell wherever the type expression **has a resolution to name**. What it cannot name is a resolution that is a bare function type, or one that failed altogether (a removed alias, an alias applied at the wrong arity) — both refused by the compilability gate before they reach a cell. The reference compiler falls back to the alias-opaque spelling there, and only there, so two spellings of one such type name two cells rather than sharing one. The fallback can leave split a cell the resolution would have merged; it never merges two the checker keeps apart. [`spec/07-effects.md`](spec/07-effects.md) §7.5.1 states the rule.
 
 ---
 
@@ -583,7 +583,7 @@ A helper's scope is closed and parameter-rooted: only its own parameters and its
 
 ### Aliases
 
-`type Cnt = Int` gives `@Cnt` its own stack: `@Int.0` does not reach a `@Cnt` parameter, and vice versa. But an alias used as a type *argument* resolves, so a parameter written `@Option<Cnt>` binds `Option<Int>` and is referenced `@Option<Int>.0`. `State<T>`/`Exn<E>` cell identity is the *resolved* type, so spelling does not split a cell wherever that type has a mangle-safe family name (§6.5). Full rule in §6.
+`type Cnt = Int` gives `@Cnt` its own stack: `@Int.0` does not reach a `@Cnt` parameter, and vice versa. But an alias used as a type *argument* resolves, so a parameter written `@Option<Cnt>` binds `Option<Int>` and is referenced `@Option<Int>.0`. `State<T>`/`Exn<E>` cell identity is the *resolved* type, so spelling does not split a cell wherever that type expression has a resolution to name (§6.5). Full rule in §6.
 
 ### The result reference
 
@@ -649,7 +649,7 @@ parameter:**
 The spec chapter on slot references is the authoritative technical reference for how Vera resolves `@T.n`:
 
 - [`spec/03-slot-references.md`](spec/03-slot-references.md) — formal definition, binding sites, scope rules, error cases, ten worked examples including generics, closures, and ADT matching. §3.8 states the head-opacity rule §6 above works through, and §3.8.1 the complementary rule for type arguments.
-- [`spec/07-effects.md`](spec/07-effects.md) — §7.5.1 on `State<T>`/`Exn<E>` cell identity: the resolved type names the cell, and where a resolution has no mangle-safe family name the compiler falls back to the spelling.
+- [`spec/07-effects.md`](spec/07-effects.md) — §7.5.1 on `State<T>`/`Exn<E>` cell identity: the resolved type names the cell, predicate included, and only a type expression with no resolution to name — a bare function type, or one that does not resolve — falls back to the spelling.
 
 For the broader context of why Vera is designed around structural references rather than names:
 

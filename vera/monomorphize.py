@@ -389,42 +389,121 @@ def declared_return_clone_key(te: ast.TypeExpr | None) -> str | None:
     return None
 
 
+# Source character -> its two-character `_X` escape code.  These, plus the
+# `", "` pair below, are the PRE-#1219 alphabet and their meanings are
+# FROZEN: every family name, Z3 sort, `$eq_` helper and mono clone the
+# compiler already emits is named through them, so changing one renames
+# symbols across the corpus.  Anything else outside `[A-Za-z0-9_]` takes the
+# `_U<hex>_` escape below.
+_MANGLE_CODES = {
+    "_": "__",
+    "<": "_L",
+    ">": "_R",
+    " ": "_S",
+}
+
+# The canonical argument SEPARATOR, escaped as one unit (`Map<String, Int>`
+# → `Map_LString_CInt_R`).  Matched before the per-character table, so a
+# comma that is NOT part of the separator — only a string literal inside a
+# refinement predicate can spell one — falls through to `_U2c_` instead of
+# being collapsed onto this code, which is what keeps `'a,b'` and `'a, b'`
+# distinct families (#1219).
+_MANGLE_SEP = ", "
+_MANGLE_SEP_CODE = "_C"
+
+# The reserved letter for the variable-length escape (`_U` + lowercase hex +
+# `_`).  It may never be given to a character in `_MANGLE_CODES`; nor may
+# `J`, which `Monomorphizer._mangle_fn_name` uses as the JOIN separator
+# between mangled components and which therefore must stay outside the
+# mangler's range.
+_MANGLE_HEX = "U"
+
+
 def mangle_type_name(type_name: str) -> str:
     """Escape a canonical Vera type name for embedding in a WAT identifier.
 
-    The ONE escape convention for type names in WAT symbols (#775): both the
+    The ONE escape convention for type names in WAT symbols (#775): the
     structural-Eq helper namer (``$eq_<type>``, ``vera/wasm/operators.py``,
-    #773) and the mono-clone namer (:meth:`Monomorphizer._mangle_fn_name`)
-    delegate here, so the two naming families cannot drift apart.
+    #773), the mono-clone namer (:meth:`Monomorphizer._mangle_fn_name`), the
+    Z3 sort namer (``vera/smt.py``) and the State/Exn cell-family symbols
+    (``vera/codegen/assembly.py``) all delegate here, so the naming families
+    cannot drift apart.
 
-    Encoding: ``_`` doubles to ``__``; the type-grammar metacharacters get
-    distinct ``_X`` codes — ``<`` → ``_L``, ``>`` → ``_R``, ``, ``/``,`` →
-    ``_C``, `` `` → ``_S``.
+    Encoding, a left-to-right scan:
 
-    Injectivity (over canonical type names, as produced by
-    :meth:`Monomorphizer._format_type_name`): the output is a concatenation
-    of code units, each either a single non-``_`` character (mapping to
-    itself) or a two-character code starting with ``_`` (``__``, ``_L``,
-    ``_R``, ``_C``, ``_S``).  A left-to-right scan decodes uniquely: at a
-    ``_`` consume two characters, otherwise one — a prefix code, so no two
-    inputs share an output.  (``A, B`` / ``A,B`` both encode to ``A_CB``,
-    but canonical names always spell the separator ``", "``, so only one
-    preimage exists in the domain.)  This kills the ``g<Map<String, Int>>``
-    vs ``g<Map_String_Int>`` collision class from #775: the former encodes
-    its brackets (``Map_LString_CInt_R``) while the flat ADT name doubles
-    its underscores (``Map__String__Int``).
+    ==============  ========  ====================================
+    source          code      where it comes from
+    ==============  ========  ====================================
+    ``_``           ``__``    any identifier
+    ``<``           ``_L``    ``Head<arg>``
+    ``>``           ``_R``    ``Head<arg>``
+    ``", "``        ``_C``    the canonical argument separator
+    ``" "``         ``_S``    a space that is not that separator
+    other non-      ``_U``    everything a canonical rendering can
+    ``[A-Za-z0-9_]``  ``<hex>_``  carry outside the two grammars above
+    ==============  ========  ====================================
+
+    The first five are the pre-#1219 alphabet, unchanged, so no symbol the
+    compiler already emits moves.  The sixth is what makes the mangler TOTAL
+    (#1219): a cell family is no longer restricted to the ``Head<arg, arg>``
+    grammar, so a family name can now carry a function type's parentheses
+    and arrow, an effect row, a refinement's braces and ``|`` bar, the
+    canonical source form a refinement predicate renders as (#1218), and
+    any character a string literal inside such a predicate spells —
+    non-ASCII included.  Output is ``[A-Za-z0-9_]`` only, which is
+    inside the WAT ``idchar`` set, inside the SMT-LIB simple-symbol set, and
+    unchanged by the browser runtime's ``/^state_get_(.+)$/`` split.
+
+    Injectivity (now over EVERY canonical rendering, not just
+    :meth:`Monomorphizer._format_type_name`'s): the output is a
+    concatenation of code units, each either a single ``[A-Za-z0-9]``
+    character mapping to itself, or a unit starting with ``_`` — the
+    two-character codes above, or ``_U`` followed by hex digits and a
+    closing ``_``.  Decoding scans left to right: at a ``_``, the next
+    character selects the unit (and ``U`` makes it variable-length,
+    terminated by the ``_`` that no hex digit can be), otherwise consume
+    one.  :func:`unmangle_type_name` is that scan, and
+    ``unmangle_type_name(mangle_type_name(t)) == t`` for every ``t`` — a
+    left inverse, which is exactly injectivity.  This kills the
+    ``g<Map<String, Int>>`` vs ``g<Map_String_Int>`` collision class from
+    #775 (the former encodes its brackets, the latter doubles its
+    underscores) and, since #1219, the ``'a,b'`` vs ``'a, b'`` class a
+    refinement predicate's string literal introduced: a comma NOT followed
+    by a space is no longer collapsed onto the ``", "`` separator's code.
+
+    NOT idempotent, and cannot be: ``mangle_type_name("Option_LInt_R")`` is
+    ``"Option__LInt__R"``, because ``Option_LInt_R`` is itself a legal flat
+    ADT name and must not collide with ``Option<Int>``'s symbol.  The range
+    and the domain overlap, so there is likewise no sound "already mangled?"
+    guard to add.  The invariant is STRUCTURAL instead: canonical names are
+    carried everywhere and mangled exactly once, at symbol construction, and
+    any comparison of two families is made on the canonical side.
+    ``tests/test_codegen_monomorphize.py::TestMangleInjectivity`` pins the
+    decision, the alphabet, and the preserved pre-#1219 symbols.
     """
-    return (
-        type_name.replace("_", "__")
-        .replace("<", "_L").replace(">", "_R")
-        .replace(", ", "_C").replace(",", "_C").replace(" ", "_S")
-    )
+    out: list[str] = []
+    i = 0
+    n = len(type_name)
+    while i < n:
+        if type_name.startswith(_MANGLE_SEP, i):
+            out.append(_MANGLE_SEP_CODE)
+            i += len(_MANGLE_SEP)
+            continue
+        ch = type_name[i]
+        code = _MANGLE_CODES.get(ch)
+        if code is not None:
+            out.append(code)
+        elif ch.isascii() and ch.isalnum():
+            out.append(ch)
+        else:
+            out.append(f"_{_MANGLE_HEX}{ord(ch):x}_")
+        i += 1
+    return "".join(out)
 
 
-# Two-char escape code -> the canonical character(s) it decodes to.
-# `_C` decodes to the canonical separator spelling `", "` (mangle collapses
-# both `", "` and `","` to `_C`, but canonical type names always spell the
-# separator `", "`, so that is the sole preimage in the domain).
+# Two-char escape code -> the canonical character(s) it decodes to.  `_U` is
+# absent deliberately: it is the variable-length escape and is decoded by its
+# own branch in :func:`unmangle_type_name`.
 _UNMANGLE_CODES = {"_": "_", "L": "<", "R": ">", "C": ", ", "S": " "}
 
 
@@ -705,20 +784,23 @@ def unmangle_type_name(mangled: str) -> str:
     """Inverse of :func:`mangle_type_name` over canonical type names.
 
     :func:`mangle_type_name` is a prefix code — the output is a concatenation
-    of code units, each either a single non-``_`` character (mapping to
-    itself) or a two-character ``_X`` code (``__``/``_L``/``_R``/``_C``/``_S``)
-    — so a left-to-right scan decodes uniquely: at a ``_`` consume two
-    characters and emit the decoded character(s), otherwise consume one and
-    emit it.  Round-trips every canonical type name
-    (``unmangle_type_name(mangle_type_name(t)) == t``), which is what lets the
-    verifier's Array-element reverse lookup (``_get_element_sort_for_array``
-    in ``vera/smt.py``) recover the ``_z3_sorts`` key (``List<Int>``) from a
+    of code units, each either a single ``[A-Za-z0-9]`` character (mapping to
+    itself) or a unit starting with ``_``: one of the two-character codes
+    (``__``/``_L``/``_R``/``_C``/``_S``), or the variable-length ``_U<hex>_``
+    (#1219).  A left-to-right scan therefore decodes uniquely: at a ``_`` the
+    next character selects the unit, and for ``_U`` the run of hex digits
+    ends at the ``_`` that no hex digit can be.  Round-trips every canonical
+    type name (``unmangle_type_name(mangle_type_name(t)) == t``) — the LEFT
+    INVERSE that makes the mangler injective, and what lets the verifier's
+    Array-element reverse lookup (``_get_element_sort_for_array`` in
+    ``vera/smt.py``) recover the ``_z3_sorts`` key (``List<Int>``) from a
     mangled Array-element sort name (``List_LInt_R``) after #884 routed ADT
     sort names through the mangler.
 
     Raises ``ValueError`` on a string that is not valid mangler output (a
-    trailing lone ``_`` or an unknown ``_X`` code) — such input is outside the
-    mangler's range and has no preimage.
+    trailing lone ``_``, an unknown ``_X`` code, or an unterminated / empty /
+    non-hex ``_U…`` run) — such input is outside the mangler's range and has
+    no preimage.
     """
     out: list[str] = []
     i = 0
@@ -732,6 +814,18 @@ def unmangle_type_name(mangled: str) -> str:
         if i + 1 >= n:
             raise ValueError(f"trailing lone '_' in mangled name: {mangled!r}")
         code = mangled[i + 1]
+        if code == _MANGLE_HEX:
+            end = mangled.find("_", i + 2)
+            digits = mangled[i + 2:end] if end >= 0 else ""
+            if end < 0 or not digits or any(
+                    d not in "0123456789abcdef" for d in digits):
+                raise ValueError(
+                    f"malformed '_{_MANGLE_HEX}<hex>_' escape in mangled "
+                    f"name: {mangled!r}"
+                )
+            out.append(chr(int(digits, 16)))
+            i = end + 1
+            continue
         decoded = _UNMANGLE_CODES.get(code)
         if decoded is None:
             raise ValueError(
@@ -2054,17 +2148,31 @@ class Monomorphizer:
 
         INJECTIVE over (name, type-arg vector), #775.  Each component is
         escaped by :func:`mangle_type_name` (itself injective — see its
-        docstring) and the vector is joined with ``_J``.  ``_J`` can never
-        be *produced* by the escape: every ``_`` in escaped output starts
-        one of the codes ``__``/``_L``/``_R``/``_C``/``_S``, so during the
-        left-to-right decode a ``_J`` at a code boundary is unambiguously a
-        separator (a literal ``_J`` in a type name escapes to ``__J``,
-        whose leading ``__`` is consumed as one code first).  Splitting on
-        boundary-``_J`` therefore recovers the exact component vector, and
-        each component un-escapes uniquely — no two distinct instantiation
-        vectors share a symbol.  ``name`` never contains ``$`` (Vera
-        identifiers can't lex it), so the prefix splits off unambiguously
-        at the first ``$``.
+        docstring) and the vector is joined with ``_J``.
+
+        The separator is safe because of a property of the escape, not
+        because of a list of its codes: **no mangler unit begins with**
+        ``J``.  A unit is either a single ``[A-Za-z0-9]`` character or a
+        ``_``-led escape, and ``J`` is not one of the escape letters — so
+        during the left-to-right decode, a ``_J`` at a unit boundary can
+        only be the separator.  A literal ``_J`` inside a type name is not
+        that: its ``_`` escapes to ``__``, whose two characters are
+        consumed as one unit first, leaving the ``J`` as an ordinary
+        character mid-unit-stream.  Splitting on boundary-``_J`` therefore
+        recovers the exact component vector, and each component un-escapes
+        uniquely — no two distinct instantiation vectors share a symbol.
+
+        Stating it as the property rather than as an enumeration is what
+        keeps it true as the escape grows: the #1219 widening added the
+        variable-length ``_U<hex>_`` unit, whose TERMINATOR is a ``_`` that
+        can sit immediately before a literal ``J``, and an argument phrased
+        as "the codes are ``__``/``_L``/``_R``/``_C``/``_S``" would have
+        silently stopped covering the alphabet it describes.  It is still
+        sound: that ``_`` closes its unit, so the ``J`` after it begins a
+        new one as an ordinary character, never a ``_J`` boundary.
+
+        ``name`` never contains ``$`` (Vera identifiers can't lex it), so
+        the prefix splits off unambiguously at the first ``$``.
 
         Collision classes this kills (both produced duplicate WAT ``func``
         identifiers pre-fix): parameterized built-in vs flat user ADT

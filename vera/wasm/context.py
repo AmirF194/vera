@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
 from vera.wasm.helpers import (  # noqa: F401 — re-exported for consumers
     _INLINE_I32_TYPES,
+    CellNames,
     StateClauseEntry,
     StringPool,
     WasmSlotEnv,
@@ -87,6 +88,7 @@ class WasmContext(
         effect_ops: dict[str, tuple[str, bool]] | None = None,
         effect_op_result_wt: dict[str, str | None] | None = None,
         effect_op_result_vera: dict[str, str | None] | None = None,
+        effect_op_cells: dict[str, CellNames] | None = None,
         ctor_layouts: dict[str, ConstructorLayout] | None = None,
         adt_type_names: set[str] | None = None,
         generic_fn_info: (
@@ -130,6 +132,18 @@ class WasmContext(
         self._effect_op_result_vera: dict[str, str | None] = (
             effect_op_result_vera or {}
         )
+        # #1218: op_name -> the CELL that op dispatches to, as the canonical
+        # pair :class:`CellNames` (identity + representation).  The fourth
+        # registry in the lock-step set, populated at the same two injection
+        # sites and saved/restored the same way.  It exists so a call site
+        # can ask "which cell is this?" from the canonical side: the answers
+        # used to be recovered by slicing the mangled family back out of the
+        # op's own `$vera.state_put_…` dispatch target, which is a SECOND
+        # derivation of the family — and re-mangling an already-mangled name
+        # is the exact non-idempotence trap #1233's round-5 review found.
+        # Only State get/put have entries; `throw` and user-effect ops reach
+        # no host cell and are absent.
+        self._effect_op_cells: dict[str, CellNames] = effect_op_cells or {}
         # #976 option C: op_name -> :class:`StateClauseEntry` for the
         # innermost enclosing ``handle[State<T>]``.  When a get/put call site
         # has an entry here, the clause BODY is inlined at the site
@@ -144,11 +158,12 @@ class WasmContext(
         # True while translating an inlined State clause body/`with` expr —
         # gates the ``resume(v)`` lowering (v IS the op's result value).
         self._in_state_clause: bool = False
-        # The active clause's cell FAMILY name while translating it —
-        # lets the resume lowering apply the #865 Byte-literal width
+        # The active clause's cell REPRESENTATION name while translating
+        # it — lets the resume lowering apply the #865 Byte-literal width
         # coercion (`resume(0)` in a `State<Byte>` get clause is the
-        # op's i32 result).
-        self._state_clause_family: str | None = None
+        # op's i32 result).  The BASE rather than the family (#1218): a
+        # refined `Byte` cell has its own family and the same i32 width.
+        self._state_clause_family_base: str | None = None
         # #1233: the host cell stack, as FAMILIES, at the current emission
         # point — one entry per enclosing `handle[State<T>]` whose
         # `state_push_T` has run, innermost last.  Maintained by

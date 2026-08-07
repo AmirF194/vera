@@ -16,6 +16,7 @@ from vera.monomorphize import mangle_type_name
 from vera.slots import type_expr_slot_name
 from vera.skip import STATE_CLAUSE_INLINE_DEPTH_CAP, CodegenSkip
 from vera.wasm.helpers import (
+    CellNames,
     StateClauseEntry,
     WasmSlotEnv,
     _element_load_op,
@@ -44,14 +45,15 @@ class CallsHandlersMixin:
     # saves, swaps, and restores them around handler bodies and inlined
     # clause bodies.  Spelling them out keeps the mixin's view of each type
     # equal to the context's rather than inferred from whichever assignment
-    # mypy reaches first — `_state_clause_family` is optional (None outside a
-    # clause), and inferring it as `str` from an assignment here contradicted
-    # the context's own declaration (#1211).
+    # mypy reaches first — `_state_clause_family_base` is optional (None
+    # outside a clause), and inferring it as `str` from an assignment here
+    # contradicted the context's own declaration (#1211).
     _effect_ops: dict[str, tuple[str, bool]]
     _effect_op_result_wt: dict[str, str | None]
     _effect_op_result_vera: dict[str, str | None]
+    _effect_op_cells: dict[str, CellNames]
     _state_clause_ops: dict[str, StateClauseEntry]
-    _state_clause_family: str | None
+    _state_clause_family_base: str | None
     _in_state_clause: bool
     _pushed_cell_families: list[str]
     _addressable_from: int
@@ -1450,7 +1452,21 @@ class CallsHandlersMixin:
         # SLOT names stay checker-level: top name syntactic, type
         # arguments canonicalized (the checker's binding rule), so the
         # clause envs below use those, not the family.
+        # IDENTITY and REPRESENTATION, derived side by side from the one
+        # type expression (#1218).  `family` discriminates the refinement —
+        # `State<Pos>` and `State<Neg>` over one base are two cells to the
+        # checker and so two here — and is what the symbols, the pushed-cell
+        # stack and the addressability gate use.  `family_base` strips it,
+        # and is what every width / pointer-ness / write-guard decision
+        # below uses, because all three refinements of one base share those.
         family = self._family_name(type_arg)
+        # Alias-resolved, matching the bare-`put` path's
+        # `_resolve_base_type_name(cell.base)` (PR #1238 review): both
+        # dispatch paths must classify one cell the same way, and
+        # `family_fallback_name`'s residue can leave a syntactic alias
+        # here.  A no-op on every resolved family.
+        family_base = self._resolve_base_type_name(
+            self._family_base(type_arg))
         mangled = mangle_type_name(family)
 
         put_import = f"$vera.state_put_{mangled}"
@@ -1489,20 +1505,22 @@ class CallsHandlersMixin:
             # @Int -> @Nat narrowing (and the @Nat -> @Int widen dual)
             # exactly like a `let` binding, so an unverified compile traps
             # instead of storing a negative through the @Nat cell.  Keyed
-            # off `type_name` — the effect's `State<T>` argument, the same
-            # source every other guard site and the host imports use — NOT
-            # the declared `with` annotation, which can diverge (#1206)
-            # and, as a RefinementType, has no `name` at all (PR #1202
-            # review: the getattr skipped both branches for refined
-            # binders while the verifier recorded the obligation).
-            if (family == "Nat"
+            # off `family_base` — the cell's REPRESENTATION (#1218), the
+            # same source every other guard site uses, derived from the
+            # effect's `State<T>` argument — NOT the declared `with`
+            # annotation, which can diverge (#1206) and, as a
+            # RefinementType, has no `name` at all (PR #1202 review: the
+            # getattr skipped both branches for refined binders while the
+            # verifier recorded the obligation).  `type_name` survives for
+            # the #1006 Vera-name mirror alone.
+            if (family_base == "Nat"
                     and self._narrows_into_nat(expr.state.init_expr)):
                 init_instrs = self._emit_nat_bind_guard(init_instrs)
-            elif (family == "Int"
+            elif (family_base == "Int"
                     and self._result_is_nat(expr.state.init_expr)):
                 init_instrs = self._emit_int_widen_guard(init_instrs)
             byte_init = self._state_byte_literal(
-                expr.state.init_expr, family)
+                expr.state.init_expr, family_base)
             if byte_init is not None:
                 init_instrs = byte_init
             instructions.extend(init_instrs)
@@ -1532,6 +1550,7 @@ class CallsHandlersMixin:
         saved_ops = self._effect_ops
         saved_result_wt = self._effect_op_result_wt
         saved_result_vera = self._effect_op_result_vera
+        saved_cells = self._effect_op_cells
         saved_clause_ops = self._state_clause_ops
         # The DECLARATION-time snapshot the clause entries carry (#1211) —
         # private copies, so nothing that runs later can alter what a clause
@@ -1542,6 +1561,7 @@ class CallsHandlersMixin:
         decl_ops = dict(saved_ops)
         decl_result_wt = dict(saved_result_wt)
         decl_result_vera = dict(saved_result_vera)
+        decl_cells = dict(saved_cells)
         decl_clause_ops = dict(saved_clause_ops)
         decl_addressable_from = self._addressable_from
         self._effect_ops = {
@@ -1549,9 +1569,17 @@ class CallsHandlersMixin:
             "get": (get_import, False),
             "put": (put_import, True),
         }
+        # The fourth registry, in lock-step (#1218): which CELL a bare
+        # `get`/`put` under this handler dispatches to, named
+        # canonically instead of being recoverable only by unpicking
+        # the mangled import name above.
+        cell = CellNames(family=family, base=family_base)
+        self._effect_op_cells = {
+            **saved_cells, "get": cell, "put": cell,
+        }
         self._effect_op_result_wt = {
             **saved_result_wt,
-            "get": self._type_name_to_wasm(family),
+            "get": self._type_name_to_wasm(family_base),
         }
         # #1006: the VERA-name mirror of the WT record above —
         # `_infer_vera_type` needs the Vera name (not the layout-ambiguous
@@ -1603,6 +1631,7 @@ class CallsHandlersMixin:
             self._state_clause_ops[clause.op_name] = StateClauseEntry(
                 clause=clause,
                 family=family,
+                family_base=family_base,
                 state_slot_name=state_slot_name,
                 decl_env=env,
                 get_import=get_import,
@@ -1610,6 +1639,7 @@ class CallsHandlersMixin:
                 decl_effect_ops=decl_ops,
                 decl_effect_op_result_wt=decl_result_wt,
                 decl_effect_op_result_vera=decl_result_vera,
+                decl_effect_op_cells=decl_cells,
                 decl_state_clause_ops=decl_clause_ops,
                 decl_addressable_from=decl_addressable_from,
             )
@@ -1633,6 +1663,7 @@ class CallsHandlersMixin:
             self._effect_ops = saved_ops
             self._effect_op_result_wt = saved_result_wt
             self._effect_op_result_vera = saved_result_vera
+            self._effect_op_cells = saved_cells
             self._state_clause_ops = saved_clause_ops
             self._pushed_cell_families = saved_pushed
             self._addressable_from = saved_addressable
@@ -1648,23 +1679,6 @@ class CallsHandlersMixin:
         instructions.append(f"call {pop_import}")
 
         return instructions
-
-    # The two `State` host imports whose name encodes the cell family.
-    _STATE_CELL_IMPORT_PREFIXES: ClassVar[tuple[str, ...]] = (
-        "$vera.state_get_", "$vera.state_put_",
-    )
-
-    @classmethod
-    def _state_import_family(cls, target_name: str) -> str | None:
-        """The MANGLED cell family a ``state_get_``/``state_put_`` addresses.
-
-        ``None`` for anything else — a user effect's op, `throw`, an ability
-        op — none of which reach a host State cell.
-        """
-        for prefix in cls._STATE_CELL_IMPORT_PREFIXES:
-            if target_name.startswith(prefix):
-                return target_name[len(prefix):]
-        return None
 
     def _reject_unaddressable_clause_op(self, call: ast.FnCall) -> None:
         """Refuse a clause-body bare op that cannot reach its own cell (#1233).
@@ -1701,39 +1715,42 @@ class CallsHandlersMixin:
         shadowed = self._pushed_cell_families[self._addressable_from:]
         if not shadowed:
             return
-        # ONE representation on both sides of the comparison, each side
-        # mangled EXACTLY ONCE (round-5 review).  `_pushed_cell_families` and
-        # a clause entry both carry the CANONICAL family (`Option<Int>`); an
-        # import name carries the MANGLED one (`Option_LInt_R`).  Mangling is
-        # not idempotent — `mangle_type_name("Option_LInt_R")` is
-        # `"Option__LInt__R"` — so re-mangling the already-mangled side made
-        # every COMPOSITE family compare unequal to itself, and the gate
-        # returned instead of refusing.  `handle[State<Option<Int>>]` nested
-        # in `handle[State<Option<Int>>]`, with the outer declaring no `put`
-        # clause (the branch that reads the import name), compiled and ran:
-        # 5100, where the enclosing-context rule says 5042 — the silent wrong
-        # value this whole gate exists to prevent, on the exact shape a
-        # scalar `Int` nest was correctly refusing.
+        # ONE canonical family on both sides, and no mangling anywhere in the
+        # comparison (#1218).  Round 5 of #1233 had the two sides in two
+        # REPRESENTATIONS — `_pushed_cell_families` and a clause entry carry
+        # the canonical family (`Option<Int>`), an import name carries the
+        # mangled one (`Option_LInt_R`) — and reconciled them by mangling
+        # both.  Mangling is not idempotent (`mangle_type_name` of
+        # `Option_LInt_R` is `Option__LInt__R`), so re-mangling the
+        # already-mangled side made every COMPOSITE family compare unequal to
+        # itself and the gate returned instead of refusing:
+        # `handle[State<Option<Int>>]` nested in itself, with the outer
+        # declaring no `put` clause — the branch that read the import name —
+        # compiled and ran 5100 where the enclosing-context rule says 5042.
+        # The class is now gone rather than repaired: the op registry carries
+        # the canonical family beside the dispatch target
+        # (`_effect_op_cells`), so there is one derivation and nothing to
+        # unpick.
         entry = self._state_clause_ops.get(call.name)
         if entry is not None:
-            target_mangled: str | None = mangle_type_name(entry.family)
+            target_family = entry.family
+            target_base = entry.family_base
         else:
-            op = self._effect_ops.get(call.name)
-            if op is None:
+            cell = self._effect_op_cells.get(call.name)
+            # Absent for anything that reaches no host State cell — a user
+            # effect's op, `throw`, an ability op.
+            if cell is None:
                 return
-            target_mangled = self._state_import_family(op[0])
-            if target_mangled is None:
-                return
-        # The canonical spelling of the shadowing cell, for the message: it
-        # comes from the pushed-cell stack, so a mangled import name is never
-        # what the user reads.
-        shadowing = next(
-            (f for f in shadowed if mangle_type_name(f) == target_mangled),
-            None,
-        )
-        if shadowing is None:
+            target_family = cell.family
+            target_base = cell.base
+        if target_family not in shadowed:
             return
-        target_family = shadowing
+        # The message names the cell's BASE, not its identity: since #1218 a
+        # refined family's canonical rendering carries the whole predicate,
+        # which is a discriminator rather than something to read at the
+        # width a diagnostic has.  The base is what a handler is written
+        # over, and the shadowing cell shares it — the gate only fires when
+        # the two identities are EQUAL, so one name describes both.
         raise CodegenSkip(
             call,
             # Wording covers BOTH spellings: `State.put(x)` delegates to this
@@ -1742,8 +1759,8 @@ class CallsHandlersMixin:
             # refusal a user reading a `State.put` diagnostic did not write.
             f"a bare or qualified State operation '{call.name}' in a handler "
             f"clause body resolves to a "
-            f"State<{target_family}> handler (or a declared State<"
-            f"{target_family}> row) that an enclosing State<{target_family}> "
+            f"State<{target_base}> handler (or a declared State<"
+            f"{target_base}> row) that an enclosing State<{target_base}> "
             "handler shadows: the host cell intrinsics address only the "
             "innermost cell of a family, so the enclosing-context rule of "
             "spec 7.5.2 cannot be honoured when the same cell family is "
@@ -1785,7 +1802,11 @@ class CallsHandlersMixin:
         """
         entry = self._state_clause_ops[call.name]
         clause = entry.clause
-        family = entry.family
+        # Only the cell's REPRESENTATION is needed here (#1218): every
+        # decision below is a width, a pointer-ness, or a write guard,
+        # and all of those are the base's.  The IDENTITY (`entry.family`)
+        # is read by the addressability gate, which compares cells.
+        family_base = self._resolve_base_type_name(entry.family_base)
         state_slot_name = entry.state_slot_name
         decl_env = entry.decl_env
         get_import = entry.get_import
@@ -1821,7 +1842,7 @@ class CallsHandlersMixin:
         # CHECK BEFORE MUTATE (round-5 review): this used to sit below the
         # six registry replacements, so its own raise left `_effect_ops`,
         # the two result-type maps, `_state_clause_ops`, `_in_state_clause`
-        # and `_state_clause_family` at THIS clause's values — the one
+        # and `_state_clause_family_base` at THIS clause's values — the
         # `CodegenSkip` path out of this method that did not restore them.
         # Unobservable today (the skip unwinds to a per-function boundary
         # that rebuilds the registries), but it is the invariant every other
@@ -1842,7 +1863,7 @@ class CallsHandlersMixin:
         # WASM type and pointer-ness derive from the threaded FAMILY name
         # (computed once at the handle site — matching the import decls),
         # never the source alias spelling (#1205/#1209).
-        state_wt = self._type_name_to_wasm(family)
+        state_wt = self._type_name_to_wasm(family_base)
         # Composite state is a heap pointer (i32, excluding the non-pointer
         # i32 scalars) — root the capture/argument locals on the GC shadow
         # stack so an allocating clause body (or `with` expr) cannot free or
@@ -1853,8 +1874,8 @@ class CallsHandlersMixin:
         # reclaimed by the function's epilogue $gc_sp restore.
         state_is_ptr = (
             state_wt == "i32"
-            and family not in ("Bool", "Byte")
-            and not _is_host_handle_type(family)
+            and family_base not in ("Bool", "Byte")
+            and not _is_host_handle_type(family_base)
         )
         instructions: list[str] = []
 
@@ -1868,13 +1889,14 @@ class CallsHandlersMixin:
                 return None
             # #1203: put's argument writes the state cell — guard the
             # narrowing/widening at the boundary (the `let` guard's twin).
-            if (family == "Nat"
+            if (family_base == "Nat"
                     and self._narrows_into_nat(call.args[0])):
                 arg_instrs = self._emit_nat_bind_guard(arg_instrs)
-            elif (family == "Int"
+            elif (family_base == "Int"
                     and self._result_is_nat(call.args[0])):
                 arg_instrs = self._emit_int_widen_guard(arg_instrs)
-            byte_arg = self._state_byte_literal(call.args[0], family)
+            byte_arg = self._state_byte_literal(
+                call.args[0], family_base)
             if byte_arg is not None:
                 arg_instrs = byte_arg
             arg_local = self.alloc_local(state_wt)
@@ -1936,14 +1958,15 @@ class CallsHandlersMixin:
         saved_ops = self._effect_ops
         saved_result_wt = self._effect_op_result_wt
         saved_result_vera = self._effect_op_result_vera
+        saved_cells = self._effect_op_cells
         saved_clause_ops = self._state_clause_ops
-        saved_clause_family = self._state_clause_family
+        saved_clause_family = self._state_clause_family_base
         self._in_state_clause = True
-        # `_state_clause_family` and `_in_state_clause` describe THIS clause,
+        # `_state_clause_family_base` and `_in_state_clause` describe THIS,
         # not the scope it compiles in: they type the `resume(v)` whose value
         # is this op's result (#865 Byte width), so they take this handler's
         # family however the op registries below are scoped.
-        self._state_clause_family = family
+        self._state_clause_family_base = family_base
         # LOAD-BEARING (#1211): a clause body is not part of the body it
         # refines, so its own bare `get`/`put` belong to the handler's
         # DECLARATION context — the §7.5.2 lexical rule the checker applies
@@ -1966,6 +1989,7 @@ class CallsHandlersMixin:
         self._effect_ops = dict(entry.decl_effect_ops)
         self._effect_op_result_wt = dict(entry.decl_effect_op_result_wt)
         self._effect_op_result_vera = dict(entry.decl_effect_op_result_vera)
+        self._effect_op_cells = dict(entry.decl_effect_op_cells)
         self._state_clause_ops = dict(entry.decl_state_clause_ops)
         # #1233: the clause body resolves into the DECLARATION scope, so every
         # cell pushed since then shadows it — `_reject_unaddressable_clause_op`
@@ -1984,8 +2008,9 @@ class CallsHandlersMixin:
             self._effect_ops = saved_ops
             self._effect_op_result_wt = saved_result_wt
             self._effect_op_result_vera = saved_result_vera
+            self._effect_op_cells = saved_cells
             self._state_clause_ops = saved_clause_ops
-            self._state_clause_family = saved_clause_family
+            self._state_clause_family_base = saved_clause_family
             self._addressable_from = saved_addressable
             self._clause_inline_depth -= 1
         if body_instrs is None:
@@ -1998,10 +2023,10 @@ class CallsHandlersMixin:
         if call.name == "get":
             resume_arg = self._tail_resume_arg(clause.body)
             if resume_arg is not None:
-                if (family == "Nat"
+                if (family_base == "Nat"
                         and self._narrows_into_nat(resume_arg)):
                     body_instrs = self._emit_nat_bind_guard(body_instrs)
-                elif (family == "Int"
+                elif (family_base == "Int"
                         and self._result_is_nat(resume_arg)):
                     body_instrs = self._emit_int_widen_guard(body_instrs)
         instructions.extend(body_instrs)
@@ -2010,14 +2035,14 @@ class CallsHandlersMixin:
                 return None
             # #1203: `with @T = <expr>` overrides the state cell — the
             # third write boundary; same guard pair as put's argument.
-            if (family == "Nat"
+            if (family_base == "Nat"
                     and self._narrows_into_nat(clause.state_update[1])):
                 upd_instrs = self._emit_nat_bind_guard(upd_instrs)
-            elif (family == "Int"
+            elif (family_base == "Int"
                     and self._result_is_nat(clause.state_update[1])):
                 upd_instrs = self._emit_int_widen_guard(upd_instrs)
             byte_upd = self._state_byte_literal(
-                clause.state_update[1], family)
+                clause.state_update[1], family_base)
             if byte_upd is not None:
                 upd_instrs = byte_upd
             instructions.extend(upd_instrs)
@@ -2047,7 +2072,7 @@ class CallsHandlersMixin:
         return False
 
     def _state_byte_literal(
-        self, value: ast.Expr, family: str,
+        self, value: ast.Expr, family_base: str,
     ) -> list[str] | None:
         """#865's Byte-literal width coercion at a State-cell WRITE
         boundary: ``@Byte`` is i32 (spec §11) but an int literal defaults
@@ -2057,8 +2082,12 @@ class CallsHandlersMixin:
         the family imports were correctly i32 all along.  Returns the
         i32 lowering for an ``IntLit`` into a Byte-family cell, ``None``
         otherwise (non-literals already produce i32).  The `let` binding
-        and constructor-field sites have their own #865/#1092 arms."""
-        if family == "Byte" and isinstance(value, ast.IntLit):
+        and constructor-field sites have their own #865/#1092 arms.
+
+        Takes the cell's REPRESENTATION name (#1218): a refined `Byte`
+        cell has its own family carrying the predicate, and the same
+        i32 width."""
+        if family_base == "Byte" and isinstance(value, ast.IntLit):
             return [f"i32.const {value.value}"]
         return None
 
@@ -2180,8 +2209,15 @@ class CallsHandlersMixin:
         # caught-value SLOT binding below stays source-level (the checker
         # binds the clause pattern's own name).
         family = self._family_name(type_arg)
+        family_base = self._resolve_base_type_name(
+            self._family_base(type_arg))
         tag_name = f"$exn_{mangle_type_name(family)}"
-        is_pair = self._is_pair_type_name(family)
+        # Pair-ness is the BASE's question (#1218): `Exn<Short>` under
+        # `type Short = {@String | ...}` is its own tag and still carries a
+        # (ptr, len) pair, so asking the identity name — which carries the
+        # predicate and matches no representation the name table knows —
+        # would bind a single i32 against a two-i32 tag.
+        is_pair = self._is_pair_type_name(family_base)
 
         # Unique label ids for nested handlers
         hid = self._next_handle_id
@@ -2241,7 +2277,7 @@ class CallsHandlersMixin:
             thrown_local = self.alloc_local("i32")  # ptr
             _len_local = self.alloc_local("i32")    # len (consecutive: thrown_local + 1)
         else:
-            thrown_wt = self._type_name_to_wasm(family)
+            thrown_wt = self._type_name_to_wasm(family_base)
             thrown_local = self.alloc_local(thrown_wt)
 
         # Push caught value into slot env for handler body, under the

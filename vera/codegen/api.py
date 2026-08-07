@@ -22,6 +22,7 @@ import wasmtime
 
 from vera import ast
 from vera.runtime.async_http import register_async
+from vera.wasm.helpers import CellNames
 from vera.runtime.decimal import register_decimal
 from vera.runtime.heap import (
     InstanceCaller,
@@ -80,7 +81,8 @@ class CompileResult:
     wasm_bytes: bytes
     exports: list[str]
     diagnostics: list["Diagnostic"] = field(default_factory=list)
-    state_types: list[tuple[str, str]] = field(default_factory=list)
+    state_types: list[tuple[CellNames, str]] = field(
+        default_factory=list)
     md_ops_used: set[str] = field(default_factory=set)
     regex_ops_used: set[str] = field(default_factory=set)
     map_ops_used: set[str] = field(default_factory=set)

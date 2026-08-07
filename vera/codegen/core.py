@@ -32,6 +32,7 @@ from vera.naming import EMPTY_ALIAS_ENV, AliasEnv
 from vera.prelude import PRELUDE_FILE, mentioned_fn_names
 from vera.slots import family_fallback_name
 from vera.wasm import StringPool
+from vera.wasm.helpers import CellNames
 from vera.wasm.async_fusion import (
     compute_future_ret_fns,
     compute_future_ret_module_fns,
@@ -197,7 +198,13 @@ class CodeGenerator(
         # so assembly.py declares the host import.
         self._needs_overflow_trap: bool = False
         self._needs_memory: bool = False
-        self._state_types: list[tuple[str, str]] = []  # (type_name, wasm_type)
+        # (cell, wasm_type).  `CellNames` rather than a bare family
+        # (#1238 review F2): the wasi target names the unsupported
+        # families in a user-facing error, and since #1218 a refined
+        # cell's IDENTITY carries its whole predicate — a
+        # discriminator, not something to read.  The base travels
+        # with it so a message can say `state (Byte)`.
+        self._state_types: list[tuple[CellNames, str]] = []
         self._exn_types: list[tuple[str, str]] = []  # (type_name, wasm_type)
         # #1210: State cell types and Exn payload types the handler walk
         # found and could NOT register.  Reset by
@@ -206,8 +213,8 @@ class CodeGenerator(
         # so neither list outlives one function.  Declared here as well so
         # the two siblings are visible together and neither depends on the
         # walk having run for the attribute to exist.
-        self._unregistrable_state_cells: list[ast.TypeExpr] = []
-        self._unregistrable_exn_tags: list[ast.TypeExpr] = []
+        self._unregistrable_state_cells: list[tuple[ast.TypeExpr, str]] = []
+        self._unregistrable_exn_tags: list[tuple[ast.TypeExpr, str]] = []
         self._md_ops_used: set[str] = set()  # Markdown host-import builtins
         self._regex_ops_used: set[str] = set()  # Regex host-import builtins
         self._map_ops_used: set[str] = set()  # Map host-import builtins
@@ -615,6 +622,18 @@ class CodeGenerator(
         parameterised alias joins the family its resolution names instead of
         minting a second one beside it (#1209)."""
         return naming.family_name(
+            te, self._alias_env, family_fallback_name(te))
+
+    def _family_base_te(self, te: ast.TypeExpr) -> str:
+        """The same cell's REPRESENTATION name (#1218) — the
+        ``WasmContext._family_base`` twin.
+
+        :func:`vera.naming.family_base_name` over the same environment: the
+        family with its refinements stripped, which is what decides
+        i32/i64/f64/pair and which write guard applies.  Never a symbol —
+        see the function's own docstring for why the two names are separate.
+        """
+        return naming.family_base_name(
             te, self._alias_env, family_fallback_name(te))
 
     # -----------------------------------------------------------------

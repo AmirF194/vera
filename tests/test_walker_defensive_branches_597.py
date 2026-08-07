@@ -58,6 +58,7 @@ from vera import ast
 from vera.codegen import compilability
 from vera.codegen.core import CodeGenerator
 from vera.wasm.context import WasmContext
+from vera.wasm.helpers import CellNames
 from vera.wasm.helpers import StringPool
 
 
@@ -175,26 +176,26 @@ class TestScanExprForHandlersDefensiveBranches:
             qualifier="IO", name="print", args=(_handle_expr(),))
         cg._scan_expr_for_handlers(node)
         # State<Int> registered
-        assert ("Int", "i64") in cg._state_types
+        assert (CellNames(family="Int", base="Int"), "i64") in cg._state_types
 
     def test_indexexpr_recursion(self) -> None:
         cg = _make_cg()
         node = ast.IndexExpr(
             collection=_handle_expr(), index=ast.IntLit(value=0))
         cg._scan_expr_for_handlers(node)
-        assert ("Int", "i64") in cg._state_types
+        assert (CellNames(family="Int", base="Int"), "i64") in cg._state_types
 
     def test_arraylit_recursion(self) -> None:
         cg = _make_cg()
         node = ast.ArrayLit(elements=(_handle_expr(),))
         cg._scan_expr_for_handlers(node)
-        assert ("Int", "i64") in cg._state_types
+        assert (CellNames(family="Int", base="Int"), "i64") in cg._state_types
 
     def test_interpolated_string_recursion(self) -> None:
         cg = _make_cg()
         node = ast.InterpolatedString(parts=("x: ", _handle_expr()))
         cg._scan_expr_for_handlers(node)
-        assert ("Int", "i64") in cg._state_types
+        assert (CellNames(family="Int", base="Int"), "i64") in cg._state_types
 
     def test_anonfn_body_recursion(self) -> None:
         cg = _make_cg()
@@ -206,7 +207,7 @@ class TestScanExprForHandlersDefensiveBranches:
             body=body,
         )
         cg._scan_expr_for_handlers(node)
-        assert ("Int", "i64") in cg._state_types
+        assert (CellNames(family="Int", base="Int"), "i64") in cg._state_types
 
 
 # =====================================================================

@@ -265,19 +265,25 @@ def family_fallback_name(te: ast.TypeExpr) -> str:
 
     The family itself resolves — :func:`vera.naming.family_name` names the
     CELL the checker typed, so every spelling that resolves to one cell
-    mangles to one import and one tag (#1209).  What is left for here is the
-    residue that resolution cannot name: a type expression whose resolution
-    is a function type or ``UnknownType`` (an ``FnType``-bodied alias as
-    ``State<F>``, an arity-mismatched alias application, a removed alias).
-    Those have no cell type to name, so the family falls back on the
-    alias-OPAQUE syntactic spelling — distinct per spelling, which is the
-    conservative direction: it can only ever split a family the checker
-    already refuses to type, never merge two the checker keeps apart.
+    mangles to one import and one tag (#1209), including one whose
+    resolution carries a function type (#1219) or a refinement predicate
+    (#1218).  What is left for here is the residue that resolution cannot
+    name: a type expression whose resolution is a BARE function type or
+    ``UnknownType`` (an ``FnType``-bodied alias as ``State<F>``, an
+    arity-mismatched alias application, a removed alias).  Those have no
+    cell type to name, so the family falls back on the alias-OPAQUE
+    syntactic spelling — distinct per spelling, which is the conservative
+    direction: it can only ever split a family the checker already refuses
+    to type, never merge two the checker keeps apart.
 
     Total, because a family must always have a name to mangle.  Derived here
-    rather than passed in by each of the eight call sites: the fallback and
-    the resolution are one decision about one type expression, and the two
-    `_family_name` methods that make it are the only places allowed to make
-    it.
+    rather than passed in by each call site: the fallback and the resolution
+    are one decision about one type expression, and the four methods that
+    make it — ``WasmContext._family_name`` / ``._family_base`` and
+    ``CodeGenerator._family_name_te`` / ``._family_base_te``, the identity
+    and representation halves on each side — are the only places allowed to
+    make it.  All four fall back on the SAME type expressions, so a consumer
+    can never hold an identity for a cell whose representation it cannot
+    name, or the reverse.
     """
     return type_expr_slot_name(te) or "?"

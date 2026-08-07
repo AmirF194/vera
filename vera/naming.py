@@ -15,7 +15,13 @@ there is one function of one environment.
 
 The State/Exn cell FAMILY renders here too (:func:`family_name`, #1209):
 one cell per checker is one cell per codegen, so a composite alias joins
-the family its resolution names instead of minting a second one.
+the family its resolution names instead of minting a second one.  That one
+renderer is the only clause of THE RULE below that does NOT go through
+``pretty_type``: a family names a CELL rather than a spelling, so it
+renders through :func:`~vera.types.structural_type_key` — the same key the
+checker orders effect rows by — because ``pretty_type``'s two elisions
+(a refinement's predicate, a type variable's built-in marker) would merge
+cells the checker keeps apart (#1219).
 
 TWO derivations deliberately stay behind in :mod:`vera.slots`, and both are
 about a type's REPRESENTATION rather than about naming anything:
@@ -95,7 +101,6 @@ is what makes the iterative resolution's dependency graph a DAG.
 
 from __future__ import annotations
 
-import re
 import sys
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -116,6 +121,7 @@ from vera.types import (
     UnknownType,
     base_type,
     pretty_type,
+    structural_type_key,
     substitute,
 )
 
@@ -124,8 +130,8 @@ __all__ = [
     "AliasEnv",
     "RefinementBinder",
     "alias_env_from_environment",
+    "family_base_name",
     "family_name",
-    "is_ref_spellable",
     "refinement_binder_parts",
     "resolve_type_expr",
     "slot_name",
@@ -616,70 +622,89 @@ def family_name(
     collapsed this way, #1205; composite ones splitting the family was
     #1209.)  This mirrors the checker, which resolves effect-instance type
     arguments in full (``_resolve_effect_ref``), so the family agrees with
-    the cell type the checker typed.  Refinements collapse to their base —
-    ``{@Int | P}`` and ``Int`` are one cell.
+    the cell type the checker typed.
 
-    *fallback* is returned when there is no type expression, when the
-    resolution has no nameable family (a function type, or an unresolvable
-    type), and when the RENDERING is not mangle-safe.  That last gate is
-    what keeps the answer usable as a WAT symbol: a family feeds
-    ``mangle_type_name``, whose escape covers exactly the canonical
-    ``Head<arg, arg>`` grammar :func:`is_ref_spellable` describes, and a
-    resolution rendering outside it (``Option<{@Int | ...}>``,
-    ``Option<fn(@Int) -> @Int>``) would emit an import name WAT cannot
-    parse.  Those keep the alias-opaque spelling, which is the conservative
-    direction: it can leave a family split, never merge two cells the
-    checker keeps apart.
+    A refinement is part of that cell type, NOT stripped from it (#1218).
+    The checker keeps ``State<Pos>``, ``State<Neg>`` and ``State<Int>``
+    apart over one base — ``EffectInstance`` holds the ``RefinedType``, and
+    E125 rejects passing one where another is required — so collapsing them
+    to ``Int`` gave three checker cells one host cell, and a callee bound to
+    the outer one wrote whichever was innermost.  This is the IDENTITY
+    question; a cell's REPRESENTATION (i32 / i64 / f64 / pair, which #1203
+    write guard applies) is the base's, and that is
+    :func:`family_base_name`.
+
+    The rendering is :func:`~vera.types.structural_type_key`, not
+    ``pretty_type`` (#1219).  A family names a cell, and two cells are one
+    exactly when the CHECKER holds their types equal — so the rendering has
+    to discriminate everything the checker does, and ``pretty_type`` makes
+    two deliberate elisions that it does not: a refinement's predicate
+    becomes ``...`` and a type variable's built-in marker is stripped.
+    ``State<Option<Pos>>`` and ``State<Option<Neg>>`` both render
+    ``Option<{@Int | ...}>`` under ``pretty_type``, and merging those two
+    families is a shared cell behind a check that typed them apart.  The
+    structural key is the same one ``TypeEnv`` orders effect rows by, so
+    family identity and checker identity are one derivation rather than two
+    that agree by coincidence.
+
+    *fallback* is returned when there is no type expression and when the
+    resolution has no nameable family — a top-level function type, or an
+    unresolvable type.  Both are shapes ``_register_state_cell`` /
+    ``_register_exn_tag`` already refuse (E607 / E612), so the fallback's
+    only remaining job is to keep two such spellings apart rather than
+    merging them onto one ``fn(…)`` or ``?``; see
+    :func:`~vera.slots.family_fallback_name`.
+
+    Until #1219 a third gate stood here: the rendering also had to be
+    *mangle-safe*, meaning inside the canonical ``Head<arg, arg>`` grammar,
+    because ``mangle_type_name`` escaped only that grammar and anything else
+    emitted an import name the WAT parser rejects.  A resolution outside it
+    (``Option<{@Int | ...}>``, ``Option<fn(Int -> Int) effects(pure)>``)
+    kept the alias-opaque spelling instead — conservative, but it left a
+    family split the checker does not have, and it was the only thing
+    keeping the ``pretty_type`` elisions above from merging two cells.  The
+    mangler is now total over canonical renderings, so the gate is gone.
+    """
+    if te is None:
+        return fallback
+    ty = resolve_type_expr(te, env)
+    if isinstance(base_type(ty), (FunctionType, UnknownType)):
+        return fallback
+    return structural_type_key(ty)
+
+
+def family_base_name(
+    te: ast.TypeExpr | None, env: AliasEnv, fallback: str,
+) -> str:
+    """A cell's REPRESENTATION name — :func:`family_name`'s base (#1218).
+
+    The same resolution, with the refinement wrappers stripped and rendered
+    by ``pretty_type``: ``State<Pos>`` under ``type Pos = {@Int | P}``
+    answers ``Int``.  Two clauses of one rule, and the split is what #1218
+    is: a cell's IDENTITY must discriminate the predicate (three refinements
+    of one base are three cells), while its REPRESENTATION must not (all
+    three are i64, all three take the same ``@Nat``-narrowing guard, a
+    refined ``String`` payload is still a pointer/length pair).  Deriving
+    both from the same type expression is what keeps them from disagreeing —
+    the pre-#1218 code had ONE name doing both jobs, which is why making it
+    discriminate would otherwise have silently switched off every
+    representation decision keyed on ``"Nat"`` / ``"Int"`` / ``"Byte"`` /
+    ``"Bool"`` / ``"String"``.
+
+    Never a symbol, and never compared against another cell's: an import
+    name, a tag, ``_pushed_cell_families`` and the addressability gate all
+    take :func:`family_name`, because two cells sharing a base share
+    everything this answers and nothing that one answers.
+
+    Falls back exactly as :func:`family_name` does, so the two agree about
+    which type expressions have no cell at all.
     """
     if te is None:
         return fallback
     ty = base_type(resolve_type_expr(te, env))
     if isinstance(ty, (FunctionType, UnknownType)):
         return fallback
-    name = pretty_type(ty)
-    return name if is_ref_spellable(name) else fallback
-
-
-_IDENT_RE = re.compile(r"[A-Z][A-Za-z0-9_]*")
-
-
-def _scan_spellable(name: str, i: int) -> int:
-    """Consume one ``UPPER_IDENT type_args?`` from *name* at *i*; return the
-    end offset, or -1 if it is not that shape."""
-    m = _IDENT_RE.match(name, i)
-    if m is None:
-        return -1
-    i = m.end()
-    if i < len(name) and name[i] == "<":
-        i += 1
-        while True:
-            i = _scan_spellable(name, i)
-            if i < 0:
-                return -1
-            if name.startswith(", ", i):
-                i += 2
-                continue
-            break
-        if i >= len(name) or name[i] != ">":
-            return -1
-        i += 1
-    return i
-
-
-def is_ref_spellable(name: str) -> bool:
-    """Can *name* appear as the type of a ``@Name.n`` slot reference?
-
-    The grammar's slot reference is ``"@" UPPER_IDENT type_args? "." INT``,
-    so a spellable name is an upper-initial identifier optionally applied to
-    spellable arguments — the shape :func:`~vera.slots.type_expr_slot_name`
-    builds and returns non-``None`` for.  ``?`` is never spellable, and
-    neither is an argument-position rendering that elides
-    (``{@Int | ...}``) or spells a function type — a reference written that
-    way could not be parsed, so a name in that shape can only ever dangle.
-    The synthetic ``Fn`` IS spellable: ``@Fn.0`` is how a function-typed
-    parameter is referenced.
-    """
-    return _scan_spellable(name, 0) == len(name) and bool(name)
+    return pretty_type(ty)
 
 
 # =====================================================================
