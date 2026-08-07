@@ -51,7 +51,7 @@ vera lsp                          # Serve LSP over stdio (needs the [lsp] extra;
 vera version                      # Print the installed version (also --version, -V)
 vera builtins [--json]            # List the built-in function registry (no file needed)
 vera effects [--json]             # List the effect and ability registry (no file needed)
-vera errors [--json]              # List the diagnostic error-code registry E001–E702 (no file needed)
+vera errors [--json]              # List the diagnostic code registry E001–E702 + W001/W002 (no file needed)
 
 pytest tests/ -v                  # Run the test suite (see TESTING.md)
 VERA_JS_COVERAGE=1 pytest tests/test_browser.py -v  # Browser tests with JS coverage
@@ -159,7 +159,7 @@ Each diagnostic includes: `severity`, `description`, `location` (`file`, `line`,
 
 ### Error codes
 
-Every diagnostic has a stable error code (`E001`–`E702`). Codes are grouped by compiler phase:
+Every diagnostic has a stable code — errors `E001`–`E702`, warnings `W001`/`W002`. Codes are grouped by compiler phase:
 
 | Range | Phase |
 |-------|-------|
