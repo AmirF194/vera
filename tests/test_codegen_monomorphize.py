@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import re
 from pathlib import Path
 
 import pytest
@@ -2329,6 +2331,200 @@ class TestMangleInjectivity:
             unmangle_type_name("Box_")  # trailing lone underscore
         with pytest.raises(ValueError):
             unmangle_type_name("Box_X")  # unknown escape code
+        # #1219's variable-length escape has three ways to be malformed, and
+        # all three must raise rather than decode to something plausible.
+        with pytest.raises(ValueError):
+            unmangle_type_name("Box_U2c")   # unterminated hex run
+        with pytest.raises(ValueError):
+            unmangle_type_name("Box_U_")    # empty hex run
+        with pytest.raises(ValueError):
+            unmangle_type_name("Box_U2z_")  # non-hex digit
+
+    # =================================================================
+    # #1219: TOTAL over canonical renderings, not just `Head<a, b>`
+    # =================================================================
+
+    # Every rendering a cell family can now carry, harvested from what
+    # `vera.types.pretty_type` and `vera.environment.structural_type_key`
+    # actually emit: function types (parentheses, the `->` arrow, effect
+    # rows), refinement structural keys (braces, the `|` bar, `@`, the
+    # newline-indented `ast.Node.pretty` tree, quoted reprs), and the
+    # non-ASCII a string literal inside a predicate can carry.
+    _TOTALITY_NAMES = (
+        "Int",
+        "Option<Int>",
+        "Map<String, Int>",
+        "fn(Int -> Int) effects(pure)",
+        "fn(Int -> Int) effects(<State<Int>>)",
+        "fn(Int, Nat -> Bool) effects(<IO, State<Option<Int>>>)",
+        "Option<fn(Int -> Int) effects(pure)>",
+        "{@Int | ...}",
+        "Option<{@Int | ...}>",
+        "{Int|BinaryExpr\n  op: >\n  left:\n    SlotRef\n"
+        "      type_name: 'Int'\n      index: 0}",
+        "{String|StringLit\n  value: 'café, naïve'}",
+        "'T#b",
+        "Res<?, Int>",
+        "A_B",
+        "Box_LInt_R",
+    )
+
+    @pytest.mark.parametrize("name", _TOTALITY_NAMES)
+    def test_mangle_output_is_identifier_safe(self, name: str) -> None:
+        """Every canonical rendering mangles to ``[A-Za-z0-9_]`` only (#1219).
+
+        The mangler's output alphabet is the WAT ``idchar`` set intersected
+        with the SMT-LIB simple-symbol set intersected with what a JS
+        ``.match(/^state_get_(.+)$/)`` hands back unchanged — i.e. plain
+        identifier characters.  Pre-#1219 the escape covered only the
+        ``Head<arg, arg>`` grammar, so a family whose resolution rendered a
+        function type emitted ``$vera.state_get_Option_Lfn(Int -> Int)…`` and
+        the WAT parser rejected the module; ``naming.family_name`` gated on
+        :func:`vera.naming.is_ref_spellable` to avoid ever producing one.
+        With the mangler total, the gate can go.
+        """
+        from vera.monomorphize import mangle_type_name
+
+        mangled = mangle_type_name(name)
+        assert re.fullmatch(r"[A-Za-z0-9_]+", mangled), (
+            f"{name!r} mangled to {mangled!r}, which leaves the "
+            f"identifier-safe alphabet"
+        )
+
+    @pytest.mark.parametrize("name", _TOTALITY_NAMES)
+    def test_unmangle_round_trips_the_widened_alphabet(
+        self, name: str,
+    ) -> None:
+        """``unmangle`` still inverts ``mangle`` over the widened domain."""
+        from vera.monomorphize import mangle_type_name, unmangle_type_name
+
+        assert unmangle_type_name(mangle_type_name(name)) == name
+
+    def test_mangle_pairwise_distinct_over_canonical_renderings(self) -> None:
+        """Adversarial near-misses over the widened domain, all distinct.
+
+        Each cluster is a pair the *checker* keeps apart and whose mangled
+        family names must therefore differ.  A collision here is a wrong-cell
+        write (#1218's failure mode one level down): two `State<T>` cells the
+        checker typed as two would share one host import.
+        """
+        from vera.monomorphize import mangle_type_name
+
+        names = [
+            # The #775 class, restated over the widened alphabet.
+            "Option<Int>", "Option_LInt_R", "Option__LInt__R",
+            # Function types differing ONLY in the effect row.
+            "fn(Int -> Int) effects(pure)",
+            "fn(Int -> Int) effects(<IO>)",
+            "fn(Int -> Int) effects(<State<Int>>)",
+            # ... and only in arity / parameter types / return type.
+            "fn(Int, Int -> Int) effects(pure)",
+            "fn(Nat -> Int) effects(pure)",
+            "fn(Int -> Nat) effects(pure)",
+            # Refinements differing ONLY in the predicate.
+            "{Int|BinaryExpr\n  op: >}",
+            "{Int|BinaryExpr\n  op: <}",
+            # ... and only in the base.
+            "{Nat|BinaryExpr\n  op: >}",
+            # Nested combinations.
+            "Option<fn(Int -> Int) effects(pure)>",
+            "Option<fn(Int -> Int) effects(<IO>)>",
+            "Option<{Int|BinaryExpr\n  op: >}>",
+            "Option<{Int|BinaryExpr\n  op: <}>",
+            # A bare comma vs the canonical `", "` separator: a string
+            # literal inside a predicate can spell either, and collapsing
+            # both to `_C` (as the pre-#1219 escape did) merged them.
+            "{String|StringLit\n  value: 'a,b'}",
+            "{String|StringLit\n  value: 'a, b'}",
+            # Forgery attempts: a flat name spelling an escape code.
+            "fn_PInt", "fn(Int", "A_U2c_B", "A,B", "A, B",
+        ]
+        seen: dict[str, str] = {}
+        for name in names:
+            m = mangle_type_name(name)
+            assert m not in seen, (
+                f"collision: {seen[m]!r} and {name!r} both mangle to {m!r}"
+            )
+            seen[m] = name
+
+    def test_mangle_preserves_every_pre_1219_symbol(self) -> None:
+        """Widening the escape moves NO symbol that existed before it.
+
+        The five pre-#1219 codes (``__``/``_L``/``_R``/``_C``/``_S``) keep
+        their exact meanings, so every family, Z3 sort, ``$eq_`` helper and
+        mono clone the corpus already emits keeps its name.  ``", "`` in
+        particular stays ONE ``_C`` rather than becoming per-character
+        ``_C_S``; only a comma NOT followed by a space — which no canonical
+        `Head<a, b>` rendering produces, and which only a string literal
+        inside a refinement predicate can — takes the new escape.
+        """
+        from vera.monomorphize import mangle_type_name
+
+        assert mangle_type_name("Int") == "Int"
+        assert mangle_type_name("Option<Int>") == "Option_LInt_R"
+        assert mangle_type_name("Map<String, Int>") == "Map_LString_CInt_R"
+        assert mangle_type_name("Tuple<Int, Int>") == "Tuple_LInt_CInt_R"
+        assert mangle_type_name("A_B") == "A__B"
+        assert mangle_type_name("Option<Option<Int>>") == \
+            "Option_LOption_LInt_R_R"
+
+    def test_mangle_is_not_idempotent_and_cannot_be(self) -> None:
+        """Pins the #1219 idempotence DECISION, and why it is the only one.
+
+        ``mangle_type_name`` is deliberately NOT idempotent: mangling an
+        already-mangled name mangles it again (``Option<Int>`` →
+        ``Option_LInt_R`` → ``Option__LInt__R``).  It cannot be made
+        idempotent without losing injectivity, and injectivity is the whole
+        point — ``Option_LInt_R`` is itself a legal flat ADT name a program
+        may declare, so a mangler that left it alone would map it and
+        ``Option<Int>`` to one symbol.  That is exactly the #775 collision
+        class.
+
+        There is likewise no sound "is this already mangled?" guard, for the
+        same reason: the range and the domain overlap.  The invariant is
+        therefore STRUCTURAL — canonical names are carried everywhere and
+        mangled once, at symbol construction — and every comparison between
+        two families is made on the canonical side (``vera/wasm/
+        calls_handlers.py``'s clause-op gate is the one that got this wrong,
+        #1233 round 5).
+        """
+        from vera.monomorphize import mangle_type_name
+
+        once = mangle_type_name("Option<Int>")
+        assert once == "Option_LInt_R"
+        assert mangle_type_name(once) == "Option__LInt__R"
+        assert mangle_type_name(once) != once
+        # The collision the non-idempotence buys: a program may declare
+        # `data Option_LInt_R`, and its symbol must not be `Option<Int>`'s.
+        assert mangle_type_name("Option_LInt_R") != mangle_type_name(
+            "Option<Int>")
+
+    def test_mangle_is_seed_independent(self) -> None:
+        """Deterministic across hash seeds — no dict/set iteration inside.
+
+        The family name reaches a WAT symbol, so a seed-dependent escape
+        would make compilation itself nondeterministic.  Run in a subprocess
+        under two different ``PYTHONHASHSEED`` values.
+        """
+        import subprocess
+        import sys
+
+        name = ("{Int|BinaryExpr\\n  op: >\\n  left:\\n    SlotRef\\n"
+                "      type_name: 'Int'}")
+        prog = (
+            "from vera.monomorphize import mangle_type_name;"
+            f"print(mangle_type_name({name!r}))"
+        )
+        outs = set()
+        for seed in ("0", "1", "12345"):
+            env = {**os.environ, "PYTHONHASHSEED": seed}
+            out = subprocess.run(
+                [sys.executable, "-c", prog],
+                capture_output=True, text=True, encoding="utf-8",
+                check=True, env=env,
+            ).stdout.strip()
+            outs.add(out)
+        assert len(outs) == 1, f"seed-dependent mangle: {outs}"
 
     # Two-param collision program: `unwrap_second<A_B, C>` and
     # `unwrap_second<A, B_C>` collided to `$unwrap_second$A_B_C` pre-fix
