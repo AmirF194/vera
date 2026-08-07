@@ -242,11 +242,11 @@ class TestImportedCalleeContractEnv:
 
     The obligation is asserted, not just the CODE: which call site raised it,
     which callee it names, and — for the mirror — that it was raised at all
-    and discharged, rather than never existing.  What is NOT asserted is the
-    ``Precondition:`` line quoted in the message body: for an imported callee
-    that text is #1220's known-broken rendering (the callee's span indexed
-    into the IMPORTER's source buffer, so it quotes whatever sits on that line
-    here).  Assert it when #1220 closes.
+    and discharged, rather than never existing.  The ``Precondition:`` line
+    quoted in the message body is asserted too, now that #1220 resolves an
+    imported clause's span against the file that declared it;
+    ``tests/test_callee_contract_scope_1220_1225_1226.py`` holds that
+    rendering's own suite, including the misattribution direction.
     """
 
     def test_violated_precondition_still_reported_bare_import(self) -> None:
@@ -293,6 +293,9 @@ public fn main(@Unit -> @Int)
             if d.error_code == "E501" and d.severity == "error"
         )
         assert "'need3'" in message and "'main'" in message, message
+        # #1220: and the clause it quotes is the CALLEE's, read out of the
+        # module that declared it — not this file's line 6 (`ensures(true)`).
+        assert "requires(@Option<Int>.0 == Some(3))" in message, message
 
     def test_violated_precondition_still_reported_qualified_call(self) -> None:
         """probe p8q: a ``mod::fn`` call takes the same registry, same fix."""

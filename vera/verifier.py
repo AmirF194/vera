@@ -77,6 +77,25 @@ _I64_MAX = 2**63 - 1
 _U64_MAX = 2**64 - 1
 
 
+def _walk_fn_decls(program: ast.Program) -> Iterator[ast.FnDecl]:
+    """Every function *declaration* in *program*, ``where``-helpers included.
+
+    The registries built from a module's registration are flat and last-wins,
+    so they cannot answer "which declarations did this file contain?" for a
+    module that spells one helper name twice.  This walks the AST instead, and
+    is used to attribute each declaration's contract clauses to the file they
+    were written in (#1220).
+    """
+    stack: list[ast.FnDecl] = [
+        tld.decl for tld in program.declarations
+        if isinstance(tld.decl, ast.FnDecl)
+    ]
+    while stack:
+        decl = stack.pop()
+        yield decl
+        stack.extend(decl.where_fns or ())
+
+
 # =====================================================================
 # Public API
 # =====================================================================
@@ -197,6 +216,11 @@ class ContractVerifier:
     #: answers for an instance built without ``__init__`` too.
     _decl_alias_env: AliasEnv | None = None
 
+    #: #1220: the DEFINING module's source text over the same scope — the
+    #: buffer a clause of the declaration under verification is quoted from.
+    #: Class default for the same reason.
+    _decl_source: str | None = None
+
     def __init__(
         self,
         source: str = "",
@@ -236,6 +260,10 @@ class ContractVerifier:
         # namespace, and two modules that spell the same alias differently then
         # merge or split parameter stacks the checker kept apart.
         self._module_alias_envs: dict[tuple[str, ...], AliasEnv] = {}
+        # #1220: each RESOLVED MODULE's source text, recorded beside its env in
+        # `_register_modules` and read through the same origin walk — the
+        # buffer a clause DECLARED in that module is quoted from.
+        self._module_sources: dict[tuple[str, ...], str] = {}
         # #1208: which module a harvested `FunctionInfo` came from, keyed by
         # object identity.  `FunctionInfo` is an unhashable mutable dataclass
         # and carries no origin of its own, so identity is the join — sound
@@ -243,13 +271,24 @@ class ContractVerifier:
         # its id) alive for as long as the map is.  A callee absent from here
         # is local to THIS program and renders against `self._alias_env`.
         self._fn_origin_envs: dict[int, tuple[FunctionInfo, AliasEnv]] = {}
+        # #1220: the SOURCE TEXT each imported contract clause was WRITTEN in,
+        # keyed by clause identity on the same reasoning as `_fn_origin_envs`
+        # above.  A clause's span numbers lines in the file that declared it,
+        # so a message quoting an imported callee's `requires` has to index
+        # that module's buffer — indexing this program's returns whatever text
+        # happens to sit on that line here (`requires(true)`, `effects(pure)`).
+        # A clause absent from here was declared in THIS program and quotes
+        # `self.source`.
+        self._contract_sources: dict[int, tuple[ast.Contract, str]] = {}
         # #1208: the origin module of each IMPORTED generic, keyed by the same
         # discovery key `_instances` / `generic_decls` use.  A key absent from
         # here is a main-file generic.
         self._generic_origins: dict[str, tuple[str, ...]] = {}
-        # See the class-level default: the DEFINING module's env while an
-        # imported generic's clone is verified, `None` otherwise (#1208).
+        # See the class-level defaults: the DEFINING module's env (#1208) and
+        # source (#1220) while an imported generic's clone is verified, `None`
+        # otherwise.
         self._decl_alias_env = None
+        self._decl_source = None
         self.source = source
         self.file = file
         self.timeout_ms = timeout_ms
@@ -803,6 +842,18 @@ class ContractVerifier:
             # namespace.
             mod_alias_env = alias_env_from_environment(temp.env)
             self._module_alias_envs[mod.path] = mod_alias_env
+            self._module_sources[mod.path] = mod.source
+            # #1220: pin every clause this module DECLARES to the module's own
+            # source, so a message quoting one indexes the buffer its span
+            # numbers.  Walked off the AST rather than off `all_fns` below so
+            # a `where`-helper's clauses — flattened last-wins into the
+            # registry, and quotable through the scoped lookup — are pinned
+            # too.  Before the `direct` gate for the same reason the env above
+            # is: a transitive module's clause is quotable while an imported
+            # generic's clone is verified in its declaring module's scope.
+            for fn_decl in _walk_fn_decls(mod.program):
+                for clause in fn_decl.contracts:
+                    self._contract_sources[id(clause)] = (clause, mod.source)
 
             # All module-declared functions (exclude builtins)
             all_fns = {
@@ -929,15 +980,52 @@ class ContractVerifier:
             else self._decl_alias_env
         )
 
+    @property
+    def _current_source(self) -> str:
+        """The source text of the module that DECLARED what is being verified.
+
+        This program's, except while an IMPORTED generic's clone is under
+        verification — then the defining module's, entered by the same
+        :meth:`_declaring_module_scope` that swaps the naming env (#1220).  A
+        clause quoted out of the wrong buffer names a line that file does not
+        have: the clone's helper contracts sit past the end of a shorter
+        importer, so the ``Precondition:`` line vanished from the message.
+        """
+        return self.source if self._decl_source is None else self._decl_source
+
     @contextlib.contextmanager
-    def _declaring_module_scope(self, env: AliasEnv) -> Iterator[None]:
-        """Verify the enclosed declarations in *env*'s namespace (#1208)."""
-        saved = self._decl_alias_env
-        self._decl_alias_env = env
+    def _declaring_module_scope(
+        self, origin: tuple[str, ...] | None,
+    ) -> Iterator[None]:
+        """Verify the enclosed declarations as module *origin* wrote them.
+
+        Both halves of "which file is this?" ride this one scope: the naming
+        env its slots render against (#1208) and the source buffer its clauses
+        are quoted from (#1220).  ``None`` is a main-file declaration and keeps
+        this program's.  Entered and left together, so a clone named in one
+        module can never quote another's text.
+        """
+        saved = (self._decl_alias_env, self._decl_source)
+        self._decl_alias_env = self._alias_env_for_module(origin)
+        self._decl_source = self._source_for_module(origin)
         try:
             yield
         finally:
-            self._decl_alias_env = saved
+            self._decl_alias_env, self._decl_source = saved
+
+    def _alias_env_for_module(self, origin: tuple[str, ...] | None) -> AliasEnv:
+        """Module *origin*'s naming env; this program's for ``None`` or an
+        unregistered path (#1208)."""
+        if origin is None:
+            return self._alias_env
+        return self._module_alias_envs.get(origin, self._alias_env)
+
+    def _source_for_module(self, origin: tuple[str, ...] | None) -> str:
+        """Module *origin*'s source text; this program's for ``None`` or an
+        unregistered path (#1220)."""
+        if origin is None:
+            return self.source
+        return self._module_sources.get(origin, self.source)
 
     @staticmethod
     def _fn_naming_scope(
@@ -970,6 +1058,19 @@ class ContractVerifier:
         clone.  The De Bruijn recount in ``monomorphize_fn`` and the clone's
         re-declaration in ``_verify_fn`` must agree on it, or the verifier
         proves a body codegen never emits.
+        """
+        return self._alias_env_for_module(self._origin_module_for_generic(key))
+
+    def _origin_module_for_generic(
+        self, key: str | None,
+    ) -> tuple[str, ...] | None:
+        """The module a generic registered under *key* was DECLARED in, or
+        ``None`` for a main-file generic.
+
+        The single walk behind every per-generic origin question — the naming
+        env (:meth:`_alias_env_for_generic`) and the source buffer its clauses
+        quote from (:meth:`_source_for_module`) resolve the same key the same
+        way, so the two cannot answer for different modules.
 
         *key* may be a lexical CHAIN (``parent$where$helper``), and the origin
         registry holds whichever ancestor the harvest recorded: an imported
@@ -988,10 +1089,10 @@ class ContractVerifier:
         while probe is not None:
             origin = self._generic_origins.get(probe)
             if origin is not None:
-                return self._module_alias_envs.get(origin, self._alias_env)
+                return origin
             ancestor, sep, _ = probe.rpartition("$where$")
             probe = ancestor if sep else None
-        return self._alias_env
+        return None
 
     # -----------------------------------------------------------------
     # Type resolution (simplified — reuses TypeEnv patterns)
@@ -2048,8 +2149,9 @@ class ContractVerifier:
         # the canonical discovery key — `origin_key` where the caller has one
         # that is not the clone's name, else `clone_name`), this program's
         # otherwise.
-        origin_env = self._alias_env_for_generic(
+        origin_module = self._origin_module_for_generic(
             origin_key or clone_name or decl.name)
+        origin_env = self._alias_env_for_module(origin_module)
         for concrete in instances:
             clone = self._mono.monomorphize_fn(decl, concrete, origin_env)
             clone = replace(clone, name=clone_name or decl.name)
@@ -2079,7 +2181,7 @@ class ContractVerifier:
                 # re-declare under the SAME env the recount above renamed them
                 # in — a clone recounted in one namespace and re-declared in
                 # another resolves references onto the wrong parameters.
-                with self._declaring_module_scope(origin_env):
+                with self._declaring_module_scope(origin_module):
                     self._verify_fn(clone, enclosing=enclosing)
             finally:
                 self._instance_subst = saved_subst
@@ -7974,12 +8076,41 @@ class ContractVerifier:
             )
 
     def _contract_source_text(self, contract: ast.Contract) -> str:
-        """Extract the source text of a contract clause."""
+        """Extract the source text of a contract clause, from the file that
+        DECLARED it (#1220).
+
+        A clause's span numbers lines in its own file, so an IMPORTED callee's
+        `requires` quoted out of this program's buffer reads whatever sits on
+        that line here — the E501 for a violated `requires(@Option<Int>.0 ==
+        Some(3))` quoted `requires(true)`, and a reader has no way to tell the
+        garbage from a real clause.  The buffer comes from
+        :meth:`_declaring_source`, which is keyed by the clause itself.
+        """
         if contract.span:
-            lines = self.source.splitlines()
+            lines = self._declaring_source(contract).splitlines()
             if 1 <= contract.span.line <= len(lines):
                 return lines[contract.span.line - 1].strip()
         return ""
+
+    def _declaring_source(self, contract: ast.Contract) -> str:
+        """The source text *contract*'s span numbers lines in (#1220).
+
+        The defining module's for an imported clause, this program's for a
+        local one.  Identity is the join, and the pinned value holds the clause
+        object itself so a recycled ``id`` cannot answer for another clause —
+        the same reasoning ``_callee_alias_env`` documents.
+
+        An unpinned clause falls back to the module UNDER verification, not to
+        the entry program: only clauses parsed from a module's own AST are
+        pinned, so a monomorphized clone's clause — a fresh node carrying the
+        original's span — reaches here while its declaring module is in scope
+        (:meth:`_declaring_module_scope`), which is the buffer that span
+        numbers.
+        """
+        found = self._contract_sources.get(id(contract))
+        if found is not None and found[0] is contract:
+            return found[1]
+        return self._current_source
 
     # -----------------------------------------------------------------
     # Helpers
