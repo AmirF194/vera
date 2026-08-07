@@ -109,6 +109,12 @@ class StateClauseEntry:
             declaration — the ENCLOSING handlers' clauses, never this
             handler's own, so re-entering an op from inside a clause body
             walks strictly outwards and terminates.
+        decl_addressable_from: how many host cells were pushed at the
+            declaration — the index into ``_pushed_cell_families`` from which
+            this clause body's cells are SHADOWS.  A bare op in the clause
+            body resolves into the declaration scope, but the host intrinsics
+            address only the innermost cell of a family, so an op whose family
+            appears at or after this index cannot reach its cell (#1233).
     """
 
     clause: ast.HandlerClause
@@ -121,6 +127,7 @@ class StateClauseEntry:
     decl_effect_op_result_wt: dict[str, str | None]
     decl_effect_op_result_vera: dict[str, str | None]
     decl_state_clause_ops: dict[str, "StateClauseEntry"]
+    decl_addressable_from: int
 
 
 # =====================================================================

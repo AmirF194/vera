@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, cast
 
 from vera import ast
 from vera.skip import AdtEqNotDerivableError, CodegenInvariantError, CodegenSkip
+from vera.codegen.compilability import contract_exprs
 from vera.codegen.tail_position import compute_tail_call_sites
 from vera.monomorphize import mangle_type_name
 from vera.slots import type_expr_slot_name
@@ -450,12 +451,14 @@ class FunctionCompilationMixin:
         else:
             result_part = ""
 
-        # Scan body for handle[State<T>] expressions to register imports.
-        # #1210: a handler naming a cell type the backend cannot compile
-        # drops the function here with its own [E607], the same verdict the
-        # declared-effect gate reaches — the walk used to skip such a cell in
-        # silence and leave the lowering to emit calls to imports that were
-        # never declared.
+        # Scan the function for handle[State<T>] / handle[Exn<E>] expressions
+        # to register imports and tags.  #1210: a handler naming a cell or
+        # payload type the backend cannot compile drops the function here with
+        # its own [E607] / [E612], the same verdict the declared-effect gate
+        # reaches — the walk used to skip such a type in silence and leave the
+        # lowering to emit calls to imports that were never declared.  The
+        # walk covers the contract predicates too (round 2): they are lowered
+        # code, so a handler in one is emitted like any other.
         if not self._scan_body_for_state_handlers(decl.body, decl):
             return None
 
@@ -468,11 +471,13 @@ class FunctionCompilationMixin:
         # `requires(...)` / `ensures(...)` would emit an orphaned
         # `call $vera.<name>` with no import declaration and fail WAT
         # compilation.  Contracts are pure, so the QualifiedCall (IO / Http /
-        # Inference / Random) branches of the scan never fire here.
-        for _contract in decl.contracts:
-            _pred = getattr(_contract, "expr", None)
-            if _pred is not None:
-                self._scan_io_ops(_pred)
+        # Inference / Random) branches of the scan never fire here — except
+        # through a handler clause body, which is ordinary code.
+        # `contract_exprs` is the shared enumeration (#1210 round 2): the
+        # `getattr(c, "expr")` shortcut this replaced skipped `decreases`,
+        # whose measure lives in `exprs`.
+        for _pred in contract_exprs(decl.contracts):
+            self._scan_io_ops(_pred)
 
         # #517 — configure tail-call optimization for this function.
         # The analyzer marks `id(FnCall)` for every call in syntactic

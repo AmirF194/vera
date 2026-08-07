@@ -28,8 +28,24 @@ from vera.types import (
     PureEffectRow,
     Type,
     TypeVar,
+    pretty_type,
     substitute,
 )
+
+
+def _effect_sort_key(ei: EffectInstance) -> tuple[str, str]:
+    """A STRUCTURAL total order on effect instances (#1215 / #1231).
+
+    Used as the deterministic tiebreak for row members
+    :attr:`TypeEnv.current_effect_order` does not mention.  Keying on the
+    effect NAME alone is not a total order: spec §7.3.3 permits one effect
+    twice with different type arguments (`effects(<State<Int>, State<Bool>>)`
+    is two independent cells), so those two tie, and `sorted` — being stable —
+    then preserves the `frozenset`'s own iteration order, reintroducing the
+    exact `PYTHONHASHSEED` dependence the ordering exists to remove.
+    Rendering the arguments makes the key discriminate them.
+    """
+    return (ei.name, ", ".join(pretty_type(a) for a in ei.type_args))
 
 
 # =====================================================================
@@ -2227,7 +2243,12 @@ class TypeEnv:
         The result is TOTAL over the row: a member the order tuple does not
         mention (a row assigned without its companion order, e.g. by a
         consumer outside the checker) is not dropped, it follows the ordered
-        prefix sorted by effect name — still independent of hash seed.
+        prefix under a STRUCTURAL tiebreak — still independent of hash seed.
+        The tiebreak keys on the effect name AND its rendered type arguments,
+        because §7.3.3 lets one effect appear twice with different arguments:
+        `State<Int>` and `State<Bool>` tie on name alone, and a stable sort
+        then leaves them in the frozenset's own iteration order, which is the
+        `PYTHONHASHSEED` dependence this method exists to remove.
         """
         row = self.current_effect_row
         if not isinstance(row, ConcreteEffectRow):
@@ -2238,9 +2259,7 @@ class TypeEnv:
             if ei in row.effects and ei not in seen:
                 seen.add(ei)
                 ordered.append(ei)
-        ordered.extend(
-            sorted(row.effects - seen, key=lambda e: e.name)
-        )
+        ordered.extend(sorted(row.effects - seen, key=_effect_sort_key))
         return tuple(ordered)
 
     def lookup_effect_op(self, op_name: str,

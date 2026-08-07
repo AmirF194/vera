@@ -75,8 +75,8 @@
   <g>
     <rect class="card" x="36" y="288" width="520" height="58" rx="10"/>
     <rect x="36.5" y="288.5" width="4" height="57" rx="2" fill="#4a82a8"/>
-    <rect x="52" y="300" width="28" height="20" rx="6" fill="#e4ecf2"/>
-    <text class="f num" x="66" y="314.5" text-anchor="middle" fill="#4a82a8">2b</text>
+    <rect x="52" y="300" width="24" height="20" rx="6" fill="#e4ecf2"/>
+    <text class="f num" x="64" y="314.5" text-anchor="middle" fill="#4a82a8">3</text>
     <text class="f title" x="90" y="315">Resolve</text>
     <text class="m mod" x="540" y="314" text-anchor="end">resolver.py</text>
     <text class="f desc" x="90" y="334">Imports → transitive module closure · circular-import detection</text>
@@ -89,7 +89,7 @@
     <rect class="card" x="36" y="378" width="520" height="58" rx="10"/>
     <rect x="36.5" y="378.5" width="4" height="57" rx="2" fill="#8b6cad"/>
     <rect x="52" y="390" width="24" height="20" rx="6" fill="#ede8f2"/>
-    <text class="f num" x="64" y="404.5" text-anchor="middle" fill="#8b6cad">3</text>
+    <text class="f num" x="64" y="404.5" text-anchor="middle" fill="#8b6cad">4</text>
     <text class="f title" x="86" y="405">Type Check</text>
     <text class="m mod" x="540" y="404" text-anchor="end">checker/ · naming.py · environment.py · types.py</text>
     <text class="f desc" x="86" y="424">Two passes: register every signature, then check bodies → list[Diagnostic]</text>
@@ -109,7 +109,7 @@
     <rect class="card" x="600" y="414" width="284" height="72" rx="10"/>
     <rect x="600.5" y="414.5" width="4" height="71" rx="2" fill="#d4952a"/>
     <rect x="614" y="424" width="24" height="20" rx="6" fill="#f8efdf"/>
-    <text class="f num" x="626" y="438.5" text-anchor="middle" fill="#d4952a">4</text>
+    <text class="f num" x="626" y="438.5" text-anchor="middle" fill="#d4952a">5</text>
     <text class="f title" x="648" y="439">Verify</text>
     <text class="m mod" x="870" y="438" text-anchor="end">verifier.py · smt.py</text>
     <text class="f desc" x="614" y="458">Z3 proves each obligation (Tier 1) or defers it (Tier 3)</text>
@@ -130,7 +130,7 @@
     <rect class="card" x="36" y="540" width="520" height="58" rx="10"/>
     <rect x="36.5" y="540.5" width="4" height="57" rx="2" fill="#5a9e6f"/>
     <rect x="52" y="552" width="24" height="20" rx="6" fill="#e6f0e9"/>
-    <text class="f num" x="64" y="566.5" text-anchor="middle" fill="#5a9e6f">5</text>
+    <text class="f num" x="64" y="566.5" text-anchor="middle" fill="#5a9e6f">6</text>
     <text class="f title" x="86" y="567">Compile</text>
     <text class="m mod" x="540" y="566" text-anchor="end">codegen/ · wasm/</text>
     <text class="f desc" x="86" y="586">Monomorphize generics · insert contract guards · emit WAT → wat2wasm</text>
@@ -147,7 +147,7 @@
     <rect class="card" x="36" y="630" width="520" height="58" rx="10"/>
     <rect x="36.5" y="630.5" width="4" height="57" rx="2" fill="#cc9966"/>
     <rect x="52" y="642" width="24" height="20" rx="6" fill="#f7efe8"/>
-    <text class="f num" x="64" y="656.5" text-anchor="middle" fill="#cc9966">6</text>
+    <text class="f num" x="64" y="656.5" text-anchor="middle" fill="#cc9966">7</text>
     <text class="f title" x="86" y="657">Execute</text>
     <text class="m mod" x="540" y="656" text-anchor="end">runtime/ · wasmtime</text>
     <text class="f desc" x="86" y="676">Host binds vera.* imports (IO, State, Http, …) — vera run · test · serve</text>
@@ -169,6 +169,6 @@
 
   <!-- footer -->
   <text class="f foot" x="36" y="718">Cross-cutting: cli.py orchestrates every stage · errors.py (Diagnostic, E-codes) · formatter.py (vera fmt) · tester.py (vera test)</text>
-  <text class="f foot" x="36" y="738">naming.py answers “what is this type expression called?” once — stages 4 and 5, tester.py and lsp/ all render slot names and State/Exn families through it.</text>
+  <text class="f foot" x="36" y="738">naming.py answers “what is this type expression called?” once — stages 5 and 6, tester.py and lsp/ all render slot names and State/Exn families through it.</text>
   <text class="f footi" x="36" y="760">Nothing exits early — every stage accumulates diagnostics, so an agent gets all feedback in one pass.</text>
 </svg>

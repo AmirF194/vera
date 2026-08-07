@@ -23,28 +23,28 @@ Source (.vera)
   v
 1   Parse        grammar.lark + parser.py     -> Lark parse tree (LALR(1))
 2   Transform    transform.py + ast.py        -> typed AST
-2b  Resolve      resolver.py                  -> transitive module closure
-3   Type Check   checker/ + naming.py + environment.py -> list[Diagnostic]
+3   Resolve      resolver.py                  -> transitive module closure
+4   Type Check   checker/ + naming.py + environment.py -> list[Diagnostic]
   |              (two passes: register every signature, then check bodies)
   |
-  +--- vera verify ------------->  4  Verify   verifier.py + smt.py (Z3)
+  +--- vera verify ------------->  5  Verify   verifier.py + smt.py (Z3)
   |                                   each obligation proved (Tier 1) or
   |                                   deferred to a runtime guard (Tier 3)
   |                                   -> ok / diagnostics / tier counts
   |                                   sidecar: obligations/ + lsp/ -- warm
   |                                   incremental re-verification (LSP)
   v    vera compile / vera run
-5   Compile      codegen/ + wasm/             -> WAT + .wasm
+6   Compile      codegen/ + wasm/             -> WAT + .wasm
   |              monomorphize generics / insert contract guards
   +------------------------------>  Browser bundle   (--target browser)
   +------------------------------>  WASI 0.2 component (--target wasi-p2)
   v
-6   Execute      runtime/ + wasmtime          vera run / test / serve
+7   Execute      runtime/ + wasmtime          vera run / test / serve
 
 Cross-cutting: cli.py (orchestrates every stage) / errors.py (Diagnostic,
 E-codes) / formatter.py (vera fmt) / tester.py (vera test).
-naming.py answers "what is this type expression called?" once -- stages 4
-and 5, tester.py and lsp/ all render slot names and State/Exn cell families
+naming.py answers "what is this type expression called?" once -- stages 5
+and 6, tester.py and lsp/ all render slot names and State/Exn cell families
 through it, never their own.
 Nothing exits early -- every stage accumulates diagnostics, so an agent
 gets all feedback in one pass.
@@ -94,16 +94,16 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `monomorphize.py` | 2,438 | Resolve | Shared generic instantiation discovery + AST substitution (verifier and codegen); each clone's De Bruijn recount renders its binder names under the **origin module's** `AliasEnv`, the one its consumers rebuild the clone's scope with (#1208) | `substitute_type_vars()`, `resolve_type_alias()`, `canonicalize_type_aliases()` |
 | `smt.py` | 2,877 | Verify | Z3 translation layer; rebinds its naming env per callee (`_callee_alias_env_lookup`) so an imported callee's contract is rendered in *its* module's namespace (#1208) | `SmtContext`, `SlotEnv` |
 | `verifier.py` | 8,190 | Verify | Contract verification; owns the per-module `AliasEnv` registry every rendering goes through — an imported callee's contract and an imported generic's clone are both named in the module that **declared** them (#1208) | `verify()` |
-| `wasm/` | 25,941 | Compile | WASM translation layer (package) | `WasmContext`, `WasmSlotEnv`, `StringPool` |
-| ` ├ context.py` | 1,089 | | Composed WasmContext, expression dispatcher, block translation | |
-| ` ├ helpers.py` | 541 | | WasmSlotEnv, StateClauseEntry, StringPool, type mapping, array element helpers | |
+| `wasm/` | 26,561 | Compile | WASM translation layer (package) | `WasmContext`, `WasmSlotEnv`, `StringPool` |
+| ` ├ context.py` | 1,118 | | Composed WasmContext, expression dispatcher, block translation | |
+| ` ├ helpers.py` | 548 | | WasmSlotEnv, StateClauseEntry, StringPool, type mapping, array element helpers | |
 | ` ├ inference.py` | 2,480 | | Type inference, slot/type utilities, operator tables | |
 | ` ├ operators.py` | 2,803 | | Binary/unary operators, if, quantifiers, assert/assume, old/new | |
-| ` ├ calls.py` | 1,146 | | Core dispatcher for `_translate_call` / `_translate_qualified_call`, generic resolution, shared element-type inference (domain mixins below) | |
+| ` ├ calls.py` | 1,196 | | Core dispatcher for `_translate_call` / `_translate_qualified_call`, generic resolution, shared element-type inference (domain mixins below) | |
 | ` ├ calls_arrays.py` | 2,694 | | `array_length` / `append` / `range` / `concat` / `slice` / `map` / `filter` / `fold` / `mapi` / `reverse` / `find` / `any` / `all` / `flatten` / `sort_by` | |
 | ` ├ calls_containers.py` | 1,304 | | Map, Set, Decimal (opaque-handle types) | |
 | ` ├ calls_encoding.py` | 2,210 | | Base64 and URL encoding/decoding/parsing | |
-| ` ├ calls_handlers.py` | 2,022 | | Show/Hash ability dispatch, `handle[State<T>]` and `handle[Exn<E>]` | |
+| ` ├ calls_handlers.py` | 2,262 | | Show/Hash ability dispatch, `handle[State<T>]` and `handle[Exn<E>]` | |
 | ` ├ calls_markup.py` | 400 | | JSON, HTML, Markdown, Regex, async/await (#841: fused concurrent lowering for `async(Http.get/post)`, identity otherwise) | |
 | ` ├ async_fusion.py` | 435 | | #841 fusion predicates — the single source of truth shared by the `_scan_io_ops` import pre-scan and the `WasmContext` async/await lowering | `fused_async_target()`, `await_needs_check()`, `compute_future_ret_fns()` |
 | ` ├ calls_math.py` | 635 | | `abs`, `min`, `max`, `floor`, `ceil`, `round`, `sqrt`, `pow`, Float64 predicates, numeric conversions | |
@@ -126,19 +126,19 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `  extensions.py` | 146 | | vera/speculativeEdit proof-delta | |
 | `  server.py` | 287 | | pygls wiring, single-session serialisation | |
 | `  workflows.py` | 442 | | Skill-layer workflows: enforced edit sequences (#222 F) | |
-| `codegen/` | 17,669 | Compile | Codegen orchestrator (mixin package) | `compile()`, `execute()` |
+| `codegen/` | 17,785 | Compile | Codegen orchestrator (mixin package) | `compile()`, `execute()` |
 | `  api.py` | 1,341 | | Public API, dataclasses, `compile()`/`execute()` orchestration, core IO host bindings (#421) | |
 | `  memory.py` | 105 | | Compile-time ADT layout helpers (`ConstructorLayout`, alignment) (#421) | |
 | `  core.py` | 2,561 | | CodeGenerator class, orchestration, ability op rewriting (Pass 1.6), skip propagation to callers (#1100) | |
 | `  modules.py` | 1,017 | | Cross-module registration + call detection (C7e), per-module alias + source scopes (#1111/#1186) — `_module_alias_scope` swaps the alias maps *and* the `AliasEnv` every codegen rendering goes through as one pair (#1208) | |
 | `  registration.py` | 479 | | Pass 1 forward declarations, ADT layout | |
 | `  monomorphize.py` | 1,369 | | Generic instantiation, type inference, ability constraint checking (Pass 1.5) | |
-| `  functions.py` | 1,202 | | Function body compilation, GC prologue/epilogue (Pass 2) | |
+| `  functions.py` | 1,270 | | Function body compilation, GC prologue/epilogue (Pass 2) | |
 | `  tail_position.py` | 106 | | Tail-position analysis for the function body compiler | |
 | `  closures.py` | 876 | | Closure lifting, GC instrumentation | |
 | `  contracts.py` | 1,196 | | Runtime pre/postconditions, old state snapshots, decreases termination guard (entry check-and-set, per-function chain state, ADT rank helpers, self-tail site checks); the refinement boundary guard derives its binder from `naming.refinement_binder_parts` and layers the erased-base skip and the nested-base E618 on top | |
 | `  assembly.py` | 1,447 | | WAT module assembly, `$alloc`, `$gc_collect` | |
-| `  compilability.py` | 606 | | Compilability checks, state handler scanning | |
+| `  compilability.py` | 738 | | Compilability checks, state handler scanning | |
 | `  wasi.py` | 4,820 | | WASI Preview 2 component/adapter emitter — `--target wasi-p2` / `--world server` (#237, #853) | |
 | `runtime/` | 4,784 | Execute | wasmtime host layer (#421): traps + per-effect host-binding families | `register_*()`, `WasmTrapError` |
 | `  traps.py` | 493 | | `WasmTrapError`, `_classify_trap`, source-backtrace resolution | |
@@ -751,7 +751,7 @@ The `ERROR_CODES` dict in `errors.py` maps every code to a short description (15
 
 ## Test Suite
 
-Testing spans a **pytest suite** of 9,445 tests across 146 files — compiler-internals unit tests plus a **conformance suite** (199 programs in `tests/conformance/` validating every language feature against the spec) and **example programs** (42 end-to-end demos). The conformance suite is the definitive specification artifact — each program tests one feature and serves as a minimal working example.
+Testing spans a **pytest suite** of 9,465 tests across 146 files — compiler-internals unit tests plus a **conformance suite** (199 programs in `tests/conformance/` validating every language feature against the spec) and **example programs** (42 end-to-end demos). The conformance suite is the definitive specification artifact — each program tests one feature and serves as a minimal working example.
 
 See **[TESTING.md](../TESTING.md)** for the comprehensive testing reference -- test file table, conformance suite details, compiler code coverage, language feature coverage, helper conventions, validation scripts, CI pipeline, and guidelines for adding tests.
 

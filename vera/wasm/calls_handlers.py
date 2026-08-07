@@ -14,7 +14,7 @@ from dataclasses import fields, is_dataclass
 from vera import ast
 from vera.monomorphize import mangle_type_name
 from vera.slots import type_expr_slot_name
-from vera.skip import CodegenSkip
+from vera.skip import STATE_CLAUSE_INLINE_DEPTH_CAP, CodegenSkip
 from vera.wasm.helpers import (
     StateClauseEntry,
     WasmSlotEnv,
@@ -53,6 +53,9 @@ class CallsHandlersMixin:
     _state_clause_ops: dict[str, StateClauseEntry]
     _state_clause_family: str | None
     _in_state_clause: bool
+    _pushed_cell_families: list[str]
+    _addressable_from: int
+    _clause_inline_depth: int
 
     # -----------------------------------------------------------------
     # Ability operation dispatch: show and hash (§9.8)
@@ -1516,17 +1519,46 @@ class CallsHandlersMixin:
         #    result WAT type (#914 A2: a `match get(())` inside the body needs
         #    it to type the scrutinee — State<T>'s T is validated non-pair by
         #    the checker, so `_type_name_to_wasm` yields the op's result WT).
-        saved_ops = dict(self._effect_ops)
-        saved_result_wt = dict(self._effect_op_result_wt)
-        saved_result_vera = dict(self._effect_op_result_vera)
-        saved_clause_ops = dict(self._state_clause_ops)
-        self._effect_ops["get"] = (get_import, False)
-        self._effect_ops["put"] = (put_import, True)
-        self._effect_op_result_wt["get"] = self._type_name_to_wasm(family)
+        # The four registries are SAVED BY REFERENCE and REPLACED with fresh
+        # copies, so this handler's `get`/`put` never land in a dict some
+        # enclosing scope (or a `StateClauseEntry` from an outer handler)
+        # still holds — the in-place `self._effect_ops["get"] = …` this
+        # replaces mutated exactly such a shared object and relied on the
+        # rebinding below to hide it.  The restore is in a `finally` for the
+        # same reason its twin `_translate_state_clause_op` has one: the body
+        # translation raises `CodegenSkip` on any unsupported shape, and a
+        # non-local exit past the restore would leak this handler's op
+        # registry into whatever catches it.
+        saved_ops = self._effect_ops
+        saved_result_wt = self._effect_op_result_wt
+        saved_result_vera = self._effect_op_result_vera
+        saved_clause_ops = self._state_clause_ops
+        # The DECLARATION-time snapshot the clause entries carry (#1211) —
+        # private copies, so nothing that runs later can alter what a clause
+        # body's bare op resolves against.  `decl_addressable_from` is the
+        # same idea for the host CELL stack (#1233): how many cells were
+        # pushed here, i.e. how far back a clause body's outward-routed op has
+        # to reach past cells the intrinsics cannot skip.
+        decl_ops = dict(saved_ops)
+        decl_result_wt = dict(saved_result_wt)
+        decl_result_vera = dict(saved_result_vera)
+        decl_clause_ops = dict(saved_clause_ops)
+        decl_addressable_from = self._addressable_from
+        self._effect_ops = {
+            **saved_ops,
+            "get": (get_import, False),
+            "put": (put_import, True),
+        }
+        self._effect_op_result_wt = {
+            **saved_result_wt,
+            "get": self._type_name_to_wasm(family),
+        }
         # #1006: the VERA-name mirror of the WT record above —
         # `_infer_vera_type` needs the Vera name (not the layout-ambiguous
         # WAT type) to type a `get(())` array-literal element.
-        self._effect_op_result_vera["get"] = type_name
+        self._effect_op_result_vera = {
+            **saved_result_vera, "get": type_name,
+        }
         # #976 option C: register the clauses so each get/put CALL SITE in
         # the body inlines its clause body (intrinsic-hybrid semantics)
         # instead of the bare host-cell call.  Start from an EMPTY registry:
@@ -1561,12 +1593,13 @@ class CallsHandlersMixin:
             #
             # #1211: the entry carries the WHOLE declaration-time scope — the
             # env AND the three op registries and the clause registry as they
-            # stood before this handler installed its own (`saved_*` above,
-            # captured before the overwrites).  A bare `get`/`put` in a clause
-            # body belongs to the ENCLOSING context, the same rule as an outer
-            # slot reference in a clause body; threading only the env left the
-            # op registries at THIS handler's, so such a call read and wrote
-            # the inner cell while the checker typed it against the outer one.
+            # stood before this handler installed its own (the `decl_*`
+            # snapshots above, taken before the replacements).  A bare
+            # `get`/`put` in a clause body belongs to the ENCLOSING context,
+            # the same rule as an outer slot reference in a clause body;
+            # threading only the env left the op registries at THIS handler's,
+            # so such a call read and wrote the inner cell while the checker
+            # typed it against the outer one.
             self._state_clause_ops[clause.op_name] = StateClauseEntry(
                 clause=clause,
                 family=family,
@@ -1574,20 +1607,35 @@ class CallsHandlersMixin:
                 decl_env=env,
                 get_import=get_import,
                 put_import=put_import,
-                decl_effect_ops=saved_ops,
-                decl_effect_op_result_wt=saved_result_wt,
-                decl_effect_op_result_vera=saved_result_vera,
-                decl_state_clause_ops=saved_clause_ops,
+                decl_effect_ops=decl_ops,
+                decl_effect_op_result_wt=decl_result_wt,
+                decl_effect_op_result_vera=decl_result_vera,
+                decl_state_clause_ops=decl_clause_ops,
+                decl_addressable_from=decl_addressable_from,
             )
 
-        # 4. Compile handler body
-        body_instrs = self.translate_block(expr.body, env)
-
-        # 5. Restore effect_ops (and the clause registry — nested handlers)
-        self._effect_ops = saved_ops
-        self._effect_op_result_wt = saved_result_wt
-        self._effect_op_result_vera = saved_result_vera
-        self._state_clause_ops = saved_clause_ops
+        # 4. Compile handler body.  This handler's `state_push_T` has run, so
+        #    its cell is now the innermost of family `family` — and an op in
+        #    the BODY targets exactly that handler, so nothing is shadowed for
+        #    it (`_addressable_from` moves to the top of the stack).  An op in
+        #    a CLAUSE body rolls that index back to the declaration-time value
+        #    the entries above carry (#1233).
+        saved_pushed = self._pushed_cell_families
+        saved_addressable = self._addressable_from
+        self._pushed_cell_families = [*saved_pushed, family]
+        self._addressable_from = len(self._pushed_cell_families)
+        try:
+            body_instrs = self.translate_block(expr.body, env)
+        finally:
+            # 5. Restore effect_ops (and the clause registry — nested
+            #    handlers).  In a `finally` because the body translation
+            #    raises `CodegenSkip` for any unsupported shape.
+            self._effect_ops = saved_ops
+            self._effect_op_result_wt = saved_result_wt
+            self._effect_op_result_vera = saved_result_vera
+            self._state_clause_ops = saved_clause_ops
+            self._pushed_cell_families = saved_pushed
+            self._addressable_from = saved_addressable
 
         if body_instrs is None:
             return None
@@ -1600,6 +1648,82 @@ class CallsHandlersMixin:
         instructions.append(f"call {pop_import}")
 
         return instructions
+
+    # The two `State` host imports whose name encodes the cell family.
+    _STATE_CELL_IMPORT_PREFIXES: ClassVar[tuple[str, ...]] = (
+        "$vera.state_get_", "$vera.state_put_",
+    )
+
+    @classmethod
+    def _state_import_family(cls, target_name: str) -> str | None:
+        """The MANGLED cell family a ``state_get_``/``state_put_`` addresses.
+
+        ``None`` for anything else — a user effect's op, `throw`, an ability
+        op — none of which reach a host State cell.
+        """
+        for prefix in cls._STATE_CELL_IMPORT_PREFIXES:
+            if target_name.startswith(prefix):
+                return target_name[len(prefix):]
+        return None
+
+    def _reject_unaddressable_clause_op(self, call: ast.FnCall) -> None:
+        """Refuse a clause-body bare op that cannot reach its own cell (#1233).
+
+        §7.5.2 routes a bare ``get``/``put`` written in a clause body to the
+        ENCLOSING context.  Codegen implements the routing half exactly — the
+        call resolves against the handler's declaration-time registries — but
+        the ADDRESSING half belongs to the host, and `state_get_T` /
+        `state_put_T` reach only the INNERMOST pushed cell of family ``T``.
+        The two halves agree exactly when the handler the op resolves to owns
+        that innermost cell — i.e. when no cell of the target's family sits
+        between the emission point and it.
+
+        `_pushed_cell_families[_addressable_from:]` is precisely that "between"
+        set: the cells pushed since the scope the op resolves into.  If the
+        target family occurs in it, the store or read would land in the wrong
+        cell — `handle[State<Int>]` nested in `handle[State<Int>]` with a bare
+        `put(42)` in the inner clause writes the INNER cell where the rule
+        says the outer one (the probe returns 5100 where the rule says 5042).
+        The shadowing cell need not be the immediately enclosing one: with an
+        `Int`/`Nat`/`Int`/`Nat` nest, the third level's clause routes to the
+        second but its `state_put_Nat` addresses the fourth's cell.
+
+        Different-family nesting has no such conflict, so it lowers exactly as
+        specified — which is what the spec sentence now claims.  The
+        unaddressable case is refused loudly here instead of compiling to
+        hybrid semantics; true outward addressing needs depth-indexed host
+        access across all three runtimes and is tracked as #1233.
+        """
+        shadowed = self._pushed_cell_families[self._addressable_from:]
+        if not shadowed:
+            return
+        entry = self._state_clause_ops.get(call.name)
+        if entry is not None:
+            target_family = entry.family
+        else:
+            op = self._effect_ops.get(call.name)
+            if op is None:
+                return
+            mangled = self._state_import_family(op[0])
+            if mangled is None:
+                return
+            target_family = mangled
+        if mangle_type_name(target_family) not in {
+            mangle_type_name(f) for f in shadowed
+        }:
+            return
+        raise CodegenSkip(
+            call,
+            f"a bare '{call.name}' in a handler clause body resolves to a "
+            f"State<{target_family}> handler (or a declared State<"
+            f"{target_family}> row) that an enclosing State<{target_family}> "
+            "handler shadows: the host cell intrinsics address only the "
+            "innermost cell of a family, so the enclosing-context rule of "
+            "spec 7.5.2 cannot be honoured when the same cell family is "
+            "nested (see https://github.com/aallan/vera/issues/1233) — nest "
+            "handlers over different cell types, or refine the inner cell "
+            "with 'with @T = ...', which is the clause's own state override",
+        )
 
     def _translate_state_clause_op(
         self, call: ast.FnCall, env: WasmSlotEnv,
@@ -1790,6 +1914,28 @@ class CallsHandlersMixin:
         self._effect_op_result_wt = dict(entry.decl_effect_op_result_wt)
         self._effect_op_result_vera = dict(entry.decl_effect_op_result_vera)
         self._state_clause_ops = dict(entry.decl_state_clause_ops)
+        # #1233: the clause body resolves into the DECLARATION scope, so every
+        # cell pushed since then shadows it — `_reject_unaddressable_clause_op`
+        # reads exactly this index at each bare-op site inside the body.
+        saved_addressable = self._addressable_from
+        self._addressable_from = entry.decl_addressable_from
+        # #1211: bound the outward re-entry.  Each nested clause body is a
+        # fresh expansion of another clause, so the emitted code is
+        # exponential in this depth; past the cap the function is a loud
+        # [E602] skip rather than a multi-megabyte module.
+        if self._clause_inline_depth >= STATE_CLAUSE_INLINE_DEPTH_CAP:
+            self._addressable_from = saved_addressable
+            raise CodegenSkip(
+                call,
+                "handler clause bodies nest more than "
+                f"{STATE_CLAUSE_INLINE_DEPTH_CAP} deep in outward operation "
+                "re-entry: a bare get/put in a clause body is the ENCLOSING "
+                "handler's operation (spec 7.5.2), so each one inlines "
+                "another clause and the emitted code grows exponentially in "
+                "the nesting depth — reduce the handler nesting, or move the "
+                "clause-body operations into the handled body",
+            )
+        self._clause_inline_depth += 1
         try:
             body_instrs = self.translate_expr(clause.body, clause_env)
             upd_instrs = (
@@ -1803,6 +1949,8 @@ class CallsHandlersMixin:
             self._effect_op_result_vera = saved_result_vera
             self._state_clause_ops = saved_clause_ops
             self._state_clause_family = saved_clause_family
+            self._addressable_from = saved_addressable
+            self._clause_inline_depth -= 1
         if body_instrs is None:
             return None
         # #1203: for a GET clause the body's net value is the tail
@@ -2023,14 +2171,20 @@ class CallsHandlersMixin:
             result_wt = self._infer_expr_wasm_type(expr.body)
 
         # Save/inject throw as an effect op for the body
-        saved_ops = dict(self._effect_ops)
-        self._effect_ops["throw"] = (tag_name, False)
+        # Saved by reference, replaced with a fresh copy, restored in a
+        # `finally` — the same discipline as the State twin: the body
+        # translation raises `CodegenSkip` for any unsupported shape, and an
+        # in-place `self._effect_ops["throw"] = …` would leave that entry in
+        # a dict an enclosing scope still holds.
+        saved_ops = self._effect_ops
+        self._effect_ops = {**saved_ops, "throw": (tag_name, False)}
 
         # Compile body
-        body_instrs = self.translate_block(expr.body, env)
-
-        # Restore effect_ops
-        self._effect_ops = saved_ops
+        try:
+            body_instrs = self.translate_block(expr.body, env)
+        finally:
+            # Restore effect_ops
+            self._effect_ops = saved_ops
 
         if body_instrs is None:
             return None

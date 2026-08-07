@@ -7,8 +7,34 @@ for State handler expressions.
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Sequence
+
 from vera import ast
 from vera.wasm.async_fusion import await_needs_check, fused_async_target
+
+
+def contract_exprs(
+    contracts: Sequence[ast.Contract],
+) -> Iterator[ast.Expr]:
+    """Every predicate expression carried by a function's contracts.
+
+    One enumeration shared by both import pre-scans (#1210 round 2), because
+    a contract is LOWERED code: `requires` / `ensures` become runtime checks
+    and `decreases` becomes the termination guard's measure, so anything in
+    one that needs a host import or a State/Exn family needs it registered.
+
+    `Decreases` is why this is a function rather than a `getattr(c, "expr")`:
+    it carries `exprs` (a tuple — a lexicographic measure is several
+    expressions), so the attribute-name shortcut silently skipped it and a
+    `handle[State<Nat>]` in a `decreases` measure emitted `state_push_Nat`
+    against an import that was never declared.
+    """
+    for contract in contracts:
+        expr = getattr(contract, "expr", None)
+        if expr is not None:
+            yield expr
+        for sub in getattr(contract, "exprs", ()):
+            yield sub
 
 
 class CompilabilityMixin:
@@ -188,16 +214,30 @@ class CompilabilityMixin:
             return False
         type_arg = eff.type_args[0]
         if not self._register_exn_tag(type_arg):
-            self._warning(
-                decl,
-                f"Function '{decl.name}' uses Exn with "
-                f"unsupported type — skipped.",
-                rationale="Exn<E> requires a compilable type "
-                "(Int, Nat, Bool, Float64, String).",
-                error_code="E612",
-            )
+            self._warn_unsupported_exn_tag(decl, decl.name)
             return False
         return True
+
+    def _warn_unsupported_exn_tag(
+        self, node: ast.Node, fn_name: str,
+    ) -> None:
+        """The E612 both Exn-tag paths emit — one wording, one code.
+
+        The `_warn_unsupported_state_cell` twin.  Both registration paths
+        (the declared-effect gate and the handler walk) must reach the same
+        verdict on the same payload type, or a handler discharging `Exn<E>`
+        inside a `pure` function registers no tag while its lowering emits
+        `throw $exn_E` / `catch $exn_E` regardless — `unknown tag $exn_Unit`
+        at whole-module WAT compilation, from a check-green program (#1210).
+        """
+        self._warning(
+            node,
+            f"Function '{fn_name}' uses Exn with "
+            f"unsupported type — skipped.",
+            rationale="Exn<E> requires a compilable type "
+            "(Int, Nat, Bool, Float64, String).",
+            error_code="E612",
+        )
 
     def _register_exn_tag(self, type_arg: ast.TypeExpr) -> bool:
         """Register the `Exn<type_arg>` WASM tag; False if it has none.
@@ -311,6 +351,14 @@ class CompilabilityMixin:
         #                       so without this branch IO ops
         #                       inside a closure body would silently
         #                       miss their host-import registration)
+        #   AssertExpr        → recurses into the condition (#1210
+        #                       round 2 — pure ≠ host-import-free: an
+        #                       `md_*` / `regex_*` builtin, or a
+        #                       handler clause reached through one,
+        #                       registers its import only here)
+        #   AssumeExpr        → recurses into the condition
+        #   ForallExpr        → recurses into domain + predicate
+        #   ExistsExpr        → recurses into domain + predicate
         #
         # Intentionally ignored (leaves — no sub-exprs to recurse into):
         #   IntLit            → leaf
@@ -323,14 +371,10 @@ class CompilabilityMixin:
         #   NullaryConstructor → zero-arg, no sub-exprs
         #   ModuleCall        → cross-module IO tracked separately
         #                       via the imported module's own scan
+        #   OldExpr           → names an EffectRef, not an expression
+        #   NewExpr           → names an EffectRef, not an expression
         #
-        # Cannot occur (contract-only or pure-by-construction):
-        #   AssertExpr        → predicate is pure, no IO
-        #   AssumeExpr        → predicate is pure, no IO
-        #   ForallExpr        → quantifier body is pure
-        #   ExistsExpr        → quantifier body is pure
-        #   OldExpr           → contract-only
-        #   NewExpr           → contract-only
+        # Cannot occur:
         #   HoleExpr          → parser placeholder, check-time rejects
         """
         if isinstance(node, ast.QualifiedCall):
@@ -465,32 +509,64 @@ class CompilabilityMixin:
                     self._scan_io_ops(part)
         elif isinstance(node, ast.AnonFn):
             self._scan_io_ops(node.body)
+        # #1210 round 2 — symmetrical with `_scan_expr_for_handlers`.  The
+        # handler walk now descends these positions, so a handler reached
+        # through one is lowered; anything its clause bodies call has to be
+        # registered from here or the module references an undeclared import.
+        elif isinstance(node, (ast.AssertExpr, ast.AssumeExpr)):
+            self._scan_io_ops(node.expr)
+        elif isinstance(node, (ast.ForallExpr, ast.ExistsExpr)):
+            self._scan_io_ops(node.domain)
+            self._scan_io_ops(node.predicate)
 
     def _scan_body_for_state_handlers(
         self, node: ast.Node, decl: ast.FnDecl | None = None,
     ) -> bool:
-        """Walk a function body registering every handler's State/Exn family.
+        """Walk a function registering every handler's State/Exn family.
 
         The ENTRY POINT for the handler walk — ``_scan_expr_for_handlers``
         does the recursion, this owns the per-function verdict.
 
-        Returns ``False`` when a ``handle[State<T>]`` reached from *node*
-        names a cell type the backend cannot compile, having emitted the same
-        ``E607`` the declared-effect gate emits; the caller drops the
-        function.  It used to skip such a cell in SILENCE while the lowering
-        emitted `state_push_…` for it regardless — a check-green program that
-        failed whole-module WAT compilation (#1210).
+        Covers the body AND every contract predicate (``requires`` /
+        ``ensures`` / ``decreases``), which ``contract_exprs`` enumerates.
+        Runtime-checked contracts are lowered into the function like any
+        other code, so a ``handle[State<Nat>]`` written in a ``requires``
+        predicate emits ``call $vera.state_push_Nat`` — the body-only walk
+        registered nothing for it and the module failed to compile with
+        ``unknown func``, from a check-green, verify-clean program (#1210
+        round 2).
+
+        Returns ``False`` when a ``handle[State<T>]`` / ``handle[Exn<E>]``
+        reached from *node* names a cell or payload type the backend cannot
+        compile, having emitted the same ``E607`` / ``E612`` the
+        declared-effect gate emits; the caller drops the function.  Both used
+        to be skipped in SILENCE while the lowering emitted ``state_push_…``
+        / ``throw $exn_…`` for them regardless.
         """
         self._unregistrable_state_cells: list[ast.TypeExpr] = []
+        self._unregistrable_exn_tags: list[ast.TypeExpr] = []
         self._scan_expr_for_handlers(node)
-        if not self._unregistrable_state_cells:
-            return True
-        offender = self._unregistrable_state_cells[0]
-        self._warn_unsupported_state_cell(
-            offender if getattr(offender, "span", None) else (decl or offender),
-            decl.name if decl is not None else "<unknown>",
-        )
-        return False
+        if decl is not None:
+            for pred in contract_exprs(decl.contracts):
+                self._scan_expr_for_handlers(pred)
+        fn_name = decl.name if decl is not None else "<unknown>"
+        if self._unregistrable_state_cells:
+            offender = self._unregistrable_state_cells[0]
+            self._warn_unsupported_state_cell(
+                offender if getattr(offender, "span", None)
+                else (decl or offender),
+                fn_name,
+            )
+            return False
+        if self._unregistrable_exn_tags:
+            offender = self._unregistrable_exn_tags[0]
+            self._warn_unsupported_exn_tag(
+                offender if getattr(offender, "span", None)
+                else (decl or offender),
+                fn_name,
+            )
+            return False
+        return True
 
     def _register_scanned_handler(self, node: ast.HandleExpr) -> None:
         """Register the State/Exn family of one ``handle`` expression.
@@ -500,6 +576,13 @@ class CompilabilityMixin:
         (#1209) and accept exactly one set of cell types (#1210) — a handler
         declared in a body must not register an import its own lowering never
         calls, nor emit calls to one it never registered.
+
+        The two arms are symmetric on purpose: each records the type it could
+        NOT register so the entry point can emit the declared-effect gate's
+        own diagnostic and drop the function.  The Exn arm used to discard the
+        verdict, so `handle[Exn<Unit>]` in a `pure` function registered no tag
+        and still compiled — `unknown tag $exn_Unit` at WAT, where the
+        declared-row twin was a clean E612 function drop.
         """
         if not isinstance(node.effect, ast.EffectRef):
             return
@@ -511,7 +594,8 @@ class CompilabilityMixin:
             if not self._register_state_cell(type_arg):
                 self._unregistrable_state_cells.append(type_arg)
         elif node.effect.name == "Exn":
-            self._register_exn_tag(type_arg)
+            if not self._register_exn_tag(type_arg):
+                self._unregistrable_exn_tags.append(type_arg)
 
     def _scan_expr_for_handlers(self, node: ast.Node) -> None:
         """Recurse into expressions looking for HandleExpr nodes.
@@ -553,6 +637,16 @@ class CompilabilityMixin:
         #                       a closure body would silently miss
         #                       their State/Exn host-import
         #                       registration)
+        #   AssertExpr        → recurses into the condition (#1210
+        #                       round 2 — "pure" is not "handler-free":
+        #                       `assert(handle[State<Nat>] … > 0)` is
+        #                       check-green and LOWERED, so refusing to
+        #                       descend left `state_push_Nat` undeclared)
+        #   AssumeExpr        → recurses into the condition (same shape;
+        #                       verifier-only today, kept symmetric so
+        #                       the two cannot drift)
+        #   ForallExpr        → recurses into domain + predicate
+        #   ExistsExpr        → recurses into domain + predicate
         #
         # Intentionally ignored (leaves — no sub-exprs to walk):
         #   IntLit            → leaf
@@ -565,14 +659,10 @@ class CompilabilityMixin:
         #   NullaryConstructor → zero-arg, no sub-exprs
         #   ModuleCall        → handlers in imported module tracked
         #                       by that module's own scan
+        #   OldExpr           → names an EffectRef, not an expression
+        #   NewExpr           → names an EffectRef, not an expression
         #
-        # Cannot occur (contract-only or pure):
-        #   AssertExpr        → predicate is pure; no handle in pred
-        #   AssumeExpr        → predicate is pure
-        #   ForallExpr        → quantifier body is pure
-        #   ExistsExpr        → quantifier body is pure
-        #   OldExpr           → contract-only
-        #   NewExpr           → contract-only
+        # Cannot occur:
         #   HoleExpr          → parser placeholder, check-time rejects
         """
         if isinstance(node, ast.HandleExpr):
@@ -636,3 +726,13 @@ class CompilabilityMixin:
                     self._scan_expr_for_handlers(part)
         elif isinstance(node, ast.AnonFn):
             self._scan_expr_for_handlers(node.body)
+        # #1210 round 2 — the contract-predicate positions.  These are not
+        # "cannot occur": a handle expression is an ordinary Bool-valued
+        # expression, so it type-checks inside an `assert` condition or a
+        # quantifier predicate, and codegen lowers it there.  Refusing to
+        # descend registered nothing while the lowering emitted the calls.
+        elif isinstance(node, (ast.AssertExpr, ast.AssumeExpr)):
+            self._scan_expr_for_handlers(node.expr)
+        elif isinstance(node, (ast.ForallExpr, ast.ExistsExpr)):
+            self._scan_expr_for_handlers(node.domain)
+            self._scan_expr_for_handlers(node.predicate)

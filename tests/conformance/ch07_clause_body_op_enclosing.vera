@@ -53,8 +53,12 @@ private fn with_expr(@Unit -> @Int)
 }
 
 -- Three deep: the innermost clause's bare put reaches the IMMEDIATELY enclosing
--- handler (the Nat cell), not the outermost (the Bool cell), so the Nat cell
--- becomes 33 while the Bool cell stays false: 33 * 1000 + 7.
+-- handler (the Nat cell), not the outermost (the Bool cell).  The Nat cell is
+-- read into the result BEFORE the inner handler overwrites it, so its initial
+-- 20 is load-bearing too: 20 * 100000 + 33 * 1000 + 7.  (Routing the clause's
+-- put to the inner Int cell would leave the Nat cell at 20 throughout: the
+-- 33 * 1000 term would read 20 as well.)  The Bool cell stays false, which the
+-- final `if` reads.
 private fn depth_three(@Unit -> @Int)
   requires(true)
   ensures(true)
@@ -68,13 +72,14 @@ private fn depth_three(@Unit -> @Int)
       get(@Unit) -> { resume(@Nat.0) },
       put(@Nat) -> { resume(()) }
     } in {
+      let @Nat = get(());
       let @Int = handle[State<Int>](@Int = 7) {
         get(@Unit) -> { put(33); resume(@Int.0) },
         put(@Int) -> { resume(()) }
       } in {
         get(())
       };
-      nat_to_int(get(())) * 1000 + @Int.0
+      nat_to_int(@Nat.0) * 100000 + nat_to_int(get(())) * 1000 + @Int.0
     };
     if get(()) then {
       0 - 1
@@ -98,7 +103,7 @@ public fn main(@Unit -> @Int)
       2
     } else {
       let @Int = depth_three(());
-      if @Int.0 != 33007 then {
+      if @Int.0 != 2033007 then {
         3
       } else {
         0

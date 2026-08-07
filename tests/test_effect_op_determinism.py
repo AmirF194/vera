@@ -23,6 +23,7 @@ a value that coincides with a default.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -32,8 +33,9 @@ from vera.environment import TypeEnv
 from vera.types import INT, ConcreteEffectRow, EffectInstance
 
 # Bounded on purpose: six interpreter starts are enough to catch a
-# frozenset-order flip (the pre-fix program bound `Http.get` on four of the
-# first eight seeds) without turning the default suite into a subprocess farm.
+# frozenset-order flip (the pre-fix program bound `Http.get` on six of the
+# first eight seeds — 0, 1, 2, 5, 6 and 7) without turning the default suite
+# into a subprocess farm.
 _SEEDS = ("0", "1", "2", "3", "4", "5")
 
 # `probe` delegates a bare `get(())` while declaring BOTH `State<Int>` and
@@ -268,6 +270,83 @@ def test_lookup_effect_op_returns_the_ordered_row_head() -> None:
     fallback = env.lookup_effect_op("get")
     assert fallback is not None
     assert fallback.parent_effect == "Http"  # sorted(("Http", "State"))[0]
+
+
+# A row whose members the order tuple does not mention at all — the public
+# `ordered_effect_row()` fallback.  Its two members share the effect NAME and
+# differ only in their type ARGUMENT (spec §7.3.3: two independent cells), so
+# a name-only sort key ties them and `sorted`, being stable, hands back the
+# `frozenset`'s own iteration order — the PYTHONHASHSEED dependence the whole
+# ordering exists to remove.  Printed from a child interpreter so the sweep is
+# a genuine cross-seed comparison rather than one process's lucky bucket
+# layout.
+_ORDER_FALLBACK_PROBE = """\
+import json
+from vera.checker.core import TypeChecker
+from vera.environment import TypeEnv
+from vera.types import BOOL, INT, ConcreteEffectRow, EffectInstance, pretty_type
+
+si = EffectInstance("State", (INT,))
+sb = EffectInstance("State", (BOOL,))
+row = ConcreteEffectRow(frozenset({si, sb}))
+
+env = TypeEnv()
+env.current_effect_row = row
+env.current_effect_order = ()
+order = [
+    f"{e.name}<{', '.join(pretty_type(a) for a in e.type_args)}>"
+    for e in env.ordered_effect_row()
+]
+
+tc = TypeChecker()
+tc.env.current_effect_row = row
+tc.env.current_effect_order = ()
+mapping = {
+    k: pretty_type(v) for k, v in tc._effect_type_mapping("State").items()
+}
+print(json.dumps({"order": order, "mapping": mapping}))
+"""
+
+
+def _sweep_python(payload: str) -> set[str]:
+    """The set of distinct stdout results of *payload* over ``_SEEDS``."""
+    results = set()
+    for seed in _SEEDS:
+        proc = subprocess.run(
+            [sys.executable, "-c", payload],
+            capture_output=True, text=True, encoding="utf-8",
+            env={**os.environ, "PYTHONHASHSEED": seed},
+            timeout=120,
+            check=True,
+        )
+        results.add(proc.stdout.strip())
+    return results
+
+
+def test_unmentioned_row_members_order_structurally() -> None:
+    """The name tiebreak is not a total order — the STRUCTURE has to break it.
+
+    `ordered_effect_row()` is a public method whose docstring promises a
+    result independent of the interpreter start, including for a row assigned
+    without its companion order tuple (a consumer outside the checker).  Two
+    instantiations of ONE effect tie on name, so the fallback fell straight
+    back into frozenset iteration order — and `_effect_type_mapping`, which
+    reads the same list, then typed a bare `get(())` as `Int` on some seeds
+    and `Bool` on others.  Both are asserted here: the order AND the mapping
+    it selects, over the same seeds the source-level sweeps use.
+    """
+    results = _sweep_python(_ORDER_FALLBACK_PROBE)
+    assert len(results) == 1, (
+        "the unmentioned-member fallback is not hash-seed stable: "
+        f"{len(results)} distinct outcomes across seeds {_SEEDS}:\n"
+        + "\n--\n".join(sorted(results))
+    )
+    only = json.loads(results.pop())
+    # `Bool` sorts before `Int` under the structural key, so the order —
+    # and therefore the type argument `_effect_type_mapping` picks — is a
+    # property of the two types, not of the run.
+    assert only["order"] == ["State<Bool>", "State<Int>"], only
+    assert only["mapping"] == {"T": "Bool"}, only
 
 
 def test_qualified_lookup_is_unaffected_by_row_order() -> None:

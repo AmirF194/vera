@@ -432,6 +432,14 @@ class CallsMixin:
         if call.name == "apply_fn" and len(call.args) >= 2:
             return self._translate_apply_fn(call, env)
 
+        # #1233: inside an inlined clause body, an outward-routed op of the
+        # SAME cell family cannot address the enclosing cell — the intrinsics
+        # only reach the innermost cell of a family.  Refuse it here, before
+        # either dispatch below picks a route, so both the clause-inline and
+        # the bare-import path are covered by one gate (and so is the
+        # qualified `State.get`/`State.put` spelling, which delegates here).
+        self._reject_unaddressable_clause_op(call)
+
         # #976 option C: a get/put under a handle with registered clauses
         # inlines the clause body at the call site (intrinsic-hybrid
         # semantics) instead of the bare host-cell call below.
