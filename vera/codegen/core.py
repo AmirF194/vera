@@ -294,14 +294,16 @@ class CodeGenerator(
         self._prelude_decl_order_next: int = _PRELUDE_DECL_BASE
         # #1208: the naming environment the ONE renderer (:mod:`vera.naming`)
         # resolves against, held as the single value the flat maps above
-        # describe.  DERIVED from those maps rather than taken from
-        # ``CheckArtifacts.module_alias_envs``: codegen's alias view is not the
-        # checker's — it is the prelude's aliases overlaid by the main file's
-        # (and, inside ``_module_alias_scope``, by the compiling module's), and
-        # it is built from the TRANSFORMED, monomorphized AST.  Sourcing it
-        # from the check would name against a table codegen does not otherwise
-        # use, which is exactly the mint-one-way / look-up-another split #1208
-        # closes.  `_sync_alias_env` re-derives it wherever the maps change.
+        # describe.  DERIVED from those maps rather than adopted from another
+        # phase's per-module registration (the verifier keeps its own,
+        # ``ContractVerifier._module_alias_envs``): codegen's alias view is not
+        # the checker's — it is the prelude's aliases overlaid by the main
+        # file's (and, inside ``_module_alias_scope``, by the compiling
+        # module's), and it is built from the TRANSFORMED, monomorphized AST.
+        # Sourcing it from the check would name against a table codegen does
+        # not otherwise use, which is exactly the mint-one-way /
+        # look-up-another split #1208 closes.  `_sync_alias_env` re-derives it
+        # wherever the maps change.
         self._alias_env: AliasEnv = EMPTY_ALIAS_ENV
 
         # #1172: runtime decreases-guard state.  ``_dec_guard_fns`` maps

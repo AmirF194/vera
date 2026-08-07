@@ -959,13 +959,28 @@ class ContractVerifier:
         clone.  The De Bruijn recount in ``monomorphize_fn`` and the clone's
         re-declaration in ``_verify_fn`` must agree on it, or the verifier
         proves a body codegen never emits.
+
+        *key* may be a lexical CHAIN (``parent$where$helper``), and the origin
+        registry holds whichever ancestor the harvest recorded: an imported
+        top-level generic under its bare or ``mod$…`` name, an imported
+        generic nested under a non-generic function under the qualified chain
+        that names it (``mod$ng$outer$where$mid``).  So the chain is probed
+        whole and then one ``$where$`` segment shorter at a time, and the
+        FIRST recorded ancestor wins — the most specific one, and a lexical
+        descendant is declared in the same module as its ancestor either way.
+        Taking only the outermost segment instead missed the nested-key case
+        entirely (``mod$ng$outer`` is never a recorded key), so a helper
+        beneath an imported nested generic recounted in the IMPORTER's
+        namespace (#1208 round 2, probe ``m4``).
         """
-        if key is None:
-            return self._alias_env
-        origin = self._generic_origins.get(key)
-        if origin is None:
-            return self._alias_env
-        return self._module_alias_envs.get(origin, self._alias_env)
+        probe = key
+        while probe is not None:
+            origin = self._generic_origins.get(probe)
+            if origin is not None:
+                return self._module_alias_envs.get(origin, self._alias_env)
+            ancestor, sep, _ = probe.rpartition("$where$")
+            probe = ancestor if sep else None
+        return self._alias_env
 
     # -----------------------------------------------------------------
     # Type resolution (simplified — reuses TypeEnv patterns)
@@ -1615,8 +1630,12 @@ class ContractVerifier:
                 clone, ctor_to_adt,
             )
             # #1208: a nested helper is declared in the same module as the
-            # ancestor whose chain names it, so it recounts in that env.
-            env = self._alias_env_for_generic(base_chain.split("$where$")[0])
+            # ancestor whose chain names it, so it recounts in that env.  The
+            # WHOLE chain is handed over — `_alias_env_for_generic` walks to
+            # the nearest recorded ancestor itself, and an imported generic
+            # nested under a non-generic function is recorded under the chain,
+            # not under its outermost segment (#1208 round 2, probe ``m4``).
+            env = self._alias_env_for_generic(base_chain)
             for h_name, (h_decl, h_cts) in found.items():
                 chain_key = f"{base_chain}$where${h_name}"
                 for h_ct in h_cts:
@@ -1959,6 +1978,7 @@ class ContractVerifier:
         instances: tuple[tuple[str, ...], ...],
         enclosing: tuple[ast.FnDecl, ...] = (),
         clone_name: str | None = None,
+        origin_key: str | None = None,
     ) -> None:
         """Verify each concrete instantiation of a generic, then aggregate.
 
@@ -1996,6 +2016,17 @@ class ContractVerifier:
         the De Bruijn recount and the clone's parameter re-declaration both
         render an alias-typed parameter as a class it is not, so the verifier
         proves a body codegen does not emit: verify clean, trap at run.
+
+        *origin_key* is that namespace lookup's key where it differs from the
+        clone's NAME.  A nested where-helper keeps its bare source name on the
+        clone (so recursion, ``decreases`` and diagnostics resolve as written)
+        while its origin is recorded against the lexical CHAIN its ancestor
+        was harvested under — the key ``_verify_fn`` already rebuilds to find
+        the instances.  Passing it separately is what keeps this side in step
+        with the discovery-time recount, which reaches the same env from the
+        same chain (#1208 round 2): the two rendering the helper in different
+        namespaces is the exact desync the origin registry exists to close,
+        and it was invisible only while BOTH were wrong.
         """
         assert self._mono is not None  # set by register_program  # noqa: S101
         per_instance: list[
@@ -2003,9 +2034,11 @@ class ContractVerifier:
         ] = []
         assert decl.forall_vars is not None  # generic by construction  # noqa: S101
         # #1208: the declaring module's env for an imported generic (keyed by
-        # the canonical discovery key, which is `clone_name` where the caller
-        # supplies one), this program's otherwise.
-        origin_env = self._alias_env_for_generic(clone_name or decl.name)
+        # the canonical discovery key — `origin_key` where the caller has one
+        # that is not the clone's name, else `clone_name`), this program's
+        # otherwise.
+        origin_env = self._alias_env_for_generic(
+            origin_key or clone_name or decl.name)
         for concrete in instances:
             clone = self._mono.monomorphize_fn(decl, concrete, origin_env)
             clone = replace(clone, name=clone_name or decl.name)
@@ -2264,7 +2297,13 @@ class ContractVerifier:
                 # ancestor's helper lexically, not through the flat last-wins
                 # registry (where a same-named decoy helper under any other
                 # function could capture it — a wrong-body verification).
-                self._verify_generic_instances(decl, instances, enclosing)
+                # #1208 round 2: `inst_key` is also the key the ORIGIN
+                # registry answers to, so it is handed over as well — the
+                # clone keeps its bare name, but its naming env comes from the
+                # module that declared the chain, matching the recount.
+                self._verify_generic_instances(
+                    decl, instances, enclosing, origin_key=inst_key,
+                )
                 return
             # Never instantiated in this program: the body's type variables
             # can't be represented in Z3, so non-trivial contracts fall to

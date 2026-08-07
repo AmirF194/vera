@@ -43,11 +43,13 @@ keyed by, so everything downstream must match it or it matches nothing:
 * every renderer is TOTAL — an unresolvable type renders ``?``, matching
   the checker's ``UnknownType``, and none of them raise, at any input the
   parser accepts.  Totality is a property to defend, not to assume: alias
-  resolution is ITERATIVE (see :func:`_resolve_alias`) precisely because a
-  recursive descent raised ``RecursionError`` on a legal 340-hop alias
-  chain, and the alias branch checks ``env.aliases`` membership so an
-  environment carrying an index without a body falls through rather than
-  raising.
+  resolution is ITERATIVE, ONE dependency at a time (see
+  :func:`_resolve_alias`), precisely because a recursive descent raised
+  ``RecursionError`` on a legal 340-hop alias chain — and because resolving
+  a whole pending list at once merely moved the recursion onto a
+  sibling-shaped alias graph, which raised it again.  The alias branch also
+  checks ``env.aliases`` membership so an environment carrying an index
+  without a body falls through rather than raising.
 
 Argument resolution is done by rebuilding the checker's own semantic
 :class:`~vera.types.Type` and handing it to the checker's own
@@ -408,23 +410,41 @@ def _resolve_alias(name: str, env: AliasEnv) -> Type:
     A1; …`` at ~340 hops raised an uncaught ``RecursionError`` from inside a
     renderer this module's docstring calls TOTAL (#1208 review, probe
     ``d01_deep_chain``).  Every alias a body mentions has a strictly smaller
-    declaration index, so the mention graph is a DAG; memoizing the deepest
-    first leaves each ``_resolve`` below recursing no further than its own
-    body's syntactic nesting, whatever the chain length.  Equivalence with
-    the checker is preserved exactly — this is an evaluation ORDER, not a
-    depth bound, so a long chain still renders its real resolution rather
-    than a truncated ``?``.
+    declaration index, so the mention graph is a DAG.
+
+    ONE dependency is pushed per iteration, and that is the load-bearing
+    detail rather than a stylistic one.  Pushing a body's whole pending list
+    at once puts SIBLINGS in progress together, and the ``in_progress`` guard
+    below then FILTERS a sibling that is also a real dependency — so the body
+    is resolved with that sibling still unmemoized and ``_resolve`` reaches it
+    through a nested ``_resolve_alias``, one Python frame per level.  ``type
+    Bk = D(k-1); type Ck = Drop<Bk>; type Dk = Drop2<Bk, Ck>;`` is that shape,
+    and it raised ``RecursionError`` from the same renderer at a few hundred
+    levels (#1208 round-2 review, probe ``sib_300``).  Pushing one at a time
+    leaves only this walk's ANCESTORS in progress, and an ancestor can never
+    be a pending dependency (its index is strictly larger), so nothing is ever
+    filtered: by the time a body is resolved every alias it mentions is in the
+    memo, and the ``_resolve_alias`` calls underneath it return from the memo
+    without recursing.  The Python nesting is therefore ONE frame below this
+    one, whatever the chain length — the depth of the ``_resolve`` walk itself
+    stays bounded by the alias body's own syntactic nesting.
+
+    Equivalence with the checker is preserved exactly — this is an evaluation
+    ORDER, not a depth bound, so a long chain still renders its real
+    resolution rather than a truncated ``?``.
     """
     memo = env._memo
     cached = memo.get(name)
     if cached is not None:
         return cached
     stack: list[str] = [name]
-    # Defence in depth, and provably inert on any environment this module
-    # builds: the visibility bound strictly decreases along a dependency edge,
-    # so an alias can never be its own ancestor here.  Should that invariant
-    # ever be broken, skipping an in-progress name terminates on the same
-    # opaque placeholder the checker produces instead of spinning.
+    # Exactly this walk's ancestors — see the docstring.  Defence in depth,
+    # and provably inert on any environment this module builds: the visibility
+    # bound strictly decreases along a dependency edge, so an ancestor's index
+    # is strictly larger than every pending dependency's and can never be one
+    # of them.  Should that invariant ever be broken, skipping an in-progress
+    # name terminates on the same opaque placeholder the checker produces
+    # instead of spinning.
     in_progress: set[str] = {name}
     while stack:
         cur = stack[-1]
@@ -435,18 +455,20 @@ def _resolve_alias(name: str, env: AliasEnv) -> Type:
         limit = env._order[cur]
         mentioned: list[str] = []
         _mentioned_names(env.aliases[cur], mentioned)
-        pending = [
+        pending = next((
             ref for ref in mentioned
             if ref not in memo
             and ref not in in_progress
             and ref in env.aliases
             and env._order.get(ref, _UNBOUNDED) < limit
-        ]
-        if pending:
-            # Strictly smaller indices, so the stack cannot cycle and each
-            # alias is resolved at most once (later pushes hit the memo).
-            stack.extend(pending)
-            in_progress.update(pending)
+        ), None)
+        if pending is not None:
+            # ONE at a time, so only ancestors are ever in progress and no
+            # real dependency is filtered.  Strictly smaller indices, so the
+            # stack cannot cycle and each alias is resolved at most once
+            # (a later push hits the memo).
+            stack.append(pending)
+            in_progress.add(pending)
             continue
         memo[cur] = _resolve(
             env.aliases[cur], env,

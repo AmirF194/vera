@@ -83,6 +83,27 @@ def _codes(result: VerifyResult) -> set[str]:
     return {d.error_code for d in result.diagnostics if d.severity == "error"}
 
 
+def _call_pre(result: VerifyResult) -> list[object]:
+    """The reified call-precondition obligations, in stream order.
+
+    Asserting on these rather than only on the diagnostic CODE pins which
+    obligation was raised and where — a code-only assertion is satisfied by
+    any E501 anywhere in the program.
+    """
+    return [o for o in result.obligations if o.kind == "call_pre"]
+
+
+def _line_of(source: str, needle: str) -> int:
+    """1-based line number of the (unique) line containing *needle*.
+
+    Computed rather than hard-coded so editing a fixture cannot silently
+    re-point a location assertion at a different statement.
+    """
+    hits = [i for i, line in enumerate(source.splitlines(), 1) if needle in line]
+    assert len(hits) == 1, f"{needle!r} is not unique in the fixture: {hits}"
+    return hits[0]
+
+
 def _compile_mod(source: str, modules: list[ResolvedModule]) -> object:
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".vera", delete=False, encoding="utf-8",
@@ -145,83 +166,8 @@ public fn need3(@Option<Int>, @Option<Cnt> -> @Int)
 }
 """
 
-
-class TestImportedCalleeContractEnv:
-    """The call obligation is rendered in the CALLEE's namespace (#1208).
-
-    Rendered in the importer's, ``@Option<Int>`` and ``@Option<Cnt>`` either
-    merge into one stack (the precondition attaches to the wrong argument, and
-    the obligation VANISHES) or split one the callee merged (a spurious E501).
-    Reviewer probes ``reviewA2/p10*`` (the vanish) and ``reviewA2/p11*`` (the
-    spurious error).
-    """
-
-    def test_violated_precondition_still_reported_bare_import(self) -> None:
-        """probe p10: the E501 must not vanish because the importer renames.
-
-        The library's ``@Option<Cnt>`` is ``Option<Nat>``, so its
-        ``@Option<Int>.0`` is parameter 1 and the call passes ``Some(9)`` —
-        a violation.  Under the importer's ``type Cnt = Int`` both parameters
-        render ``Option<Int>``, ``@Option<Int>.0`` resolves to parameter 2
-        (``Some(3)``), and the precondition proves: a false Tier-1.
-        """
-        result = _verify_mod("""\
-import clib(need3);
-
-type Cnt = Int;
-
-public fn main(@Unit -> @Int)
-  requires(true)
-  ensures(true)
-  effects(pure)
-{
-  need3(Some(9), Some(3))
-}
-""", [_resolved(("clib",), _CONFLICT_LIB)])
-        assert "E501" in _codes(result), (
-            "the callee's precondition obligation was lost to the importer's "
-            f"alias namespace; got {_codes(result)}"
-        )
-
-    def test_violated_precondition_still_reported_qualified_call(self) -> None:
-        """probe p8q: a ``mod::fn`` call takes the same registry, same fix."""
-        result = _verify_mod("""\
-import clib;
-
-type Cnt = Int;
-
-public fn main(@Unit -> @Int)
-  requires(true)
-  ensures(true)
-  effects(pure)
-{
-  clib::need3(Some(9), Some(3))
-}
-""", [_resolved(("clib",), _CONFLICT_LIB)])
-        assert "E501" in _codes(result), (
-            f"qualified call lost its precondition obligation: {_codes(result)}"
-        )
-
-    def test_satisfied_precondition_is_not_spuriously_reported(self) -> None:
-        """probe p11: the mirror — a CORRECT program must stay clean.
-
-        Same shape, but the argument the callee's contract names IS the one it
-        constrains.  Under the importer's env the reference resolved onto the
-        other parameter and the call E501'd for no reason.
-        """
-        result = _verify_mod("""\
-import clib(pick);
-
-type Cnt = Int;
-
-public fn main(@Unit -> @Int)
-  requires(true)
-  ensures(true)
-  effects(pure)
-{
-  pick(Some(7), Some(3))
-}
-""", [_resolved(("clib",), """\
+# The mirror: the constrained parameter is the one the correct call satisfies.
+_PICK_LIB = """\
 module clib;
 
 type Cnt = Nat;
@@ -233,10 +179,142 @@ public fn pick(@Option<Int>, @Option<Cnt> -> @Int)
 {
   0
 }
-""")])
+"""
+
+
+class TestImportedCalleeContractEnv:
+    """The call obligation is rendered in the CALLEE's namespace (#1208).
+
+    Rendered in the importer's, ``@Option<Int>`` and ``@Option<Cnt>`` either
+    merge into one stack (the precondition attaches to the wrong argument, and
+    the obligation VANISHES) or split one the callee merged (a spurious E501).
+    Reviewer probes ``reviewA2/p10*`` (the vanish) and ``reviewA2/p11*`` (the
+    spurious error).
+
+    The obligation is asserted, not just the CODE: which call site raised it,
+    which callee it names, and — for the mirror — that it was raised at all
+    and discharged, rather than never existing.  What is NOT asserted is the
+    ``Precondition:`` line quoted in the message body: for an imported callee
+    that text is #1220's known-broken rendering (the callee's span indexed
+    into the IMPORTER's source buffer, so it quotes whatever sits on that line
+    here).  Assert it when #1220 closes.
+    """
+
+    def test_violated_precondition_still_reported_bare_import(self) -> None:
+        """probe p10: the E501 must not vanish because the importer renames.
+
+        The library's ``@Option<Cnt>`` is ``Option<Nat>``, so its
+        ``@Option<Int>.0`` is parameter 1 and the call passes ``Some(9)`` —
+        a violation.  Under the importer's ``type Cnt = Int`` both parameters
+        render ``Option<Int>``, ``@Option<Int>.0`` resolves to parameter 2
+        (``Some(3)``), and the precondition proves: a false Tier-1.
+        """
+        source = """\
+import clib(need3);
+
+type Cnt = Int;
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  need3(Some(9), Some(3))
+}
+"""
+        result = _verify_mod(source, [_resolved(("clib",), _CONFLICT_LIB)])
+        assert "E501" in _codes(result), (
+            "the callee's precondition obligation was lost to the importer's "
+            f"alias namespace; got {_codes(result)}"
+        )
+        violated = [o for o in _call_pre(result) if o.status == "violated"]
+        assert len(violated) == 1, _call_pre(result)
+        obligation = violated[0]
+        assert obligation.error_code == "E501"
+        # The CALL SITE in the importer, not the callee's own contract line.
+        assert obligation.fn_name == "main"
+        assert obligation.line == _line_of(source, "need3(Some(9)")
+        # The callee's precondition, resolved onto its FIRST `Option` slot —
+        # the identity the naming env decides.  Under the importer's namespace
+        # this obligation is about the other parameter, or absent.
+        assert obligation.expr_text.startswith("@Option<"), obligation.expr_text
+        assert ".0 ==" in obligation.expr_text, obligation.expr_text
+        message = next(
+            d.description for d in result.diagnostics
+            if d.error_code == "E501" and d.severity == "error"
+        )
+        assert "'need3'" in message and "'main'" in message, message
+
+    def test_violated_precondition_still_reported_qualified_call(self) -> None:
+        """probe p8q: a ``mod::fn`` call takes the same registry, same fix."""
+        source = """\
+import clib;
+
+type Cnt = Int;
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  clib::need3(Some(9), Some(3))
+}
+"""
+        result = _verify_mod(source, [_resolved(("clib",), _CONFLICT_LIB)])
+        assert "E501" in _codes(result), (
+            f"qualified call lost its precondition obligation: {_codes(result)}"
+        )
+        violated = [o for o in _call_pre(result) if o.status == "violated"]
+        assert len(violated) == 1, _call_pre(result)
+        assert violated[0].fn_name == "main"
+        assert violated[0].line == _line_of(source, "clib::need3(")
+        assert "'need3'" in next(
+            d.description for d in result.diagnostics
+            if d.error_code == "E501" and d.severity == "error"
+        )
+
+    def test_satisfied_precondition_is_not_spuriously_reported(self) -> None:
+        """probe p11: the mirror — a CORRECT program must stay clean.
+
+        Same shape, but the argument the callee's contract names IS the one it
+        constrains.  Under the importer's env the reference resolved onto the
+        other parameter and the call E501'd for no reason.
+        """
+        source = """\
+import clib(pick);
+
+type Cnt = Int;
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  pick(Some(7), Some(3))
+}
+"""
+        result = _verify_mod(source, [_resolved(("clib",), _PICK_LIB)])
         assert not _codes(result), (
             f"correct cross-module call spuriously rejected: {_codes(result)}"
         )
+        # A DISCHARGED call precondition is reified as nothing at all (only
+        # violations and Tier-3 demotions become `call_pre` obligations), so
+        # "clean" has to be read two ways: nothing failed, and nothing was
+        # quietly demoted to a runtime check either.
+        assert not _call_pre(result), _call_pre(result)
+        # And the obligation is still LIVE on this call — swap the arguments
+        # so the parameter the callee constrains is the wrong one, and the
+        # same program must be rejected.  Without this, a verifier that had
+        # stopped checking imported preconditions altogether would pass above.
+        swapped = source.replace("pick(Some(7), Some(3))", "pick(Some(3), Some(7))")
+        control = _verify_mod(swapped, [_resolved(("clib",), _PICK_LIB)])
+        assert "E501" in _codes(control), (
+            "the imported callee's precondition is not being checked at all: "
+            f"{_codes(control)}"
+        )
+        violated = [o for o in _call_pre(control) if o.status == "violated"]
+        assert len(violated) == 1, _call_pre(control)
+        assert violated[0].line == _line_of(swapped, "pick(Some(3)")
 
     def test_control_no_alias_conflict_still_reports(self) -> None:
         """Control: with no same-named alias the two envs agree, and always did.
@@ -397,6 +475,115 @@ class TestImportedGenericCloneEnv:
             )
 
 
+class TestImportedNestedGenericOriginEnv:
+    """A generic nested under an imported NON-generic function (#1208 round 2).
+
+    ``_generic_origins`` records such a generic under the lexical chain that
+    names it (``mod$ng$outer$where$mid``) — there is no entry for the bare
+    ancestor ``mod$ng$outer``.  Both the discovery-time recount and the
+    verification-time clone looked the origin up under a key that could never
+    hit (the chain's first segment; the helper's bare name), fell back to the
+    IMPORTER's env, and rendered the helper's alias-typed parameters in a
+    namespace where the same alias names a different type.  Reviewer probe
+    ``m4``.
+    """
+
+    _NG = """\
+module ng;
+
+type Elem = Nat;
+
+public fn outer(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  mid(@Int.0)
+}
+where {
+  forall<T> fn mid(@T -> @Int)
+    requires(true)
+    ensures(true)
+    effects(pure)
+  {
+    inner(@T.0, Some(3))
+  }
+  where {
+    forall<V> fn inner(@V, @Option<Elem> -> @Int)
+      requires(true)
+      ensures(true)
+      effects(pure)
+    {
+      0
+    }
+  }
+}
+"""
+
+    _MAIN = """\
+import ng;
+
+type Elem = Bool;
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  outer(1)
+}
+"""
+
+    def test_nested_generic_clones_in_the_defining_modules_namespace(
+        self,
+    ) -> None:
+        """Every clone of ``ng``'s nested generic renders ``Elem`` as ``Nat``.
+
+        The importer declares ``type Elem = Bool``, so the two namespaces give
+        the helper's ``@Option<Elem>`` parameter two different names — and the
+        wrong one is a name neither the checker nor codegen ever binds.  The
+        env is inspected through what it RENDERS rather than by identity: the
+        failure is a rendering, and an identity assertion would pass for any
+        env that happened to be the right object for the wrong reason.
+        """
+        from vera import naming
+        from vera.monomorphize import Monomorphizer
+
+        seen: list[tuple[str, str]] = []
+        original = Monomorphizer.monomorphize_fn
+
+        def patched(
+            self: Monomorphizer, decl: ast.FnDecl,
+            concrete_types: tuple[str, ...], alias_env: object = None,
+        ) -> ast.FnDecl:
+            seen.append((decl.name, "<default>" if alias_env is None
+                         else naming.type_arg_name(
+                             ast.NamedType(name="Elem", type_args=None),
+                             alias_env)))  # type: ignore[arg-type]
+            return original(self, decl, concrete_types, alias_env)  # type: ignore[arg-type]
+
+        Monomorphizer.monomorphize_fn = patched  # type: ignore[method-assign]
+        try:
+            result = _verify_mod(self._MAIN, [_resolved(("ng",), self._NG)])
+        finally:
+            Monomorphizer.monomorphize_fn = original  # type: ignore[method-assign]
+
+        assert not _codes(result), _codes(result)
+        inner_envs = {rendered for name, rendered in seen if name == "inner"}
+        assert inner_envs, (
+            f"the nested generic was never monomorphized; saw {seen}"
+        )
+        assert inner_envs == {"Nat"}, (
+            "a clone of ng's nested generic was built in the IMPORTER's alias "
+            f"namespace (Elem = Bool): {sorted(inner_envs)}"
+        )
+        # The ancestor's own clone was already right — asserted so a
+        # regression there cannot hide behind the helper's assertion.
+        assert {
+            rendered for name, rendered in seen if name.endswith("mid")
+        } == {"Nat"}, seen
+
+
 # =====================================================================
 # Finding 1c — a `forall` variable shadows a same-named module alias
 # =====================================================================
@@ -553,6 +740,274 @@ public fn main(@Unit -> @Int)
         )
 
 
+class TestVerifierScopeIsTheSlotTableScope:
+    """The narrowing, as a CROSS-COMPONENT differential (#1208 round 2).
+
+    ``ContractVerifier._fn_naming_scope`` was green both ways: replace it with
+    ``return env`` and the full suite still passed.  Every one of its call
+    sites renders a signature and the references into that signature against
+    the SAME environment, so a wrong scope is wrong CONSISTENTLY — the
+    verifier proves a self-consistent story about parameters the checker
+    never bound, and nothing inside the verifier can see it.
+
+    What sees it is a second component that answers the same question
+    independently: :func:`vera.slots.slot_table` is the binding table
+    ``vera check --explain-slots`` and the LSP report, and it is pinned to the
+    checker by ``test_slot_naming_differential.py``.  So the assertion is
+    equality between the two, not the plausibility of either.
+    """
+
+    _SHADOWED_GENERIC = """\
+type T = Int;
+type Pos = { @Int | @Int.0 > 0 };
+
+public forall<T> fn g(@Option<Int>, @Option<T> -> @Pos)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  1
+}
+"""
+
+    @staticmethod
+    def _declared_slots(source: str) -> list[tuple[str, int]]:
+        """``(slot name, De Bruijn index)`` per parameter, as the VERIFIER
+        declares them into its ``SlotEnv``/``SmtContext``.
+
+        ``_count_slots`` is called exactly once per parameter, at the point
+        the ``@Name.n`` Z3 constant is named, on both paths that declare a
+        function's parameters — so recording it records the names the verifier
+        actually reasons under, not a re-derivation of them.
+        """
+        seen: list[tuple[str, int]] = []
+        original = ContractVerifier._count_slots
+
+        def patched(env: object, type_name: str) -> int:
+            index = original(env, type_name)  # type: ignore[arg-type]
+            seen.append((type_name, index))
+            return index
+
+        # Re-wrapped in `staticmethod` on BOTH sides: `_count_slots` is a
+        # staticmethod, and restoring the bare function would rebind it as an
+        # instance method — a leak that fails unrelated tests later in the
+        # session rather than this one.
+        ContractVerifier._count_slots = staticmethod(  # type: ignore[method-assign]
+            patched)
+        try:
+            program = parse_to_ast(source)
+            verify(program, source)
+        finally:
+            ContractVerifier._count_slots = staticmethod(  # type: ignore[method-assign]
+                original)
+        return seen
+
+    @staticmethod
+    def _slot_table_slots(
+        decl: ast.FnDecl, env: object, forall_vars: object,
+    ) -> list[tuple[str, int]]:
+        """The same list, derived from :func:`vera.slots.slot_table`.
+
+        The table is ``{name: [1-based parameter positions, slot-0-first]}``,
+        so a parameter's De Bruijn index is its distance from the END of its
+        own group — which makes this a comparison of the ORDERING as well as
+        of the names.
+        """
+        from vera.slots import slot_table
+
+        table = slot_table(decl.params, env, forall_vars)  # type: ignore[arg-type]
+        out: list[tuple[str, int]] = []
+        for position in range(1, len(decl.params) + 1):
+            name = next(n for n, ps in table.items() if position in ps)
+            out.append(
+                (name, len(table[name]) - 1 - table[name].index(position)))
+        return out
+
+    def test_generic_signature_declares_the_slot_table_names(self) -> None:
+        """The differential: verifier parameter names == the slot table's.
+
+        ``_check_generic_refined_return`` is the one path that declares a
+        STILL-GENERIC signature's parameters (an instantiated generic is
+        verified through its clones, whose ``forall_vars`` are already gone),
+        so it is where the narrowing is observable end to end.  Under
+        ``type T = Int`` the two ``Option`` parameters render as one stack
+        without it and two with it, and the checker keeps two.
+        """
+        from tests.naming_helpers import alias_env_from_declarations
+
+        source = self._SHADOWED_GENERIC
+        program = parse_to_ast(source)
+        decl = next(
+            tld.decl for tld in program.declarations
+            if isinstance(tld.decl, ast.FnDecl) and tld.decl.name == "g"
+        )
+        env = alias_env_from_declarations(program.declarations)
+
+        observed = self._declared_slots(source)
+        expected = self._slot_table_slots(decl, env, decl.forall_vars)
+        assert observed == expected, (
+            "the verifier declared this generic's parameters under names the "
+            f"slot table does not use: verifier={observed} table={expected}"
+        )
+        # Named, not merely equal: two equal-but-collapsed sides would also
+        # satisfy the comparison above if BOTH components lost the narrowing.
+        assert observed == [("Option<Int>", 0), ("Option<T>", 0)], observed
+
+    def test_where_helper_scope_accumulates_its_ancestors_forall_vars(
+        self,
+    ) -> None:
+        """The ``enclosing`` half, against the checker-side accumulation.
+
+        A ``where`` helper sees its parent's ``forall`` variables as well as
+        its own — ``_check_fn`` ADDS to one shared type-parameter map — so the
+        scope the verifier renders a helper's signature in must be the scope
+        :func:`vera.slots.fn_scopes` accumulates for it.  Drop the
+        accumulation and the helper's ``@Option<T>`` renders ``Option<Int>``,
+        merging with the sibling parameter the checker kept apart.
+        """
+        from vera import naming
+        from vera.slots import fn_scopes, fn_slot_scope
+
+        from tests.naming_helpers import alias_env_from_declarations
+
+        source = """\
+type T = Int;
+
+private forall<T> fn parent(@T -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  helper(Some(@T.0), Some(2))
+}
+where {
+  fn helper(@Option<T>, @Option<Int> -> @Int)
+    requires(true)
+    ensures(true)
+    effects(pure)
+  {
+    0
+  }
+}
+"""
+        program = parse_to_ast(source)
+        parent = next(
+            tld.decl for tld in program.declarations
+            if isinstance(tld.decl, ast.FnDecl) and tld.decl.name == "parent"
+        )
+        helper = (parent.where_fns or ())[0]
+        env = alias_env_from_declarations(program.declarations)
+
+        scope = ContractVerifier._fn_naming_scope(env, helper, (parent,))
+        inherited = next(
+            in_scope for fn, in_scope, _ in fn_scopes(parent) if fn is helper
+        )
+        assert scope == fn_slot_scope(env, inherited), (
+            "the verifier's helper scope is not the accumulation "
+            "`fn_scopes` performs, so the two surfaces disagree about which "
+            "module aliases a helper's signature still sees"
+        )
+        # The rendering that disagreement produces, stated outright.
+        assert naming.slot_name(helper.params[0], scope) == "Option<T>"
+        assert naming.slot_name(helper.params[1], scope) == "Option<Int>"
+
+
+class TestMonoPostSubstitutionScope:
+    """The De Bruijn recount's POST side narrows by the SURVIVING vars.
+
+    ``_compute_scoped_reindex`` narrowed only the pre-substitution side, on
+    the stated ground that "the clone carries ``forall_vars=None``".  That is
+    true of the function being cloned and false one level down:
+    ``monomorphize_fn`` clears only the top declaration's variables, so a
+    ``where`` helper declared ``forall<U>`` still carries them in the clone —
+    and both consumers narrow by them when they re-render it.  The names the
+    recount minted for that helper were therefore names nobody looks up
+    (#1208 round 2).
+    """
+
+    _SRC = """\
+type U = Int;
+
+private forall<T> fn parent(@T, @Option<Int> -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  helper(Some(true), @Option<Int>.0, false)
+}
+where {
+  forall<U> fn helper(@Option<U>, @Option<Int>, @U -> @Int)
+    requires(true)
+    ensures(true)
+    effects(pure)
+  {
+    0
+  }
+}
+"""
+
+    def test_helper_post_names_are_the_names_the_clone_is_read_under(
+        self,
+    ) -> None:
+        from vera import naming
+        from vera.monomorphize import MonoContext, Monomorphizer
+        from vera.slots import fn_slot_scope
+
+        from tests.naming_helpers import alias_env_from_declarations
+
+        program = parse_to_ast(self._SRC)
+        parent = next(
+            tld.decl for tld in program.declarations
+            if isinstance(tld.decl, ast.FnDecl) and tld.decl.name == "parent"
+        )
+        helper = (parent.where_fns or ())[0]
+        env = alias_env_from_declarations(program.declarations)
+
+        minted: dict[int, str | None] = {}
+        original = Monomorphizer._substituted_slot_name
+
+        def patched(
+            self: Monomorphizer, te: ast.TypeExpr,
+            mapping: dict[str, str], scope: object,
+        ) -> str | None:
+            name = original(self, te, mapping, scope)  # type: ignore[arg-type]
+            minted[id(te)] = name
+            return name
+
+        Monomorphizer._substituted_slot_name = patched  # type: ignore[method-assign]
+        try:
+            mono = Monomorphizer(MonoContext(
+                generic_decls={}, ctor_to_adt={}, ctor_tp_indices={},
+                adt_tp_counts={}, type_aliases={}, type_alias_params={},
+                fn_ret_types={},
+            ))
+            clone = mono.monomorphize_fn(parent, ("Int",), env)
+        finally:
+            Monomorphizer._substituted_slot_name = original  # type: ignore[method-assign]
+
+        clone_helper = (clone.where_fns or ())[0]
+        # The premise the old justification got wrong: substitution clears the
+        # cloned function's variables, not its helpers'.
+        assert clone_helper.forall_vars == ("U",), clone_helper.forall_vars
+
+        observed = [minted[id(te)] for te in helper.params]
+        # What the consumers will look the clone's helper up under: the clone's
+        # own signature, rendered in the scope its surviving `forall` variables
+        # create — the same narrowing `slot_table` and `WasmSlotEnv` apply.
+        expected = [
+            naming.slot_name(te, fn_slot_scope(env, clone_helper.forall_vars))
+            for te in clone_helper.params
+        ]
+        assert observed == expected, (
+            "the recount minted post-substitution names for the helper that "
+            f"its consumers do not rebuild: recount={observed} "
+            f"consumers={expected}"
+        )
+        # Named outright: under `type U = Int` the un-narrowed post side
+        # rendered `Option<Int>`, merging the helper's first two parameters.
+        assert observed == ["Option<U>", "Option<Int>", "U"], observed
+
+
 # =====================================================================
 # Finding 1d — the tester's SmtContext gets the NARROWED scope
 # =====================================================================
@@ -564,31 +1019,66 @@ class TestTesterSmtScope:
     Handed the un-narrowed module env, ``_translate_slot_ref`` looks a
     ``requires`` clause's ``@T.n`` up under a key the bind side never pushed —
     latent until a ``forall`` variable shadows a same-named module alias.
+
+    The fixture puts ``T`` in ARGUMENT position (``@Box<T>``, where
+    ``type Box<X> = Int`` keeps the semantic type Z3-representable), because
+    that is where the shadowing changes a rendering: a bare ``@T`` head is
+    alias-opaque on both sides and would make the narrowing unobservable
+    (#1208 round 2).  The two ``requires`` conjuncts then constrain different
+    parameters when the scope is right and ONE parameter to two different
+    values when it is wrong — so the generator's own output distinguishes the
+    two, rather than only the environment it was handed.
     """
 
-    def test_smt_context_holds_the_narrowed_scope(self) -> None:
-        from tests.naming_helpers import alias_env_from_declarations
-        from vera.smt import SmtContext
-        from vera.tester import _generate_inputs
-        from vera.types import INT
-
-        src = """\
+    _SRC = """\
 type T = Int;
+type Box<X> = Int;
 
-public forall<T> fn f(@Int -> @Int)
-  requires(@Int.0 > 0)
+public forall<T> fn f(@Box<T>, @Box<Int> -> @Int)
+  requires(@Box<T>.0 == 5 && @Box<Int>.0 == 9)
   ensures(true)
   effects(pure)
 {
-  @Int.0
+  @Box<T>.0
 }
 """
-        prog = parse_to_ast(src)
+
+    def _decl_and_env(self) -> tuple[ast.FnDecl, object]:
+        from tests.naming_helpers import alias_env_from_declarations
+
+        prog = parse_to_ast(self._SRC)
         decl = next(
             tld.decl for tld in prog.declarations
             if isinstance(tld.decl, ast.FnDecl)
         )
-        env = alias_env_from_declarations(prog.declarations)
+        return decl, alias_env_from_declarations(prog.declarations)
+
+    def test_generated_inputs_satisfy_both_conjuncts(self) -> None:
+        """The behavioural pin: two parameters, two constraints, one answer.
+
+        Rendered without the narrowing, ``@Box<T>`` and ``@Box<Int>`` are one
+        stack: both references resolve onto parameter 2, which must then be
+        ``5`` and ``9`` at once.  The precondition becomes unsatisfiable and
+        the generator returns NO inputs — every contract-driven trial for this
+        function silently disappears.
+        """
+        from vera.tester import _generate_inputs
+        from vera.types import INT
+
+        decl, env = self._decl_and_env()
+        assert _generate_inputs(decl, [INT, INT], 1, env) == [[5, 9]]
+
+    def test_smt_context_holds_the_narrowed_scope(self) -> None:
+        """The plumbing, kept alongside: the SMT context gets that scope.
+
+        The behavioural assertion above covers the two together; this one says
+        which of them is responsible, so a regression names the seam.
+        """
+        from vera.smt import SmtContext
+        from vera.tester import _generate_inputs
+        from vera.types import INT
+
+        decl, env = self._decl_and_env()
         seen: list[object] = []
         original = SmtContext.__init__
 
@@ -598,7 +1088,7 @@ public forall<T> fn f(@Int -> @Int)
 
         try:
             SmtContext.__init__ = patched  # type: ignore[method-assign]
-            _generate_inputs(decl, [INT], 1, env)
+            _generate_inputs(decl, [INT, INT], 1, env)
         finally:
             SmtContext.__init__ = original  # type: ignore[method-assign]
 

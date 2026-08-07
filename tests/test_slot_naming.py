@@ -639,6 +639,124 @@ public fn deep(@Box<A{hops - 1}> -> @Int)
     assert rendered == checker._type_expr_to_slot_name(fn.params[0])
 
 
+def _sibling_program(levels: int) -> str:
+    """An alias graph whose bodies mention SIBLINGS as well as ancestors.
+
+    Every alias still resolves to ``Int`` (so the resolved type stays O(1) and
+    the rendering is a fixed string), but each ``D`` body mentions both ``B``
+    and ``C`` at its own level and ``C`` in turn mentions ``B`` — so a
+    resolution that puts a whole pending list in progress at once filters
+    ``B`` out of ``C``'s dependencies and reaches it by recursing instead
+    (#1208 round-2 review, probe ``sib_300``).
+    """
+    lines = [
+        "type Drop<Z> = Int;",
+        "type Drop2<Y, Z> = Int;",
+        "type B0 = Int;",
+        "type C0 = Drop<B0>;",
+        "type D0 = Drop2<B0, C0>;",
+    ]
+    for k in range(1, levels + 1):
+        lines += [
+            f"type B{k} = D{k - 1};",
+            f"type C{k} = Drop<B{k}>;",
+            f"type D{k} = Drop2<B{k}, C{k}>;",
+        ]
+    lines.append(f"""
+public fn main(@Option<D{levels}> -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{{
+  0
+}}
+""")
+    return "\n".join(lines)
+
+
+def test_sibling_dependency_graph_renders_without_recursing_per_level() -> None:
+    """A 300-level sibling-mentioning alias graph RESOLVES (#1208 round 2).
+
+    The chain tests above are a straight line, which the dependency-first
+    walk handles however it pushes.  This is the shape that distinguishes the
+    two: pushing a body's whole pending list makes SIBLINGS in progress
+    together, the ``in_progress`` guard then filters a sibling that is a real
+    dependency, and the resolution reaches it through a nested
+    ``_resolve_alias`` — one Python frame per level, ``RecursionError`` from a
+    renderer this module documents as TOTAL.
+
+    The assertion is the RENDERING, on both the binding and the reference
+    side, so a depth bound answering ``Option<?>`` cannot pass either.
+    """
+    source = _sibling_program(300)
+    program = parse_to_ast(source)
+    checker = TypeChecker(source=source, file="<sib>")
+    checker.check_program(program)
+    assert not [d for d in checker.errors if d.severity == "error"]
+
+    fn = next(d.decl for d in program.declarations
+              if isinstance(d.decl, ast.FnDecl))
+    env = alias_env_from_environment(checker.env)
+    assert slot_name(fn.params[0], env) == "Option<Int>"
+    assert slot_ref_key(
+        ast.SlotRef(
+            type_name="Option",
+            type_args=(ast.NamedType(name="D300", type_args=None),),
+            index=0,
+        ),
+        env,
+    ) == "Option<Int>"
+    # And the CHECKER agrees — the equivalence the evaluation order preserves.
+    assert checker._type_expr_to_slot_name(fn.params[0]) == "Option<Int>"
+
+
+def test_sibling_dependency_graph_nests_a_constant_depth() -> None:
+    """The structural claim, independent of ``sys.getrecursionlimit()``.
+
+    "Does not raise at N=300" is a threshold test: it passes for an
+    implementation that recurses once per level on a machine with a generous
+    limit, and it says nothing about N+1.  What the fix actually establishes
+    is that ``_resolve_alias`` nests a CONSTANT depth whatever the graph
+    size — one frame below the walk, for the memo hit underneath the body
+    being resolved — so that is what is asserted here, at a size (1000
+    levels) no per-level recursion could reach.
+    """
+    from vera import naming as naming_module
+
+    source = _sibling_program(1000)
+    program = parse_to_ast(source)
+    checker = TypeChecker(source=source, file="<sib1k>")
+    checker.check_program(program)
+    env = alias_env_from_environment(checker.env)
+
+    original = naming_module._resolve_alias
+    depth = 0
+    max_depth = 0
+
+    def counting(name: str, alias_env: AliasEnv) -> object:
+        nonlocal depth, max_depth
+        depth += 1
+        max_depth = max(max_depth, depth)
+        try:
+            return original(name, alias_env)
+        finally:
+            depth -= 1
+
+    naming_module._resolve_alias = counting  # type: ignore[assignment]
+    try:
+        fn = next(d.decl for d in program.declarations
+                  if isinstance(d.decl, ast.FnDecl))
+        assert slot_name(fn.params[0], env) == "Option<Int>"
+    finally:
+        naming_module._resolve_alias = original  # type: ignore[assignment]
+
+    assert max_depth <= 2, (
+        f"_resolve_alias nested {max_depth} deep over a 1000-level graph — "
+        "the walk is recursing per level again, which is a RecursionError "
+        "waiting for a larger program"
+    )
+
+
 def test_alias_with_an_order_entry_but_no_body_falls_through() -> None:
     """An env whose ``_order`` names an alias it has no body for is TOTAL.
 

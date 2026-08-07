@@ -145,9 +145,13 @@ class Sweep:
     def corpus(self) -> list[Observation]:
         """Observations from real ``.vera`` files, excluding the battery.
 
-        The floors below are about the CORPUS not decaying; counted over
-        everything, adding a battery entry would let a corpus that stopped
-        reaching a corner still clear its floor.
+        Read by the ONE floor that is about a corpus corner not decaying —
+        ``corpus_alias_in_arg`` in ``test_corpus_sweep_is_not_vacuous``.  The
+        other two floors in that test are counted over EVERYTHING on purpose:
+        they are about the sweep observing a large, alias-rich population at
+        all, which the battery legitimately contributes to.  Separating this
+        one is what stops a growing battery from covering for a corpus that
+        stopped reaching the corner.
         """
         return [o for o in self.observations
                 if not o.origin.startswith("<battery:")]
@@ -156,6 +160,17 @@ class Sweep:
     def battery(self) -> list[Observation]:
         return [o for o in self.observations
                 if o.origin.startswith("<battery:")]
+
+    @property
+    def corpus_files(self) -> list[str]:
+        """The real ``.vera`` origins swept, excluding the battery entries.
+
+        ``files_seen`` counts battery sources too, so a floor on it measures
+        the two populations added together and a battery that grows can mask
+        a corpus that shrinks — the same conflation the ``corpus`` property
+        above exists to undo, one level up (#1208 round 2).
+        """
+        return [o for o in self.files_seen if not o.startswith("<battery:")]
 
 
 def _mentions_alias(
@@ -719,9 +734,10 @@ def test_corpus_sweep_is_not_vacuous(sweep: Sweep) -> None:
     """Floors, so the gate cannot pass by observing nothing interesting.
 
     A differential that records ten trivial ``Int`` renderings proves
-    nothing; these are the populations that make it evidence.  If the corpus
-    stops reaching a floor, extend the inline battery rather than lowering
-    the number.
+    nothing; these are the populations that make it evidence.  Two of the
+    three are counted over the whole sweep, and a shortfall in either is
+    answered by extending the inline battery.  The third is CORPUS-ONLY and
+    deliberately cannot be answered that way — see its comment below.
     """
     assert len(sweep.observations) > 2000, len(sweep.observations)
     assert len(sweep.with_aliases) > 200, len(sweep.with_aliases)
@@ -743,8 +759,17 @@ def test_corpus_sweep_is_not_vacuous(sweep: Sweep) -> None:
 
 
 def test_corpus_is_almost_entirely_parseable(sweep: Sweep) -> None:
-    """A silently-shrinking corpus is the other way this goes vacuous."""
-    assert len(sweep.files_seen) > 500, len(sweep.files_seen)
+    """A silently-shrinking corpus is the other way this goes vacuous.
+
+    Counted over the real ``.vera`` origins ONLY (#1208 round 2).  Against
+    ``files_seen`` — corpus plus battery — the number measured two
+    populations at once, so adding battery entries raised it and a corpus
+    that lost files could pass unnoticed.  The corpus is 494 programs across
+    ``examples/``, ``tests/conformance/`` and ``tests/probes/``; the floor is
+    that with a little headroom, and the way to raise it is to add ``.vera``
+    programs.
+    """
+    assert len(sweep.corpus_files) > 480, len(sweep.corpus_files)
     assert len(sweep.parse_skipped) <= 10, sweep.parse_skipped
 
 
