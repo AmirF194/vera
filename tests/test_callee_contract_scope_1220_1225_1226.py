@@ -930,15 +930,19 @@ class TestAModulesOwnImportsAreInItsRegistry:
     ) -> None:
         """§8.5.1 is the rule, and the fix does not widen past it.
 
-        `mid` imports only `cap`, so `other` is NOT in scope inside `mid` —
-        `vera check mid.vera` rejects that file on its own with "Unresolved
-        function 'other'" (the checker applies §8.5.1 only to the file it is
-        given: reached as an import, `mid`'s own body is not re-checked under
-        its own import filter, so the program below checks clean).  The importer happens to import `other` itself, so
-        a registry that took the whole reachable set (or fell through to the
-        importer's, the pre-#1225 behaviour) would bind it and interpret the
-        callee's contract with a function the callee cannot name.  It must
-        miss instead — loudly, as an E532 demotion.
+        `mid` imports only `cap`, so `other` is NOT in scope inside `mid`.
+        The CHECKER says so only when it is handed that file: `vera check
+        mid.vera` warns "Unresolved function 'other'" (E200, exit 0), while
+        `vera check main.vera` — reaching `mid` as an import, and never
+        re-checking its body under its own import filter — says nothing at
+        all.  Warn-vs-silent, not reject-vs-accept, and the asymmetry is
+        #1244.
+
+        The importer happens to import `other` itself, so a registry that
+        took the whole reachable set (or fell through to the importer's, the
+        pre-#1225 behaviour) would bind it and interpret the callee's
+        contract with a function the callee cannot name.  It must miss
+        instead — loudly, as an E532 demotion.
         """
         mid = _MID_REQ.replace("cap(0)", "other(0)")
         main = _MAIN_REQ.replace("import deep(cap);", "import deep(other);")
@@ -1182,3 +1186,149 @@ public fn main(@Unit -> @Nat)
         assert all(o.status != "verified" for o in refine), [
             (o.fn_name, o.status, o.error_code) for o in refine
         ]
+
+
+class TestObligationsCarryTheirDeclaringFile:
+    """An obligation names the file its line number belongs to (#1220).
+
+    The rendering fix moved DIAGNOSTICS onto the declaring module and left the
+    obligation stream behind: `ProofObligation` had no file at all, so the CLI
+    stamped the entry path on every entry and the documented
+    ``(file, line, column)`` join between the two halves of ``verify --json``
+    silently produced non-matches — and line numbers past the entry file's end
+    (PR #1239 review).
+    """
+
+    def _verified(
+        self, modules: list[ResolvedModule] | None = None,
+    ) -> VerifyResult:
+        if modules is None:
+            modules = [_resolved(("hlib",), _HELPER_LIB)]
+        prog = parse_to_ast(_HELPER_MAIN)
+        typecheck(prog, _HELPER_MAIN, resolved_modules=modules)
+        return verify(
+            prog, _HELPER_MAIN, file="main.vera", resolved_modules=modules)
+
+    def test_a_module_located_obligation_joins_its_diagnostic(self) -> None:
+        result = self._verified()
+        e501 = [d for d in result.diagnostics if d.error_code == "E501"]
+        assert len(e501) == 1, [d.error_code for d in result.diagnostics]
+        key = (e501[0].location.file, e501[0].location.line,
+               e501[0].location.column)
+        assert key in {(o.file, o.line, o.column) for o in result.obligations}, (
+            f"no obligation joins the E501 at {key}: "
+            f"{[(o.kind, o.file, o.line, o.column) for o in result.obligations]}"
+        )
+        assert key[0] != "main.vera", key
+
+    def test_an_entry_located_obligation_keeps_the_entry_file(self) -> None:
+        """The control: `main`'s own contracts are still the entry file's."""
+        result = self._verified()
+        entry = [o for o in result.obligations if o.fn_name == "main"]
+        assert entry, [o.fn_name for o in result.obligations]
+        assert {o.file for o in entry} == {"main.vera"}, entry
+
+    def test_no_obligation_cites_a_line_its_file_lacks(self) -> None:
+        """The symptom that made the break visible without a join."""
+        lengths = {
+            "main.vera": len(_HELPER_MAIN.splitlines()),
+            None: 10**9,
+        }
+        result = self._verified()
+        for o in result.obligations:
+            limit = lengths.get(o.file)
+            if limit is not None:
+                assert o.line <= limit, (o.kind, o.file, o.line)
+
+    def test_the_warm_session_agrees_with_the_cold_run(self) -> None:
+        """The warm incremental path reifies through the same recorder, so
+        its stream must carry the same files — the differential oracle in
+        test_obligations.py compares the two, and a field only one of them
+        populated would slip through a fingerprint that ignores it."""
+        from vera.obligations.session import VerificationSession
+
+        # ONE module list for both runs: `_resolved` writes a fresh temp
+        # file each call, so two lists would differ by path alone.
+        modules = [_resolved(("hlib",), _HELPER_LIB)]
+        cold = self._verified(modules)
+        session = VerificationSession()
+        warm = session.verify_source(
+            _HELPER_MAIN, file="main.vera", resolved_modules=modules)
+        assert [(o.kind, o.file, o.line, o.column) for o in warm.obligations] \
+            == [(o.kind, o.file, o.line, o.column) for o in cold.obligations]
+
+
+class TestQuotedClauseDropsComments:
+    """A comment inside a multi-line clause is not quoted as code.
+
+    Joining physical lines put a trailing `--` comment in front of the rest of
+    the clause: the message showed a condition that stops where the comment
+    starts, with the comment's prose reading as source (PR #1239 review).
+    """
+
+    _COMMENTED = """\
+private fn needs_both(@Int, @Int -> @Int)
+  requires(@Int.0 > 424242    -- the first bound
+           && @Int.1 > 424242) -- and the second
+  ensures(true)
+  effects(pure)
+{
+  @Int.0
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  needs_both(1, 2)
+}
+"""
+
+    _WITH_STRING = """\
+private fn needs_tag(@String, @Int -> @Int)
+  requires(string_contains(@String.0, "a--b")
+           && @Int.0 > 424242)
+  ensures(true)
+  effects(pure)
+{
+  @Int.0
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  needs_tag("zz", 2)
+}
+"""
+
+    @staticmethod
+    def _quoted(source: str) -> str:
+        message = _e501(_verify_mod(source, []))
+        return next(
+            line.split("Precondition:", 1)[1].strip()
+            for line in message.splitlines() if "Precondition:" in line
+        )
+
+    def test_the_comments_are_not_quoted(self) -> None:
+        quoted = self._quoted(self._COMMENTED)
+        assert quoted == "requires(@Int.0 > 424242 && @Int.1 > 424242)", quoted
+        assert "--" not in quoted, quoted
+        assert quoted.count("(") == quoted.count(")"), quoted
+
+    def test_a_double_dash_inside_a_string_survives(self) -> None:
+        """The case a naive split on `--` would corrupt: the scanner is the
+        lexer's own, so a string literal is not comment syntax."""
+        quoted = self._quoted(self._WITH_STRING)
+        assert '"a--b"' in quoted, quoted
+        assert quoted.count("(") == quoted.count(")"), quoted
+
+    def test_an_uncommented_clause_is_unchanged(self) -> None:
+        """Control: blanking must not touch a clause with no comment."""
+        plain = self._COMMENTED.replace("    -- the first bound", "").replace(
+            " -- and the second", "")
+        assert "--" not in plain
+        assert self._quoted(plain) == (
+            "requires(@Int.0 > 424242 && @Int.1 > 424242)")

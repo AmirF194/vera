@@ -334,12 +334,27 @@ def cmd_verify(path: str, as_json: bool = False, quiet: bool = False) -> int:
                         "location": {
                             "line": o.line,
                             "column": o.column,
-                            # str(p), not the raw CLI `path`: diagnostics
-                            # carry the normalized path (verify(...,
-                            # file=str(p))), and a consumer must be able to
-                            # join an obligation to its diagnostic on
-                            # (file, line, column) (PR #974 review).
-                            **({"file": str(p)} if path else {}),
+                            # The obligation's OWN file, so a consumer can
+                            # join it to its diagnostic on (file, line,
+                            # column) (PR #974 review).  That join assumed
+                            # every obligation belonged to the entry program
+                            # and stamped `str(p)` on all of them, which was
+                            # true only while the verifier reported
+                            # everything against the entry buffer; once an
+                            # imported generic's clone reports against its
+                            # own module (#1220), a stamped entry path both
+                            # broke the join and named a line the entry file
+                            # does not have.  The verifier normalizes the
+                            # path it is handed (`verify(..., file=str(p))`),
+                            # so a main-file obligation still carries exactly
+                            # the `str(p)` diagnostics carry; the fallback
+                            # covers only an obligation reified with no file
+                            # at all, which a run given `path` does not
+                            # produce.
+                            **(
+                                {"file": o.file or str(p)}
+                                if path else {}
+                            ),
                         },
                         **({"error_code": o.error_code} if o.error_code else {}),
                     }

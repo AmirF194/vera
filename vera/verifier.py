@@ -35,6 +35,7 @@ from vera.monomorphize import (
 if TYPE_CHECKING:
     from vera.resolver import ResolvedModule
 from vera.errors import Diagnostic, SourceLocation
+from vera.lexical import blank_comments
 from vera.obligations.core import (
     ObligationKind,
     ObligationStatus,
@@ -612,6 +613,14 @@ class ContractVerifier:
         preconditions render the callee's contract expression but are
         located at the call site, so two calls violating the same
         precondition stay distinct obligations.
+
+        The FILE that line number belongs to travels with it, from the same
+        ``_current_file`` a diagnostic raised here would carry (#1220, PR
+        #1239 review): the two halves of ``verify --json`` are joined on
+        ``(file, line, column)``, so an obligation whose file was assumed
+        to be the entry program could not be joined to the diagnostic it
+        shares a site with — and, for an imported clone, named a line the
+        entry file does not have.
         """
         loc = span_node if span_node is not None else node
         line = loc.span.line if loc.span else 0
@@ -625,6 +634,7 @@ class ContractVerifier:
             column=column,
             error_code=error_code,
             counterexample=counterexample,
+            file=self._current_file,
         ))
 
     @staticmethod
@@ -8187,10 +8197,13 @@ class ContractVerifier:
                 f"The precondition will be checked at runtime.",
                 rationale="An argument or the callee's precondition contains "
                           "constructs that cannot be translated to SMT (e.g. "
-                          "an ADT field of a host-handle type such as Map), or "
-                          "the callee is generic and its contract is written "
-                          "over type parameters, which have no Z3 sort until "
-                          "the call is monomorphized.",
+                          "an ADT field of a host-handle type such as Map); "
+                          "or the callee is generic and its contract is "
+                          "written over type parameters, which have no Z3 "
+                          "sort until the call is monomorphized; or the "
+                          "callee's contract calls a name that resolves to no "
+                          "function in the module that declared it, which is "
+                          "every name outside that module's own imports.",
                 spec_ref='Chapter 6, Section 6.8 "Summary of Verification Tiers"',
                 error_code="E532",
                 tier=3,
@@ -8212,9 +8225,19 @@ class ContractVerifier:
         mid-expression with unbalanced parentheses and named a condition the
         program does not have (PR #1239 review).  Continuation lines are joined
         on single spaces, since the message is one line.
+
+        Comments are blanked first, through the lexer's own scanner
+        (:func:`~vera.lexical.blank_comments`), because joining lines puts a
+        trailing `--` comment in front of the rest of the clause — the reader
+        then sees a condition that stops where the comment starts, and a
+        comment's text quoted as though it were code.  The scanner is what
+        keeps a `--` inside a STRING literal from being mistaken for one, and
+        blanking preserves offsets, so the line numbers this slices by are
+        unaffected.
         """
         if contract.span:
-            lines = self._declaring_source(contract).splitlines()
+            lines = blank_comments(
+                self._declaring_source(contract)).splitlines()
             first, last = contract.span.line, contract.span.end_line
             if 1 <= first <= len(lines):
                 last = min(max(last, first), len(lines))
