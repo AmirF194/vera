@@ -398,6 +398,15 @@ Slot environments (index 0 = last occurrence in signature):
     @Int.1  parameter 1 (first @Int)
 ```
 
+`where`-block helpers get their own table, indented under their parent:
+
+```text
+  fn is_even(@Nat -> @Bool)
+    @Nat.0  parameter 1 (only @Nat)
+    where fn is_odd(@Nat -> @Bool)
+      @Nat.0  parameter 1 (only @Nat)
+```
+
 **Read this table before writing any contract or recursive call.** The ordering only matters
 when a function has multiple parameters of the same type — but that is exactly when bugs occur.
 
@@ -484,6 +493,12 @@ match @Tuple<Int, String>.0 {
 type PosInt = { @Int | @Int.0 > 0 };
 type Name = String;
 ```
+
+An alias is **opaque as the head** of a slot name and **transparent inside type arguments**
+(spec §3.8.1). A parameter written `@PosInt` is referenced `@PosInt.0`, never `@Int.0` — the
+two are separate namespaces. A parameter written `@Option<Name>` binds `Option<String>`, so it
+is referenced `@Option<String>.0`. When in doubt, run `vera check --explain-slots`: it prints
+the resolved name of every parameter.
 
 ## Data Types (ADTs)
 
@@ -2431,7 +2446,7 @@ public fn main(@Unit -> @Unit)
 
 ## Conformance Suite
 
-The `tests/conformance/` directory contains 179 small programs — most self-contained, with the Chapter 8 module-system programs and a few cross-module Chapter 7 and 9 programs importing companion `_lib.vera` / `_mid.vera` modules — that validate every language feature against the spec — often one program per feature, though some features (slot references, match, contracts) span several. These are the best minimal working examples of Vera syntax and semantics.
+The `tests/conformance/` directory contains 196 small programs — most self-contained, with the Chapter 8 module-system programs and a few cross-module Chapter 7 and 9 programs importing companion `_lib.vera` / `_mid.vera` modules — that validate every language feature against the spec — often one program per feature, though some features (slot references, match, contracts) span several. These are the best minimal working examples of Vera syntax and semantics.
 
 Each program is organized by spec chapter (`ch01_int_literals.vera`, `ch04_match_basic.vera`, `ch07_state_handler.vera`, etc.) and the `manifest.json` file maps features to programs. When you need to see how a specific construct works, check the conformance program before reading the spec.
 

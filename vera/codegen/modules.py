@@ -32,7 +32,8 @@ class CrossModuleMixin:
         main file's aliases must never re-type a module's declarations.
         For the duration of the ``with`` block the flat
         ``_type_aliases`` / ``_type_alias_params`` maps (main file +
-        non-shadowed prelude) are swapped for ``{prelude, **module_own}``
+        non-shadowed prelude) — and the ``_alias_env`` those two describe
+        (#1208) — are swapped for ``{prelude, **module_own}``
         — the module's aliases overlaying the prelude's, mirroring how
         the main file's own aliases overlay the prelude in the flat maps.
         Every alias consumer downstream (signature derivation, contract
@@ -66,11 +67,29 @@ class CrossModuleMixin:
             if name not in mod_aliases
         }
         gen._type_alias_params.update(mod_params)
+        # The declaration-index space is swapped with them (PR #1224 review):
+        # it answers "was this name already declared when this alias body was
+        # registered?", which is a question about ONE namespace.  The module's
+        # own 0-based space overlays the prelude's negative block, mirroring
+        # the alias overlay above; a main-file declaration is not in it, and a
+        # module declaration is not in the main file's.
+        saved_order = gen._decl_order
+        gen._decl_order = {
+            **gen._prelude_decl_order,
+            **gen._module_decl_order.get(mod_path, {}),
+        }
+        # #1208: the naming environment is part of the swapped pair — it
+        # describes exactly these two maps, so it moves with them or it names
+        # the module's declarations against the main file's aliases.
+        saved_env = gen._alias_env
+        gen._sync_alias_env()
         try:
             yield
         finally:
             gen._type_aliases = saved_aliases
             gen._type_alias_params = saved_params
+            gen._decl_order = saved_order
+            gen._alias_env = saved_env
 
     @contextlib.contextmanager
     def _module_source_scope(
@@ -473,6 +492,22 @@ class CrossModuleMixin:
             self._module_type_alias_params[mod.path] = dict(
                 temp._type_alias_params,
             )
+            # #1208: capture this module's declaration ORDER as its OWN
+            # namespace, exactly as the alias maps above are captured, in the
+            # module's own source order (`temp` registered them 0-based).
+            # `_module_alias_scope` installs it as {prelude, **module_own}
+            # while the module compiles.
+            #
+            # It used to be folded into ONE shared index space instead, which
+            # was a silent miscompile (PR #1224 review): `_stamp_decl_order`
+            # is idempotent by name, modules are absorbed at Pass 0.5 and the
+            # main file at Pass 1, so a name a module stamped kept that
+            # earlier index in the MAIN file's namespace and turned its
+            # forward reference into a backward one.  The reverse direction
+            # (a main-file alias ordering against a module's namespace) was
+            # never possible; this one was, and both directions are closed by
+            # keying the space to its owner.
+            self._module_decl_order[mod.path] = dict(temp._decl_order)
 
             # Collect ALL FnDecls from this module for compilation, and wire
             # up module-qualified-call resolution (#814 §8.5.3 + C2).

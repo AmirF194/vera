@@ -114,6 +114,11 @@ class VerificationSession:
         registry is cleared before each program and repopulated by the
         verifier's per-function registration loop.  The function
         lookups are rebound per function by the verifier itself.
+
+        #1208: the naming environment is in the same category as the lookups
+        — this context is built before any program is known, so it starts on
+        the empty env and the verifier rebinds ``_alias_env`` per function
+        from the module it just registered.
         """
         if self._smt is None:
             self._smt = SmtContext(timeout_ms=self._timeout_ms)

@@ -12,6 +12,7 @@ from vera import ast
 from vera.skip import AdtEqNotDerivableError, CodegenInvariantError, CodegenSkip
 from vera.codegen.tail_position import compute_tail_call_sites
 from vera.monomorphize import mangle_type_name
+from vera.slots import type_expr_slot_name
 from vera.wasm import WasmContext, WasmSlotEnv
 from vera.wasm.helpers import _is_host_handle_type, gc_shadow_push
 
@@ -188,17 +189,19 @@ class FunctionCompilationMixin:
             for eff in decl.effect.effects:
                 if (isinstance(eff, ast.EffectRef) and eff.name == "State"
                         and eff.type_args and len(eff.type_args) == 1):
-                    type_name = self._type_expr_to_slot_name(eff.type_args[0])
+                    # The alias-OPAQUE source spelling, kept for exactly one
+                    # role: the #1006 Vera-name mirror below.
+                    type_name = type_expr_slot_name(eff.type_args[0])
                     if type_name:
-                        # #1205: the import NAME keys on the scalar-collapsed
-                        # family (matching `_check_state_type` registration);
-                        # the Vera-name mirror below stays the SOURCE name
-                        # (note it also feeds the #1006/#914-A2 clone-naming
-                        # contract for a `get(())` array element driving a
-                        # generic instantiation — see the tracked mono
-                        # discovery desync).
+                        # The import NAME keys on the resolved cell FAMILY
+                        # (matching `_check_state_type` registration, #1205
+                        # / #1209); the Vera-name mirror below stays the
+                        # SOURCE name (note it also feeds the #1006/#914-A2
+                        # clone-naming contract for a `get(())` array
+                        # element driving a generic instantiation — see the
+                        # tracked mono discovery desync).
                         mangled = mangle_type_name(
-                            self._family_name_te(eff.type_args[0], type_name))
+                            self._family_name_te(eff.type_args[0]))
                         # Only map if no user-defined function shadows the op
                         if "get" not in self._fn_sigs:
                             effect_ops["get"] = (
@@ -221,13 +224,13 @@ class FunctionCompilationMixin:
                             )
                 elif (isinstance(eff, ast.EffectRef) and eff.name == "Exn"
                         and eff.type_args and len(eff.type_args) == 1):
-                    type_name = self._type_expr_to_slot_name(eff.type_args[0])
+                    type_name = type_expr_slot_name(eff.type_args[0])
                     if type_name and "throw" not in self._fn_sigs:
-                        # #1205: tag family name collapses like the State
-                        # import family (matching `_check_exn_type`).
+                        # The tag name resolves like the State import
+                        # family (matching `_check_exn_type`, #1205/#1209).
                         effect_ops["throw"] = (
                             f"$exn_"
-                            f"{mangle_type_name(self._family_name_te(eff.type_args[0], type_name))}",
+                            f"{mangle_type_name(self._family_name_te(eff.type_args[0]))}",
                             False,
                         )
 
@@ -310,9 +313,10 @@ class FunctionCompilationMixin:
         # #865: per-parameter concrete-@Byte flags for the call-site
         # int-literal → i32.const coercion.
         ctx.set_fn_byte_params(self._fn_byte_params)
-        # Provide type aliases so closures can resolve FnType return types
-        ctx.set_type_aliases(self._type_aliases)
-        ctx.set_type_alias_params(self._type_alias_params)
+        # Provide the naming environment so closures can resolve FnType
+        # return types.  One value, so the alias bodies and their parameter
+        # lists cannot be handed over half-updated (#1184 / #1208).
+        ctx.set_alias_env(self._alias_env)
         ctx.set_closure_id_start(self._next_closure_id)
         ctx.set_closure_sigs(self._closure_sigs)
         # #814 §8.5.3: module-qualified call target table, so a ``m::f`` call
@@ -622,13 +626,13 @@ class FunctionCompilationMixin:
             return None
         pre_instrs = pre_instrs + dec_entry_instrs
 
-        # Snapshot old state for postcondition old() references.  The
-        # snapshot's family resolution can raise (an `old(State<T>)`
-        # whose alias chain overflows the resolver bound — round-7
-        # review, F2: this was the ONE `_family_name_te` door outside
-        # every CodegenSkip net, and the raise escaped as a crash on a
-        # check-green program).  Degrade to the same clean E602 skip
-        # the body path uses.
+        # Snapshot old state for postcondition old() references.  This call
+        # sits OUTSIDE the body's CodegenSkip net (round-7 review, F2: a
+        # raise from the snapshot's family resolution escaped as a crash on
+        # a check-green program), so it carries its own — kept as
+        # defence-in-depth now that `_family_name_te` is total (#1209), for
+        # the same reason the boundary had a net at all: nothing else here
+        # would degrade a skip to a diagnostic.
         try:
             snapshot_instrs = self._snapshot_old_state(ctx, decl)
         except CodegenSkip as skip:

@@ -1,0 +1,36 @@
+-- Conformance: alias opacity is head-only (Chapter 3, Section 3.8.1).
+-- Tests: a parameter written `@Option<Cnt>` under `type Cnt = Int` binds the
+-- slot name `Option<Int>` — the HEAD of a slot name stays syntactic, its type
+-- ARGUMENTS resolve — so `@Option<Int>.0` reaches it and `@Cnt.0` reaches the
+-- parameter whose head is the alias.  Both spellings in one signature, so a
+-- renderer that resolved the head would merge two namespaces the checker
+-- keeps apart, and one that left the argument opaque would leave the first
+-- reference dangling (#1208).
+type Cnt = Int;
+
+private fn unwrap(@Option<Cnt>, @Cnt -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  match @Option<Int>.0 {
+    Some(@Int) -> @Int.0,
+    None -> @Cnt.0
+  }
+}
+
+public fn read_some(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  unwrap(Some(5), 0 - 1)
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 0)
+  effects(pure)
+{
+  unwrap(Some(5), 0 - 1) - 5 + (unwrap(None, 3) - 3)
+}

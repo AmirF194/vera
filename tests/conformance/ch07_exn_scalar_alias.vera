@@ -1,0 +1,51 @@
+-- Conformance: a scalar alias as the Exn<E> payload type (Chapter 7,
+-- Section 7.6).  Tests: `Exn<Code>` with `type Code = Int` throws and
+-- catches through the SAME tag as `Exn<Int>` — the tag family is the
+-- payload the checker typed, so a thrower declaring one spelling is caught
+-- by a handler written in the other, and the alias-spelled clause pattern
+-- `throw(@Code)` binds the payload the reference reads (#1205/#1209).
+type Code = Int;
+
+private fn risky(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<Exn<Code>>)
+{
+  if @Int.0 < 0 then {
+    throw(@Int.0)
+  } else {
+    @Int.0 * 2
+  }
+}
+
+private fn caught_by_alias(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[Exn<Code>] {
+    throw(@Code) -> { 0 - @Code.0 }
+  } in {
+    risky(0 - 41)
+  }
+}
+
+private fn caught_by_base(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[Exn<Int>] {
+    throw(@Int) -> { 0 - @Int.0 }
+  } in {
+    risky(0 - 9)
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 0)
+  effects(pure)
+{
+  caught_by_alias(()) - 41 + (caught_by_base(()) - 9)
+}

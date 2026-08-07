@@ -12,14 +12,16 @@ See spec/06-contracts.md for the full verification specification.
 
 from __future__ import annotations
 
+import contextlib
+
 import z3
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
 from dataclasses import fields as ast_fields
 from typing import TYPE_CHECKING
 
-from vera import ast
+from vera import ast, naming
 from vera.environment import ConstructorInfo, FunctionInfo, TypeEnv
 from vera.monomorphize import (
     MonoContext,
@@ -39,7 +41,8 @@ from vera.obligations.core import (
     ProofObligation,
     expr_text_for,
 )
-from vera.slots import slot_table, type_expr_slot_name
+from vera.naming import EMPTY_ALIAS_ENV, AliasEnv, alias_env_from_environment
+from vera.slots import fn_slot_scope, slot_table
 from vera.smt import SlotEnv, SmtContext
 from vera.types import (
     erases_to_unit,
@@ -188,6 +191,12 @@ def verify(
 class ContractVerifier:
     """Walks the AST, generates VCs, and submits them to Z3."""
 
+    #: #1208: the DEFINING module's naming env while an imported generic's
+    #: clone is under verification, ``None`` (this program's env) otherwise.
+    #: A CLASS default as well as an instance field, so the property below
+    #: answers for an instance built without ``__init__`` too.
+    _decl_alias_env: AliasEnv | None = None
+
     def __init__(
         self,
         source: str = "",
@@ -213,6 +222,34 @@ class ContractVerifier:
         # program.  None (the default) preserves the historical
         # fresh-context-per-function cold path exactly.
         self._shared_smt = shared_smt
+        # #1208: the naming environment for THIS verifier's module — alias
+        # bodies, alias parameters, and declared-ADT names, as
+        # :mod:`vera.naming` renders against.  Built from `self.env` once
+        # registration has populated it (see `register_program`); empty until
+        # then, because there is nothing to name before the aliases register.
+        self._alias_env: AliasEnv = EMPTY_ALIAS_ENV
+        # #1208: the naming environment of each RESOLVED MODULE, built in
+        # `_register_modules` from that module's own registration.  Aliases are
+        # module-scoped (spec §8.4.1), so an imported callee's contract and an
+        # imported generic's body have to be rendered against the env of the
+        # module that DECLARED them — the importer's env names a different
+        # namespace, and two modules that spell the same alias differently then
+        # merge or split parameter stacks the checker kept apart.
+        self._module_alias_envs: dict[tuple[str, ...], AliasEnv] = {}
+        # #1208: which module a harvested `FunctionInfo` came from, keyed by
+        # object identity.  `FunctionInfo` is an unhashable mutable dataclass
+        # and carries no origin of its own, so identity is the join — sound
+        # because the value pins the info object itself, keeping it (and hence
+        # its id) alive for as long as the map is.  A callee absent from here
+        # is local to THIS program and renders against `self._alias_env`.
+        self._fn_origin_envs: dict[int, tuple[FunctionInfo, AliasEnv]] = {}
+        # #1208: the origin module of each IMPORTED generic, keyed by the same
+        # discovery key `_instances` / `generic_decls` use.  A key absent from
+        # here is a main-file generic.
+        self._generic_origins: dict[str, tuple[str, ...]] = {}
+        # See the class-level default: the DEFINING module's env while an
+        # imported generic's clone is verified, `None` otherwise (#1208).
+        self._decl_alias_env = None
         self.source = source
         self.file = file
         self.timeout_ms = timeout_ms
@@ -636,6 +673,9 @@ class ContractVerifier:
     def _register_data(self, decl: ast.DataDecl) -> None:
         """Register an ADT with constructor info for SMT translation."""
         from vera.environment import AdtInfo, ConstructorInfo
+        # #1208: same shared declaration-index stamp as the checker's
+        # registration pass, allocated before anything resolves.
+        decl_index = self.env.next_decl_index()
         # Set up type params for resolving constructor field types
         saved_params = dict(self.env.type_params)
         if decl.type_params:
@@ -657,6 +697,7 @@ class ContractVerifier:
             name=decl.name,
             type_params=decl.type_params,
             constructors=ctors,
+            decl_index=decl_index,
         )
         self.env.type_params = saved_params
 
@@ -691,11 +732,14 @@ class ContractVerifier:
     def _register_alias(self, decl: ast.TypeAliasDecl) -> None:
         """Register a type alias."""
         from vera.environment import TypeAliasInfo
+        decl_index = self.env.next_decl_index()
         resolved = self._resolve_type(decl.type_expr)
         self.env.type_aliases[decl.name] = TypeAliasInfo(
             name=decl.name,
             type_params=decl.type_params,
             resolved_type=resolved,
+            body=decl.type_expr,
+            decl_index=decl_index,
         )
 
     def _register_ability(self, decl: ast.AbilityDecl) -> None:
@@ -750,6 +794,15 @@ class ContractVerifier:
         for mod in self._resolved_modules:
             temp = ContractVerifier(source=mod.source)
             temp._register_all(mod.program)
+            # #1208: capture this module's naming environment from the same
+            # isolated registration the contracts are harvested from — the env
+            # every rendering of one of ITS declarations has to happen under.
+            # Recorded for transitive modules too (before the `direct` gate
+            # below): an imported generic reached through another module's body
+            # is monomorphized by this importer and must be recounted in its own
+            # namespace.
+            mod_alias_env = alias_env_from_environment(temp.env)
+            self._module_alias_envs[mod.path] = mod_alias_env
 
             # All module-declared functions (exclude builtins)
             all_fns = {
@@ -776,6 +829,12 @@ class ContractVerifier:
             }
 
             self._module_functions[mod.path] = mod_fns
+            # #1208: pin each harvested contract to its defining module's env,
+            # so a call obligation renders the CALLEE's slots in the callee's
+            # namespace whichever way the call is spelled (bare after a named
+            # import, or `mod::fn` — both resolve to these same info objects).
+            for fn_info in mod_fns.values():
+                self._fn_origin_envs[id(fn_info)] = (fn_info, mod_alias_env)
 
             # 4. Inject into self.env for bare calls
             name_filter = self._import_names.get(mod.path)
@@ -823,6 +882,116 @@ class ContractVerifier:
         if mod_fns is None:
             return None
         return mod_fns.get(name)
+
+    def _callee_alias_env(self, callee_info: object) -> AliasEnv:
+        """The naming env *callee_info*'s own contract renders against (#1208).
+
+        The defining module's env for an IMPORTED callee, this program's for a
+        local one.  A callee's ``requires`` / ``ensures`` is written in ITS
+        module's namespace, so the parameter stack the obligation pushes and the
+        ``@T.n`` references that read it must both be rendered there — the
+        importer's env is a different namespace, and where the two modules
+        declare the same alias name over different bodies, an obligation
+        rendered in the wrong one either merges two parameter stacks the callee
+        kept apart (the precondition silently attaches to the wrong argument, or
+        vanishes: a false Tier-1) or splits one it merged (a spurious E501).
+        """
+        found = self._fn_origin_envs.get(id(callee_info))
+        # Identity is only meaningful for the very object that was pinned;
+        # `found[0] is callee_info` rules out an id reused after a collection.
+        if found is not None and found[0] is callee_info:
+            return found[1]
+        # Unpinned: the env of whatever module is UNDER verification, not the
+        # entry program's (PR #1224 review).  Only public functions of directly
+        # imported modules are pinned (`_register_modules`), so an imported
+        # generic's own `where`-helper — resolved through `_fn_info_for_decl`
+        # while its clone verifies inside `_declaring_module_scope` — reaches
+        # here, and `_alias_env` would render its contract in the IMPORTER's
+        # namespace.  That is exactly the merge this method exists to prevent:
+        # a helper whose parameters are two stacks in its own module and ONE in
+        # the importer's discharged a violated precondition as true (a false
+        # Tier-1 that traps at run time), and the mirror shape rejected a valid
+        # call with a spurious E501.
+        return self._current_alias_env
+
+    @property
+    def _current_alias_env(self) -> AliasEnv:
+        """The naming env of the module that DECLARED what is being verified.
+
+        This program's env, except while an IMPORTED generic's clone is under
+        verification — then the defining module's, entered by
+        :meth:`_declaring_module_scope` (#1208).  Codegen names the very same
+        clone under the very same env (``_clone_alias_env``), so a slot the
+        verifier proves about is the slot the emitted code reads.
+        """
+        return (
+            self._alias_env if self._decl_alias_env is None
+            else self._decl_alias_env
+        )
+
+    @contextlib.contextmanager
+    def _declaring_module_scope(self, env: AliasEnv) -> Iterator[None]:
+        """Verify the enclosed declarations in *env*'s namespace (#1208)."""
+        saved = self._decl_alias_env
+        self._decl_alias_env = env
+        try:
+            yield
+        finally:
+            self._decl_alias_env = saved
+
+    @staticmethod
+    def _fn_naming_scope(
+        env: AliasEnv,
+        decl: ast.FnDecl,
+        enclosing: tuple[ast.FnDecl, ...] = (),
+    ) -> AliasEnv:
+        """*env* narrowed by every ``forall`` variable in scope over *decl*.
+
+        A type parameter SHADOWS a same-named module alias for the whole
+        signature and body (``_check_fn`` binds it first), and a ``where``
+        helper inherits its ancestors' as well as its own — the same
+        accumulation :func:`~vera.slots.fn_scopes` performs.  Rendering a
+        generic's parameters against the bare module env instead merges two
+        parameter stacks the checker kept apart, so the two conjuncts of one
+        ``requires`` land on one slot and the premises go unsatisfiable — which
+        proves anything (#1208 review, probe ``v01``).
+        """
+        return fn_slot_scope(env, (
+            *(v for e in enclosing for v in e.forall_vars or ()),
+            *(decl.forall_vars or ()),
+        ))
+
+    def _alias_env_for_generic(self, key: str | None) -> AliasEnv:
+        """The naming env a generic registered under *key* was DECLARED in.
+
+        ``None`` or an unrecorded key is a main-file generic and renders against
+        this program's env; an imported one renders against its own module's
+        (#1208), which is what codegen's ``_clone_alias_env`` gives the same
+        clone.  The De Bruijn recount in ``monomorphize_fn`` and the clone's
+        re-declaration in ``_verify_fn`` must agree on it, or the verifier
+        proves a body codegen never emits.
+
+        *key* may be a lexical CHAIN (``parent$where$helper``), and the origin
+        registry holds whichever ancestor the harvest recorded: an imported
+        top-level generic under its bare or ``mod$…`` name, an imported
+        generic nested under a non-generic function under the qualified chain
+        that names it (``mod$ng$outer$where$mid``).  So the chain is probed
+        whole and then one ``$where$`` segment shorter at a time, and the
+        FIRST recorded ancestor wins — the most specific one, and a lexical
+        descendant is declared in the same module as its ancestor either way.
+        Taking only the outermost segment instead missed the nested-key case
+        entirely (``mod$ng$outer`` is never a recorded key), so a helper
+        beneath an imported nested generic recounted in the IMPORTER's
+        namespace (#1208 round 2, probe ``m4``).
+        """
+        probe = key
+        while probe is not None:
+            origin = self._generic_origins.get(probe)
+            if origin is not None:
+                return self._module_alias_envs.get(origin, self._alias_env)
+            ancestor, sep, _ = probe.rpartition("$where$")
+            probe = ancestor if sep else None
+        return self._alias_env
 
     # -----------------------------------------------------------------
     # Type resolution (simplified — reuses TypeEnv patterns)
@@ -906,6 +1075,11 @@ class ContractVerifier:
                 self._top_level_fn_infos[tld.decl.name] = self._fn_info_for_decl(
                     tld.decl, visibility=tld.visibility,
                 )
+        # #1208: registration has recorded every alias body (`TypeAliasInfo.body`)
+        # and every ADT, so the naming environment is now complete for this
+        # module.  Rebuilt here rather than lazily so it is a plain value: the
+        # warm session re-registers per program and picks up the new one.
+        self._alias_env = alias_env_from_environment(self.env)
         # #732: discover every concrete instantiation of each generic NOW, off
         # the registered env, so both verify_program (cold) and the warm
         # incremental session — which both go through register_program — verify
@@ -1125,6 +1299,9 @@ class ContractVerifier:
             adt_tp_counts=adt_tp_counts,
             type_aliases=type_aliases,
             type_alias_params=type_alias_params,
+            # #1208: the verifier's own naming environment, built from the
+            # same `TypeEnv` the two maps above are harvested from.
+            alias_env=self._alias_env,
             fn_ret_types=fn_ret_types,
             fn_ret_type_exprs=fn_ret_type_exprs,
         )
@@ -1216,6 +1393,10 @@ class ContractVerifier:
                             decl, mod.path, priv_names,
                         ),
                     )
+                    # #1208: first-seen-wins, in lockstep with the setdefault
+                    # above, so the origin recorded is the origin of the decl
+                    # actually kept.
+                    self._generic_origins.setdefault(decl.name, mod.path)
                 elif not is_public:
                     # #1029: reroute the PRIVATE generic's own body too, so a
                     # private→private chain (this generic calls ANOTHER private
@@ -1229,6 +1410,10 @@ class ContractVerifier:
                         self._reroute_to_module_privates(
                             decl, mod.path, priv_names,
                         ),
+                    )
+                    self._generic_origins.setdefault(  # #1208
+                        self._module_qualified_base(mod.path, decl.name),
+                        mod.path,
                     )
         return public, private
 
@@ -1285,6 +1470,7 @@ class ContractVerifier:
         # re-verify a clone that no longer exists.
         self._shadowed_module_generic_verify = {}
         self._imported_generic_verify_decls = {}
+        self._generic_origins = {}
 
         disc = _replace(program)
         # #1014: qualify nested generic helper names on the discovery copy —
@@ -1386,7 +1572,9 @@ class ContractVerifier:
                     for tld in qmod.declarations
                 ))
             qualified_module_programs.append(qmod)
-        for qmod in qualified_module_programs:
+        for mod, qmod in zip(
+            self._resolved_modules, qualified_module_programs, strict=True,
+        ):
             for tld in qmod.declarations:
                 decl = tld.decl
                 if not isinstance(decl, ast.FnDecl) or decl.forall_vars:
@@ -1399,6 +1587,8 @@ class ContractVerifier:
                         self._imported_generic_verify_decls.setdefault(
                             gname, gdecl,
                         )
+                        self._generic_origins.setdefault(  # #1208
+                            gname, mod.path)
         if not generic_decls:
             return {}
 
@@ -1450,6 +1640,13 @@ class ContractVerifier:
             found = mono.collect_clone_nested_generic_instances(
                 clone, ctor_to_adt,
             )
+            # #1208: a nested helper is declared in the same module as the
+            # ancestor whose chain names it, so it recounts in that env.  The
+            # WHOLE chain is handed over — `_alias_env_for_generic` walks to
+            # the nearest recorded ancestor itself, and an imported generic
+            # nested under a non-generic function is recorded under the chain,
+            # not under its outermost segment (#1208 round 2, probe ``m4``).
+            env = self._alias_env_for_generic(base_chain)
             for h_name, (h_decl, h_cts) in found.items():
                 chain_key = f"{base_chain}$where${h_name}"
                 for h_ct in h_cts:
@@ -1458,7 +1655,7 @@ class ContractVerifier:
                     nested_seen.add((chain_key, h_ct))
                     nested_result.setdefault(chain_key, set()).add(h_ct)
                     record_nested(
-                        mono.monomorphize_fn(h_decl, h_ct), chain_key,
+                        mono.monomorphize_fn(h_decl, h_ct, env), chain_key,
                     )
 
         # Transitive closure: monomorphize each, rescan its body.  Mirrors the
@@ -1477,6 +1674,7 @@ class ContractVerifier:
                 continue
             mono_fn = mono.monomorphize_fn(
                 generic_decls[fn_name], concrete_types,
+                self._alias_env_for_generic(fn_name),  # #1208
             )
             # #1002: seed nested generic-under-generic instances from this clone.
             record_nested(mono_fn, fn_name)
@@ -1626,8 +1824,9 @@ class ContractVerifier:
             gdecl = generic_decls.get(gname)
             if gdecl is None:
                 continue
+            genv = self._alias_env_for_generic(gname)  # #1208
             for gct in list(gcts):
-                walk_seed(mono.monomorphize_fn(gdecl, gct))
+                walk_seed(mono.monomorphize_fn(gdecl, gct, genv))
 
         # Transitive worklist over shadowed clones, mirroring codegen.
         shadowed_seen: set[tuple[tuple[str, ...], str, tuple[str, ...]]] = set()
@@ -1661,7 +1860,13 @@ class ContractVerifier:
                 self._shadowed_module_generic_verify.setdefault(
                     base, (gdecl, set()),
                 )[1].add(sct)
-            clone = mono.monomorphize_fn(gdecl, sct)
+            # #1208: a shadowed MODULE generic recounts in ITS module's env —
+            # the shadow means the importer spells the name differently, which
+            # is exactly when the two namespaces can disagree.
+            self._generic_origins.setdefault(base, spath)
+            clone = mono.monomorphize_fn(
+                gdecl, sct, self._module_alias_envs.get(spath, self._alias_env),
+            )
 
             # Unshadowed transitive generics → chase full closure into `result`.
             self._chase_normal_from_clone(
@@ -1708,7 +1913,10 @@ class ContractVerifier:
                         continue
                     normal_seen.add((t_name, t_ct))
                     result.setdefault(t_name, set()).add(t_ct)
-                    stack.append(mono.monomorphize_fn(generic_decls[t_name], t_ct))
+                    stack.append(mono.monomorphize_fn(
+                        generic_decls[t_name], t_ct,
+                        self._alias_env_for_generic(t_name),  # #1208
+                    ))
 
     @property
     def summary(self) -> VerifySummary:
@@ -1781,6 +1989,7 @@ class ContractVerifier:
         instances: tuple[tuple[str, ...], ...],
         enclosing: tuple[ast.FnDecl, ...] = (),
         clone_name: str | None = None,
+        origin_key: str | None = None,
     ) -> None:
         """Verify each concrete instantiation of a generic, then aggregate.
 
@@ -1811,14 +2020,38 @@ class ContractVerifier:
         PR #1013 review).  The top-level call sites (shadowed / imported
         generic verification) pass nothing — those generics are genuinely
         top-level and an empty chain is correct there.
+
+        #1208: an IMPORTED generic is monomorphized AND verified in the
+        namespace of the module that declared it — the same env codegen's
+        ``_clone_alias_env`` hands the same clone.  Under the importer's env,
+        the De Bruijn recount and the clone's parameter re-declaration both
+        render an alias-typed parameter as a class it is not, so the verifier
+        proves a body codegen does not emit: verify clean, trap at run.
+
+        *origin_key* is that namespace lookup's key where it differs from the
+        clone's NAME.  A nested where-helper keeps its bare source name on the
+        clone (so recursion, ``decreases`` and diagnostics resolve as written)
+        while its origin is recorded against the lexical CHAIN its ancestor
+        was harvested under — the key ``_verify_fn`` already rebuilds to find
+        the instances.  Passing it separately is what keeps this side in step
+        with the discovery-time recount, which reaches the same env from the
+        same chain (#1208 round 2): the two rendering the helper in different
+        namespaces is the exact desync the origin registry exists to close,
+        and it was invisible only while BOTH were wrong.
         """
         assert self._mono is not None  # set by register_program  # noqa: S101
         per_instance: list[
             tuple[tuple[str, ...], list[ProofObligation], list[Diagnostic]]
         ] = []
         assert decl.forall_vars is not None  # generic by construction  # noqa: S101
+        # #1208: the declaring module's env for an imported generic (keyed by
+        # the canonical discovery key — `origin_key` where the caller has one
+        # that is not the clone's name, else `clone_name`), this program's
+        # otherwise.
+        origin_env = self._alias_env_for_generic(
+            origin_key or clone_name or decl.name)
         for concrete in instances:
-            clone = self._mono.monomorphize_fn(decl, concrete)
+            clone = self._mono.monomorphize_fn(decl, concrete, origin_env)
             clone = replace(clone, name=clone_name or decl.name)
             # Verify each instance into scratch error/obligation buffers so its
             # per-instance obligations don't pollute the aggregate stream; the
@@ -1842,8 +2075,12 @@ class ContractVerifier:
             try:
                 # forall_vars=None → normal path; the ancestor chain rides
                 # along so a nested generic's clone resolves helper calls
-                # lexically (PR #1013 review).
-                self._verify_fn(clone, enclosing=enclosing)
+                # lexically (PR #1013 review).  #1208: the clone's parameters
+                # re-declare under the SAME env the recount above renamed them
+                # in — a clone recounted in one namespace and re-declared in
+                # another resolves references onto the wrong parameters.
+                with self._declaring_module_scope(origin_env):
+                    self._verify_fn(clone, enclosing=enclosing)
             finally:
                 self._instance_subst = saved_subst
                 inst_obl, inst_err = self.obligations, self.errors
@@ -2071,7 +2308,13 @@ class ContractVerifier:
                 # ancestor's helper lexically, not through the flat last-wins
                 # registry (where a same-named decoy helper under any other
                 # function could capture it — a wrong-body verification).
-                self._verify_generic_instances(decl, instances, enclosing)
+                # #1208 round 2: `inst_key` is also the key the ORIGIN
+                # registry answers to, so it is handed over as well — the
+                # clone keeps its bare name, but its naming env comes from the
+                # module that declared the chain, matching the recount.
+                self._verify_generic_instances(
+                    decl, instances, enclosing, origin_key=inst_key,
+                )
                 return
             # Never instantiated in this program: the body's type variables
             # can't be represented in Z3, so non-trivial contracts fall to
@@ -2114,13 +2357,20 @@ class ContractVerifier:
             if (decl.body is not None
                     and self._is_refined_type(generic_ret)
                     and not contains_typevar(generic_ret)):
-                self._check_generic_refined_return(decl, generic_ret)
+                self._check_generic_refined_return(
+                    decl, generic_ret, enclosing)
             return
 
         # #991: resolve bare calls in this body through the lexically-scoped
         # where-helper lookup, so a same-named helper in a sibling subtree can't
         # be assumed at this call site (the diamond false-E500).
         fn_lookup = self._scoped_fn_lookup(decl, enclosing)
+        # #1208: THIS function's naming scope — its declaring module's env
+        # narrowed by the `forall` variables in scope over it.  Both the slot
+        # names declared below and the SMT context that resolves references to
+        # them are built from it, so the two sides cannot end up scoped
+        # differently.
+        fn_env = self._fn_naming_scope(self._current_alias_env, decl, enclosing)
         if self._shared_smt is not None:
             # Warm session (#222 Phase A): reuse one z3.Solver across
             # functions.  reset() clears all per-function state (vars,
@@ -2131,12 +2381,19 @@ class ContractVerifier:
             smt.reset()
             smt._fn_lookup = fn_lookup
             smt._module_fn_lookup = self._lookup_module_function
+            # #1208: the warm context outlives the program that built it, so
+            # its naming environment is rebound per function exactly as the
+            # lookups above are.
+            smt._alias_env = fn_env
+            smt._callee_alias_env_lookup = self._callee_alias_env
         else:
             smt = SmtContext(
                 timeout_ms=self.timeout_ms,
                 fn_lookup=fn_lookup,
                 module_fn_lookup=self._lookup_module_function,
+                alias_env=fn_env,
             )
+            smt._callee_alias_env_lookup = self._callee_alias_env
         # CR PR-review: let the SMT match translation assume a constructor
         # pattern's refined / @Nat sub-pattern SOURCE facts while checking the
         # arm body's call PRECONDITIONS — the E501 path the narrowing-walk fact
@@ -2164,7 +2421,7 @@ class ContractVerifier:
         refined_param_assumptions: list[object] = []
         param_types = [self._resolve_type(p) for p in decl.params]
         for i, (param_te, param_ty) in enumerate(zip(decl.params, param_types)):
-            type_name = self._type_expr_to_slot_name(param_te)
+            type_name = self._type_expr_to_slot_name(param_te, fn_env)
             z3_name = f"@{type_name}.{self._count_slots(slot_env, type_name)}"
 
             if self._is_nat_type(param_ty):
@@ -2720,7 +2977,12 @@ class ContractVerifier:
                 z3_arg = smt.translate_expr(arg_expr, call_site_env)
                 if z3_arg is None:  # pragma: no cover
                     return False
-                type_name = self._type_expr_to_slot_name(param_te)
+                # #1208: `smt._alias_env` IS the scope `_verify_fn` built for
+                # this function (its module's env, forall-narrowed) — a
+                # decreases group is same-module and non-generic by
+                # construction, so the sibling's parameters render there too.
+                type_name = self._type_expr_to_slot_name(
+                    param_te, smt._alias_env)
                 callee_env = callee_env.push(type_name, z3_arg)
 
             # For cross-calls, use the callee's decreases expression
@@ -5709,6 +5971,7 @@ class ContractVerifier:
 
     def _check_generic_refined_return(
         self, decl: ast.FnDecl, ret_type: Type,
+        enclosing: tuple[ast.FnDecl, ...] = (),
     ) -> None:
         """Discharge a *concrete* refined return on a generic function (#746).
 
@@ -5721,11 +5984,26 @@ class ContractVerifier:
         ``tier3``), exactly as on the non-generic path."""
         if decl.body is None:  # pragma: no cover — caller guards this
             return
+        # #1208: the ONE path that renders a still-GENERIC signature, so the
+        # forall narrowing is load-bearing here — `type T = Int;` shadowed by
+        # `forall<T>` would otherwise merge `@T` and `@Int` parameters into one
+        # stack the checker kept apart.  The ancestor chain rides along for the
+        # same reason the main path (`_verify_fn` step 3) threads it: a
+        # `where`-helper inherits its ancestors' type parameters, which is the
+        # accumulation `slots.fn_scopes` performs.  Every ancestor that reaches
+        # this site today is already monomorphized (a still-generic parent
+        # returns before step 9, so only its clones recurse into `where_fns`),
+        # so the chain contributes nothing yet; passing it keeps the two
+        # `_fn_naming_scope` calls from disagreeing if that ever changes.
+        fn_env = self._fn_naming_scope(
+            self._current_alias_env, decl, enclosing)
         smt = SmtContext(
             timeout_ms=self.timeout_ms,
             fn_lookup=self.env.lookup_function,
             module_fn_lookup=self._lookup_module_function,
+            alias_env=fn_env,
         )
+        smt._callee_alias_env_lookup = self._callee_alias_env
         for adt_info in self.env.data_types.values():
             smt.register_adt(adt_info)
         # CR PR-review: the generic refined-return fast path translates the body
@@ -5742,7 +6020,7 @@ class ContractVerifier:
         assumptions: list[object] = []
         for param_te in decl.params:
             param_ty = self._resolve_type(param_te)
-            type_name = self._type_expr_to_slot_name(param_te)
+            type_name = self._type_expr_to_slot_name(param_te, fn_env)
             z3_name = f"@{type_name}.{self._count_slots(slot_env, type_name)}"
             if self._is_nat_type(param_ty):
                 var = smt.declare_nat(z3_name)
@@ -7430,7 +7708,13 @@ class ContractVerifier:
                 if name != "@result":
                     ce_lines.append(f"    {name} = {value}")
             if "@result" in counterexample:
-                result_name = f"@{self._type_expr_to_slot_name(fn.return_type)}.result"
+                # #1208: named in the function's OWN scope, so a `forall<T>`
+                # return type reads `@T.result` as written rather than picking
+                # up a same-named module alias's resolution.
+                result_name = "@{}.result".format(self._type_expr_to_slot_name(
+                    fn.return_type,
+                    self._fn_naming_scope(self._current_alias_env, fn),
+                ))
                 ce_lines.append(f"    {result_name} = {counterexample['@result']}")
 
         ce_text = "\n  ".join(ce_lines) if ce_lines else ""
@@ -7473,8 +7757,10 @@ class ContractVerifier:
     def _pre_at_call_site(
         self,
         callee_params: tuple[ast.TypeExpr, ...],
+        callee_forall: tuple[str, ...] | None,
         call_node: ast.FnCall | ast.ModuleCall,
         precondition: ast.Requires,
+        callee_env: AliasEnv | None = None,
     ) -> str | None:
         """The precondition rendered in CALL-SITE terms, or None.
 
@@ -7487,17 +7773,33 @@ class ContractVerifier:
         any slot cannot be mapped (unknown type in the table, index
         out of range, arity mismatch), in which case the caller keeps
         the generic wording.
+
+        Both sides of the lookup render through :mod:`vera.naming` (#1208),
+        in the CALLEE's scope: *callee_env* (the module that DECLARED the
+        callee — a bare call after ``import m(f)`` reaches an imported
+        contract, so this is not always this program's env) narrowed by
+        *callee_forall*, its own type parameters.  The table is keyed by
+        :func:`~vera.naming.slot_name` and the reference by
+        :func:`~vera.naming.slot_ref_key`, the same renderer the checker
+        binds and resolves with.  Keying by the reference's bare HEAD instead
+        — the pre-#1208 bug — meant a PARAMETERISED reference
+        (``@Wrap<Int>.0`` against a ``Wrap<Int>`` entry) never matched, so
+        the substitution was abandoned and the message fell back to its
+        generic wording on exactly the signatures the concrete rendering
+        helps most.  It failed closed, which is why it stayed invisible.
         """
         import dataclasses as _dc
 
-        table = slot_table(callee_params)
+        env = self._current_alias_env if callee_env is None else callee_env
+        table = slot_table(callee_params, env, callee_forall)
+        scope = fn_slot_scope(env, callee_forall)
 
         class _NoSubstitution(Exception):
             pass
 
         def rebuild(node: ast.Expr) -> ast.Expr:
             if isinstance(node, ast.SlotRef):
-                positions = table.get(node.type_name)
+                positions = table.get(naming.slot_ref_key(node, scope))
                 if not positions or node.index >= len(positions):
                     raise _NoSubstitution
                 pos = positions[node.index]
@@ -7567,8 +7869,14 @@ class ContractVerifier:
                     "tuple[ast.TypeExpr, ...]",
                     callee_info.param_type_exprs,
                 ),
+                callee_info.forall_vars,
                 call_node,
                 precondition,
+                # #1208: an IMPORTED callee's parameters are spelled in its own
+                # module's alias namespace, so the substitution table has to be
+                # keyed there or a rendered `@Alias.n` silently misses and the
+                # message falls back to its generic wording.
+                self._callee_alias_env(callee_info),
             )
 
         # Build counterexample description
@@ -7920,11 +8228,23 @@ class ContractVerifier:
         stack = env._stacks.get(type_name, [])
         return len(stack)
 
-    def _type_expr_to_slot_name(self, te: ast.TypeExpr) -> str:
-        """Extract the canonical slot name from a type expression.
+    def _type_expr_to_slot_name(
+        self, te: ast.TypeExpr, env: AliasEnv | None = None,
+    ) -> str:
+        """The slot-binding name of *te*, as the checker binds it (#1208).
 
-        Delegates to the shared recursive :func:`vera.slots.type_expr_slot_name`
-        (fully-qualified over nested composites, #914 finding 2) with the
-        verifier's total-``str`` contract: an unnameable component is ``"?"``.
+        Delegates to :func:`vera.naming.slot_name` against *env*, defaulting to
+        the module env currently in scope (``_current_alias_env``: this
+        program's, built at the end of ``register_program`` from the same
+        registration pass the checker runs — or an imported generic's defining
+        module while its clone is verified).  Syntactic head, RESOLVED type
+        arguments, fully qualified over nested composites (#914 finding 2);
+        already total, and its ``"?"`` is the same unnameable rendering the
+        verifier's contract used.
+
+        A caller rendering a FUNCTION's own parameters passes that function's
+        scope (``_fn_naming_scope``) so its ``forall`` variables shadow
+        same-named aliases; a caller rendering an IMPORTED CALLEE's parameters
+        passes the callee's module env (``_callee_alias_env``).
         """
-        return type_expr_slot_name(te) or "?"
+        return naming.slot_name(te, self._current_alias_env if env is None else env)

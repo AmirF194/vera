@@ -74,11 +74,12 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `ast.py` | 895 | Transform | Frozen dataclass AST nodes, source formatting | `Program`, `Node`, `Expr`, `format_expr` |
 | `types.py` | 662 | Type check | Semantic type representation | `Type`, `is_subtype()` |
 | `prelude.py` | 927 | Type check | Standard prelude — built-in ADT and combinator injection | `inject_prelude()`, `overridable_builtin_names()` |
-| `slots.py` | 289 | Type check | Slot reference table for `vera check --explain-slots` | `slot_table()`, `slot_ref_name()` |
+| `naming.py` | 759 | Type check | The ONE slot / slot-reference-key / State-Exn-family renderer (#1208, #1209) — the checker's rendering, as a total pure function over an `AliasEnv`, consumed by the checker, the monomorphizer, the verifier, the SMT layer, codegen, the tester, the LSP, and `vera check --explain-slots`.  Also the ONE refinement-binder derivation codegen's runtime guard consumes (`refinement_binder_parts`), and each consumer is handed the env of the module that DECLARED what it is rendering | `slot_name()`, `slot_ref_key()`, `family_name()`, `resolve_type_expr()`, `AliasEnv` |
+| `slots.py` | 280 | Type check | Presentation over `naming.py`: slot resolution tables and their text/JSON rendering, plus the two scope walks the tables need (`forall` narrowing, `where`-helper nesting).  The two walks here that are NOT naming say so in their docstrings — the alias-opaque syntactic spelling for WASM representation questions, and the last-resort name for a State/Exn cell family that resolves to none | `slot_table()`, `format_slot_table()`, `fn_slot_scope()`, `fn_scopes()`, `type_expr_slot_name()`, `family_fallback_name()` |
 | `environment.py` | 2,167 | Type check | Type environment, scope stacks, ability registry, all built-in registrations | `TypeEnv`, `AbilityInfo` |
-| `checker/` | 5,948 | Type check | Two-pass type checker (mixin package) | `typecheck()` |
+| `checker/` | 6,620 | Type check | Two-pass type checker (mixin package) | `typecheck()` |
 | `  core.py` | 952 | | TypeChecker class, orchestration, contracts, constraint validation | |
-| `  resolution.py` | 419 | | AST TypeExpr → semantic Type, inference | |
+| `  resolution.py` | 470 | | AST TypeExpr → semantic Type, inference | |
 | `  modules.py` | 180 | | Cross-module registration (C7b/C7c) | |
 | `  registration.py` | 717 | | Pass 1 forward declarations, ability registration | |
 | `  expressions.py` | 1,335 | | Expression synthesis (bidirectional), operators, statements | |
@@ -89,7 +90,7 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `resolver.py` | 332 | Resolve | Module path resolution, parse cache | `ModuleResolver` |
 | `monomorphize.py` | 2,438 | Resolve | Shared generic instantiation discovery + AST substitution (verifier and codegen) | `substitute_type_vars()`, `resolve_type_alias()`, `canonicalize_type_aliases()` |
 | `smt.py` | 2,877 | Verify | Z3 translation layer | `SmtContext`, `SlotEnv` |
-| `verifier.py` | 7,321 | Verify | Contract verification | `verify()` |
+| `verifier.py` | 8,190 | Verify | Contract verification | `verify()` |
 | `wasm/` | 25,941 | Compile | WASM translation layer (package) | `WasmContext`, `WasmSlotEnv`, `StringPool` |
 | ` ├ context.py` | 1,089 | | Composed WasmContext, expression dispatcher, block translation | |
 | ` ├ helpers.py` | 463 | | WasmSlotEnv, StringPool, type mapping, array element helpers | |
@@ -118,7 +119,7 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `lsp/` | 1,397 | Serve | Language Server Protocol over stdio (#222 C/D/E/F) | `create_server()`, `vera lsp` |
 | `  convert.py` | 144 | | Span/SourceLocation/LSP coordinate conversions, UTF-16 transcoding | |
 | `  documents.py` | 69 | | URI-keyed document store, full-text sync | |
-| `  features.py` | 300 | | Diagnostics + tier hints, hover, slot goto, hole completion | |
+| `  features.py` | 327 | | Diagnostics + tier hints, hover, slot goto, hole completion | |
 | `  extensions.py` | 146 | | vera/speculativeEdit proof-delta | |
 | `  server.py` | 287 | | pygls wiring, single-session serialisation | |
 | `  workflows.py` | 442 | | Skill-layer workflows: enforced edit sequences (#222 F) | |
@@ -132,9 +133,9 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `  functions.py` | 1,202 | | Function body compilation, GC prologue/epilogue (Pass 2) | |
 | `  tail_position.py` | 106 | | Tail-position analysis for the function body compiler | |
 | `  closures.py` | 876 | | Closure lifting, GC instrumentation | |
-| `  contracts.py` | 1,262 | | Runtime pre/postconditions, old state snapshots, decreases termination guard (entry check-and-set, per-function chain state, ADT rank helpers, self-tail site checks) | |
+| `  contracts.py` | 1,196 | | Runtime pre/postconditions, old state snapshots, decreases termination guard (entry check-and-set, per-function chain state, ADT rank helpers, self-tail site checks); the refinement boundary guard derives its binder from `naming.refinement_binder_parts` and layers the erased-base skip and the nested-base E618 on top | |
 | `  assembly.py` | 1,447 | | WAT module assembly, `$alloc`, `$gc_collect` | |
-| `  compilability.py` | 545 | | Compilability checks, state handler scanning | |
+| `  compilability.py` | 606 | | Compilability checks, state handler scanning | |
 | `  wasi.py` | 4,820 | | WASI Preview 2 component/adapter emitter — `--target wasi-p2` / `--world server` (#237, #853) | |
 | `runtime/` | 4,784 | Execute | wasmtime host layer (#421): traps + per-effect host-binding families | `register_*()`, `WasmTrapError` |
 | `  traps.py` | 493 | | `WasmTrapError`, `_classify_trap`, source-backtrace resolution | |
@@ -144,7 +145,7 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `  <effect>.py` ×14 | 2,480 | | one `register_<effect>(linker, …)` per family: random, math, md, json, regex, html, map, set, decimal, http, async_http (#841 fused-async: worker-thread submit + blocking await + kind-4 cancel/evict decref), inference, state, db | |
 | `  wasi_host.py` | 213 | | Built-in `wasi-p2` runner via `add_wasip2` — `vera run --target wasi-p2` (#237, #853) | |
 | `  server.py` | 150 | | `vera serve` HTTP driver for `handle(Request -> Response)` (#305) | |
-| `tester.py` | 992 | Test | Z3-guided input generation, WASM execution, tier classification | `test()` |
+| `tester.py` | 1,081 | Test | Z3-guided input generation (parameter types resolved through `naming.py`), WASM execution, tier classification | `test()` |
 | `formatter.py` | 1,951 | Format | Canonical code formatter | `format_source()` |
 | `errors.py` | 803 | All | Diagnostic class, error hierarchy, error code registry | `Diagnostic`, `VeraError`, `ERROR_CODES` |
 | `skip.py` | 217 | All | Codegen-internal control-flow exceptions behind structured skip diagnostics (#626) | `CodegenSkip`, `CodegenInvariantError` |
@@ -154,7 +155,7 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | ` ├ emit.py` | 137 | | Browser bundle emission (wasm + runtime + html) | `emit_browser_bundle()` |
 | ` ├ runtime.mjs` | 3,303 | | Self-contained JS runtime: IO, State, Http, Inference, contracts, Markdown, Json, Html | |
 | ` └ harness.mjs` | 106 | | Node.js test harness for parity testing | |
-| `cli.py` | 1,780 | All | CLI commands | `main()` |
+| `cli.py` | 1,975 | All | CLI commands | `main()` |
 | `registration.py` | 126 | Type check | Shared function registration | `register_fn()` |
 
 Total: ~72,000 lines of Python + 343 lines of grammar + 3,378 lines of JavaScript.

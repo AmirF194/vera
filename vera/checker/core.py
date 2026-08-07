@@ -26,8 +26,9 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from vera.resolver import ResolvedModule
 
-from vera import ast
+from vera import ast, naming
 from vera.errors import Diagnostic, SourceLocation
+from vera.naming import AliasEnv
 from vera.environment import (
     AdtInfo,
     FunctionInfo,
@@ -45,7 +46,6 @@ from vera.types import (
     Type,
     TypeVar,
     UnknownType,
-    canonical_type_name,
     is_subtype,
     pretty_type,
     pretty_inferred_type,
@@ -128,6 +128,13 @@ class CheckArtifacts:
     # the #820 @Nat -> @Int widening guard fires at the array-element /
     # tuple-construction sites through the import door, not just same-file.
     module_artifacts: ModuleArtifacts
+    # #1208: the ENTRY module's naming environment — the alias bodies, alias
+    # parameters, and declared-ADT names :mod:`vera.naming` renders slot names,
+    # slot-reference keys, and State/Exn cell families against.  Captured from
+    # the checker's own ``TypeEnv`` once the program has been checked, so a
+    # consumer downstream of the check renders against exactly the table the
+    # checker keyed its bindings by rather than rebuilding an approximation.
+    alias_env: AliasEnv
 
 
 def typecheck_with_artifacts(
@@ -154,6 +161,13 @@ def typecheck_with_artifacts(
     extra ``check_program`` per resolved module for nothing, so they leave it
     ``False`` (``module_artifacts`` is then an empty dict, which ``_compile_fn``
     already tolerates — the #986 imported-body suppression fallback).
+    ``alias_env`` (#1208), by contrast, is the entry module's own and always
+    present — it costs one walk of an already-built table.  There is no
+    per-module counterpart in the artifacts: the two consumers that need one
+    build it themselves from a namespace they already hold — codegen from its
+    own flat alias maps (``_sync_alias_env``), the verifier from its own
+    per-module registration (``ContractVerifier._module_alias_envs``) — and a
+    third, unread copy here would only be one more table to drift.
     """
     checker = TypeChecker(
         source=source, file=file, resolved_modules=resolved_modules,
@@ -188,6 +202,7 @@ def typecheck_with_artifacts(
         expr_semantic_types=checker.expr_semantic_types,
         expr_target_types=checker.expr_target_types,
         module_artifacts=module_arts,
+        alias_env=naming.alias_env_from_environment(checker.env),
     )
 
 
@@ -805,19 +820,18 @@ class TypeChecker(
 
     def _type_expr_to_slot_name(self, te: ast.TypeExpr) -> str:
         """Extract the canonical slot name from a type expression used as a
-        parameter binding.  This is the syntactic name — aliases are opaque."""
-        if isinstance(te, ast.NamedType):
-            if te.type_args:
-                resolved_args = tuple(
-                    self._resolve_type(a) for a in te.type_args)
-                return canonical_type_name(te.name, resolved_args)
-            return te.name
-        if isinstance(te, ast.RefinementType):
-            return self._type_expr_to_slot_name(te.base_type)
-        if isinstance(te, ast.FnType):
-            # Function-typed parameters: use a synthetic name
-            return "Fn"
-        return "?"
+        parameter binding.  The head is the syntactic name — aliases are
+        opaque — while type arguments resolve.
+
+        Delegates to :func:`vera.naming.slot_name` (#1208), which is the ONE
+        renderer of that rule; the six subsystems that used to answer this
+        question independently disagreed about aliases, and a name minted one
+        way and looked up another misses silently.  The argument diagnostics
+        the old in-place composition emitted as a side effect are preserved
+        by ``_check_slot_name_args`` — see its docstring.
+        """
+        self._check_slot_name_args(te)
+        return naming.slot_name(te, self._naming_env())
 
     # -----------------------------------------------------------------
     # Contracts

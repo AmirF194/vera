@@ -17,11 +17,12 @@ from typing import TYPE_CHECKING
 
 import z3
 
-from vera import ast
+from vera import ast, naming
 from vera.errors import Diagnostic, SourceLocation
-from vera.slots import type_expr_slot_name
+from vera.naming import EMPTY_ALIAS_ENV, AliasEnv
+from vera.slots import fn_slot_scope
 from vera.smt import SlotEnv, SmtContext
-from vera.types import BOOL, BYTE, FLOAT64, INT, NAT, STRING, UNIT, ModuleArtifacts, PrimitiveType, RefinedType, Type, base_type
+from vera.types import BOOL, BYTE, FLOAT64, INT, NAT, STRING, UNIT, ModuleArtifacts, PrimitiveType, Type, base_type, pretty_type
 
 if TYPE_CHECKING:
     from vera.codegen import CompileResult
@@ -108,9 +109,17 @@ _VERIFICATION_ERROR_CODES = frozenset({"E500", "E501", "E502"})
 
 
 def _unsupported_type_names(param_types: list[Type]) -> list[str]:
-    """Return a sorted list of type names that cannot be Z3-encoded."""
+    """Return a sorted list of type names that cannot be Z3-encoded.
+
+    Named by the checker's own :func:`~vera.types.pretty_type`, so the skip
+    reason reads in the user's vocabulary: since #1216 the types reaching
+    here are the RESOLVED ones, and reporting an ADT parameter as
+    ``Option<Int>`` rather than as its Python class name is what makes the
+    message actionable.  Primitives keep their bare name (``pretty_type``
+    agrees) — only the composite cases change spelling.
+    """
     return sorted({
-        t.name if isinstance(t, PrimitiveType) else type(t).__name__
+        t.name if isinstance(t, PrimitiveType) else pretty_type(t)
         for pt in param_types
         for t in (base_type(pt),)
         if t not in _Z3_SUPPORTED
@@ -155,6 +164,7 @@ def test(
     expr_semantic_types: dict[tuple[int, int, int, int], Type] | None = None,
     expr_target_types: dict[tuple[int, int, int, int], Type] | None = None,
     module_artifacts: ModuleArtifacts | None = None,
+    alias_env: AliasEnv = EMPTY_ALIAS_ENV,
 ) -> TestResult:
     """Test a type-checked Vera program by generating inputs from contracts.
 
@@ -174,6 +184,10 @@ def test(
     ``module_artifacts`` (#987) carries each resolved module's OWN side-tables so
     the tester-compiled WASM also emits the widen guards for IMPORTED bodies —
     the same threading ``vera run`` / ``vera compile`` use.
+
+    ``alias_env`` (#1208) is the checked program's naming environment
+    (``CheckArtifacts.alias_env``), carried down to the Z3 input generator so
+    the slot names it declares variables under are the checker's.
     """
     engine = _TestEngine(
         program=program,
@@ -185,6 +199,7 @@ def test(
         expr_semantic_types=expr_semantic_types,
         expr_target_types=expr_target_types,
         module_artifacts=module_artifacts,
+        alias_env=alias_env,
     )
     return engine.run()
 
@@ -209,6 +224,7 @@ class _TestEngine:
         expr_target_types: (
             dict[tuple[int, int, int, int], Type] | None) = None,
         module_artifacts: ModuleArtifacts | None = None,
+        alias_env: AliasEnv = EMPTY_ALIAS_ENV,
     ) -> None:
         self.program = program
         self.source = source
@@ -224,6 +240,9 @@ class _TestEngine:
         # #987: per-module tables so the tester's WASM emits the widen guards for
         # imported bodies too (threaded into `codegen_compile` below).
         self.module_artifacts = module_artifacts
+        # #1208: the checked program's naming environment, threaded into the
+        # Z3 input generator so its slot names are the checker's.
+        self.alias_env = alias_env
 
     def run(self) -> TestResult:
         """Execute the full test pipeline."""
@@ -240,7 +259,7 @@ class _TestEngine:
             expr_target_types=self.expr_target_types,
         )
         classification = _classify_functions(
-            self.program, verify_result.diagnostics,
+            self.program, verify_result.diagnostics, self.alias_env,
         )
 
         # 2. Filter to target functions
@@ -344,8 +363,9 @@ class _TestEngine:
                 continue
 
             # Generate inputs
-            param_types = _get_param_types(decl)
-            inputs = _generate_inputs(decl, param_types, self.trials)
+            param_types = _get_param_types(decl, self.alias_env)
+            inputs = _generate_inputs(
+                decl, param_types, self.trials, self.alias_env)
 
             if inputs is None:  # pragma: no cover — _classify_functions filters unsupported types
                 unsupported_names = _unsupported_type_names(param_types)
@@ -395,6 +415,7 @@ class _TestEngine:
             # Run trials
             trial_results = _run_trials(
                 compile_result, fn_name, inputs, param_types, decl,
+                self.alias_env,
             )
 
             n_passed = sum(1 for t in trial_results if t.status == "pass")
@@ -535,10 +556,16 @@ def _not_exported_reason(
 def _classify_functions(
     program: ast.Program,
     verify_diagnostics: list[Diagnostic],
+    alias_env: AliasEnv = EMPTY_ALIAS_ENV,
 ) -> dict[str, tuple[str, str, ast.FnDecl]]:
     """Classify each function as verified/tier3/skipped.
 
     Returns {name: (category, reason, decl)}.
+
+    *alias_env* is the checked program's naming environment, needed because
+    the encodability question is asked of each parameter's RESOLVED type
+    (#1216); the engine passes its own, and the default keeps every alias
+    opaque for a caller that has none.
     """
     # Collect function names mentioned in verifier diagnostics.
     tier3_fns: set[str] = set()
@@ -581,7 +608,7 @@ def _classify_functions(
             continue
 
         # Check parameter types
-        param_types = _get_param_types(decl)
+        param_types = _get_param_types(decl, alias_env)
         has_unsupported = any(
             base_type(pt) not in _Z3_SUPPORTED for pt in param_types
         )
@@ -683,30 +710,25 @@ def _has_nontrivial_contracts(decl: ast.FnDecl) -> bool:
     return False
 
 
-def _get_param_types(decl: ast.FnDecl) -> list[Type]:
-    """Resolve parameter types for a function declaration."""
-    from vera.types import PRIMITIVES
-    types: list[Type] = []
-    for param_te in decl.params:
-        if isinstance(param_te, ast.NamedType):
-            ty = PRIMITIVES.get(param_te.name)
-            if ty is not None:
-                types.append(ty)
-            else:
-                # Non-primitive (ADT, etc.)
-                types.append(Type())
-        elif isinstance(param_te, ast.RefinementType):
-            if isinstance(param_te.base_type, ast.NamedType):
-                ty = PRIMITIVES.get(param_te.base_type.name)
-                if ty is not None:
-                    types.append(RefinedType(ty, param_te.predicate))
-                else:
-                    types.append(Type())
-            else:
-                types.append(Type())
-        else:
-            types.append(Type())
-    return types
+def _get_param_types(decl: ast.FnDecl, alias_env: AliasEnv) -> list[Type]:
+    """The semantic type of each parameter, as the CHECKER resolves it (#1216).
+
+    One resolution, :func:`vera.naming.resolve_type_expr`, against the naming
+    environment of the module that declared *decl* — narrowed by the
+    function's own ``forall`` variables, which shadow same-named module
+    aliases exactly as they do for the checker.  The pre-#1216 derivation
+    matched a parameter's SYNTACTIC head against ``PRIMITIVES``, so
+    ``type Cnt = Int`` never reached ``Int``: every alias-typed signature was
+    classified un-encodable and skipped (E701) although its resolved type is
+    ordinary Z3-encodable ``Int``.
+
+    Resolving is not the same as being encodable: an ADT, a function type, a
+    type variable and an unresolvable expression all resolve to types
+    :data:`_Z3_SUPPORTED` does not contain, and the caller still skips them —
+    now by the resolved answer rather than by the spelling.
+    """
+    scope = fn_slot_scope(alias_env, decl.forall_vars)
+    return [naming.resolve_type_expr(te, scope) for te in decl.params]
 
 
 # =====================================================================
@@ -717,11 +739,16 @@ def _generate_inputs(
     decl: ast.FnDecl,
     param_types: list[Type],
     count: int,
+    alias_env: AliasEnv = EMPTY_ALIAS_ENV,
 ) -> list[list[int | float | str]] | None:
     """Generate test inputs from requires() clauses via Z3.
 
     Returns None if any parameter type is unsupported.
     Returns empty list if precondition is unsatisfiable.
+
+    Names every variable in the function's own slot scope — the module
+    environment narrowed by its ``forall`` variables (#1216), the same
+    narrowing the checker applies before it binds these parameters.
     """
     # 1. Check all param types are Z3-supported
     for pt in param_types:
@@ -729,15 +756,20 @@ def _generate_inputs(
         if bt not in _Z3_SUPPORTED:
             return None
 
-    # 2. Declare Z3 variables
-    smt = SmtContext(timeout_ms=5000)
+    # 2. Declare Z3 variables.  The SMT context gets the SAME narrowed scope
+    # the names above are minted in (#1208): it is what `_translate_slot_ref`
+    # resolves a `requires` clause's `@T.n` against, so handing it the
+    # un-narrowed env would look up under a key the bind side never pushed —
+    # exactly once a `forall` variable shadows a same-named module alias.
+    scope = fn_slot_scope(alias_env, decl.forall_vars)
+    smt = SmtContext(timeout_ms=5000, alias_env=scope)
     slot_env = SlotEnv()
     z3_vars: list[z3.ExprRef] = []
     var_types: list[Type] = []  # base types for each var
 
     for i, (param_te, param_ty) in enumerate(zip(decl.params, param_types)):
         bt = base_type(param_ty)
-        type_name = _type_expr_to_slot_name(param_te)
+        type_name = _type_expr_to_slot_name(param_te, scope)
         slot_idx = _count_slots(slot_env, type_name)
         z3_name = f"@{type_name}.{slot_idx}"
 
@@ -769,6 +801,35 @@ def _generate_inputs(
             smt.solver.add(var <= _I64_BOUND)
         elif bt == NAT:
             smt.solver.add(var <= _I64_BOUND)
+
+    # 3b. Refinement membership.  A refined parameter's predicate is part of
+    # its TYPE, not of its contract, so no `requires` clause states it — and
+    # codegen emits it as an entry guard that traps on a violating argument.
+    # Since #1216 a refined alias reaches here (a refinement is unwritable in
+    # parameter position, so an alias is the only way to have one), and an
+    # unconstrained generator would manufacture arguments the guard rejects
+    # and report the trap as a contract failure.  The binder comes from
+    # `vera.naming`, so the predicate's own `@Base.n` resolves onto this
+    # variable under exactly the name codegen's guard pushes it under.
+    #
+    # The binder is the SOLE slot in scope (spec §2.6): the checker isolates
+    # the scope stack for the predicate rather than pushing onto it
+    # (`_check_one_refinement_predicate`), so translating against a FRESH
+    # `SlotEnv` rather than the accumulated one keeps this side to the same
+    # rule.  Pushing onto the accumulated env instead let a `@Base.1` in the
+    # predicate capture a sibling parameter's variable — a constraint the
+    # emitted guard never checks.  The checker rejects such a predicate
+    # (E130) so no check-clean program reaches it; isolating here means a
+    # future scoping change cannot turn that into a silent wrong constraint.
+    for param_te, var in zip(decl.params, z3_vars):
+        parts = naming.refinement_binder_parts(param_te, scope)
+        if parts is None or parts.base_is_refinement:
+            continue
+        membership = smt.translate_expr(
+            parts.predicate, SlotEnv().push(parts.binder_name, var),
+        )
+        if membership is not None:
+            smt.solver.add(membership)
 
     # 4. Translate requires() clauses to Z3 constraints
     for contract in decl.contracts:
@@ -924,13 +985,20 @@ def _run_trials(
     inputs: list[list[int | float | str]],
     param_types: list[Type],
     decl: ast.FnDecl,
+    alias_env: AliasEnv,
 ) -> list[TrialResult]:
-    """Execute test trials against the compiled WASM module."""
+    """Execute test trials against the compiled WASM module.
+
+    Labels each argument in the function's own slot scope — the module
+    environment narrowed by its ``forall`` variables (#1216) — so a reported
+    failure names the argument the way the source's own `@T.n` references do.
+    """
     from vera.codegen import execute
 
     # String uses i32_pair ABI (two WASM params); Float64 has string→float
     # parsing. Both require the raw_args calling convention.
     needs_raw = any(base_type(pt) in _NEEDS_RAW for pt in param_types)
+    scope = fn_slot_scope(alias_env, decl.forall_vars)
 
     results: list[TrialResult] = []
     for args in inputs:
@@ -938,7 +1006,7 @@ def _run_trials(
         arg_dict: dict[str, int | float | str] = {}
         slot_counts: dict[str, int] = {}
         for param_te, val in zip(decl.params, args):
-            tname = _type_expr_to_slot_name(param_te)
+            tname = _type_expr_to_slot_name(param_te, scope)
             idx = slot_counts.get(tname, 0)
             arg_dict[f"@{tname}.{idx}"] = val
             slot_counts[tname] = idx + 1
@@ -991,14 +1059,16 @@ def _run_trials(
 # Helpers
 # =====================================================================
 
-def _type_expr_to_slot_name(te: ast.TypeExpr) -> str:
-    """Extract the canonical slot name from a type expression.
+def _type_expr_to_slot_name(te: ast.TypeExpr, alias_env: AliasEnv) -> str:
+    """The slot-binding name of *te*, as the checker binds it (#1208).
 
-    Delegates to the shared recursive :func:`vera.slots.type_expr_slot_name`
-    (fully-qualified over nested composites, #914 finding 2) with the
-    tester's total-``str`` contract: an unnameable component is ``"?"``.
+    Delegates to :func:`vera.naming.slot_name` against the checked program's
+    naming environment, so a generated input is labelled with the slot name
+    the source's own `@T.n` references resolve to (`@Option<Int>.0` for a
+    parameter written `@Option<Cnt>`).  Already total: an unresolvable type
+    expression renders `"?"`, which is the tester's contract.
     """
-    return type_expr_slot_name(te) or "?"
+    return naming.slot_name(te, alias_env)
 
 
 def _count_slots(env: SlotEnv, type_name: str) -> int:

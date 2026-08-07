@@ -15,23 +15,22 @@ each handle a specific concern:
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import re
+from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
 import wasmtime
 
-from vera import ast
+from vera import ast, naming
 from vera.codegen.api import CompileResult
 from vera.codegen.memory import ConstructorLayout
 from vera.errors import Diagnostic, SourceLocation
 from vera.monomorphize import canonicalize_type_aliases, qualify_nested_generic_decls
+from vera.naming import EMPTY_ALIAS_ENV, AliasEnv
 from vera.prelude import PRELUDE_FILE, mentioned_fn_names
-from vera.slots import (
-    AliasResolutionDepthError,
-    resolve_scalar_alias_te,
-    type_expr_slot_name,
-)
+from vera.slots import family_fallback_name
 from vera.wasm import StringPool
 from vera.wasm.async_fusion import (
     compute_future_ret_fns,
@@ -70,6 +69,13 @@ _WAT_CALL_RE = re.compile(r"\b(?:return_call|call)\s+\$([^\s()]+)")
 # the propagation needs its own probe.  Anchored at line start so a `;;`
 # comment naming the instruction can never be read as an emission.
 _WAT_CALL_INDIRECT_RE = re.compile(r"(?m)^\s*call_indirect\b")
+
+# #1208: the two reserved floors of the shared declaration-index space (see
+# `CodeGenerator._decl_order`).  A built-in ADT precedes every declaration,
+# including the prelude's; the prelude block sits between it and the user's,
+# with room for far more injected declarations than the prelude has.
+_BUILTIN_DECL_INDEX = -(1 << 30)
+_PRELUDE_DECL_BASE = -(1 << 20)
 
 
 def _find_holes(program: ast.Program) -> list[ast.HoleExpr]:
@@ -266,6 +272,67 @@ class CodeGenerator(
         # onto THESE, never onto the main file's aliases.
         self._prelude_type_aliases: dict[str, ast.TypeExpr] = {}
         self._prelude_type_alias_params: dict[str, tuple[str, ...]] = {}
+        # #1208: the SHARED declaration-index space over aliases AND ADTs, the
+        # codegen-side counterpart of ``TypeEnv.next_decl_index``.  An alias
+        # body sees only what was declared before it, and "before" has to
+        # order the two registries against EACH OTHER — a `data Decimal`
+        # declared below `type M = Decimal<Int>` is invisible to that body,
+        # exactly as at check.
+        #
+        # Three blocks, ordered as the checker sees them: built-ins first
+        # (unstamped, they read ``_BUILTIN_DECL_INDEX``), then the prelude
+        # (a NEGATIVE block, because `inject_prelude` PREPENDS its
+        # declarations while codegen registers the main file before injecting
+        # them — without the block a main-file alias over a prelude alias
+        # would resolve opaquely here and fully at check), then that
+        # namespace's own declarations from 0 up.
+        #
+        # PER NAMESPACE, exactly like ``_type_aliases`` and for the same
+        # reason (§8.4.1, #1111): ``_decl_order`` holds the ACTIVE namespace
+        # — the main file's — and ``_module_alias_scope`` swaps in the
+        # compiling module's own space beside its alias maps.  A single
+        # shared space was a silent MISCOMPILE (PR #1224 review): modules
+        # register at Pass 0.5 and the main file at Pass 1, and
+        # ``_stamp_decl_order`` is idempotent by name, so a name a module had
+        # already stamped kept that EARLIER index inside the main file's
+        # namespace — turning the main file's forward reference into a
+        # backward one.  `import lib;` (declaring `data X`) + `type Z = X;
+        # type X = Nat;` then resolved `Z` to `Nat` here and to the opaque
+        # ADT `X` at check, merging two parameter stacks the checker kept
+        # apart, and a check-clean verify-clean program read the wrong
+        # parameter.  Only names in the ACTIVE namespace are stamped, so
+        # relative order within it is exact — which is all the bound reads.
+        self._decl_order: dict[str, int] = {}
+        self._decl_order_next: int = 0
+        self._prelude_decl_order_next: int = _PRELUDE_DECL_BASE
+        # The prelude's negative block, kept separately so a module's
+        # namespace can be rebuilt as {prelude, **module_own} — the same
+        # overlay ``_module_alias_scope`` performs on the alias maps.
+        self._prelude_decl_order: dict[str, int] = {}
+        # Each imported module's OWN 0-based space, captured at absorb time
+        # (`_register_modules`) and installed by ``_module_alias_scope``.
+        self._module_decl_order: dict[tuple[str, ...], dict[str, int]] = {}
+        # #1208: the naming environment the ONE renderer (:mod:`vera.naming`)
+        # resolves against, held as the single value the flat maps above
+        # describe.  DERIVED from those maps rather than adopted from another
+        # phase's per-module registration (the verifier keeps its own,
+        # ``ContractVerifier._module_alias_envs``): codegen's alias view is not
+        # the checker's — it is the prelude's aliases overlaid by the main
+        # file's (and, inside ``_module_alias_scope``, by the compiling
+        # module's), and it is built from the TRANSFORMED, monomorphized AST.
+        # Sourcing it from the check would name against a table codegen does
+        # not otherwise use, which is exactly the mint-one-way /
+        # look-up-another split #1208 closes.  `_sync_alias_env` re-derives it
+        # wherever the maps change.
+        self._alias_env: AliasEnv = EMPTY_ALIAS_ENV
+
+        # E618 sites already reported (PR #1224 review).  The nested-refinement
+        # rejection in `_refinement_guard_parts` fires from several call sites
+        # per declaration and once per monomorphized clone, all from the same
+        # spans; the set keeps one declaration to one diagnostic.  Keyed by
+        # resolved (file, line, column), so a same-position declaration in a
+        # different module still reports.
+        self._e618_sites: set[tuple[str, int, int]] = set()
 
         # #1172: runtime decreases-guard state.  ``_dec_guard_fns`` maps
         # each guarded function's WAT name -> lexicographic component
@@ -512,23 +579,22 @@ class CodeGenerator(
             tuple[tuple[str, ...], str], str
         ] = {}
 
-    def _family_name_te(self, te: ast.TypeExpr, fallback: str) -> str:
+    def _family_name_te(self, te: ast.TypeExpr) -> str:
         """The ``State<T>``/``Exn<E>`` host-import/tag FAMILY name for a
-        type argument (#1205) — the CodeGenerator twin of
-        ``WasmContext._family_name``, over the active module's alias
-        tables (parameterised aliases substituted).  Registration
-        (``_check_state_type`` / ``_check_exn_type`` / the body scan)
-        and per-function lowering resolve through the SAME
-        :func:`vera.slots.resolve_scalar_alias_te`, so the declared
-        import families and the call sites that target them cannot
-        diverge (the #914 bug class)."""
-        try:
-            return (resolve_scalar_alias_te(
-                        te, self._type_aliases, self._type_alias_params)
-                    or fallback)
-        except AliasResolutionDepthError as exc:
-            from vera.skip import CodegenSkip
-            raise CodegenSkip(te, str(exc)) from exc
+        type argument (#1209) — the CodeGenerator twin of
+        ``WasmContext._family_name``, over ``_alias_env``: the aliases of
+        the module whose declaration is compiling, kept current by
+        ``_sync_alias_env`` / ``_module_alias_scope``.
+
+        Registration (``_check_state_type`` / ``_check_exn_type`` / the body
+        scan) and per-function lowering resolve through the SAME
+        :func:`vera.naming.family_name`, so the declared import families and
+        the call sites that target them cannot diverge (the #914 bug class)
+        — and both now name the CELL the checker typed, so a composite or
+        parameterised alias joins the family its resolution names instead of
+        minting a second one beside it (#1209)."""
+        return naming.family_name(
+            te, self._alias_env, family_fallback_name(te))
 
     # -----------------------------------------------------------------
     # Diagnostics
@@ -755,10 +821,13 @@ class CodeGenerator(
         diags_before = len(self.diagnostics)
         closures_before = len(self._closure_fns_wat)
         self._fn_decl_by_wat_name[decl.name] = decl
-        fn_wat = self._compile_fn(
-            decl, export=export, module_renames=module_renames,
-            imported=imported, module_tables=module_tables,
-        )
+        # #1208: the one door every emission passes, so the function's own
+        # type-parameter narrowing is applied here rather than at each caller.
+        with self._fn_alias_scope(decl):
+            fn_wat = self._compile_fn(
+                decl, export=export, module_renames=module_renames,
+                imported=imported, module_tables=module_tables,
+            )
         if fn_wat is None:
             # The LAST codegen diagnostic emitted during this compile is
             # the one that explains the drop (a closure-level skip is
@@ -1068,6 +1137,90 @@ class CodeGenerator(
     # Compilation entry point
     # -----------------------------------------------------------------
 
+    @contextlib.contextmanager
+    def _fn_alias_scope(self, decl: ast.FnDecl) -> Iterator[None]:
+        """Name *decl*'s own scope for the duration of its compile (#1208).
+
+        A ``forall`` variable SHADOWS a same-named module alias over the whole
+        signature and body — the checker binds it before it binds any slot — so
+        the parameter names, refinement binders and slot-reference keys emitted
+        for a generic TEMPLATE have to be rendered with it in scope.  Almost
+        every function codegen compiles is already concrete (a mono clone
+        carries ``forall_vars=None``, and this is then the identity), but the
+        uninstantiated template is emitted and EXPORTED too: named against the
+        bare module env, ``forall<T> fn f(@Option<T>, @Option<Int>)`` under
+        ``type T = Int`` collapses two parameter stacks the checker kept apart,
+        and the exported body reads the wrong parameter.
+
+        Narrows only ``_alias_env`` — the flat alias maps are unchanged, since
+        a type parameter is not an alias — so it composes with
+        ``_module_alias_scope``, which the emission doors enter outside it.
+        """
+        if not decl.forall_vars:
+            yield
+            return
+        saved = self._alias_env
+        self._alias_env = naming.with_type_params(saved, decl.forall_vars)
+        try:
+            yield
+        finally:
+            self._alias_env = saved
+
+    def _sync_alias_env(self) -> None:
+        """Re-derive ``_alias_env`` from the flat alias maps (#1208).
+
+        The naming environment must describe the SAME aliases every other
+        alias consumer reads mid-compile, so it is rebuilt at each point the
+        flat maps change: Pass-1 registration, prelude injection, and both
+        ends of ``_module_alias_scope``'s swap.  A new mutation site must call
+        this too — a stale env renders a name against the wrong namespace, and
+        a name minted one way and looked up another misses SILENTLY.
+
+        The type-parameter narrowing a generic TEMPLATE needs is layered on top
+        per function by ``_fn_alias_scope``, not stored here: it belongs to one
+        declaration, while this describes the module.
+        """
+        order = self._decl_order
+        self._alias_env = AliasEnv(
+            aliases=dict(self._type_aliases),
+            alias_params=dict(self._type_alias_params),
+            data_types={
+                name: order.get(name, _BUILTIN_DECL_INDEX)
+                for name in self._adt_layouts
+            },
+            _order={
+                name: order.get(name, _BUILTIN_DECL_INDEX)
+                for name in self._type_aliases
+            },
+        )
+
+    def _stamp_decl_order(self, name: str, *, prelude: bool = False) -> None:
+        """Record *name*'s position in the ACTIVE declaration-index space.
+
+        Called once per ``type`` / ``data`` registration, in source order.
+        Idempotent by name WITHIN one namespace — a name is stamped where it
+        first registers there, and a later re-registration (the prelude pass
+        revisits declarations) does not move it.  A module's declarations are
+        never stamped here: they are captured into ``_module_decl_order`` in
+        the module's own 0-based space and installed by
+        ``_module_alias_scope``, so one namespace's stamp can never decide
+        another's forward/backward question (PR #1224 review).
+
+        *prelude* draws from the negative block instead, so injected
+        declarations precede the main file's whatever order codegen happens to
+        walk them in — and, being recorded in ``_prelude_decl_order`` too,
+        precede every module's as well.
+        """
+        if name in self._decl_order:
+            return
+        if prelude:
+            self._decl_order[name] = self._prelude_decl_order_next
+            self._prelude_decl_order[name] = self._prelude_decl_order_next
+            self._prelude_decl_order_next += 1
+        else:
+            self._decl_order[name] = self._decl_order_next
+            self._decl_order_next += 1
+
     def compile_program(self, program: ast.Program) -> CompileResult:
         """Compile a complete Vera program to WebAssembly."""
         # Pass 0a: reject programs with typed holes
@@ -1196,10 +1349,16 @@ class CodeGenerator(
         # the `<prelude>` origin) for prelude-origin diagnostics.
         self._prelude_source = inject_prelude(program)
         for tld in program.declarations:
-            if (
-                id(tld) not in pre_inject_ids
-                and isinstance(tld.decl, ast.TypeAliasDecl)
-            ):
+            if id(tld) in pre_inject_ids:
+                continue
+            # #1208: stamp every INJECTED declaration into the prelude block
+            # of the shared index space, in the order `inject_prelude` laid
+            # them down — which is ahead of the main file's, where codegen
+            # has already stamped from 0.  Both kinds, because the bound
+            # orders aliases and ADTs against each other.
+            if isinstance(tld.decl, (ast.TypeAliasDecl, ast.DataDecl)):
+                self._stamp_decl_order(tld.decl.name, prelude=True)
+            if isinstance(tld.decl, ast.TypeAliasDecl):
                 self._prelude_type_aliases[tld.decl.name] = tld.decl.type_expr
                 if tld.decl.type_params:
                     self._prelude_type_alias_params[tld.decl.name] = (
@@ -1229,9 +1388,12 @@ class CodeGenerator(
                     self._register_data(decl)
             elif isinstance(decl, ast.TypeAliasDecl):
                 if decl.name not in self._type_aliases:
+                    self._stamp_decl_order(decl.name)
                     self._type_aliases[decl.name] = decl.type_expr
                     if decl.type_params:
                         self._type_alias_params[decl.name] = decl.type_params
+        # #1208: prelude aliases and ADTs are now in the flat maps too.
+        self._sync_alias_env()
 
         # #305: Pass-1 signatures for USER fns whose params/return
         # reference prelude ADTs (Request/Response/Json/HtmlNode) were
@@ -1468,7 +1630,20 @@ class CodeGenerator(
             origin = self._mono_clone_origins.get(mdecl.name)
             # #1111: the clone's alias references resolve against its
             # defining module's namespace (no-op for a local clone).
-            with self._module_alias_scope(origin):
+            # #1189 (PR #1224 review): and its spans are that module's
+            # coordinates, so the source scope is paired here exactly as at
+            # the Pass-1.5 registration above and in Passes 2.5/2.6 — this
+            # was the one emission door that entered the alias scope alone,
+            # stamping the IMPORTER's path onto module-local line/column.
+            # Beyond the misleading location (a line past the importer's EOF
+            # renders an empty `source_line`), the E618 dedup keys on the
+            # resolved location precisely because it carries the owning file,
+            # so two modules declaring a nested refinement at coinciding
+            # coordinates collapsed to ONE diagnostic.
+            with (
+                self._module_alias_scope(origin),
+                self._module_source_scope(origin),
+            ):
                 fn_wat = self._compile_fn_tracked(
                     mdecl, export=is_public,
                     imported=origin is not None,
@@ -1968,14 +2143,17 @@ class CodeGenerator(
         return "unsupported"
 
     def _type_expr_to_slot_name(self, te: ast.TypeExpr) -> str | None:
-        """Extract the slot name from a type expression.
+        """The slot-binding name of *te*, as the checker binds it (#1208).
 
-        Delegates to the shared recursive :func:`vera.slots.type_expr_slot_name`
-        so nested composite type args (`Option<Tuple<Int, Int>>`) are
-        FULLY qualified and distinguishable (#914 finding 2), and every
-        slot-name builder agrees by construction (dedup).
+        Delegates to :func:`vera.naming.slot_name` against ``_alias_env`` —
+        the aliases of the module whose declaration is compiling, kept
+        current by ``_sync_alias_env`` / ``_module_alias_scope``.  Syntactic
+        head, RESOLVED type arguments: a parameter written ``@Option<Cnt>``
+        keys the ``Option<Int>`` stack the checker created, which is the
+        stack the reference side (``naming.slot_ref_key``) looks up.  Nested
+        composite arguments stay fully qualified (#914 finding 2).
         """
-        return type_expr_slot_name(te)
+        return naming.slot_name_or_none(te, self._alias_env)
 
     def _hoist_nongeneric_where_helpers(
         self, program: ast.Program,

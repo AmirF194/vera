@@ -282,8 +282,7 @@ class ClosureLiftingMixin:
         # #865: per-parameter concrete-@Byte flags for the call-site
         # int-literal → i32.const coercion inside closure bodies too.
         ctx.set_fn_byte_params(self._fn_byte_params)
-        ctx.set_type_aliases(self._type_aliases)
-        ctx.set_type_alias_params(self._type_alias_params)
+        ctx.set_alias_env(self._alias_env)
         # #814/#774: a qualified call inside a closure body must resolve the
         # same way it does in a top-level body — to the module's function
         # (`mod$…` for a shadowed fn) and, for a shadowed imported generic, to

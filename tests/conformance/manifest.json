@@ -2573,5 +2573,240 @@
       "adt",
       "check_error"
     ]
+  },
+  {
+    "id": "ch02_alias_cycle_rejected",
+    "file": "ch02_alias_cycle_rejected.vera",
+    "chapter": 2,
+    "title": "A cyclic type alias is rejected at check",
+    "level": "check",
+    "spec_ref": "Section 2",
+    "expected_error": "E132",
+    "features": [
+      "type_alias",
+      "alias_cycle",
+      "check_error"
+    ]
+  },
+  {
+    "id": "ch03_slot_alias_type_argument",
+    "file": "ch03_slot_alias_type_argument.vera",
+    "chapter": 3,
+    "title": "Alias opacity is head-only: type arguments resolve",
+    "level": "run",
+    "spec_ref": "Section 3.8.1",
+    "features": [
+      "slot_reference",
+      "type_alias",
+      "slot_naming"
+    ]
+  },
+  {
+    "id": "ch07_state_composite_alias",
+    "file": "ch07_state_composite_alias.vera",
+    "chapter": 7,
+    "title": "A composite type alias as the State<T> cell type",
+    "level": "run",
+    "spec_ref": "Section 7.5",
+    "features": [
+      "state_effect",
+      "type_alias",
+      "cell_family",
+      "composite_type"
+    ]
+  },
+  {
+    "id": "ch07_state_composite_alias_cross_spelling",
+    "file": "ch07_state_composite_alias_cross_spelling.vera",
+    "chapter": 7,
+    "title": "Two spellings of one composite State cell share it",
+    "level": "run",
+    "spec_ref": "Section 7.5",
+    "features": [
+      "state_effect",
+      "type_alias",
+      "cell_family",
+      "composite_type"
+    ]
+  },
+  {
+    "id": "ch07_state_scalar_alias_cross_spelling",
+    "file": "ch07_state_scalar_alias_cross_spelling.vera",
+    "chapter": 7,
+    "title": "A scalar alias and its base name one State cell",
+    "level": "run",
+    "spec_ref": "Section 7.5",
+    "features": [
+      "state_effect",
+      "type_alias",
+      "cell_family"
+    ]
+  },
+  {
+    "id": "ch07_state_alias_chain",
+    "file": "ch07_state_alias_chain.vera",
+    "chapter": 7,
+    "title": "Multi-hop and parameterised alias State cells",
+    "level": "run",
+    "spec_ref": "Section 7.5",
+    "features": [
+      "state_effect",
+      "type_alias",
+      "generic_alias",
+      "cell_family"
+    ]
+  },
+  {
+    "id": "ch07_state_nested_param_alias",
+    "file": "ch07_state_nested_param_alias.vera",
+    "chapter": 7,
+    "title": "A twice-applied parameterised alias State cell",
+    "level": "run",
+    "spec_ref": "Section 7.5",
+    "features": [
+      "state_effect",
+      "generic_alias",
+      "cell_family",
+      "slot_naming"
+    ]
+  },
+  {
+    "id": "ch07_state_scalar_alias_widths",
+    "file": "ch07_state_scalar_alias_widths.vera",
+    "chapter": 7,
+    "title": "Bool / Byte / Float64 alias State cells keep their width",
+    "level": "run",
+    "spec_ref": "Section 7.5",
+    "features": [
+      "state_effect",
+      "type_alias",
+      "cell_family",
+      "byte_type",
+      "float64"
+    ]
+  },
+  {
+    "id": "ch07_state_alias_op_result_positions",
+    "file": "ch07_state_alias_op_result_positions.vera",
+    "chapter": 7,
+    "title": "An effect op's result type under an alias State cell",
+    "level": "run",
+    "spec_ref": "Section 7.5",
+    "features": [
+      "state_effect",
+      "type_alias",
+      "cell_family",
+      "effect_op_result"
+    ]
+  },
+  {
+    "id": "ch07_state_clause_alias_slots",
+    "file": "ch07_state_clause_alias_slots.vera",
+    "chapter": 7,
+    "title": "Alias spellings inside handler clause slots name one stack",
+    "level": "run",
+    "spec_ref": "Section 7.5.2",
+    "features": [
+      "state_effect",
+      "handler_clause",
+      "type_alias",
+      "slot_naming"
+    ]
+  },
+  {
+    "id": "ch07_exn_scalar_alias",
+    "file": "ch07_exn_scalar_alias.vera",
+    "chapter": 7,
+    "title": "A scalar alias as the Exn<E> payload type",
+    "level": "run",
+    "spec_ref": "Section 7.6",
+    "features": [
+      "exn_effect",
+      "type_alias",
+      "cell_family"
+    ]
+  },
+  {
+    "id": "ch07_exn_string_alias",
+    "file": "ch07_exn_string_alias.vera",
+    "chapter": 7,
+    "title": "A String alias as the Exn<E> payload type",
+    "level": "run",
+    "spec_ref": "Section 7.6",
+    "features": [
+      "exn_effect",
+      "type_alias",
+      "cell_family",
+      "string"
+    ]
+  },
+  {
+    "id": "ch07_exn_param_alias",
+    "file": "ch07_exn_param_alias.vera",
+    "chapter": 7,
+    "title": "Parameterised alias payloads for Exn<E>",
+    "level": "run",
+    "spec_ref": "Section 7.6",
+    "features": [
+      "exn_effect",
+      "generic_alias",
+      "cell_family"
+    ]
+  },
+  {
+    "id": "ch08_state_alias_per_module_lib",
+    "file": "ch08_state_alias_per_module_lib.vera",
+    "chapter": 8,
+    "title": "Per-module alias table library (private Hid<T> = T)",
+    "level": "verify",
+    "spec_ref": "Section 8.4.1",
+    "features": [
+      "cross_module",
+      "type_alias",
+      "generic_alias",
+      "state_effect"
+    ]
+  },
+  {
+    "id": "ch08_state_alias_per_module",
+    "file": "ch08_state_alias_per_module.vera",
+    "chapter": 8,
+    "title": "An alias resolves in the namespace of the module that declared it",
+    "level": "run",
+    "spec_ref": "Section 8.4.1",
+    "features": [
+      "cross_module",
+      "type_alias",
+      "generic_alias",
+      "state_effect",
+      "cell_family"
+    ]
+  },
+  {
+    "id": "ch08_state_alias_module_table_lib",
+    "file": "ch08_state_alias_module_table_lib.vera",
+    "chapter": 8,
+    "title": "Same-name alias library (Count = Nat)",
+    "level": "verify",
+    "spec_ref": "Section 8.4.1",
+    "features": [
+      "cross_module",
+      "type_alias",
+      "state_effect"
+    ]
+  },
+  {
+    "id": "ch08_state_alias_module_table",
+    "file": "ch08_state_alias_module_table.vera",
+    "chapter": 8,
+    "title": "Same alias name, different body, per module",
+    "level": "run",
+    "spec_ref": "Section 8.4.1",
+    "features": [
+      "cross_module",
+      "type_alias",
+      "state_effect",
+      "cell_family"
+    ]
   }
 ]

@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 
 from lsprotocol import types as lsp
 
-from vera import ast
+from vera import ast, naming
 from vera.checker.core import CheckArtifacts
 from vera.errors import Diagnostic, ParseError, TransformError
 from vera.lsp.convert import (
@@ -43,7 +43,8 @@ from vera.lsp.convert import (
 from vera.obligations.cache import walk_nodes
 from vera.obligations.core import ProofObligation
 from vera.obligations.session import VerificationSession
-from vera.slots import slot_table
+from vera.naming import EMPTY_ALIAS_ENV, AliasEnv
+from vera.slots import fn_scopes, fn_slot_scope, slot_table
 
 _SEVERITY = {
     "error": lsp.DiagnosticSeverity.Error,
@@ -62,6 +63,11 @@ class Analysis:
     obligations: list[ProofObligation] = field(default_factory=list)
     artifacts: CheckArtifacts | None = None
     program: ast.Program | None = None
+    # #1208: the document's naming environment, lifted out of `artifacts` so
+    # the slot-table and hover renderers can name against the checker's own
+    # alias table.  Empty when the pipeline stopped at parse/transform — there
+    # is no check, so there are no aliases to name against.
+    alias_env: AliasEnv = EMPTY_ALIAS_ENV
 
 
 def analyze(
@@ -88,6 +94,7 @@ def analyze(
     analysis.program = program
     check_diags, artifacts = typecheck_with_artifacts(program, text, file=uri)
     analysis.artifacts = artifacts
+    analysis.alias_env = artifacts.alias_env
     analysis.diagnostics = list(check_diags)
 
     if not any(d.severity == "error" for d in check_diags):
@@ -226,19 +233,27 @@ def definition_at(
     # parameters, not the enclosing top-level function's.
     enclosing: ast.FnDecl | None = None
     enclosing_size: tuple[int, int] | None = None
+    # `fn_scopes` (vera/slots.py) pairs each function with the type
+    # parameters in scope OVER it — a `where` helper inside a generic sees
+    # the outer function's variables too (`_check_fn` saves and restores one
+    # shared map rather than replacing it) — so taking the INNERMOST function
+    # containing the cursor takes its accumulated scope with it.  Shared with
+    # `vera check --explain-slots` (#1217): the two surfaces answer the same
+    # question about the same helper, so they accumulate in one place.
+    in_scope_vars: tuple[str, ...] = ()
     for tld in analysis.program.declarations:
-        for node in walk_nodes(tld.decl):
-            if (
-                isinstance(node, ast.FnDecl)
-                and node.span is not None
-                and _span_contains(node.span, line1, col1)
-            ):
-                size = (
-                    node.span.end_line - node.span.line,
-                    node.span.end_column - node.span.column,
-                )
-                if enclosing_size is None or size < enclosing_size:
-                    enclosing, enclosing_size = node, size
+        if not isinstance(tld.decl, ast.FnDecl):
+            continue
+        for fn, fn_vars, _path in fn_scopes(tld.decl):
+            if fn.span is None or not _span_contains(fn.span, line1, col1):
+                continue
+            size = (
+                fn.span.end_line - fn.span.line,
+                fn.span.end_column - fn.span.column,
+            )
+            if enclosing_size is None or size < enclosing_size:
+                enclosing, enclosing_size = fn, size
+                in_scope_vars = fn_vars
     if enclosing is None:
         return None
 
@@ -254,8 +269,16 @@ def definition_at(
     if slot is None:
         return None
 
-    table = slot_table(enclosing.params)
-    positions = table.get(slot.type_name, [])
+    # #1208: BOTH sides render through :mod:`vera.naming`, in ONE scope —
+    # this module's env (the document being analysed owns `enclosing`)
+    # narrowed by `fn_slot_scope`, the same narrowing `slot_table` applies to
+    # the binding side, so the two cannot be scoped differently.  The
+    # reference used to be keyed by its bare HEAD, so `@Option<Int>.0` looked
+    # up `Option` in a table keyed `Option<Int>` and go-to-definition
+    # silently returned nothing for every parameterised slot.
+    scope = fn_slot_scope(analysis.alias_env, in_scope_vars)
+    table = slot_table(enclosing.params, analysis.alias_env, in_scope_vars)
+    positions = table.get(naming.slot_ref_key(slot, scope), [])
     if slot.index >= len(positions):
         return None  # binds to a let/match binding, not a parameter
     param = enclosing.params[positions[slot.index] - 1]

@@ -5,17 +5,31 @@ the raw corpus behind the roughly thirty defects that PR handled in the
 builtin `State`/`Exn` handler machinery (type aliases × handler
 combinatorics, clause-scope binding, dispatch-path parity, write-boundary
 guards).  Kept verbatim as review evidence and as the promotion pool for
-[#1213](https://github.com/aallan/vera/issues/1213): the conformance
-suite never covered these shapes, and PR 1 of that consolidation
-promotes the distinguishing ones into `tests/conformance/` with manifest
-entries.
+[#1213](https://github.com/aallan/vera/issues/1213): what remains is the
+material for the open issues below, and each burndown PR promotes its
+own shapes into `tests/conformance/` with manifest entries and deletes
+the probes it dispositioned.
+
+The slot-naming and cell-family shapes ([#1208](https://github.com/aallan/vera/issues/1208),
+[#1209](https://github.com/aallan/vera/issues/1209)) have been through
+that cycle: they live in `tests/conformance/` as the `ch03_slot_alias_*`,
+`ch07_state_*alias*`, `ch07_exn_*alias*` and `ch08_state_alias_*`
+programs, plus the `ch02_alias_cycle_rejected` negative.
 
 **Not wired into CI.** These are probe programs, not curated fixtures:
 some deliberately fail (`check`, `verify`, or `run`) to demonstrate a
-defect that is now fixed, some pin pre-existing open issues (#1207–#1212),
-and some were superseded mid-round.  Each file's leading comment states
-what it probes and what the expected-vs-observed behaviour was AT THE
-TIME it was written; the tracked regression suites
+defect that is now fixed, some pin the open issues [#1207](https://github.com/aallan/vera/issues/1207),
+[#1210](https://github.com/aallan/vera/issues/1210),
+[#1211](https://github.com/aallan/vera/issues/1211),
+[#1212](https://github.com/aallan/vera/issues/1212),
+[#1218](https://github.com/aallan/vera/issues/1218) and
+[#1219](https://github.com/aallan/vera/issues/1219), and some were
+superseded mid-round.  Five are **parse-broken** and flagged as such in
+the index below — they belong to the PRs that close their issues, and
+are counted by the differential sweep's `parse_skipped` allowance.  Each
+file's leading comment states what it probes and what the
+expected-vs-observed behaviour was AT THE TIME it was written; the
+tracked regression suites
 (`tests/test_nat_narrowing_return_differential.py`,
 `tests/test_verifier_fresh_scope.py`, `tests/test_checker_types.py`)
 carry the maintained, asserted versions of the shapes that mattered.
@@ -35,10 +49,10 @@ review-round directory it came from.
 | `nested_handlers/` | Handler nesting: cell isolation and push/pop, per-family save/restore, registration-walk gaps, clause-body handles, cross-spelled nesting |
 | `old_state/` | `old(State<T>)`/`new(State<T>)` snapshot probes in `ensures` |
 
-Module fixtures (`statelib.vera`, `xmod_lib.vera`, `xmod_lib2.vera`,
-`e533lib.vera`, `loclib.vera`) sit in the same directory as their
-importers — imports resolve relative to the importing file — so each
-importer/fixture pair is co-located in the importer's purpose directory.
+Module fixtures (`xmod_lib2.vera`, `e533lib.vera`, `loclib.vera`) sit in
+the same directory as their importers — imports resolve relative to the
+importing file — so each importer/fixture pair is co-located in the
+importer's purpose directory.
 
 ## Per-file index
 
@@ -47,19 +61,15 @@ comment; headerless files are summarised from the program itself.  Origin
 is the review-round directory the file lived in before the
 purpose-directory reorganisation.
 
-### alias_families/ (50 files)
+### alias_families/ (21 files)
 
 | File | What it probes | Origin |
 |---|---|---|
-| `f1_cross_spelling.vera` | Helper declares `State<Option<Int>>`, handler spells `State<MaybeInt>` — do both sites join one cell? | round2_family |
 | `g1_array.vera` | `Array<Int>` state cell: put `[5, 6]`, read an element back — heap-value cell baseline | round2_family |
 | `p10_xmod_importer_alias.vera` | Importer-declared alias: `handle[State<Nid<Nat>>]` around a module fn declared plain `State<Nat>` | round3_naming |
-| `p11_xmod_alias_collision.vera` | Importer's `Hid<T> = Option<T>` collides with the module's private `Hid<T> = T` — per-module tables | round3_naming |
 | `p1205.vera` | #1205 repro: `State<Count>` (`Count = Nat`) canonical handler — the scalar-alias cell must collapse to Nat | session |
-| `p12_cross_spelling.vera` | Helper declares `State<Count>`, handler spells `State<Nat>` — scalar-alias collapse across the fn boundary | round2_family |
 | `p12a_verify_nat_cell.vera` | Obligation-parity baseline: plain Nat cell + a narrowing `let` in the handled body | round3_naming |
 | `p12b_verify_alias_cell.vera` | Identical program spelled `State<Id<Nat>>` — the obligation stream must match p12a | round3_naming |
-| `p13_exn_cross.vera` | Helper throws `Exn<Code>`, handler spells `Exn<Int>` — Exn scalar-alias cross-spelling | round2_family |
 | `p15_generic_elem.vera` | `get(())` as an array element in a generic call, under an alias cell | round2_family |
 | `p15b_append.vera` | `get(())` as an `array_append` argument under an alias cell — builtin call-site typing | round2_family |
 | `p15c_direct.vera` | p15_generic_elem respelled with a plain `State<Nat>` cell — no-alias control | round2_family |
@@ -67,49 +77,24 @@ purpose-directory reorganisation.
 | `p16c_family_split_control.vera` | Single-`Id` control for p16 (`State<Id<Nat>>` spelling) — must join the handler's cell | round3_naming |
 | `p17_wrapper_alias.vera` | Wrapper alias `Two<T> = Id<Id<T>>` — head re-entry reached through one user application | round3_naming |
 | `p17b_state_string_minimal.vera` | Minimal `State<String>` in a pure fn — pair-family registration refusal vs the emitted calls | round3_clause_env |
-| `p22_param_alias.vera` | Parameterised alias cell `State<Id<Nat>>`, single application — put/get roundtrip | round2_family |
-| `p23_alias_of_generic.vera` | Scalar alias OF a parameterised alias (`IdN = Id<Nat>`) as the cell type | round2_family |
-| `p24_exn_generic.vera` | `Exn<Id<Int>>` with an alias-spelled throw pattern — parameterised-alias payload | round2_family |
 | `p25_refined_cell.vera` | Refined-alias cell, in-bounds put — happy path | round2_family |
-| `p2_chain.vera` | Two-hop scalar alias chain (`A = B`, `B = Nat`) as the cell — multi-hop family collapse | round2_family |
-| `p2_family_nested_alias.vera` | `State<Id<Id<Nat>>>`: resolver seen-set stops at the 2nd `Id` (opaque family) vs full WASM-type recursion | round3_naming |
 | `p2b_chain_fwd.vera` | Forward-declared alias chain (`A = B` before `B = Nat`) — declaration-order robustness | round2_family |
 | `p2b_family_nested_alias_canonrefs.vera` | Same cell, refs spelled `Id<Nat>` (the both-sides key) — isolates the family-name/WASM-type question | round3_naming |
 | `p2c_family_param_alias_control.vera` | `State<Id<Nat>>` single application — the commit's headline fixed case, must run to 7 | round3_naming |
-| `p3_scalars.vera` | `Bool`/`Byte`/`Float64` scalar-alias cells in one program — per-family roundtrips | round2_family |
-| `p3a_self_param_cycle.vera` | Self-referential parameterised alias `Loop<T> = Loop<T>` — reject, or codegen hang? | round3_naming |
 | `p3b_byte_direct.vera` | Plain `State<Byte>` put/get roundtrip from a fn param — Byte width control | round2_family |
-| `p3b_mutual_param_cycle.vera` | Mutual parameterised alias cycle `A<T> = B<T>`, `B<T> = A<T>` | round3_naming |
-| `p3c_byte_alias.vera` | Byte behind a scalar alias (`Level = Byte`) — aliased Byte-cell roundtrip | round2_family |
-| `p3d_bool_float.vera` | `Bool` + `Float64` alias cells only — non-Int scalar families without Byte | round2_family |
-| `p6_main.vera` | Cross-module: imports `statelib` (`Count = Nat` there) beside a local `Count = Int` — per-module alias tables | round2_family |
-| `p7_exn_scalar.vera` | `Exn<Code>` throw/catch with matching alias spellings and a delegated thrower | round2_family |
 | `p7_fn_alias_state_arg.vera` | FnType-bodied alias as the State type argument — alias resolution returns None, opaque family fallback | round3_naming |
-| `p7a_array.vera` | `get(())` as an array-literal element under an alias cell — result type must reach i64 via the family | round2_family |
-| `p7b_match.vera` | `get(())` as a match scrutinee (int patterns) under an alias cell | round2_family |
-| `p7c_composite_alias.vera` | Composite alias cell (`MaybeInt = Option<Int>`, opaque family) + match scrutinee | round2_family |
-| `p7d_eq.vera` | `get(()) == get(())` equality dispatch under an alias cell | round2_family |
-| `p8_exn_string.vera` | `Exn<Name>` (`Name = String`): string payload through an alias — pair-type payload | round2_family |
-| `p8_xmod_alias_family.vera` | Module-private parameterised alias family — registration and lowering must agree it collapses to Nat | round3_naming |
-| `p9_composite.vera` | Composite alias cell baseline: `put(Some(41))` + match | round2_family |
-| `p9_exn_nested_alias.vera` | Exn twin of p2b: `Exn<Id<Id<Int>>>` — the tag family resolves through the same seen-set walk | round3_naming |
 | `p9_refined_state_minimal.vera` | Minimal `State<refined alias>` — does it compile at all? | round2_family |
 | `p_byte.vera` | `State<Byte>` fed via `int_to_byte` conversions — Byte roundtrip without bare int literals | session |
-| `p_exnalias.vera` | `Exn<Code>` (`Code = Int`) with an alias-spelled throw pattern — Exn scalar-alias collapse | session |
-| `p_nested_app.vera` | `State<Id<Id<Nat>>>` nested alias application — head-re-entry cell, fix acceptance | session |
-| `statelib.vera` | Module fixture for p6_main: `bump()` handling `State<Count>` (`Count = Nat`) | round2_family |
-| `x1_exn_string_alias.vera` | `Exn<Msg>` (`Msg = String`): pair-ness of the alias family — (ptr,len) desync probe | round2_family |
-| `xmod_lib.vera` | Module fixture: `tally()` handles `State<Hid<Nat>>` via a private alias (support for p8/p11) | round3_naming |
 | `xmod_lib2.vera` | Module fixture: `bump()` declaring plain `<State<Nat>>` effects (support for p10) | round3_naming |
 
-### clause_scoping/ (62 files)
+### clause_scoping/ (58 files)
 
 | File | What it probes | Origin |
 |---|---|---|
 | `a10a.vera` | Patternless `put()` + alias decl + fn `@Nat` param: with-expr `@Nat.0` = fn param vs codegen's arg fallback | round2_family |
 | `a10b.vera` | Patternless `put()` with no outer Nat binding — with-expr `@Nat.0` must be E130 | round2_family |
 | `a10c_stateless_patternless.vera` | Patternless `put()` under a stateless handler — fn param vs arg fallback, observed via division trap | round2_family |
-| `a11_refined_pattern.vera` | Refinement-typed clause pattern `@Nat{self >= 0}` — both sides must erase to the base name | round2_family |
+| `a11_refined_pattern.vera` | Refinement-typed clause pattern `@Nat{self >= 0}` — both sides must erase to the base name — **parse-broken**, pending the PR that closes its issue | round2_family |
 | `a1a.vera` | All names split: `State<Nat>` cell, `@Count` decl, `put(@Nat)` pattern, cross-name with-update | round2_family |
 | `a1b.vera` | Swapped spellings: `State<Count>` cell, `@Nat` decl, `put(@Count)` pattern | round2_family |
 | `a1c.vera` | Full collision under the alias (`Count` everywhere): `@Count.0` = state, `.1` = put arg | round2_family |
@@ -145,18 +130,14 @@ purpose-directory reorganisation.
 | `p18b_skew.vera` | Stateless get-only handler: clause `@Int.0` = fn param (42) — stateless clause-env skew | round2_family |
 | `p1_decl_scope.vera` | Clause refs past its own bindings resolve at handler-DECLARATION scope, not the call site's lets | round3_clause_env |
 | `p1a_nested_alias_clause_e699.vera` | Pattern `@Option<Id<Id<Int>>>`, body ref `.1` — a codegen misbind makes the ref dangle (E699) | round3_naming |
-| `p1b_nested_alias_clause_value.vera` | Silent wrong-value twin: with-ref `@Option<Id<Int>>.0` — checker keep-old 5 vs misbound put-arg 9 | round3_naming |
 | `p1b_two_sites.vera` | The same get clause inlined at two let-depths must behave identically (difference 0) | round3_clause_env |
 | `p1c_keepold_canonical_control.vera` | Canonical spellings only: `with ... = @Option<Int>.0` is keep-old (5) — pins index 0 = state | round3_naming |
-| `p1d_single_alias_ref.vera` | Single alias application with an alias-SPELLED with-ref — expected loud E699 (#1208 class) | round3_naming |
 | `p21_handle_in_closure.vera` | Full handle inside a lifted closure — the clause reaches the closure's param as its decl scope | round3_clause_env |
 | `p3_closure.vera` | Closure in a clause body capturing the state slot AND a decl-scope slot; body distractor must not leak | round3_clause_env |
 | `p4_refined_arg_clause.vera` | Refined type-arg inside a composite (`Option<Pos>`) — predicate-elided bind key vs syntactic ref side | round3_naming |
 | `p4a_composite_plain.vera` | Baseline: composite `State<Option<Int>>` with no aliases anywhere | round2_clauses |
-| `p4b_alias_arg_pattern.vera` | Alias inside a composite clause pattern — checker-canonical slot key vs codegen's opaque key | round2_clauses |
 | `p4c_alias_arg_dangling.vera` | Same shape, ref spelled `@Option<Int>.1` (checker: the put arg) — should dangle on the codegen side | round2_clauses |
 | `p4d_alias_annotation.vera` | Alias inside the composite state DECLARATION — natural body ref misses codegen's opaque key | round2_clauses |
-| `p4e_fn_param_baseline.vera` | Ordinary fn param `@Option<Cnt>` with a canonical-spelled ref — is the naming split pre-existing? | round2_clauses |
 | `p5_e130_gate.vera` | With-expr ref past the clause scope (`@Int.2`) must be E130 — the old call-site env would resolve it | round3_clause_env |
 | `p5_mainline_alias_arg_control.vera` | The commit's fixed mainline: `put(@Option<Cnt>)` + canonical `.1` ref — green, value 9 | round3_naming |
 | `p5b_e130_clause_body.vera` | Clause-body ref past its own bindings with an EMPTY decl scope (`@Int.1`) — expect E130 | round3_clause_env |
@@ -197,7 +178,7 @@ purpose-directory reorganisation.
 | `byte_delegated_put.vera` | `put(150)` delegated through a `<State<Byte>>` helper — cross-fn Byte literal width | round3_gates |
 | `byte_init999.vera` | Byte cell init literal 999 — out-of-range width at the init boundary | round3_gates |
 | `byte_init_if.vera` | Byte init from an if-expression — non-literal init width | round3_gates |
-| `byte_let999.vera` | `let @Byte = 999` — out-of-range Byte literal in a plain let (control outside handlers) | round3_gates |
+| `byte_let999.vera` | `let @Byte = 999` — out-of-range Byte literal in a plain let (control outside handlers) — **parse-broken**, pending the PR that closes its issue | round3_gates |
 | `byte_let_if.vera` | `let @Byte =` an if-expression — branch-literal narrowing control | round3_gates |
 | `byte_neg_composite.vera` | `put(0 - 5)` composite negative expression into a Byte cell | round3_gates |
 | `byte_put42.vera` | Clause-dispatched `put(42)` into a Byte cell — literal width through the clause path | round3_clause_env |
@@ -222,7 +203,7 @@ purpose-directory reorganisation.
 | `p1205_neg.vera` | The #1205 shape with the init taken from an `@Int` fn arg — negative-init guard on the alias cell | session |
 | `p19_guard_bareput.vera` | Bare put of a negative via a delegated `<State<Count>>` effect, get-only handler — boundary guard | round2_family |
 | `p1_put_no_clause.vera` | Bare-path put of an SMT-opaque runtime negative (`get() - 100`) — bare-path guard probe | round2_family |
-| `p1_put_noclause.vera` | `put(@Int.0)` with an EMPTY clause list — clause-free handler still takes the bare path | round2_family |
+| `p1_put_noclause.vera` | `put(@Int.0)` with an EMPTY clause list — clause-free handler still takes the bare path — **parse-broken**, pending the PR that closes its issue | round2_family |
 | `p2.vera` | Negative through a `@Nat` cell observed as `get(()) < 0` — no later boundary guard can mask it | round2_family |
 | `p20_guard_init.vera` | State init from a negative fn arg (`@Count = @Int.0`) — init-boundary narrowing trap | round2_family |
 | `p21_guard_resume.vera` | Get clause resumes a negative fn arg — resume-boundary narrowing trap | round2_family |
@@ -259,7 +240,7 @@ purpose-directory reorganisation.
 | `diverge.vera` | Divergent `@Int` decl on a `State<Nat>` cell (get-only, resumes 0) — decl/effect-arg split | round2_family |
 | `diverge2.vera` | Divergent `@Int` decl; get clause resumes the state slot — echoes a negative init through the Nat cell | round2_family |
 | `diverge3.vera` | Divergent `@Int` decl with a put-clause-only handler — bare `get` under a negative Int init | round2_family |
-| `e128_array.vera` | E128 gate: `forall` over an `@Array<Int>` domain, predicate lambda carrying contract clauses | round2_family |
+| `e128_array.vera` | E128 gate: `forall` over an `@Array<Int>` domain, predicate lambda carrying contract clauses — **parse-broken**, pending the PR that closes its issue | round2_family |
 | `e128_bool.vera` | E128 gate: `@Bool` quantifier domain | round2_family |
 | `e128_byte.vera` | E128 gate: `@Byte` quantifier domain | round2_family |
 | `e128_byte_run.vera` | E128 gate: `@Byte` domain with a real predicate and `main` — runnable variant | round2_family |
@@ -276,7 +257,7 @@ purpose-directory reorganisation.
 | `e337_bare_state_decl.vera` | Bare `handle[State]` with a state declaration — arity gate for State | round3_gates |
 | `e337_exn_two.vera` | `Exn<String, Int>` — two type arguments on Exn | round3_gates |
 | `e337_twoargs_badclause.vera` | `State<Int, Nat>` plus bogus clause refs (`@Int.5`, `@Bogus.0`) — arity gate before clause errors | round3_gates |
-| `e337_user_effect_exn.vera` | User-declared `effect Exn` — builtin-effect redefinition gate | round3_gates |
+| `e337_user_effect_exn.vera` | User-declared `effect Exn` — builtin-effect redefinition gate — **parse-broken**, pending the PR that closes its issue | round3_gates |
 | `e533_import.vera` | Generic state-decl lie imported cross-module — E533 must fire at the importer's instantiation | round3_gates |
 | `e533_indirect.vera` | The lie reached through an intermediate generic fn — E533 through instantiation indirection | round3_gates |
 | `e533_match_arm.vera` | The lying handler inside a match arm of the generic — the E533 walker must descend match arms | round3_gates |

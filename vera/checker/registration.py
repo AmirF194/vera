@@ -605,6 +605,9 @@ class RegistrationMixin:
     ) -> None:
         """Register an ADT and its constructors."""
         self._check_reserved_type_name(decl)
+        # #1208: allocate the declaration index BEFORE resolving anything, so
+        # data and alias registrations interleave in source order.
+        decl_index = self.env.next_decl_index()
         # Set up type params for resolving constructor field types
         saved_params = dict(self.env.type_params)
         if decl.type_params:
@@ -631,6 +634,7 @@ class RegistrationMixin:
             type_params=decl.type_params,
             constructors=ctors,
             visibility=visibility,
+            decl_index=decl_index,
         )
 
         self.env.type_params = saved_params
@@ -638,6 +642,7 @@ class RegistrationMixin:
     def _register_alias(self, decl: ast.TypeAliasDecl) -> None:
         """Register a type alias."""
         self._check_reserved_type_name(decl)
+        decl_index = self.env.next_decl_index()
         saved_params = dict(self.env.type_params)
         if decl.type_params:
             for tv in decl.type_params:
@@ -648,6 +653,8 @@ class RegistrationMixin:
             name=decl.name,
             type_params=decl.type_params,
             resolved_type=resolved,
+            body=decl.type_expr,
+            decl_index=decl_index,
         )
 
         self.env.type_params = saved_params

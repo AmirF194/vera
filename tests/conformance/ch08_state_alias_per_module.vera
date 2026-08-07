@@ -1,0 +1,32 @@
+import ch08_state_alias_per_module_lib;
+
+-- Conformance: an alias resolves in the namespace of the module that
+-- DECLARED it (Chapter 8, Section 8.4.1).  Tests: this module declares
+-- `type Hid<T> = Option<T>` while the imported module declares the same NAME
+-- as `type Hid<T> = T`.  Each `handle[State<Hid<...>>]` must name its cell
+-- family against its own module's alias table — the import's collapses to
+-- the `Nat` family, this module's to `Option<Int>` — so a rendering done in
+-- a neighbouring module's namespace picks the wrong cell (#1208/#1209).
+type Hid<T> = Option<T>;
+
+private fn local_probe(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Hid<Int>>](@Hid<Int> = Some(5)) {
+    get(@Unit) -> { resume(@Hid<Int>.0) },
+    put(@Hid<Int>) -> { resume(()) }
+  } in {
+    put(Some(9));
+    option_unwrap_or(get(()), 0 - 1)
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 16)
+  effects(pure)
+{
+  tally(7) + local_probe(())
+}

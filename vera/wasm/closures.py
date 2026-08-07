@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from vera import ast
-from vera.slots import slot_ref_name
+from vera import ast, naming
 from vera.wasm.helpers import WasmSlotEnv, _align_up, gc_shadow_push
 
 
@@ -346,14 +345,13 @@ class ClosuresMixin:
         #   ResultRef         → only valid in `ensures`; not in body
         """
         if isinstance(expr, ast.SlotRef):
-            # Shared recursive builder (#914 finding 2) — a captured
-            # nested-composite slot (`@Array<Array<Int>>`) must key its
-            # capture under the SAME fully-qualified name that
-            # `_translate_slot_ref` resolves, else the capture desyncs and the
-            # enclosing function drops (`unknown func`).
-            type_name = slot_ref_name(expr)
-            if type_name is None:
-                return
+            # #1208: the ONE renderer, against this context's alias
+            # environment — a captured slot must key its capture under the
+            # SAME name `_translate_slot_ref` resolves and `param_counts` was
+            # built from (`_type_expr_name`), or the capture desyncs and the
+            # enclosing function drops (`unknown func`).  Nested composites
+            # stay fully qualified (#914 finding 2).
+            type_name = naming.slot_ref_key(expr, self._alias_env)
             count = param_counts.get(type_name, 0)
             if expr.index >= count:
                 # This refers to an outer scope binding

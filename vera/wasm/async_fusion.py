@@ -28,6 +28,7 @@ single source of truth; do not re-derive the conditions inline.
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Mapping
 
 from vera import ast
 from vera.monomorphize import resolve_fn_type_alias, resolve_type_alias
@@ -117,8 +118,8 @@ def _is_future_result_string_type(
 
 def _canonicalize_type_expr_aliases(
     te: ast.TypeExpr,
-    type_aliases: dict[str, ast.TypeExpr],
-    type_alias_params: dict[str, tuple[str, ...]],
+    type_aliases: Mapping[str, ast.TypeExpr],
+    type_alias_params: Mapping[str, tuple[str, ...] | None],
     _active: frozenset[str] = frozenset(),
 ) -> ast.TypeExpr | None:
     """``te`` with every type alias replaced by its terminal target,
@@ -181,8 +182,8 @@ def _canonicalize_type_expr_aliases(
 
 def _resolves_to_future_result_string(
     te: ast.TypeExpr,
-    type_aliases: dict[str, ast.TypeExpr],
-    type_alias_params: dict[str, tuple[str, ...]],
+    type_aliases: Mapping[str, ast.TypeExpr],
+    type_alias_params: Mapping[str, tuple[str, ...] | None],
 ) -> bool:
     """True iff ``te`` — with type aliases resolved transitively, at the
     outer level AND inside type arguments — is exactly
@@ -278,8 +279,8 @@ def compute_future_ret_module_fns(
 
 def _apply_fn_closure_ret_type(
     closure_arg: ast.Expr,
-    type_aliases: dict[str, ast.TypeExpr],
-    type_alias_params: dict[str, tuple[str, ...]],
+    type_aliases: Mapping[str, ast.TypeExpr],
+    type_alias_params: Mapping[str, tuple[str, ...] | None],
 ) -> ast.TypeExpr | None:
     """Declared return TypeExpr of the closure an ``apply_fn`` applies.
 
@@ -329,8 +330,8 @@ def _apply_fn_closure_ret_type(
 
 def apply_fn_awaits_fused_future(
     arg: ast.Expr,
-    type_aliases: dict[str, ast.TypeExpr],
-    type_alias_params: dict[str, tuple[str, ...]],
+    type_aliases: Mapping[str, ast.TypeExpr],
+    type_alias_params: Mapping[str, tuple[str, ...] | None],
 ) -> bool:
     """True iff ``arg`` is ``apply_fn(closure, …)`` whose closure's
     declared return type is ``Future<Result<String, String>>``.
@@ -374,8 +375,8 @@ def await_needs_check(
         frozenset[tuple[tuple[str, ...], str]]
         | set[tuple[tuple[str, ...], str]]
     ) = frozenset(),
-    type_aliases: dict[str, ast.TypeExpr] | None = None,
-    type_alias_params: dict[str, tuple[str, ...]] | None = None,
+    type_aliases: Mapping[str, ast.TypeExpr] | None = None,
+    type_alias_params: Mapping[str, tuple[str, ...] | None] | None = None,
 ) -> bool:
     """True iff ``await(arg)`` must emit the runtime fused-handle check.
 

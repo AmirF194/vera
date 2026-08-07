@@ -1,0 +1,32 @@
+-- Conformance: two spellings of one composite cell share it (Chapter 7,
+-- Section 7.5).  Tests: a helper declares its effect `<State<Option<Int>>>`
+-- while the handler around it spells `handle[State<MaybeInt>]` — one cell,
+-- so the helper's `put` is visible to the handler's `get` (#1209).  The
+-- value is the discriminator: a split family leaves the handler reading its
+-- own untouched cell and the program returns the `None` arm's -1 instead.
+type MaybeInt = Option<Int>;
+
+private fn bump(@Unit -> @Unit)
+  requires(true)
+  ensures(true)
+  effects(<State<Option<Int>>>)
+{
+  put(Some(7))
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 7)
+  effects(pure)
+{
+  handle[State<MaybeInt>](@MaybeInt = None) {
+    get(@Unit) -> { resume(@MaybeInt.0) },
+    put(@MaybeInt) -> { resume(()) }
+  } in {
+    bump(());
+    match get(()) {
+      Some(@Int) -> @Int.0,
+      None -> 0 - 1
+    }
+  }
+}

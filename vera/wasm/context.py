@@ -22,6 +22,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Callable
 
 from vera import ast
+from vera.naming import EMPTY_ALIAS_ENV, AliasEnv
 from vera.skip import DERIVED_HELPER_DEPTH_CAP, CodegenSkip
 
 if TYPE_CHECKING:
@@ -138,8 +139,8 @@ class WasmContext(
         # keep the bare host-cell call.  Saved/restored around each handler
         # body exactly like ``_effect_ops`` (nested handlers).  Tuple
         # fields, in order: the HandlerClause; the effect argument's
-        # source slot name; the scalar-collapsed FAMILY name (import
-        # naming + WASM types); the state annotation's slot name (None
+        # source slot name; the resolved cell FAMILY name (import naming
+        # + WASM types); the state annotation's slot name (None
         # for a stateless handler); the handler-DECLARATION scope's
         # WasmSlotEnv (clause bodies compile against it, not the op
         # call-site env); the get import; the put import.
@@ -353,10 +354,12 @@ class WasmContext(
         self._pending_closures: list[
             tuple[ast.AnonFn, list[tuple[str, int, str]], int]
         ] = []
-        # Type aliases: alias_name -> TypeExpr (for FnType resolution)
-        self._type_aliases: dict[str, ast.TypeExpr] = {}
-        # Type alias parameters: alias_name -> param names (for generic aliases)
-        self._type_alias_params: dict[str, tuple[str, ...]] = {}
+        # #1208: the naming environment — alias name -> body TypeExpr (for
+        # FnType resolution) and alias name -> declared parameter names (for
+        # generic aliases), as ONE value instead of two maps that could be
+        # swapped independently and fall out of step (the #1184 mispairing).
+        # Seeded empty; codegen calls `set_alias_env` before translation.
+        self._alias_env: AliasEnv = EMPTY_ALIAS_ENV
         # Closure signature registry: sig_key -> (type_name, param/result WAT)
         self._closure_sigs: dict[str, str] = {}
         # Flags for resource requirements detected during translation
@@ -547,17 +550,16 @@ class WasmContext(
         int-literal → i32.const coercion (#865)."""
         self._fn_byte_params = byte_params
 
-    def set_type_aliases(
-        self, aliases: dict[str, ast.TypeExpr],
-    ) -> None:
-        """Set type alias mappings for FnType resolution."""
-        self._type_aliases = aliases
+    def set_alias_env(self, env: AliasEnv) -> None:
+        """Set the naming environment for alias resolution (#1208).
 
-    def set_type_alias_params(
-        self, params: dict[str, tuple[str, ...]],
-    ) -> None:
-        """Set type alias parameter names for generic alias resolution."""
-        self._type_alias_params = params
+        Replaces the former ``set_type_aliases`` / ``set_type_alias_params``
+        pair.  The two maps have to be overlaid together — a module alias
+        shadowing a *parameterised* prelude alias with a *non*-parameterised
+        one must not inherit the prelude's parameter list (#1184) — so they
+        travel as one value that cannot be half-updated.
+        """
+        self._alias_env = env
 
     def set_closure_id_start(self, start: int) -> None:
         """Set the starting closure ID for this context."""

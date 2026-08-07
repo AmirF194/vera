@@ -171,6 +171,38 @@ The builtin parameterized effects take exactly one type argument at the handle: 
 
 For the builtin `State` effect the state declaration **is** the `State<T>` cell: its declared type must structurally equal the effect's `T` after alias resolution — for refined types, predicate included — or the handle is a checker error (E336). A type alias that resolves to `T` is accepted (including a refined alias on both sides, or two textually identical refinement declarations); a declaration that widens (`@Int` on `State<Nat>`), narrows (`@Nat` on `State<Int>`), or carries a refinement predicate the effect argument does not (or a different one) is rejected — verification obligations and runtime guards key off `T`, so a divergent declaration would be documentation the toolchain contradicts. Any refinement on the cell belongs in the `State<T>` argument itself **via a named refinement alias** (`type Small = { @Nat | ... }; handle[State<Small>](@Small = ...)`) — an inline refinement literal in the `State<T>` argument position is not compilable. A user-declared effect's handler state is the handler's own accumulator and may take any type.
 
+**Cell identity is the RESOLVED `T`, not the spelling.** `State<T>` is one effect instance per resolved `T`, so every spelling that resolves to the same type names the same cell — whether that type is scalar or composite, and whether the alias is plain or parameterized. A `handle[State<MaybeInt>]` under `type MaybeInt = Option<Int>` therefore handles a callee declaring `effects(<State<Option<Int>>>)`, and the two share one cell:
+
+```vera
+type MaybeInt = Option<Int>;
+
+private fn stash(@Unit -> @Unit)
+  requires(true)
+  ensures(true)
+  effects(<State<Option<Int>>>)
+{
+  put(Some(7))
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<MaybeInt>](@MaybeInt = None) {
+    get(@Unit) -> { resume(@MaybeInt.0) },
+    put(@MaybeInt) -> { resume(()) }
+  } in {
+    stash(());
+    option_unwrap_or(get(()), 0 - 1)
+  }
+}
+```
+
+`main` returns `7` — `stash` writes to the cell the handler established. The same rule governs `Exn<E>` payloads: `Exn<Msg>` under `type Msg = String` catches a `throw` from a function declaring `effects(<Exn<String>>)`. Two cells are distinct exactly when their resolved types are (`State<Option<Int>>` and `State<Option<Bool>>` are two cells; a handler for one does not handle the other).
+
+Resolved-type identity governs the cell wherever the resolved type has a **nameable, mangle-safe family** — the canonical `Head<arg, arg>` grammar a `@Name.n` slot reference can spell, since the family name is what the emitted cell symbol is mangled from. A resolution outside that grammar has no such family (`State<Handler>` under `type Handler = Option<fn(Int -> Int) effects(pure)>`), and the reference compiler falls back to the alias-opaque **spelling**, so two spellings of one such type name two cells rather than sharing one. The fallback runs in the conservative direction only: it can leave split a cell the resolution would have merged, never merge two the checker keeps apart. Extending the mangler over these renderings, so the resolved-type rule holds without exception, is tracked as [#1219](https://github.com/aallan/vera/issues/1219).
+
 ### 7.5.2 Handler Semantics
 
 When an effect operation is performed in the handled body:

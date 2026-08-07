@@ -447,6 +447,161 @@ class TestDefinition:
         # outer's (line 0).
         assert loc.range.start.line == 6
 
+    def test_parameterised_slot_resolves_to_its_parameter(self) -> None:
+        """Go-to-definition works on a PARAMETERISED slot reference (#1208).
+
+        The slot table is keyed by the rendered name (``Option<Int>``); the
+        lookup used to be by the reference's bare HEAD (``Option``), so every
+        `@T<Args>.n` missed the table and go-to-definition silently returned
+        nothing — the whole class of container-typed parameters.  Keyed with
+        :func:`vera.naming.slot_ref_key`, the reference renders the way the
+        binding did.
+
+        Two parameters of the SAME rendered name pin which one was reached:
+        `@Option<Int>.0` is De Bruijn most-recent, so it must land on
+        parameter 2, not parameter 1.
+        """
+        src = (
+            "public fn pick(@Option<Int>, @Option<Int> -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{\n"
+            "  match @Option<Int>.0 {\n"
+            "    Some(@Int) -> @Int.0,\n"
+            "    None -> 0\n"
+            "  }\n"
+            "}\n"
+        )
+        a = analyze(VerificationSession(), "file:///p.vera", src)
+        # `@Option<Int>.0` on line 4 (0-based 3), inside the match scrutinee.
+        loc = definition_at(a, lsp.Position(line=3, character=12))
+        assert loc is not None, (
+            "a parameterised slot reference must resolve to its parameter"
+        )
+        assert loc.range.start.line == 0
+        # Parameter 2, not parameter 1: the second `@Option<Int>` starts past
+        # `public fn pick(@Option<Int>, `.
+        assert loc.range.start.character > len(
+            "public fn pick(@Option<Int>, ") - 2
+
+    def test_parameterised_slot_alias_spelling_resolves(self) -> None:
+        """The reference may be spelled through an ALIAS and still resolve.
+
+        `@Option<Cnt>` (parameter) and `@Option<Int>` (reference) render to
+        the one name `Option<Int>` — THE renderer resolves type ARGUMENTS —
+        so go-to-definition must cross the spelling, exactly as the checker's
+        own binding lookup does.  A syntactic key would see two different
+        names and return nothing.
+        """
+        src = (
+            "type Cnt = Int;\n"
+            "\n"
+            "public fn f(@Option<Cnt> -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{\n"
+            "  match @Option<Int>.0 {\n"
+            "    Some(@Int) -> @Int.0,\n"
+            "    None -> 0\n"
+            "  }\n"
+            "}\n"
+        )
+        a = analyze(VerificationSession(), "file:///alias.vera", src)
+        # `@Option<Int>.0` on line 6 (0-based 5).
+        loc = definition_at(a, lsp.Position(line=5, character=12))
+        assert loc is not None, (
+            "an alias-spelled parameter must be reachable from a "
+            "canonically-spelled reference"
+        )
+        assert loc.range.start.line == 2  # the signature, line 3 (0-based 2)
+
+    def test_forall_var_shadowing_an_alias_lands_on_the_right_param(
+        self,
+    ) -> None:
+        """The jump is computed in the FUNCTION's scope, not the module's.
+
+        `T` is a module alias AND `g`'s own type parameter; the type
+        parameter shadows the alias, so the checker binds `Option<Int>`
+        (parameter 1) and `Option<T>` (parameter 2) as two stacks.  Resolved
+        against the bare module environment they merge into one, and
+        `@Option<Int>.0` — De Bruijn most-recent of a two-entry stack —
+        lands on parameter 2.  Wrong parameter, no error: the function's own
+        type parameters have to be in the environment the table is built
+        against.
+        """
+        src = (
+            "type T = Int;\n"
+            "\n"
+            "public forall<T> fn g(@Option<Int>, @Option<T> -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{\n"
+            "  match @Option<Int>.0 {\n"
+            "    Some(@Int) -> @Int.0,\n"
+            "    None -> 0 - 1\n"
+            "  }\n"
+            "}\n"
+        )
+        a = analyze(VerificationSession(), "file:///shadow.vera", src)
+        # `@Option<Int>.0` on line 6 (0-based 5).
+        loc = definition_at(a, lsp.Position(line=5, character=12))
+        assert loc is not None
+        sig = "public forall<T> fn g("
+        assert loc.range.start.line == 2
+        assert loc.range.start.character == len(sig) + 1, (
+            "must land on parameter 1 (@Option<Int>); parameter 2 means the "
+            "forall shadow was invisible and the two stacks merged"
+        )
+
+    def test_where_helper_inherits_the_parents_forall_shadow(self) -> None:
+        """A helper INSIDE a generic parent is narrowed by the parent's vars.
+
+        `fn_scopes` accumulates rather than replaces — the checker saves and
+        restores ONE type-parameter map, so a `where` helper sees its parent's
+        `forall<T>` as well as its own.  With `type T = Int` also in scope, a
+        helper rendered against the bare module environment merges its two
+        `@Option` parameters into one stack and go-to-definition lands on
+        parameter 2 where the checker resolves parameter 1.
+
+        The CLI side of this shape is pinned
+        (`test_where_helper_inherits_the_parents_forall_vars`); this is its
+        LSP twin, added because dropping the accumulation in
+        `definition_at` survived the LSP suite while failing the CLI one
+        (#1208 review, M9) — one narrowing, two surfaces, and only one of
+        them was watching.
+        """
+        src = (
+            "type T = Int;\n"
+            "\n"
+            "public forall<T> fn outer(@Option<Int>, @Option<T> -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{\n"
+            "  helper(@Option<Int>.0, @Option<T>.0)\n"
+            "}\n"
+            "where {\n"
+            "  fn helper(@Option<Int>, @Option<T> -> @Int)\n"
+            "    requires(true) ensures(true) effects(pure)\n"
+            "  {\n"
+            "    match @Option<Int>.0 {\n"
+            "      Some(@Int) -> @Int.0,\n"
+            "      None -> 0 - 1\n"
+            "    }\n"
+            "  }\n"
+            "}\n"
+        )
+        a = analyze(VerificationSession(), "file:///where_shadow.vera", src)
+        # `@Option<Int>.0` inside the HELPER's body, line 12 (0-based 11).
+        loc = definition_at(a, lsp.Position(line=11, character=14))
+        assert loc is not None, (
+            "a helper's own parameter must be reachable from its body"
+        )
+        assert loc.range.start.line == 8, (
+            "must land on the helper's signature (line 9), not the parent's"
+        )
+        sig = "  fn helper("
+        assert loc.range.start.character == len(sig) + 1, (
+            "must land on the helper's parameter 1 (@Option<Int>); parameter "
+            "2 means the parent's forall shadow did not reach the helper and "
+            "its two stacks merged"
+        )
+
 
 class TestHoleCompletion:
     def test_completion_inside_hole_lists_bindings(self) -> None:

@@ -1085,13 +1085,65 @@ class TestObligationKinds:
         assert len(e501) == 1
         assert "At this call site: 1 > 2" in e501[0].description
 
+    def test_e501_substitutes_a_parameterised_slot_reference(self) -> None:
+        """A PARAMETERISED callee slot substitutes too (#1208).
+
+        The slot table is keyed by the rendered name (``Wrap<Int>``); the
+        lookup used to be by the reference's bare HEAD (``Wrap``), so every
+        parameterised reference missed and the whole substitution was
+        abandoned — E501 silently fell back to its generic wording on exactly
+        the signatures where the concrete rendering helps most.  Keying with
+        :func:`vera.naming.slot_ref_key` renders the reference the same way
+        the binding was rendered.
+
+        ``type Wrap<T> = T`` keeps the parameter SMT-translatable (it resolves
+        to ``Int``), which is what makes the call site reach E501 at all
+        rather than the E532 Tier-3 demotion an opaque container would take.
+        """
+        source = (
+            "type Wrap<T> = T;\n"
+            "\n"
+            "private fn need_pos(@Wrap<Int> -> @Int)\n"
+            "  requires(@Wrap<Int>.0 > 0)\n"
+            "  ensures(true)\n"
+            "  effects(pure)\n"
+            "{\n"
+            "  0\n"
+            "}\n"
+            "\n"
+            "public fn caller(-> @Int)\n"
+            "  requires(true)\n"
+            "  ensures(true)\n"
+            "  effects(pure)\n"
+            "{\n"
+            "  let @Int = need_pos(0);\n"
+            "  @Int.0\n"
+            "}\n"
+        )
+        result = self._verify_source(source)
+        e501 = [d for d in result.diagnostics if d.error_code == "E501"]
+        assert len(e501) == 1
+        d = e501[0]
+        assert "At this call site: 0 > 0" in d.description
+        assert d.fix is not None
+        assert "if 0 > 0 then { need_pos(0) } else { ... }" in d.fix
+
     def test_e501_unmappable_slot_keeps_generic_fix(self) -> None:
         """When a precondition slot cannot be mapped to an argument,
         the message keeps the generic wording instead of guessing."""
         from vera import ast as A
+        from vera.naming import EMPTY_ALIAS_ENV
         from vera.verifier import ContractVerifier
 
         v = ContractVerifier.__new__(ContractVerifier)
+        # #1208: `slot_table` is named against the verifier's alias env; this
+        # fixture bypasses `__init__`, so supply the empty one it declares no
+        # aliases against.  `_decl_alias_env` too: the call site reads
+        # `_current_alias_env`, which consults it (PR #1224 review) — without
+        # it the fixture raises `AttributeError` instead of exercising the
+        # unmappable-slot branch.
+        v._alias_env = EMPTY_ALIAS_ENV
+        v._decl_alias_env = None
         pre = A.Requires(
             expr=A.SlotRef(
                 type_name="String", type_args=None, index=5, span=None,
@@ -1099,7 +1151,7 @@ class TestObligationKinds:
             span=None,
         )
         call = A.FnCall(name="f", args=(), span=None)
-        out = v._pre_at_call_site((), call, pre)
+        out = v._pre_at_call_site((), None, call, pre)
         assert out is None
 
     def test_content_key_stable_across_runs(self) -> None:

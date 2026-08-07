@@ -6,10 +6,11 @@ postcondition checks with informative failure messages.
 
 from __future__ import annotations
 
-from vera import ast
+from vera import ast, naming
 from vera.monomorphize import mangle_type_name
 from vera.skip import CodegenSkip
 from vera.wasm import WasmContext, WasmSlotEnv
+from vera.wasm.helpers import state_type_arg
 from vera.wasm.inference import substitute_type_vars
 
 # Recursion bound for tuple-component boundary guards (#746).  A *finite* tuple
@@ -29,145 +30,88 @@ class ContractsMixin:
         """(predicate, base slot-name) if *te* is a refinement, else None
         (#746) — the codegen counterpart of the verifier's ``_refined_parts``.
 
-        Resolves an alias chain (``type PosInt = { @Int | ... }``; also
-        ``type P2 = PosInt``) to the underlying ``RefinementType`` and returns
-        its predicate plus the base type's *name* (the binder slot, e.g.
-        ``Int`` for ``{ @Int | ... }`` or the canonical ``Array<Int>`` for
-        ``{ @Array<Int> | array_length(@Array<Int>.0) > 0 }`` — matching
-        ``_translate_slot_ref``'s key, since a bare ``Array`` would never
-        resolve).  Unlike the
-        verify side — where Z3 cannot decide ``array_length`` so a collection
-        base is Tier 3 — the runtime guard compiles the predicate to WASM
-        directly, so it covers any base whose predicate
-        :py:meth:`WasmContext.translate_expr` can lower (:py:meth:`_emit_refinement_check`
-        returns None and emits no guard when it cannot)."""
-        node: ast.TypeExpr = te
-        seen: set[str] = set()
-        while (isinstance(node, ast.NamedType)
-               and node.name in self._type_aliases
-               and node.name not in seen):
-            seen.add(node.name)
-            node = self._type_aliases[node.name]
-        if isinstance(node, ast.RefinementType):
-            base = node.base_type
-            if isinstance(base, ast.NamedType):
-                # Build the canonical slot name the predicate's binder uses —
-                # ``Array<Int>`` for a parameterised base, ``Int`` otherwise —
-                # matching `_translate_slot_ref`'s key (a bare ``Array`` would
-                # never resolve).
-                name = base.name
-                if base.type_args:
-                    arg_names: list[str] = []
-                    for ta in base.type_args:
-                        if isinstance(ta, ast.NamedType):
-                            arg_names.append(ta.name)
-                        else:
-                            return None
-                    name = f"{base.name}<{', '.join(arg_names)}>"
-                predicate = node.predicate
-                # Conjoin the `@Nat` base's implicit `>= 0` when the base
-                # resolves to `@Nat` — directly OR through an alias chain
-                # (`type Age = Nat`).  The *decision* follows the base's
-                # aliases, but the synthetic slot ref uses `name` (the binder
-                # key the predicate uses and the guard pushes the value under,
-                # e.g. `@Age.0`), NOT a literal `@Nat.0` which wouldn't resolve.
-                # Mirrors the verifier's `_translate_refined_predicate` so the
-                # runtime guard (and its trap message, both derived here) reject
-                # a negative value satisfying P — `-1` for `{ @Age | @Age.0 < 10
-                # }` — at an FFI/public boundary (CR f1f2a26, db24433).
-                base_node: ast.TypeExpr = base
-                bseen: set[str] = set()
-                while (isinstance(base_node, ast.NamedType)
-                       and base_node.name in self._type_aliases
-                       and base_node.name not in bseen):
-                    bseen.add(base_node.name)
-                    base_node = self._type_aliases[base_node.name]
-                if isinstance(base_node, ast.RefinementType):
-                    # Refinement-over-refinement (e.g. `type Tiny = { @Pos |
-                    # @Pos.0 < 10 }` where `Pos = { @Int | @Int.0 > 0 }`): the
-                    # outer guard would compile only the outer predicate and
-                    # silently DROP the inner `> 0` membership — a soundness
-                    # hole that wrongly accepts `f(-1)`.  The verifier already
-                    # records such a narrowing as a Tier-3 E506 (its
-                    # `_base_slot_name` returns None for a non-primitive base),
-                    # so reject it loudly here at codegen (the "reject before
-                    # codegen" choice) with a clean E600 — a non-zero-exit
-                    # diagnostic, not a partial guard.  Returns None after
-                    # recording the error so the helper stays total; the
-                    # recorded error fails the compile.  This IS reachable.
-                    inner = ast.format_type_expr(base_node.base_type)
-                    self._error(
-                        te,
-                        f"Refinement base '{base.name}' resolves to another "
-                        f"refinement ({{ {inner} | ... }}); a refinement base "
-                        "must not itself resolve to a refinement.",
-                        rationale="Composing nested refinement membership "
-                        "predicates is unsupported — the runtime guard would "
-                        "silently drop the inner base predicate, so codegen "
-                        "rejects this rather than emit a partial guard.",
-                        error_code="E618",
-                    )
-                    return None
-                if self._type_expr_to_wasm_type(base_node) is None:
-                    # A zero-size / erased base — `@Unit`, or a `Future`
-                    # transparently wrapping one (`Future<Unit>`; #841/#943):
-                    # there is no WASM local to load into a boundary predicate
-                    # check, so emit NO guard (the verifier records such a
-                    # refinement `tier3_unguarded` rather than claiming a runtime
-                    # check; CR db24433).  Keyed on codegen's OWN erasure
-                    # (`_type_expr_to_wasm_type` returns None iff a type has no
-                    # WASM representation), so the guard-skip set is exactly the
-                    # set with no runtime local — #943 review found the literal
-                    # `base_node.name == "Unit"` keying missed `Future<Unit>`,
-                    # which erases identically and raised a raw `ValueError` at
-                    # the `wt is None` invariant in `_compile_fn` below.
-                    return None
-                if (isinstance(base_node, ast.NamedType)
-                        and base_node.name == "Nat"):
-                    predicate = ast.BinaryExpr(
-                        op=ast.BinOp.AND,
-                        left=ast.BinaryExpr(
-                            op=ast.BinOp.GE,
-                            left=ast.SlotRef(
-                                type_name=name, type_args=None, index=0),
-                            right=ast.IntLit(value=0),
-                        ),
-                        right=predicate,
-                    )
-                if (isinstance(base_node, ast.NamedType)
-                        and base_node.name == "Byte"):
-                    # Conjoin the `@Byte` base's implicit `0 <= @Byte.0 <= 255`
-                    # range the way `@Nat` conjoins `>= 0` above (#766, the
-                    # deferred PR #763 range-conjoin point).  A `@Byte` crosses
-                    # a public / FFI boundary as an unbounded i32, so a value
-                    # SATISFYING P but outside 0..255 (e.g. `300` for `@Byte.0
-                    # > 5`) would otherwise launder past the guard.  The
-                    # synthetic refs use the binder key `name` (`@SmallByte.0`
-                    # through an alias, `@Byte.0` directly) — the key the
-                    # predicate uses and the guard pushes the value under, NOT a
-                    # literal `@Byte.0` which wouldn't resolve for an alias.
-                    # The literal bounds are Byte-typed slot comparisons, so
-                    # `_translate_byte_binop` (#766) lowers them at i32 too.
-                    slot = ast.SlotRef(type_name=name, type_args=None, index=0)
-                    predicate = ast.BinaryExpr(
-                        op=ast.BinOp.AND,
-                        left=ast.BinaryExpr(
-                            op=ast.BinOp.AND,
-                            left=ast.BinaryExpr(
-                                op=ast.BinOp.GE,
-                                left=slot,
-                                right=ast.IntLit(value=0),
-                            ),
-                            right=ast.BinaryExpr(
-                                op=ast.BinOp.LE,
-                                left=slot,
-                                right=ast.IntLit(value=255),
-                            ),
-                        ),
-                        right=predicate,
-                    )
-                return (predicate, name)
-        return None
+        The DERIVATION is :func:`vera.naming.refinement_binder_parts` (#1208):
+        chase the alias chain (``type PosInt = { @Int | ... }``; also
+        ``type P2 = PosInt``) to the underlying ``RefinementType``, name its
+        base with the ONE renderer, and conjoin the ``@Nat`` / ``@Byte`` base's
+        implicit range so a value satisfying the written predicate but outside
+        the base's range cannot launder past the guard.  It used to be a second
+        hand-maintained copy of that walk, and the two had already drifted
+        apart at the erased-base and nested-refinement corners; layering
+        codegen's two WASM-specific decisions ON TOP of one shared derivation
+        is what keeps the guard's binder equal to the key the predicate's
+        ``@Base.n`` resolves to (and to the key the checker bound it under).
+
+        The two decisions that stay here, because they are about a type's WASM
+        REPRESENTATION and :mod:`vera.naming` must not import the backend:
+
+        * a nested refinement base is rejected LOUDLY (E618) — naming reports
+          the shape, codegen decides what to do about it;
+        * an erased base emits NO guard at all.
+        """
+        parts = naming.refinement_binder_parts(te, self._alias_env)
+        if parts is None:
+            return None
+        if parts.base_is_refinement:
+            # Refinement-over-refinement (e.g. `type Tiny = { @Pos |
+            # @Pos.0 < 10 }` where `Pos = { @Int | @Int.0 > 0 }`): the
+            # outer guard would compile only the outer predicate and
+            # silently DROP the inner `> 0` membership — a soundness
+            # hole that wrongly accepts `f(-1)`.  The verifier already
+            # records such a narrowing as a Tier-3 E506 (its
+            # `_base_slot_name` returns None for a non-primitive base),
+            # so reject it loudly here at codegen (the "reject before
+            # codegen" choice) with a clean E618 — a non-zero-exit
+            # diagnostic, not a partial guard.  Returns None after
+            # recording the error so the helper stays total; the
+            # recorded error fails the compile.  This IS reachable.
+            # `base` IS the inner `RefinementType` on this branch; the
+            # isinstance keeps the unwrap total rather than asserting it.
+            inner = ast.format_type_expr(
+                parts.base.base_type
+                if isinstance(parts.base, ast.RefinementType)
+                else parts.base
+            )
+            # Once per SITE, not once per visit (PR #1224 review).  This
+            # helper is consulted from several places per declaration, and a
+            # generic carrying a concrete nested-refinement parameter is
+            # compiled once per instantiation from the SAME spans, so
+            # `forall<T> fn g(@T, @Tiny -> @Int)` used at two types reported
+            # the one declaration twice.  Keyed on the resolved diagnostic
+            # location, which carries the owning file — two modules whose
+            # declarations happen to share a line/column stay distinct.
+            loc, _src = self._diag_location(te)
+            site = (loc.file, loc.line, loc.column)
+            if site in self._e618_sites:
+                return None
+            self._e618_sites.add(site)
+            self._error(
+                te,
+                f"Refinement base '{parts.binder_name}' resolves to another "
+                f"refinement ({{ {inner} | ... }}); a refinement base "
+                "must not itself resolve to a refinement.",
+                rationale="Composing nested refinement membership "
+                "predicates is unsupported — the runtime guard would "
+                "silently drop the inner base predicate, so codegen "
+                "rejects this rather than emit a partial guard.",
+                error_code="E618",
+            )
+            return None
+        if self._type_expr_to_wasm_type(parts.base) is None:
+            # A zero-size / erased base — `@Unit`, or a `Future`
+            # transparently wrapping one (`Future<Unit>`; #841/#943):
+            # there is no WASM local to load into a boundary predicate
+            # check, so emit NO guard (the verifier records such a
+            # refinement `tier3_unguarded` rather than claiming a runtime
+            # check; CR db24433).  Keyed on codegen's OWN erasure
+            # (`_type_expr_to_wasm_type` returns None iff a type has no
+            # WASM representation), so the guard-skip set is exactly the
+            # set with no runtime local — #943 review found the literal
+            # `base_node.name == "Unit"` keying missed `Future<Unit>`,
+            # which erases identically and raised a raw `ValueError` at
+            # the `wt is None` invariant in `_compile_fn` below.
+            return None
+        return (parts.predicate, parts.binder_name)
 
     def _emit_refinement_check(
         self,
@@ -774,16 +718,14 @@ class ContractsMixin:
     ) -> None:
         """Recursively collect State<T> type names from OldExpr nodes."""
         if isinstance(expr, ast.OldExpr):
-            type_name = WasmContext._extract_state_type_name(
-                expr.effect_ref,
-            )
-            if type_name is not None:
-                # #1205: key the snapshot set by the scalar-collapsed
-                # family — matches `_state_types` registration and the
-                # `_translate_old_expr` read, so `old(State<Count>)`
-                # snapshots (and finds) the `Nat` family.
-                types.add(self._family_name_te(
-                    expr.effect_ref.type_args[0], type_name))
+            # Key the snapshot set by the resolved cell FAMILY — matches
+            # `_state_types` registration and the `_translate_old_expr`
+            # read, so `old(State<Count>)` snapshots (and finds) the `Nat`
+            # family (#1205) and `old(State<MaybeInt>)` the `Option<Int>`
+            # one (#1209).  The fallback for a resolution that names no
+            # family is derived inside `_family_name_te`, so the two sides
+            # cannot pass different ones.
+            types.add(self._family_name_te(state_type_arg(expr.effect_ref)))
             return
         # Walk child expressions
         for child in self._expr_children(expr):

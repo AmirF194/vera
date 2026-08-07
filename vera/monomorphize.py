@@ -9,8 +9,9 @@ instantiation set codegen emits, or a missed instantiation becomes a false
 Tier-1 — ``vera verify`` reports clean while a runtime obligation is left
 unproven.
 
-This module is deliberately codegen-free.  Its only imports are :mod:`vera.ast`
-and the pure :func:`substitute_type_vars` ``TypeExpr`` walk (relocated here from
+This module is deliberately codegen-free.  It imports :mod:`vera.ast`, the ONE
+naming renderer (:mod:`vera.naming` / :mod:`vera.slots`, #1208), and the pure
+:func:`substitute_type_vars` ``TypeExpr`` walk (relocated here from
 ``vera/wasm/inference.py`` so importing the monomorphizer doesn't pull in the
 ``vera.wasm`` backend).  WASM/layout-specific concerns — ability-constraint
 checking (E613) and layout-derived ``Eq`` auto-derivation — stay in
@@ -28,12 +29,13 @@ instantiation sets in agreement.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, fields, replace
 from typing import Any, cast
 
-from vera import ast
-from vera.slots import slot_ref_name, type_expr_slot_name
+from vera import ast, naming
+from vera.naming import EMPTY_ALIAS_ENV, AliasEnv
+from vera.slots import fn_slot_scope
 
 
 def substitute_type_vars(
@@ -108,8 +110,8 @@ def substitute_type_vars(
 
 def resolve_type_alias(
     te: ast.TypeExpr,
-    type_aliases: dict[str, ast.TypeExpr],
-    type_alias_params: dict[str, tuple[str, ...]],
+    type_aliases: Mapping[str, ast.TypeExpr],
+    type_alias_params: Mapping[str, tuple[str, ...] | None],
 ) -> ast.TypeExpr | None:
     """Resolve a ``TypeExpr`` through the alias chain to its terminal shape.
 
@@ -177,8 +179,8 @@ def resolve_type_alias(
 
 def resolve_fn_type_alias(
     te: ast.TypeExpr,
-    type_aliases: dict[str, ast.TypeExpr],
-    type_alias_params: dict[str, tuple[str, ...]],
+    type_aliases: Mapping[str, ast.TypeExpr],
+    type_alias_params: Mapping[str, tuple[str, ...] | None],
 ) -> ast.FnType | None:
     """Resolve a ``TypeExpr`` to the ``FnType`` it aliases, transitively.
 
@@ -1049,6 +1051,8 @@ class MonoContext:
       discovered set is a sound superset under that normalization, which the
       #732 differential test maintains (its ``collapse`` table is the one place
       that mapping lives) and pins.
+    * ``alias_env`` — the same alias namespace as the two maps above, carried
+      as the one value :mod:`vera.naming` renders against (#1208).
     * ``fn_ret_type_exprs`` — function name (bare-keyed, same as ``fn_ret_types``)
       → declared return **TypeExpr** (type args RETAINED, unlike ``fn_ret_types``).
       Lets discovery recover a user fn's *parameterized* return (`maybe → Option<Decimal>`)
@@ -1067,6 +1071,11 @@ class MonoContext:
     type_alias_params: dict[str, tuple[str, ...]]
     fn_ret_types: dict[str, str]
     fn_ret_type_exprs: dict[str, ast.TypeExpr] = field(default_factory=dict)
+    # #1208: the naming environment for this consumer's alias namespace — the
+    # `type_aliases` / `type_alias_params` pair above as ONE value, plus the
+    # declared-ADT names.  Defaulted empty so a consumer that has not been
+    # threaded yet behaves exactly as before.
+    alias_env: AliasEnv = EMPTY_ALIAS_ENV
 
 
 class Monomorphizer:
@@ -2078,6 +2087,7 @@ class Monomorphizer:
         self,
         decl: ast.FnDecl,
         concrete_types: tuple[str, ...],
+        alias_env: AliasEnv | None = None,
     ) -> ast.FnDecl:
         """Create a monomorphized copy of a generic function.
 
@@ -2091,15 +2101,31 @@ class Monomorphizer:
         When distinct type variables map to the same concrete type
         (e.g. A→Int, B→Int), De Bruijn indices in slot references
         must be adjusted because formerly separate namespaces merge.
+
+        *alias_env* is the naming environment the reindex renders binder
+        names against (#1208).  It must be the env of the module that
+        DECLARED *decl*, not the driver's own: aliases are module-scoped
+        (spec §8.4.1), so a clone of an IMPORTED generic whose parameters
+        name a module-local alias merges differently in its own namespace
+        than in the importer's — and the consumers rebuild the clone's scope
+        under the defining module's scope, so a recount done against the
+        importer's would be a recount against a scope nobody has.  Defaults
+        to ``ctx.alias_env``, which is right whenever the caller has only
+        one namespace in play.  ``_compute_scoped_reindex`` narrows it by the
+        ``forall`` variables in scope on each side of the recount — all of
+        them before substitution, the SURVIVING ones after — so a type
+        parameter shadowing a same-named alias renders as the checker
+        rendered it, and as the consumers re-render it on the clone.
         """
         assert decl.forall_vars is not None  # noqa: S101
+        env = self.ctx.alias_env if alias_env is None else alias_env
         mapping = dict(zip(decl.forall_vars, concrete_types))
         mangled = self._mangle_fn_name(decl.name, concrete_types)
 
         # Scope-aware De Bruijn reindexing (#769 gap 3): resolve every
         # SlotRef against the full binding scope at its reference site and
         # recompute its index in the collapsed (post-substitution) namespace.
-        reindex = self._compute_scoped_reindex(decl, mapping)
+        reindex = self._compute_scoped_reindex(decl, mapping, env)
 
         # Substitute type variables in the entire FnDecl
         substituted = self._substitute_in_ast(decl, mapping, reindex)
@@ -2112,16 +2138,24 @@ class Monomorphizer:
         )
 
     def _substituted_slot_name(
-        self, te: ast.TypeExpr, mapping: dict[str, str],
+        self, te: ast.TypeExpr, mapping: dict[str, str], env: AliasEnv,
     ) -> str | None:
-        """Full-depth canonical slot name of ``te`` AFTER type-variable
-        substitution — the name this binder carries in the clone."""
-        return type_expr_slot_name(self._substitute_type_expr(te, mapping))
+        """Canonical slot name of ``te`` AFTER type-variable substitution —
+        the name this binder carries in the clone.
+
+        #1208: rendered by :func:`vera.naming.slot_name` against the origin
+        module's alias environment, the same renderer the consumers rebuild
+        the clone's scope with.  A name minted here that they would not mint
+        is a De Bruijn recount against a scope neither of them has.
+        """
+        return naming.slot_name_or_none(
+            self._substitute_type_expr(te, mapping), env)
 
     def _compute_scoped_reindex(
         self,
         decl: ast.FnDecl,
         mapping: dict[str, str],
+        env: AliasEnv,
     ) -> dict[int, int]:
         """Scope-aware De Bruijn reindex for monomorphization (#769 gap 3).
 
@@ -2166,25 +2200,78 @@ class Monomorphizer:
         the walker never descends into ``TypeExpr`` fields, so their indices
         are untouched (an outer collapse cannot shift a one-binder scope).
 
-        Names are FULL-DEPTH canonical slot names (``vera/slots.py``, the
-        shared namer both consumers resolve against).  A reference that does
-        not resolve against the walked scope keeps its index — the consumers
-        surface dangling refs (hard E699 in codegen) exactly as they would
-        have pre-substitution.
+        Names come from :mod:`vera.naming` — the ONE renderer both consumers
+        resolve the clone's scope against (#1208) — with the BIND side
+        (``push``) and the REFERENCE side (``resolve``) rendered by the same
+        function over the same environment.  They have to move together: a
+        recount that pushes under one rendering and looks up under another
+        silently mis-resolves, which is the whole failure mode this walker
+        exists to prevent.  A reference that does not resolve against the
+        walked scope keeps its index — the consumers surface dangling refs
+        (hard E699 in codegen) exactly as they would have pre-substitution.
+
+        TWO environments, because the recount spans a scope change.  The
+        PRE-substitution side (the old name a ``push`` records and the key a
+        ``resolve`` looks up) is rendered against *scope* — the module env
+        NARROWED by the ``forall`` variables in scope over the function being
+        walked (:func:`~vera.slots.fn_slot_scope`), which is what the CHECKER
+        rendered the generic's own signature and body against: a type
+        parameter shadows a same-named module alias for the whole signature
+        (``type T = Int;`` + ``forall<T>``), so rendering the pre-substitution
+        side against the bare module env collapses ``@Option<T>`` and
+        ``@Option<Int>`` into one stack the checker kept apart, and every
+        reference into that stack silently resolves onto the wrong parameter
+        (#1208 review, probes ``m01``/``m03``/``v01``).
+
+        The POST-substitution side is narrowed by the ``forall`` variables the
+        CLONE declares — which is what the consumers rebuild from, so matching
+        them is by construction rather than by argument.  For the function
+        being cloned that is none of them (``monomorphize_fn`` clears its
+        ``forall_vars``), which is why the bare env is right for the top-level
+        walk.  It is NOT right one level down: substitution clears only the
+        cloned function's own variables, so a ``where`` helper declared
+        ``forall<U>`` still carries ``forall_vars=('U',)`` in the clone, and
+        both consumers narrow by it when they re-render the helper.  Minting
+        the helper's post-substitution names against the bare env instead
+        resolves ``U`` through a same-named module alias (``type U = Int;`` →
+        ``Option<Int>``) — a recount whose new names are names nobody looks
+        up.  Narrowing by the variables that merely SURVIVE the substitution
+        (``v not in mapping``) is not the same rule and was the same bug one
+        case further out: it dropped a helper variable that shares a name with
+        the parent's, and under an identity mapping (``forall<T>``
+        instantiated at a module alias spelled ``T``) that variable is still
+        written in the clone, so the post side minted ``Option<Int>`` where
+        the consumers rebuild ``Option<T>`` (PR #1224 round-3).  Every
+        currently-reachable instance of that shape is blocked upstream by
+        `#1223 <https://github.com/aallan/vera/issues/1223>`_ — codegen drops
+        a generic ``where``-helper under a generic parent before it can be
+        run — so the rule is pinned as a differential against the consumers'
+        own rebuild rather than end to end.  A ``where`` helper extends BOTH
+        narrowings with its own parameters on top of its ancestors' — the same
+        accumulation :func:`~vera.slots.fn_scopes` performs, because
+        ``_check_fn`` adds to one shared type-parameter map rather than
+        replacing it.  One environment per side, used by every rendering on
+        that side: ``push`` mints both names, and ``resolve`` reads the
+        pre-side key it minted and the post-side name it recorded, so the two
+        cannot be scoped differently.
         """
         out: dict[int, int] = {}
         stack: list[tuple[str | None, str | None]] = []
 
+        scope = fn_slot_scope(env, decl.forall_vars)
+        # The clone this walk is minting names for declares NO type parameters
+        # — `monomorphize_fn` clears them — so the consumers rebuild its scope
+        # from the bare env, and so does the post side.
+        post_scope = env
+
         def push(te: ast.TypeExpr) -> None:
             stack.append((
-                type_expr_slot_name(te),
-                self._substituted_slot_name(te, mapping),
+                naming.slot_name_or_none(te, scope),
+                self._substituted_slot_name(te, mapping, post_scope),
             ))
 
         def resolve(ref: ast.SlotRef) -> None:
-            name = slot_ref_name(ref)
-            if name is None:
-                return
+            name = naming.slot_ref_key(ref, scope)
             seen = 0
             for pos in range(len(stack) - 1, -1, -1):
                 if stack[pos][0] != name:
@@ -2287,6 +2374,7 @@ class Monomorphizer:
                     walk(item)
 
         def walk_fn_scope(fn_decl: ast.FnDecl) -> None:
+            nonlocal scope, post_scope
             del stack[:]
             for param_te in fn_decl.params:
                 push(param_te)
@@ -2298,7 +2386,23 @@ class Monomorphizer:
             # collect_calls_in_node walk (PR #972 review; a depth-1 walk left
             # nested helpers' collapsed indices stale).
             for nested in fn_decl.where_fns or ():
-                walk_fn_scope(nested)
+                saved = (scope, post_scope)
+                scope = fn_slot_scope(scope, nested.forall_vars)
+                # AS DECLARED on both sides.  Substitution clears only the
+                # cloned function's own variables, so the helper carries its
+                # `forall_vars` unchanged into the clone and the consumers
+                # narrow by exactly them.  Narrowing the post side by the
+                # SURVIVING ones instead dropped any helper variable that
+                # shared a name with the parent's — under an identity mapping
+                # (`forall<T>` instantiated at a module alias spelled `T`) the
+                # variable is still written in the clone, so the post side
+                # minted `Option<Int>` through the alias where the consumers
+                # rebuild `Option<T>` (PR #1224 round-3).
+                post_scope = fn_slot_scope(post_scope, nested.forall_vars)
+                try:
+                    walk_fn_scope(nested)
+                finally:
+                    scope, post_scope = saved
 
         walk_fn_scope(decl)
         return out

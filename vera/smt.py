@@ -9,15 +9,17 @@ See spec/06-contracts.md, Section 6.4 "Verification Conditions".
 
 from __future__ import annotations
 
+import contextlib
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable
 
 import z3
 
-from vera import ast
+from vera import ast, naming
 from vera.monomorphize import mangle_type_name, unmangle_type_name
-from vera.slots import slot_ref_name, type_expr_slot_name
+from vera.naming import EMPTY_ALIAS_ENV, AliasEnv
 from vera.types import (
     AdtType,
     PRIMITIVES,
@@ -286,8 +288,21 @@ class SmtContext:
         module_fn_lookup: (
             Callable[[tuple[str, ...], str], Any] | None
         ) = None,
+        alias_env: AliasEnv = EMPTY_ALIAS_ENV,
     ) -> None:
         self.solver = z3.Solver()
+        # #1208: the naming environment this context renders slot names and
+        # State/Exn families against.  Defaulted empty for the WARM session,
+        # which builds one context before any program is known and rebinds
+        # this per program exactly as it rebinds `_fn_lookup`.
+        self._alias_env = alias_env
+        # #1208: given a callee's registered info, the naming env that callee's
+        # OWN contract renders against.  Bound by the verifier to
+        # `ContractVerifier._callee_alias_env`; ``None`` (a bare SmtContext, or
+        # a driver with a single namespace) keeps `_alias_env` for every callee.
+        self._callee_alias_env_lookup: (
+            Callable[[Any], AliasEnv] | None
+        ) = None
         self.solver.set("timeout", timeout_ms)
         # Retained so reset() can re-apply it on warm-session reuse.
         self._timeout_ms = timeout_ms
@@ -1003,15 +1018,14 @@ class SmtContext:
         self, ref: ast.SlotRef, env: SlotEnv
     ) -> z3.ExprRef | None:
         """Translate @Type.n to the corresponding Z3 variable."""
-        # Shared recursive builder (#914 finding 2) — fully-qualified nested
-        # type args, matching the env-key side and the checker so the
-        # verifier resolves the SAME slot the checker did (a one-level name
-        # collided distinct nested composites like `Option<Tuple<Int, Int>>`
-        # vs `Option<Tuple<Bool, Bool>>` into one `Option<Tuple>` stack).
-        type_name = slot_ref_name(ref)
-        if type_name is None:  # pragma: no cover — complex type arg
-            return None
-        return env.resolve(type_name, ref.index)
+        # #1208: the ONE renderer, against this context's alias environment —
+        # the same function over the same environment that keyed every push
+        # into `env` (`_type_expr_to_slot_name`), so the verifier resolves the
+        # SAME slot the checker did.  Nested composites stay fully qualified
+        # (#914 finding 2: a one-level name collided `Option<Tuple<Int, Int>>`
+        # with `Option<Tuple<Bool, Bool>>` into one `Option<Tuple>` stack).
+        return env.resolve(
+            naming.slot_ref_key(ref, self._alias_env), ref.index)
 
     def _translate_binary(
         self, expr: ast.BinaryExpr, env: SlotEnv
@@ -1806,6 +1820,34 @@ class SmtContext:
             z3_args.append(z3_arg)
         return z3_args
 
+    @contextlib.contextmanager
+    def _callee_naming_scope(self, callee_info: Any) -> Iterator[None]:
+        """Render *callee_info*'s own contract in ITS module's namespace (#1208).
+
+        A callee's parameter list and its ``requires`` / ``ensures`` are written
+        against the aliases of the module that DECLARED it (spec §8.4.1), so the
+        parameter stack this obligation pushes and the ``@T.n`` references that
+        read it both have to be rendered there.  Rendered against the IMPORTER's
+        env instead — the pre-fix behaviour — two modules that declare the same
+        alias name over different bodies make the obligation attach to the wrong
+        argument: it either merges two of the callee's parameter stacks (the
+        precondition silently vanishes, a false Tier-1) or splits one (a
+        spurious E501).
+
+        Scoped exactly to the callee-contract translation: the ACTUAL arguments
+        are translated before this is entered, in the caller's own env, because
+        they are the caller's expressions.
+        """
+        if self._callee_alias_env_lookup is None:
+            yield
+            return
+        saved = self._alias_env
+        self._alias_env = self._callee_alias_env_lookup(callee_info)
+        try:
+            yield
+        finally:
+            self._alias_env = saved
+
     def _build_callee_env(
         self,
         callee_info: Any,
@@ -1814,15 +1856,20 @@ class SmtContext:
         """Build the callee's SlotEnv by pushing each parameter's Z3 argument
         in declaration order (#882 helper).
 
+        The parameter names are rendered in the CALLEE's namespace (#1208, see
+        :meth:`_callee_naming_scope`) — they key the stack every reference in
+        the callee's contract resolves against.
+
         Returns None if a parameter type expression has no slot name (a shape
         the checker rules out; guarded for safety).
         """
         callee_env = SlotEnv()
-        for param_te, z3_arg in zip(callee_info.param_type_exprs, z3_args):
-            slot_name = self._type_expr_to_slot_name(param_te)
-            if slot_name is None:  # pragma: no cover
-                return None
-            callee_env = callee_env.push(slot_name, z3_arg)
+        with self._callee_naming_scope(callee_info):
+            for param_te, z3_arg in zip(callee_info.param_type_exprs, z3_args):
+                slot_name = self._type_expr_to_slot_name(param_te)
+                if slot_name is None:  # pragma: no cover
+                    return None
+                callee_env = callee_env.push(slot_name, z3_arg)
         return callee_env
 
     def _check_call_preconditions(
@@ -1850,7 +1897,11 @@ class SmtContext:
             # Skip trivial requires(true)
             if isinstance(contract.expr, ast.BoolLit) and contract.expr.value:
                 continue
-            z3_pre = self.translate_expr(contract.expr, callee_env)
+            # #1208: the precondition is the CALLEE's expression, so its
+            # `@T.n` references resolve in the callee's namespace — the same
+            # one `_build_callee_env` keyed the stack under.
+            with self._callee_naming_scope(callee_info):
+                z3_pre = self.translate_expr(contract.expr, callee_env)
             if z3_pre is None:
                 # The precondition itself uses a construct outside the
                 # decidable fragment.  Demote loudly to Tier-3 rather than
@@ -2033,7 +2084,10 @@ class SmtContext:
                 continue
             if isinstance(contract.expr, ast.BoolLit) and contract.expr.value:
                 continue
-            z3_post = self.translate_expr(contract.expr, callee_env)
+            # #1208: the postcondition is the CALLEE's expression too — same
+            # namespace as the precondition above and the stack it reads.
+            with self._callee_naming_scope(callee_info):
+                z3_post = self.translate_expr(contract.expr, callee_env)
             if z3_post is not None:
                 self.solver.add(self._guard_fact(z3_post))
         self._result_var = saved_result
@@ -2063,10 +2117,19 @@ class SmtContext:
             # won't resolve against `Nat` and `z3_pred` is None, silently
             # dropping the refined-return fact so a caller can't rely on it (CR
             # PR-review — the SMT analogue of the verifier/codegen binder fix).
-            binder = (ast.predicate_binder_name(ret_type.predicate)
-                      or ret_type.base.name)
-            inner_env = SlotEnv().push(binder, ret_var)
-            z3_pred = self.translate_expr(ret_type.predicate, inner_env)
+            # In the CALLEE's namespace, like the `requires` / `ensures`
+            # translations above (#1208; PR #1224 review).  This predicate is
+            # written in the DEFINING module's namespace, so an alias it names
+            # has to resolve there — the importer's env is a different
+            # namespace, and a name minted one way and looked up another misses
+            # SILENTLY.  The binder derivation is inside the scope too, so the
+            # push side and the reference side cannot end up scoped
+            # differently.
+            with self._callee_naming_scope(callee_info):
+                binder = (ast.predicate_binder_name(ret_type.predicate)
+                          or ret_type.base.name)
+                inner_env = SlotEnv().push(binder, ret_var)
+                z3_pred = self.translate_expr(ret_type.predicate, inner_env)
             if z3_pred is not None:
                 self.solver.add(self._guard_fact(z3_pred))
 
@@ -2921,13 +2984,15 @@ class SmtContext:
                 self._vera_type_to_z3_sort(adt_ty)
 
     def _type_expr_to_slot_name(self, te: ast.TypeExpr) -> str | None:
-        """Extract the slot name from a type expression.
+        """The slot-binding name of *te*, as the checker binds it (#1208).
 
-        Delegates to the shared recursive :func:`vera.slots.type_expr_slot_name`
-        so the verifier's slot-env keys are fully-qualified over nested
-        composites and agree with the checker + codegen (#914 finding 2).
+        Delegates to :func:`vera.naming.slot_name` against this context's
+        ``_alias_env`` (threaded from both cold drivers, rebound per program
+        on the warm session).  Syntactic head, RESOLVED type arguments, so
+        the SMT slot environment is keyed exactly as the checker's was — and
+        as `_translate_slot_ref` looks it up.
         """
-        return type_expr_slot_name(te)
+        return naming.slot_name_or_none(te, self._alias_env)
 
     # -----------------------------------------------------------------
     # Validity checking

@@ -7,7 +7,7 @@ _unify_for_inference methods extracted from TypeChecker.
 
 from __future__ import annotations
 
-from vera import ast
+from vera import ast, naming
 from vera.types import (
     PRIMITIVES,
     REMOVED_ALIASES,
@@ -21,7 +21,6 @@ from vera.types import (
     Type,
     TypeVar,
     UnknownType,
-    canonical_type_name,
     erases_to_unit,
     merge_inferred_types,
     pretty_type,
@@ -295,13 +294,50 @@ class ResolutionMixin:
     # Canonical type name for slot references
     # -----------------------------------------------------------------
 
+    def _naming_env(self) -> naming.AliasEnv:
+        """The naming environment for the checker's CURRENT state.
+
+        Rebuilt per call rather than cached: ``env.type_aliases`` grows
+        through registration and ``env.type_params`` changes on entering and
+        leaving every ``forall`` scope, so a cached env would render a
+        ``forall<T>`` parameter against the wrong shadowing set.  The build is
+        a copy of the module's alias table (user aliases only — no built-in
+        seeds the table), which is small enough that the full suite shows no
+        measurable cost.
+        """
+        return naming.alias_env_from_environment(self.env)
+
+    def _check_slot_name_args(self, te: ast.TypeExpr) -> None:
+        """Resolve a slot name's type ARGUMENTS for their diagnostics.
+
+        The naming composition that used to live in the checker got E133 /
+        E134 / E135 / removed-alias reporting for free, because it rendered
+        each argument by RESOLVING it — and at a slot REFERENCE
+        (``@Option<Box>.0`` for a parameterised ``Box``) that incidental
+        report is the only one there is.  :mod:`vera.naming` is total and
+        silent by design, so delegating the rendering to it would drop those
+        diagnostics; this walk keeps them, following exactly the traversal
+        the old composition took (refinement bases unwrapped, a function type
+        naming nothing).  It is a reporting pass only — the name itself comes
+        from the module.
+        """
+        while isinstance(te, ast.RefinementType):
+            te = te.base_type
+        if isinstance(te, ast.NamedType) and te.type_args:
+            for arg in te.type_args:
+                self._resolve_type(arg)
+
     def _slot_type_name(self, type_name: str,
                         type_args: tuple[ast.TypeExpr, ...] | None) -> str:
-        """Form the canonical type name for slot reference matching."""
-        if not type_args:
-            return type_name
-        resolved = tuple(self._resolve_type(a) for a in type_args)
-        return canonical_type_name(type_name, resolved)
+        """Form the canonical type name for slot reference matching.
+
+        Delegates to :func:`vera.naming.slot_name` (#1208): the head is
+        syntactic and the arguments resolve, which is what the binding side
+        does too, so a reference and its binding cannot be keyed differently.
+        """
+        te = ast.NamedType(name=type_name, type_args=type_args)
+        self._check_slot_name_args(te)
+        return naming.slot_name(te, self._naming_env())
 
     def _slot_ref_key(self, ref: ast.SlotRef) -> str:
         """Binding-table key for a ``SlotRef``, keyed as ``bind()`` keys it.

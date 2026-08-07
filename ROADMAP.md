@@ -12,7 +12,7 @@ Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verificati
 
 ## Where we are
 
-9,037 tests, 179 conformance programs, 42 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
+9,382 tests, 196 conformance programs, 42 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
 
 ## Stage 19 — The verification completeness sprint
 
@@ -38,7 +38,7 @@ Exit criterion: each listed drift class has a generator or a gate, and a release
 
 | Issue | What |
 |---|---|
-| [#1213](https://github.com/aallan/vera/issues/1213) | **Handler naming consolidation** — the PR #1202 bug cluster's generator is two sides re-deriving one fact (checker vs codegen slot names, registration vs lowering family names, three dispatch paths for one `put`); one naming module consumed by checker, codegen, and verifier closes [#1208](https://github.com/aallan/vera/issues/1208) and the class behind it, with the round's adversarial probe programs promoted into conformance so the alias × handler corner stays covered.  Sibling decisions ride the plan: [#1211](https://github.com/aallan/vera/issues/1211) (which cell a clause-body op targets — a §7.5.2 spec call), [#1210](https://github.com/aallan/vera/issues/1210) (registration walks clause bodies), [#1212](https://github.com/aallan/vera/issues/1212), [#1207](https://github.com/aallan/vera/issues/1207), [#1209](https://github.com/aallan/vera/issues/1209). |
+| [#1213](https://github.com/aallan/vera/issues/1213) | **Handler naming consolidation** — `vera/naming.py` is the one renderer for slot names, slot-reference keys, and State/Exn cell families, and every subsystem consumes it.  What remains is the rest of the PR #1202 bug cluster, each closed against that one renderer and its probe shapes promoted into conformance as it lands: [#1210](https://github.com/aallan/vera/issues/1210) (registration walks clause bodies, state-init expressions, and `i32_pair` cells), [#1211](https://github.com/aallan/vera/issues/1211) (which cell a clause-body op targets — a §7.5.2 spec call), [#1212](https://github.com/aallan/vera/issues/1212) (Byte literals in value-position joins), [#1218](https://github.com/aallan/vera/issues/1218) (refined cell types keep their own family), [#1219](https://github.com/aallan/vera/issues/1219) (`FnType`-carrying composite alias cells), [#1207](https://github.com/aallan/vera/issues/1207) (monomorphization discovery vs effect-op result naming), [#1215](https://github.com/aallan/vera/issues/1215) (hash-seed-dependent bare-op resolution). |
 | [#735](https://github.com/aallan/vera/issues/735) | **Builtin dispatch table** — replace the 475-line `_translate_call` if-chain with a `{name: BuiltinSpec}` table, then have checker registration and the spec §9 tables consume it.  One table, three consumers. |
 | [#828](https://github.com/aallan/vera/issues/828) | `error_code` uniqueness — one stable code per diagnostic concept, enforced by a collision gate on the registry. |
 | [#954](https://github.com/aallan/vera/issues/954) | Single-source the `E001` example — generate all five doc mirrors from `vera/errors.py` instead of guarding hand-copies. |

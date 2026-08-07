@@ -1,0 +1,60 @@
+-- Conformance: a String alias as the Exn<E> payload type (Chapter 7,
+-- Section 7.6).  Tests: `Exn<Name>` / `Exn<Msg>` with `type Name = String`
+-- resolve to the `String` tag family, so the two-i32 (ptr, len) payload is
+-- thrown and caught through ONE tag — a family named after the alias loses
+-- the pair-ness and the caught pointer and length desync (#1209).
+type Name = String;
+
+type Msg = String;
+
+private fn risky(@Int -> @String)
+  requires(true)
+  ensures(true)
+  effects(<Exn<Name>>)
+{
+  if @Int.0 < 0 then {
+    throw("negative")
+  } else {
+    "ok"
+  }
+}
+
+private fn boom(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<Exn<Msg>>)
+{
+  throw("abc")
+}
+
+public fn catch_text(@Unit -> @String)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[Exn<Name>] {
+    throw(@Name) -> { string_concat("caught: ", @Name.0) }
+  } in {
+    risky(0 - 1)
+  }
+}
+
+public fn catch_length(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[Exn<Msg>] {
+    throw(@Msg) -> { string_length(@Msg.0) }
+  } in {
+    boom(())
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 0)
+  effects(pure)
+{
+  string_length(catch_text(())) - 16 + (catch_length(()) - 3)
+}
