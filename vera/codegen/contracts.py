@@ -773,12 +773,13 @@ class ContractsMixin:
     ) -> None:
         """Recursively collect State<T> type names from OldExpr nodes."""
         if isinstance(expr, ast.OldExpr):
-            # #1205: key the snapshot set by the scalar-collapsed FAMILY —
-            # matches `_state_types` registration and the
-            # `_translate_old_expr` read, so `old(State<Count>)` snapshots
-            # (and finds) the `Nat` family.  The family's own opaque
-            # fallback is derived inside `_family_name_te` (#1208), so the
-            # two sides cannot pass different ones.
+            # Key the snapshot set by the resolved cell FAMILY — matches
+            # `_state_types` registration and the `_translate_old_expr`
+            # read, so `old(State<Count>)` snapshots (and finds) the `Nat`
+            # family (#1205) and `old(State<MaybeInt>)` the `Option<Int>`
+            # one (#1209).  The fallback for a resolution that names no
+            # family is derived inside `_family_name_te`, so the two sides
+            # cannot pass different ones.
             types.add(self._family_name_te(state_type_arg(expr.effect_ref)))
             return
         # Walk child expressions

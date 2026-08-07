@@ -75,7 +75,7 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `types.py` | 662 | Type check | Semantic type representation | `Type`, `is_subtype()` |
 | `prelude.py` | 927 | Type check | Standard prelude — built-in ADT and combinator injection | `inject_prelude()`, `overridable_builtin_names()` |
 | `naming.py` | 761 | Type check | The ONE slot / slot-reference-key / State-Exn-family renderer (#1208, #1209) — the checker's rendering, as a total pure function over an `AliasEnv` | `slot_name()`, `slot_ref_key()`, `family_name()`, `AliasEnv` |
-| `slots.py` | 275 | Type check | Slot resolution tables (named by `naming.py`), plus the two walks that are NOT naming: the syntactic spelling for WASM representation questions, and the State/Exn cell family | `slot_table()`, `fn_slot_scope()`, `type_expr_slot_name()`, `family_fallback_name()` |
+| `slots.py` | 246 | Type check | Slot resolution tables (named by `naming.py`), plus the walk that is NOT naming: the alias-opaque syntactic spelling for WASM representation questions, and the last-resort name for a State/Exn cell family that resolves to none | `slot_table()`, `fn_slot_scope()`, `type_expr_slot_name()`, `family_fallback_name()` |
 | `environment.py` | 2,167 | Type check | Type environment, scope stacks, ability registry, all built-in registrations | `TypeEnv`, `AbilityInfo` |
 | `checker/` | 6,620 | Type check | Two-pass type checker (mixin package) | `typecheck()` |
 | `  core.py` | 952 | | TypeChecker class, orchestration, contracts, constraint validation | |

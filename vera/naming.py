@@ -13,15 +13,17 @@ guards, slot references), the verifier, the SMT layer, the tester, and
 ``vera check --explain-slots``.  They move together by construction, because
 there is one function of one environment.
 
-Two derivations deliberately stay behind, and both are about a type's
-REPRESENTATION rather than about naming a binding:
+The State/Exn cell FAMILY renders here too (:func:`family_name`, #1209):
+one cell per checker is one cell per codegen, so a composite alias joins
+the family its resolution names instead of minting a second one.
+
+One derivation deliberately stays behind, and it is about a type's
+REPRESENTATION rather than about naming anything:
 :func:`~vera.slots.type_expr_slot_name` still answers the alias-opaque
 syntactic spelling for the WASM width / erasure walks and the
-structural-``Eq`` derivability oracle, and the State/Exn cell FAMILY
-(:func:`~vera.slots.resolve_scalar_alias_te` plus
-:func:`~vera.slots.family_fallback_name`) keeps its own opaque fallback —
-resolving it changes the emitted import surface, which is #1209's, and the
-checker's argument rendering is not mangle-safe.
+structural-``Eq`` derivability oracle.  It also supplies
+:func:`~vera.slots.family_fallback_name`, the name a family falls back on
+when its type expression has no nameable family at all.
 
 THE RULE, and this module implements exactly it, is **the checker's current
 rendering** — because the checker's rendering is what the binding table is
@@ -524,16 +526,27 @@ def family_name(
     #1209.)  This mirrors the checker, which resolves effect-instance type
     arguments in full (``_resolve_effect_ref``), so the family agrees with
     the cell type the checker typed.  Refinements collapse to their base —
-    ``{@Int | P}`` and ``Int`` are one cell.  *fallback* is returned when
-    there is no type expression, or when it resolves to something with no
-    nameable family (a function type, or an unresolvable type).
+    ``{@Int | P}`` and ``Int`` are one cell.
+
+    *fallback* is returned when there is no type expression, when the
+    resolution has no nameable family (a function type, or an unresolvable
+    type), and when the RENDERING is not mangle-safe.  That last gate is
+    what keeps the answer usable as a WAT symbol: a family feeds
+    ``mangle_type_name``, whose escape covers exactly the canonical
+    ``Head<arg, arg>`` grammar :func:`is_ref_spellable` describes, and a
+    resolution rendering outside it (``Option<{@Int | ...}>``,
+    ``Option<fn(@Int) -> @Int>``) would emit an import name WAT cannot
+    parse.  Those keep the alias-opaque spelling, which is the conservative
+    direction: it can leave a family split, never merge two cells the
+    checker keeps apart.
     """
     if te is None:
         return fallback
     ty = base_type(resolve_type_expr(te, env))
     if isinstance(ty, (FunctionType, UnknownType)):
         return fallback
-    return pretty_type(ty)
+    name = pretty_type(ty)
+    return name if is_ref_spellable(name) else fallback
 
 
 _IDENT_RE = re.compile(r"[A-Z][A-Za-z0-9_]*")
@@ -714,12 +727,16 @@ _RESOLVE_DEPTH_LIMIT = 32
 
 class AliasResolutionDepthError(Exception):
     """An alias application nested past ``_RESOLVE_DEPTH_LIMIT`` — a
-    legal (acyclic, check-green) but absurd chain the resolver refuses
-    to resolve.  Raised instead of silently returning ``None``: the
-    family-collapse callers' opaque fallback on ``None`` would SPLIT the
-    State/Exn family exactly the way the pre-round-4 truncation did
-    (round-5 review, F4), so overflow must surface loudly (the codegen
-    thin methods convert it to a ``CodegenSkip`` → E602)."""
+    legal (acyclic, check-green) but absurd chain
+    :func:`resolve_alias_type_expr` refuses to resolve.  Raised rather
+    than silently returning ``None``, because a caller that treats
+    ``None`` as "keep the opaque spelling" would answer one way here and
+    another at a fully-resolving sibling site (round-5 review, F4).
+
+    Nothing in the pipeline raises it today: the State/Exn family, the
+    last caller with a ``None``-means-opaque fallback, moved to
+    :func:`family_name` (#1209), whose resolution is bounded by
+    DECLARATION ORDER and so needs no depth limit at all."""
 
 
 def resolve_alias_type_expr(
@@ -733,9 +750,15 @@ def resolve_alias_type_expr(
     substitution (``type Id<T> = T`` applied at ``Id<Nat>`` — the
     #630-era latent gap the PR #1202 adversarial rounds showed still
     split the state family).  ``None`` when the walk lands on a
-    non-``NamedType`` (an ``FnType``-bodied alias, etc.).  Lives here so
-    the ``CodeGenerator`` registration side and the ``WasmContext``
-    lowering side resolve through ONE implementation and cannot drift.
+    non-``NamedType`` (an ``FnType``-bodied alias, etc.).
+
+    The State/Exn family was its caller, on both the ``CodeGenerator``
+    registration side and the ``WasmContext`` lowering side, until the
+    family moved onto :func:`family_name` (#1209) — which resolves to a
+    semantic :class:`~vera.types.Type` rather than back to a
+    ``TypeExpr``, and is bounded by declaration order rather than by a
+    depth limit.  What remains here is the TypeExpr-to-TypeExpr walk,
+    exported for a consumer that needs the answer in that form.
 
     Arguments resolve FIRST, mirroring the checker's order — a
     seen-set head-follow truncated legitimate finite expansions
@@ -743,8 +766,8 @@ def resolve_alias_type_expr(
     seen-set misreads as a cycle, stopping one level short: the round-3
     review's silent handler-bypass and invalid-WASM shapes).  True
     cycles are E132 at check; the depth bound is defence-in-depth so a
-    future upstream regression degrades to the opaque fallback instead
-    of a hang."""
+    future upstream regression degrades to a loud
+    :class:`AliasResolutionDepthError` instead of a hang."""
     if _depth > _RESOLVE_DEPTH_LIMIT:
         raise AliasResolutionDepthError(
             f"type alias application nested deeper than "

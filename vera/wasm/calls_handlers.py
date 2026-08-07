@@ -1411,25 +1411,23 @@ class CallsHandlersMixin:
         # pre-fix the two diverged for composite T (`state_push_Option` vs
         # `state_push_Option<Int>`).  Then route through the injective
         # `mangle_type_name` (#775) so the WAT identifier is legal.
-        # #1208: the effect's own type argument is a FAMILY question (import
-        # names, the cell's WASM type, and the `get` result's Vera type), not
-        # a slot key, so it stays on the alias-opaque syntactic spelling —
-        # see `vera.slots.family_fallback_name`.  The clause slot names below
-        # are the ones that moved onto `vera.naming`.
+        # `type_name` is the alias-OPAQUE source spelling, and it survives
+        # for exactly one role: the #1006 Vera-name mirror below, which
+        # answers "what did the source call this?" for `_infer_vera_type`.
         type_name = type_expr_slot_name(type_arg)
         if type_name is None:  # pragma: no cover — NamedType always resolves
             raise CodegenSkip(
                 expr, "State<T> type argument has no slot name"
             )
-        # #1205: `type_name` serves two ROLES that a scalar alias splits
-        # apart.  The import FAMILY (names + WASM types) keys on the
-        # scalar-collapsed name, matching `_check_state_type` registration
-        # — `State<Count>` with `type Count = Nat` joins the `state_*_Nat`
+        # The import FAMILY (names + WASM types) is the CELL the checker
+        # typed (#1209), matching `_check_state_type` registration.
+        # `State<Count>` with `type Count = Nat` joins the `state_*_Nat`
         # family every host already binds, instead of minting a
         # `state_*_Count` family whose derived WT (i32, the unknown-name
-        # default) contradicts its registered i64; the te-level resolution
-        # also sees through parameterised aliases (`State<Id<Nat>>`, an
-        # alias of `Id<Nat>` — the adversarial round's residual split).
+        # default) contradicts its registered i64 (#1205); `State<MaybeInt>`
+        # with `type MaybeInt = Option<Int>` joins the `Option<Int>` family
+        # a `State<Option<Int>>` sibling site targets, instead of splitting
+        # the cell in two behind a check that typed them as one (#1209).
         # SLOT names stay checker-level: top name syntactic, type
         # arguments canonicalized (the checker's binding rule), so the
         # clause envs below use those, not the family.
@@ -1626,9 +1624,9 @@ class CallsHandlersMixin:
                 "single-shot continuation) — move the resume to the "
                 "clause body and keep the 'with' expression pure",
             )
-        # #1205: WASM type and pointer-ness derive from the threaded
-        # FAMILY name (computed once at the handle site — matching the
-        # import decls), never the source alias spelling.
+        # WASM type and pointer-ness derive from the threaded FAMILY name
+        # (computed once at the handle site — matching the import decls),
+        # never the source alias spelling (#1205/#1209).
         state_wt = self._type_name_to_wasm(family)
         # Composite state is a heap pointer (i32, excluding the non-pointer
         # i32 scalars) — root the capture/argument locals on the GC shadow
@@ -1929,12 +1927,14 @@ class CallsHandlersMixin:
             raise CodegenSkip(
                 expr, "Exn<E> type argument has no slot name"
             )
-        # #1205: tag family, pair-ness, and payload WT derive from the
-        # scalar-collapsed family (matching `_check_exn_type` registration)
-        # — `Exn<Code>` with `type Code = Int` otherwise binds an i32
-        # payload local against the i64-tagged throw.  The caught-value
-        # SLOT binding below stays source-level (the checker binds the
-        # clause pattern's own name).
+        # Tag family, pair-ness, and payload WT derive from the RESOLVED
+        # family (matching `_check_exn_type` registration) — `Exn<Code>`
+        # with `type Code = Int` otherwise binds an i32 payload local
+        # against the i64-tagged throw (#1205), and `Exn<Msg>` with
+        # `type Msg = String` otherwise declares a second one-i32 tag
+        # beside the `String` pair tag its throw sites use (#1209).  The
+        # caught-value SLOT binding below stays source-level (the checker
+        # binds the clause pattern's own name).
         family = self._family_name(type_arg)
         tag_name = f"$exn_{mangle_type_name(family)}"
         is_pair = self._is_pair_type_name(family)

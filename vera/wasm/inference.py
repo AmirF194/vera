@@ -13,14 +13,8 @@ from vera.monomorphize import (
     resolve_fn_type_alias,
     substitute_type_vars,
 )
-from vera.skip import CodegenSkip
-from vera.slots import (
-    AliasResolutionDepthError,
-    family_fallback_name,
-    resolve_scalar_alias_te,
-    type_expr_slot_name,
-)
-from vera.wasm.helpers import _element_wasm_type
+from vera.slots import family_fallback_name, type_expr_slot_name
+from vera.wasm.helpers import _element_wasm_type, state_type_arg
 
 # `substitute_type_vars` was relocated to `vera.monomorphize` (the codegen-free
 # shared monomorphizer, #732) so the verifier can reuse it without importing the
@@ -256,13 +250,11 @@ class InferenceMixin:
         # i32 pointers (`expected i64, found i32`).  Resolve T's WAT type via
         # the shared canonical-slot-name → WASM map so the `==` picks i32.
         if isinstance(expr, (ast.OldExpr, ast.NewExpr)):
-            name = self._extract_state_type_name(expr.effect_ref)
-            # #1205: scalar-collapse before the WT map — `old(State<Count>)`
-            # over `type Count = Nat` is an i64 read, not the unknown-name
-            # i32 default.
-            if name and expr.effect_ref.type_args:
-                name = self._family_name(expr.effect_ref.type_args[0])
-            return self._type_name_to_wasm(name) if name else None
+            # The FAMILY, not the source spelling, before the WT map —
+            # `old(State<Count>)` over `type Count = Nat` is an i64 read,
+            # not the unknown-name i32 default (#1205).
+            return self._type_name_to_wasm(
+                self._state_effect_family(expr.effect_ref))
         return None
 
     _IO_WASM_TYPES: ClassVar[dict[str, str | None]] = {
@@ -2198,23 +2190,31 @@ class InferenceMixin:
 
     def _family_name(self, te: ast.TypeExpr) -> str:
         """The ``State<T>``/``Exn<E>`` host-import/tag FAMILY name for a
-        type argument (#1205) — the scalar-gated collapse of
-        :func:`vera.slots.resolve_scalar_alias_te` over this module set's
-        alias tables (parameterised aliases substituted), falling back to
-        the opaque *fallback* slot name for composite-resolving
-        arguments.  Distinct from :py:meth:`_resolve_base_type_name`,
-        which resolves unconditionally (for TYPE questions); this
-        resolves only to scalars (for NAMING questions, where composite
-        names must stay opaque per the #914 full-name invariant)."""
-        try:
-            return (resolve_scalar_alias_te(
-                        te, self._alias_env.aliases, self._alias_env.alias_params)
-                    or family_fallback_name(te))
-        except AliasResolutionDepthError as exc:
-            # Loud, not opaque: falling back on overflow would key the
-            # family one way at this site and another at a
-            # fully-resolving site — the silent split of round-5 F4.
-            raise CodegenSkip(te, str(exc)) from exc
+        type argument (#1209) — :func:`vera.naming.family_name` over this
+        context's alias environment, so the family names the CELL the
+        checker typed.  Every spelling that resolves to one cell (a scalar
+        alias, #1205; a composite or parameterised alias, #1209) is one
+        import and one tag; only :func:`vera.slots.family_fallback_name`'s
+        residue stays syntactic.  The env is the DECLARING module's
+        (``set_alias_env``), so a name means what it meant where it was
+        written."""
+        return naming.family_name(
+            te, self._alias_env, family_fallback_name(te))
+
+    def _state_effect_family(self, effect_ref: ast.EffectRefNode) -> str:
+        """The cell FAMILY named by a ``State<T>`` effect REFERENCE (#1209).
+
+        The one derivation behind ``old(State<T>)`` and ``new(State<T>)``:
+        the snapshot map (``_collect_old_types``) and the import registry
+        (``_state_types``) are keyed by the family, so a read that named the
+        reference any other way misses a registered entry and the
+        ``old(State<T>)`` lowering raises (#914 finding 1).  Naming it here,
+        once, is what keeps the three call sites from re-deriving it three
+        ways.  Shape validation belongs to
+        :func:`~vera.wasm.helpers.state_type_arg`, which raises for anything
+        that is not a one-argument ``State``.
+        """
+        return self._family_name(state_type_arg(effect_ref))
 
     def _resolve_base_type_name(
         self,

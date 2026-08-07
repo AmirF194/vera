@@ -10,9 +10,10 @@ user something no subsystem agrees with.
 
 What remains here is deliberately NOT naming.
 :func:`type_expr_slot_name` is the alias-opaque syntactic spelling the WASM
-representation walks want, and :func:`resolve_scalar_alias_te` /
-:func:`family_fallback_name` are the State/Exn cell FAMILY — an import name
-and a WASM tag, not a binding key.  Each says why in its own docstring.
+representation walks want, and :func:`family_fallback_name` is what a
+State/Exn cell family falls back on when its type expression names no
+family at all.  Each says why in its own docstring.  The family itself
+renders through :func:`vera.naming.family_name` (#1209).
 
 The De Bruijn convention: @T.0 is the *last* (rightmost) parameter of
 type T in the signature; @T.1 is second-to-last; and so on.  For a
@@ -24,15 +25,16 @@ function ``fn foo(@Int, @Int -> @Int)``:
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 
 from vera import ast, naming
 
 # `substitute_named`, `resolve_alias_type_expr` and `AliasResolutionDepthError`
 # MOVED to `vera.naming` (#1208), which owns every type-expression naming and
-# resolution walk.  Re-exported here — unchanged, one implementation — so the
-# existing `from vera.slots import ...` call sites (codegen/core.py,
-# wasm/inference.py) keep working.
+# resolution walk.  Re-exported here — unchanged, one implementation — so a
+# `from vera.slots import ...` of the old names keeps working; the State/Exn
+# family, which was the last of them inside the compiler, resolves through
+# `naming.family_name` since #1209.
 from vera.naming import (
     AliasEnv,
     AliasResolutionDepthError,
@@ -46,7 +48,6 @@ __all__ = [
     "fn_slot_scope",
     "format_slot_table",
     "resolve_alias_type_expr",
-    "resolve_scalar_alias_te",
     "slot_table",
     "slot_table_dict",
     "substitute_named",
@@ -97,39 +98,6 @@ def type_expr_slot_name(te: ast.TypeExpr) -> str | None:
         return type_expr_slot_name(te.base_type)
     if isinstance(te, ast.FnType):
         return "Fn"
-    return None
-
-
-_SCALAR_BASE_NAMES = frozenset({"Int", "Nat", "Float64", "Bool", "Byte"})
-
-
-def resolve_scalar_alias_te(
-    te: ast.TypeExpr,
-    aliases: Mapping[str, ast.TypeExpr],
-    alias_params: Mapping[str, tuple[str, ...] | None],
-) -> str | None:
-    """Collapse a ``State<T>``/``Exn<E>`` type argument to its scalar
-    base name IFF it resolves to a scalar primitive; ``None`` otherwise.
-
-    The single resolution rule for the host-import and tag FAMILIES
-    (#1205): the family's WASM type is derived from the RESOLVED type
-    (``_type_expr_to_wasm_type`` canonicalizes), so the family NAME must
-    resolve identically or a scalar alias splits into a name keyed one
-    way and a WASM type keyed the other — the emitted ``state_put_Count``
-    family carried i64 values into i32-typed uses, and the parameterised
-    spellings (``Id<Nat>``, an alias of ``Id<Nat>``, ``Exn<Id<Int>>``)
-    split identically.  Collapsing means a scalar-resolving argument
-    NEVER mints a new import name: it joins the base family
-    (``state_put_Nat``) every host binding (wasmtime, api.py,
-    runtime.mjs) already provides — no #808-class import-surface fan-in.
-    Composite-resolving names stay opaque on purpose: their WASM type is
-    uniformly i32 (pointer), so name and type cannot diverge, and
-    collapsing them WOULD change the import surface (#914 full-name
-    invariant).
-    """
-    cn = resolve_alias_type_expr(te, aliases, alias_params)
-    if cn is not None and not cn.type_args and cn.name in _SCALAR_BASE_NAMES:
-        return cn.name
     return None
 
 
@@ -257,19 +225,23 @@ def slot_table_dict(
 
 
 def family_fallback_name(te: ast.TypeExpr) -> str:
-    """The opaque fallback for a ``State<T>`` / ``Exn<E>`` cell FAMILY.
+    """The last-resort name for a ``State<T>`` / ``Exn<E>`` cell FAMILY.
 
-    The family names an IMPORT and a WASM tag, not a slot, and it stays on
-    the alias-opaque syntactic spelling for now: resolving it is a change to
-    the emitted import surface (#1209), separate from the #1208 slot-naming
-    consolidation, and the checker's own argument rendering is not
-    mangle-safe — a refined argument renders ``Option<{@Int | ...}>``, which
-    ``mangle_type_name`` does not escape.  Total, because a family must
-    always have a name to mangle.
+    The family itself resolves — :func:`vera.naming.family_name` names the
+    CELL the checker typed, so every spelling that resolves to one cell
+    mangles to one import and one tag (#1209).  What is left for here is the
+    residue that resolution cannot name: a type expression whose resolution
+    is a function type or ``UnknownType`` (an ``FnType``-bodied alias as
+    ``State<F>``, an arity-mismatched alias application, a removed alias).
+    Those have no cell type to name, so the family falls back on the
+    alias-OPAQUE syntactic spelling — distinct per spelling, which is the
+    conservative direction: it can only ever split a family the checker
+    already refuses to type, never merge two the checker keeps apart.
 
-    Derived here rather than passed in by each of the eight call sites: the
-    scalar collapse and its fallback are one decision about one type
-    expression, and the two `_family_name` methods that make it are the only
-    places allowed to make it.
+    Total, because a family must always have a name to mangle.  Derived here
+    rather than passed in by each of the eight call sites: the fallback and
+    the resolution are one decision about one type expression, and the two
+    `_family_name` methods that make it are the only places allowed to make
+    it.
     """
     return type_expr_slot_name(te) or "?"

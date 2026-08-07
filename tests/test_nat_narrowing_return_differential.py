@@ -2646,14 +2646,8 @@ public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
         assert _run(self._REFINED_CLASS_MIXED % ("Some(5)", 0), "go", 0) == 5
         assert _run(self._REFINED_CLASS_MIXED % ("Some(5)", 1), "go", 0) == 9
 
-    def test_alias_depth_overflow_is_loud(self) -> None:
-        """A 33-deep (legal, acyclic) alias chain as a State cell: the
-        resolver's depth bound surfaces as a loud per-function E607 skip
-        — an opaque fallback would silently split the family against a
-        fully-resolving sibling site (round-5 F4)."""
-        chain = "type A0 = Nat;\n" + "".join(
-            f"type A{i} = A{i - 1};\n" for i in range(1, 34))
-        src = chain + """
+    _DEEP_CHAIN = "type A0 = Nat;\n" + "".join(
+        f"type A{i} = A{i - 1};\n" for i in range(1, 34)) + """
 public fn go(@Nat -> @Int)
   requires(true)
   ensures(true)
@@ -2663,13 +2657,42 @@ public fn go(@Nat -> @Int)
   nat_to_int(get(()))
 }
 """
-        with _resolved_pipeline(src) as (program, arts, resolved, path):
+
+    def test_deep_alias_chain_joins_the_base_family(self) -> None:
+        """A 33-deep (legal, acyclic) alias chain as a State cell resolves.
+
+        The depth bound this chain used to trip belonged to the
+        TypeExpr-level walk the family named itself through before #1209.
+        ``vera.naming``'s resolution is bounded by DECLARATION ORDER
+        instead — each alias body resolves against a strictly shorter
+        prefix of the table, so the recursion is well-founded with no
+        arbitrary limit, exactly as the checker's own registration is.  A
+        chain the checker resolves therefore joins the ``Nat`` family the
+        checker typed, instead of being refused with a loud per-function
+        skip.
+
+        That refusal was never the goal: it was the least-bad answer while
+        the family could fall back OPAQUELY, where an overflow at one site
+        and a resolution at a sibling site split one cell in two silently
+        (round-5 F4).  Resolving it removes the hazard at the root, so the
+        assertion is the family name AND the round-trip value, not the
+        absence of a diagnostic.
+        """
+        with _resolved_pipeline(self._DEEP_CHAIN) as (
+                program, arts, resolved, path):
             result = codegen_compile(
-                program, source=src, file=path, resolved_modules=resolved,
+                program, source=self._DEEP_CHAIN, file=path,
+                resolved_modules=resolved,
                 expr_semantic_types=arts.expr_semantic_types,
             )
-            msgs = [d.description for d in result.diagnostics]
-            assert any("nested deeper than 32" in m for m in msgs), msgs
+            hard = [(d.error_code, d.description) for d in result.diagnostics
+                    if d.severity == "error"]
+            assert not hard, hard
+            assert '(import "vera" "state_get_Nat"' in result.wat, (
+                "the chain must join the base family, not mint its own: "
+                f"{result.wat[:400]}"
+            )
+        assert _run(self._DEEP_CHAIN, "go", 7) == 7
 
     _QUAL_USER_SHADOW = """\
 private fn put(@Int -> @Unit) requires(true) ensures(true) effects(pure)
@@ -2793,11 +2816,22 @@ public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
 }
 """, "go", 0) == 9
 
-    def test_old_state_depth_overflow_is_clean_skip(self) -> None:
-        """`old(State<A33>)` in an ensures — the ONE family-resolution
-        door outside every CodegenSkip net: the depth error escaped as
-        a raw crash on a check-green program (round-7 F2).  Now the
-        same clean E602 skip the body path uses."""
+    def test_old_state_cross_spelling_reads_the_same_snapshot(self) -> None:
+        """`old(State<A33>)` against an `effects(<State<Nat>>)` function.
+
+        The `old` reference and the effect name ONE cell — `A33` is a
+        33-hop alias chain ending at `Nat` — so the snapshot the
+        postcondition reads must be the snapshot the `Nat` family
+        registered.  Both sides resolve through `naming.family_name`, so
+        they agree by construction (#1209); before, this was the ONE
+        family-resolution door outside every CodegenSkip net and the
+        chain's depth error escaped as a raw crash on a check-green
+        program, later degraded to an E602 skip (round-7 F2).
+
+        Asserted as a CLEAN compile with the `Nat` snapshot read emitted:
+        a spelling that resolved to its own key would either skip the
+        function or emit a `state_get_A33` the module never imports.
+        """
         chain = "type A0 = Nat;\n" + "".join(
             f"type A{i} = A{i - 1};\n" for i in range(1, 34))
         src = chain + """
@@ -2810,6 +2844,13 @@ public fn bump(@Nat -> @Int)
   nat_to_int(get(()))
 }
 """
-        msgs = self._compile_msgs(src)
-        assert any("old(State<T>) snapshot" in m
-                   and "nested deeper than 32" in m for m in msgs), msgs
+        with _resolved_pipeline(src) as (program, arts, resolved, path):
+            result = codegen_compile(
+                program, source=src, file=path, resolved_modules=resolved,
+                expr_semantic_types=arts.expr_semantic_types,
+            )
+        hard = [(d.error_code, d.description) for d in result.diagnostics
+                if d.severity == "error"]
+        assert not hard, hard
+        assert "call $vera.state_get_Nat" in result.wat, result.wat[:400]
+        assert "state_get_A33" not in result.wat, result.wat[:400]

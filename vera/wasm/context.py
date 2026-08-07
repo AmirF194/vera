@@ -139,8 +139,8 @@ class WasmContext(
         # keep the bare host-cell call.  Saved/restored around each handler
         # body exactly like ``_effect_ops`` (nested handlers).  Tuple
         # fields, in order: the HandlerClause; the effect argument's
-        # source slot name; the scalar-collapsed FAMILY name (import
-        # naming + WASM types); the state annotation's slot name (None
+        # source slot name; the resolved cell FAMILY name (import naming
+        # + WASM types); the state annotation's slot name (None
         # for a stateless handler); the handler-DECLARATION scope's
         # WasmSlotEnv (clause bodies compile against it, not the op
         # call-site env); the get import; the put import.

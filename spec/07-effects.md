@@ -171,6 +171,36 @@ The builtin parameterized effects take exactly one type argument at the handle: 
 
 For the builtin `State` effect the state declaration **is** the `State<T>` cell: its declared type must structurally equal the effect's `T` after alias resolution — for refined types, predicate included — or the handle is a checker error (E336). A type alias that resolves to `T` is accepted (including a refined alias on both sides, or two textually identical refinement declarations); a declaration that widens (`@Int` on `State<Nat>`), narrows (`@Nat` on `State<Int>`), or carries a refinement predicate the effect argument does not (or a different one) is rejected — verification obligations and runtime guards key off `T`, so a divergent declaration would be documentation the toolchain contradicts. Any refinement on the cell belongs in the `State<T>` argument itself **via a named refinement alias** (`type Small = { @Nat | ... }; handle[State<Small>](@Small = ...)`) — an inline refinement literal in the `State<T>` argument position is not compilable. A user-declared effect's handler state is the handler's own accumulator and may take any type.
 
+**Cell identity is the RESOLVED `T`, not the spelling.** `State<T>` is one effect instance per resolved `T`, so every spelling that resolves to the same type names the same cell — whether that type is scalar or composite, and whether the alias is plain or parameterized. A `handle[State<MaybeInt>]` under `type MaybeInt = Option<Int>` therefore handles a callee declaring `effects(<State<Option<Int>>>)`, and the two share one cell:
+
+```vera
+type MaybeInt = Option<Int>;
+
+private fn stash(@Unit -> @Unit)
+  requires(true)
+  ensures(true)
+  effects(<State<Option<Int>>>)
+{
+  put(Some(7))
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<MaybeInt>](@MaybeInt = None) {
+    get(@Unit) -> { resume(@MaybeInt.0) },
+    put(@MaybeInt) -> { resume(()) }
+  } in {
+    stash(());
+    option_unwrap_or(get(()), 0 - 1)
+  }
+}
+```
+
+`main` returns `7` — `stash` writes to the cell the handler established. The same rule governs `Exn<E>` payloads: `Exn<Msg>` under `type Msg = String` catches a `throw` from a function declaring `effects(<Exn<String>>)`. Two cells are distinct exactly when their resolved types are (`State<Option<Int>>` and `State<Option<Bool>>` are two cells; a handler for one does not handle the other).
+
 ### 7.5.2 Handler Semantics
 
 When an effect operation is performed in the handled body:

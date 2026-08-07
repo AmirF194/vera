@@ -6,7 +6,6 @@ from typing import ClassVar
 
 from vera import ast, naming
 from vera.skip import AdtEqNotDerivableError, CodegenInvariantError
-from vera.slots import type_expr_slot_name
 from vera.wasm.helpers import WasmSlotEnv, state_type_arg
 
 
@@ -1768,17 +1767,12 @@ class OperatorsMixin:
 
     def _translate_old_expr(self, expr: ast.OldExpr) -> list[str] | None:
         """Translate old(State<T>) → local.get of saved pre-execution state."""
-        type_name = self._extract_state_type_name(expr.effect_ref)
-        if type_name is None:
-            raise CodegenInvariantError(  # pragma: no cover
-                "old(State<T>) effect ref has no extractable type name", expr)
-        # #1205: the snapshot map is keyed by the scalar-collapsed family
-        # (see `_collect_old_types`) — `old(State<Count>)` reads the
-        # `Nat` family's snapshot.
-        eff_ref = expr.effect_ref
-        if isinstance(eff_ref, ast.EffectRef) and eff_ref.type_args:
-            type_name = self._family_name(eff_ref.type_args[0])
-        local_idx = self.get_old_state_local(type_name)
+        # The snapshot map is keyed by the cell FAMILY (see
+        # `_collect_old_types`), so `old(State<Count>)` reads the `Nat`
+        # snapshot (#1205) and `old(State<MaybeInt>)` the `Option<Int>` one
+        # (#1209) — one derivation, `_state_effect_family`, on both sides.
+        local_idx = self.get_old_state_local(
+            self._state_effect_family(expr.effect_ref))
         if local_idx is None:
             raise CodegenInvariantError(  # pragma: no cover
                 "old(State<T>) has no saved pre-execution state local", expr)
@@ -1786,37 +1780,13 @@ class OperatorsMixin:
 
     def _translate_new_expr(self, expr: ast.NewExpr) -> list[str] | None:
         """Translate new(State<T>) → call state_get to read current value."""
-        type_name = self._extract_state_type_name(expr.effect_ref)
-        if type_name is None:
-            raise CodegenInvariantError(  # pragma: no cover
-                "new(State<T>) effect ref has no extractable type name", expr)
+        state_type_arg(expr.effect_ref)  # shape validation; raises otherwise
         # Look up the state getter import
         if "get" not in self._effect_ops:
             raise CodegenInvariantError(  # pragma: no cover
                 "new(State<T>) has no 'get' effect op registered", expr)
         call_target, _is_void = self._effect_ops["get"]
         return [f"call {call_target}"]
-
-    @staticmethod
-    def _extract_state_type_name(
-        effect_ref: ast.EffectRefNode,
-    ) -> str | None:
-        """The FAMILY-side type name of a ``State<T>`` effect reference.
-
-        #914 finding 1: the full name (`Option<Int>`), not the base name
-        (`Option`) — `_state_types` and `get_old_state_local` are keyed on
-        the full name, so a base-name key missed the registered entry and the
-        `old(State<T>)` read raised an uncaught `CodegenInvariantError` at
-        run.  Every consumer routes this through `_family_name`, so it is a
-        family question and stays on the alias-opaque syntactic spelling
-        (#1208: see :func:`vera.slots.family_fallback_name` for why the
-        family has not moved with the slot names).
-        """
-        name = type_expr_slot_name(state_type_arg(effect_ref))
-        if name is None:
-            raise CodegenInvariantError(  # pragma: no cover
-                "State<T> type argument is not a NamedType", effect_ref)
-        return name
 
     # -----------------------------------------------------------------
     # @Nat subtraction underflow guard (#520)
