@@ -74,8 +74,8 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `ast.py` | 895 | Transform | Frozen dataclass AST nodes, source formatting | `Program`, `Node`, `Expr`, `format_expr` |
 | `types.py` | 662 | Type check | Semantic type representation | `Type`, `is_subtype()` |
 | `prelude.py` | 927 | Type check | Standard prelude — built-in ADT and combinator injection | `inject_prelude()`, `overridable_builtin_names()` |
-| `naming.py` | 677 | Type check | The ONE slot / slot-reference-key / State-Exn-family renderer (#1208, #1209) — the checker's rendering, as a total pure function over an `AliasEnv` | `slot_name()`, `slot_ref_key()`, `family_name()`, `AliasEnv` |
-| `slots.py` | 218 | Type check | Slot reference table for `vera check --explain-slots` | `slot_table()`, `slot_ref_name()` |
+| `naming.py` | 761 | Type check | The ONE slot / slot-reference-key / State-Exn-family renderer (#1208, #1209) — the checker's rendering, as a total pure function over an `AliasEnv` | `slot_name()`, `slot_ref_key()`, `family_name()`, `AliasEnv` |
+| `slots.py` | 245 | Type check | Slot resolution tables (named by `naming.py`), plus the two walks that are NOT naming: the syntactic spelling for WASM representation questions, and the State/Exn cell family | `slot_table()`, `type_expr_slot_name()`, `family_fallback_name()` |
 | `environment.py` | 2,167 | Type check | Type environment, scope stacks, ability registry, all built-in registrations | `TypeEnv`, `AbilityInfo` |
 | `checker/` | 6,620 | Type check | Two-pass type checker (mixin package) | `typecheck()` |
 | `  core.py` | 952 | | TypeChecker class, orchestration, contracts, constraint validation | |
@@ -135,7 +135,7 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `  closures.py` | 876 | | Closure lifting, GC instrumentation | |
 | `  contracts.py` | 1,262 | | Runtime pre/postconditions, old state snapshots, decreases termination guard (entry check-and-set, per-function chain state, ADT rank helpers, self-tail site checks) | |
 | `  assembly.py` | 1,447 | | WAT module assembly, `$alloc`, `$gc_collect` | |
-| `  compilability.py` | 545 | | Compilability checks, state handler scanning | |
+| `  compilability.py` | 606 | | Compilability checks, state handler scanning | |
 | `  wasi.py` | 4,820 | | WASI Preview 2 component/adapter emitter — `--target wasi-p2` / `--world server` (#237, #853) | |
 | `runtime/` | 4,784 | Execute | wasmtime host layer (#421): traps + per-effect host-binding families | `register_*()`, `WasmTrapError` |
 | `  traps.py` | 493 | | `WasmTrapError`, `_classify_trap`, source-backtrace resolution | |

@@ -3679,22 +3679,22 @@ def _slot_sigs(node) -> list[tuple[str, int]]:
     """(canonical slot name, De Bruijn index) for every SlotRef under
     ``node``, in deterministic dataclass-field order.
 
-    Uses the shared namer ``vera.slots.slot_ref_name`` — the same key both
-    codegen and the verifier resolve against — so an assertion here is an
-    assertion about what the consumers will actually look up.
+    Uses the ONE namer ``vera.naming.slot_ref_key`` (#1208) — the same key
+    both codegen and the verifier resolve against — so an assertion here is
+    an assertion about what the consumers will actually look up.  These
+    fixtures declare no aliases, so the empty environment is the whole
+    environment.
     """
     from dataclasses import fields as dc_fields
 
     from vera import ast as vera_ast
-    from vera.slots import slot_ref_name
+    from vera.naming import EMPTY_ALIAS_ENV, slot_ref_key
 
     out: list[tuple[str, int]] = []
 
     def walk(v: object) -> None:
         if isinstance(v, vera_ast.SlotRef):
-            name = slot_ref_name(v)
-            assert name is not None
-            out.append((name, v.index))
+            out.append((slot_ref_key(v, EMPTY_ALIAS_ENV), v.index))
         if isinstance(v, vera_ast.Node):
             for fld in dc_fields(v):
                 if fld.name == "span":
@@ -3870,8 +3870,8 @@ class TestScopeAwareReindex769:
     binders, and closure parameters, with contracts staying a params-only
     scope — not via a static params-only map applied body-wide.
 
-    Assertions use ``vera.slots.slot_ref_name`` (the shared full-depth
-    namer), i.e. exactly the keys codegen and the verifier resolve, and the
+    Assertions use ``vera.naming.slot_ref_key`` (the ONE namer, #1208),
+    i.e. exactly the keys codegen and the verifier resolve, and the
     public ``monomorphize_fn`` contract both consumers call (#732).
     """
 

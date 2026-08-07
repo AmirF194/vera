@@ -10,6 +10,7 @@ from vera import ast
 from vera.monomorphize import mangle_type_name
 from vera.skip import CodegenSkip
 from vera.wasm import WasmContext, WasmSlotEnv
+from vera.wasm.helpers import state_type_arg
 from vera.wasm.inference import substitute_type_vars
 
 # Recursion bound for tuple-component boundary guards (#746).  A *finite* tuple
@@ -51,19 +52,17 @@ class ContractsMixin:
         if isinstance(node, ast.RefinementType):
             base = node.base_type
             if isinstance(base, ast.NamedType):
-                # Build the canonical slot name the predicate's binder uses —
-                # ``Array<Int>`` for a parameterised base, ``Int`` otherwise —
-                # matching `_translate_slot_ref`'s key (a bare ``Array`` would
-                # never resolve).
-                name = base.name
-                if base.type_args:
-                    arg_names: list[str] = []
-                    for ta in base.type_args:
-                        if isinstance(ta, ast.NamedType):
-                            arg_names.append(ta.name)
-                        else:
-                            return None
-                    name = f"{base.name}<{', '.join(arg_names)}>"
+                # #1208: the binder's slot name comes from the ONE renderer,
+                # so it is what `_translate_slot_ref` now resolves a
+                # predicate's `@Base.n` against — and what the checker bound
+                # the predicate's binder under (`_check_one_refinement_
+                # predicate`).  The pre-#1208 join was syntactic in argument
+                # position (`Array<Txt>` for `type Txt = String`), which
+                # matched only because the reference side was syntactic too;
+                # with both resolved they meet on `Array<String>`.
+                name = self._type_expr_to_slot_name(base)
+                if name is None:
+                    return None
                 predicate = node.predicate
                 # Conjoin the `@Nat` base's implicit `>= 0` when the base
                 # resolves to `@Nat` — directly OR through an alias chain
@@ -774,16 +773,13 @@ class ContractsMixin:
     ) -> None:
         """Recursively collect State<T> type names from OldExpr nodes."""
         if isinstance(expr, ast.OldExpr):
-            type_name = WasmContext._extract_state_type_name(
-                expr.effect_ref,
-            )
-            if type_name is not None:
-                # #1205: key the snapshot set by the scalar-collapsed
-                # family — matches `_state_types` registration and the
-                # `_translate_old_expr` read, so `old(State<Count>)`
-                # snapshots (and finds) the `Nat` family.
-                types.add(self._family_name_te(
-                    expr.effect_ref.type_args[0], type_name))
+            # #1205: key the snapshot set by the scalar-collapsed FAMILY —
+            # matches `_state_types` registration and the
+            # `_translate_old_expr` read, so `old(State<Count>)` snapshots
+            # (and finds) the `Nat` family.  The family's own opaque
+            # fallback is derived inside `_family_name_te` (#1208), so the
+            # two sides cannot pass different ones.
+            types.add(self._family_name_te(state_type_arg(expr.effect_ref)))
             return
         # Walk child expressions
         for child in self._expr_children(expr):

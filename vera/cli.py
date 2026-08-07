@@ -162,7 +162,7 @@ def cmd_check(
                 if not isinstance(top.decl, FnDecl):
                     continue
                 decl = top.decl
-                table = slot_table(decl.params)
+                table = slot_table(decl.params, artifacts.alias_env)
                 params_str = (
                     ", ".join(format_type_expr(te) for te in decl.params)
                     + " -> "

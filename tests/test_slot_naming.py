@@ -459,15 +459,25 @@ def test_refinement_binder_names_the_base_slot() -> None:
     assert not binder.base_is_refinement
 
 
-def test_refinement_binder_names_parameterised_bases_syntactically() -> None:
-    """Replicated as-is: the binder names the base's arguments by their
-    SOURCE spelling (`Array<Txt>`, not `Array<String>`) because the guard
-    and its predicate must agree with each other.  One of the six
-    renderings #1208 records; correcting it is a behaviour change."""
+def test_refinement_binder_names_parameterised_bases_through_slot_name() -> None:
+    """The binder is `slot_name`'s answer (#1208), so it agrees with what a
+    predicate's `@Array<Txt>.0` resolves to through `slot_ref_key` and with
+    what the checker bound the predicate's binder under.  The pre-
+    consolidation derivation named the arguments by SOURCE spelling
+    (`Array<Txt>`) and met a reference side that was syntactic too; with both
+    resolved they meet here."""
     binder = refinement_binder_parts(
         ast.NamedType(name="Sized", type_args=None), _env())
     assert binder is not None
-    assert binder.binder_name == "Array<Txt>"
+    assert binder.binder_name == "Array<String>"
+    assert binder.binder_name == slot_ref_key(
+        ast.SlotRef(
+            type_name="Array",
+            type_args=(ast.NamedType(name="Txt", type_args=None),),
+            index=0,
+        ),
+        _env(),
+    )
 
 
 def test_refinement_binder_conjoins_the_nat_range() -> None:

@@ -13,6 +13,7 @@ from dataclasses import fields, is_dataclass
 
 from vera import ast
 from vera.monomorphize import mangle_type_name
+from vera.slots import type_expr_slot_name
 from vera.skip import CodegenSkip
 from vera.wasm.helpers import (
     WasmSlotEnv,
@@ -1410,7 +1411,12 @@ class CallsHandlersMixin:
         # pre-fix the two diverged for composite T (`state_push_Option` vs
         # `state_push_Option<Int>`).  Then route through the injective
         # `mangle_type_name` (#775) so the WAT identifier is legal.
-        type_name = self._type_expr_to_slot_name(type_arg)
+        # #1208: the effect's own type argument is a FAMILY question (import
+        # names, the cell's WASM type, and the `get` result's Vera type), not
+        # a slot key, so it stays on the alias-opaque syntactic spelling —
+        # see `vera.slots.family_fallback_name`.  The clause slot names below
+        # are the ones that moved onto `vera.naming`.
+        type_name = type_expr_slot_name(type_arg)
         if type_name is None:  # pragma: no cover — NamedType always resolves
             raise CodegenSkip(
                 expr, "State<T> type argument has no slot name"
@@ -1427,7 +1433,7 @@ class CallsHandlersMixin:
         # SLOT names stay checker-level: top name syntactic, type
         # arguments canonicalized (the checker's binding rule), so the
         # clause envs below use those, not the family.
-        family = self._family_name(type_arg, type_name)
+        family = self._family_name(type_arg)
         mangled = mangle_type_name(family)
 
         put_import = f"$vera.state_put_{mangled}"
@@ -1445,7 +1451,7 @@ class CallsHandlersMixin:
         # to the pre-store cell value).
         state_slot_name: str | None = None
         if expr.state is not None:
-            state_slot_name = self._canonical_clause_slot_name(
+            state_slot_name = self._type_expr_to_slot_name(
                 expr.state.type_expr)
 
         instructions: list[str] = []
@@ -1528,55 +1534,16 @@ class CallsHandlersMixin:
         # handle's own env.
         self._state_clause_ops = {}
         for clause in expr.clauses:
-            # The class-collision skip: when the clause PATTERN and the
-            # state ANNOTATION are the same slot stack to the checker
-            # (equal checker-canonical forms — e.g. two different
-            # aliases of one refined class) but would bind here under
-            # two DIFFERENT keys, a mixed-spelling clause reference
-            # resolves against the wrong member SILENTLY (round-5
-            # review, F3).  Same-key collisions are fine (one stack,
-            # checker-ordered); different-class keys are fine (two
-            # stacks both sides agree on); only the split-class shape
-            # is unlowerable until #1208/#1213 unify naming.
-            if (clause.params and state_slot_name is not None
-                    and expr.state is not None):
-                pattern_key = self._canonical_clause_slot_name(
-                    clause.params[0])
-                pattern_form = self._checker_form_slot_name(
-                    clause.params[0])
-                state_form = self._checker_form_slot_name(
-                    expr.state.type_expr)
-                if (pattern_key is not None
-                        and pattern_key != state_slot_name
-                        and pattern_form is not None
-                        and pattern_form == state_form):
-                    raise CodegenSkip(
-                        clause.params[0],
-                        "the clause pattern and the handler state "
-                        "annotation are the same slot class to the "
-                        "checker but are spelled through different "
-                        "aliases — spell both with ONE alias so clause "
-                        "references resolve unambiguously",
-                    )
-                # The DUAL direction (round-7 review, F3): the pattern
-                # and annotation bind under ONE key here (a refinement
-                # literal erases to its base in codegen keys) while the
-                # checker keeps them DISTINCT classes — a reference the
-                # checker resolves to one of them silently lands on the
-                # merged stack's other member.
-                if (pattern_key is not None
-                        and pattern_key == state_slot_name
-                        and pattern_form is not None
-                        and state_form is not None
-                        and pattern_form != state_form):
-                    raise CodegenSkip(
-                        clause.params[0],
-                        "the clause pattern and the handler state "
-                        "annotation are DIFFERENT slot classes to the "
-                        "checker but would bind here under one key — "
-                        "name the refined type with an alias (and use "
-                        "it on both) so the classes stay distinct",
-                    )
+            # #1208: the two class-collision skips that stood here are gone.
+            # Both existed because codegen keyed clause slots by a rendering
+            # that was not the checker's — one direction merged two checker
+            # classes under one codegen key, the other split one checker
+            # class across two.  Bind and ref now BOTH render through
+            # `vera.naming`, so a pattern and an annotation are one key here
+            # exactly when they are one class to the checker, and the shapes
+            # the skips refused (two aliases of one refined class; a
+            # refinement literal against its alias) lower with the checker's
+            # own semantics.
             self._state_clause_ops[clause.op_name] = (
                 clause, type_name, family, state_slot_name, env,
                 get_import, put_import,
@@ -1735,8 +1702,20 @@ class CallsHandlersMixin:
         # F2); names use the checker's canonicalization rule.
         clause_env = decl_env
         if arg_local is not None and clause.params:
-            param_slot = self._canonical_clause_slot_name(clause.params[0])
-            clause_env = clause_env.push(param_slot or type_name, arg_local)
+            # #1208: no `or type_name` fallback.  `type_name` is the EFFECT's
+            # type argument, not this pattern's name, so substituting it bound
+            # the clause parameter under a key the checker never used — the
+            # renderer disagreement the fallback was papering over.  The
+            # renderer is now the checker's and reports `None` only for a
+            # type expression the checker could not name either, which is a
+            # skip, not a different name.
+            param_slot = self._type_expr_to_slot_name(clause.params[0])
+            if param_slot is None:  # pragma: no cover — defensive
+                raise CodegenSkip(
+                    clause.params[0],
+                    "handler clause parameter has no slot name",
+                )
+            clause_env = clause_env.push(param_slot, arg_local)
         if state_slot_name is not None and state_local is not None:
             clause_env = clause_env.push(state_slot_name, state_local)
 
@@ -1945,7 +1924,7 @@ class CallsHandlersMixin:
         # cause C — pre-fix the push used the base name and the ref dangled,
         # E699).  The tag identifier is escaped via `mangle_type_name` (#775)
         # so a composite E yields a legal WAT tag name (root cause B3).
-        type_name = self._type_expr_to_slot_name(type_arg)
+        type_name = type_expr_slot_name(type_arg)  # FAMILY question, see above
         if type_name is None:  # pragma: no cover — NamedType always resolves
             raise CodegenSkip(
                 expr, "Exn<E> type argument has no slot name"
@@ -1956,7 +1935,7 @@ class CallsHandlersMixin:
         # payload local against the i64-tagged throw.  The caught-value
         # SLOT binding below stays source-level (the checker binds the
         # clause pattern's own name).
-        family = self._family_name(type_arg, type_name)
+        family = self._family_name(type_arg)
         tag_name = f"$exn_{mangle_type_name(family)}"
         is_pair = self._is_pair_type_name(family)
 
@@ -2020,8 +1999,14 @@ class CallsHandlersMixin:
         # (top name syntactic, arguments resolved — `throw(@Code)` binds
         # `@Code` whatever `E` was named).
         if clause.params:
-            caught_slot = self._canonical_clause_slot_name(clause.params[0])
-            handler_env = env.push(caught_slot or type_name, thrown_local)
+            # #1208: no `or type_name` fallback — see the State twin.
+            caught_slot = self._type_expr_to_slot_name(clause.params[0])
+            if caught_slot is None:  # pragma: no cover — defensive
+                raise CodegenSkip(
+                    clause.params[0],
+                    "handler clause parameter has no slot name",
+                )
+            handler_env = env.push(caught_slot, thrown_local)
         else:
             # A patternless `throw()` clause binds nothing in the checker
             # (its zip has no param to bind) — pushing the payload anyway

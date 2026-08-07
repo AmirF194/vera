@@ -12,6 +12,7 @@ from vera import ast
 from vera.skip import AdtEqNotDerivableError, CodegenInvariantError, CodegenSkip
 from vera.codegen.tail_position import compute_tail_call_sites
 from vera.monomorphize import mangle_type_name
+from vera.slots import type_expr_slot_name
 from vera.wasm import WasmContext, WasmSlotEnv
 from vera.wasm.helpers import _is_host_handle_type, gc_shadow_push
 
@@ -188,7 +189,10 @@ class FunctionCompilationMixin:
             for eff in decl.effect.effects:
                 if (isinstance(eff, ast.EffectRef) and eff.name == "State"
                         and eff.type_args and len(eff.type_args) == 1):
-                    type_name = self._type_expr_to_slot_name(eff.type_args[0])
+                    # #1208: the effect's type argument is a FAMILY /
+                    # Vera-name-mirror question (the comment below), not
+                    # a slot key — it stays alias-opaque and syntactic.
+                    type_name = type_expr_slot_name(eff.type_args[0])
                     if type_name:
                         # #1205: the import NAME keys on the scalar-collapsed
                         # family (matching `_check_state_type` registration);
@@ -198,7 +202,7 @@ class FunctionCompilationMixin:
                         # generic instantiation — see the tracked mono
                         # discovery desync).
                         mangled = mangle_type_name(
-                            self._family_name_te(eff.type_args[0], type_name))
+                            self._family_name_te(eff.type_args[0]))
                         # Only map if no user-defined function shadows the op
                         if "get" not in self._fn_sigs:
                             effect_ops["get"] = (
@@ -221,13 +225,13 @@ class FunctionCompilationMixin:
                             )
                 elif (isinstance(eff, ast.EffectRef) and eff.name == "Exn"
                         and eff.type_args and len(eff.type_args) == 1):
-                    type_name = self._type_expr_to_slot_name(eff.type_args[0])
+                    type_name = type_expr_slot_name(eff.type_args[0])
                     if type_name and "throw" not in self._fn_sigs:
                         # #1205: tag family name collapses like the State
                         # import family (matching `_check_exn_type`).
                         effect_ops["throw"] = (
                             f"$exn_"
-                            f"{mangle_type_name(self._family_name_te(eff.type_args[0], type_name))}",
+                            f"{mangle_type_name(self._family_name_te(eff.type_args[0]))}",
                             False,
                         )
 

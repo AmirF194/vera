@@ -19,7 +19,7 @@ from dataclasses import dataclass, field, replace
 from dataclasses import fields as ast_fields
 from typing import TYPE_CHECKING
 
-from vera import ast
+from vera import ast, naming
 from vera.environment import ConstructorInfo, FunctionInfo, TypeEnv
 from vera.monomorphize import (
     MonoContext,
@@ -40,7 +40,7 @@ from vera.obligations.core import (
     expr_text_for,
 )
 from vera.naming import EMPTY_ALIAS_ENV, AliasEnv, alias_env_from_environment
-from vera.slots import slot_table, type_expr_slot_name
+from vera.slots import slot_table
 from vera.smt import SlotEnv, SmtContext
 from vera.types import (
     erases_to_unit,
@@ -7518,7 +7518,7 @@ class ContractVerifier:
         """
         import dataclasses as _dc
 
-        table = slot_table(callee_params)
+        table = slot_table(callee_params, self._alias_env)
 
         class _NoSubstitution(Exception):
             pass
@@ -7949,10 +7949,13 @@ class ContractVerifier:
         return len(stack)
 
     def _type_expr_to_slot_name(self, te: ast.TypeExpr) -> str:
-        """Extract the canonical slot name from a type expression.
+        """The slot-binding name of *te*, as the checker binds it (#1208).
 
-        Delegates to the shared recursive :func:`vera.slots.type_expr_slot_name`
-        (fully-qualified over nested composites, #914 finding 2) with the
-        verifier's total-``str`` contract: an unnameable component is ``"?"``.
+        Delegates to :func:`vera.naming.slot_name` against the verifier's own
+        ``_alias_env`` (built at the end of ``register_program`` from the same
+        registration pass the checker runs).  Syntactic head, RESOLVED type
+        arguments, fully qualified over nested composites (#914 finding 2);
+        already total, and its ``"?"`` is the same unnameable rendering the
+        verifier's contract used.
         """
-        return type_expr_slot_name(te) or "?"
+        return naming.slot_name(te, self._alias_env)

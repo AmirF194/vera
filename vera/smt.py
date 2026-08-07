@@ -15,10 +15,9 @@ from typing import TYPE_CHECKING, Any, Callable
 
 import z3
 
-from vera import ast
+from vera import ast, naming
 from vera.monomorphize import mangle_type_name, unmangle_type_name
 from vera.naming import EMPTY_ALIAS_ENV, AliasEnv
-from vera.slots import slot_ref_name, type_expr_slot_name
 from vera.types import (
     AdtType,
     PRIMITIVES,
@@ -1010,15 +1009,14 @@ class SmtContext:
         self, ref: ast.SlotRef, env: SlotEnv
     ) -> z3.ExprRef | None:
         """Translate @Type.n to the corresponding Z3 variable."""
-        # Shared recursive builder (#914 finding 2) — fully-qualified nested
-        # type args, matching the env-key side and the checker so the
-        # verifier resolves the SAME slot the checker did (a one-level name
-        # collided distinct nested composites like `Option<Tuple<Int, Int>>`
-        # vs `Option<Tuple<Bool, Bool>>` into one `Option<Tuple>` stack).
-        type_name = slot_ref_name(ref)
-        if type_name is None:  # pragma: no cover — complex type arg
-            return None
-        return env.resolve(type_name, ref.index)
+        # #1208: the ONE renderer, against this context's alias environment —
+        # the same function over the same environment that keyed every push
+        # into `env` (`_type_expr_to_slot_name`), so the verifier resolves the
+        # SAME slot the checker did.  Nested composites stay fully qualified
+        # (#914 finding 2: a one-level name collided `Option<Tuple<Int, Int>>`
+        # with `Option<Tuple<Bool, Bool>>` into one `Option<Tuple>` stack).
+        return env.resolve(
+            naming.slot_ref_key(ref, self._alias_env), ref.index)
 
     def _translate_binary(
         self, expr: ast.BinaryExpr, env: SlotEnv
@@ -2928,13 +2926,15 @@ class SmtContext:
                 self._vera_type_to_z3_sort(adt_ty)
 
     def _type_expr_to_slot_name(self, te: ast.TypeExpr) -> str | None:
-        """Extract the slot name from a type expression.
+        """The slot-binding name of *te*, as the checker binds it (#1208).
 
-        Delegates to the shared recursive :func:`vera.slots.type_expr_slot_name`
-        so the verifier's slot-env keys are fully-qualified over nested
-        composites and agree with the checker + codegen (#914 finding 2).
+        Delegates to :func:`vera.naming.slot_name` against this context's
+        ``_alias_env`` (threaded from both cold drivers, rebound per program
+        on the warm session).  Syntactic head, RESOLVED type arguments, so
+        the SMT slot environment is keyed exactly as the checker's was — and
+        as `_translate_slot_ref` looks it up.
         """
-        return type_expr_slot_name(te)
+        return naming.slot_name_or_none(te, self._alias_env)
 
     # -----------------------------------------------------------------
     # Validity checking

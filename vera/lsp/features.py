@@ -265,7 +265,7 @@ def definition_at(
     if slot is None:
         return None
 
-    table = slot_table(enclosing.params)
+    table = slot_table(enclosing.params, analysis.alias_env)
     positions = table.get(slot.type_name, [])
     if slot.index >= len(positions):
         return None  # binds to a let/match binding, not a parameter

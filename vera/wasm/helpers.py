@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from vera import ast
+from vera.skip import CodegenInvariantError
 from vera.types import (
     BOOL,
     FLOAT64,
@@ -461,3 +463,25 @@ def _element_wasm_type(elem_type: str) -> str | None:
         return "i32_pair"
     # ADT / other compound types: i32 heap pointer
     return "i32"
+
+
+def state_type_arg(effect_ref: ast.EffectRefNode) -> ast.TypeExpr:
+    """The single type argument of a ``State<T>`` effect reference.
+
+    Shape validation only, shared by the two sides that name that argument
+    (#1208): the ``WasmContext`` translating ``old(State<T>)`` and the
+    ``CodeGenerator`` collecting which snapshots to allocate.  The NAMING is
+    deliberately not done here — each side renders through its own alias
+    environment, and the whole point of the one renderer is that a name is a
+    function of the environment it is asked in.
+    """
+    if not isinstance(effect_ref, ast.EffectRef):
+        raise CodegenInvariantError(  # pragma: no cover
+            "State type ref is not an EffectRef", effect_ref)
+    if effect_ref.name != "State":
+        raise CodegenInvariantError(  # pragma: no cover
+            "State type ref name is not 'State'", effect_ref)
+    if not effect_ref.type_args or len(effect_ref.type_args) != 1:
+        raise CodegenInvariantError(  # pragma: no cover
+            "State<T> must have exactly one type argument", effect_ref)
+    return effect_ref.type_args[0]

@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 
 import wasmtime
 
-from vera import ast
+from vera import ast, naming
 from vera.codegen.api import CompileResult
 from vera.codegen.memory import ConstructorLayout
 from vera.errors import Diagnostic, SourceLocation
@@ -30,8 +30,8 @@ from vera.naming import EMPTY_ALIAS_ENV, AliasEnv
 from vera.prelude import PRELUDE_FILE, mentioned_fn_names
 from vera.slots import (
     AliasResolutionDepthError,
+    family_fallback_name,
     resolve_scalar_alias_te,
-    type_expr_slot_name,
 )
 from vera.wasm import StringPool
 from vera.wasm.async_fusion import (
@@ -551,7 +551,7 @@ class CodeGenerator(
             tuple[tuple[str, ...], str], str
         ] = {}
 
-    def _family_name_te(self, te: ast.TypeExpr, fallback: str) -> str:
+    def _family_name_te(self, te: ast.TypeExpr) -> str:
         """The ``State<T>``/``Exn<E>`` host-import/tag FAMILY name for a
         type argument (#1205) — the CodeGenerator twin of
         ``WasmContext._family_name``, over the active module's alias
@@ -564,7 +564,7 @@ class CodeGenerator(
         try:
             return (resolve_scalar_alias_te(
                         te, self._type_aliases, self._type_alias_params)
-                    or fallback)
+                    or family_fallback_name(te))
         except AliasResolutionDepthError as exc:
             from vera.skip import CodegenSkip
             raise CodegenSkip(te, str(exc)) from exc
@@ -2059,14 +2059,17 @@ class CodeGenerator(
         return "unsupported"
 
     def _type_expr_to_slot_name(self, te: ast.TypeExpr) -> str | None:
-        """Extract the slot name from a type expression.
+        """The slot-binding name of *te*, as the checker binds it (#1208).
 
-        Delegates to the shared recursive :func:`vera.slots.type_expr_slot_name`
-        so nested composite type args (`Option<Tuple<Int, Int>>`) are
-        FULLY qualified and distinguishable (#914 finding 2), and every
-        slot-name builder agrees by construction (dedup).
+        Delegates to :func:`vera.naming.slot_name` against ``_alias_env`` —
+        the aliases of the module whose declaration is compiling, kept
+        current by ``_sync_alias_env`` / ``_module_alias_scope``.  Syntactic
+        head, RESOLVED type arguments: a parameter written ``@Option<Cnt>``
+        keys the ``Option<Int>`` stack the checker created, which is the
+        stack the reference side (``naming.slot_ref_key``) looks up.  Nested
+        composite arguments stay fully qualified (#914 finding 2).
         """
-        return type_expr_slot_name(te)
+        return naming.slot_name_or_none(te, self._alias_env)
 
     def _hoist_nongeneric_where_helpers(
         self, program: ast.Program,

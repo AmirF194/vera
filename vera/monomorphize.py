@@ -32,9 +32,8 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, fields, replace
 from typing import Any, cast
 
-from vera import ast
+from vera import ast, naming
 from vera.naming import EMPTY_ALIAS_ENV, AliasEnv
-from vera.slots import slot_ref_name, type_expr_slot_name
 
 
 def substitute_type_vars(
@@ -2086,6 +2085,7 @@ class Monomorphizer:
         self,
         decl: ast.FnDecl,
         concrete_types: tuple[str, ...],
+        alias_env: AliasEnv | None = None,
     ) -> ast.FnDecl:
         """Create a monomorphized copy of a generic function.
 
@@ -2099,15 +2099,27 @@ class Monomorphizer:
         When distinct type variables map to the same concrete type
         (e.g. A→Int, B→Int), De Bruijn indices in slot references
         must be adjusted because formerly separate namespaces merge.
+
+        *alias_env* is the naming environment the reindex renders binder
+        names against (#1208).  It must be the env of the module that
+        DECLARED *decl*, not the driver's own: aliases are module-scoped
+        (spec §8.4.1), so a clone of an IMPORTED generic whose parameters
+        name a module-local alias merges differently in its own namespace
+        than in the importer's — and the consumers rebuild the clone's scope
+        under the defining module's scope, so a recount done against the
+        importer's would be a recount against a scope nobody has.  Defaults
+        to ``ctx.alias_env``, which is right whenever the caller has only
+        one namespace in play.
         """
         assert decl.forall_vars is not None  # noqa: S101
+        env = self.ctx.alias_env if alias_env is None else alias_env
         mapping = dict(zip(decl.forall_vars, concrete_types))
         mangled = self._mangle_fn_name(decl.name, concrete_types)
 
         # Scope-aware De Bruijn reindexing (#769 gap 3): resolve every
         # SlotRef against the full binding scope at its reference site and
         # recompute its index in the collapsed (post-substitution) namespace.
-        reindex = self._compute_scoped_reindex(decl, mapping)
+        reindex = self._compute_scoped_reindex(decl, mapping, env)
 
         # Substitute type variables in the entire FnDecl
         substituted = self._substitute_in_ast(decl, mapping, reindex)
@@ -2120,16 +2132,24 @@ class Monomorphizer:
         )
 
     def _substituted_slot_name(
-        self, te: ast.TypeExpr, mapping: dict[str, str],
+        self, te: ast.TypeExpr, mapping: dict[str, str], env: AliasEnv,
     ) -> str | None:
-        """Full-depth canonical slot name of ``te`` AFTER type-variable
-        substitution — the name this binder carries in the clone."""
-        return type_expr_slot_name(self._substitute_type_expr(te, mapping))
+        """Canonical slot name of ``te`` AFTER type-variable substitution —
+        the name this binder carries in the clone.
+
+        #1208: rendered by :func:`vera.naming.slot_name` against the origin
+        module's alias environment, the same renderer the consumers rebuild
+        the clone's scope with.  A name minted here that they would not mint
+        is a De Bruijn recount against a scope neither of them has.
+        """
+        return naming.slot_name_or_none(
+            self._substitute_type_expr(te, mapping), env)
 
     def _compute_scoped_reindex(
         self,
         decl: ast.FnDecl,
         mapping: dict[str, str],
+        env: AliasEnv,
     ) -> dict[int, int]:
         """Scope-aware De Bruijn reindex for monomorphization (#769 gap 3).
 
@@ -2174,25 +2194,27 @@ class Monomorphizer:
         the walker never descends into ``TypeExpr`` fields, so their indices
         are untouched (an outer collapse cannot shift a one-binder scope).
 
-        Names are FULL-DEPTH canonical slot names (``vera/slots.py``, the
-        shared namer both consumers resolve against).  A reference that does
-        not resolve against the walked scope keeps its index — the consumers
-        surface dangling refs (hard E699 in codegen) exactly as they would
-        have pre-substitution.
+        Names come from :mod:`vera.naming` — the ONE renderer both consumers
+        resolve the clone's scope against (#1208) — with the BIND side
+        (``push``) and the REFERENCE side (``resolve``) rendered by the same
+        function over the same environment.  They have to move together: a
+        recount that pushes under one rendering and looks up under another
+        silently mis-resolves, which is the whole failure mode this walker
+        exists to prevent.  A reference that does not resolve against the
+        walked scope keeps its index — the consumers surface dangling refs
+        (hard E699 in codegen) exactly as they would have pre-substitution.
         """
         out: dict[int, int] = {}
         stack: list[tuple[str | None, str | None]] = []
 
         def push(te: ast.TypeExpr) -> None:
             stack.append((
-                type_expr_slot_name(te),
-                self._substituted_slot_name(te, mapping),
+                naming.slot_name_or_none(te, env),
+                self._substituted_slot_name(te, mapping, env),
             ))
 
         def resolve(ref: ast.SlotRef) -> None:
-            name = slot_ref_name(ref)
-            if name is None:
-                return
+            name = naming.slot_ref_key(ref, env)
             seen = 0
             for pos in range(len(stack) - 1, -1, -1):
                 if stack[pos][0] != name:

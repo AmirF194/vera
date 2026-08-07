@@ -2589,34 +2589,62 @@ public fn drive(@Int -> @Int) requires(true) ensures(true) effects(pure)
         silently hit the canonically-spelled sibling (111)."""
         assert _run(self._OUTER_MIXED_PARAMS, "drive", 0) == 222
 
-    def test_refined_class_collision_is_loud_skip(self) -> None:
-        """Two aliases of ONE refined class as pattern and annotation
-        (`put(@Option<P2>)` under `(@Option<Pos> = ...)`) would bind one
-        checker stack under two keys — a mixed reference resolves
-        silently wrong — so the clause translator refuses it loudly
-        with spell-both-with-one-alias guidance."""
-        src = """\
+    _REFINED_CLASS_MIXED = """\
 type Pos = { @Int | @Int.0 > 0 };
 type P2 = Pos;
 
 public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
 {
-  handle[State<Option<Pos>>](@Option<Pos> = Some(5)) {
+  handle[State<Option<Pos>>](@Option<Pos> = %s) {
     get(@Unit) -> { resume(@Option<Pos>.0) },
-    put(@Option<P2>) -> { resume(()) } with @Option<Pos> = @Option<P2>.0
+    put(@Option<P2>) -> { resume(()) } with @Option<Pos> = @Option<P2>.%d
   } in {
     put(Some(9));
     option_unwrap_or(get(()), 0 - 1)
   }
 }
 """
-        with _resolved_pipeline(src) as (program, arts, resolved, path):
-            result = codegen_compile(
-                program, source=src, file=path, resolved_modules=resolved,
-                expr_semantic_types=arts.expr_semantic_types,
-            )
-            msgs = [d.description for d in result.diagnostics]
-            assert any("spell both with ONE alias" in m for m in msgs), msgs
+
+    _REFINED_CLASS_SINGLE = """\
+type Pos = { @Int | @Int.0 > 0 };
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Option<Pos>>](@Option<Pos> = Some(5)) {
+    get(@Unit) -> { resume(@Option<Pos>.0) },
+    put(@Option<Pos>) -> { resume(()) } with @Option<Pos> = @Option<Pos>.0
+  } in {
+    put(Some(9));
+    option_unwrap_or(get(()), 0 - 1)
+  }
+}
+"""
+
+    def test_refined_class_two_spellings_are_one_stack(self) -> None:
+        """Two aliases of ONE refined class as pattern and annotation
+        (`put(@Option<P2>)` under `(@Option<Pos> = ...)`) are one slot stack
+        to the checker, and now to codegen (#1208) — both spellings render
+        `Option<{@Int | ...}>`.
+
+        Pre-#1208 they bound under two DIFFERENT codegen keys, so a mixed
+        reference resolved against the wrong member silently; the clause
+        translator refused the shape with spell-both-with-one-alias
+        guidance.  With one renderer on both the bind and the reference
+        side the workaround IS the semantics: the mixed spelling and the
+        single-alias spelling the guidance asked for now agree, which is
+        the property the skip could only approximate by refusing."""
+        mixed = _run(self._REFINED_CLASS_MIXED % ("Some(5)", 0), "go", 0)
+        assert mixed == _run(self._REFINED_CLASS_SINGLE, "go", 0)
+        assert mixed == 5
+
+    def test_refined_class_one_stack_orders_state_over_argument(self) -> None:
+        """The merged stack is the CHECKER's, in the checker's order: the
+        clause pushes the op parameter and then the handler state, so index
+        0 is the state (`Some(5)`) and index 1 the put argument
+        (`Some(9)`) — reached through the OTHER alias, which is what makes
+        this one stack rather than two that happen to agree."""
+        assert _run(self._REFINED_CLASS_MIXED % ("Some(5)", 0), "go", 0) == 5
+        assert _run(self._REFINED_CLASS_MIXED % ("Some(5)", 1), "go", 0) == 9
 
     def test_alias_depth_overflow_is_loud(self) -> None:
         """A 33-deep (legal, acyclic) alias chain as a State cell: the
@@ -2699,8 +2727,16 @@ class TestClauseClassCollisionBothDirections:
             )
             return [d.description for d in result.diagnostics]
 
-    def test_parameterised_refined_alias_collision_is_loud(self) -> None:
-        msgs = self._compile_msgs("""\
+    def test_parameterised_refined_alias_is_one_stack_with_the_literal(
+        self,
+    ) -> None:
+        """A parameterised refined alias applied (`Ref<Int>`) and the
+        refinement literal it substitutes to are ONE class — the round-7 F1
+        ordering (substitute the alias parameters BEFORE the refinement
+        branch) is what makes both render `Option<{@Int | ...}>`.  Pre-#1208
+        this was the loud collision skip; now the mixed spelling agrees with
+        the single-alias spelling the skip's guidance asked for."""
+        mixed = _run("""\
 type Ref<T> = { @T | true };
 
 public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
@@ -2713,15 +2749,38 @@ public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
     option_unwrap_or(get(()), 0 - 1)
   }
 }
-""")
-        assert any("spell both with ONE alias" in m for m in msgs), msgs
+""", "go", 0)
+        single = _run("""\
+type Ref<T> = { @T | true };
 
-    def test_reverse_skew_merged_key_is_loud(self) -> None:
-        """The dual direction: refined-literal annotation + plain
-        pattern bind under ONE codegen key while the checker splits
-        them — previously a silent wrong value (the with-expr's ref
-        resolved to the state where the checker meant the argument)."""
-        msgs = self._compile_msgs("""\
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Option<Ref<Int>>>](@Option<Ref<Int>> = Some(5)) {
+    get(@Unit) -> { resume(@Option<Ref<Int>>.0) },
+    put(@Option<Ref<Int>>) -> { resume(()) } with @Option<Ref<Int>> = @Option<Ref<Int>>.0
+  } in {
+    put(Some(9));
+    option_unwrap_or(get(()), 0 - 1)
+  }
+}
+""", "go", 0)
+        assert mixed == single
+        assert mixed == 5
+
+    def test_reverse_skew_binds_two_classes_as_the_checker_does(self) -> None:
+        """The DUAL direction: a refined-literal annotation and a plain
+        `Option<Int>` pattern are two DISTINCT classes to the checker, and
+        now to codegen — the annotation renders `Option<{@Int | ...}>`, the
+        pattern `Option<Int>`.
+
+        Pre-#1208 codegen erased the refinement literal to its base and bound
+        both under one key, so the `with` expression's `@Option<Int>.0`
+        landed on the merged stack's other member (the handler state,
+        `Some(5)`) where the checker means the put ARGUMENT — a silent wrong
+        value, which is why the shape was refused.  The argument is
+        `Some(9)`, distinct from the state, so the returned value names
+        which binding was reached: 9 is the checker's."""
+        assert _run("""\
 public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
 {
   handle[State<Option<{ @Int | @Int.0 > 0 }>>](@Option<{ @Int | @Int.0 > 0 }> = Some(5)) {
@@ -2732,8 +2791,7 @@ public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
     option_unwrap_or(get(()), 0 - 1)
   }
 }
-""")
-        assert any("DIFFERENT slot classes" in m for m in msgs), msgs
+""", "go", 0) == 9
 
     def test_old_state_depth_overflow_is_clean_skip(self) -> None:
         """`old(State<A33>)` in an ensures — the ONE family-resolution

@@ -1089,9 +1089,14 @@ class TestObligationKinds:
         """When a precondition slot cannot be mapped to an argument,
         the message keeps the generic wording instead of guessing."""
         from vera import ast as A
+        from vera.naming import EMPTY_ALIAS_ENV
         from vera.verifier import ContractVerifier
 
         v = ContractVerifier.__new__(ContractVerifier)
+        # #1208: `slot_table` is named against the verifier's alias env; this
+        # fixture bypasses `__init__`, so supply the empty one it declares no
+        # aliases against.
+        v._alias_env = EMPTY_ALIAS_ENV
         pre = A.Requires(
             expr=A.SlotRef(
                 type_name="String", type_args=None, index=5, span=None,

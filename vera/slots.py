@@ -1,7 +1,18 @@
-"""Slot reference table utilities for ``vera check --explain-slots``.
+"""Slot resolution tables, and the two walks that are not about naming.
 
-Computes a slot resolution table for a function purely from its parameter
-type expressions (no live type-checker environment required).
+:func:`slot_table` computes a function's slot resolution table from its
+parameter type expressions and a module's :class:`~vera.naming.AliasEnv` —
+what ``vera check --explain-slots`` prints, and what the verifier and the
+LSP map a ``@T.n`` back to a parameter with.  The naming itself is
+:mod:`vera.naming`'s (#1208): the table reports the names the checker
+actually bound and every consumer resolves against, so it cannot tell the
+user something no subsystem agrees with.
+
+What remains here is deliberately NOT naming.
+:func:`type_expr_slot_name` is the alias-opaque syntactic spelling the WASM
+representation walks want, and :func:`resolve_scalar_alias_te` /
+:func:`family_fallback_name` are the State/Exn cell FAMILY — an import name
+and a WASM tag, not a binding key.  Each says why in its own docstring.
 
 The De Bruijn convention: @T.0 is the *last* (rightmost) parameter of
 type T in the signature; @T.1 is second-to-last; and so on.  For a
@@ -15,7 +26,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Mapping
 
-from vera import ast
+from vera import ast, naming
 
 # `substitute_named`, `resolve_alias_type_expr` and `AliasResolutionDepthError`
 # MOVED to `vera.naming` (#1208), which owns every type-expression naming and
@@ -23,6 +34,7 @@ from vera import ast
 # existing `from vera.slots import ...` call sites (codegen/core.py,
 # wasm/inference.py) keep working.
 from vera.naming import (
+    AliasEnv,
     AliasResolutionDepthError,
     resolve_alias_type_expr,
     substitute_named,
@@ -30,10 +42,10 @@ from vera.naming import (
 
 __all__ = [
     "AliasResolutionDepthError",
+    "family_fallback_name",
     "format_slot_table",
     "resolve_alias_type_expr",
     "resolve_scalar_alias_te",
-    "slot_ref_name",
     "slot_table",
     "slot_table_dict",
     "substitute_named",
@@ -46,26 +58,29 @@ __all__ = [
 # ------------------------------------------------------------------
 
 def type_expr_slot_name(te: ast.TypeExpr) -> str | None:
-    """Canonical slot-matching name for a TypeExpr, or ``None`` if the
-    type has no nameable slot form.
+    """The SYNTACTIC full-depth type name of a TypeExpr, or ``None``.
 
-    The ONE recursive builder for slot-environment keys and slot-reference
-    lookups across the codegen and verifier subsystems (#914 finding 2 /
-    dedup): a parameterized type recurses into its type arguments to a
-    FULLY-QUALIFIED name, so nested composites are distinguishable
+    NOT a slot-environment key and NOT a slot-reference lookup: both of
+    those render through :mod:`vera.naming` against a module's alias
+    environment (#1208), because a name minted one way and looked up
+    another misses silently.  What remains here is the alias-OPAQUE
+    spelling — no environment, so nothing to resolve against — which is
+    what the two REPRESENTATION walks want: the hop-by-hop alias
+    canonicalization behind the WASM width / erasure deciders
+    (``_canonicalize_alias_slot_name``) and the structural-``Eq``
+    derivability oracle (``_ground_field_type_name``).  Both ask a
+    question about a type's machine representation, one alias hop at a
+    time; neither keys a binding.
+
+    A parameterized type recurses into its type arguments to a
+    FULLY-QUALIFIED name, so nested composites stay distinguishable
     (``Option<Tuple<Int, Int>>`` and ``Option<Tuple<Bool, Bool>>`` do NOT
-    collapse to the same ``Option<Tuple>`` — the pre-#914 one-level bug that
-    collided their `state_*` imports / `exn_*` tags and any two same-outer
-    nested slots in one scope).  Type aliases stay OPAQUE (``@PosInt.0``
-    counts ``PosInt`` bindings, not ``Int``) — refinements resolve to their
-    base name only.  Matches the checker's own recursive key (via
-    ``canonical_type_name`` → ``pretty_type``), so the checker's slot
-    environment and the downstream codegen/verifier ones agree.
+    collapse to one ``Option<Tuple>`` — the pre-#914 one-level bug).
+    Refinements resolve to their base name only.
 
     Returns ``None`` when a component is neither a `NamedType` nor a
     `RefinementType` chain over one — e.g. a `FnType` **nested inside** a
-    type argument — so the strict codegen callers (`str | None`) can skip.
-    A top-level `FnType` yields the synthetic ``"Fn"`` name.
+    type argument.  A top-level `FnType` yields the synthetic ``"Fn"``.
     """
     if isinstance(te, ast.NamedType):
         if te.type_args:
@@ -117,34 +132,19 @@ def resolve_scalar_alias_te(
     return None
 
 
-def slot_ref_name(ref: ast.SlotRef) -> str | None:
-    """Canonical lookup name for a ``@T.n`` slot reference, or ``None``.
-
-    The lookup-side counterpart of :func:`type_expr_slot_name` — a
-    `SlotRef` carries `type_name` (str) + `type_args` (TypeExprs), so it
-    resolves through the SAME recursive builder as the key side, keeping
-    env-key construction and slot lookup matched for nested composites
-    (#914 finding 2).  Bare (no-type-arg) refs return `type_name` unchanged.
-    """
-    if not ref.type_args:
-        return ref.type_name
-    return type_expr_slot_name(
-        ast.NamedType(name=ref.type_name, type_args=ref.type_args)
-    )
-
-
 # ------------------------------------------------------------------
 # Internal helpers
 # ------------------------------------------------------------------
 
-def _te_slot_name(te: ast.TypeExpr) -> str:
-    """Return the canonical slot-matching name for a parameter TypeExpr.
+def _te_slot_name(te: ast.TypeExpr, env: AliasEnv) -> str:
+    """Return the slot-matching name for a parameter TypeExpr (#1208).
 
-    Thin ``str``-total wrapper over :func:`type_expr_slot_name` (the shared
-    recursive builder) for the ``--explain-slots`` table, which wants a
-    display string for every input: an unnameable component becomes ``"?"``.
+    :func:`vera.naming.slot_name` against the module's naming environment —
+    the ONE renderer, so the table reports the names the checker actually
+    bound and every consumer resolves against, not a syntactic rebuild of
+    them.  Already ``str``-total: an unresolvable component is ``"?"``.
     """
-    return type_expr_slot_name(te) or "?"
+    return naming.slot_name(te, env)
 
 
 def _label(tname: str, slot_idx: int, n: int) -> str:
@@ -164,6 +164,7 @@ def _label(tname: str, slot_idx: int, n: int) -> str:
 
 def slot_table(
     params: tuple[ast.TypeExpr, ...],
+    env: AliasEnv,
 ) -> dict[str, list[int]]:
     """Return the slot resolution table for a function's parameter list.
 
@@ -171,10 +172,16 @@ def slot_table(
 
     Example: ``(@Int, @Int)`` → ``{"Int": [2, 1]}``
     meaning ``@Int.0`` = parameter 2, ``@Int.1`` = parameter 1.
+
+    *env* is the module's naming environment (#1208): the table is a NAMING
+    answer, so it is rendered by the one renderer rather than rebuilt
+    syntactically.  Required rather than defaulted — an empty environment
+    silently renders every alias opaquely, which is the failure mode the
+    consolidation exists to close.
     """
     by_type: dict[str, list[int]] = defaultdict(list)
     for i, te in enumerate(params, 1):
-        by_type[_te_slot_name(te)].append(i)
+        by_type[_te_slot_name(te, env)].append(i)
     return {tname: list(reversed(pos)) for tname, pos in by_type.items()}
 
 
@@ -217,3 +224,22 @@ def slot_table_dict(
                 "parameter": param_pos,
             })
     return {"function": fn_name, "slots": entries}
+
+
+def family_fallback_name(te: ast.TypeExpr) -> str:
+    """The opaque fallback for a ``State<T>`` / ``Exn<E>`` cell FAMILY.
+
+    The family names an IMPORT and a WASM tag, not a slot, and it stays on
+    the alias-opaque syntactic spelling for now: resolving it is a change to
+    the emitted import surface (#1209), separate from the #1208 slot-naming
+    consolidation, and the checker's own argument rendering is not
+    mangle-safe — a refined argument renders ``Option<{@Int | ...}>``, which
+    ``mangle_type_name`` does not escape.  Total, because a family must
+    always have a name to mangle.
+
+    Derived here rather than passed in by each of the eight call sites: the
+    scalar collapse and its fallback are one decision about one type
+    expression, and the two `_family_name` methods that make it are the only
+    places allowed to make it.
+    """
+    return type_expr_slot_name(te) or "?"

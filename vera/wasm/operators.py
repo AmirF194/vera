@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from typing import ClassVar
 
-from vera import ast
+from vera import ast, naming
 from vera.skip import AdtEqNotDerivableError, CodegenInvariantError
-from vera.slots import slot_ref_name, type_expr_slot_name
-from vera.wasm.helpers import WasmSlotEnv
+from vera.slots import type_expr_slot_name
+from vera.wasm.helpers import WasmSlotEnv, state_type_arg
 
 
 class OperatorsMixin:
@@ -28,32 +28,15 @@ class OperatorsMixin:
         self, ref: ast.SlotRef, env: WasmSlotEnv
     ) -> list[str] | None:
         """Translate @Type.n to local.get."""
-        # Shared recursive builder (#914 finding 2) — nested composite type
-        # args are FULLY qualified, matching the env-key side so the lookup
-        # cannot desync.
-        type_name = slot_ref_name(ref)
-        if type_name is None:
-            raise CodegenInvariantError(  # pragma: no cover
-                "slot reference type argument is not a NamedType", ref)
-        # Refs resolve by the OPAQUE syntactic rendering only.  Round-4
-        # tried canonical-first resolution (globally, then scoped to
-        # clause bodies) and BOTH were unsound the same way: a canonical
-        # key over codegen's mixed-keyed environments sees only the
-        # canonically-KEYED subset of the checker's merged equivalence
-        # class, so a "hit" can land on the wrong member whenever any
-        # same-class binding is spelled differently (round-4's
-        # Future<Alias> regression; round-5's clause-body-let and
-        # outer-param shapes).  A canonical-first hit is sound only when
-        # the canonical stack provably contains the checker's WHOLE
-        # class — which requires the #1208/#1213 single naming module.
-        # Until then: a divergent spelling with NO same-keyed sibling in
-        # scope dangles loudly here (E699); one WITH a same-keyed
-        # sibling silently resolves to that sibling wherever the
-        # checker's merged/split class disagrees (#1208 documents the
-        # shapes — a clause-body `let` or a plain param+let pair of one
-        # class under two spellings).  The clause translator refuses
-        # the pattern/annotation seam's versions in BOTH directions
-        # (its class-collision skips); the general fix is #1213's.
+        # #1208: the reference resolves by the CHECKER's rendering — the
+        # single `vera.naming` renderer, against this context's alias
+        # environment — and so does every binding key in `env`.  The two
+        # sides of the lookup are one function of one environment, which is
+        # what makes a hit the checker's own binding rather than whichever
+        # member of its equivalence class happened to be spelled the way
+        # this reference was.  Nested composite type arguments stay fully
+        # qualified (#914 finding 2).
+        type_name = naming.slot_ref_key(ref, self._alias_env)
         local_idx = env.resolve(type_name, ref.index)
         if local_idx is None:
             # Defensive invariant: a check-green slot reference must map to a
@@ -1794,7 +1777,7 @@ class OperatorsMixin:
         # `Nat` family's snapshot.
         eff_ref = expr.effect_ref
         if isinstance(eff_ref, ast.EffectRef) and eff_ref.type_args:
-            type_name = self._family_name(eff_ref.type_args[0], type_name)
+            type_name = self._family_name(eff_ref.type_args[0])
         local_idx = self.get_old_state_local(type_name)
         if local_idx is None:
             raise CodegenInvariantError(  # pragma: no cover
@@ -1818,23 +1801,18 @@ class OperatorsMixin:
     def _extract_state_type_name(
         effect_ref: ast.EffectRefNode,
     ) -> str | None:
-        """Extract the type name from a State<T> effect reference."""
-        if not isinstance(effect_ref, ast.EffectRef):
-            raise CodegenInvariantError(  # pragma: no cover
-                "State type ref is not an EffectRef", effect_ref)
-        if effect_ref.name != "State":
-            raise CodegenInvariantError(  # pragma: no cover
-                "State type ref name is not 'State'", effect_ref)
-        if not effect_ref.type_args or len(effect_ref.type_args) != 1:
-            raise CodegenInvariantError(  # pragma: no cover
-                "State<T> must have exactly one type argument", effect_ref)
-        # #914 finding 1: return the CANONICAL slot name (`Option<Int>`), not
-        # the base name (`Option`).  `_state_types` and `get_old_state_local`
-        # are keyed canonically, so a base-name key missed the registered
-        # entry — no `old(State<T>)` snapshot local was allocated and the read
-        # raised an uncaught `CodegenInvariantError` at run.  Shared recursive
-        # builder so nested composites (`Option<Tuple<Int, Int>>`) are exact.
-        name = type_expr_slot_name(effect_ref.type_args[0])
+        """The FAMILY-side type name of a ``State<T>`` effect reference.
+
+        #914 finding 1: the full name (`Option<Int>`), not the base name
+        (`Option`) — `_state_types` and `get_old_state_local` are keyed on
+        the full name, so a base-name key missed the registered entry and the
+        `old(State<T>)` read raised an uncaught `CodegenInvariantError` at
+        run.  Every consumer routes this through `_family_name`, so it is a
+        family question and stays on the alias-opaque syntactic spelling
+        (#1208: see :func:`vera.slots.family_fallback_name` for why the
+        family has not moved with the slot names).
+        """
+        name = type_expr_slot_name(state_type_arg(effect_ref))
         if name is None:
             raise CodegenInvariantError(  # pragma: no cover
                 "State<T> type argument is not a NamedType", effect_ref)

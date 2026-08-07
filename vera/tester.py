@@ -17,10 +17,9 @@ from typing import TYPE_CHECKING
 
 import z3
 
-from vera import ast
+from vera import ast, naming
 from vera.errors import Diagnostic, SourceLocation
 from vera.naming import EMPTY_ALIAS_ENV, AliasEnv
-from vera.slots import type_expr_slot_name
 from vera.smt import SlotEnv, SmtContext
 from vera.types import BOOL, BYTE, FLOAT64, INT, NAT, STRING, UNIT, ModuleArtifacts, PrimitiveType, RefinedType, Type, base_type
 
@@ -407,6 +406,7 @@ class _TestEngine:
             # Run trials
             trial_results = _run_trials(
                 compile_result, fn_name, inputs, param_types, decl,
+                self.alias_env,
             )
 
             n_passed = sum(1 for t in trial_results if t.status == "pass")
@@ -750,7 +750,7 @@ def _generate_inputs(
 
     for i, (param_te, param_ty) in enumerate(zip(decl.params, param_types)):
         bt = base_type(param_ty)
-        type_name = _type_expr_to_slot_name(param_te)
+        type_name = _type_expr_to_slot_name(param_te, alias_env)
         slot_idx = _count_slots(slot_env, type_name)
         z3_name = f"@{type_name}.{slot_idx}"
 
@@ -937,6 +937,7 @@ def _run_trials(
     inputs: list[list[int | float | str]],
     param_types: list[Type],
     decl: ast.FnDecl,
+    alias_env: AliasEnv,
 ) -> list[TrialResult]:
     """Execute test trials against the compiled WASM module."""
     from vera.codegen import execute
@@ -951,7 +952,7 @@ def _run_trials(
         arg_dict: dict[str, int | float | str] = {}
         slot_counts: dict[str, int] = {}
         for param_te, val in zip(decl.params, args):
-            tname = _type_expr_to_slot_name(param_te)
+            tname = _type_expr_to_slot_name(param_te, alias_env)
             idx = slot_counts.get(tname, 0)
             arg_dict[f"@{tname}.{idx}"] = val
             slot_counts[tname] = idx + 1
@@ -1004,14 +1005,16 @@ def _run_trials(
 # Helpers
 # =====================================================================
 
-def _type_expr_to_slot_name(te: ast.TypeExpr) -> str:
-    """Extract the canonical slot name from a type expression.
+def _type_expr_to_slot_name(te: ast.TypeExpr, alias_env: AliasEnv) -> str:
+    """The slot-binding name of *te*, as the checker binds it (#1208).
 
-    Delegates to the shared recursive :func:`vera.slots.type_expr_slot_name`
-    (fully-qualified over nested composites, #914 finding 2) with the
-    tester's total-``str`` contract: an unnameable component is ``"?"``.
+    Delegates to :func:`vera.naming.slot_name` against the checked program's
+    naming environment, so a generated input is labelled with the slot name
+    the source's own `@T.n` references resolve to (`@Option<Int>.0` for a
+    parameter written `@Option<Cnt>`).  Already total: an unresolvable type
+    expression renders `"?"`, which is the tester's contract.
     """
-    return type_expr_slot_name(te) or "?"
+    return naming.slot_name(te, alias_env)
 
 
 def _count_slots(env: SlotEnv, type_name: str) -> int:

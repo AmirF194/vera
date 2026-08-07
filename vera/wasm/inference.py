@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import ClassVar
 
-from vera import ast
+from vera import ast, naming
 from vera.monomorphize import (
     _BUILTIN_PARAMETERIZED_RETURNS,
     _BUILTIN_VERA_RETURN_TYPES,
@@ -16,8 +16,8 @@ from vera.monomorphize import (
 from vera.skip import CodegenSkip
 from vera.slots import (
     AliasResolutionDepthError,
+    family_fallback_name,
     resolve_scalar_alias_te,
-    substitute_named,
     type_expr_slot_name,
 )
 from vera.wasm.helpers import _element_wasm_type
@@ -261,7 +261,7 @@ class InferenceMixin:
             # over `type Count = Nat` is an i64 read, not the unknown-name
             # i32 default.
             if name and expr.effect_ref.type_args:
-                name = self._family_name(expr.effect_ref.type_args[0], name)
+                name = self._family_name(expr.effect_ref.type_args[0])
             return self._type_name_to_wasm(name) if name else None
         return None
 
@@ -2165,13 +2165,12 @@ class InferenceMixin:
     def _type_expr_name(self, te: ast.TypeExpr) -> str | None:
         """Extract a simple type name from a TypeExpr.
 
-        Delegates to the shared recursive :func:`vera.slots.type_expr_slot_name`
-        so a closure's parameter-count keys (`param_type_counts`) use the same
-        fully-qualified nested-composite name that `_translate_slot_ref` /
-        `_walk_free_vars` resolve against (#914 finding 2 — a captured
-        `@Array<Array<Int>>` desynced when this stayed one-level).
+        Delegates to :func:`vera.naming.slot_name` (#1208) so a closure's
+        parameter-count keys (`param_type_counts`) use the same name that
+        `_translate_slot_ref` / `_walk_free_vars` resolve against — and that
+        the checker bound the slot under.
         """
-        return type_expr_slot_name(te)
+        return naming.slot_name_or_none(te, self._alias_env)
 
     def _type_name_to_wasm(self, type_name: str) -> str:
         """Map a Vera type name string to a WASM type string."""
@@ -2187,15 +2186,17 @@ class InferenceMixin:
         return "i32"
 
     def _type_expr_to_slot_name(self, te: ast.TypeExpr) -> str | None:
-        """Extract the slot name from a type expression.
+        """The slot-binding name of *te*, as the checker binds it (#1208).
 
-        Delegates to the shared recursive :func:`vera.slots.type_expr_slot_name`
-        so nested composite type args (`Option<Tuple<Int, Int>>`) are FULLY
-        qualified and distinguishable (#914 finding 2).
+        Delegates to :func:`vera.naming.slot_name` against this context's
+        alias environment: syntactic head, RESOLVED type arguments, so a
+        parameter written ``@Option<Cnt>`` keys the ``Option<Int>`` stack the
+        checker created and the reference side (``naming.slot_ref_key``)
+        looks up.  Nested composites stay fully qualified (#914 finding 2).
         """
-        return type_expr_slot_name(te)
+        return naming.slot_name_or_none(te, self._alias_env)
 
-    def _family_name(self, te: ast.TypeExpr, fallback: str) -> str:
+    def _family_name(self, te: ast.TypeExpr) -> str:
         """The ``State<T>``/``Exn<E>`` host-import/tag FAMILY name for a
         type argument (#1205) — the scalar-gated collapse of
         :func:`vera.slots.resolve_scalar_alias_te` over this module set's
@@ -2208,197 +2209,12 @@ class InferenceMixin:
         try:
             return (resolve_scalar_alias_te(
                         te, self._alias_env.aliases, self._alias_env.alias_params)
-                    or fallback)
+                    or family_fallback_name(te))
         except AliasResolutionDepthError as exc:
             # Loud, not opaque: falling back on overflow would key the
             # family one way at this site and another at a
             # fully-resolving site — the silent split of round-5 F4.
             raise CodegenSkip(te, str(exc)) from exc
-
-    def _canonical_clause_slot_name(self, te: ast.TypeExpr) -> str | None:
-        """The CHECKER's slot-binding name for a clause pattern / state
-        annotation: top-level name syntactic (aliases opaque), type
-        ARGUMENTS fully resolved (the checker's
-        ``_type_expr_to_slot_name`` runs each argument through
-        ``_resolve_type`` before rendering with ``canonical_type_name``,
-        so ``put(@Option<Cnt>)`` binds under ``Option<Int>`` when
-        ``type Cnt = Int``, and a refined argument renders
-        predicate-elided as ``{@Int | ...}``).  The codegen-side clause
-        bindings must match or a mixed-spelling clause body resolves
-        against the wrong stack (PR #1202 adversarial round: two silent
-        wrong-value shapes, two dangling E699s on check-green
-        programs)."""
-        if isinstance(te, ast.RefinementType):
-            return self._canonical_clause_slot_name(te.base_type)
-        if isinstance(te, ast.FnType):
-            return "Fn"
-        if not isinstance(te, ast.NamedType):
-            return None
-        if not te.type_args:
-            return te.name
-        arg_names: list[str] = []
-        for a in te.type_args:
-            arg = self._checker_arg_name(a)
-            if arg is None:
-                return None
-            arg_names.append(arg)
-        return f"{te.name}<{', '.join(arg_names)}>"
-
-    def _checker_arg_name(
-        self, a: ast.TypeExpr, _depth: int = 0,
-    ) -> str | None:
-        """Render a slot-name type ARGUMENT for a clause binding key.
-
-        Mirrors the checker's argument resolution (``_resolve_type`` +
-        ``canonical_type_name``) with ONE reachability deviation:
-
-        * Alias chains resolve fully — parameterised aliases
-          substituted, arguments before heads (a seen-set head-follow
-          truncated ``Id<Id<Int>>`` one level short, the round-3
-          review's silent wrong-binding shape).
-        * An argument whose resolution passes through a REFINEMENT keeps
-          its SOURCE syntactic rendering instead of the checker's
-          predicate-elided ``{@Base | ...}`` form: the codegen ref side
-          (``slot_ref_name``) can never spell that form (refinement
-          literals are unparseable in ref position and erase to the
-          base), so the checker-form key would make the binding
-          unreachable by every writable reference — the round-3 review
-          turned working refined-arg programs into dangling E699s.  The
-          source spelling is exactly the one ref spelling the checker
-          accepts for such a binding (any other canonicalizes onto the
-          refined form and is E130 at check), so bind and ref meet
-          there.
-        """
-        if _depth > 32:
-            return type_expr_slot_name(a)
-        if self._head_resolves_through_refinement(a):
-            # Refined-resolving argument (a literal refinement, a refined
-            # alias, or an alias-of-a-refined-alias): keep the OUTERMOST
-            # source spelling — the reachability deviation above.  The
-            # pre-check keeps this at the original node, so a chain like
-            # `P2 -> Pos -> {refined}` keys "P2" (the spelling the refs
-            # use), never the intermediate "Pos".
-            return type_expr_slot_name(a)
-        te: ast.TypeExpr = a
-        if not isinstance(te, ast.NamedType):
-            # FnType etc. — not a slot-nameable key form; keep opaque.
-            return type_expr_slot_name(a)
-        if te.type_args:
-            inner: list[str] = []
-            for x in te.type_args:
-                n = self._checker_arg_name(x, _depth + 1)
-                if n is None:
-                    return None
-                inner.append(n)
-            head_args = f"<{', '.join(inner)}>"
-        alias = self._alias_env.aliases.get(te.name)
-        if alias is None:
-            return te.name + (head_args if te.type_args else "")
-        if not isinstance(alias, ast.NamedType):
-            # FnType-bodied (or other non-named) alias — keep opaque.
-            return type_expr_slot_name(a)
-        params = self._alias_env.alias_params.get(te.name)
-        if params and te.type_args and len(params) == len(te.type_args):
-            alias = substitute_named(alias, dict(zip(params, te.type_args)))
-        elif te.type_args:
-            return te.name + head_args
-        return self._checker_arg_name(alias, _depth + 1)
-
-    def _checker_form_slot_name(self, te: ast.TypeExpr) -> str | None:
-        """The checker's OWN binding key for *te* (top name syntactic,
-        arguments fully canonical, a refined-resolving argument rendered
-        predicate-elided as ``{@Base | ...}``) — used ONLY for
-        equivalence-class comparison, never as a bind key: the
-        predicate-elided form is unreachable by any writable reference,
-        which is exactly why ``_canonical_clause_slot_name`` deviates to
-        the source spelling for bind keys.  Two type expressions with
-        equal checker forms are ONE slot stack to the checker; the
-        clause translator refuses to bind them under two different keys
-        (the class-collision skip) because that split is where a
-        mixed-spelling reference goes silently wrong."""
-        if isinstance(te, ast.RefinementType):
-            base = self._checker_form_slot_name(te.base_type)
-            return None if base is None else f"{{@{base} | ...}}"
-        if isinstance(te, ast.FnType):
-            return "Fn"
-        if not isinstance(te, ast.NamedType):
-            return None
-        if not te.type_args:
-            return te.name
-        inner: list[str] = []
-        for a in te.type_args:
-            n = self._checker_form_arg_name(a)
-            if n is None:
-                return None
-            inner.append(n)
-        return f"{te.name}<{', '.join(inner)}>"
-
-    def _checker_form_arg_name(
-        self, a: ast.TypeExpr, _depth: int = 0,
-    ) -> str | None:
-        """Argument renderer for :py:meth:`_checker_form_slot_name` —
-        the checker's full canonicalization with NO reachability
-        deviation (refined chains render predicate-elided)."""
-        if _depth > 32:
-            return type_expr_slot_name(a)
-        if isinstance(a, ast.RefinementType):
-            base = self._checker_form_arg_name(a.base_type, _depth + 1)
-            return None if base is None else f"{{@{base} | ...}}"
-        if not isinstance(a, ast.NamedType):
-            return type_expr_slot_name(a)
-        if a.type_args:
-            inner: list[str] = []
-            for x in a.type_args:
-                n = self._checker_form_arg_name(x, _depth + 1)
-                if n is None:
-                    return None
-                inner.append(n)
-            head_args = f"<{', '.join(inner)}>"
-        alias = self._alias_env.aliases.get(a.name)
-        if alias is None:
-            return a.name + (head_args if a.type_args else "")
-        if not isinstance(alias, (ast.NamedType, ast.RefinementType)):
-            return type_expr_slot_name(a)
-        # Substitute the alias's params BEFORE branching on refinement —
-        # a parameterised alias whose body is a refinement
-        # (`type Ref<T> = { @T | P }` at `Ref<Int>`) must render
-        # `{@Int | ...}` like the checker, not `{@T | ...}` (the round-6
-        # gate compared the unsubstituted form against the checker's and
-        # never fired — round-7 review, F1).  Mirrors
-        # `resolve_alias_type_expr`'s ordering.
-        params = self._alias_env.alias_params.get(a.name)
-        if params and a.type_args and len(params) == len(a.type_args):
-            alias = substitute_named(alias, dict(zip(params, a.type_args)))
-        elif a.type_args and not isinstance(alias, ast.RefinementType):
-            return a.name + head_args
-        if isinstance(alias, ast.RefinementType):
-            base = self._checker_form_arg_name(alias.base_type, _depth + 1)
-            return None if base is None else f"{{@{base} | ...}}"
-        return self._checker_form_arg_name(alias, _depth + 1)
-
-    def _head_resolves_through_refinement(
-        self, te: ast.TypeExpr, _depth: int = 0,
-    ) -> bool:
-        """Whether *te*'s HEAD alias chain passes through (or is) a
-        refinement — the gate for ``_checker_arg_name``'s source-spelling
-        deviation.  Follows bare and parameterised head links only (type
-        arguments don't decide the head's refined-ness)."""
-        if _depth > 32:
-            return False
-        if isinstance(te, ast.RefinementType):
-            return True
-        if not isinstance(te, ast.NamedType):
-            return False
-        alias = self._alias_env.aliases.get(te.name)
-        if alias is None or not isinstance(
-                alias, (ast.NamedType, ast.RefinementType)):
-            return False
-        if isinstance(alias, ast.RefinementType):
-            return True
-        params = self._alias_env.alias_params.get(te.name)
-        if params and te.type_args and len(params) == len(te.type_args):
-            alias = substitute_named(alias, dict(zip(params, te.type_args)))
-        return self._head_resolves_through_refinement(alias, _depth + 1)
 
     def _resolve_base_type_name(
         self,

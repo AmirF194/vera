@@ -1,14 +1,27 @@
 """The ONE renderer for slot names, slot-reference keys, and cell families.
 
-Six subsystems independently answered the question "what is the name of this
-type expression?" — the checker (``_type_expr_to_slot_name`` /
-``_slot_type_name``), the syntactic builder in :mod:`vera.slots`
-(``type_expr_slot_name``), codegen's clause-scope mirror, the State/Exn
-family collapse (``resolve_scalar_alias_te``), codegen's refinement-binder
-derivation (``_refinement_guard_parts``), and ``--explain-slots``.  They
-disagree about aliases, and the disagreements are the #1208 / #1209 bug
-class: a name minted one way and looked up another silently misses, and a
-miss reads as "not statically known".
+Six subsystems used to answer the question "what is the name of this type
+expression?" independently, and disagreed about aliases; the disagreements
+are the #1208 / #1209 bug class, where a name minted one way and looked up
+another silently misses and the miss reads as "not statically known".
+
+Every slot name and every slot-reference key now comes from here, on the
+BIND side and the REFERENCE side together: the checker's two naming entry
+points, the monomorphizer's De Bruijn recount, codegen (parameters, ``let``
+and match binders, closure captures, handler clause scopes, refinement
+guards, slot references), the verifier, the SMT layer, the tester, and
+``vera check --explain-slots``.  They move together by construction, because
+there is one function of one environment.
+
+Two derivations deliberately stay behind, and both are about a type's
+REPRESENTATION rather than about naming a binding:
+:func:`~vera.slots.type_expr_slot_name` still answers the alias-opaque
+syntactic spelling for the WASM width / erasure walks and the
+structural-``Eq`` derivability oracle, and the State/Exn cell FAMILY
+(:func:`~vera.slots.resolve_scalar_alias_te` plus
+:func:`~vera.slots.family_fallback_name`) keeps its own opaque fallback —
+resolving it changes the emitted import surface, which is #1209's, and the
+checker's argument rendering is not mangle-safe.
 
 THE RULE, and this module implements exactly it, is **the checker's current
 rendering** — because the checker's rendering is what the binding table is
@@ -33,10 +46,12 @@ rather than by re-implementing the rendering.  Byte-identity with the
 checker is therefore structural, not a coincidence to be maintained; the
 differential in ``tests/test_slot_naming_differential.py`` pins it.
 
-Consumers (flipped onto this module by the later commits of #1208 / #1209):
-the checker's two naming entry points, :mod:`vera.slots`, the codegen
-clause-scope mirror, the State/Exn family collapse, codegen's refinement
-binders, and ``vera check --explain-slots``.
+An :class:`AliasEnv` is MODULE-scoped (spec §8.4.1), so every consumer must
+render a type expression against the env of the module that DECLARED the
+enclosing function — codegen's ``_module_alias_scope``-current env, the
+clone's ORIGIN module env in the monomorphizer, the verifier's own
+registration.  Rendering against a neighbouring module's namespace is the
+same failure as rendering with a different renderer.
 
 Alias visibility follows the checker's REGISTRATION ORDER: an alias body is
 resolved against only the aliases declared before it, exactly as
@@ -87,6 +102,7 @@ __all__ = [
     "resolve_alias_type_expr",
     "resolve_type_expr",
     "slot_name",
+    "slot_name_or_none",
     "slot_ref_key",
     "substitute_named",
     "type_arg_name",
@@ -454,6 +470,22 @@ def slot_name(te: ast.TypeExpr, env: AliasEnv) -> str:
     return "?"
 
 
+def slot_name_or_none(te: ast.TypeExpr, env: AliasEnv) -> str | None:
+    """:func:`slot_name`, with the unnameable ``?`` reported as ``None``.
+
+    The subsystems downstream of the checker carry a ``str | None`` naming
+    contract and branch on ``None`` to skip (a ``CodegenSkip``, an untranslated
+    SMT term).  ``?`` is the checker's ``UnknownType`` rendering — a type
+    expression the checker could not resolve either — so it is the one
+    rendering that should still take those branches.  Everything else now
+    HAS a name, including the shapes the pre-#1208 syntactic builder gave up
+    on (a function type nested in a type argument): the checker binds those,
+    so binding them here is what makes the two sides agree.
+    """
+    name = slot_name(te, env)
+    return None if name == "?" else name
+
+
 def type_arg_name(te: ast.TypeExpr, env: AliasEnv) -> str:
     """The ARGUMENT-position rendering of a type expression.
 
@@ -578,15 +610,19 @@ def refinement_binder_parts(
     only, cycle-guarded) to a ``RefinementType``, then name its base as the
     predicate's binder.
 
-    Two deliberate differences from :func:`slot_name` are replicated here
-    rather than corrected, because the guard and the predicate must agree
-    with each other: the alias chain is followed by NAME with no
-    substitution (a parameterised alias application is chased as its head),
-    and the base's type arguments are named SYNTACTICALLY (``Array<Txt>``,
-    not ``Array<String>``) — an argument that is not a bare named type makes
-    the whole thing unnameable, hence ``None``.  That syntactic argument
-    naming is one of the six renderings #1208 records; correcting it is a
-    behaviour change, not a consolidation.
+    The binder itself is named by :func:`slot_name` (#1208), so the guard
+    pushes the value under exactly the key a predicate's ``@Base.n``
+    resolves to through :func:`slot_ref_key` — and under the key the checker
+    bound the predicate's binder to.  The pre-consolidation derivation named
+    the base's type arguments SYNTACTICALLY (``Array<Txt>`` for
+    ``type Txt = String``), which met its reference side only because that
+    side was syntactic too; with both resolved they meet on
+    ``Array<String>``.
+
+    One deliberate difference from :func:`slot_name` remains, because the
+    guard and the predicate must agree with each other: the alias chain is
+    followed by NAME with no substitution, so a parameterised alias
+    application is chased as its head.
 
     The ``@Nat``/``@Byte`` implicit range predicates are conjoined here, as
     codegen does, so a value satisfying the written predicate but outside
@@ -606,14 +642,7 @@ def refinement_binder_parts(
     base = node.base_type
     if not isinstance(base, ast.NamedType):
         return None
-    name = base.name
-    if base.type_args:
-        arg_names: list[str] = []
-        for ta in base.type_args:
-            if not isinstance(ta, ast.NamedType):
-                return None
-            arg_names.append(ta.name)
-        name = f"{base.name}<{', '.join(arg_names)}>"
+    name = slot_name(base, env)
     base_node: ast.TypeExpr = base
     bseen: set[str] = set()
     while (isinstance(base_node, ast.NamedType)

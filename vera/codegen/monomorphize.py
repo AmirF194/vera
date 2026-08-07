@@ -16,6 +16,9 @@ plus the transitive worklist, with constraint-failing instances filtered out
 
 from __future__ import annotations
 
+import contextlib
+from collections.abc import Iterator
+
 from vera import ast
 from vera.monomorphize import (
     MonoContext,
@@ -23,7 +26,7 @@ from vera.monomorphize import (
     collect_nested_generic_decls,
     declared_return_clone_key,
 )
-from vera.naming import EMPTY_ALIAS_ENV
+from vera.naming import EMPTY_ALIAS_ENV, AliasEnv
 from vera.skip import DERIVED_HELPER_DEPTH_CAP
 from vera.slots import type_expr_slot_name
 
@@ -266,7 +269,12 @@ class MonomorphizationMixin:
             decl = generic_decls[fn_name]
             if not self._check_constraints(decl, concrete_types):
                 continue  # constraint violation — error emitted
-            mono_fn = mono.monomorphize_fn(decl, concrete_types)
+            # #1208: the clone's binders are named against the DEFINING
+            # module's aliases, which is the namespace the consumers rebuild
+            # its scope in — see `_clone_alias_env`.
+            with self._clone_alias_env(
+                    self._imported_generic_base_origins.get(fn_name)) as cenv:
+                mono_fn = mono.monomorphize_fn(decl, concrete_types, cenv)
             mono_decls.append(mono_fn)
             self._record_clone_origin(fn_name, mono_fn.name)
             # #1002: remember this clone's concrete-FREE chain base so the
@@ -460,7 +468,8 @@ class MonomorphizationMixin:
         for concrete in sorted(instances[gen.name]):
             if not self._check_constraints(gen, concrete):
                 continue
-            clone = mono.monomorphize_fn(gen, concrete)
+            with self._clone_alias_env(origin) as cenv:  # #1208
+                clone = mono.monomorphize_fn(gen, concrete, cenv)
             if origin is not None:
                 self._mono_clone_origins[clone.name] = origin
             # Chain the deeper base so a generic sub-helper of `gen` keys
@@ -537,6 +546,29 @@ class MonomorphizationMixin:
         rewritten = self._rewrite_call_names(stripped, combined)
         assert isinstance(rewritten, ast.FnDecl)  # noqa: S101
         return rewritten
+
+    @contextlib.contextmanager
+    def _clone_alias_env(
+        self, origin: tuple[str, ...] | None,
+    ) -> Iterator[AliasEnv]:
+        """Yield the naming env a clone of a generic from *origin* is named
+        against (#1208), with the flat alias maps swapped to match.
+
+        Aliases are module-scoped (spec §8.4.1), so the De Bruijn recount in
+        ``monomorphize_fn`` has to render binder names in the namespace of the
+        module that DECLARED the generic — which is also the namespace the
+        clone is later registered and emitted under (``_module_alias_scope``
+        at the Pass 1.5 registration and the Pass 2.5 / 2.6 emission doors).
+        Named against the importer's instead, an imported generic's
+        alias-typed parameter looks like a different class than it is, the
+        recount misses the merge, and the emitted clone resolves a reference
+        onto the wrong parameter — silently, with the right arity.
+
+        ``origin=None`` (a main-file generic, or a nested helper of one) makes
+        this the identity: the flat maps already hold that namespace.
+        """
+        with self._module_alias_scope(origin):
+            yield self._alias_env
 
     def _record_clone_origin(self, base_name: str, clone_name: str) -> None:
         """Record *clone_name*'s origin module when its base is an imported
@@ -664,7 +696,8 @@ class MonomorphizationMixin:
             gdecl = decls_by_name[gen_name]
             if not self._check_constraints(gdecl, concrete_types):
                 continue
-            clone = mono.monomorphize_fn(gdecl, concrete_types)
+            with self._clone_alias_env(path) as cenv:  # #1208
+                clone = mono.monomorphize_fn(gdecl, concrete_types, cenv)
             qual_base = self._module_qualified_generic_bases[(path, gen_name)]
             mangled = self._mono_shadowed_name(qual_base, gen_name, clone.name)
 
@@ -756,7 +789,10 @@ class MonomorphizationMixin:
                     t_decl = generic_decls[t_name]
                     if not self._check_constraints(t_decl, t_ct):
                         continue
-                    t_fn = mono.monomorphize_fn(t_decl, t_ct)
+                    with self._clone_alias_env(  # #1208
+                            self._imported_generic_base_origins.get(
+                                t_name)) as cenv:
+                        t_fn = mono.monomorphize_fn(t_decl, t_ct, cenv)
                     mono_decls.append(t_fn)
                     self._record_clone_origin(t_name, t_fn.name)
                     # #1029 (R3): a normal clone reached transitively from a

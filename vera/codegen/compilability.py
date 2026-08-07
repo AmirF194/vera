@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from vera import ast
 from vera.skip import CodegenSkip
+from vera.slots import family_fallback_name
 from vera.wasm.async_fusion import await_needs_check, fused_async_target
 
 
@@ -138,7 +139,7 @@ class CompilabilityMixin:
                 error_code="E607",
             )
             return False
-        type_name = self._type_expr_to_slot_name(type_arg)
+        type_name = family_fallback_name(type_arg)  # FAMILY key (#1208)
         # #1205: collapse scalar-resolving aliases (parameterised ones
         # included) into the base import family — `wt` above is derived
         # from the RESOLVED type, so registering the unresolved name
@@ -149,7 +150,7 @@ class CompilabilityMixin:
         # family against a fully-resolving sibling site.
         if type_name:
             try:
-                type_name = self._family_name_te(type_arg, type_name)
+                type_name = self._family_name_te(type_arg)
             except CodegenSkip as skip:
                 self._warning(
                     decl,
@@ -195,14 +196,14 @@ class CompilabilityMixin:
             return False
         # i32_pair (String, Array<T>) → WASM exception tag uses two i32 params
         wasm_tag_t = "i32 i32" if wt == "i32_pair" else wt
-        type_name = self._type_expr_to_slot_name(type_arg)
+        type_name = family_fallback_name(type_arg)  # FAMILY key (#1208)
         # #1205: scalar-resolving aliases join the base tag family (see
         # `_check_state_type`) — `Exn<Code>` with `type Code = Int`
         # otherwise declares an i64 tag the i32-typed catch sites of the
         # unresolved-name derivation cannot match.
         if type_name:
             try:
-                type_name = self._family_name_te(type_arg, type_name)
+                type_name = self._family_name_te(type_arg)
             except CodegenSkip as skip:
                 self._warning(
                     decl,
@@ -462,7 +463,7 @@ class CompilabilityMixin:
                         type_arg = node.effect.type_args[0]
                         wt = self._type_expr_to_wasm_type(type_arg)
                         if wt and wt not in ("unsupported", "i32_pair"):
-                            type_name = self._type_expr_to_slot_name(type_arg)
+                            type_name = family_fallback_name(type_arg)  # FAMILY key (#1208)
                             # #1205: same scalar-alias collapse as
                             # `_check_state_type` — the two registration
                             # paths must key one family.  Depth overflow
@@ -471,7 +472,7 @@ class CompilabilityMixin:
                             if type_name:
                                 try:
                                     type_name = self._family_name_te(
-                                        type_arg, type_name)
+                                        type_arg)
                                 except CodegenSkip:
                                     pass
                             if type_name and (type_name, wt) not in self._state_types:
@@ -482,13 +483,13 @@ class CompilabilityMixin:
                         wt = self._type_expr_to_wasm_type(type_arg)
                         if wt and wt != "unsupported":
                             wasm_tag_t = "i32 i32" if wt == "i32_pair" else wt
-                            type_name = self._type_expr_to_slot_name(type_arg)
+                            type_name = family_fallback_name(type_arg)  # FAMILY key (#1208)
                             # #1205: same collapse as `_check_exn_type`.
                             # Depth overflow: see the State scan above.
                             if type_name:
                                 try:
                                     type_name = self._family_name_te(
-                                        type_arg, type_name)
+                                        type_arg)
                                 except CodegenSkip:
                                     pass
                             if type_name and (type_name, wasm_tag_t) not in self._exn_types:
