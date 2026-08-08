@@ -120,13 +120,13 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `  core.py` | 198 | | ProofObligation record: identity (content_key) + discharge outcome | |
 | `  cache.py` | 219 | | Invalidation keys (structural/callee/context hashes), DischargeCache | |
 | `  session.py` | 311 | | Warm-Z3 daemon: per-function replay vs re-verify in declaration order | |
-| `lsp/` | 1,420 | Serve | Language Server Protocol over stdio (#222 C/D/E/F) | `create_server()`, `vera lsp` |
+| `lsp/` | 1,673 | Serve | Language Server Protocol over stdio (#222 C/D/E/F) | `create_server()`, `vera lsp` |
 | `  convert.py` | 218 | | Span/SourceLocation/LSP coordinate conversions, UTF-16 transcoding | |
 | `  documents.py` | 69 | | URI-keyed document store, full-text sync | |
 | `  features.py` | 374 | | Diagnostics + tier hints, hover, slot goto (keyed through `naming.slot_ref_key`, so parameterised and alias-spelled references resolve, and a `where` helper resolves in its own accumulated scope), hole completion | |
 | `  extensions.py` | 146 | | vera/speculativeEdit proof-delta | |
 | `  server.py` | 287 | | pygls wiring, single-session serialisation | |
-| `  workflows.py` | 442 | | Skill-layer workflows: enforced edit sequences (#222 F) | |
+| `  workflows.py` | 563 | | Skill-layer workflows: enforced edit sequences (#222 F) | |
 | `codegen/` | 18,981 | Compile | Codegen orchestrator (mixin package) | `compile()`, `execute()` |
 | `  api.py` | 1,402 | | Public API, dataclasses, `compile()`/`execute()` orchestration, core IO host bindings (#421) | |
 | `  memory.py` | 105 | | Compile-time ADT layout helpers (`ConstructorLayout`, alignment) (#421) | |
@@ -752,7 +752,7 @@ The `ERROR_CODES` dict in `errors.py` maps every code to a short description (15
 
 ## Test Suite
 
-Testing spans a **pytest suite** of 10,389 tests across 161 files — compiler-internals unit tests plus a **conformance suite** (214 programs in `tests/conformance/` validating every language feature against the spec) and **example programs** (42 end-to-end demos). The conformance suite is the definitive specification artifact — most programs target a single feature, though some (slot references, match, contracts) span several, and each serves as a minimal working example.
+Testing spans a **pytest suite** of 10,403 tests across 161 files — compiler-internals unit tests plus a **conformance suite** (214 programs in `tests/conformance/` validating every language feature against the spec) and **example programs** (42 end-to-end demos). The conformance suite is the definitive specification artifact — most programs target a single feature, though some (slot references, match, contracts) span several, and each serves as a minimal working example.
 
 See **[TESTING.md](../TESTING.md)** for the comprehensive testing reference -- test file table, conformance suite details, compiler code coverage, language feature coverage, helper conventions, validation scripts, CI pipeline, and guidelines for adding tests.
 
