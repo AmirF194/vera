@@ -112,6 +112,25 @@ class FunctionCompilationMixin:
         else:
             self._emit_contract_predicate_skip(ctx, exc, decl)
 
+    def _mark_byte_return_leaves(
+        self, ctx: WasmContext, return_type: ast.TypeExpr, body: ast.Block,
+    ) -> None:
+        """Mark *body*'s literal leaves when the return resolves to `@Byte`.
+
+        The return-boundary arm of #1212's ONE marking, shared by the named
+        path (`_compile_fn`) and the closure path
+        (`_compile_lifted_closure`) so the two cannot decide a return width
+        differently — which is exactly what the ninth and tenth shapes were.
+        Resolves the declared return through the alias chain first
+        (`_resolve_base_type_name`), so a refined `@Byte` alias is a Byte
+        boundary here as it is at every other one.
+        """
+        ctx._mark_byte_write_value(
+            body,
+            ctx._resolve_base_type_name(
+                self._type_expr_to_slot_name(return_type) or ""),
+        )
+
     def _lift_closures_or_drop(
         self, ctx: WasmContext, decl: ast.FnDecl,
     ) -> bool:
@@ -816,6 +835,19 @@ class FunctionCompilationMixin:
         #    The audit-and-convert pass (Phase 3, tracked in #657) is
         #    migrating these sites to ``raise CodegenSkip``; until
         #    that's complete this branch stays as the catch-all.
+        # #1212: the RETURN is a `@Byte` write boundary like any other, so
+        # mark the body's literal leaves before translating it.  The
+        # whole-body `i32.wrap_i64` below cannot cover a HETEROGENEOUS join
+        # — `_infer_block_result_type` reads the then-branch / first arm
+        # only, so a join whose read arm is an i32 `@Byte` slot and whose
+        # sibling is a bare literal was annotated from one arm while the
+        # other lowered at its own width, and ARM ORDER decided which way
+        # the module failed to validate.  Marking makes every arm i32, after
+        # which whichever arm the decider reads gives the same answer; a
+        # decider taught to read every arm would not have helped, since the
+        # literal arm would still emit `i64.const`.  Alias-aware, so a
+        # refined `@Byte` alias return marks too.
+        self._mark_byte_return_leaves(ctx, decl.return_type, decl.body)
         try:
             body_instrs = ctx.translate_block(decl.body, env)
         except CodegenSkip as skip:

@@ -459,15 +459,16 @@ class TestTheLiftQueueIsCycleGuarded:
     two shapes below, which legitimately lift one predicate's closure more
     than once.
 
-    Mutation-measured, replacing the chain key with a module-wide seen set
-    (`if id(anon_fn) in seen` over a set accumulated across the worklist):
-    `test_two_refined_formals_of_one_type_both_lift` and
+    Mutation-measured, replacing the chain key with a seen set scoped to one
+    lift run (`if id(anon_fn) in seen` over a set accumulated across the
+    worklist): `test_two_refined_formals_of_one_type_both_lift` and
     `test_a_diamond_reaches_one_refinement_by_two_routes` go RED — the
-    enclosing function is dropped and the module exports nothing.  One
-    pre-existing test moves with them, `test_wasi_target.py`'s dual-target
-    agreement on `ch09_prelude.vera` (the prelude lifts one combinator's
-    closure from several functions), which is a whole-corpus symptom rather
-    than a statement about the key — these two say WHICH property broke.
+    enclosing function is dropped and the module exports nothing — and they
+    are the ONLY two tests in the suite that move.  Nothing in the corpus
+    lifts one `AnonFn` node twice (`ch09_prelude`, the closest candidate,
+    lifts four distinct nodes exactly once each), so no corpus program can
+    stand in for these: without them the distinction between a chain and a
+    seen set is untested, which is what it was.
     """
 
     @pytest.mark.parametrize(

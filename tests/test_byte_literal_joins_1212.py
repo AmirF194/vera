@@ -15,12 +15,22 @@ BRANCH literal as `@Byte` too, so each of
     MkB(if c then { 200 } else { 3 })      -- at Box<Byte>
     let @Byte = match … { Some(@Byte) -> @Byte.0, None -> 0 }
     apply_fn(fn(@Bool -> @Byte) { 207 }, b)   -- the closure's own RETURN
+    fn g(@Byte -> @Byte) { if p then { @Byte.0 } else { 8 } }  -- hetero join
 
 was a check-green program that failed WASM validation with `type mismatch:
-expected i32, found i64`.  Loud at run, never silent corruption, but nine
-arms of one defect.  The ninth is a MISSING MIRROR rather than a missing
-mark: a named function's `@Byte` return has been coerced at the return
-boundary since #865, and the lifted-closure path simply had no such step.
+expected i32, found i64`.  Loud at run, never silent corruption.
+
+The last two are worth separating from the rest.  The closure RETURN was a
+missing MIRROR, not a missing mark: a named function's `@Byte` return has
+been coerced at the return boundary since #865 and the lifted-closure path
+simply had no such step.  The heterogeneous join is a COMPOSITION of two
+defects — the return boundary marked no leaves at all (its coercion was a
+whole-body `i32.wrap_i64`) and `_infer_block_result_type` reads the
+then-branch / first arm only — so a join whose read arm was already i32 and
+whose sibling was a bare literal got an annotation from one arm and arms
+lowered at their own widths, with ARM ORDER deciding which way it failed.
+The return is now a MARKING boundary on both paths, which makes the join
+agree with itself whichever arm inference happens to read.
 
 The fix is ONE branch descent — `WasmContext._mark_byte_literal_leaves`,
 driven through `_mark_byte_write_value` — marking the literal LEAVES of a
@@ -30,6 +40,16 @@ join result-type deciders (`_infer_block_result_type`,
 marks and the `(result i32)` annotation agrees with its arms.  Marking
 before translation, rather than overwriting an already-translated i64
 lowering, is also what keeps each written value translated exactly once.
+
+**What is and is not claimed.**  The list above is the set of boundaries
+this suite proves, each with a run-asserting oracle — not a proof that no
+further one exists.  The checker has exactly ONE Byte coercion
+(`_synth_expr` on an `IntLit` whose `expected` resolves to `BYTE`,
+`vera/checker/expressions.py`), so the true enumeration is "every position
+that propagates a Byte expectation", and that is a property of the
+checker's bidirectional propagation which nothing enumerates in one place.
+Each round of review has found the list to be one longer, so it is stated
+here as measured coverage rather than as a closed class.
 
 Every test carries a VALUE oracle, not merely "it runs": an i32/i64 width
 defect that happened to validate would still read back the wrong number.
@@ -46,7 +66,8 @@ from tests.checker_helpers import _check_ok
 from tests.codegen_helpers import _run
 
 # =====================================================================
-# The nine write boundaries
+# The write boundaries this suite proves (see the module docstring
+# on why that is measured coverage, not a closed class)
 # =====================================================================
 
 _LET_IF = """
@@ -304,6 +325,135 @@ public fn main(@Unit -> @Int)
 }
 """
 
+# The TENTH shape (PR #1250 round 3): a HETEROGENEOUS join at a `@Byte`
+# return, where the arm the result-type decider reads is already i32 and a
+# SIBLING arm is a bare literal.  Two defects compose:
+#
+#   * the return boundary marked no literal leaves at all — the coercion
+#     there was a whole-body `i32.wrap_i64`, which fires only when the
+#     decider calls the WHOLE body i64;
+#   * `_infer_block_result_type` reads the then-branch / first arm only.
+#
+# So the join is annotated from ONE arm while its siblings lower at their
+# own widths, and which way it fails is decided by arm ORDER — the two
+# fixtures below are the same defect mirrored, and their WASM errors are
+# mirrored too (`expected i32, found i64` and `expected i64, found i32`).
+# Both paths have it: the named function and the lifted closure alike.
+#
+# The fix has to be the MARKING, not the decider: teaching the decider to
+# read every arm would pick a type for the annotation while the literal arm
+# still emitted `i64.const`, which is the second fixture verbatim.  Marking
+# the leaves makes every arm i32, after which whichever arm the decider
+# reads gives the same answer — sufficient as well as necessary, and it
+# keeps the ONE derivation (`_mark_byte_write_value`) as the only place a
+# Byte write width is decided.
+_RETURN_HETERO_JOIN_SLOT_FIRST = """
+private fn g(@Byte -> @Byte)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  if byte_to_int(@Byte.0) > 0 then { @Byte.0 } else { 8 }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  byte_to_int(g(207))
+}
+"""
+
+# The same join with the arms swapped: now the decider reads the LITERAL,
+# calls the body i64, and the `@Byte` slot arm is the one that mismatches.
+_RETURN_HETERO_JOIN_LITERAL_FIRST = """
+private fn g(@Byte -> @Byte)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  if byte_to_int(@Byte.0) > 0 then { 8 } else { @Byte.0 }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  byte_to_int(g(207))
+}
+"""
+
+# The `match` spelling, whose arm-0-only inference is the same rule one
+# node type over — and the reviewer's original repro.
+_RETURN_HETERO_MATCH_NAMED = """
+private fn g(@Int -> @Byte)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  match int_to_byte(@Int.0) {
+    Some(@Byte) -> @Byte.0,
+    None -> 0
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  byte_to_int(g(207))
+}
+"""
+
+# Its closure twin: the same body behind an `apply_fn`.
+_RETURN_HETERO_MATCH_CLOSURE = """
+public fn f(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  byte_to_int(apply_fn(fn(@Int -> @Byte) effects(pure) {
+    match int_to_byte(@Int.0) {
+      Some(@Byte) -> @Byte.0,
+      None -> 0
+    }
+  }, @Int.0))
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  f(207)
+}
+"""
+
+# A refined-Byte alias return, so the marking has to resolve the alias
+# chain rather than match the syntactic head.
+_RETURN_HETERO_REFINED_ALIAS = """
+type SmallByte = { @Byte | byte_to_int(@Byte.0) < 250 };
+
+private fn g(@Byte -> @SmallByte)
+  requires(byte_to_int(@Byte.0) < 250)
+  ensures(true)
+  effects(pure)
+{
+  if byte_to_int(@Byte.0) > 0 then { @Byte.0 } else { 8 }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  byte_to_int(g(207))
+}
+"""
+
 # The named twin of the closure return — the path that already worked, and
 # the oracle the closure one is held to.
 _NAMED_RETURN_JOIN = """
@@ -468,6 +618,52 @@ def test_the_named_return_control_was_always_correct() -> None:
 def test_the_closure_return_reaches_its_other_branch_too() -> None:
     """The else arm of the ninth boundary, so it is a real join."""
     assert _run(_CLOSURE_RETURN_JOIN.replace("f(true)", "f(false)")) == 8
+
+
+# =====================================================================
+# The tenth shape: a heterogeneous join AT the return boundary
+# =====================================================================
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        pytest.param(
+            _RETURN_HETERO_JOIN_SLOT_FIRST, 207, id="if_slot_arm_first"),
+        pytest.param(
+            _RETURN_HETERO_JOIN_LITERAL_FIRST, 8, id="if_literal_arm_first"),
+        pytest.param(
+            _RETURN_HETERO_MATCH_NAMED, 207, id="match_named"),
+        pytest.param(
+            _RETURN_HETERO_MATCH_CLOSURE, 207, id="match_closure"),
+        pytest.param(
+            _RETURN_HETERO_REFINED_ALIAS, 207, id="refined_alias_return"),
+    ],
+)
+def test_a_heterogeneous_join_at_a_byte_return_agrees_with_itself(
+    source: str, expected: int,
+) -> None:
+    """Every arm of a `@Byte`-returning join lowers at the same width.
+
+    The oracles differ per fixture on purpose: 207 where the `@Byte` slot
+    arm is taken and 8 where the literal arm is, so a fix that made both
+    arms i32 but wired the wrong one would still be caught.
+    """
+    _check_ok(source)
+    assert _run(source) == expected
+
+
+def test_both_arm_orders_of_the_return_join_are_fixed() -> None:
+    """Arm ORDER decided which way it failed, so both orders are pinned.
+
+    Slot-first reported `expected i32, found i64` and literal-first
+    `expected i64, found i32` — the same defect read from either end, which
+    is what says the annotation and the arms were derived separately.
+    """
+    assert _run(
+        _RETURN_HETERO_JOIN_SLOT_FIRST.replace("g(207)", "g(0)")) == 8
+    assert _run(
+        _RETURN_HETERO_JOIN_LITERAL_FIRST.replace("g(207)", "g(0)")) == 0
 
 
 # =====================================================================
