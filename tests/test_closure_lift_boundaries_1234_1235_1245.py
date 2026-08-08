@@ -143,6 +143,48 @@ public fn main(@Unit -> @Nat)
 """
 
 
+# The case the TWO passes have to agree about.  A closure struct stores its
+# `closure_id` as `func_table_idx` and the table index is its position in
+# `_closure_table`, so the second pass has to resume from the counter the
+# first left.
+#
+# The BODY closure must itself contain a NESTED one, which is what makes
+# this distinguishing: a nested closure's id is allocated inside
+# `_compile_lifted_closure`'s own context during the first pass, so the
+# outer function context never sees it.  Without the hand-back the
+# return-refinement's closure reuses that id — mutation-measured as
+# `duplicate func identifier $anon_1` at whole-module WAT.  A body closure
+# with NO nesting does not distinguish: the outer context allocated that id
+# itself and is already past it, so the test would pass either way.
+#
+# 18 + array_length(array_map(array_range(0, 5), …)) = 18 + 5 = 23 at [0];
+# the mapped array still satisfies `Grown`, so the return guard passes.
+_TWO_CLOSURES_ONE_FUNCTION = """
+type Grown = { @Array<Nat> | array_all(@Array<Nat>.0, fn(@Nat -> @Bool)
+  effects(pure) { @Nat.0 >= 18 }) };
+
+private fn mk(@Array<Nat> -> @Grown)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  array_map(@Array<Nat>.0, fn(@Nat -> @Nat) effects(pure) {
+    @Nat.0 + array_length(array_map(array_range(0, 5), fn(@Nat -> @Nat)
+      effects(pure) { @Nat.0 * 2 }))
+  })
+}
+
+public fn main(@Unit -> @Nat)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Array<Nat> = mk(array_range(18, 21));
+  @Array<Nat>.0[0]
+}
+"""
+
+
 class TestAClosureInAReturnPositionPredicateIsLifted:
     """#1245: check-green + verify-clean must mean a runnable module."""
 
@@ -172,6 +214,27 @@ class TestAClosureInAReturnPositionPredicateIsLifted:
     def test_the_lifted_guard_actually_enforces(self) -> None:
         """A violating return traps — the guard is emitted, not just lifted."""
         _run_refine_trap(_CLOSURE_IN_RETURN_REFINEMENT_VIOLATED)
+
+    def test_both_passes_share_one_closure_id_space(self) -> None:
+        """A NESTED body closure and a return-guard closure, one function.
+
+        The second pass has to resume from the id the first left.  Measured
+        against the mutant that drops the hand-back: `duplicate func
+        identifier $anon_1` at whole-module WAT, because the nested closure's
+        id was allocated inside the first pass's own context and the outer
+        one never saw it.  Three distinct lifted functions and a value of 23
+        are the two halves of the assertion — a crossed id is either a
+        duplicate identifier or a wrong dispatch, and both show here.
+        """
+        _check_ok(_TWO_CLOSURES_ONE_FUNCTION)
+        assert _run(_TWO_CLOSURES_ONE_FUNCTION) == 23
+        wat = _compile(_TWO_CLOSURES_ONE_FUNCTION).wat or ""
+        names = sorted(
+            line.split()[1] for line in wat.splitlines()
+            if line.strip().startswith("(func $anon_")
+        )
+        assert names == ["$anon_0", "$anon_1", "$anon_2"], names
+        _assert_call_indirect_iff_table(wat)
 
 
 # =====================================================================
