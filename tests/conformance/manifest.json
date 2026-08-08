@@ -73,6 +73,20 @@
     ]
   },
   {
+    "id": "ch01_byte_literal_join_width",
+    "file": "ch01_byte_literal_join_width.vera",
+    "chapter": 1,
+    "title": "Byte literal width inside a value-position join (#1212)",
+    "level": "run",
+    "spec_ref": "Section 1.1",
+    "features": [
+      "byte_type",
+      "byte_coercion",
+      "if_expression",
+      "match_expression"
+    ]
+  },
+  {
     "id": "ch01_comments",
     "file": "ch01_comments.vera",
     "chapter": 1,
@@ -1181,6 +1195,22 @@
       "handler_state",
       "handler_clause",
       "state_update"
+    ]
+  },
+  {
+    "id": "ch07_state_byte_join_writes",
+    "file": "ch07_state_byte_join_writes.vera",
+    "chapter": 7,
+    "title": "Byte literal width at every State-cell write boundary (#1212)",
+    "level": "run",
+    "spec_ref": "Section 7.3",
+    "features": [
+      "state_effect",
+      "handler",
+      "handler_clause",
+      "state_update",
+      "byte_coercion",
+      "if_expression"
     ]
   },
   {

@@ -354,7 +354,7 @@ class ContractsMixin:
     def _emit_component_refinement_guards(
         self,
         ctx: WasmContext,
-        decl: ast.FnDecl,
+        sig_text: str,
         te: ast.TypeExpr,
         value_local: int,
         env: WasmSlotEnv,
@@ -363,6 +363,13 @@ class ContractsMixin:
     ) -> list[str]:
         """Per-component refinement / ``@Nat`` runtime guards for a boundary
         **tuple** value (#746, PR-review-found FFI gap).
+
+        *sig_text* is the rendered signature the violation message names —
+        ``ast.format_fn_signature(decl)`` for a named function, the
+        ``fn(… -> …)`` rendering for a closure (#1235).  A pre-rendered
+        string rather than the declaration itself, because an ``AnonFn``
+        has no ``FnDecl`` to format and the two callers already build the
+        same text for their top-level guards.
 
         The top-level param / return guard (``_refinement_guard_parts``) fires
         only when the boundary *type itself* is a refinement; a
@@ -409,7 +416,7 @@ class ContractsMixin:
             if site.guard is not None:
                 predicate, base_name = site.guard
                 msg = (
-                    f"Refinement violation in {ast.format_fn_signature(decl)}\n"
+                    f"Refinement violation in {sig_text}\n"
                     f"  {role} (tuple component): "
                     f"{ast.format_expr(predicate)} failed"
                 )
@@ -419,7 +426,8 @@ class ContractsMixin:
                     instrs.extend(guard)
             if site.nested is not None:
                 instrs.extend(self._emit_component_refinement_guards(
-                    ctx, decl, site.nested, comp_local, env, role, _depth + 1))
+                    ctx, sig_text, site.nested, comp_local, env, role,
+                    _depth + 1))
         return instrs
 
     def _has_guardable_tuple_components(
@@ -488,23 +496,20 @@ class ContractsMixin:
         exceed it: an import declared for a guard that is never emitted is a
         host obligation nothing calls.
 
-        Which is why COMPONENT decomposition is a `FnDecl`-only leg.  The
-        closure path emits top-level formal / return guards only — it never
-        calls `_emit_component_refinement_guards` — so enumerating a closure's
-        tuple components here would register families no lowering asks for.
-        (That asymmetry is the closure path's, not this derivation's, and is
-        tracked as #1235: when the closure path consumes the same
-        `_tuple_component_guard_sites` decomposition the named path does,
-        emitter and registration flip together and this leg drops its
-        `FnDecl`-only condition.)
+        COMPONENT decomposition applies to a closure signature as well as a
+        named one (#1235).  It was a `FnDecl`-only leg for exactly as long as
+        the closure path emitted top-level formal / return guards only —
+        enumerating a closure's tuple components then would have registered
+        families no lowering asked for.  `_compile_lifted_closure` now
+        consumes the same `_tuple_component_guard_sites` decomposition the
+        named path consumes, so emitter and registration flip together and
+        this walks every signature the same way.
         """
-        decompose = isinstance(sig, ast.FnDecl)
         for te in (*sig.params, sig.return_type):
             parts = self._refinement_guard_parts(te)
             if parts is not None:
                 yield parts[0]
-            if decompose:
-                yield from self._component_guard_predicates(te)
+            yield from self._component_guard_predicates(te)
 
     def _component_guard_predicates(
         self, te: ast.TypeExpr, _depth: int = 0,
@@ -711,8 +716,8 @@ class ContractsMixin:
             # OVER a tuple has its predicate potentially read the components, so
             # establish those first (mirrors the param-guard order, CR).
             instrs.extend(self._emit_component_refinement_guards(
-                ctx, decl, decl.return_type, result_local, env,
-                "return value"))
+                ctx, ast.format_fn_signature(decl), decl.return_type,
+                result_local, env, "return value"))
 
             if refined_ret is not None:
                 predicate, base_name = refined_ret

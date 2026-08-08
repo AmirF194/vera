@@ -112,6 +112,128 @@ class FunctionCompilationMixin:
         else:
             self._emit_contract_predicate_skip(ctx, exc, decl)
 
+    def _mark_byte_return_leaves(
+        self, ctx: WasmContext, return_type: ast.TypeExpr, body: ast.Block,
+    ) -> None:
+        """Mark *body*'s literal leaves when the return resolves to `@Byte`.
+
+        The return-boundary arm of #1212's ONE marking, shared by the named
+        path (`_compile_fn`) and the closure path
+        (`_compile_lifted_closure`) so the two cannot decide a return width
+        differently — which is exactly what the ninth and tenth shapes were.
+        Resolves the declared return through the alias chain first
+        (`_resolve_base_type_name`), so a refined `@Byte` alias is a Byte
+        boundary here as it is at every other one.
+        """
+        ctx._mark_byte_write_value(
+            body,
+            ctx._resolve_base_type_name(
+                self._type_expr_to_slot_name(return_type) or ""),
+        )
+
+    def _lift_closures_or_drop(
+        self, ctx: WasmContext, decl: ast.FnDecl,
+    ) -> bool:
+        """Lift *ctx*'s pending closures; True means drop the function.
+
+        The ONE degradation net around ``_lift_pending_closures``, driven
+        TWICE per function (#1245): once after the body, once after
+        ``_compile_postconditions`` — which lowers the refined-RETURN guard,
+        a tuple return's component guards and every ``ensures(...)``
+        predicate, any of which may construct a closure that registers on
+        ``ctx`` only at that point.  Both passes need the identical
+        treatment of a failed lift, so the handling lives here rather than
+        being written out twice.
+
+        If any closure body failed to compile, the enclosing fn is dropped
+        rather than emitting a module with a ``call_indirect`` to a missing
+        function-table entry — closes #636.  The closure body's own
+        diagnostics (E615 from interpolation failures, generic E602 from
+        translation failures) were already emitted by
+        ``_compile_lifted_closure``'s harvest; a specific E602 is added here
+        noting that the parent is being dropped *because* of the closure
+        failure, so the user can correlate the cause with the effect.
+        """
+        try:
+            closure_failed = self._lift_pending_closures(ctx)
+        except (AdtEqNotDerivableError, CodegenSkip) as exc:
+            # #773 / PR #870 review: a direct `==` on a non-Eq-derivable ADT
+            # inside a CLOSURE body — same clean E613 as the function-body
+            # catch (a user error, not a compiler bug).  MUST precede the
+            # parent CodegenInvariantError catch below (subclass).
+            # #922: also degrade a `CodegenSkip` (an unsupported `hash`/`show`
+            # inside a closure) to a clean E602 rather than an uncaught
+            # traceback, via the shared contract-predicate dispatcher.
+            # #1185 (PR #1192 review): record the failed lift here too — an
+            # escape from `_lift_pending_closures` leaves `_closure_table`
+            # empty exactly as the rolled-back `closure_failed` path below
+            # does, so the orphan-carrier blame chain must be able to select
+            # THIS function as the [E602] root; without the record, the
+            # carrier's [E620] falls back to the no-closure-in-program
+            # wording, which is false for this shape.  No check-green
+            # program reaches this branch today (a closure-body skip is
+            # caught inside `_compile_lifted_closure`, and non-Eq `==` is
+            # E243-gated in body and refinement position since #928) — it
+            # is the defensive sibling of the append below, pinned by the
+            # stubbed-lift regression in
+            # tests/test_codegen_orphan_call_indirect_1185.py.
+            self._closure_lift_skips.append(decl.name)
+            self._emit_contract_predicate_degradation(ctx, exc, decl)
+            return True
+        except CodegenInvariantError as inv:  # #657: a closure-body invariant
+            # violation (a codegen bug) propagates out of
+            # `_compile_lifted_closure` to here and surfaces as ONE [E699] for
+            # the whole function — NOT the [E602] "closure skipped" warning
+            # below, which is reserved for a user-facing unsupported-construct
+            # skip.  Swallowing it in the closure helper (its previous
+            # behaviour) mixed the compiler-bug and user-skip signals: the
+            # helper emitted [E699] AND returned None, so this path then also
+            # emitted [E602].  Covered by tests/test_codegen_invariant_e699.py.
+            # #1185 (PR #1192 review, outside-diff): record the failed lift
+            # on THIS route too — the [E699] is an error, but the module is
+            # still assembled (compilation degrades, it does not abort), so
+            # the orphan-carrier blame chain runs and must be able to name
+            # this function as the root instead of falling back to the
+            # false no-closure-in-program wording.  Pinned by the
+            # `invariant_error` leg of the stubbed-lift regression in
+            # tests/test_codegen_orphan_call_indirect_1185.py.
+            self._closure_lift_skips.append(decl.name)
+            self._harvest_interp_inference_failures(ctx)
+            self._error(
+                inv.node if inv.node is not None else decl,
+                f"Internal compiler error while compiling '{decl.name}': "
+                f"{inv.msg}",
+                rationale="This is a codegen invariant violation — the type "
+                "checker should have rejected the input before it reached this "
+                "point.  Please file a bug report with the offending program.",
+                error_code="E699",
+            )
+            return True
+        if closure_failed:
+            # #1185: record the rolled-back lift.  A lift that rolls back
+            # is what leaves `_closure_table` empty, and an empty table
+            # orphans every `call_indirect` elsewhere in the module — the
+            # drop-propagation pass blames this function for those
+            # carriers, so the user gets one root cause, not two.
+            self._closure_lift_skips.append(decl.name)
+            self._warning(
+                decl,
+                f"Function '{decl.name}' contains a closure whose "
+                f"body failed to compile — skipped to avoid emitting "
+                f"an invalid module.",
+                rationale="A closure body inside this function failed "
+                "to translate (see preceding diagnostics for the "
+                "specific cause). The closure was dropped from the "
+                "function table; the enclosing function references it "
+                "via call_indirect, which would fail at WASM "
+                "validation. Dropping the enclosing function lets the "
+                "build complete with diagnostics only, no invalid "
+                "module emission.",
+                error_code="E602",
+            )
+            return True
+        return False
+
     def _compile_fn(
         self, decl: ast.FnDecl, *, export: bool = True,
         module_renames: dict[str, str] | None = None,
@@ -594,7 +716,8 @@ class FunctionCompilationMixin:
             for value_local, param_te in component_param_checks:
                 refine_guard_instrs.extend(
                     self._emit_component_refinement_guards(
-                        ctx, decl, param_te, value_local, env, "parameter"))
+                        ctx, ast.format_fn_signature(decl), param_te,
+                        value_local, env, "parameter"))
 
             for value_local, param_te in refined_param_checks:
                 parts = self._refinement_guard_parts(param_te)
@@ -712,6 +835,19 @@ class FunctionCompilationMixin:
         #    The audit-and-convert pass (Phase 3, tracked in #657) is
         #    migrating these sites to ``raise CodegenSkip``; until
         #    that's complete this branch stays as the catch-all.
+        # #1212: the RETURN is a `@Byte` write boundary like any other, so
+        # mark the body's literal leaves before translating it.  The
+        # whole-body `i32.wrap_i64` below cannot cover a HETEROGENEOUS join
+        # — `_infer_block_result_type` reads the then-branch / first arm
+        # only, so a join whose read arm is an i32 `@Byte` slot and whose
+        # sibling is a bare literal was annotated from one arm while the
+        # other lowered at its own width, and ARM ORDER decided which way
+        # the module failed to validate.  Marking makes every arm i32, after
+        # which whichever arm the decider reads gives the same answer; a
+        # decider taught to read every arm would not have helped, since the
+        # literal arm would still emit `i64.const`.  Alias-aware, so a
+        # refined `@Byte` alias return marks too.
+        self._mark_byte_return_leaves(ctx, decl.return_type, decl.body)
         try:
             body_instrs = ctx.translate_block(decl.body, env)
         except CodegenSkip as skip:
@@ -861,92 +997,11 @@ class FunctionCompilationMixin:
                 body_instrs.append("i32.wrap_i64")
 
         # Collect closures created during body compilation and lift them.
-        # If any closure body failed to compile, drop the enclosing fn
-        # rather than emit a module with a `call_indirect` to a missing
-        # function-table entry — closes #636.  The closure body's own
-        # diagnostics (E615 from interpolation failures, generic E602
-        # from translation failures) were already emitted by
-        # `_compile_lifted_closure`'s harvest; here we add a specific
-        # E602 noting that the parent is being dropped *because* of
-        # the closure failure, so the user can correlate the cause
-        # diagnostic with the effect.
-        try:
-            closure_failed = self._lift_pending_closures(ctx)
-        except (AdtEqNotDerivableError, CodegenSkip) as exc:
-            # #773 / PR #870 review: a direct `==` on a non-Eq-derivable ADT
-            # inside a CLOSURE body — same clean E613 as the function-body
-            # catch above (a user error, not a compiler bug).  MUST precede
-            # the parent CodegenInvariantError catch below (subclass).
-            # #922: also degrade a `CodegenSkip` (an unsupported `hash`/`show`
-            # inside a closure) to a clean E602 rather than an uncaught
-            # traceback, via the shared contract-predicate dispatcher.
-            # #1185 (PR #1192 review): record the failed lift here too — an
-            # escape from `_lift_pending_closures` leaves `_closure_table`
-            # empty exactly as the rolled-back `closure_failed` path below
-            # does, so the orphan-carrier blame chain must be able to select
-            # THIS function as the [E602] root; without the record, the
-            # carrier's [E620] falls back to the no-closure-in-program
-            # wording, which is false for this shape.  No check-green
-            # program reaches this branch today (a closure-body skip is
-            # caught inside `_compile_lifted_closure`, and non-Eq `==` is
-            # E243-gated in body and refinement position since #928) — it
-            # is the defensive sibling of the append below, pinned by the
-            # stubbed-lift regression in
-            # tests/test_codegen_orphan_call_indirect_1185.py.
-            self._closure_lift_skips.append(decl.name)
-            self._emit_contract_predicate_degradation(ctx, exc, decl)
-            return None
-        except CodegenInvariantError as inv:  # #657: a closure-body invariant
-            # violation (a codegen bug) propagates out of
-            # `_compile_lifted_closure` to here and surfaces as ONE [E699] for
-            # the whole function — NOT the [E602] "closure skipped" warning
-            # below, which is reserved for a user-facing unsupported-construct
-            # skip.  Swallowing it in the closure helper (its previous
-            # behaviour) mixed the compiler-bug and user-skip signals: the
-            # helper emitted [E699] AND returned None, so this path then also
-            # emitted [E602].  Covered by tests/test_codegen_invariant_e699.py.
-            # #1185 (PR #1192 review, outside-diff): record the failed lift
-            # on THIS route too — the [E699] is an error, but the module is
-            # still assembled (compilation degrades, it does not abort), so
-            # the orphan-carrier blame chain runs and must be able to name
-            # this function as the root instead of falling back to the
-            # false no-closure-in-program wording.  Pinned by the
-            # `invariant_error` leg of the stubbed-lift regression in
-            # tests/test_codegen_orphan_call_indirect_1185.py.
-            self._closure_lift_skips.append(decl.name)
-            self._harvest_interp_inference_failures(ctx)
-            self._error(
-                inv.node if inv.node is not None else decl,
-                f"Internal compiler error while compiling '{decl.name}': "
-                f"{inv.msg}",
-                rationale="This is a codegen invariant violation — the type "
-                "checker should have rejected the input before it reached this "
-                "point.  Please file a bug report with the offending program.",
-                error_code="E699",
-            )
-            return None
-        if closure_failed:
-            # #1185: record the rolled-back lift.  A lift that rolls back
-            # is what leaves `_closure_table` empty, and an empty table
-            # orphans every `call_indirect` elsewhere in the module — the
-            # drop-propagation pass blames this function for those
-            # carriers, so the user gets one root cause, not two.
-            self._closure_lift_skips.append(decl.name)
-            self._warning(
-                decl,
-                f"Function '{decl.name}' contains a closure whose "
-                f"body failed to compile — skipped to avoid emitting "
-                f"an invalid module.",
-                rationale="A closure body inside this function failed "
-                "to translate (see preceding diagnostics for the "
-                "specific cause). The closure was dropped from the "
-                "function table; the enclosing function references it "
-                "via call_indirect, which would fail at WASM "
-                "validation. Dropping the enclosing function lets the "
-                "build complete with diagnostics only, no invalid "
-                "module emission.",
-                error_code="E602",
-            )
+        # #1245: this is the FIRST of two lift passes — the second runs
+        # after `_compile_postconditions` below, which is where a closure
+        # written in a refined RETURN's predicate, a tuple return's
+        # component guards, or an `ensures(...)` clause is registered.
+        if self._lift_closures_or_drop(ctx, decl):
             return None
 
         # Compile postcondition checks (wrap around body result).
@@ -995,6 +1050,35 @@ class FunctionCompilationMixin:
                 "point.  Please file a bug report with the offending program.",
                 error_code="E699",
             )
+            return None
+
+        # #1245: the SECOND lift pass.  `_compile_postconditions` lowers the
+        # refined-RETURN guard, a tuple return's per-component guards, and
+        # every `ensures(...)` predicate — all of which may construct a
+        # closure, which registers on `ctx` only now.  With one pass, that
+        # closure was created and never lifted: the module's function table
+        # stayed empty, the `call_indirect` its construction emits was
+        # orphaned, and the #1185 propagation dropped the function and every
+        # caller — a check-green, verify-clean program compiling to ZERO
+        # exports.  `_lift_pending_closures` consumes the pending list and
+        # re-syncs the id counter, so this pass sees exactly the closures the
+        # postcondition phase added.
+        #
+        # The two passes are deliberately NOT one transaction (PR #1250
+        # review).  When this one reports a failed lift the function is
+        # dropped while the FIRST pass's lifted closures stay committed, so
+        # the module carries them as dead code.  Measured on a stubbed
+        # second-pass failure: `$anon_0`/`$anon_1` and their `elem` entries
+        # remain, contiguous and still aligned with their `closure_id`s, the
+        # parent and its callers drop with the usual [E602]/[E620] chain, and
+        # the module VALIDATES — so the cost is output size in a path no
+        # check-green program reaches (every catch in
+        # `_lift_closures_or_drop` is defensive; a closure-body failure is
+        # caught inside `_compile_lifted_closure`), not a correctness one.
+        # Deferring pass 1's commit would mean holding its four output
+        # buffers uncommitted across the whole postcondition phase to buy
+        # that back.
+        if self._lift_closures_or_drop(ctx, decl):
             return None
 
         # Propagate resource / host-import flags from ``ctx`` to the module

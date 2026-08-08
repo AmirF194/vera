@@ -145,7 +145,10 @@ class InferenceMixin:
         #   HoleExpr          → parser placeholder; check time rejects
         """
         if isinstance(expr, ast.IntLit):
-            return "i64"
+            # #1212: same Byte-width mark the lowering reads — a `match`
+            # result type is inferred from an arm BODY through here, so the
+            # two deciders must agree about a marked leaf.
+            return "i32" if id(expr) in self._byte_literal_ids else "i64"
         if isinstance(expr, ast.FloatLit):
             return "f64"
         if isinstance(expr, ast.BoolLit):
@@ -519,10 +522,17 @@ class InferenceMixin:
         return None
 
     def _infer_block_result_type(self, block: ast.Block) -> str | None:
-        """Infer the WAT result type of a block from its final expression."""
+        """Infer the WAT result type of a block from its final expression.
+
+        #1212: a literal marked for the i32 Byte width lowers as
+        ``i32.const``, so the join built over it must be annotated
+        ``(result i32)`` — the decider and the lowering read the same marks
+        (`_mark_byte_literal_leaves`), which is what keeps the `if` / `match`
+        result type and its arms in agreement.
+        """
         expr = block.expr
         if isinstance(expr, ast.IntLit):
-            return "i64"
+            return "i32" if id(expr) in self._byte_literal_ids else "i64"
         if isinstance(expr, ast.FloatLit):
             return "f64"
         if isinstance(expr, ast.BoolLit):

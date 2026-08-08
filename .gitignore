@@ -62,3 +62,10 @@ node_modules/
 # interrupted run can strand one in the repo root.  Backstop only — the checkers
 # now write to the system tempdir, not here.
 /tmp*.vera
+
+# Run artifacts from the example corpus.  `examples/file_io.vera` writes
+# `examples/hello.txt` when it executes, so any sweep that RUNS the examples
+# (scripts/check_examples.py does not, but `vera run` over the corpus does)
+# leaves it in the tree — where a `git add -A` has twice picked it up.  It is
+# output, not source.
+/examples/hello.txt

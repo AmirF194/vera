@@ -504,11 +504,17 @@ def test_handler_family_reached_only_off_the_body_is_registered(
 # (`ContractsMixin._signature_refinement_predicates`), so they are properties
 # of a single function rather than of two that happen to agree.
 
-# A closure formal typed as a refined TUPLE.  The closure path emits
-# top-level formal / return guards only — it never calls
-# `_emit_component_refinement_guards` — so `Big`'s predicate is not lowered
-# anywhere here and its `State<Nat>` family must not be declared.  Measured:
-# enumerating components for an AnonFn too declares 4 spurious state imports.
+# A closure formal typed as a refined TUPLE.  This fixture pinned the
+# over-registration direction for as long as the closure path emitted
+# top-level formal / return guards only: `Big`'s predicate was lowered
+# NOWHERE, so declaring its `State<Nat>` family would have been four host
+# obligations nothing calls (measured: exactly 4 spurious state imports).
+# #1235 flipped the emitter — `_compile_lifted_closure` now consumes the same
+# `_tuple_component_guard_sites` decomposition the named path consumes — so
+# the predicate IS lowered here and the family MUST be declared.  The
+# fixture's job is unchanged: registration equals emission.  Which side of
+# the equality it pins moved with the emitter, exactly as this test's
+# docstring said it would.
 _CLOSURE_TUPLE_FORMAL = """
 type Big = { @Int | nat_to_int(handle[State<Nat>](@Nat = 3) {
   get(@Unit) -> { resume(@Nat.0) },
@@ -588,23 +594,32 @@ private fn probe(@Unit -> @Int)
 """
 
 
-def test_a_closure_tuple_formal_registers_nothing_spurious() -> None:
-    """A guard the closure path does not emit must not be registered.
+def test_a_closure_tuple_formal_registers_what_it_now_lowers() -> None:
+    """Component decomposition covers a closure signature, both halves.
 
-    Component decomposition is a `FnDecl`-only leg of the derivation because
-    it is a `FnDecl`-only leg of the EMITTERS.  Enumerating a closure's tuple
-    components would declare a `State<Nat>` import quadruple that no
-    instruction in the module ever calls — the mirror-image of the bug this
-    round fixes, and the reason the derivation is written against what is
-    emitted rather than against what could be.
+    Component decomposition was a `FnDecl`-only leg of the derivation because
+    it was a `FnDecl`-only leg of the EMITTERS: enumerating a closure's tuple
+    components while nothing lowered them would have declared a `State<Nat>`
+    import quadruple that no instruction in the module ever calls.  #1235
+    made `_compile_lifted_closure` consume the same
+    `_tuple_component_guard_sites` decomposition the named path consumes, so
+    the leg is unconditional and this fixture pins the OTHER direction of the
+    same equality — the predicate is lowered into the lifted closure's
+    prologue, so its family must be declared, and the module must run rather
+    than dying at whole-module WAT with `unknown func $vera.state_push_Nat`.
     """
     program = _CLOSURE_TUPLE_FORMAL + _MAIN
     _check_ok(program)
     assert _run(program) == 1
     wat = _compile(program).wat or ""
-    assert not _STATE_DECL.findall(wat), (
-        "no guard lowers `Big`'s predicate in this program, so no State "
-        "family may be declared: "
+    assert sorted(set(_STATE_DECL.findall(wat))) == [
+        "$vera.state_get_Nat",
+        "$vera.state_pop_Nat",
+        "$vera.state_push_Nat",
+        "$vera.state_put_Nat",
+    ], (
+        "the closure's component guard lowers `Big`'s predicate, so its "
+        "State family must be declared: "
         f"{sorted(set(_STATE_DECL.findall(wat)))}"
     )
 

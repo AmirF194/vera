@@ -1,9 +1,0 @@
-public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
-{
-  handle[State<Byte>](@Byte = 5) {
-    get(@Unit) -> { resume(@Byte.0) }
-  } in {
-    put(33);
-    byte_to_int(get(()))
-  }
-}

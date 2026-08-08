@@ -1498,6 +1498,10 @@ class CallsHandlersMixin:
         #    the zero-arg push call below.
         init_instrs: list[str] | None = None
         if expr.state is not None:
+            # #865/#1212: mark a Byte cell's literal init (or the literal
+            # leaves of an `if` / `match` init) BEFORE translating, so the
+            # value lowers at the cell's i32 width in one pass.
+            self._mark_state_byte_write(expr.state.init_expr, family_base)
             init_instrs = self.translate_expr(expr.state.init_expr, env)
             if init_instrs is None:
                 return None
@@ -1519,10 +1523,6 @@ class CallsHandlersMixin:
             elif (family_base == "Int"
                     and self._result_is_nat(expr.state.init_expr)):
                 init_instrs = self._emit_int_widen_guard(init_instrs)
-            byte_init = self._state_byte_literal(
-                expr.state.init_expr, family_base)
-            if byte_init is not None:
-                init_instrs = byte_init
             instructions.extend(init_instrs)
 
         # 2. Push a fresh state cell (isolates this handler from any outer
@@ -1884,6 +1884,9 @@ class CallsHandlersMixin:
         # `@Count`, whatever the effect's argument was named).
         arg_local: int | None = None
         if call.name == "put":
+            # #865/#1212: the Byte width of a literal (or branch-literal)
+            # put argument, marked before translation — see the init above.
+            self._mark_state_byte_write(call.args[0], family_base)
             arg_instrs = self.translate_expr(call.args[0], env)
             if arg_instrs is None:
                 return None
@@ -1895,10 +1898,6 @@ class CallsHandlersMixin:
             elif (family_base == "Int"
                     and self._result_is_nat(call.args[0])):
                 arg_instrs = self._emit_int_widen_guard(arg_instrs)
-            byte_arg = self._state_byte_literal(
-                call.args[0], family_base)
-            if byte_arg is not None:
-                arg_instrs = byte_arg
             arg_local = self.alloc_local(state_wt)
             instructions.extend(arg_instrs)
             instructions.append(f"local.set {arg_local}")
@@ -1999,6 +1998,11 @@ class CallsHandlersMixin:
         self._clause_inline_depth += 1
         try:
             body_instrs = self.translate_expr(clause.body, clause_env)
+            if clause.state_update is not None:
+                # #865/#1212: `with @Byte = <literal or branch join>` writes
+                # the cell — mark before translating, as init and put do.
+                self._mark_state_byte_write(
+                    clause.state_update[1], family_base)
             upd_instrs = (
                 self.translate_expr(clause.state_update[1], clause_env)
                 if clause.state_update is not None else None
@@ -2041,10 +2045,6 @@ class CallsHandlersMixin:
             elif (family_base == "Int"
                     and self._result_is_nat(clause.state_update[1])):
                 upd_instrs = self._emit_int_widen_guard(upd_instrs)
-            byte_upd = self._state_byte_literal(
-                clause.state_update[1], family_base)
-            if byte_upd is not None:
-                upd_instrs = byte_upd
             instructions.extend(upd_instrs)
             instructions.append(f"call {put_import}")
         return instructions
@@ -2071,25 +2071,31 @@ class CallsHandlersMixin:
             )
         return False
 
-    def _state_byte_literal(
+    def _mark_state_byte_write(
         self, value: ast.Expr, family_base: str,
-    ) -> list[str] | None:
+    ) -> None:
         """#865's Byte-literal width coercion at a State-cell WRITE
         boundary: ``@Byte`` is i32 (spec §11) but an int literal defaults
         to ``i64.const``, so a literal flowing into a ``State<Byte>``
         cell (init, put argument on either dispatch path, ``with``
         update, get-clause resume value) validated as ill-typed WASM —
-        the family imports were correctly i32 all along.  Returns the
-        i32 lowering for an ``IntLit`` into a Byte-family cell, ``None``
-        otherwise (non-literals already produce i32).  The `let` binding
-        and constructor-field sites have their own #865/#1092 arms.
+        the family imports were correctly i32 all along.
+
+        Only the cell-family question lives here; the branch descent and
+        the width decision are ``WasmContext._mark_byte_write_value``
+        (#1212), the ONE marking the `let` binding, the constructor field
+        and the call argument drive too.  The coercion used to test for a
+        bare ``IntLit`` and OVERWRITE the already-translated lowering,
+        which is why every branch spelling — including
+        ``resume(if c then { 1 } else { 2 })``, the form the E602 clause
+        skip message recommends — compiled to invalid WASM.  Marking
+        before the value is translated fixes the branch case and translates
+        the written value exactly once.
 
         Takes the cell's REPRESENTATION name (#1218): a refined `Byte`
         cell has its own family carrying the predicate, and the same
         i32 width."""
-        if family_base == "Byte" and isinstance(value, ast.IntLit):
-            return [f"i32.const {value.value}"]
-        return None
+        self._mark_byte_write_value(value, family_base)
 
     @staticmethod
     def _tail_resume_arg(body: ast.Expr) -> ast.Expr | None:

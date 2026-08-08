@@ -1,0 +1,60 @@
+-- Conformance: Byte literal width inside a value-position join (Ch 1)
+-- Tests: an int literal the checker coerces to @Byte (spec §11 — Byte is
+-- i32) must lower at i32 even when it sits inside an `if` or `match`
+-- BRANCH rather than being the written value itself (#1212).  #865 coerced
+-- a top-level literal only, so `let @Byte = if c then { 200 } else { 3 }`,
+-- a branch literal in a @Byte call ARGUMENT, and a `match` arm whose other
+-- arm is an i32 @Byte slot were all check-green programs that failed WASM
+-- validation with "type mismatch: expected i32, found i64".  The Block-tail
+-- leg (a branch whose literal is its trailing expression) is covered too.
+-- 200 + 3 = 203 distinguishes both branches and both widths.
+public fn byte_id(@Byte -> @Byte)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  @Byte.0
+}
+
+public fn from_join(@Bool -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  -- if-join, then-branch a Block whose TAIL is the literal
+  let @Byte = if @Bool.0 then {
+    let @Int = 1;
+    200
+  } else {
+    3
+  };
+  byte_to_int(@Byte.0)
+}
+
+public fn from_match(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  -- multi-arm match: the first arm is an i32 @Byte slot, the second a
+  -- literal — a mixed join, so the arms and the result annotation must be
+  -- decided together
+  let @Byte = match int_to_byte(@Int.0) {
+    Some(@Byte) -> @Byte.0,
+    None -> 0
+  };
+  byte_to_int(@Byte.0)
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  -- 200 (if-join through a Block tail) + 3 (else branch)
+  -- + 0 (match's literal arm, int_to_byte(999) is None)
+  -- + 0 (branch literal as a @Byte call argument, minus itself)
+  let @Int = from_join(true) + from_join(false);
+  let @Int = @Int.0 + from_match(999);
+  @Int.0 + byte_to_int(byte_id(if true then { 0 } else { 5 }))
+}
