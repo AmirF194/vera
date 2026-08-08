@@ -830,6 +830,13 @@ def format_expr(expr: Expr) -> str:
         return "true" if expr.value else "false"
     if isinstance(expr, StringLit):
         return f'"{expr.value}"'
+    if isinstance(expr, UnitLit):
+        # #1248: without this arm the `<expr>` catch-all below swallowed every
+        # Unit literal, so an obligation over `mk(())` described its call as
+        # `mk(<expr>)` in `verify --json` and in E505 text — two calls that
+        # differ only in a Unit argument became indistinguishable by
+        # description.  A missing arm here never fails; it silently degrades.
+        return "()"
     if isinstance(expr, InterpolatedString):
         parts = []
         for p in expr.parts:

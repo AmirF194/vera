@@ -807,6 +807,26 @@ class TestExpressions:
         )
         assert format_expr(mc) == "vera.math::abs(42)"
 
+    def test_format_expr_unit_literal(self):
+        """`()` renders as itself, not as the `<expr>` catch-all (#1248).
+
+        ``format_expr`` is what names an obligation in ``verify --json``'s
+        `description` and in E505 message text, so a missing arm does not
+        fail — it silently degrades every mention of that construct to
+        `<expr>`, and two calls distinguished only by their Unit argument
+        become indistinguishable by description.
+        """
+        from vera.ast import UnitLit
+
+        assert format_expr(UnitLit()) == "()"
+
+    def test_format_expr_call_with_a_unit_argument(self):
+        """... and in the position it is actually read in: a call argument."""
+        from vera.ast import FnCall, UnitLit
+
+        call = FnCall(name="mk", args=(UnitLit(),))
+        assert format_expr(call) == "mk(())"
+
 
 # -- Contract expressions --
 
