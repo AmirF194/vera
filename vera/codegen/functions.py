@@ -1031,6 +1031,21 @@ class FunctionCompilationMixin:
         # exports.  `_lift_pending_closures` consumes the pending list and
         # re-syncs the id counter, so this pass sees exactly the closures the
         # postcondition phase added.
+        #
+        # The two passes are deliberately NOT one transaction (PR #1250
+        # review).  When this one reports a failed lift the function is
+        # dropped while the FIRST pass's lifted closures stay committed, so
+        # the module carries them as dead code.  Measured on a stubbed
+        # second-pass failure: `$anon_0`/`$anon_1` and their `elem` entries
+        # remain, contiguous and still aligned with their `closure_id`s, the
+        # parent and its callers drop with the usual [E602]/[E620] chain, and
+        # the module VALIDATES — so the cost is output size in a path no
+        # check-green program reaches (every catch in
+        # `_lift_closures_or_drop` is defensive; a closure-body failure is
+        # caught inside `_compile_lifted_closure`), not a correctness one.
+        # Deferring pass 1's commit would mean holding its four output
+        # buffers uncommitted across the whole postcondition phase to buy
+        # that back.
         if self._lift_closures_or_drop(ctx, decl):
             return None
 

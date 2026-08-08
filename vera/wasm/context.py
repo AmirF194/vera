@@ -377,9 +377,9 @@ class WasmContext(
         self._fn_byte_params: dict[str, tuple[bool, ...]] = {}
         # #1212: `IntLit` nodes this context lowers at the i32 Byte width.
         # Populated by `_mark_byte_literal_leaves`, the ONE branch descent
-        # every #865 arm drives (see `_lower_at_byte_width`); read by the
-        # `IntLit` lowering and by the two join result-type deciders, so a
-        # marked leaf and the `(result …)` annotation over it agree.
+        # every #865 arm drives through `_mark_byte_write_value`; read by
+        # the `IntLit` lowering and by the two join result-type deciders, so
+        # a marked leaf and the `(result …)` annotation over it agree.
         self._byte_literal_ids: set[int] = set()
         # Closure compilation state — accumulated during translation
         # Each entry: (anon_fn, captures, closure_id)

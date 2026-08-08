@@ -14,10 +14,13 @@ BRANCH literal as `@Byte` too, so each of
     byte_id(if c then { 1 } else { 2 })
     MkB(if c then { 200 } else { 3 })      -- at Box<Byte>
     let @Byte = match … { Some(@Byte) -> @Byte.0, None -> 0 }
+    apply_fn(fn(@Bool -> @Byte) { 207 }, b)   -- the closure's own RETURN
 
 was a check-green program that failed WASM validation with `type mismatch:
-expected i32, found i64`.  Loud at run, never silent corruption, but eight
-arms of one defect.
+expected i32, found i64`.  Loud at run, never silent corruption, but nine
+arms of one defect.  The ninth is a MISSING MIRROR rather than a missing
+mark: a named function's `@Byte` return has been coerced at the return
+boundary since #865, and the lifted-closure path simply had no such step.
 
 The fix is ONE branch descent — `WasmContext._mark_byte_literal_leaves`,
 driven through `_mark_byte_write_value` — marking the literal LEAVES of a
@@ -43,7 +46,7 @@ from tests.checker_helpers import _check_ok
 from tests.codegen_helpers import _run
 
 # =====================================================================
-# The eight write boundaries
+# The nine write boundaries
 # =====================================================================
 
 _LET_IF = """
@@ -254,6 +257,73 @@ public fn main(@Unit -> @Int)
 }
 """
 
+# The NINTH boundary (PR #1250 review): a closure's own RETURN.  A named
+# function's `@Byte` return has always been coerced at the return boundary
+# (`_compile_fn`: `i32.wrap_i64` when the body infers i64 into an i32
+# result); the lifted-closure path had no such step, so `fn(@Bool -> @Byte)`
+# behind an `apply_fn` emitted `i64.const` into an `(result i32)` and
+# `$anon_0` failed WASM validation on a check-green program — while its
+# named twin ran.  Both the bare literal and the join spelling reach it.
+_CLOSURE_RETURN_LIT = """
+public fn f(@Bool -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  byte_to_int(apply_fn(fn(@Bool -> @Byte) effects(pure) {
+    207
+  }, @Bool.0))
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  f(true)
+}
+"""
+
+_CLOSURE_RETURN_JOIN = """
+public fn f(@Bool -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  byte_to_int(apply_fn(fn(@Bool -> @Byte) effects(pure) {
+    if @Bool.0 then { 207 } else { 8 }
+  }, @Bool.0))
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  f(true)
+}
+"""
+
+# The named twin of the closure return — the path that already worked, and
+# the oracle the closure one is held to.
+_NAMED_RETURN_JOIN = """
+private fn g(@Bool -> @Byte)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  if @Bool.0 then { 207 } else { 8 }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  byte_to_int(g(true))
+}
+"""
+
 
 @pytest.mark.parametrize(
     ("source", "expected"),
@@ -267,6 +337,8 @@ public fn main(@Unit -> @Int)
         pytest.param(_RESUME_IF, 200, id="resume_if"),
         pytest.param(_WITH_IF, 200, id="with_update_if"),
         pytest.param(_CALL_ARG_IF, 200, id="call_arg_if"),
+        pytest.param(_CLOSURE_RETURN_LIT, 207, id="closure_return_lit"),
+        pytest.param(_CLOSURE_RETURN_JOIN, 207, id="closure_return_join"),
     ],
 )
 def test_a_byte_literal_in_a_join_reaches_the_boundary(
@@ -379,6 +451,23 @@ def test_a_byte_join_with_no_literal_arm_is_untouched() -> None:
 def test_a_byte_returning_literal_join_still_runs() -> None:
     assert _run(_BYTE_RETURN_JOIN) == 200
     assert _run(_BYTE_RETURN_JOIN.replace("pick(true)", "pick(false)")) == 3
+
+
+def test_the_named_return_control_was_always_correct() -> None:
+    """The oracle the closure-return coercion mirrors.
+
+    A named `@Byte` return has been coerced at the return boundary since
+    #865; the closure path is now the same code in the same position, so
+    this control is what says the ninth boundary was a MISSING mirror
+    rather than a new rule.
+    """
+    assert _run(_NAMED_RETURN_JOIN) == 207
+    assert _run(_NAMED_RETURN_JOIN.replace("g(true)", "g(false)")) == 8
+
+
+def test_the_closure_return_reaches_its_other_branch_too() -> None:
+    """The else arm of the ninth boundary, so it is a real join."""
+    assert _run(_CLOSURE_RETURN_JOIN.replace("f(true)", "f(false)")) == 8
 
 
 # =====================================================================

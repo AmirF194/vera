@@ -291,6 +291,129 @@ public fn main(@Unit -> @Int)
 }
 """
 
+# --- cycles longer than one hop ---------------------------------------
+# The guard is keyed on the lift CHAIN, so it catches a cycle of any
+# length, not only a type refined through itself.  Both of these HANG the
+# compiler without it — a termination regression here would present in CI
+# as a job that never finishes, which is why they are pinned under the
+# wall-clock harness rather than merely compiled.
+
+# A -> B -> A.  Neither type's predicate contains its OWN closure, so the
+# one-hop reading of the guard would miss this entirely.
+_MUTUAL_CYCLE = """
+type A = { @Int | @Int.0 > 0 && apply_fn(fn(@B -> @Int)
+  effects(pure) { @B.0 }, 3) > 0 };
+
+type B = { @Int | @Int.0 > 0 && apply_fn(fn(@A -> @Int)
+  effects(pure) { @A.0 }, 3) > 0 };
+
+private fn f(@A -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  @A.0
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  f(7)
+}
+"""
+
+# P -> Q -> R -> P.  Three hops: an ancestry depth of one or two would
+# still run for ever here.
+_THREE_CYCLE = """
+type P = { @Int | @Int.0 > 0 && apply_fn(fn(@Q -> @Int)
+  effects(pure) { @Q.0 }, 3) > 0 };
+
+type Q = { @Int | @Int.0 > 0 && apply_fn(fn(@R -> @Int)
+  effects(pure) { @R.0 }, 3) > 0 };
+
+type R = { @Int | @Int.0 > 0 && apply_fn(fn(@P -> @Int)
+  effects(pure) { @P.0 }, 3) > 0 };
+
+private fn f(@P -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  @P.0
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  f(7)
+}
+"""
+
+# --- the two shapes a module-wide seen-set breaks ----------------------
+# The guard is a CHAIN, not a set of everything already lifted.  These two
+# programs are the difference: each legitimately lifts ONE predicate's
+# closure more than once, from positions that are not each other's
+# ancestors, so a seen-set refuses the second lift, drops the enclosing
+# function and produces zero exports.  Measured: with the seen-set mutant
+# both go red here and NOTHING else in the suite does.
+
+# The code comment's own worked example: two refined formals of one type.
+# `R`'s predicate holds a single `AnonFn` node, and each formal's boundary
+# guard lifts it — twice, siblings rather than ancestor and descendant.
+# f(9, 4) = 13, a value neither predicate's argument (4) nor any default.
+_TWO_REFINED_FORMALS_OF_ONE_TYPE = """
+type R = { @Int | @Int.0 > 0 && apply_fn(fn(@Int -> @Int)
+  effects(pure) { @Int.0 }, 4) > 0 };
+
+private fn f(@R, @R -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  @R.0 + @R.1
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  f(9, 4)
+}
+"""
+
+# A diamond: `Outer`'s predicate closure is refined by `Inner`, and the
+# same function ALSO takes an `@Inner` formal directly — so `Inner`'s
+# closure is reached by two routes, once as a descendant of `Outer`'s lift
+# and once at the top of its own.  Finite, and it must run: g(9, 4) = 13.
+_DIAMOND_ANCESTRY = """
+type Inner = { @Int | @Int.0 > 0 && apply_fn(fn(@Int -> @Int)
+  effects(pure) { @Int.0 }, 4) > 0 };
+
+type Outer = { @Int | @Int.0 > 0 && apply_fn(fn(@Inner -> @Int)
+  effects(pure) { @Inner.0 }, 5) > 0 };
+
+private fn g(@Outer, @Inner -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  @Outer.0 + @Inner.0
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  g(9, 4)
+}
+"""
+
 
 def _compile_within(source: str, budget_s: float) -> object:
     """Compile *source* on a daemon thread, failing if it outlives *budget_s*.
@@ -326,19 +449,61 @@ def _compile_within(source: str, budget_s: float) -> object:
 
 
 class TestTheLiftQueueIsCycleGuarded:
-    """#1234: a self-referential refinement in a signature must terminate."""
+    """#1234: a cyclic refinement in a signature must terminate.
 
-    def test_it_terminates_with_a_loud_skip(self) -> None:
-        _check_ok(_SELF_REFERENTIAL_IN_A_SIGNATURE)
-        result = _compile_within(_SELF_REFERENTIAL_IN_A_SIGNATURE, 60.0)
+    Three properties, and each needs its own shape.  That the guard FIRES
+    is pinned by the self-reference; that it fires on cycles of ANY LENGTH
+    by the mutual and three-type cycles (a one-hop reading of it misses
+    both, and the symptom is a CI job that never ends); and that it is
+    keyed on the lift CHAIN rather than on everything already lifted by the
+    two shapes below, which legitimately lift one predicate's closure more
+    than once.
+
+    Mutation-measured, replacing the chain key with a module-wide seen set
+    (`if id(anon_fn) in seen` over a set accumulated across the worklist):
+    `test_two_refined_formals_of_one_type_both_lift` and
+    `test_a_diamond_reaches_one_refinement_by_two_routes` go RED — the
+    enclosing function is dropped and the module exports nothing.  One
+    pre-existing test moves with them, `test_wasi_target.py`'s dual-target
+    agreement on `ch09_prelude.vera` (the prelude lifts one combinator's
+    closure from several functions), which is a whole-corpus symptom rather
+    than a statement about the key — these two say WHICH property broke.
+    """
+
+    @pytest.mark.parametrize(
+        ("source", "closure_sig"),
+        [
+            pytest.param(
+                _SELF_REFERENTIAL_IN_A_SIGNATURE,
+                "fn(@SelfRef -> @Int)", id="self_reference"),
+            pytest.param(
+                _MUTUAL_CYCLE, "fn(@B -> @Int)", id="mutual_two_cycle"),
+            pytest.param(
+                _THREE_CYCLE, "fn(@Q -> @Int)", id="three_cycle"),
+        ],
+    )
+    def test_it_terminates_with_a_loud_skip(
+        self, source: str, closure_sig: str,
+    ) -> None:
+        """Bounded termination, and the skip names the closure it refused.
+
+        The wall-clock budget is the assertion that matters: every one of
+        these ran for ever before the guard, so a regression is a hang, and
+        a hang in CI is a job that has to be killed rather than a red test.
+        """
+        _check_ok(source)
+        result = _compile_within(source, 60.0)
         diags = getattr(result, "diagnostics", [])
         codes = [d.error_code for d in diags]
         assert "E602" in codes, [(d.error_code, d.description) for d in diags]
-        # The skip must NAME the self-reference, not merely say "skipped".
         said = " ".join(
             d.description for d in diags if d.error_code == "E602")
-        assert "SelfRef" in said, said
-        assert "self-referential" in said.lower(), said
+        # The skip must NAME the closure it refused and say WHY, not merely
+        # say "skipped".  "cyclic" rather than "self-referential": the guard
+        # catches a cycle of any length, and two of these three are not
+        # self-references at all.
+        assert closure_sig in said, said
+        assert "cyclic refinement" in said.lower(), said
 
     def test_a_finite_nested_refinement_chain_still_lifts_and_runs(
         self,
@@ -346,6 +511,27 @@ class TestTheLiftQueueIsCycleGuarded:
         """The control: the guard must fire on a CYCLE, not on nesting."""
         _check_ok(_NESTED_NON_CYCLIC_REFINEMENT)
         assert _run(_NESTED_NON_CYCLIC_REFINEMENT) == 9
+
+    def test_two_refined_formals_of_one_type_both_lift(self) -> None:
+        """The code comment's own worked example, as an executable claim.
+
+        `fn f(@R, @R -> @Int)` guards two formals of one refined type, so
+        `R`'s single `AnonFn` node is lifted twice — as siblings, neither
+        one an ancestor of the other.  A module-wide seen-set refuses the
+        second and drops `f`; the chain key does not.
+        """
+        _check_ok(_TWO_REFINED_FORMALS_OF_ONE_TYPE)
+        assert _run(_TWO_REFINED_FORMALS_OF_ONE_TYPE) == 13
+
+    def test_a_diamond_reaches_one_refinement_by_two_routes(self) -> None:
+        """`Inner` is reached under `Outer`'s lift AND at the top of its own.
+
+        The second reach is a descendant of the first in one route and a
+        root in the other — finite either way, and a seen-set cannot tell
+        that from a cycle.
+        """
+        _check_ok(_DIAMOND_ANCESTRY)
+        assert _run(_DIAMOND_ANCESTRY) == 13
 
 
 # =====================================================================
@@ -436,3 +622,103 @@ class TestAClosureTupleFormalIsComponentGuarded:
         """7 satisfies `PosInt`: 70 through both paths, not a trap."""
         assert _run(_at(_CLOSURE_TUPLE_COMPONENT, "7")) == 70
         assert _run(_at(_NAMED_TUPLE_COMPONENT, "7")) == 70
+
+
+# The RETURN side of the same boundary (PR #1250 review).  The class above
+# pins the FORMAL only, so `ret_has_components` and the scalar return-guard
+# leg in `_compile_lifted_closure` were reached by no test at all: forcing
+# `ret_has_components` to False leaves that class green.
+#
+# The components are deliberately ASYMMETRIC — component 0 is the refined
+# `PosInt` and component 1 is the constant 2, which SATISFIES `> 0`.  An
+# emitter that read the wrong component's offset would therefore check `2 >
+# 0`, pass, and let the violating value through: the index is pinned by the
+# violating case rather than assumed.
+_CLOSURE_TUPLE_RETURN = """
+type PosInt = { @Int | @Int.0 > 0 };
+type IntToPair = fn(Int -> Tuple<PosInt, Int>) effects(pure);
+
+private fn make(@Unit -> @IntToPair)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  fn(@Int -> @Tuple<PosInt, Int>) effects(pure) { Tuple(@Int.0, 2) }
+}
+
+private fn probe(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @IntToPair = make(());
+  let @Tuple<PosInt, Int> = apply_fn(@IntToPair.0, @Int.0);
+  match @Tuple<PosInt, Int>.0 {
+    Tuple(@PosInt, @Int) -> @PosInt.0 * 10
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(FIRST)
+}
+"""
+
+# Its named twin, built from the same components, as the oracle.
+_NAMED_TUPLE_RETURN = """
+type PosInt = { @Int | @Int.0 > 0 };
+
+private fn mkpair(@Int -> @Tuple<PosInt, Int>)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  Tuple(@Int.0, 2)
+}
+
+private fn probe(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Tuple<PosInt, Int> = mkpair(@Int.0);
+  match @Tuple<PosInt, Int>.0 {
+    Tuple(@PosInt, @Int) -> @PosInt.0 * 10
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(FIRST)
+}
+"""
+
+
+class TestAClosureTupleReturnIsComponentGuarded:
+    """#1235's return half — `ret_has_components` and the epilogue it gates.
+
+    Mutation-measured: forcing `ret_has_components` to False in
+    `_compile_lifted_closure` turns `test_the_closure_return_traps_on_a_
+    violating_component` RED and leaves the formal class above green, which
+    is why this exists as its own fixture rather than as another parameter
+    of the formal one.
+    """
+
+    def test_the_closure_return_traps_on_a_violating_component(self) -> None:
+        """A closure RETURNING `Tuple(-5, 2)` must not hand it back."""
+        _run_refine_trap(_at(_CLOSURE_TUPLE_RETURN, "0 - 5"))
+
+    def test_the_named_return_traps_identically(self) -> None:
+        """The oracle the closure return is being held to."""
+        _run_refine_trap(_at(_NAMED_TUPLE_RETURN, "0 - 5"))
+
+    def test_the_passing_return_still_runs(self) -> None:
+        """7 satisfies `PosInt`: 70 through both paths, not a trap."""
+        assert _run(_at(_CLOSURE_TUPLE_RETURN, "7")) == 70
+        assert _run(_at(_NAMED_TUPLE_RETURN, "7")) == 70

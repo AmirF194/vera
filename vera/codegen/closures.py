@@ -113,36 +113,45 @@ class ClosureLiftingMixin:
         while worklist:
             anon_fn, captures, closure_id, ancestry = worklist.popleft()
             if id(anon_fn) in ancestry:
-                # #1234: this closure's own refined-formal / refined-return
-                # guard lowers a predicate that contains THIS closure, so
-                # lifting it queues it again — `type SelfRef = { @Int | …
-                # fn(@SelfRef -> @Int) … }` used in a signature made
-                # `vera compile` run for ever on a check-green program with
-                # no diagnostic and no bound.  Refuse the lift loudly and
-                # let the #636 path drop the enclosing function, mirroring
-                # the registration pre-scan's `_anon_sig_scan_stack` guard
-                # (compilability.py), which made the REGISTRATION walk
-                # immune to the same cycle.  Keyed on the `AnonFn` node
-                # identity along the current lift CHAIN — not a
-                # module-wide seen-set — so the same predicate's closure
-                # legitimately lifting once per refined formal (`fn f(@R,
-                # @R -> @Int)`) is untouched.
+                # #1234: lifting this closure lowers its refined-formal /
+                # refined-return guard, whose predicate leads back to THIS
+                # closure, so the lift queues it again — `type SelfRef =
+                # { @Int | … fn(@SelfRef -> @Int) … }` used in a signature
+                # made `vera compile` run for ever on a check-green program
+                # with no diagnostic and no bound.  Refuse the lift loudly
+                # and let the #636 path drop the enclosing function,
+                # mirroring the registration pre-scan's
+                # `_anon_sig_scan_stack` guard (compilability.py), which
+                # made the REGISTRATION walk immune to the same cycle.
+                #
+                # Keyed on the `AnonFn` node identity along the current lift
+                # CHAIN, not a module-wide seen-set.  The distinction is
+                # load-bearing in both directions and is pinned by
+                # `tests/test_closure_lift_boundaries_1234_1235_1245.py`:
+                # a seen-set refuses the SECOND legitimate lift of one
+                # predicate's closure — `fn f(@R, @R -> @Int)` guards two
+                # formals of the same refined type, and a diamond reaches
+                # one refinement by two routes — while the chain still
+                # catches a cycle of ANY length, self-reference and mutual
+                # A -> B -> A and longer alike.
                 param_sig = ", ".join(
                     ast.format_type_expr(p) for p in anon_fn.params)
                 ret_sig = ast.format_type_expr(anon_fn.return_type)
                 self._warning(
                     anon_fn,
                     f"Closure fn({param_sig} -> {ret_sig}) is refined by a "
-                    "type whose own predicate contains this same closure — "
-                    "a self-referential refinement, whose boundary guard "
+                    "type whose refinement chain leads back to this same "
+                    "closure — a cyclic refinement, whose boundary guard "
                     "cannot be lowered without unbounded expansion; "
                     "closure skipped.",
-                    rationale="A refined closure formal is guarded at entry "
-                    "by lowering the refinement's predicate.  When that "
-                    "predicate contains the closure being guarded, each "
-                    "lift queues another one and codegen would never "
-                    "terminate.  The enclosing function is dropped too, to "
-                    "avoid a missing function-table entry.",
+                    rationale="A refined closure formal or return is "
+                    "guarded at the boundary by lowering the refinement's "
+                    "predicate.  When that predicate contains a closure "
+                    "whose own refinement leads back here — directly, or "
+                    "around a cycle of two or more types — each lift queues "
+                    "another closure and codegen would never terminate.  "
+                    "The enclosing function is dropped too, to avoid a "
+                    "missing function-table entry.",
                     error_code="E602",
                 )
                 any_failed = True
@@ -689,6 +698,24 @@ class ClosureLiftingMixin:
             # `_translate_interpolated_string`.
             self._harvest_interp_inference_failures(ctx)
             return None
+
+        # Coerce body result if return type is i32 but body produces i64
+        # (e.g. an IntLit in a @Byte-returning closure) — the closure-side
+        # mirror of `_compile_fn`'s return-boundary coercion (functions.py),
+        # and the NINTH @Byte write boundary (#1212).  A closure's return is
+        # a Byte write exactly as a named function's is, and only the named
+        # path coerced it: `fn(@Bool -> @Byte) { 207 }` behind an `apply_fn`
+        # emitted `i64.const 207` into an `(result i32)` and the lifted
+        # `$anon_0` failed WASM validation, on a check-green program, while
+        # its named twin `fn g(@Bool -> @Byte) { 207 }` ran.  Same gate, same
+        # place in the sequence: after the body, before anything that reads
+        # the result at `ret_wt` (the #1032 refined-return guard below saves
+        # it into an `ret_wt` local, which an i64 result would make
+        # ill-typed too).  MUST NOT move above `translate_block`.
+        if ret_wt == "i32":
+            body_result_type = ctx._infer_block_result_type(anon_fn.body)
+            if body_result_type == "i64":
+                body_instrs.append("i32.wrap_i64")
 
         # #1024: emit the refined-formal prologue guards now — AFTER the body
         # compiles (so the `_nat_return_leaf_ids` setup that MUST precede

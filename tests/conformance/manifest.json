@@ -1209,7 +1209,8 @@
       "handler",
       "handler_clause",
       "state_update",
-      "byte_coercion"
+      "byte_coercion",
+      "if_expression"
     ]
   },
   {
