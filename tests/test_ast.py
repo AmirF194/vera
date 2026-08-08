@@ -807,7 +807,7 @@ class TestExpressions:
         )
         assert format_expr(mc) == "vera.math::abs(42)"
 
-    def test_format_expr_unit_literal(self):
+    def test_format_expr_unit_literal(self) -> None:
         """`()` renders as itself, not as the `<expr>` catch-all (#1248).
 
         ``format_expr`` is what names an obligation in ``verify --json``'s
@@ -820,7 +820,7 @@ class TestExpressions:
 
         assert format_expr(UnitLit()) == "()"
 
-    def test_format_expr_call_with_a_unit_argument(self):
+    def test_format_expr_call_with_a_unit_argument(self) -> None:
         """... and in the position it is actually read in: a call argument."""
         from vera.ast import FnCall, UnitLit
 

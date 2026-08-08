@@ -4,6 +4,8 @@ Split from tests/test_verifier.py (#839). Shared helpers live in tests/verifier_
 """
 from __future__ import annotations
 
+import pathlib
+
 from vera.parser import parse_to_ast
 
 from tests.verifier_helpers import (
@@ -1830,3 +1832,115 @@ public fn use(@String -> @Int)
         assert not [
             d for d in result.diagnostics if d.severity == "error"
         ], [d.description[:90] for d in result.diagnostics]
+
+
+class TestANonVerdictIsAttributedToTheRightOutcome:
+    """``check_valid`` has FOUR outcomes; two of them demote (#1251).
+
+    ``unknown`` is the solver declining to decide.  ``opaque`` is the #1199
+    verdict — it decided promptly and SAT, but every countermodel ran over an
+    effect-operation stand-in, so it refutes nothing the effect actually
+    produces.  Three demotion sites reported both as "the solver timed out on
+    the predicate", which is the same misattribution #1251 is about one level
+    down: it names an event that did not happen and sends the reader to raise
+    a timeout that was never hit.
+
+    All three are latent — no whole program is known that reaches them — so
+    they are pinned where they can be reached: at the derivation, at the
+    branch (driven directly), and structurally, so a fourth site cannot
+    reintroduce a hardcoded solver reason.
+    """
+
+    def test_the_two_outcomes_get_different_reasons(self) -> None:
+        from vera.verifier import ContractVerifier
+
+        opaque = ContractVerifier._refined_undecided_reason("opaque")
+        unknown = ContractVerifier._refined_undecided_reason("unknown")
+        assert opaque != unknown, opaque
+        assert "opaque" in opaque and "stand-in" in opaque, opaque
+        assert "no decision" in unknown, unknown
+        # Neither may claim a timeout: `unknown` covers a timeout but is not
+        # only a timeout, and `opaque` is not one at all.
+        assert "timed out" not in opaque, opaque
+        assert "timed out" not in unknown, unknown
+
+    def test_the_branch_reports_opaque_as_opaque(self, monkeypatch) -> None:
+        """Driven directly: force the #1199 verdict and read the disclosure.
+
+        The reviewer could not construct a program that reaches these branches,
+        so the outcome is injected at ``check_valid`` — the one place all three
+        sites take it from. Without the split this emits the timeout text for a
+        run in which the solver never timed out.
+        """
+        from vera.smt import SmtContext, SmtResult
+
+        monkeypatch.setattr(
+            SmtContext, "check_valid",
+            lambda self, goal, assumptions: SmtResult(status="opaque"),
+        )
+        result = _verify("""
+type PosInt = { @Int | @Int.0 > 0 };
+
+public fn mk(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @PosInt = @Int.0;
+  @PosInt.0
+}
+""")
+        warns = [d for d in result.diagnostics if d.error_code == "E506"]
+        assert warns, [d.description[:90] for d in result.diagnostics]
+        rationale = warns[0].rationale
+        assert "stand-in" in rationale, rationale
+        assert "timed out" not in rationale, rationale
+        # ... and it is still a demotion, not a claimed refutation.
+        assert not [
+            d for d in result.diagnostics if d.error_code == "E505"
+        ], [d.description[:90] for d in result.diagnostics]
+
+    def test_no_demotion_site_hardcodes_a_solver_reason(self) -> None:
+        """Structural: a solver-outcome reason must come from the derivation.
+
+        Every ``reason=`` handed to ``_record_refined_bind_tier3`` as a plain
+        string literal describes something the verifier knows without asking
+        the solver — an unmodelled base, an untranslatable value, an opaque
+        scrutinee.  A literal that talks about the solver is by construction a
+        branch that had ``result.status`` in hand and threw it away, which is
+        how three sites came to claim a timeout for the opaque verdict.
+        """
+        import ast as py_ast
+
+        source = pathlib.Path("vera/verifier.py").read_text(encoding="utf-8")
+        tree = py_ast.parse(source)
+        offenders: list[tuple[int, str]] = []
+        for node in py_ast.walk(tree):
+            if not isinstance(node, py_ast.Call):
+                continue
+            fn = node.func
+            if not (isinstance(fn, py_ast.Attribute)
+                    and fn.attr == "_record_refined_bind_tier3"):
+                continue
+            for kw in node.keywords:
+                if kw.arg != "reason":
+                    continue
+                literal = _joined_str_constant(kw.value)
+                if literal is None:
+                    continue  # derived (a helper call) — the correct shape
+                if "solver" in literal or "timed out" in literal:
+                    offenders.append((node.lineno, literal[:80]))
+        assert not offenders, (
+            "a solver-outcome reason is hardcoded rather than derived from "
+            f"`result.status`: {offenders}"
+        )
+
+
+def _joined_str_constant(node: object) -> str | None:
+    """The value of *node* when it is a plain (possibly implicitly
+    concatenated) string literal, else None."""
+    import ast as py_ast
+
+    if isinstance(node, py_ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None

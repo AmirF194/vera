@@ -291,7 +291,12 @@ The type checker treats a refined type as its base for assignability (it permits
 
 A refined **parameter** is, conversely, *assumed* to satisfy its predicate inside the body — sound precisely because every call site discharges the obligation. If the solver finds inputs violating the predicate, verification fails with error `E505` and a counterexample. A discharge proved from the surrounding `requires` clauses, path conditions, or an already-refined source carries no runtime cost.
 
-An obligation drops to Tier 3 — reported as an `E506` warning rather than silently accepted — in two cases: (1) the predicate uses a construct outside the decidable fragment (§2.6.1); or (2) the refinement is over a non-primitive base, such as `{ @Array<Int> | array_length(...) > 0 }`, which the predicate translator does not lower — only primitive bases (`@Int`, `@Nat`, `@Bool`, `@Float64`, `@String`) have their binder substituted, so a non-primitive base is Tier 3 even when its predicate (here `array_length(...) > 0`) is itself in the fragment.
+An obligation drops to Tier 3 — reported as an `E506` warning rather than silently accepted — whenever the verifier reaches no verdict. The warning names which of the following applies, because they call for different responses:
+
+1. **The value being narrowed does not translate.** It uses a construct outside the decidable fragment (§2.6.1), so no term reaches the predicate. A value the verifier models only opaquely falls here too: an effect-operation result, a closure body (never entered), or a scrutinee or destructure source it cannot project to the field or component the predicate is about.
+2. **The refinement's base is one the verifier does not model.** Only `@Int`, `@Nat`, `@Bool`, `@Float64` and `@String` have their binder substituted, so the predicate is never given a value to reason about. This is a property of the *base*, not of the predicate, which may be perfectly decidable: `{ @Array<Int> | array_length(...) > 0 }` is Tier 3 although `array_length(...) > 0` is in the fragment, and so is `{ @Byte | @Byte.0 < 10 }` although `@Byte` is a primitive (§2.1) and the comparison is well-typed by §2.6.3. Codegen lowers such a predicate regardless, so a boundary narrowing is still checked at run time (§2.6.5).
+3. **The predicate uses a construct outside the decidable fragment** (§2.6.1), over a base that is modelled.
+4. **The solver returns no verdict** — it declines to decide, or its only countermodel ranges over an opaque effect-operation stand-in and therefore refutes nothing the effect can actually produce. Neither is a refutation, so neither reports `E505`.
 
 ### 2.6.5 Runtime Guards
 
