@@ -442,6 +442,9 @@ class TypeChecker(
         ] = {}
         # De-dup removed-alias errors (emitted once per alias name).
         self._reported_alias_errors: set[str] = set()
+        # De-dup reserved-namespace type REFERENCES (E154, #1221) — one
+        # error per name, at its first mention.
+        self._reported_reserved_type_refs: set[str] = set()
         # Monotonic counter for fresh TypeVar names (prevents
         # self-referential mappings when different ADTs share a type
         # parameter name — see #243).

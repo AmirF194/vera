@@ -29,7 +29,7 @@ from pathlib import Path
 
 import pytest
 
-from vera import ast
+from vera import ast, naming
 from vera.checker import typecheck
 from vera.codegen import compile, execute
 from vera.monomorphize import Monomorphizer
@@ -1668,34 +1668,10 @@ class TestDeclOrderIsPerNamespace:
 
 
 # =====================================================================
-# The one env asymmetry that is NOT a naming bug (#1208 review, probe x01)
+# #1221 — the prelude's type aliases are CODEGEN-INTERNAL and unspellable
 # =====================================================================
 
-class TestPreludeAliasEnvAsymmetry:
-    """Codegen sees prelude type aliases; the checker never does.
-
-    ``inject_prelude`` runs at CODEGEN (and at the verifier's mono discovery),
-    not at check — so ``ArrayMapFn<Int, Bool>`` is an opaque ADT to the checker
-    and a resolved ``fn(Int -> Bool) effects(pure)`` to codegen.  In ARGUMENT
-    position (where naming resolves) the two therefore render one spelling
-    differently, and codegen merges two parameter stacks the checker keeps
-    apart.
-
-    This is CHARACTERIZED here, not fixed.  Both naming envs faithfully report
-    their own side, so it is not a renderer bug: closing it means registering
-    the prelude's aliases in the CHECKER, which changes what the checker
-    resolves (and therefore `--explain-slots`, LSP hovers, and the binding
-    table itself) — a language-semantics change, out of scope for a naming
-    consolidation.  The affected parameter is also uninhabited from Vera
-    source: the checker rejects any argument for an opaque ``ArrayMapFn<…>``,
-    so the wrong-parameter read is reachable only by a HOST calling the
-    exported symbol.
-
-    Delete this test when the gap is closed — its failure is the signal that
-    someone did.
-    """
-
-    _SRC = """\
+_PRELUDE_ALIAS_SRC = """\
 public fn f(@Array<ArrayMapFn<Int, Bool>>,
             @Array<fn(Int -> Bool) effects(pure)> -> @Int)
   requires(true)
@@ -1715,42 +1691,197 @@ public fn main(@Unit -> @Int)
 }
 """
 
-    def test_checker_keeps_the_two_stacks_apart(self) -> None:
-        from vera import naming
+# The same program spelled with the RESERVED twin the prelude's own
+# combinators resolve through.  Renaming the public names into the reserved
+# namespace only closes #1221 if the reserved namespace is itself unwritable
+# — otherwise the identical divergence survives four characters longer.
+_RESERVED_ALIAS_SRC = _PRELUDE_ALIAS_SRC.replace(
+    "ArrayMapFn", "VeraOptionMapFn",
+)
+
+_PRELUDE_ALIAS_NAMES = (
+    "OptionMapFn", "OptionBindFn", "ResultMapFn",
+    "ArrayMapFn", "ArrayFilterFn", "ArrayFoldFn",
+)
+
+
+def _codegen_alias_env(source: str) -> naming.AliasEnv:
+    """The naming env codegen renders the MAIN file under."""
+    from vera.codegen.core import CodeGenerator
+
+    gen = CodeGenerator(source=source, file="<prelude-alias>")
+    gen.compile_program(parse_to_ast(source))
+    return gen._alias_env
+
+
+class TestPreludeAliasesAreCodegenInternal:
+    """The prelude's aliases live in the reserved namespace, unspellable.
+
+    ``inject_prelude`` runs at CODEGEN and at the verifier's mono discovery,
+    never at check — so any alias name it injects is a name codegen resolves
+    and the checker does not.  With the six user-facing names injected, a
+    program mixing ``ArrayMapFn<Int, Bool>`` with the function type it aliases
+    made codegen merge two parameter stacks the checker keeps apart, and the
+    emitted export read parameter 2 where the binding table says parameter 1
+    (#1221; reachable only by a host calling the export, since the checker
+    rejects every Vera-source argument for the opaque head).
+
+    The close is Vera-prefix internalization, not teaching the checker: the
+    prelude injects only reserved ``Vera``-prefixed declarations (spec §8.4.1,
+    E154), the six public spellings become ordinary unknown names both sides
+    treat opaquely, and a reference to a reserved name is refused where it is
+    written.  The checker's ignorance is then correct by construction — no
+    name it leaves opaque is a name codegen resolves.
+    """
+
+    def test_the_checker_keeps_the_two_stacks_apart(self) -> None:
+        """Unchanged by the fix: an unknown head is opaque and stays apart.
+
+        ``ArrayMapFn`` was never in the checker's alias table and still is
+        not, so what the checker names — the rule every naming consumer keys
+        off — is byte-identical before and after internalization.
+        """
         from vera.checker.core import TypeChecker
 
-        prog = parse_to_ast(self._SRC)
-        checker = TypeChecker(source=self._SRC, file="<x01>")
+        prog = parse_to_ast(_PRELUDE_ALIAS_SRC)
+        checker = TypeChecker(source=_PRELUDE_ALIAS_SRC, file="<x01>")
         checker.check_program(prog)
         fn = next(
             tld.decl for tld in prog.declarations
             if isinstance(tld.decl, ast.FnDecl) and tld.decl.name == "f"
         )
         env = naming.alias_env_from_environment(checker.env)
-        assert "ArrayMapFn" not in env.aliases, (
-            "the checker now registers prelude type aliases — the asymmetry "
-            "this test characterizes is gone; delete it and align the "
-            "codegen-side expectation below"
-        )
+        assert "ArrayMapFn" not in env.aliases, sorted(env.aliases)
         names = [naming.slot_name(te, env) for te in fn.params]
         assert names == [
             "Array<ArrayMapFn<Int, Bool>>",
             "Array<fn(Int -> Bool) effects(pure)>",
         ], names
 
-    def test_codegen_merges_them_and_reads_the_second(self) -> None:
-        """The measured consequence, in the emitted WAT.
+    def test_codegen_names_the_parameters_the_checker_names(self) -> None:
+        """The differential: one renderer, two envs, and they must agree.
 
-        ``@Array<ArrayMapFn<Int, Bool>>.0`` is parameter 1 for the checker and
-        parameter 2 for codegen, so the exported body loads the wrong pair of
-        locals.  Asserted on the instruction stream because no Vera caller can
-        reach it — only a host can.
+        Both sides go through :func:`vera.naming.slot_name`, so a divergence
+        here is a divergence of the ENVIRONMENTS — exactly the #1213 class.
+        Compared as a list rather than a set: the partition is what decides
+        which parameter a slot reference lands on.
         """
-        wat = _compile_ok(self._SRC).wat
-        body = wat.split('(func $f (export "f")')[1].split("(func ")[0]
-        reads = _local_gets(body)
-        assert {2, 3} <= reads, body
-        assert 0 not in reads, (
-            "codegen now reads parameter 1 — the prelude-alias asymmetry has "
-            "been closed; delete this characterization test"
+        from vera.checker.core import TypeChecker
+
+        prog = parse_to_ast(_PRELUDE_ALIAS_SRC)
+        checker = TypeChecker(source=_PRELUDE_ALIAS_SRC, file="<x01>")
+        checker.check_program(prog)
+        fn = next(
+            tld.decl for tld in prog.declarations
+            if isinstance(tld.decl, ast.FnDecl) and tld.decl.name == "f"
         )
+        check_env = naming.alias_env_from_environment(checker.env)
+        gen_env = _codegen_alias_env(_PRELUDE_ALIAS_SRC)
+        checker_names = [naming.slot_name(te, check_env) for te in fn.params]
+        codegen_names = [naming.slot_name(te, gen_env) for te in fn.params]
+        assert checker_names == codegen_names, (
+            "codegen and the checker partition f's parameters differently: "
+            f"checker {checker_names} vs codegen {codegen_names}"
+        )
+
+    def test_codegen_reads_the_parameter_the_checker_names(self) -> None:
+        """The same claim in the emitted instruction stream.
+
+        ``@Array<ArrayMapFn<Int, Bool>>.0`` is parameter 1 for the checker, so
+        the exported body must load the first pair of locals.  Asserted on the
+        WAT because no Vera caller can reach this export — only a host can.
+        """
+        wat = _compile_ok(_PRELUDE_ALIAS_SRC).wat
+        body = _fn_body(wat, "f")
+        reads = _local_gets(body)
+        assert {0, 1} <= reads, body
+        assert 2 not in reads, (
+            "codegen still reads parameter 2 — the prelude alias is still "
+            f"resolving on the codegen side only:\n{body}"
+        )
+
+    def test_the_user_facing_alias_names_reach_no_namespace(self) -> None:
+        """Structural: the six public spellings are injected nowhere.
+
+        A future re-injection of any one of them reopens the divergence for
+        that name, so the whole family is named here rather than counted.
+        """
+        from vera.prelude import inject_prelude
+
+        prog = parse_to_ast(_PRELUDE_ALIAS_SRC)
+        inject_prelude(prog)
+        declared = {
+            tld.decl.name for tld in prog.declarations
+            if isinstance(tld.decl, ast.TypeAliasDecl)
+        }
+        leaked = sorted(declared & set(_PRELUDE_ALIAS_NAMES))
+        assert not leaked, (
+            f"the prelude still injects user-facing aliases: {leaked}"
+        )
+        gen_env = _codegen_alias_env(_PRELUDE_ALIAS_SRC)
+        leaked_env = sorted(set(gen_env.aliases) & set(_PRELUDE_ALIAS_NAMES))
+        assert not leaked_env, (
+            f"codegen still resolves user-facing prelude aliases: {leaked_env}"
+        )
+
+    def test_the_prelude_keeps_its_reserved_twins(self) -> None:
+        """The control on the assertion above: the internals are still there.
+
+        The combinators resolve their closure parameters through the reserved
+        twins, so deleting the injections outright (rather than internalizing
+        them) would satisfy the emptiness assertion and break ``option_map``.
+        """
+        from vera.prelude import inject_prelude
+
+        prog = parse_to_ast(_PRELUDE_ALIAS_SRC)
+        inject_prelude(prog)
+        declared = {
+            tld.decl.name for tld in prog.declarations
+            if isinstance(tld.decl, ast.TypeAliasDecl)
+        }
+        assert {"VeraOptionMapFn", "VeraOptionBindFn"} <= declared, sorted(
+            declared,
+        )
+        assert all(name.startswith("Vera") for name in declared), sorted(
+            declared,
+        )
+
+    def test_a_reserved_prelude_name_is_unspellable(self) -> None:
+        """E154 covers REFERENCES, not only declarations.
+
+        The reserved twins stay in codegen's alias table (the combinators need
+        them), so a user reference to one reproduces #1221 verbatim under a
+        longer name unless the reservation refuses it where it is written.
+        """
+        prog = parse_to_ast(_RESERVED_ALIAS_SRC)
+        errors = [
+            d for d in typecheck(prog, _RESERVED_ALIAS_SRC)
+            if d.severity == "error"
+        ]
+        assert [d.error_code for d in errors] == ["E154"], errors
+        assert "VeraOptionMapFn" in errors[0].description, errors[0].description
+
+    def test_an_ordinary_vera_containing_name_stays_ordinary(self) -> None:
+        """The reservation is anchored: ``Veranda`` is not the prelude's."""
+        src = _PRELUDE_ALIAS_SRC.replace("ArrayMapFn", "Veranda")
+        errors = [
+            d for d in typecheck(parse_to_ast(src), src)
+            if d.severity == "error"
+        ]
+        assert not errors, errors
+
+    def test_the_option_combinators_still_run(self) -> None:
+        """End-to-end control: internalization did not break the prelude."""
+        src = """\
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Option<Int> = option_map(
+    Some(20), fn(@Int -> @Int) effects(pure) { @Int.0 + 1 }
+  );
+  option_unwrap_or(@Option<Int>.0, 0)
+}
+"""
+        assert _run(src) == 21

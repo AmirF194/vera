@@ -614,14 +614,17 @@ where {
   }
 }
 """),
-    # A PRELUDE alias name in argument position (#1208 review, probe x01).
-    # The checker never registers the prelude's type aliases — `inject_prelude`
-    # runs at codegen and at the verifier's mono discovery, not at check — so
-    # `ArrayMapFn<Int, Bool>` is an opaque ADT here and stays apart from the
-    # spelled-out function type beside it.  Swept so the CHECKER-side answer is
-    # pinned: it is the one every naming consumer keyed off, and codegen's
-    # differing view of the same spelling is a separate, checker-level gap (see
-    # `test_prelude_alias_split_is_a_checker_level_gap`).
+    # A former PRELUDE alias name in argument position (#1208 review, probe
+    # x01).  The checker never registers the prelude's type aliases —
+    # `inject_prelude` runs at codegen and at the verifier's mono discovery,
+    # not at check — so `ArrayMapFn<Int, Bool>` is an opaque ADT here and stays
+    # apart from the spelled-out function type beside it.  Swept so the
+    # CHECKER-side answer is pinned: it is the one every naming consumer keys
+    # off, and codegen's view of the same spelling used to differ — the #1221
+    # divergence, closed by moving the prelude's own aliases into the reserved
+    # `Vera` namespace (see `TestPreludeAliasesAreCodegenInternal` in
+    # tests/test_naming_env_provenance_1208.py), which leaves these six
+    # spellings as ordinary unknown names both sides render this way.
     # The effect-row corners of the argument-position rendering (#1208
     # review): a QUALIFIED effect reference (`Module.Effect`, the
     # `qualified_effect_ref` grammar rule) and an effect ROW VARIABLE, both
@@ -849,8 +852,8 @@ def test_inline_battery_reaches_the_alias_corners(sweep: Sweep) -> None:
         and "Log.Write" in r and "E" in r
         for r in rendered
     ), sorted(r for r in rendered if "effects" in r)
-    # The prelude-alias split, pinned on the CHECKER's side (see
-    # `TestPreludeAliasEnvAsymmetry` for why codegen's differs).
+    # The former prelude-alias spellings, pinned on the CHECKER's side — the
+    # rendering codegen now agrees with (#1221).
     assert "Option<ArrayMapFn<Int, Bool>>" in rendered
     assert "Option<fn(Int -> Bool) effects(pure)>" in rendered
     # #1208: the declaration-ORDER corner, in both directions.  An ADT
