@@ -736,6 +736,54 @@ class TestCmdVerify:
         assert v["tier1_verified"] == tier1
         assert v["tier3_runtime"] == tier3
 
+    def test_json_obligations_array_is_the_whole_stream(
+        self, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The array is emitted UNFILTERED, and the summary is a partition of
+        it rather than a count of it (#1242).
+
+        ``ch08_transitive_module_import_base`` emits three obligations against
+        ``total = 2``, which reads as the summary disagreeing with the stream
+        until the third is named: a REFUTED obligation discharges to no tier,
+        so it is counted by no summary field and surfaced as the E500 error
+        instead.  Both halves are pinned here — the entry is present in the
+        array (a `cmd_verify` that filtered it out would satisfy the naive
+        ``len == total`` reading and lose the join to its diagnostic), and the
+        counts account for it exactly once.
+        """
+        path = str(
+            Path(__file__).parent / "conformance"
+            / "ch08_transitive_module_import_base.vera"
+        )
+        rc = cmd_verify(path, as_json=True)
+        assert rc == 1, rc
+        data = json.loads(capsys.readouterr().out)
+        obls, v = data["obligations"], data["verification"]
+        uncounted = [
+            o for o in obls
+            if o["status"] in ("violated", "tier3_unguarded")
+        ]
+        assert len(uncounted) == 1, obls
+        assert uncounted[0]["status"] == "violated", uncounted
+        assert uncounted[0]["kind"] == "ensures", uncounted
+        # The counts partition the array: nothing double-counted, nothing
+        # unexplained.
+        assert v["total"] == v["tier1_verified"] + v["tier3_runtime"]
+        assert len(obls) == v["total"] + len(uncounted), (obls, v)
+        assert len(obls) > v["total"], (
+            "the fixture must actually exercise an uncounted entry"
+        )
+        # And the uncounted entry joins the error it was surfaced as.
+        e500 = [d for d in data["diagnostics"] if d["error_code"] == "E500"]
+        assert len(e500) == 1, data["diagnostics"]
+        assert (
+            e500[0]["location"]["line"],
+            e500[0]["location"]["column"],
+        ) == (
+            uncounted[0]["location"]["line"],
+            uncounted[0]["location"]["column"],
+        ), (e500, uncounted)
+
     def test_json_type_error(
         self,
         tmp_path: Path,

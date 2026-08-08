@@ -155,7 +155,18 @@ Before changing code — **adding or removing** — write the test that proves y
 {"ok": true, "file": "...", "diagnostics": [], "warnings": []}
 ```
 
-Each diagnostic includes: `severity`, `description`, `location` (`file`, `line`, `column`), `source_line`, `rationale`, `fix`, `spec_ref`, and `error_code`. The `verify --json` output also includes a `verification` summary with `tier1_verified`, `tier3_runtime`, and `total` counts (the summary is derived from the reified obligation stream, so `total == tier1_verified + tier3_runtime`), plus an `obligations` array — one entry per reified obligation with `kind`, `status`, `description`, `location`, and `error_code` (when present) — from which a consumer can reproduce the counts.
+Each diagnostic includes: `severity`, `description`, `location` (`file`, `line`, `column`), `source_line`, `rationale`, `fix`, `spec_ref`, and `error_code`. The `verify --json` output also includes a `verification` summary with `tier1_verified`, `tier3_runtime`, and `total` counts, plus an `obligations` array — one entry per reified obligation with `kind`, `status`, `description`, `location`, and `error_code` (when present).
+
+The summary is *derived* from that array, by `status`. A consumer reproduces the counts by filtering on `status`, never by taking the array's length:
+
+| `status` | counted as | also surfaced as |
+|----------|-----------|------------------|
+| `verified` | `tier1_verified` | — |
+| `tier3`, `timeout` | `tier3_runtime` | an informational warning, for the kinds that carry one |
+| `violated` | *nothing* | an error diagnostic (E500, E501, E502, E505, …) |
+| `tier3_unguarded` | *nothing* | a warning diagnostic (E504, E506, E531) |
+
+So `total == tier1_verified + tier3_runtime`, and the array — which is the complete stream — is a *superset* of what the counts cover: `violated` and `tier3_unguarded` discharged to no tier, so they are counted nowhere and appear only as diagnostics. The full accounting is `len(obligations) == total + violated + tier3_unguarded`. A program with one refuted contract therefore reports (say) `total: 2` beside a three-entry array; that is the partition, not a disagreement.
 
 ### Error codes
 

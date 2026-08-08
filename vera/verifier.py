@@ -133,6 +133,16 @@ def summarize(obligations: list[ProofObligation]) -> VerifySummary:
     ``total`` is exactly ``tier1_verified + tier3_runtime`` — the count of
     obligations that discharged to *some* tier — so the summary is internally
     arithmetic-consistent by construction.
+
+    The three buckets PARTITION the stream, which is the other half of the
+    contract ``verify --json`` documents (#1242): a consumer reproduces the
+    counts by filtering on ``status``, never by taking the array's length, and
+    the full accounting is ``len(obligations) == total + violated +
+    tier3_unguarded``.  Read as ``len == total`` instead, a program with one
+    refuted contract looks like a summary that disagrees with its own stream
+    (``ch08_transitive_module_import_base``: three obligations, ``total`` 2).
+    ``tests/test_obligations.py`` asserts both directions over every corpus
+    program the verifier runs on.
     """
     tier1 = sum(1 for o in obligations if o.status == "verified")
     tier3 = sum(1 for o in obligations if o.status in ("tier3", "timeout"))

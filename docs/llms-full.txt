@@ -2599,6 +2599,8 @@ The `verify --json` output includes a verification summary:
 }
 ```
 
+Alongside it, an `obligations` array carries one entry per reified proof obligation (`kind`, `status`, `description`, `location`). The summary is derived from that array by `status` — `verified` counts as `tier1_verified`, `tier3`/`timeout` as `tier3_runtime`, and `total` is their sum. Reproduce the counts by *filtering on `status`*, not by taking the array's length: a `violated` or `tier3_unguarded` obligation discharged to no tier, so it is counted nowhere and is surfaced as an error or warning diagnostic instead. On a program with one refuted contract, `total: 2` beside a three-entry array is the expected partition.
+
 ### Essential rules
 
 1. Every function needs `requires()`, `ensures()`, and `effects()` between the signature and body
@@ -3212,7 +3214,7 @@ The reference compiler is under active development. The current release includes
 
 - A seven-stage pipeline: parse, transform, resolve, typecheck, verify, compile, execute
 - A 14-chapter formal specification
-- 9,699 tests, including a 203-program conformance suite
+- 9,856 tests, including a 201-program conformance suite
 - 42 working example programs
 - 164 built-in functions covering strings, arrays, math, parsing, and data types
 - Four built-in abilities (Eq, Ord, Hash, Show) with constrained generics and ADT auto-derivation
