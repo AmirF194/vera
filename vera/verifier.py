@@ -3094,10 +3094,12 @@ class ContractVerifier:
                 if body_expr is not None else None
             )
             if goal is None:
-                # Untranslatable body / predicate / non-primitive base — Tier 3
-                # checked by the codegen return guard (guarded), never a silent
-                # pass (R7).  Which of the two it was decides what the reader
-                # should go and change, so the disclosure says (#1251).
+                # No goal to check: the body did not translate, the base is
+                # one the verifier does not model, or the predicate is outside
+                # the fragment — Tier 3 checked by the codegen return guard
+                # (guarded), never a silent pass (R7).  Which of the three it
+                # was decides what the reader should go and change, so the
+                # disclosure says (#1251).
                 self._record_refined_bind_tier3(
                     decl, ret_node, "return type",
                     guarded=self._refined_boundary_codegen_guardable(ret_type),
@@ -6288,13 +6290,30 @@ class ContractVerifier:
         One derivation, called from every site that demotes on a non-verdict,
         so a fifth outcome cannot be silently absorbed by whichever branch
         happens to catch it.
+
+        Every reachable status is therefore handled BY NAME and anything else
+        raises, rather than falling through to the no-decision text: a catch-all
+        ``else`` would re-create the very defect this function exists to remove,
+        one status further out.  ``verified`` and ``violated`` never arrive —
+        callers branch on them first — and ``unsupported``, which
+        :py:class:`~vera.smt.SmtResult`'s annotation once listed, is produced by
+        nothing: ``check_valid`` is the only constructor and it returns exactly
+        the four below.  A future fifth status is a decision about what to tell
+        the reader, so it fails here rather than quietly wearing wrong text.
         """
         if status == "opaque":
             return (
                 "the only countermodel ran over an opaque effect-operation "
                 "stand-in, which refutes nothing the effect actually produces"
             )
-        return "the solver returned no decision on the predicate"
+        if status == "unknown":
+            return "the solver returned no decision on the predicate"
+        raise ValueError(
+            f"no refinement-demotion reason for solver status {status!r}: "
+            "every outcome that can reach a Tier-3 demotion must say what it "
+            "was, so add a branch here rather than letting it inherit "
+            "another outcome's text"
+        )
 
     @staticmethod
     def _refined_bail_reason(
@@ -6542,10 +6561,13 @@ class ContractVerifier:
         them a projection from a `@Nat` field into `{ @Nat | true }` would be a
         false E505 — Z3 inventing a negative payload the field type forbids (CR
         a48cd2c).  An obligation still undischarged under those premises is a
-        genuine E505; an untranslatable predicate / non-primitive base yields an
-        E506 Tier-3 warning.  These projection sites are internal narrowings
-        with no codegen guard, hence ``guarded=False``.  *node* gives the
-        diagnostic location.
+        genuine E505.  Anything short of a verdict is an E506 Tier-3 warning
+        that NAMES its cause (#1251): a base the verifier does not model or a
+        predicate outside the fragment, via
+        :py:meth:`_refined_untranslatable_reason`, and either non-verdict via
+        :py:meth:`_refined_undecided_reason`.  These projection sites are
+        internal narrowings with no codegen guard, hence ``guarded=False``.
+        *node* gives the diagnostic location.
         """
         goal = self._translate_refined_predicate(smt, refined_ty, term)
         if goal is None:

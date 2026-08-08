@@ -1903,17 +1903,24 @@ public fn mk(@Int -> @Int)
     def test_no_demotion_site_hardcodes_a_solver_reason(self) -> None:
         """Structural: a solver-outcome reason must come from the derivation.
 
-        Every ``reason=`` handed to ``_record_refined_bind_tier3`` as a plain
-        string literal describes something the verifier knows without asking
-        the solver — an unmodelled base, an untranslatable value, an opaque
-        scrutinee.  A literal that talks about the solver is by construction a
-        branch that had ``result.status`` in hand and threw it away, which is
-        how three sites came to claim a timeout for the opaque verdict.
+        Every ``reason=`` handed to ``_record_refined_bind_tier3`` as a fixed
+        string describes something the verifier knows without asking the
+        solver — an unmodelled base, an untranslatable value, an opaque
+        scrutinee.  Fixed text that talks about the solver is by construction
+        a branch that had ``result.status`` in hand and threw it away, which
+        is how three sites came to claim a timeout for the opaque verdict.
+
+        "Fixed" has to mean every way of writing a fixed string, or the pin
+        forbids one spelling of the defect and waves the others through.  Two
+        measured escape hatches closed: an f-string parses as ``JoinedStr``
+        and a shared module constant parses as ``Name``, and an earlier
+        version read both as "derived, therefore fine".  Anything this cannot
+        classify fails too, so a novel spelling is a red test rather than a
+        silent gap.
         """
         import ast as py_ast
 
-        source = pathlib.Path("vera/verifier.py").read_text(encoding="utf-8")
-        tree = py_ast.parse(source)
+        tree, module_strings = _verifier_ast()
         offenders: list[tuple[int, str]] = []
         for node in py_ast.walk(tree):
             if not isinstance(node, py_ast.Call):
@@ -1925,22 +1932,84 @@ public fn mk(@Int -> @Int)
             for kw in node.keywords:
                 if kw.arg != "reason":
                     continue
-                literal = _joined_str_constant(kw.value)
-                if literal is None:
-                    continue  # derived (a helper call) — the correct shape
-                if "solver" in literal or "timed out" in literal:
-                    offenders.append((node.lineno, literal[:80]))
+                if isinstance(kw.value, py_ast.Call):
+                    continue  # derived from a helper — the correct shape
+                text = _fixed_text(kw.value, module_strings)
+                if text is None:
+                    offenders.append((
+                        node.lineno,
+                        f"unclassifiable {type(kw.value).__name__} — pass a "
+                        f"helper call or an inline literal",
+                    ))
+                elif "solver" in text or "timed out" in text:
+                    offenders.append((node.lineno, text[:80]))
         assert not offenders, (
-            "a solver-outcome reason is hardcoded rather than derived from "
-            f"`result.status`: {offenders}"
+            "a solver-outcome reason is fixed at the call site rather than "
+            f"derived from `result.status`: {offenders}"
         )
 
 
-def _joined_str_constant(node: object) -> str | None:
-    """The value of *node* when it is a plain (possibly implicitly
-    concatenated) string literal, else None."""
+def _verifier_ast() -> tuple[object, dict[str, str]]:
+    """``vera.verifier``'s parsed source, plus its module-level string consts.
+
+    The path comes from the IMPORTED module rather than a relative one, so the
+    walk cannot depend on the working directory — nor, in a layout with more
+    than one checkout, inspect a different file than the tests import.
+    """
+    import ast as py_ast
+    import inspect
+
+    import vera.verifier
+
+    path = inspect.getsourcefile(vera.verifier)
+    assert path is not None, vera.verifier
+    tree = py_ast.parse(
+        pathlib.Path(path).read_text(encoding="utf-8"))
+    consts: dict[str, str] = {}
+    for node in tree.body:
+        if not isinstance(node, py_ast.Assign):
+            continue
+        value = _string_constant(node.value)
+        if value is None:
+            continue
+        for target in node.targets:
+            if isinstance(target, py_ast.Name):
+                consts[target.id] = value
+    return tree, consts
+
+
+def _string_constant(node: object) -> str | None:
+    """*node*'s value when it is a plain string literal, else None.
+
+    Implicit concatenation ("a" "b") is already one ``Constant`` by parse
+    time, so it needs no handling of its own.
+    """
     import ast as py_ast
 
     if isinstance(node, py_ast.Constant) and isinstance(node.value, str):
         return node.value
+    return None
+
+
+def _fixed_text(node: object, module_strings: dict[str, str]) -> str | None:
+    """The text *node* contributes at the call site, or None if unclassifiable.
+
+    Covers the three ways a reason can be fixed rather than derived: a literal,
+    an f-string (whose literal parts are the fixed half — the interpolations
+    are not, and a solver word in the fixed half is the defect either way), and
+    a reference to a module-level string constant.
+    """
+    import ast as py_ast
+
+    literal = _string_constant(node)
+    if literal is not None:
+        return literal
+    if isinstance(node, py_ast.JoinedStr):
+        parts = [
+            v.value for v in node.values
+            if isinstance(v, py_ast.Constant) and isinstance(v.value, str)
+        ]
+        return "".join(parts)
+    if isinstance(node, py_ast.Name):
+        return module_strings.get(node.id)
     return None
