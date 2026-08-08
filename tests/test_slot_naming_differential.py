@@ -708,8 +708,19 @@ def sweep() -> Sweep:
         _sweep_source(origin, source, result)
     for directory in _CORPUS_DIRS:
         for path in sorted(directory.rglob("*.vera")):
+            # POSIX form BY CONSTRUCTION, not `str(...)`: an origin is a
+            # repo-relative KEY as well as a label, and the maintained-corpus
+            # classification in `test_corpus_is_almost_entirely_parseable`
+            # matches it against `examples/` and `tests/conformance/`.  Under
+            # `str()` those are Windows backslash paths, which no such prefix
+            # can match — the whole classification collected zero files on all
+            # three Windows CI cells while every POSIX cell stayed green.  The
+            # repo convention (TESTING.md, "Test Fixture Conventions") is
+            # `as_posix()` at the point the path becomes a string; doing it
+            # here makes the property hold for every consumer rather than
+            # asking each one to remember.
             _sweep_source(
-                str(path.relative_to(_ROOT)),
+                path.relative_to(_ROOT).as_posix(),
                 path.read_text(encoding="utf-8"),
                 result,
             )
@@ -776,6 +787,17 @@ def test_corpus_is_almost_entirely_parseable(sweep: Sweep) -> None:
     lowered, which is a floor measuring nothing.  Raise the number below by
     adding an example or a conformance program.
     """
+    # Separator-agnostic BY CONSTRUCTION: origins are built with
+    # `as_posix()` (see the `sweep` fixture), so these prefixes match on
+    # every platform.  Asserted rather than assumed, because the failure
+    # mode is silent — a classification that matches nothing reports a
+    # shrunken corpus, not a broken filter, and it is invisible to a
+    # POSIX-only local hook run.  This is what all three Windows CI cells
+    # caught when the origins were `str(...)`: `0 > 240`, from a walk that
+    # had collected all 428 files.
+    assert not [f for f in sweep.corpus_files if "\\" in f], [
+        f for f in sweep.corpus_files if "\\" in f
+    ][:5]
     maintained = [
         f for f in sweep.corpus_files
         if f.startswith(("examples/", "tests/conformance/"))
