@@ -1181,3 +1181,202 @@ class TestTesterUnitFunctions:
         )
         result = _get_source_line("line1\nline2", decl)
         assert result == ""
+
+
+# =====================================================================
+# #1229 — an untranslatable `requires` conjunct SKIPS the function
+# =====================================================================
+
+
+class TestUntranslatableRequiresSkips:
+    """A precondition the input generator cannot model must not be reported as
+    a falsified contract (#1229).
+
+    ``vera/smt.py`` returns None for constructs outside the decidable fragment
+    — ``string_length`` over a non-literal is the reported one (#802: Vera
+    counts UTF-8 bytes, Z3's ``Length`` counts code points, and no byte-length
+    operator exists in Z3's string theory).  The generator's solver then
+    carries no constraint from that conjunct at all, so ``_seed_boundaries``
+    happily emits ``""`` for a function whose ``requires`` forbids it, the
+    compiled WASM traps on its own entry guard, and the trap was scored as a
+    contract FAILURE: ``19/20 passed, 1 failed`` on a correct program, with an
+    E700 naming the function's own ``requires``.
+
+    Spec §0.3 forbids a diagnostic that misleads, and this one inverted the
+    truth — a generator limitation reported as a falsified contract.  The
+    function is SKIPPED instead, with a reason NAMING the conjunct, mirroring
+    the existing ``cannot generate <T> inputs`` taxonomy.
+
+    The detection is MECHANISM-based rather than a list of built-ins: it asks
+    the SMT layer to translate each conjunct and believes the answer.  That
+    matters because the tester's ``SmtContext`` is built bare — no
+    ``_fn_lookup``, no ADT registry — so far more than ``string_length``
+    defers there, and any hand-written list would have been incomplete from
+    the day it was written.
+    """
+
+    _SHOUT = """\
+public fn shout(@String -> @String)
+  requires(string_length(@String.0) > 0)
+  ensures(string_length(@String.result) >= string_length(@String.0))
+  effects(pure)
+{
+  string_concat(@String.0, "!")
+}
+"""
+
+    def _json(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        source: str,
+    ) -> dict:
+        path = _write_vera(tmp_path, source)
+        cmd_test(path, as_json=True, trials=20)
+        return json.loads(capsys.readouterr().out)
+
+    def test_the_reported_repro_no_longer_fails(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The issue's program, verbatim: skipped, not failed."""
+        data = self._json(tmp_path, capsys, self._SHOUT)
+        fns = {f["name"]: f for f in data["functions"]}
+        assert fns["shout"]["category"] == "skipped", fns["shout"]
+        assert fns["shout"]["trials_run"] == 0, fns["shout"]
+        assert data["summary"]["failed"] == 0, data["summary"]
+        assert data["summary"]["total_trials"] == 0, data["summary"]
+        assert data["ok"] is True, data
+
+    def test_the_skip_reason_names_the_conjunct(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Naming the blocker is the point of the taxonomy: "skipped" on its
+        own is no more actionable than the wrong FAILED was."""
+        data = self._json(tmp_path, capsys, self._SHOUT)
+        reason = {f["name"]: f for f in data["functions"]}["shout"]["reason"]
+        assert "string_length(@String.0) > 0" in reason, reason
+
+    def test_the_skip_is_also_disclosed_as_an_e701_diagnostic(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The unsupported-parameter-type skip discloses itself as an E701
+        warning; an unsatisfiable-by-construction precondition is the same
+        class of blocker and discloses itself the same way, so a consumer
+        reading only ``diagnostics`` still learns why nothing ran."""
+        data = self._json(tmp_path, capsys, self._SHOUT)
+        e701 = [d for d in data["diagnostics"] if d["error_code"] == "E701"]
+        assert len(e701) == 1, data["diagnostics"]
+        assert e701[0]["severity"] == "warning", e701
+        assert "string_length(@String.0) > 0" in e701[0]["description"], e701
+        assert not [d for d in data["diagnostics"] if d["severity"] == "error"]
+
+    def test_a_mixed_clause_skips_the_function_naming_only_the_blocker(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """One translatable conjunct beside one untranslatable one.
+
+        The ratified direction skips the FUNCTION — generating from the
+        satisfiable half alone still manufactures inputs the other half
+        forbids, which is the bug — and names the conjunct that blocked it,
+        not the whole clause.
+        """
+        source = """\
+public fn shout2(@String, @Int -> @String)
+  requires(@Int.0 > 0 && string_length(@String.0) > 0)
+  ensures(string_length(@String.result) >= 0)
+  effects(pure)
+{
+  string_concat(@String.0, "!")
+}
+"""
+        data = self._json(tmp_path, capsys, source)
+        fn = {f["name"]: f for f in data["functions"]}["shout2"]
+        assert fn["category"] == "skipped", fn
+        assert "string_length(@String.0) > 0" in fn["reason"], fn["reason"]
+        assert "@Int.0 > 0" not in fn["reason"], (
+            "the translatable conjunct is not a blocker and must not be named "
+            f"as one: {fn['reason']}"
+        )
+        assert data["summary"]["failed"] == 0, data["summary"]
+
+    def test_a_fully_translatable_precondition_is_still_tested(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The control.  A skip taxonomy that fired on everything would
+        satisfy every assertion above and silently switch `vera test` off.
+
+        The closure keeps the function at Tier 3 — which is the only
+        classification the new check is asked about — while its `requires`
+        stays ordinary translatable arithmetic, so this measures the check and
+        not the tier.
+        """
+        source = """\
+type IntFn = fn(Int -> Int) effects(pure);
+
+public fn half(@Int -> @Int)
+  requires(@Int.0 > 0)
+  ensures(@Int.result >= 0)
+  effects(pure)
+{
+  let @IntFn = fn(@Int -> @Int) effects(pure) { @Int.0 / 2 };
+  apply_fn(@IntFn.0, @Int.0)
+}
+"""
+        data = self._json(tmp_path, capsys, source)
+        fn = {f["name"]: f for f in data["functions"]}["half"]
+        assert fn["category"] == "tested", fn
+        assert fn["trials_run"] > 0, fn
+        assert data["summary"]["total_trials"] > 0, data["summary"]
+
+    def test_a_quantified_precondition_skips_too(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The mechanism generalises past ``string_length``.
+
+        Quantifier translation is deferred (#427), so a ``forall``
+        precondition constrains the generator no more than ``string_length``
+        did — the same defect through a different construct, and no list of
+        built-ins would have caught it.
+        """
+        source = """\
+public fn under(@Nat -> @Nat)
+  requires(forall(@Int, @Nat.0, fn(@Int -> @Bool) effects(pure) { @Int.0 >= 0 }))
+  ensures(@Nat.result >= 0)
+  effects(pure)
+{
+  @Nat.0
+}
+"""
+        data = self._json(tmp_path, capsys, source)
+        fn = {f["name"]: f for f in data["functions"]}["under"]
+        assert fn["category"] == "skipped", fn
+        assert "forall" in fn["reason"], fn["reason"]
+
+    def test_an_untranslatable_refinement_predicate_skips_too(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A refined PARAMETER's predicate is the same defect one door over.
+
+        The predicate is part of the parameter's type, not of its contract, so
+        no ``requires`` states it — and codegen emits it as an entry guard
+        that traps on a violating argument (the #1216 membership constraint
+        exists for exactly this).  Untranslatable, it constrains the generator
+        no more than an untranslatable ``requires`` conjunct does, and the
+        trap it produces is scored identically.
+        """
+        source = """\
+type NonEmpty = { @String | string_length(@String.0) > 0 };
+
+public fn shout3(@NonEmpty -> @String)
+  requires(true)
+  ensures(string_length(@String.result) >= 0)
+  effects(pure)
+{
+  string_concat(@NonEmpty.0, "!")
+}
+"""
+        data = self._json(tmp_path, capsys, source)
+        fn = {f["name"]: f for f in data["functions"]}["shout3"]
+        assert fn["category"] == "skipped", fn
+        assert "string_length(@String.0) > 0" in fn["reason"], fn["reason"]
+        assert data["summary"]["failed"] == 0, data["summary"]
