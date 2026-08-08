@@ -671,8 +671,13 @@ class TestCmdVerify:
             encoding="utf-8",
         )
 
-        cmd_verify(str(main), as_json=True)
+        rc = cmd_verify(str(main), as_json=True)
         data = json.loads(capsys.readouterr().out)
+        # The fixture violates a precondition, so the verdict is part of what
+        # this pins: an E501 reported with a success exit code would otherwise
+        # keep it green.
+        assert rc == 1, rc
+        assert data["ok"] is False, data["ok"]
         obls, reported = data["obligations"], data["diagnostics"]
         assert obls and reported, (obls, reported)
 

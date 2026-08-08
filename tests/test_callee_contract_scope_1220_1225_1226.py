@@ -1277,16 +1277,22 @@ class TestObligationsCarryTheirDeclaringFile:
         assert {o.file for o in entry} == {"main.vera"}, entry
 
     def test_no_obligation_cites_a_line_its_file_lacks(self) -> None:
-        """The symptom that made the break visible without a join."""
+        """The symptom that made the break visible without a join.
+
+        BOTH files are bounded, not just the entry one: bounding the entry
+        file alone leaves an obligation that names the MODULE free to cite any
+        line at all, which is the same defect one file over.
+        """
+        module = _resolved(("hlib",), _HELPER_LIB)
         lengths = {
-            "main.vera": len(_HELPER_MAIN.splitlines()),
-            None: 10**9,
+            _ENTRY_FILE: len(_HELPER_MAIN.splitlines()),
+            str(module.file_path): len(_HELPER_LIB.splitlines()),
         }
-        result = self._verified()
+        result = self._verified([module])
+        seen = {o.file for o in result.obligations}
+        assert seen == set(lengths), (seen, set(lengths))
         for o in result.obligations:
-            limit = lengths.get(o.file)
-            if limit is not None:
-                assert o.line <= limit, (o.kind, o.file, o.line)
+            assert o.line <= lengths[o.file], (o.kind, o.file, o.line)
 
     def test_the_warm_session_agrees_with_the_cold_run(self) -> None:
         """The warm incremental path reifies through the same recorder, so
@@ -1372,6 +1378,41 @@ public fn main(@Unit -> @Int)
         quoted = self._quoted(self._WITH_STRING)
         assert '"a--b"' in quoted, quoted
         assert quoted.count("(") == quoted.count(")"), quoted
+
+    _WITH_ANNOTATION = """\
+private fn needs_both(@Int, @Int -> @Int)
+  requires(@Int.0 > 424242 /* first bound */
+           && @Int.1 > 424242)
+  ensures(true)
+  effects(pure)
+{
+  @Int.0
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  needs_both(1, 2)
+}
+"""
+
+    def test_an_annotation_comment_is_blanked_too(self) -> None:
+        """The third comment syntax, which the blanking fast path missed.
+
+        Vera has three comment forms — `--` to end of line, `{- -}` nesting,
+        and `/* */` annotation comments (spec §1.3) — and the early return
+        that skips blanking checked only the first two.  A clause whose ONLY
+        comment was an annotation therefore came back unblanked and was quoted
+        with the comment inside it, which is the defect the blanking exists to
+        prevent (PR #1239 review).
+        """
+        assert "--" not in self._WITH_ANNOTATION
+        assert "{-" not in self._WITH_ANNOTATION
+        quoted = self._quoted(self._WITH_ANNOTATION)
+        assert quoted == "requires(@Int.0 > 424242 && @Int.1 > 424242)", quoted
+        assert "/*" not in quoted and "first bound" not in quoted, quoted
 
     def test_an_uncommented_clause_is_unchanged(self) -> None:
         """Control: blanking must not touch a clause with no comment."""

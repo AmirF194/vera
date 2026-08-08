@@ -1409,6 +1409,50 @@ public fn caller(@Unit -> @Int)
             (o.kind, o.error_code, o.line) for o in result.obligations
         ]
 
+    def test_a_call_in_BOTH_positions_is_disclosed_once(self) -> None:
+        """The documented qualifier on "both drains", pinned.
+
+        A generic call written in the body AND in the `ensures` records ONE
+        demotion, from the body: a body that did not translate leaves no term
+        to check the postcondition against, so the clause never reaches
+        translation and demotes as E522 instead.  Every other fixture here has
+        the call in one position only, so a regression that double-recorded —
+        or that moved the single record to the clause — would pass all of them
+        while changing what a consumer counts.
+        """
+        result = _verify("""
+private forall<T> fn pick(@Array<T>, @Int -> @Int)
+  requires(@Int.0 > 10)
+  ensures(true)
+  effects(pure)
+{ @Int.0 }
+
+public fn caller(@Unit -> @Int)
+  requires(true)
+  ensures(pick([1, 2], 3) == 3)
+  effects(pure)
+{ pick([1, 2], 3) }
+""")
+        demoted = _e532_demotions(result)
+        assert len(demoted) == 1, [
+            (o.kind, o.error_code, o.line) for o in result.obligations
+        ]
+        # From the BODY, which is the later line of the two.
+        body_line = max(
+            o.line for o in result.obligations if o.fn_name == "caller"
+        )
+        assert demoted[0].line == body_line, (demoted[0].line, body_line)
+        # ... and the clause itself is disclosed as an undecidable
+        # postcondition rather than silently proving.
+        clause = [
+            o for o in result.obligations
+            if o.kind == "ensures" and o.error_code == "E522"
+        ]
+        assert len(clause) == 1, [
+            (o.kind, o.status, o.error_code) for o in result.obligations
+        ]
+        assert clause[0].status == "tier3"
+
     def test_the_non_generic_twin_is_still_checked_statically(self) -> None:
         """Control: drop `forall<T>` and the obligation is discharged, not
         demoted — a violating argument is a hard E501 and a satisfied one is

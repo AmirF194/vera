@@ -2481,13 +2481,22 @@ class ContractVerifier:
         synth_error_code = rep_ob.error_code or (
             "E500" if rep_ob.kind == "ensures" else ""
         )
+        # The obligation's OWN file, not this program's: aggregation runs
+        # AFTER `_declaring_module_scope` has been left, so `self.file` is the
+        # entry program again while `rep_ob.line` numbers the module that
+        # declared the clone.  Stamping the entry file here would pair a
+        # foreign line number with the wrong name — the join `verify --json`
+        # documents, broken in the one place that synthesises a diagnostic
+        # instead of re-emitting one (PR #1239 review, outside-diff).
         self.errors.append(Diagnostic(
             description=(
                 prefix
                 + f"{rep_ob.kind} obligation `{rep_ob.expr_text}` is violated."
             ),
             location=SourceLocation(
-                file=self.file, line=rep_ob.line, column=rep_ob.column,
+                file=rep_ob.file or self.file,
+                line=rep_ob.line,
+                column=rep_ob.column,
             ),
             rationale=(
                 "A contract obligation was neither discharged statically nor "
