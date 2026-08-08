@@ -29,13 +29,31 @@ differential in `tests/test_nested_handler_clause_ops.py`,
 `tests/test_effect_op_determinism.py` and
 `tests/test_state_exn_registration.py`.
 
+So have the **write-boundary** shapes ([#1212](https://github.com/aallan/vera/issues/1212)):
+the `write_guards/` directory is retired.  The Byte-literal width inside a
+value-position join — the defect the directory's `byte_*_if` probes cornered,
+at the `let`, state-init, `put`, `resume`, `with`, call-argument and
+constructor-field boundaries — lives in `tests/conformance/` as
+`ch01_byte_literal_join_width` and `ch07_state_byte_join_writes`, with the
+per-arm matrix and its controls in `tests/test_byte_literal_joins_1212.py`.
+The rest of that directory was the #1203 `@Nat` narrow / `@Nat`→`@Int` widen
+guards at the four write boundaries, the non-join Byte literal widths, and
+the refined-boundary Tier-3 disclosure, all of which the maintained
+differentials in `tests/test_nat_narrowing_return_differential.py`
+(`TestHandlerStateBoundaryDifferential1203`,
+`TestHandlerStateWidenDifferential1203`, and its `State<Byte>` family
+cases) already assert.  Its two parse-broken files went with it: the
+`let @Byte = 999` control was written in a `let … in …` form the grammar
+has no rule for, and its repaired spelling is a plain E170 at check (E301
+for the branch spelling) — a checker range gate, not a lowering question —
+while the empty-clause-list `handle[State<Nat>] { } in { … }` probe is
+superseded by its own valid-syntax sibling `p1_put_no_clause.vera`, which
+takes the same bare path through a get-only handler.
+
 **Not wired into CI.** These are probe programs, not curated fixtures:
 some deliberately fail (`check`, `verify`, or `run`) to demonstrate a
-defect that is now fixed, some pin the open issues [#1207](https://github.com/aallan/vera/issues/1207)
-and [#1212](https://github.com/aallan/vera/issues/1212), and some were
-superseded mid-round.  Two are **parse-broken** and flagged as such in
-the index below — they belong to the PRs that close their issues, and
-are counted by the differential sweep's `parse_skipped` allowance.  Each
+defect that is now fixed, some pin the open issue [#1207](https://github.com/aallan/vera/issues/1207),
+and some were superseded mid-round.  Each
 file's leading comment states what it probes and what the
 expected-vs-observed behaviour was AT THE TIME it was written; the
 tracked regression suites
@@ -52,7 +70,6 @@ review-round directory it came from.
 | `alias_families/` | Scalar/refined/parameterised aliases as the `State<T>`/`Exn<E>` argument: family naming and collapse, WASM value types, family registration, cross-module alias tables, alias depth chains, composite and pair-type families |
 | `clause_scoping/` | Clause slot binding: pattern/annotation names, mixed alias spellings, patternless clauses, De Bruijn order, declaration-scope resolution, clause-body lets/shadowing/closures, refined-class spellings, resume placement, with-update ordering, clause-env capture lifetime (GC rooting) |
 | `dispatch_paths/` | Bare vs clause-inlined vs qualified `put`/`get` parity, user-fn shadowing of op names, re-entrant ops in clause bodies, ops performed from closures, stateless-handler dispatch |
-| `write_guards/` | The #1203 write-boundary guards: `@Nat` narrowing and `@Nat`→`@Int` widening at init/put/resume/with, Byte literal widths at every boundary, refined-boundary disclosure, guard-obligation Tier-1 precision |
 | `checker_gates/` | Diagnostic gates: E128 quantifier bounds, E336/E533 state-declaration divergence (incl. the generic-handler lie/honest pairs and their lib fixtures), E337 arity, E331/E335 interactions, builtin-effect redefinition, unresolvable-type diagnostics |
 | `generic_handlers/` | `forall<T>` + `handle[State<T>]` shapes beyond the E533 gate probes: generic wrappers, instantiation-driving arguments, mono clones reaching codegen's per-family arms |
 | `nested_handlers/` | Handler nesting: cell isolation and push/pop, per-family save/restore, clause-body handles, cross-spelled nesting |
@@ -168,71 +185,6 @@ purpose-directory reorganisation.
 | `p_stateless_ref.vera` | Stateless put clause whose body re-puts `@Int.0 + 100` — a put from within the put clause itself | session |
 | `w_put.vera` | Where-helper NAMED `put` — does the effect-op fallback misfire on a non-effect call? | round2_family |
 | `w_resume.vera` | Where-helper named `resume` — reserved-name misfire twin | round2_family |
-
-### write_guards/ (60 files)
-
-| File | What it probes | Origin |
-|---|---|---|
-| `bare_obs.vera` | Bare `put(@Int.0)` into a Nat cell (get-only handler), observed via a `get(()) > 100` branch | round2_clauses |
-| `byte_arg_if.vera` | If-expression flowing into a `@Byte` fn argument — literal width through a branch | round3_gates |
-| `byte_bare33.vera` | Bare `put(33)` into a Byte cell (get-only handler) — Byte literal width on the bare path | round3_clause_env |
-| `byte_bare_put.vera` | Bare `put(200)` (no put clause) into a Byte cell — in-range bare-path literal, expects 200 | round3_gates |
-| `byte_delegated_put.vera` | `put(150)` delegated through a `<State<Byte>>` helper — cross-fn Byte literal width | round3_gates |
-| `byte_init999.vera` | Byte cell init literal 999 — out-of-range width at the init boundary | round3_gates |
-| `byte_init_if.vera` | Byte init from an if-expression — non-literal init width | round3_gates |
-| `byte_let999.vera` | `let @Byte = 999` — out-of-range Byte literal in a plain let (control outside handlers) — **parse-broken**, pending the PR that closes its issue | round3_gates |
-| `byte_let_if.vera` | `let @Byte =` an if-expression — branch-literal narrowing control | round3_gates |
-| `byte_neg_composite.vera` | `put(0 - 5)` composite negative expression into a Byte cell | round3_gates |
-| `byte_put42.vera` | Clause-dispatched `put(42)` into a Byte cell — literal width through the clause path | round3_clause_env |
-| `byte_put999.vera` | Clause-dispatched `put(999)` — out-of-range literal through the clause path | round3_gates |
-| `byte_put_arith.vera` | `put(1 + 2)` arithmetic expression into a Byte cell | round3_gates |
-| `byte_put_if.vera` | `put(if ...)` branch expression into a Byte cell | round3_gates |
-| `byte_refined_alias.vera` | Refined-Byte alias cell (`SmallByte`), in-range put — expects 3 | round3_gates |
-| `byte_refined_violating.vera` | Refined-Byte alias (`Tiny < 10`) with init 200 — init violates the refinement | round3_gates |
-| `byte_resume300.vera` | Get clause resumes 300 — out-of-Byte-range resume literal | round3_gates |
-| `byte_resume9.vera` | Get clause resumes the literal 9 into a Byte cell — resume-boundary literal width | round3_clause_env |
-| `byte_resume_arith.vera` | `resume(1 + 2)` arithmetic in a Byte get clause | round3_gates |
-| `byte_resume_if.vera` | `resume(if ...)` branch expression in a Byte get clause | round3_gates |
-| `byte_resume_lit.vera` | `resume(99)` in-range literal — expects 99, the resume-literal control | round3_gates |
-| `byte_roundtrip.vera` | `put(200)` / `get` roundtrip — in-range Byte cell baseline, expects 200 | round3_gates |
-| `byte_with77.vera` | `with @Byte = 77` — literal width at the with-update boundary | round3_clause_env |
-| `byte_with_lit.vera` | `with @Byte = 42` literal with-update — expects 42 | round3_gates |
-| `d1_literals.vera` | Literal negatives at all four `@Nat` write boundaries (init/put/resume/with) — all must be loud | round2_family |
-| `d2_block_tail_resume.vera` | `resume` in a Block tail after a preceding `let` — narrowing guard still applied | round2_family |
-| `mut_put.vera` | The project's `_PUT` differential fixture with its put clause removed — bare-path negative put | round2_family |
-| `p1.vera` | `put(@Int.0)` into a Nat cell, get-only handler — bare intrinsic path, negative arg | round2_family |
-| `p10_alias_nat_state.vera` | Unrefined alias cell (`MyNat = Nat`), bare-path put of an SMT-opaque negative | round2_family |
-| `p1205_neg.vera` | The #1205 shape with the init taken from an `@Int` fn arg — negative-init guard on the alias cell | session |
-| `p19_guard_bareput.vera` | Bare put of a negative via a delegated `<State<Count>>` effect, get-only handler — boundary guard | round2_family |
-| `p1_put_no_clause.vera` | Bare-path put of an SMT-opaque runtime negative (`get() - 100`) — bare-path guard probe | round2_family |
-| `p1_put_noclause.vera` | `put(@Int.0)` with an EMPTY clause list — clause-free handler still takes the bare path — **parse-broken**, pending the PR that closes its issue | round2_family |
-| `p2.vera` | Negative through a `@Nat` cell observed as `get(()) < 0` — no later boundary guard can mask it | round2_family |
-| `p20_guard_init.vera` | State init from a negative fn arg (`@Count = @Int.0`) — init-boundary narrowing trap | round2_family |
-| `p21_guard_resume.vera` | Get clause resumes a negative fn arg — resume-boundary narrowing trap | round2_family |
-| `p2_put_with_clause.vera` | p1_put_no_clause control WITH a put clause — the clause-inlined guard path (#1203) | round2_family |
-| `p3.vera` | Tier-3 put arg (`Random.random_int` negative), bare path — fallback must record guarded=True | round2_family |
-| `p4.vera` | p3 WITH a put clause — differential: clause-inlined guard vs the bare path | round2_family |
-| `p4_custom_effect_resume.vera` | User effect op returning Nat; clause resumes a negative Int — guard on a non-builtin resume | round2_family |
-| `p4_refined.vera` | Alias-of-refined-alias chain (`Pos2 = Pos`), requires-protected put — Tier-1 discharge through the chain | round2_family |
-| `p4c_byte_with.vera` | Byte literal at every write boundary in one handler: init 1, put-arg 3, with-override 200 | round3_clause_env |
-| `p5_exn.vera` | `resume` of a negative inside an `Exn` throw clause — is the fallback's guarded=True truthful? | round2_family |
-| `p5_get_resume_guard.vera` | Get clause resumes an SMT-opaque negative (`@Nat.0 - 50`) — resume guard must trap | round2_family |
-| `p6.vera` | Get clause resumes a Tier-3 Random negative — resume-boundary guard on an untranslatable value | round2_family |
-| `p6_init_guard_control.vera` | SMT-opaque negative state INIT (outer `get() - 50`) — the init guard must trap | round2_family |
-| `p7_with_update_control.vera` | `with @Nat =` an SMT-opaque negative — the with-update guard must trap | round2_family |
-| `p8_refined_state.vera` | Refined-alias cell whose init violates the predicate at runtime (SMT-opaque) — does anything trap? | round2_family |
-| `p8_resume_guard.vera` | Get clause resumes a negative fn arg through an alias cell — the Nat bind guard must trap | round2_family |
-| `p8b_positive.vera` | p8_resume_guard with a positive arg — the guard must not false-trap | round2_family |
-| `p_bytelet.vera` | `let @Byte = 7` then `byte_to_int` — plain Byte let-literal control | session |
-| `p_bytewith.vera` | Byte literals at init (5), with-update (77), and put (1) — widths at every clause boundary | session |
-| `p_qualput_neg.vera` | Qualified `State.put` of a negative with a get-only handler — qualified bare-path guard | session |
-| `pr_alias.vera` | Negative put through an alias cell, observed as Bool — alias-path guard differential | round2_family |
-| `pr_alias_min.vera` | Get-only alias cell observed as Bool — minimal alias control | round2_family |
-| `pr_init.vera` | State-init guard vs the value riding the operand stack across the cell push | round2_family |
-| `pr_init_req.vera` | An enclosing `requires(@Int.0 >= 0)` must discharge the init obligation Tier-1 — precision | round2_family |
-| `pr_upd_req.vera` | Keep-old with-update obligation under a FRESH clause env — precision | round2_family |
-| `pr_update.vera` | `with @Nat =` a Tier-3 Random negative — with-update narrowing guard | round2_family |
-| `widen_ok.vera` | `@Nat` value into a `State<Int>` cell — the widen dual must not false-trap | round2_family |
 
 ### checker_gates/ (76 files)
 

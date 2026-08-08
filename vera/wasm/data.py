@@ -81,6 +81,15 @@ class DataMixin:
         arg_instrs_list: list[list[str]] = []
         arg_wasm_types: list[str] = []
         for i, arg in enumerate(expr.args):
+            # #1092/#1212: an int literal the checker coerced into a GENERIC
+            # field instantiated at @Byte is marked BEFORE translation, so
+            # both its lowering and the `arg_wt` inference below see the
+            # field's i32 width — including a literal inside an `if` /
+            # `match` argument, through the ONE branch descent.  See the
+            # #1092 note on `_ctor_field_targets_byte` for why the literal
+            # alone cannot decide this.
+            if self._ctor_field_targets_byte(expr, i):
+                self._mark_byte_write_value(arg, "Byte")
             arg_instrs = self.translate_expr(arg, env)
             if arg_instrs is None:
                 return None
@@ -121,18 +130,14 @@ class DataMixin:
             # show/hash — sizes the field from the instantiated type (Byte
             # -> i32 at the i32 offset): extraction read 0 for a stored 255
             # and `MkB(0) == MkB(255)` compared EQUAL, silently, on a
-            # check-green program.  Store the coerced literal at the field's
-            # i32 Byte width, exactly as the (always-correct) `@Byte`-slot
-            # passthrough argument does.  The target instantiation comes
-            # from the checker-recorded target type (the #820 table); an
-            # unthreaded transform->compile keeps the documented #798/#820
-            # degraded-path caveat.
-            if (isinstance(arg, ast.IntLit)
-                    and 0 <= arg.value <= 255
-                    and arg_wt == "i64"
-                    and self._ctor_field_targets_byte(expr, i)):
-                arg_instrs = [f"i32.const {arg.value}"]
-                arg_wt = "i32"
+            # check-green program.  The marking above stores the coerced
+            # literal at the field's i32 Byte width, exactly as the
+            # (always-correct) `@Byte`-slot passthrough argument does; a
+            # literal outside 0..255 is E170 at check, so nothing narrower
+            # than the marking's own range test is needed here.  The target
+            # instantiation comes from the checker-recorded target type (the
+            # #820 table); an unthreaded transform->compile keeps the
+            # documented #798/#820 degraded-path caveat.
             arg_instrs_list.append(arg_instrs)
             arg_wasm_types.append(arg_wt)
 

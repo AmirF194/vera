@@ -764,12 +764,23 @@ def test_corpus_is_almost_entirely_parseable(sweep: Sweep) -> None:
     Counted over the real ``.vera`` origins ONLY (#1208 round 2).  Against
     ``files_seen`` — corpus plus battery — the number measured two
     populations at once, so adding battery entries raised it and a corpus
-    that lost files could pass unnoticed.  The corpus is 494 programs across
-    ``examples/``, ``tests/conformance/`` and ``tests/probes/``; the floor is
-    that with a little headroom, and the way to raise it is to add ``.vera``
-    programs.
+    that lost files could pass unnoticed.
+
+    The floor is on the MAINTAINED corpus alone (#1213 burndown): ``examples/``
+    and ``tests/conformance/`` only ever grow, so a floor over them catches
+    exactly the disappearance this test is about.  ``tests/probes/`` is a
+    transitional promotion pool with a declared end-of-life — each burndown PR
+    promotes its issue's distinguishing shapes into the two maintained
+    populations and DELETES the probes it dispositioned — so counting it here
+    would turn every planned retirement into a failing floor that has to be
+    lowered, which is a floor measuring nothing.  Raise the number below by
+    adding an example or a conformance program.
     """
-    assert len(sweep.corpus_files) > 480, len(sweep.corpus_files)
+    maintained = [
+        f for f in sweep.corpus_files
+        if f.startswith(("examples/", "tests/conformance/"))
+    ]
+    assert len(maintained) > 240, (len(maintained), len(sweep.corpus_files))
     assert len(sweep.parse_skipped) <= 10, sweep.parse_skipped
 
 

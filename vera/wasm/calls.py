@@ -451,10 +451,13 @@ class CallsMixin:
         # matching put's void result.
         if call.name == "resume" and self._in_state_clause:
             if self._state_clause_family_base is not None:
-                byte_val = self._state_byte_literal(
+                # #865/#1212: the resumed value is the op's result at the
+                # call site, so a Byte cell's `resume(1)` — and
+                # `resume(if c then { 1 } else { 2 })`, the very form the
+                # E602 clause skip message recommends — must lower at i32.
+                # Marked before translating; the ONE branch descent.
+                self._mark_state_byte_write(
                     call.args[0], self._state_clause_family_base)
-                if byte_val is not None:
-                    return byte_val
             return self.translate_expr(call.args[0], env)
 
         # Check if this is an effect operation (e.g. get/put/throw)
@@ -483,27 +486,36 @@ class CallsMixin:
             # the predicate), so the slice would have matched nothing and
             # switched this guard off silently, while the verifier went on
             # recording the obligation as `tier3_runtime`.
+            # ONE normalisation for all three sibling decisions (PR #1238
+            # review).  The Nat/Int guards resolved `cell.base` and the Byte
+            # width coercion did not, so a base that still needs alias
+            # resolution — which `family_fallback_name`'s residue can produce
+            # — would fire the guards and skip the coercion, putting an
+            # `i64.const` into an i32 cell.
+            cell = self._effect_op_cells.get(call.name)
+            is_state_put = (
+                call.name == "put" and len(call.args) == 1
+                and cell is not None
+            )
+            base = (
+                self._resolve_base_type_name(cell.base)
+                if is_state_put and cell is not None else None
+            )
+            if is_state_put:
+                # #865/#1212: mark the Byte width BEFORE the argument is
+                # translated, so a literal — or the literal leaves of an
+                # `if` / `match` argument — lowers at the cell's i32 width.
+                self._mark_state_byte_write(call.args[0], base or "")
             for arg in call.args:
                 arg_instrs = self.translate_expr(arg, env)
                 if arg_instrs is None:
                     return None
                 instructions.extend(arg_instrs)
-            cell = self._effect_op_cells.get(call.name)
-            if call.name == "put" and len(call.args) == 1 and cell is not None:
-                # ONE normalisation for all three sibling decisions (PR
-                # #1238 review).  The Nat/Int guards resolved `cell.base`
-                # and the Byte width coercion did not, so a base that still
-                # needs alias resolution — which `family_fallback_name`'s
-                # residue can produce — would fire the guards and skip the
-                # coercion, putting an `i64.const` into an i32 cell.
-                base = self._resolve_base_type_name(cell.base)
+            if is_state_put:
                 if base == "Nat" and self._narrows_into_nat(call.args[0]):
                     instructions = self._emit_nat_bind_guard(instructions)
                 elif base == "Int" and self._result_is_nat(call.args[0]):
                     instructions = self._emit_int_widen_guard(instructions)
-                byte_arg = self._state_byte_literal(call.args[0], base)
-                if byte_arg is not None:
-                    instructions = byte_arg
             # throw uses WASM throw instruction, not call
             if call.name == "throw":
                 instructions.append(f"throw {target_name}")
@@ -563,16 +575,18 @@ class CallsMixin:
         # position.  Disjoint from `nat_params` / `int_params`.
         byte_params = self._fn_byte_params.get(call_target, ())
         for i, arg in enumerate(call.args):
-            if (i < len(byte_params) and byte_params[i]
-                    and isinstance(arg, ast.IntLit)):
+            if i < len(byte_params) and byte_params[i]:
                 # The bidirectional checker (`_synth_expr(expected=Byte)`)
                 # accepts a 0..255 int literal as a Byte argument (spec §11);
                 # lower it as i32 rather than the default i64 to match the
                 # callee's i32 Byte parameter.  Non-literal Byte arguments (a
                 # Byte slot ref, a Byte-returning call) already yield i32 via
                 # `translate_expr`, so only the literal needs the override.
-                instructions.append(f"i32.const {arg.value}")
-                continue
+                # #1212: the same coercion for a literal inside an `if` /
+                # `match` argument, through the ONE branch descent — the
+                # bare-`IntLit` test this replaced left
+                # `byte_id(if c then { 1 } else { 2 })` invalid WASM.
+                self._mark_byte_write_value(arg, "Byte")
             arg_instrs = self.translate_expr(arg, env)
             if arg_instrs is None:
                 return None
