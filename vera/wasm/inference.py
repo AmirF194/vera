@@ -99,6 +99,11 @@ class InferenceMixin:
         Returns "i64" for Int/Nat, "f64" for Float64, "i32" for Bool,
         None for unknown/Unit.  Used to select the correct operators.
 
+        One exception to the Int/Nat rule: an ``IntLit`` carrying the #1212
+        Byte-width mark returns "i32", because that is what the lowering
+        emits for it — the two deciders read the same mark so a marked leaf
+        cannot be inferred at one width and lowered at the other.
+
         # WALKER_COVERAGE: (#597 — every Expr subclass below has a
         # disposition; check_walker_coverage.py enforces completeness.)
         #

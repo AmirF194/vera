@@ -853,8 +853,12 @@ def test_inline_battery_reaches_the_alias_corners(sweep: Sweep) -> None:
         for r in rendered
     ), sorted(r for r in rendered if "effects" in r)
     # The former prelude-alias spellings, pinned on the CHECKER's side — the
-    # rendering codegen now agrees with (#1221).
+    # rendering codegen now agrees with (#1221).  BOTH names the battery
+    # exercises are named: they came from different prelude blocks (array vs
+    # Option), so pinning one leaves a regression in the other's rendering
+    # free to pass here.
     assert "Option<ArrayMapFn<Int, Bool>>" in rendered
+    assert "Option<OptionMapFn<Int, Bool>>" in rendered
     assert "Option<fn(Int -> Bool) effects(pure)>" in rendered
     # #1208: the declaration-ORDER corner, in both directions.  An ADT
     # declared below the alias that names it is invisible to that body (the

@@ -135,7 +135,7 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `  monomorphize.py` | 1,408 | | Generic instantiation, type inference, ability constraint checking (Pass 1.5) | |
 | `  functions.py` | 1,276 | | Function body compilation, GC prologue/epilogue (Pass 2) | |
 | `  tail_position.py` | 106 | | Tail-position analysis for the function body compiler | |
-| `  closures.py` | 995 | | Closure lifting, GC instrumentation | |
+| `  closures.py` | 1,037 | | Closure lifting, GC instrumentation | |
 | `  contracts.py` | 1,332 | | Runtime pre/postconditions, old state snapshots, decreases termination guard (entry check-and-set, per-function chain state, ADT rank helpers, self-tail site checks); the refinement boundary guard derives its binder from `naming.refinement_binder_parts` and layers the erased-base skip and the nested-base E618 on top.  Also the ONE derivation of what that guard layer lowers — `_tuple_component_guard_sites` decomposes a boundary tuple for the emitter, the return-epilogue gate and the host-import pre-scan alike, and `_signature_refinement_predicates` enumerates every predicate a signature will be guarded by (#1210) | |
 | `  assembly.py` | 1,472 | | WAT module assembly, `$alloc`, `$gc_collect` | |
 | `  compilability.py` | 1,002 | | Compilability checks; the two host-import pre-scans (State/Exn families and IO/Markdown/Regex builtins), walking each function's body, its contract predicates and every signature the guard layer will check — including closures', cycle-guarded | |
