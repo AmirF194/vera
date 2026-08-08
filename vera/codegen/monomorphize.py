@@ -566,8 +566,17 @@ class MonomorphizationMixin:
 
         ``origin=None`` (a main-file generic, or a nested helper of one) makes
         this the identity: the flat maps already hold that namespace.
+
+        The source scope is paired with the alias scope here as at the other
+        four doors (#1186/#1189, PR #1224 review): entering a module's
+        namespace leaves ``file``/``source`` on the IMPORTER, so a diagnostic
+        raised while the clone is built would carry the importer's path with
+        module-local line/column — coordinates naming unrelated source, and a
+        location-keyed dedup (E618) merging two modules' reports into one.
+        Nothing under this door reports today; the pairing is what keeps that
+        true of whatever moves into it.
         """
-        with self._module_alias_scope(origin):
+        with self._module_alias_scope(origin), self._module_source_scope(origin):
             yield self._alias_env
 
     def _record_clone_origin(self, base_name: str, clone_name: str) -> None:

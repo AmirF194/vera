@@ -531,6 +531,33 @@ class TestImportedGenericCloneEnv:
                 "reports as violated: verify and run disagree"
             )
 
+    def test_clone_construction_enters_the_modules_source_scope(self) -> None:
+        """The clone-construction door pairs both scopes, like its siblings.
+
+        Codegen enters an imported module's namespace at five doors; the
+        alias scope alone leaves ``file``/``source`` on the IMPORTER, so a
+        diagnostic raised there would pair the importer's path with
+        module-local coordinates — the #1186/#1189 attribution failure, and
+        the reason the E618 dedup (keyed on the resolved location) once
+        merged two modules' reports.  Nothing inside this door reports
+        today; the pairing is what keeps that true of whatever moves into
+        it, so it is asserted structurally rather than through a
+        diagnostic that does not exist.
+        """
+        from vera.codegen.core import CodeGenerator
+
+        module = _resolved(("blib",), _GENERIC_LIB)
+        gen = CodeGenerator(
+            source=_GENERIC_MAIN, file="main.vera", resolved_modules=[module],
+        )
+        gen.compile_program(parse_to_ast(_GENERIC_MAIN))
+        assert gen.file == "main.vera"
+        with gen._clone_alias_env(("blib",)):
+            assert gen.file == str(module.file_path), gen.file
+            assert gen.source == _GENERIC_LIB
+        assert gen.file == "main.vera", "the source scope was not restored"
+        assert gen.source == _GENERIC_MAIN
+
 
 class TestImportedNestedGenericOriginEnv:
     """A generic nested under an imported NON-generic function (#1208 round 2).
@@ -1885,3 +1912,206 @@ public fn main(@Unit -> @Int)
 }
 """
         assert _run(src) == 21
+
+# =====================================================================
+# #1227 — an imported ADT's declaration index is its OWNING module's
+# =====================================================================
+
+_XMOD_ADT_LIB = """\
+public data Float {
+  MkFloat(Int)
+}
+"""
+
+# The same module with a declaration ahead of the ADT, so "the module's own
+# position" is distinguishable from "0" and from any before-everything
+# sentinel.
+_XMOD_ADT_LIB_PADDED = """\
+public data Pad {
+  MkPad(Int)
+}
+
+public data Float {
+  MkFloat(Int)
+}
+"""
+
+_XMOD_ADT_MAIN = """\
+import dolib;
+
+type M = Float;
+
+public fn pick(@Array<M>, @Array<Float> -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  nat_to_int(array_length(@Array<M>.0))
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  pick([], [])
+}
+"""
+
+
+def _checker_env(source: str, modules: list[ResolvedModule]) -> naming.AliasEnv:
+    from vera.checker.core import TypeChecker
+
+    checker = TypeChecker(
+        source=source, file="main.vera", resolved_modules=modules,
+    )
+    checker.check_program(parse_to_ast(source))
+    return naming.alias_env_from_environment(checker.env)
+
+
+def _codegen_env(
+    source: str, modules: list[ResolvedModule],
+) -> naming.AliasEnv:
+    from vera.codegen.core import CodeGenerator
+
+    gen = CodeGenerator(
+        source=source, file="main.vera", resolved_modules=modules,
+    )
+    gen.compile_program(parse_to_ast(source))
+    return gen._alias_env
+
+
+def _params_of(source: str, fn_name: str) -> tuple[ast.TypeExpr, ...]:
+    prog = parse_to_ast(source)
+    fn = next(
+        tld.decl for tld in prog.declarations
+        if isinstance(tld.decl, ast.FnDecl) and tld.decl.name == fn_name
+    )
+    return fn.params
+
+
+class TestImportedAdtIndexIsPerOwningNamespace:
+    """An imported ADT is ordered where ITS module declared it.
+
+    Codegen's ``_adt_layouts`` is one map across every absorbed namespace,
+    while the alias maps and the declaration-index space are module-scoped
+    (§8.4.1, PR #1224).  An imported ADT therefore reached the main file's
+    naming environment with no index of its own and took the
+    before-everything fallback every built-in takes — so a main-file alias
+    naming it resolved THROUGH it, while the checker (which carries the
+    ADT's own module-space index) left the alias body opaque.
+
+    ``type M = Float;`` over an imported ``data Float`` is the shape that
+    exhibits it: the checker partitions ``['Array<?>', 'Array<Float>']`` and
+    codegen rendered ``['Array<Float>', 'Array<Float>']``, merging two
+    parameter stacks the binding table keeps apart (#1227).  A user ADT
+    named after a removed built-in alias is what makes the divergence
+    visible rather than merely latent — the alias falls back to ``?`` on the
+    side that cannot see the ADT.
+    """
+
+    def test_codegen_partitions_what_the_checker_partitions(self) -> None:
+        """The differential, on the rendering both sides key off."""
+        module = _resolved(("dolib",), _XMOD_ADT_LIB)
+        params = _params_of(_XMOD_ADT_MAIN, "pick")
+        check_env = _checker_env(_XMOD_ADT_MAIN, [module])
+        gen_env = _codegen_env(_XMOD_ADT_MAIN, [module])
+        checker_names = [naming.slot_name(te, check_env) for te in params]
+        codegen_names = [naming.slot_name(te, gen_env) for te in params]
+        assert checker_names == codegen_names, (
+            "codegen and the checker partition pick's parameters "
+            f"differently: checker {checker_names} vs codegen {codegen_names}"
+        )
+
+    def test_the_export_reads_the_parameter_the_checker_names(self) -> None:
+        """The consequence, in the emitted instruction stream.
+
+        ``@Array<M>.0`` is parameter 1 for the checker — one of two stacks.
+        Merged into one stack, index 0 is the LAST occurrence, so the body
+        loads the second array's locals instead.
+        """
+        module = _resolved(("dolib",), _XMOD_ADT_LIB)
+        result = _compile_mod(_XMOD_ADT_MAIN, [module])
+        errors = [
+            d for d in result.diagnostics  # type: ignore[attr-defined]
+            if d.severity == "error"
+        ]
+        assert not errors, f"unexpected codegen errors: {errors}"
+        body = _fn_body(result.wat, "pick")  # type: ignore[attr-defined]
+        reads = _local_gets(body)
+        assert {0, 1} & reads, (
+            "the emitted body does not read parameter 1:\n" + body
+        )
+        assert not ({2, 3} & reads), (
+            "the emitted body reads parameter 2 — the imported ADT is still "
+            f"ordered ahead of the main file's aliases:\n{body}"
+        )
+
+    def test_the_index_is_the_modules_own_position(self) -> None:
+        """Structural, and against the checker's number rather than a rule.
+
+        The module here declares an ADT ahead of ``Float``, so its own
+        position is 1 — distinguishable from 0 and from any
+        before-everything or after-everything sentinel that would happen to
+        render this one program correctly.
+        """
+        module = _resolved(("dolib",), _XMOD_ADT_LIB_PADDED)
+        check_env = _checker_env(_XMOD_ADT_MAIN, [module])
+        gen_env = _codegen_env(_XMOD_ADT_MAIN, [module])
+        assert check_env.data_types["Float"] == 1, check_env.data_types
+        assert gen_env.data_types["Float"] == check_env.data_types["Float"], (
+            f"codegen orders the imported ADT at "
+            f"{gen_env.data_types['Float']}, the checker at "
+            f"{check_env.data_types['Float']}"
+        )
+
+    def test_a_locally_declared_adt_keeps_the_main_files_index(self) -> None:
+        """The control: a main-file ADT is still ordered by the main file.
+
+        Green before and after — it differs from the repro by exactly the
+        namespace the ADT is declared in, so it pins that the fix reorders
+        imported declarations only.
+        """
+        source = _XMOD_ADT_MAIN.replace(
+            "import dolib;\n\ntype M = Float;",
+            "private data Float {\n  MkFloat(Int)\n}\n\ntype M = Float;",
+        )
+        check_env = _checker_env(source, [])
+        gen_env = _codegen_env(source, [])
+        params = _params_of(source, "pick")
+        checker_names = [naming.slot_name(te, check_env) for te in params]
+        codegen_names = [naming.slot_name(te, gen_env) for te in params]
+        assert checker_names == ["Array<Float>", "Array<Float>"], checker_names
+        assert codegen_names == checker_names, codegen_names
+
+    def test_the_module_names_its_own_adt_in_its_own_scope(self) -> None:
+        """The other direction: inside the module's scope the ADT is visible.
+
+        The owning module's own alias bodies must keep resolving through it
+        — an index that made it invisible everywhere would satisfy the
+        differential above by breaking the module.
+        """
+        from vera.codegen.core import CodeGenerator
+
+        lib = _XMOD_ADT_LIB + """
+type N = Float;
+
+public fn count(@Array<N> -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  nat_to_int(array_length(@Array<N>.0))
+}
+"""
+        module = _resolved(("dolib",), lib)
+        gen = CodeGenerator(
+            source=_XMOD_ADT_MAIN, file="main.vera", resolved_modules=[module],
+        )
+        gen.compile_program(parse_to_ast(_XMOD_ADT_MAIN))
+        with gen._module_alias_scope(("dolib",)):
+            assert gen._alias_env.data_types["Float"] == 0, (
+                gen._alias_env.data_types
+            )
+            te = _params_of(lib, "count")[0]
+            assert naming.slot_name(te, gen._alias_env) == "Array<Float>"
