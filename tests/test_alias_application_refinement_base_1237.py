@@ -221,13 +221,25 @@ class TestTheValidProgramIsAccepted:
         separates a correct rejection from the spurious one this file exists to
         remove.
         """
-        bounded = _APPLIED.replace("requires(@Nat.0 >= 18)\n  ensures(true)\n  "
-                                   "effects(pure)\n{\n  @Nat.0\n}\n\npublic fn "
-                                   "main",
-                                   "requires(@Nat.0 >= 100)\n  ensures(true)\n"
-                                   "  effects(pure)\n{\n  @Nat.0\n}\n\npublic "
-                                   "fn main")
-        assert "requires(@Nat.0 >= 100)" in bounded, bounded
+        # Keyed on the function HEADER, so the substitution names `need18`
+        # rather than selecting it by its position before `main`: `mk` and
+        # `need18` have byte-identical contract bodies, and a positional
+        # anchor would silently retarget if either moved.
+        bounded = _APPLIED.replace(
+            "private fn need18(@Nat -> @Nat)\n  requires(@Nat.0 >= 18)",
+            "private fn need18(@Nat -> @Nat)\n  requires(@Nat.0 >= 100)",
+        )
+        assert (
+            "private fn need18(@Nat -> @Nat)\n  requires(@Nat.0 >= 100)"
+            in bounded
+        ), bounded
+        # ... and `mk` still grants `>= 18`, so the rejection below is about
+        # what the refinement provides rather than about a callee that was
+        # rewritten too.
+        assert (
+            "private fn mk(@Nat -> @Grown)\n  requires(@Nat.0 >= 18)" in bounded
+        ), bounded
+        assert bounded.count("requires(@Nat.0 >= 100)") == 1, bounded
         result = _verify(bounded)
         assert "E501" in _codes(result), (
             "the refined return grants `>= 18`; a consumer wanting `>= 100` "
@@ -254,7 +266,8 @@ class TestApplicationDepth:
         grown = _resolve_in_verifier(source, "Grown")
         assert isinstance(grown, RefinedType), grown
         assert grown.base == NAT, grown.base
-        assert not _codes(_verify(source)), _codes(_verify(source))
+        codes = _codes(_verify(source))
+        assert not codes, codes
         assert _run(source) == 20
 
     def test_an_alias_whose_body_applies_another_alias(self) -> None:
@@ -269,7 +282,8 @@ class TestApplicationDepth:
         grown = _resolve_in_verifier(source, "Grown")
         assert isinstance(grown, RefinedType), grown
         assert grown.base == NAT, grown.base
-        assert not _codes(_verify(source)), _codes(_verify(source))
+        codes = _codes(_verify(source))
+        assert not codes, codes
         assert _run(source) == 20
 
 
@@ -379,5 +393,6 @@ public fn main(@Unit -> @Int)
             "}\n",
         )
         assert "need_small(mk(7))" in source, source
-        assert "E501" in _codes(_verify(source)), _codes(_verify(source))
+        codes = _codes(_verify(source))
+        assert "E501" in codes, codes
         assert _run(source) == 7

@@ -1572,6 +1572,141 @@ public fn main(@Unit -> @Int)
                 .replace("FIRST", first)
                 .replace("ARG", arg))
 
+    #: A zero-size argument that is ITSELF a call carrying a real
+    #: precondition.  ``INNER`` / ``PARAM`` / ``FIRST`` are substituted by
+    #: :meth:`_nested_src`.
+    _NESTED = """\
+private fn inner(@Int -> @INNER)
+  requires(@Int.0 > 100)
+  ensures(true)
+  effects(pure)
+{
+  FIRST
+}
+
+private fn outer(@PARAM, @Nat -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  nat_to_int(@Nat.0)
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  outer(inner(ARG), 7)
+}
+"""
+
+    def _nested_src(self, inner: str, first: str, arg: str) -> str:
+        return (self._NESTED
+                .replace("@INNER", f"@{inner}")
+                .replace("@PARAM", f"@{inner}")
+                .replace("FIRST", first)
+                .replace("ARG", arg))
+
+    def test_an_erased_argument_keeps_its_own_nested_obligation(self) -> None:
+        """A zero-size argument's expression is still WALKED (#1214).
+
+        Only its RESULT is discarded.  The walk is what records a nested
+        call's own precondition obligation, so dropping the argument before
+        translating it — rather than after — would make `outer(inner(5), 7)`
+        lose `inner`'s violated precondition entirely: a silent static-coverage
+        gap of exactly the kind #882 closed, reopened through the zero-size
+        door.
+
+        Asserted as a differential against the informative spelling, so
+        "records something" is not enough — it has to record the SAME thing.
+        """
+        erased = _verify(self._nested_src("Unit", "()", "5"))
+        informative = _verify(self._nested_src("Bool", "true", "5"))
+
+        def shape(result: object) -> list[tuple[str, str]]:
+            return [
+                (o.kind, o.status)
+                for o in result.obligations  # type: ignore[attr-defined]
+            ]
+
+        nested = [
+            o for o in erased.obligations
+            if o.kind == "call_pre" and o.status == "violated"
+        ]
+        assert len(nested) == 1, shape(erased)
+        assert nested[0].fn_name == "main", nested[0]
+        assert shape(erased) == shape(informative), (
+            f"the erased spelling lost or gained an obligation: "
+            f"{shape(erased)} vs {shape(informative)}"
+        )
+        assert erased.summary == informative.summary, (
+            erased.summary, informative.summary,
+        )
+        assert any(
+            d.error_code == "E501" and "inner" in d.description
+            for d in erased.diagnostics
+        ), [d.description[:80] for d in erased.diagnostics]
+
+    def test_a_satisfied_nested_obligation_discharges_under_both(self) -> None:
+        """The same shape with an argument the nested precondition allows: no
+        error under either spelling, so the test above is measuring the
+        obligation and not a call that always fails."""
+        for inner, first in (("Unit", "()"), ("Bool", "true")):
+            _verify_ok(self._nested_src(inner, first, "500"))
+
+    #: ``Future<Unit>`` is the SECOND zero-size type: `Future<T>` is
+    #: representation-transparent (#841), so it erases exactly as bare `Unit`
+    #: does and `erases_to_unit` recurses through it.  Nothing else reaches
+    #: that recursion through the call-summary mask — the existing
+    #: `Future<Unit>` fixtures are checker-side (E183/E206) — so without these
+    #: two the arm is unexercised on this path.
+    _FUTURE = """\
+private fn need(@PARAM, @Nat -> @Int)
+  requires(@Nat.0 > 100)
+  ensures(true)
+  effects(pure)
+{
+  nat_to_int(@Nat.0)
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<Async>)
+{
+  need(async(()), ARG)
+}
+"""
+
+    def _future_src(self, param: str, arg: str, prelude: str = "") -> str:
+        return prelude + (self._FUTURE
+                          .replace("@PARAM", f"@{param}")
+                          .replace("ARG", arg))
+
+    def test_a_future_unit_argument_is_zero_size_too(self) -> None:
+        """Direct `@Future<Unit>`: the formal is masked, so the informative
+        `@Nat` formal still pairs with the second argument and its precondition
+        is CHECKED.  Unmasked, `async(())` fails to translate and the whole
+        call — precondition included — is dropped."""
+        errs = _verify_err(
+            self._future_src("Future<Unit>", "5"),
+            "may violate the callee's precondition",
+        )
+        assert any(e.error_code == "E501" for e in errs), errs
+        _verify_ok(self._future_src("Future<Unit>", "500"))
+
+    def test_an_aliased_future_unit_argument_is_zero_size_too(self) -> None:
+        """... and through an alias, since the mask resolves the formal in the
+        callee's namespace rather than matching its spelling."""
+        prelude = "type Done = Future<Unit>;\n\n"
+        errs = _verify_err(
+            self._future_src("Done", "5", prelude),
+            "may violate the callee's precondition",
+        )
+        assert any(e.error_code == "E501" for e in errs), errs
+        _verify_ok(self._future_src("Done", "500", prelude))
+
     def test_the_call_precondition_is_checked_under_both_spellings(
         self,
     ) -> None:

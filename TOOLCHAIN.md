@@ -160,8 +160,10 @@ common one: Vera counts UTF-8 bytes and Z3's string theory has no byte-length
 operator), the constraint would reach the solver as nothing at all, the inputs
 could violate it, and the function's own entry guard would trap. That trap is a
 limit of the generator, not a falsified contract, so the function is `SKIPPED`
-with the blocking conjunct named — `cannot generate inputs satisfying
-` ``string_length(@String.0) > 0`` — rather than counted as a failure.
+with the blocking conjunct named rather than counted as a failure:
+``cannot generate inputs satisfying `string_length(@String.0) > 0` (see #1229)``.
+The same reason is repeated in an `E701` warning, so a `--json` consumer reading
+only `diagnostics` still learns why nothing ran.
 
 ---
 
