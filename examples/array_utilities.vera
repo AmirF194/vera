@@ -43,7 +43,7 @@ public fn merge_sections(@Unit -> @Int)
 -- ---------------------------------------------------------------
 public fn count_above_cutoff(@Unit -> @Int)
   requires(true)
-  ensures(@Int.result >= 0)
+  ensures(@Int.result == 6)
   effects(pure)
 {
   let @Array<Int> = [85, 72, 91, 60, 45, 78, 55];
@@ -57,7 +57,7 @@ public fn count_above_cutoff(@Unit -> @Int)
 -- ---------------------------------------------------------------
 public fn anyone_failed(@Unit -> @Bool)
   requires(true)
-  ensures(true)
+  ensures(@Bool.result)
   effects(pure)
 {
   let @Array<Int> = [85, 72, 91, 60, 45, 78, 55];
@@ -70,7 +70,7 @@ public fn anyone_failed(@Unit -> @Bool)
 -- ---------------------------------------------------------------
 public fn everyone_passed(@Unit -> @Bool)
   requires(true)
-  ensures(true)
+  ensures(!@Bool.result)
   effects(pure)
 {
   let @Array<Int> = [85, 72, 91, 60, 45, 78, 55];
@@ -78,15 +78,20 @@ public fn everyone_passed(@Unit -> @Bool)
 }
 
 -- ---------------------------------------------------------------
--- Find the first grade that strictly exceeds a threshold.  Returns
+-- Find the first grade that strictly exceeds the cutoff.  Returns
 -- `Some(grade)` for the first match, `None` if no one scored high
--- enough.
+-- enough — the closure captures the cutoff from the enclosing `let`.
+-- The cutoff is a binding rather than a parameter so the function can
+-- state what it returns: a caller reasons about a helper only through
+-- its `ensures`, and a per-threshold answer is not something one
+-- postcondition can name.
 -- ---------------------------------------------------------------
-public fn first_above(@Int -> @Int)
+public fn first_above(@Unit -> @Int)
   requires(true)
-  ensures(true)
+  ensures(@Int.result == 91)
   effects(pure)
 {
+  let @Int = 80;
   let @Array<Int> = [60, 72, 91, 85, 45, 78, 55];
   let @Option<Int> = array_find(@Array<Int>.0, fn(@Int -> @Bool) effects(pure) { @Int.0 > @Int.1 });
   match @Option<Int>.0 {
@@ -156,7 +161,7 @@ public fn main(-> @Int)
   } else {
     @Int.0 + 1
   };
-  let @Int = first_above(80);
+  let @Int = first_above(());
   -- find: first grade > 80 is 91
   let @Int = if @Int.0 == 91 then {
     @Int.1 + 1

@@ -267,26 +267,39 @@ class TestTesterTier3NoTestableParams:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
     ) -> None:
         """A unit-param function with an unverifiable ensures is skipped
-        as 'Tier 3 but no testable parameters'."""
+        as 'Tier 3 but no testable parameters'.
+
+        The closure is what makes the postcondition unverifiable.  This used
+        to call a `helper(())` whose `ensures` was `true` — but a zero-size
+        argument no longer collapses the call summary (#1214), so the helper's
+        result became a fresh variable its own contract says nothing about and
+        `@Int.result > 0` was REFUTED rather than deferred, classifying the
+        function `failed` instead of Tier 3.
+        """
         source = """\
-private fn helper(@Unit -> @Int)
-  requires(true) ensures(true) effects(pure)
-{ 42 }
+type IntFn = fn(Unit -> Int) effects(pure);
 
 public fn unit_tier3(-> @Int)
   requires(true)
   ensures(@Int.result > 0)
   effects(pure)
 {
-  helper(())
+  let @IntFn = fn(@Unit -> @Int) effects(pure) { 42 };
+  apply_fn(@IntFn.0, ())
 }
 """
         path = _write_vera(tmp_path, source)
         rc = cmd_test(path, as_json=True, trials=5)
         assert rc == 0
         data = json.loads(capsys.readouterr().out)
-        # The function should appear in results
-        assert len(data["functions"]) > 0
+        # Pin the branch, not merely the exit code: a fixture whose contract
+        # is REFUTED rather than deferred also produces a one-entry
+        # `functions` array, and the assertion this replaces could not tell
+        # the two apart.
+        assert len(data["functions"]) == 1, data["functions"]
+        fn = data["functions"][0]
+        assert fn["category"] == "skipped", fn
+        assert fn["reason"] == "Tier 3 but no testable parameters", fn
 
 
 # =====================================================================

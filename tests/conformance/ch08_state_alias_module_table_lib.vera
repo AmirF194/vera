@@ -7,7 +7,7 @@ type Count = Nat;
 
 public fn bump(@Nat -> @Int)
   requires(true)
-  ensures(true)
+  ensures(@Int.result == nat_to_int(@Nat.0))
   effects(pure)
 {
   handle[State<Count>](@Count = 0) {

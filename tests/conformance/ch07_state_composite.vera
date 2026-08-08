@@ -4,7 +4,7 @@
 -- handler-body get/put/push/pop calls match the (import ...) decls (#914).
 public fn test_option_state(@Unit -> @Int)
   requires(true)
-  ensures(true)
+  ensures(@Int.result == 9)
   effects(pure)
 {
   handle[State<Option<Int>>](@Option<Int> = Some(5)) {

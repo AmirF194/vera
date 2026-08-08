@@ -20,7 +20,7 @@ private fn risky(@Int -> @Int)
 
 private fn caught_by_alias(@Unit -> @Int)
   requires(true)
-  ensures(true)
+  ensures(@Int.result == 41)
   effects(pure)
 {
   handle[Exn<Code>] {
@@ -32,7 +32,7 @@ private fn caught_by_alias(@Unit -> @Int)
 
 private fn caught_by_base(@Unit -> @Int)
   requires(true)
-  ensures(true)
+  ensures(@Int.result == 9)
   effects(pure)
 {
   handle[Exn<Int>] {

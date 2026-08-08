@@ -14,7 +14,7 @@ type Id<T> = T;
 
 public fn alias_in_pattern(@Unit -> @Int)
   requires(true)
-  ensures(true)
+  ensures(@Int.result == 100)
   effects(pure)
 {
   handle[State<Option<Int>>](@Option<Int> = Some(100)) {
@@ -28,7 +28,7 @@ public fn alias_in_pattern(@Unit -> @Int)
 
 public fn alias_in_reference(@Unit -> @Int)
   requires(true)
-  ensures(true)
+  ensures(@Int.result == 5)
   effects(pure)
 {
   handle[State<Option<Int>>](@Option<Int> = Some(5)) {
@@ -42,7 +42,7 @@ public fn alias_in_reference(@Unit -> @Int)
 
 public fn nested_alias_reference(@Unit -> @Int)
   requires(true)
-  ensures(true)
+  ensures(@Int.result == 5)
   effects(pure)
 {
   handle[State<Option<Int>>](@Option<Int> = Some(5)) {

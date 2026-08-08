@@ -11,7 +11,7 @@ type Ratio = Float64;
 
 private fn use_flag(@Unit -> @Bool)
   requires(true)
-  ensures(true)
+  ensures(@Bool.result)
   effects(pure)
 {
   handle[State<Flag>](@Flag = false) {
@@ -24,7 +24,7 @@ private fn use_flag(@Unit -> @Bool)
 
 private fn use_ratio(@Unit -> @Float64)
   requires(true)
-  ensures(true)
+  ensures(@Float64.result == 2.5)
   effects(pure)
 {
   handle[State<Ratio>](@Ratio = 0.0) {
@@ -37,7 +37,7 @@ private fn use_ratio(@Unit -> @Float64)
 
 private fn use_level(@Unit -> @Byte)
   requires(true)
-  ensures(true)
+  ensures(byte_to_int(@Byte.result) == 42)
   effects(pure)
 {
   handle[State<Level>](@Level = 0) {

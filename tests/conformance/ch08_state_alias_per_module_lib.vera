@@ -8,7 +8,7 @@ type Hid<T> = T;
 
 public fn tally(@Nat -> @Int)
   requires(true)
-  ensures(true)
+  ensures(@Int.result == nat_to_int(@Nat.0))
   effects(pure)
 {
   handle[State<Hid<Nat>>](@Hid<Nat> = 0) {

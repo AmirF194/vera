@@ -3,7 +3,7 @@
 -- State<Int> handler starting at 3, incremented twice: result = 5.
 private fn state_from_three(@Unit -> @Int)
   requires(true)
-  ensures(true)
+  ensures(@Int.result == 5)
   effects(pure)
 {
   handle[State<Int>](@Int = 3) {
@@ -20,7 +20,7 @@ private fn state_from_three(@Unit -> @Int)
 -- Verifies that a second independent handler scopes to its own initial value.
 private fn state_from_zero(@Unit -> @Int)
   requires(true)
-  ensures(true)
+  ensures(@Int.result == 1)
   effects(pure)
 {
   handle[State<Int>](@Int = 0) {
@@ -38,7 +38,7 @@ private fn state_from_zero(@Unit -> @Int)
 -- Verifies that Exn<Int> composition with State<Int> works correctly.
 public fn test_exn_inside_state(@Unit -> @Int)
   requires(true)
-  ensures(true)
+  ensures(@Int.result == 99)
   effects(pure)
 {
   handle[State<Int>](@Int = 0) {
@@ -61,7 +61,7 @@ public fn test_exn_inside_state(@Unit -> @Int)
 -- Verifies that State<Int> composition with Exn<Int> works correctly.
 public fn test_state_inside_exn(@Unit -> @Int)
   requires(true)
-  ensures(true)
+  ensures(@Int.result == 5)
   effects(pure)
 {
   handle[Exn<Int>] {

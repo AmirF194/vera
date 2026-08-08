@@ -8,7 +8,7 @@ type Id<T> = T;
 
 private fn single(@Unit -> @Int)
   requires(true)
-  ensures(true)
+  ensures(@Int.result == 0 - 7)
   effects(pure)
 {
   handle[Exn<Id<Int>>] {
@@ -33,7 +33,7 @@ private fn thrower(@Int -> @Int)
 
 private fn nested(@Unit -> @Int)
   requires(true)
-  ensures(true)
+  ensures(@Int.result == 0 - 1)
   effects(pure)
 {
   handle[Exn<Id<Id<Int>>>] {

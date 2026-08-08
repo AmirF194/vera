@@ -10,7 +10,7 @@ type Count = Int;
 
 private fn local_sum(@Unit -> @Int)
   requires(true)
-  ensures(true)
+  ensures(@Int.result == 0 - 3)
   effects(pure)
 {
   handle[State<Count>](@Count = 0 - 5) {

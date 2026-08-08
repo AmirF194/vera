@@ -9,7 +9,7 @@ type Count = Nat;
 
 private fn as_array_element(@Unit -> @Int)
   requires(true)
-  ensures(true)
+  ensures(@Int.result == 42)
   effects(pure)
 {
   handle[State<Count>](@Count = 21) {
@@ -23,7 +23,7 @@ private fn as_array_element(@Unit -> @Int)
 
 private fn as_equality_operand(@Unit -> @Int)
   requires(true)
-  ensures(true)
+  ensures(@Int.result == 1)
   effects(pure)
 {
   handle[State<Count>](@Count = 5) {
@@ -40,7 +40,7 @@ private fn as_equality_operand(@Unit -> @Int)
 
 private fn as_match_scrutinee(@Unit -> @Int)
   requires(true)
-  ensures(true)
+  ensures(@Int.result == 222)
   effects(pure)
 {
   handle[State<Count>](@Count = 2) {

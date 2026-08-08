@@ -1460,3 +1460,136 @@ public forall<T> fn echo_f(@Float64, @T -> @NotHalf)
 { @Float64.0 }
 """, "may violate the refinement predicate")
         assert any(e.error_code == "E505" for e in errs)
+
+
+class TestZeroSizeCallArgumentKeepsTheSummary:
+    """A zero-size call argument does not weaken the call summary (#1214).
+
+    Two spellings of one call, semantically identical: `mk(1)` proved a
+    violating refined destructure of the result (a loud E505), while `mk(())`
+    — the same function with a `@Unit` parameter — demoted the SAME obligation
+    to an unguarded Tier-3 E506.  ``@Unit`` has no Z3 sort, so
+    ``translate_expr`` returned None for the argument and the call translator
+    read that None as "this call cannot be modelled at all", dropping the whole
+    summary.  A zero-size type has exactly one value, so an argument in that
+    position tells the summary nothing the signature did not already say; it
+    can never be a reason to know LESS.
+
+    The differential is the pin: the two spellings must produce the same
+    obligation, the same status and the same code.  Asserting the Unit
+    spelling's E505 alone would leave a "fix" that broke the Int spelling
+    green.
+    """
+
+    #: ``PARAM`` / ``ARG`` are substituted by :meth:`_src` — a Vera refinement
+    #: is written with braces, so ``str.format`` is not usable here.
+    _SRC = """\
+type PosInt = { @Int | @Int.0 > 0 };
+
+private fn mk(@PARAM -> @Tuple<Int, Int>)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  Tuple(0 - 5, 3)
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let Tuple<@PosInt, @Int> = mk(ARG);
+  @Int.0
+}
+"""
+
+    def _src(self, param: str, arg: str) -> str:
+        return self._SRC.replace("@PARAM", f"@{param}").replace("ARG", arg)
+
+    def _run(self, param: str, arg: str) -> object:
+        return _verify(self._src(param, arg))
+
+    def test_both_spellings_prove_the_same_violation(self) -> None:
+        as_int = self._run("Int", "1")
+        as_unit = self._run("Unit", "()")
+
+        def shape(result: object) -> list[tuple[str, str, str]]:
+            return [
+                (o.kind, o.status, o.error_code)
+                for o in result.obligations  # type: ignore[attr-defined]
+                if o.kind == "refine_bind"
+            ]
+
+        assert shape(as_int) == [("refine_bind", "violated", "E505")], \
+            shape(as_int)
+        assert shape(as_unit) == shape(as_int), (
+            "the zero-size spelling demoted an obligation the informative "
+            f"spelling proves: {shape(as_unit)} vs {shape(as_int)}"
+        )
+
+    def test_both_spellings_report_the_same_diagnostic(self) -> None:
+        for param, arg in (("Int", "1"), ("Unit", "()")):
+            result = self._run(param, arg)
+            codes = [
+                (d.severity, d.error_code) for d in result.diagnostics
+            ]
+            assert ("error", "E505") in codes, (param, codes)
+            assert ("warning", "E506") not in codes, (param, codes)
+
+    def test_the_tier_counts_agree(self) -> None:
+        """The summaries are equal too, so nothing was traded for the E505."""
+        as_int = self._run("Int", "1").summary
+        as_unit = self._run("Unit", "()").summary
+        assert as_unit == as_int, (as_unit, as_int)
+
+    #: A zero-size formal BESIDE an informative one.  ``@Nat`` rather than a
+    #: second ``@Int`` so the precondition's ``@Nat.0`` names one parameter
+    #: under both spellings — with two ``@Int`` formals it would name the
+    #: most recent, and the fixture would be measuring De Bruijn rather than
+    #: the mask.
+    _NEED = """\
+private fn need(@PARAM, @Nat -> @Int)
+  requires(@Nat.0 > 100)
+  ensures(true)
+  effects(pure)
+{
+  nat_to_int(@Nat.0)
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  need(FIRST, ARG)
+}
+"""
+
+    def _need_src(self, param: str, first: str, arg: str) -> str:
+        return (self._NEED
+                .replace("@PARAM", f"@{param}")
+                .replace("FIRST", first)
+                .replace("ARG", arg))
+
+    def test_the_call_precondition_is_checked_under_both_spellings(
+        self,
+    ) -> None:
+        """The opposite verdict as well, so the differential is not "both
+        loud" — and the mask is checked for alignment while it is here.
+
+        A satisfying argument must DISCHARGE in both spellings: a summary that
+        dropped every call would satisfy the violation tests above by refusing
+        to model anything.  And the informative formal sits SECOND, after the
+        zero-size one, so the argument list and the callee's parameter stack
+        must drop the same position — a mask applied to one and not the other
+        pairs argument *i* with formal *i+1*, and the obligation would then be
+        checked against the wrong argument (or fail to translate at all).
+        """
+        for param, first in (("Bool", "true"), ("Unit", "()")):
+            errs = _verify_err(
+                self._need_src(param, first, "5"),
+                "may violate the callee's precondition",
+            )
+            assert any(e.error_code == "E501" for e in errs), (param, errs)
+            _verify_ok(self._need_src(param, first, "500"))
