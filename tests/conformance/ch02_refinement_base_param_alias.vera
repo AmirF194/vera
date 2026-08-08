@@ -1,0 +1,39 @@
+-- Conformance: a refinement whose BASE is a parameterised alias APPLICATION
+-- (Chapter 2, Section 2.6.3 "Type Aliases with Refinements").  Tests:
+-- `type Box<T> = T;` applied as `{ @Box<Cnt> | @Box<Cnt>.0 >= 18 }` — resolving
+-- the base substitutes the application's argument, so the base is `Nat`, the
+-- producer proves its refined return at Tier 1, and a caller may rely on the
+-- fact.  Unsubstituted, the base was the alias's own parameter wearing an ADT's
+-- name, which fails the modelled-primitive gate: the fact was dropped and this
+-- program rejected with a spurious E501 (#1237).  `mk`'s `ensures` is `true`
+-- and the literal argument says nothing about the result, so the refinement is
+-- the ONLY route by which `need18`'s precondition can be discharged.
+type Cnt = Nat;
+
+type Box<T> = T;
+
+type Grown = { @Box<Cnt> | @Box<Cnt>.0 >= 18 };
+
+private fn mk(@Nat -> @Grown)
+  requires(@Nat.0 >= 18)
+  ensures(true)
+  effects(pure)
+{
+  @Nat.0
+}
+
+private fn need18(@Nat -> @Nat)
+  requires(@Nat.0 >= 18)
+  ensures(true)
+  effects(pure)
+{
+  @Nat.0
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  nat_to_int(need18(mk(20)))
+}

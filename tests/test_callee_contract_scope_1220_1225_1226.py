@@ -617,15 +617,18 @@ class TestBothHalvesOfTheScopeRideTogether:
 # `Box` is a PARAMETERISED alias, so the binder renders `Box<Nat>` while its
 # head identifier is `Box`.  The base resolves to `Nat`, which is a base the
 # SMT layer models, so nothing but the binder key decides whether the return
-# fact survives.  The `= Nat` body is load-bearing for that isolation, NOT
-# incidental: `type Box<T> = T;` resolves the base to the alias's own
-# parameter instead of substituting the argument (#1237), which fails the
-# modelled-primitive gate and drops the fact for an unrelated reason —
-# these tests would then pass or fail without touching the binder at all.
+# fact survives.  The body is the natural `= T`: until #1237 it had to be
+# written `= Nat` to keep that isolation, because the verifier resolved an
+# alias APPLICATION to the alias's own parameter instead of substituting the
+# argument, which failed the modelled-primitive gate and dropped the fact for
+# an unrelated reason — these tests would then have passed or failed without
+# touching the binder at all.  With the application substituted, both bodies
+# resolve the base to `Nat` and the isolation holds either way; the parameter
+# is exercised rather than written around.
 _PARAM_BINDER = """\
 type Cnt = Nat;
 
-type Box<T> = Nat;
+type Box<T> = T;
 
 type Grown = { @Box<Cnt> | @Box<Cnt>.0 >= 18 };
 
@@ -723,7 +726,7 @@ class TestParameterisedRefinedReturnBinder:
         """The same program with an UNPARAMETERISED binder, which always
         worked: head and key coincide when there are no type arguments."""
         control = _PARAM_BINDER.replace(
-            "type Box<T> = Nat;\n\n", "",
+            "type Box<T> = T;\n\n", "",
         ).replace("@Box<Cnt>", "@Cnt")
         assert "Box" not in control
         result = _verify_mod(control, [])
@@ -733,14 +736,16 @@ class TestParameterisedRefinedReturnBinder:
 
 # The cross-module twin: `Cnt` is `Nat` in the module and `Int` in the
 # importer, so the binder key differs BETWEEN the two namespaces —
-# `Box<Nat>` against `Box<Int>`.  `type Box<T> = Nat;` for the same reason
-# as its single-module sibling above — do not simplify it to `= T` (#1237).
+# `Box<Nat>` against `Box<Int>`.  `type Box<T> = T;` for the same reason as
+# its single-module sibling above: the application substitutes since #1237, so
+# the parameterised body isolates the binder question rather than confounding
+# it.
 _BINDER_LIB = """\
 module boxlib;
 
 type Cnt = Nat;
 
-type Box<T> = Nat;
+type Box<T> = T;
 
 public fn mk(@Nat -> @{ @Box<Cnt> | @Box<Cnt>.0 >= 18 })
   requires(@Nat.0 >= 18)

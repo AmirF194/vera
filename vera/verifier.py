@@ -807,10 +807,29 @@ class ContractVerifier:
         self.env.type_params = saved_params
 
     def _register_alias(self, decl: ast.TypeAliasDecl) -> None:
-        """Register a type alias."""
+        """Register a type alias.
+
+        A parameterised alias's own type parameters are bound as TYPE VARIABLES
+        for the resolution of its body, exactly as :meth:`_register_data` binds
+        an ADT's and as the checker's ``_register_alias`` does (#1237).  Without
+        it ``type Box<T> = T;`` fell through ``_resolve_type``'s unknown-name
+        fallback and registered ``AdtType('T')`` — the binder wearing an ADT's
+        name — which no substitution can eliminate, since
+        :func:`~vera.types.substitute` maps type variables.  Every application
+        of the alias then resolved to that phantom ADT, and a refinement over
+        it failed the modelled-primitive gate: the refined-return fact was
+        dropped and a valid program rejected with a spurious E501.
+        """
         from vera.environment import TypeAliasInfo
         decl_index = self.env.next_decl_index()
-        resolved = self._resolve_type(decl.type_expr)
+        saved_params = dict(self.env.type_params)
+        if decl.type_params:
+            for tv in decl.type_params:
+                self.env.type_params[tv] = TypeVar(tv)
+        try:
+            resolved = self._resolve_type(decl.type_expr)
+        finally:
+            self.env.type_params = saved_params
         self.env.type_aliases[decl.name] = TypeAliasInfo(
             name=decl.name,
             type_params=decl.type_params,
@@ -1261,6 +1280,29 @@ class ContractVerifier:
             # Check type aliases
             if te.name in self.env.type_aliases:
                 alias = self.env.type_aliases[te.name]
+                # An APPLICATION substitutes its arguments into the alias's
+                # body (#1237) — the same rule the checker applies in
+                # `vera/checker/resolution.py::_resolve_named_type` (#660), and
+                # the same substitute-before-you-ask-what-a-type-is discipline
+                # `vera.naming` applies on the naming side.  Ignoring
+                # `te.type_args` handed back the alias's registered body with
+                # its own parameters still in it, so `Box<Cnt>` under
+                # `type Box<T> = T;` resolved to `T` rather than to `Nat`.  The
+                # arguments resolve HERE (in the use site's scope) before they
+                # are substituted, so an argument that is itself an application
+                # is already fully resolved when it lands in the body.  Arity is
+                # the CHECKER's error (E133) and a mismatch cannot reach a
+                # verified program; `zip` truncating on one would substitute a
+                # prefix, which is the pre-#1237 behaviour for the un-mapped
+                # tail and no worse.
+                if te.type_args and alias.type_params:
+                    alias_args = tuple(
+                        self._resolve_type(a) for a in te.type_args
+                    )
+                    return substitute(
+                        alias.resolved_type,
+                        dict(zip(alias.type_params, alias_args)),
+                    )
                 return alias.resolved_type
             # Check ADTs
             if te.name in self.env.data_types:

@@ -2662,6 +2662,20 @@
     ]
   },
   {
+    "id": "ch02_refinement_base_param_alias",
+    "file": "ch02_refinement_base_param_alias.vera",
+    "chapter": 2,
+    "title": "A refinement over a parameterised alias application substitutes its argument",
+    "level": "run",
+    "spec_ref": "Section 2.6.3",
+    "features": [
+      "refinement_type",
+      "type_alias",
+      "parameterised_alias",
+      "nat"
+    ]
+  },
+  {
     "id": "ch03_slot_alias_type_argument",
     "file": "ch03_slot_alias_type_argument.vera",
     "chapter": 3,
