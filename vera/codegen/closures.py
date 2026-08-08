@@ -45,15 +45,37 @@ class ClosureLiftingMixin:
         (containing the now-dangling ``call_indirect``) was still
         emitted, producing a WASM-validation trap with no
         source-located parent-fn diagnostic.
+
+        **Called more than once per context (#1245).**  ``_compile_fn``
+        drives a lift after the body AND a second one after
+        ``_compile_postconditions``, because a closure created while
+        lowering a refined-RETURN guard, a tuple return's component
+        guards, or an ``ensures(...)`` predicate is registered on this
+        same ``ctx`` only at that later point.  The pending list is
+        therefore CONSUMED here (not merely read) so the second pass sees
+        exactly the newly-registered closures, and ``ctx``'s closure-id
+        counter is re-synced on the way out so a closure registered after
+        this pass takes the next free id — the ``closure_id`` ↔
+        ``_closure_table`` position correspondence is what a closure
+        struct's stored ``func_table_idx`` relies on.
         """
         # ``deque`` (rather than a plain list) because ``popleft`` is
         # O(1) where ``list.pop(0)`` would shift every remaining entry.
         # Closure worklists are typically tiny in practice, but the
         # deque is the right idiom for FIFO and removes the need to
         # reason about list-pop costs as the depth of nesting grows.
+        #
+        # Each entry carries the ANCESTRY of `AnonFn` identities that led
+        # to it (#1234): a lift whose own boundary guard re-queues a
+        # closure already on its lift chain is a cycle, and the worklist
+        # would otherwise grow for ever.  See the pop below.
         worklist: deque[
-            tuple[ast.AnonFn, list[tuple[str, int, str]], int]
-        ] = deque(ctx._pending_closures)
+            tuple[ast.AnonFn, list[tuple[str, int, str]], int, frozenset[int]]
+        ] = deque(
+            (anon_fn, captures, closure_id, frozenset())
+            for anon_fn, captures, closure_id in ctx._pending_closures
+        )
+        ctx._pending_closures = []
         # Snapshot `_next_closure_id` BEFORE this fn's worklist so we
         # can recycle the consumed range on failure.  closure_id is
         # module-monotonic and is stored as `func_table_idx` in each
@@ -89,7 +111,42 @@ class ClosureLiftingMixin:
         new_sigs: list[tuple[str, str]] = []
         any_failed = False
         while worklist:
-            anon_fn, captures, closure_id = worklist.popleft()
+            anon_fn, captures, closure_id, ancestry = worklist.popleft()
+            if id(anon_fn) in ancestry:
+                # #1234: this closure's own refined-formal / refined-return
+                # guard lowers a predicate that contains THIS closure, so
+                # lifting it queues it again — `type SelfRef = { @Int | …
+                # fn(@SelfRef -> @Int) … }` used in a signature made
+                # `vera compile` run for ever on a check-green program with
+                # no diagnostic and no bound.  Refuse the lift loudly and
+                # let the #636 path drop the enclosing function, mirroring
+                # the registration pre-scan's `_anon_sig_scan_stack` guard
+                # (compilability.py), which made the REGISTRATION walk
+                # immune to the same cycle.  Keyed on the `AnonFn` node
+                # identity along the current lift CHAIN — not a
+                # module-wide seen-set — so the same predicate's closure
+                # legitimately lifting once per refined formal (`fn f(@R,
+                # @R -> @Int)`) is untouched.
+                param_sig = ", ".join(
+                    ast.format_type_expr(p) for p in anon_fn.params)
+                ret_sig = ast.format_type_expr(anon_fn.return_type)
+                self._warning(
+                    anon_fn,
+                    f"Closure fn({param_sig} -> {ret_sig}) is refined by a "
+                    "type whose own predicate contains this same closure — "
+                    "a self-referential refinement, whose boundary guard "
+                    "cannot be lowered without unbounded expansion; "
+                    "closure skipped.",
+                    rationale="A refined closure formal is guarded at entry "
+                    "by lowering the refinement's predicate.  When that "
+                    "predicate contains the closure being guarded, each "
+                    "lift queues another one and codegen would never "
+                    "terminate.  The enclosing function is dropped too, to "
+                    "avoid a missing function-table entry.",
+                    error_code="E602",
+                )
+                any_failed = True
+                continue
             inner_pending: list[tuple[ast.AnonFn, list[tuple[str, int, str]], int]] = []
             try:
                 lifted_wat = self._compile_lifted_closure(
@@ -161,8 +218,13 @@ class ClosureLiftingMixin:
                 new_sigs.append((sig_content, sig_name))
 
             # Bubble up nested closures + any new sigs / IDs the
-            # inner ctx registered while translating this body.
-            worklist.extend(inner_pending)
+            # inner ctx registered while translating this body, each
+            # tagged with THIS closure added to the lift chain (#1234).
+            descendant_ancestry = ancestry | {id(anon_fn)}
+            worklist.extend(
+                (inner_fn, inner_caps, inner_id, descendant_ancestry)
+                for inner_fn, inner_caps, inner_id in inner_pending
+            )
 
         # Commit-on-success: only extend module-level state if every
         # closure in the worklist succeeded.  On failure, the parent
@@ -183,6 +245,16 @@ class ClosureLiftingMixin:
                 self._needs_table = True
                 self._needs_alloc = True
                 self._needs_memory = True
+
+        # #1245: hand the id counter back to the context.  A closure this
+        # function registers LATER — while `_compile_postconditions` lowers
+        # a refined-return guard or an `ensures(...)` predicate — allocates
+        # its `closure_id` from `ctx._next_closure_id`, and the second lift
+        # pass appends it to `_closure_table` at exactly that index.  Without
+        # the resync it would reuse an id this pass already committed, and
+        # the closure struct's stored `func_table_idx` would address another
+        # closure's table entry.
+        ctx._next_closure_id = self._next_closure_id
 
         return any_failed
 
@@ -385,6 +457,24 @@ class ClosureLiftingMixin:
             (value_local, parts)
             for _i, param_te, value_local in param_info
             if (parts := self._refinement_guard_parts(param_te)) is not None
+        ]
+        # #1235: a closure formal whose TUPLE COMPONENTS are refined / @Nat
+        # carries no top-level refinement, so the guards above see nothing —
+        # the named path's `component_param_checks` (functions.py) is what
+        # catches that, and the closure path had no equivalent.  A
+        # `Tuple<PosInt, Int>` reaching an `AnonFn` through `apply_fn` or a
+        # collection combinator therefore crossed unguarded where the same
+        # formal on a named function traps: inconsistent enforcement of a
+        # designed guard surface.  Collected here from the same `param_info`
+        # and lowered through the same `_tuple_component_guard_sites`
+        # decomposition the named path uses, so the closure and named
+        # boundaries check the same set — which is also what lets
+        # `_signature_refinement_predicates` decompose an `AnonFn`'s
+        # signature: emitter and registration flip together.
+        component_param_checks: list[tuple[int, ast.TypeExpr]] = [
+            (value_local, param_te)
+            for _i, param_te, value_local in param_info
+            if self._resolve_tuple_type(param_te) is not None
         ]
 
         # Compute capture layout (must match _translate_anon_fn).
@@ -615,12 +705,28 @@ class ClosureLiftingMixin:
         # matching the closure's existing return-side guards).  The AnonFn has no
         # `decl`, so the trap message is built from its own signature — the shape
         # `_format_refinement_message` produces for a named fn.
+        #
+        # #1235: the per-COMPONENT guards for a tuple formal / return are
+        # emitted here too, from the same `_tuple_component_guard_sites`
+        # decomposition the named path reads — see `component_param_checks`
+        # above.  Component guards precede their boundary's top-level guard
+        # on both sides, exactly as `_compile_fn` and `_compile_postconditions`
+        # order them: a refinement OVER a tuple may have its predicate read
+        # the components, so those are established first.
+        ret_has_components = self._has_guardable_tuple_components(
+            anon_fn.return_type)
         refine_guard_instrs: list[str] = []
-        if refined_param_checks or ret_refined_parts is not None:
+        if (refined_param_checks or component_param_checks
+                or ret_refined_parts is not None or ret_has_components):
             param_sig = ", ".join(
                 ast.format_type_expr(p) for p in anon_fn.params)
             ret_sig = ast.format_type_expr(anon_fn.return_type)
             closure_sig = f"fn({param_sig} -> {ret_sig})"
+            for value_local, param_te in component_param_checks:
+                refine_guard_instrs.extend(
+                    self._emit_component_refinement_guards(
+                        ctx, closure_sig, param_te, value_local, env,
+                        "parameter"))
             for value_local, parts in refined_param_checks:
                 predicate, base_name = parts
                 msg = (
@@ -648,35 +754,49 @@ class ClosureLiftingMixin:
             # the verifier records it tier3_unguarded).  Appended to
             # `body_instrs` so the check runs before the GC epilogue re-roots
             # the (now-checked) value.
-            if ret_refined_parts is not None:
-                predicate, base_name = ret_refined_parts
+            if ret_refined_parts is not None or ret_has_components:
                 msg = (
                     f"Refinement violation in {closure_sig}\n"
-                    f"  return value: {ast.format_expr(predicate)} failed"
-                )
+                    f"  return value: "
+                    f"{ast.format_expr(ret_refined_parts[0])} failed"
+                ) if ret_refined_parts is not None else ""
                 if ret_wt == "i32_pair":
                     ptr_l = ctx.alloc_local("i32")
                     len_l = ctx.alloc_local("i32")
-                    guard = self._emit_refinement_check(
-                        ctx, predicate, base_name, ptr_l, msg, env)
-                    if guard is not None:
+                    ret_guard = self._emit_component_refinement_guards(
+                        ctx, closure_sig, anon_fn.return_type, ptr_l, env,
+                        "return value")
+                    if ret_refined_parts is not None:
+                        predicate, base_name = ret_refined_parts
+                        guard = self._emit_refinement_check(
+                            ctx, predicate, base_name, ptr_l, msg, env)
+                        if guard is not None:
+                            ret_guard.extend(guard)
+                    if ret_guard:
                         body_instrs = [
                             *body_instrs,
                             f"local.set {len_l}",
                             f"local.set {ptr_l}",
-                            *guard,
+                            *ret_guard,
                             f"local.get {ptr_l}",
                             f"local.get {len_l}",
                         ]
                 elif ret_wt:
                     ret_local = ctx.alloc_local(ret_wt)
-                    guard = self._emit_refinement_check(
-                        ctx, predicate, base_name, ret_local, msg, env)
-                    if guard is not None:
+                    ret_guard = self._emit_component_refinement_guards(
+                        ctx, closure_sig, anon_fn.return_type, ret_local, env,
+                        "return value")
+                    if ret_refined_parts is not None:
+                        predicate, base_name = ret_refined_parts
+                        guard = self._emit_refinement_check(
+                            ctx, predicate, base_name, ret_local, msg, env)
+                        if guard is not None:
+                            ret_guard.extend(guard)
+                    if ret_guard:
                         body_instrs = [
                             *body_instrs,
                             f"local.set {ret_local}",
-                            *guard,
+                            *ret_guard,
                             f"local.get {ret_local}",
                         ]
 

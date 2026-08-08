@@ -980,8 +980,10 @@ class CompilabilityMixin:
         elif isinstance(node, ast.AnonFn):
             # Body AND signature (#1210 round 7) — the closure path emits a
             # boundary guard for every refined formal and for a refined
-            # return, so a `handle[State<Nat>]` in one of those predicates is
-            # lowered into the lifted body with nothing else to register it.
+            # return, and (since #1235) for each refined component of a tuple
+            # formal or return, so a `handle[State<Nat>]` in one of those
+            # predicates is lowered into the lifted body with nothing else to
+            # register it.
             self._scan_anon_fn_signature(node, self._scan_expr_for_handlers)
             self._scan_expr_for_handlers(node.body)
         # #1210 round 2 — the contract-predicate positions.  These are not
