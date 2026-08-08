@@ -1197,14 +1197,25 @@ class TestIncrementalInvalidation:
         "}\n"
     )
 
-    def _cold(self, source: str) -> VerifyResult:
-        program = transform(parse(source))
-        diags = typecheck(program, source)
-        assert not [d for d in diags if d.severity == "error"]
-        return verify(program, source)
+    def _cold(self, source: str, file: str | None = None) -> VerifyResult:
+        """The cold twin of the session runs below, driven with the SAME
+        *file* they are.
 
-    def _assert_matches_cold(self, source: str, warm: object) -> None:
-        cold = self._cold(source)
+        An obligation carries the file its line number belongs to (#1220), and
+        that is part of its identity, so a warm run given a file compared
+        against a cold run given none is comparing two different questions —
+        the fingerprint below would report a mismatch that is entirely the
+        harness's.
+        """
+        program = transform(parse(source, file=file))
+        diags = typecheck(program, source, file=file)
+        assert not [d for d in diags if d.severity == "error"]
+        return verify(program, source, file=file)
+
+    def _assert_matches_cold(
+        self, source: str, warm: object, file: str | None = None,
+    ) -> None:
+        cold = self._cold(source, file)
         assert _diag_fingerprint(
             warm.verify_diagnostics,  # type: ignore[attr-defined]
         ) == _diag_fingerprint(cold.diagnostics)
@@ -1243,11 +1254,11 @@ class TestIncrementalInvalidation:
         session = VerificationSession()
         session.verify_source(uninst, file="m.vera")
         warm = session.verify_source(inst, file="m.vera")
-        self._assert_matches_cold(inst, warm)
+        self._assert_matches_cold(inst, warm, file="m.vera")
         # Reverse: removing the last instantiation flips `bad` back to Tier-3
         # rather than replaying its cached Tier-1.
         warm_back = session.verify_source(uninst, file="m.vera")
-        self._assert_matches_cold(uninst, warm_back)
+        self._assert_matches_cold(uninst, warm_back, file="m.vera")
 
     def test_identical_source_replays_everything(self) -> None:
         session = VerificationSession()

@@ -619,6 +619,98 @@ class TestCmdVerify:
             f"and diagnostics {diag_keys}"
         )
 
+    def test_json_obligation_file_follows_the_declaring_module(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """An obligation raised while an IMPORTED body verifies carries THAT
+        module's file, not the entry program's.
+
+        The join above assumed every obligation belonged to the entry file and
+        stamped the CLI path on all of them.  Once the verifier began
+        reporting an imported clone against its own module (#1220), that
+        assumption broke the join outright — the E501 diagnostic said
+        `hlib.vera:10` while its own obligation said `main.vera:10` — and made
+        the obligation stream cite lines past the entry file's end (PR #1239
+        review).
+        """
+        module = tmp_path / "hlib.vera"
+        module.write_text(
+            "module hlib;\n"
+            "\n"
+            "type Cnt = Bool;\n"
+            "\n"
+            "public forall<T> fn f(@Array<Bool>, @Array<Int>, @T -> @Nat)\n"
+            "  requires(array_length(@Array<Bool>.0) == 3)\n"
+            "  ensures(@Nat.result >= 0)\n"
+            "  effects(pure)\n"
+            "{\n"
+            "  help(@Array<Bool>.0, @Array<Int>.0)\n"
+            "}\n"
+            "where {\n"
+            "  fn help(@Array<Cnt>, @Array<Int> -> @Nat)\n"
+            "    requires(array_length(@Array<Cnt>.0) == 2)\n"
+            "    ensures(@Nat.result >= 0)\n"
+            "    effects(pure)\n"
+            "  {\n"
+            "    array_length(@Array<Int>.0)\n"
+            "  }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        main = tmp_path / "main.vera"
+        main.write_text(
+            "import hlib(f);\n"
+            "\n"
+            "public fn main(@Unit -> @Nat)\n"
+            "  requires(true)\n"
+            "  ensures(true)\n"
+            "  effects(pure)\n"
+            "{\n"
+            "  f([true, false, true], array_range(0, 2), 9)\n"
+            "}\n",
+            encoding="utf-8",
+        )
+
+        rc = cmd_verify(str(main), as_json=True)
+        data = json.loads(capsys.readouterr().out)
+        # The fixture violates a precondition, so the verdict is part of what
+        # this pins: an E501 reported with a success exit code would otherwise
+        # keep it green.
+        assert rc == 1, rc
+        assert data["ok"] is False, data["ok"]
+        obls, reported = data["obligations"], data["diagnostics"]
+        assert obls and reported, (obls, reported)
+
+        # Every obligation names a file that exists and a line that file has.
+        lengths = {
+            str(f): len(f.read_text(encoding="utf-8").splitlines())
+            for f in (main, module)
+        }
+        for o in obls:
+            where = o["location"]["file"]
+            assert where in lengths, where
+            assert o["location"]["line"] <= lengths[where], (
+                f"obligation at {where}:{o['location']['line']} names a line "
+                f"that file does not have ({lengths[where]} lines)"
+            )
+
+        # Both files are represented — the fixture would not measure the fix
+        # if every obligation happened to belong to one of them.
+        assert len({o["location"]["file"] for o in obls}) == 2, obls
+
+        # And the E501 joins its obligation on the full key.
+        e501 = [d for d in reported if d["error_code"] == "E501"]
+        assert len(e501) == 1, reported
+        key = (
+            e501[0]["location"]["file"], e501[0]["location"]["line"],
+            e501[0]["location"]["column"],
+        )
+        assert key in {
+            (o["location"]["file"], o["location"]["line"],
+             o["location"]["column"])
+            for o in obls
+        }, (key, obls)
+
     def test_json_summary_consistent_on_demotion_example(
         self, capsys: pytest.CaptureFixture[str],
     ) -> None:

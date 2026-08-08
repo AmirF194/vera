@@ -242,11 +242,11 @@ class TestImportedCalleeContractEnv:
 
     The obligation is asserted, not just the CODE: which call site raised it,
     which callee it names, and — for the mirror — that it was raised at all
-    and discharged, rather than never existing.  What is NOT asserted is the
-    ``Precondition:`` line quoted in the message body: for an imported callee
-    that text is #1220's known-broken rendering (the callee's span indexed
-    into the IMPORTER's source buffer, so it quotes whatever sits on that line
-    here).  Assert it when #1220 closes.
+    and discharged, rather than never existing.  The ``Precondition:`` line
+    quoted in the message body is asserted too, now that #1220 resolves an
+    imported clause's span against the file that declared it;
+    ``tests/test_callee_contract_scope_1220_1225_1226.py`` holds that
+    rendering's own suite, including the misattribution direction.
     """
 
     def test_violated_precondition_still_reported_bare_import(self) -> None:
@@ -293,6 +293,9 @@ public fn main(@Unit -> @Int)
             if d.error_code == "E501" and d.severity == "error"
         )
         assert "'need3'" in message and "'main'" in message, message
+        # #1220: and the clause it quotes is the CALLEE's, read out of the
+        # module that declared it — not this file's line 6 (`ensures(true)`).
+        assert "requires(@Option<Int>.0 == Some(3))" in message, message
 
     def test_violated_precondition_still_reported_qualified_call(self) -> None:
         """probe p8q: a ``mod::fn`` call takes the same registry, same fix."""
@@ -1383,7 +1386,7 @@ class TestUnpinnedCalleeRendersInTheDeclaringModule:
     """``_callee_alias_env``'s fallback is the module UNDER verification.
 
     Only PUBLIC functions of DIRECTLY imported modules are pinned into
-    ``_fn_origin_envs`` (``_register_modules``), so an imported generic's own
+    ``_fn_origins`` (``_register_modules``), so an imported generic's own
     ``where``-helper — resolved through ``_fn_info_for_decl`` while the
     generic's clone verifies inside ``_declaring_module_scope`` — always
     reaches the fallback.  Falling back to ``_alias_env`` rendered that
@@ -1471,20 +1474,24 @@ class TestRefinedReturnTranslatesInTheCalleeNamespace:
     """A callee's refined-RETURN predicate is the callee's own text.
 
     ``requires`` and ``ensures`` are translated inside
-    ``SmtContext._callee_naming_scope``; the refined-return predicate the same
+    ``SmtContext._callee_contract_scope``; the refined-return predicate the same
     call site ASSUMES was not, so an alias it names resolved in the IMPORTER's
     namespace (PR #1224 review).  Here ``Cnt`` is ``Nat`` in ``rlib`` and
     ``Int`` in the importer.
 
-    Asserted on the ENVIRONMENT rather than on a diagnostic, because today the
-    binder pushed beside the translation comes from
-    ``ast.predicate_binder_name`` — a bare ``UPPER_IDENT`` that reads no env at
-    all — so the push key and the lookup key miss under BOTH namespaces for a
-    parameterised base, and agree under both for a bare one.  That masking is
-    exactly why the wrap has to be pinned by provenance: the moment the binder
-    becomes env-dependent (as every other consumer's already is, via
-    ``naming.refinement_binder_parts``), a translation left in the importer's
-    namespace mints one key and looks up another.
+    Asserted on the ENVIRONMENT rather than on a diagnostic, because the
+    behaviour this pin protects depends on the SHAPE of the refinement: the
+    binder key renders its type ARGUMENTS (``naming.predicate_binder_key``), so
+    it is env-dependent for a parameterised base and env-independent for a bare
+    one — and ``rlib``'s base is bare, which is what makes the observation here
+    a pure provenance one.  The prediction this pin recorded while the binder
+    was still a bare ``UPPER_IDENT`` reading no env at all has since come true
+    and is asserted behaviourally in
+    ``tests/test_callee_contract_scope_1220_1225_1226.py``
+    (``TestRefinedReturnBinderIsKeyedInTheCalleeScope``, #1226): over a
+    PARAMETERISED base the same wrap decides whether a valid program is
+    accepted, and moving the derivation out of the scope leaves the
+    single-module case green and turns the cross-module one red.
     """
 
     def test_the_predicate_is_translated_under_the_defining_modules_env(
@@ -1494,18 +1501,18 @@ class TestRefinedReturnTranslatesInTheCalleeNamespace:
         from vera import smt as smt_module
 
         module = _resolved(("rlib",), _REFINED_RETURN_LIB)
-        # `ast.predicate_binder_name` has exactly one caller in the SMT layer
+        # `naming.predicate_binder_key` has exactly one caller in the SMT layer
         # — the refined-return site — so it opens a window that isolates THAT
         # translation from the `requires` / `ensures` ones (which are wrapped
         # already, and would otherwise supply the observation on their own).
         window = {"open": False}
         seen: list[str] = []
-        orig_binder = ast.predicate_binder_name
+        orig_binder = naming_mod.predicate_binder_key
         orig_translate = smt_module.SmtContext.translate_expr
 
-        def binder_spy(predicate: object) -> object:
+        def binder_spy(predicate: object, env: object) -> object:
             window["open"] = True
-            return orig_binder(predicate)  # type: ignore[arg-type]
+            return orig_binder(predicate, env)  # type: ignore[arg-type]
 
         def translate_spy(
             self: object, expr: object, env: object = None,
@@ -1521,18 +1528,19 @@ class TestRefinedReturnTranslatesInTheCalleeNamespace:
                 seen.append(naming_mod.pretty_type(resolved))
             return orig_translate(self, expr, env)  # type: ignore[arg-type]
 
-        ast.predicate_binder_name = binder_spy  # type: ignore[assignment]
-        smt_module.ast.predicate_binder_name = binder_spy  # type: ignore[assignment]
+        naming_mod.predicate_binder_key = binder_spy  # type: ignore[assignment]
         smt_module.SmtContext.translate_expr = translate_spy  # type: ignore[method-assign]
         try:
             _verify_mod(_REFINED_RETURN_MAIN, [module])
         finally:
-            ast.predicate_binder_name = orig_binder  # type: ignore[assignment]
-            smt_module.ast.predicate_binder_name = orig_binder  # type: ignore[assignment]
+            naming_mod.predicate_binder_key = orig_binder  # type: ignore[assignment]
             smt_module.SmtContext.translate_expr = orig_translate  # type: ignore[method-assign]
 
-        # Floor first: an observation list that stayed empty would satisfy any
-        # `all(...)` below without the site having run at all.
+        # Floor first: an empty observation list would satisfy the
+        # set-equality assertion below vacuously — `set() == {"Nat"}` is
+        # False, but only because the floor makes it so; without it a spy
+        # patched onto a function the code no longer calls measures
+        # nothing and says so with a green tick.
         assert seen, (
             "the refined-return translation never ran — this test is "
             "measuring nothing"

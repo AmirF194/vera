@@ -775,22 +775,37 @@ def format_type_expr(te: TypeExpr) -> str:
     return "@?"
 
 
-def predicate_binder_name(predicate: "Expr") -> str | None:
-    """The slot type-name a refinement predicate's binder ACTUALLY uses — the
-    first ``SlotRef``'s ``type_name`` (a refinement predicate is closed over its
-    single binder).  Recovers a syntactic ALIAS binder: ``@Age.0`` for
-    ``type Age = Nat; { @Age | @Age.0 >= 18 }``, which differs from the resolved
-    primitive ``Nat`` (alias resolution erases it).  Pushing the value under
-    THIS name lets ``@Age.0`` resolve instead of the predicate falsely failing
-    to translate.  ``None`` if the predicate holds no ``SlotRef``.
+def predicate_binder_ref(predicate: "Expr") -> "SlotRef | None":
+    """A refinement predicate's binder REFERENCE — the first ``SlotRef`` the
+    traversal below reaches, whole: head name and type arguments both.
+    ``None`` if the predicate holds no ``SlotRef``.
 
-    Shared by the verifier, codegen, and SMT refined-return paths so the binder
-    recovery can't drift between them (CR PR-review)."""
+    "First" is in TRAVERSAL order, which is neither source order nor
+    outermost-first: the walk is a stack, so it descends the last field of a
+    node before the first.  For the overwhelmingly common predicate — one
+    closed over its single binder, every reference naming it — any of them is
+    that binder and the order does not matter.  It is not universal, and the
+    exception is a predicate containing a CLOSURE, which introduces a binder of
+    its own: ``{ @Array<Nat> | array_all(@Array<Nat>.0, fn(@Nat -> @Bool) …
+    { @Nat.0 >= 18 }) }`` yields the closure's ``@Nat.0``, so the key derived
+    from it is ``Nat`` where the refinement's base is ``Array<Nat>``.  The
+    consequence is conservative and pre-dates the key derivation: a value
+    pushed under a key no reference resolves leaves the predicate
+    untranslatable, which is a Tier-3 demotion, never a fact assumed about the
+    wrong term.  ``tests/test_callee_contract_scope_1220_1225_1226.py``
+    characterizes the shape.
+
+    The reference rather than its name, because the binding-table key a
+    reference resolves under is not its head — ``@Box<Cnt>.0`` looks itself up
+    under ``Box<Nat>``, a rendering that needs the type arguments AND the
+    naming environment.  :func:`~vera.naming.predicate_binder_key` is that
+    derivation; this is the syntax it reads.  Both are shared, so the verifier,
+    codegen, and SMT refined-return paths cannot drift apart (CR PR-review)."""
     stack: list[object] = [predicate]
     while stack:
         node = stack.pop()
         if isinstance(node, SlotRef):
-            return node.type_name
+            return node
         if isinstance(node, Node) and is_dataclass(node):
             for fld in fields(node):
                 val = getattr(node, fld.name)

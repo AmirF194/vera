@@ -188,6 +188,37 @@ class CallDemotion:
     precondition: ast.Requires
 
 
+@dataclass(frozen=True)
+class CalleeScope:
+    """How a callee's OWN contract has to be read (#1208, #1225).
+
+    A ``requires`` / ``ensures`` is written in the module that DECLARED it, so
+    reading it is two lookups against that module and not this one: its
+    ``@T.n`` slots render against the module's alias env, and the bare names it
+    CALLS resolve in the module's function registry.  Both live here, in one
+    record, because they are one question — a translation that swapped the
+    naming env alone interpreted the callee's precondition using the
+    IMPORTER's same-named function's contract, reporting Tier-1 clean on a
+    program whose run traps on the real precondition (#1225).
+
+    Applied and restored as a pair by
+    :meth:`SmtContext._callee_contract_scope`, whose saved record is also the
+    fallback for a callee nothing pins — so an unpinned callee reads in the
+    scope currently in force, never in a mix of two.
+
+    One lookup deliberately stays outside this record: ``_module_fn_lookup``,
+    which resolves a ``mod::fn`` call.  It is keyed by module PATH, so it
+    already carries the dimension this record exists to supply and cannot
+    resolve to the wrong module's function.  What it can do is MISS — a
+    qualified call to a module this program did not resolve returns ``None``,
+    the call summary is not built, and the obligation demotes loudly (E532)
+    rather than binding something else (PR #1239 review).
+    """
+
+    alias_env: AliasEnv
+    fn_lookup: Callable[[str], Any] | None
+
+
 # =====================================================================
 # SMT context — solver and translation
 # =====================================================================
@@ -296,12 +327,14 @@ class SmtContext:
         # which builds one context before any program is known and rebinds
         # this per program exactly as it rebinds `_fn_lookup`.
         self._alias_env = alias_env
-        # #1208: given a callee's registered info, the naming env that callee's
-        # OWN contract renders against.  Bound by the verifier to
-        # `ContractVerifier._callee_alias_env`; ``None`` (a bare SmtContext, or
-        # a driver with a single namespace) keeps `_alias_env` for every callee.
-        self._callee_alias_env_lookup: (
-            Callable[[Any], AliasEnv] | None
+        # #1208/#1225: given a callee's registered info and the scope currently
+        # in force, the :class:`CalleeScope` that callee's OWN contract is read
+        # in — its module's naming env and its module's function registry.
+        # Bound by the verifier to `ContractVerifier._callee_scope`; ``None``
+        # (a bare SmtContext, or a driver with a single namespace) reads every
+        # callee's contract in this context's own scope.
+        self._callee_scope_lookup: (
+            Callable[[Any, CalleeScope], CalleeScope] | None
         ) = None
         self.solver.set("timeout", timeout_ms)
         # Retained so reset() can re-apply it on warm-session reuse.
@@ -1821,32 +1854,46 @@ class SmtContext:
         return z3_args
 
     @contextlib.contextmanager
-    def _callee_naming_scope(self, callee_info: Any) -> Iterator[None]:
-        """Render *callee_info*'s own contract in ITS module's namespace (#1208).
+    def _callee_contract_scope(self, callee_info: Any) -> Iterator[None]:
+        """Read *callee_info*'s own contract in ITS module (#1208, #1225).
 
         A callee's parameter list and its ``requires`` / ``ensures`` are written
-        against the aliases of the module that DECLARED it (spec §8.4.1), so the
-        parameter stack this obligation pushes and the ``@T.n`` references that
-        read it both have to be rendered there.  Rendered against the IMPORTER's
-        env instead — the pre-fix behaviour — two modules that declare the same
-        alias name over different bodies make the obligation attach to the wrong
-        argument: it either merges two of the callee's parameter stacks (the
-        precondition silently vanishes, a false Tier-1) or splits one (a
-        spurious E501).
+        against the declarations of the module that DECLARED it (spec §8.4.1),
+        so BOTH lookups the translation makes belong to that module:
+
+        * its aliases, which name the parameter stack this obligation pushes
+          and the ``@T.n`` references that read it.  Rendered against the
+          IMPORTER's env instead, two modules that declare the same alias name
+          over different bodies make the obligation attach to the wrong
+          argument — it either merges two of the callee's parameter stacks (the
+          precondition silently vanishes, a false Tier-1) or splits one (a
+          spurious E501);
+        * its functions, which the bare names the contract CALLS resolve
+          through.  Resolved against the importer's registry instead, a
+          `requires(@Int.0 < cap(0))` was read using the IMPORTER's ``cap`` —
+          `vera verify` proved a precondition the callee does not have, and
+          `vera run` trapped on the one it does.
+
+        One record, applied and restored together, because a scope that swapped
+        one of them and not the other is exactly the bug: the contract would be
+        half in its own module and half in this one.  The saved record is the
+        fallback too, so an unpinned callee reads in the scope in force here
+        rather than reverting to the entry program's.
 
         Scoped exactly to the callee-contract translation: the ACTUAL arguments
         are translated before this is entered, in the caller's own env, because
         they are the caller's expressions.
         """
-        if self._callee_alias_env_lookup is None:
+        if self._callee_scope_lookup is None:
             yield
             return
-        saved = self._alias_env
-        self._alias_env = self._callee_alias_env_lookup(callee_info)
+        saved = CalleeScope(self._alias_env, self._fn_lookup)
+        scope = self._callee_scope_lookup(callee_info, saved)
+        self._alias_env, self._fn_lookup = scope.alias_env, scope.fn_lookup
         try:
             yield
         finally:
-            self._alias_env = saved
+            self._alias_env, self._fn_lookup = saved.alias_env, saved.fn_lookup
 
     def _build_callee_env(
         self,
@@ -1857,14 +1904,14 @@ class SmtContext:
         in declaration order (#882 helper).
 
         The parameter names are rendered in the CALLEE's namespace (#1208, see
-        :meth:`_callee_naming_scope`) — they key the stack every reference in
+        :meth:`_callee_contract_scope`) — they key the stack every reference in
         the callee's contract resolves against.
 
         Returns None if a parameter type expression has no slot name (a shape
         the checker rules out; guarded for safety).
         """
         callee_env = SlotEnv()
-        with self._callee_naming_scope(callee_info):
+        with self._callee_contract_scope(callee_info):
             for param_te, z3_arg in zip(callee_info.param_type_exprs, z3_args):
                 slot_name = self._type_expr_to_slot_name(param_te)
                 if slot_name is None:  # pragma: no cover
@@ -1900,7 +1947,7 @@ class SmtContext:
             # #1208: the precondition is the CALLEE's expression, so its
             # `@T.n` references resolve in the callee's namespace — the same
             # one `_build_callee_env` keyed the stack under.
-            with self._callee_naming_scope(callee_info):
+            with self._callee_contract_scope(callee_info):
                 z3_pre = self.translate_expr(contract.expr, callee_env)
             if z3_pre is None:
                 # The precondition itself uses a construct outside the
@@ -1967,14 +2014,6 @@ class SmtContext:
           5. Assume callee postconditions about the return variable
           6. Return the fresh variable
         """
-        # Generic functions can't be translated to Z3
-        if callee_info.forall_vars:
-            return None
-
-        # Must have matching arity
-        if len(args) != len(callee_info.param_type_exprs):
-            return None
-
         # Does the callee carry a real (non-trivial) precondition?  A callee
         # with only `requires(true)` has no obligation to demote — a failed
         # arg translation there is correctly silent (#882).
@@ -1983,6 +2022,43 @@ class SmtContext:
             and not (isinstance(c.expr, ast.BoolLit) and c.expr.value)
             for c in callee_info.contracts
         )
+
+        # A GENERIC callee's contract is written over its type parameters, so
+        # neither half of the summary can be built here: the precondition is
+        # not translatable to Z3 as written, and the postcondition is not
+        # assumable about the result.  The precondition is the half that
+        # carries an OBLIGATION, and returning None with nothing recorded made
+        # it vanish — `verify` reported all-Tier-1 clean while the run trapped
+        # on the callee's own entry guard, a false Tier 1 (#1236).  It demotes
+        # LOUDLY instead, exactly as the untranslatable-argument path does
+        # (#882): same E532 record, same gate (a callee with only
+        # `requires(true)` has no obligation to lose), same dedup.  The
+        # demotion is unconditional on whether the precondition would in fact
+        # HOLD — this is a "cannot check", not a "does not hold" — so the
+        # satisfied call demotes with the violating one; discharging either
+        # statically means translating the contract at each monomorphized
+        # INSTANCE, which is #732's per-instantiation machinery, not this
+        # call-summary path.  The postcondition half needs no record of its
+        # own: an unassumed fact is conservative, and it already surfaces
+        # wherever it mattered — the caller's own clause fails to translate
+        # and demotes (E520/E522), or a later call's argument does and demotes
+        # here.  Reifying it as a Tier-3 obligation would claim a runtime
+        # check the CALLER never performs (the callee's `ensures` is guarded
+        # in the callee, and counted there), which would make the tier
+        # bookkeeping less honest, not more.  Both drains see this, so a
+        # generic call written in the caller's `ensures` is disclosed as well
+        # as one in its body — with one qualifier: a call in BOTH positions is
+        # disclosed once, from the body, because a body that did not translate
+        # leaves no term to check the postcondition against and the clause
+        # never reaches translation (it demotes as E522 instead).
+        if callee_info.forall_vars:
+            if has_nontrivial_pre:
+                self._record_call_demotion(callee_info, callee_name, call_node)
+            return None
+
+        # Must have matching arity
+        if len(args) != len(callee_info.param_type_exprs):
+            return None
 
         # Translate actual arguments in the caller's env.  First WITHOUT
         # forcing any ADT sort — this is the exact pre-#882 attempt.  When it
@@ -2086,7 +2162,7 @@ class SmtContext:
                 continue
             # #1208: the postcondition is the CALLEE's expression too — same
             # namespace as the precondition above and the stack it reads.
-            with self._callee_naming_scope(callee_info):
+            with self._callee_contract_scope(callee_info):
                 z3_post = self.translate_expr(contract.expr, callee_env)
             if z3_post is not None:
                 self.solver.add(self._guard_fact(z3_post))
@@ -2111,22 +2187,27 @@ class SmtContext:
             FLOAT64,
             STRING,
         ):
-            # Push the value under the predicate's ACTUAL binder name (alias-
-            # aware: `@Age.0` for `type Age = Nat; { @Age | @Age.0 >= 18 }`),
-            # not the resolved base name — otherwise the predicate's `@Age.0`
-            # won't resolve against `Nat` and `z3_pred` is None, silently
-            # dropping the refined-return fact so a caller can't rely on it (CR
-            # PR-review — the SMT analogue of the verifier/codegen binder fix).
+            # Push the value under the key the predicate's OWN binder reference
+            # resolves through (alias-aware: `@Age.0` for `type Age = Nat;
+            # { @Age | @Age.0 >= 18 }`), not the resolved base name — otherwise
+            # `@Age.0` won't resolve against `Nat`, `z3_pred` is None, and the
+            # refined-return fact is silently dropped so a caller cannot rely
+            # on it (CR PR-review — the SMT analogue of the verifier/codegen
+            # binder fix).  Through `naming.predicate_binder_key`, so the key
+            # is the WHOLE reference rendered, not its head identifier: a
+            # parameterised base binds `Box<Nat>` where the head alone said
+            # `Box`, and that miss rejected valid programs (#1226).
             # In the CALLEE's namespace, like the `requires` / `ensures`
             # translations above (#1208; PR #1224 review).  This predicate is
             # written in the DEFINING module's namespace, so an alias it names
             # has to resolve there — the importer's env is a different
             # namespace, and a name minted one way and looked up another misses
-            # SILENTLY.  The binder derivation is inside the scope too, so the
-            # push side and the reference side cannot end up scoped
-            # differently.
-            with self._callee_naming_scope(callee_info):
-                binder = (ast.predicate_binder_name(ret_type.predicate)
+            # SILENTLY.  The binder derivation is inside the scope too, and now
+            # reads the env directly, so the push side and the reference side
+            # cannot end up scoped differently.
+            with self._callee_contract_scope(callee_info):
+                binder = (naming.predicate_binder_key(
+                              ret_type.predicate, self._alias_env)
                           or ret_type.base.name)
                 inner_env = SlotEnv().push(binder, ret_var)
                 z3_pred = self.translate_expr(ret_type.predicate, inner_env)
