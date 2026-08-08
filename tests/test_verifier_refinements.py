@@ -1728,3 +1728,105 @@ public fn main(@Unit -> @Int)
             )
             assert any(e.error_code == "E501" for e in errs), (param, errs)
             _verify_ok(self._need_src(param, first, "500"))
+
+
+class TestTheTier3DisclosureNamesItsActualCause:
+    """An E506 must say why it demoted, and be right about it (#1251).
+
+    Both E506 emitters carried one fixed rationale — "The refinement predicate
+    is outside Z3's decidable fragment (a non-primitive base such as Array, an
+    undecidable construct, or a solver timeout)" — for four different causes.
+    On `handle[State<Small>](@Small = 200)` with
+    ``type Small = { @Byte | @Byte.0 < 10 }`` that sentence is simply false:
+    ``200 < 10`` is decidable and decidably FALSE.  What actually happened is
+    that the verifier does not model ``Byte`` as a refinement base, so the
+    predicate was never given a value to reason about.
+
+    Spec §0.3 requires a diagnostic to explain itself truthfully; a rationale
+    that names the wrong cause sends a reader to rewrite a predicate that was
+    never the problem.  The demotion itself is unchanged here — attempting the
+    decidable check is #1251(b), which needs a concrete-value gate of its own
+    so a SYMBOLIC ``@Byte`` narrowing keeps its runtime-guarded disclosure
+    rather than becoming a false rejection.
+    """
+
+    _STATE_INIT = """\
+type Small = { @Byte | @Byte.0 < 10 };
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Small>](@Small = 200) {
+    get(@Unit) -> { resume(@Small.0) },
+    put(@Small) -> { resume(()) }
+  } in {
+    byte_to_int(get(()))
+  }
+}
+"""
+
+    @staticmethod
+    def _e506(result: object) -> list:
+        return [
+            d for d in result.diagnostics  # type: ignore[attr-defined]
+            if d.error_code == "E506"
+        ]
+
+    def test_an_unmodelled_base_is_not_blamed_on_undecidability(self) -> None:
+        """The issue's repro: the rationale names the BASE, not the fragment."""
+        result = _verify(self._STATE_INIT)
+        warns = self._e506(result)
+        assert len(warns) == 1, [d.description[:90] for d in result.diagnostics]
+        rationale = warns[0].rationale
+        assert "Byte" in rationale, rationale
+        assert "does not model" in rationale, rationale
+        assert "outside Z3's decidable fragment" not in rationale, rationale
+
+    def test_the_predicate_case_still_says_the_predicate(self) -> None:
+        """The control: a base the verifier DOES model, with a predicate the
+        SMT layer defers on, must still be attributed to the predicate — a
+        rationale that blamed the base for everything would be as wrong in the
+        other direction.
+
+        `string_length` over a non-literal is deliberately untranslatable
+        (#802), and `String` is a modelled base, so this separates the two.
+        """
+        result = _verify("""
+type NonEmpty = { @String | string_length(@String.0) > 0 };
+
+private fn shout(@String -> @String)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  string_concat(@String.0, "!")
+}
+
+public fn use(@String -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @NonEmpty = shout(@String.0);
+  0
+}
+""")
+        warns = self._e506(result)
+        assert len(warns) == 1, [d.description[:90] for d in result.diagnostics]
+        rationale = warns[0].rationale
+        assert "predicate is outside" in rationale, rationale
+        assert "does not model" not in rationale, rationale
+
+    def test_the_demotion_itself_is_unchanged(self) -> None:
+        """(a) is a wording fix: the obligation, its status and its code are
+        exactly what they were, so this cannot be mistaken for (b) landing."""
+        result = _verify(self._STATE_INIT)
+        binds = [o for o in result.obligations if o.kind == "refine_bind"]
+        assert len(binds) == 1, binds
+        assert binds[0].status == "tier3_unguarded", binds[0]
+        assert binds[0].error_code == "E506", binds[0]
+        assert not [
+            d for d in result.diagnostics if d.severity == "error"
+        ], [d.description[:90] for d in result.diagnostics]

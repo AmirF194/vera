@@ -77,6 +77,15 @@ _I64_MIN = -(2**63)
 _I64_MAX = 2**63 - 1
 _U64_MAX = 2**64 - 1
 
+#: The E506 reason shared by the two sub-pattern sites whose SCRUTINEE the SMT
+#: layer cannot project (#1251).  Nothing about the predicate or its base is at
+#: fault there — the field the predicate is about was never formed — so saying
+#: "outside Z3's decidable fragment" pointed the reader at the wrong thing.
+_OPAQUE_SCRUTINEE_REASON = (
+    "the matched value is opaque to the SMT layer, so its field could not be "
+    "projected and the predicate was never given a value to reason about"
+)
+
 
 def _walk_fn_decls(program: ast.Program) -> Iterator[ast.FnDecl]:
     """Every function *declaration* in *program*, ``where``-helpers included.
@@ -3087,10 +3096,12 @@ class ContractVerifier:
             if goal is None:
                 # Untranslatable body / predicate / non-primitive base — Tier 3
                 # checked by the codegen return guard (guarded), never a silent
-                # pass (R7).
+                # pass (R7).  Which of the two it was decides what the reader
+                # should go and change, so the disclosure says (#1251).
                 self._record_refined_bind_tier3(
                     decl, ret_node, "return type",
-                    guarded=self._refined_boundary_codegen_guardable(ret_type))
+                    guarded=self._refined_boundary_codegen_guardable(ret_type),
+                    reason=self._refined_bail_reason(ret_type, body_expr))
             else:
                 ret_result = smt.check_valid(goal, list(assumptions))
                 if ret_result.status == "verified":
@@ -3114,7 +3125,13 @@ class ContractVerifier:
                     self._record_refined_bind_tier3(
                         decl, ret_node, "return type",
                         guarded=self._refined_boundary_codegen_guardable(
-                            ret_type))
+                            ret_type),
+                        reason=(
+                            "the solver returned no decision, or the only "
+                            "countermodel ran over an opaque effect-op "
+                            "stand-in that refutes nothing the effect "
+                            "actually produces"
+                        ))
 
         # 7c. #813: a bare @Nat body widening into an @Int return reinterprets
         #     its bit pattern above i64.MAX (u64.MAX -> -1), so a Tier-1 proof
@@ -4480,6 +4497,11 @@ class ContractVerifier:
                     decl, expr.body, "closure return",
                     guarded=self._refined_boundary_codegen_guardable(
                         resolved_ret),
+                    reason=(
+                        "a closure body is opaque to the verifier, so its "
+                        "returned value is never translated and the predicate "
+                        "has nothing to be tested against"
+                    ),
                 )
                 # #820 INTERSECTION: a refinement OVER @Int whose body is
                 # intrinsically @Nat gets codegen's widen guard ALONGSIDE the
@@ -6202,13 +6224,21 @@ class ContractVerifier:
         val = smt.translate_expr(value_node, slot_env)
         if val is None:
             self._record_refined_bind_tier3(
-                decl, value_node, site, guarded=eff_guarded)
+                decl, value_node, site, guarded=eff_guarded,
+                reason=(
+                    "the value being narrowed is outside the SMT layer's "
+                    "decidable fragment, so there is no term to test the "
+                    "predicate against"
+                ),
+            )
             return
 
         goal = self._translate_refined_predicate(smt, refined_ty, val)
         if goal is None:
             self._record_refined_bind_tier3(
-                decl, value_node, site, guarded=eff_guarded)
+                decl, value_node, site, guarded=eff_guarded,
+                reason=self._refined_untranslatable_reason(refined_ty),
+            )
             return
 
         result = smt.check_valid(goal, list(assumptions))
@@ -6226,7 +6256,59 @@ class ContractVerifier:
                 decl, value_node, refined_ty, site, result.counterexample)
         else:  # pragma: no cover — solver timeout
             self._record_refined_bind_tier3(
-                decl, value_node, site, guarded=eff_guarded)
+                decl, value_node, site, guarded=eff_guarded,
+                reason="the solver timed out on the predicate",
+            )
+
+    @staticmethod
+    def _refined_bail_reason(
+        refined_ty: Type, value_term: object | None,
+    ) -> str:
+        """Why a refined-return check bailed before reaching the solver (#1251).
+
+        The two return-position sites fold "the body did not translate" and
+        "the predicate did not translate" into one ``goal is None``, and they
+        call for opposite actions — rewrite the body, or accept that the base
+        is unmodelled.  Split by which one it was.
+        """
+        if value_term is None:
+            return (
+                "the returned expression is outside the SMT layer's decidable "
+                "fragment, so there is no term to test the predicate against"
+            )
+        return ContractVerifier._refined_untranslatable_reason(refined_ty)
+
+    @staticmethod
+    def _refined_untranslatable_reason(refined_ty: Type) -> str:
+        """Why :py:meth:`_translate_refined_predicate` returned None (#1251).
+
+        Two causes reach that None and they call for different actions, so a
+        single sentence covering both misinforms whichever reader gets the
+        other one.  The predicate may genuinely be outside the fragment — an
+        undecidable construct, or an operand the SMT layer defers on — or the
+        BASE may be one the verifier does not model, in which case the
+        predicate was never given a value to reason about and may be perfectly
+        decidable.  ``{ @Byte | @Byte.0 < 10 }`` initialised to ``200`` is the
+        second: ``200 < 10`` decides, and decides FALSE, but ``Byte`` is not
+        among the five bases :py:meth:`_base_slot_name` models, so nothing was
+        ever asked (#1251).
+        """
+        parts = ContractVerifier._refined_parts(refined_ty)
+        if parts is None:  # pragma: no cover — caller checked the shape
+            return "the refinement's shape is not one the verifier models"
+        base, _predicate = parts
+        if ContractVerifier._base_slot_name(base) is None:
+            return (
+                f"the verifier does not model `{pretty_type(base)}` as a "
+                "refinement base — only Int, Nat, Bool, Float64 and String "
+                "carry an SMT sort here — so the predicate was never given a "
+                "value to reason about; the predicate itself may well be "
+                "decidable"
+            )
+        return (
+            "the predicate is outside Z3's decidable fragment (an undecidable "
+            "construct, or an operand the SMT layer defers on)"
+        )
 
     def _record_refined_bind_tier3(
         self,
@@ -6235,6 +6317,7 @@ class ContractVerifier:
         site: str,
         *,
         guarded: bool,
+        reason: str,
     ) -> None:
         """Record a Tier-3 ``refine_bind`` outcome — the predicate could not be
         discharged statically (a non-primitive base such as ``Array``, an
@@ -6256,13 +6339,13 @@ class ContractVerifier:
                 decl.name, "refine_bind", value_node, "tier3",
                 error_code="E506",
             )
-            self._report_refined_runtime(decl, value_node, site)
+            self._report_refined_runtime(decl, value_node, site, reason)
         else:
             self._record_obligation(
                 decl.name, "refine_bind", value_node, "tier3_unguarded",
                 error_code="E506",
             )
-            self._report_refined_unguarded(decl, value_node, site)
+            self._report_refined_unguarded(decl, value_node, site, reason)
 
     def _check_generic_refined_return(
         self, decl: ast.FnDecl, ret_type: Type,
@@ -6365,7 +6448,8 @@ class ContractVerifier:
         if goal is None:
             self._record_refined_bind_tier3(
                 decl, decl.body, "return type",
-                guarded=self._refined_boundary_codegen_guardable(ret_type))
+                guarded=self._refined_boundary_codegen_guardable(ret_type),
+                reason=self._refined_bail_reason(ret_type, body_expr))
             return
         result = smt.check_valid(goal, list(assumptions))
         if result.status == "verified":
@@ -6383,7 +6467,8 @@ class ContractVerifier:
         else:  # pragma: no cover — solver timeout
             self._record_refined_bind_tier3(
                 decl, decl.body, "return type",
-                guarded=self._refined_boundary_codegen_guardable(ret_type))
+                guarded=self._refined_boundary_codegen_guardable(ret_type),
+                reason="the solver timed out on the predicate")
 
     def _check_refined_binding_obligation_term(
         self,
@@ -6417,7 +6502,9 @@ class ContractVerifier:
         """
         goal = self._translate_refined_predicate(smt, refined_ty, term)
         if goal is None:
-            self._record_refined_bind_tier3(decl, node, site, guarded=False)
+            self._record_refined_bind_tier3(
+                decl, node, site, guarded=False,
+                reason=self._refined_untranslatable_reason(refined_ty))
             return
         local_assumptions = list(assumptions)
         if source_ty is not None:
@@ -6435,7 +6522,9 @@ class ContractVerifier:
             self._report_refined_binding(
                 decl, node, refined_ty, site, result.counterexample)
         else:  # pragma: no cover — solver timeout
-            self._record_refined_bind_tier3(decl, node, site, guarded=False)
+            self._record_refined_bind_tier3(
+                decl, node, site, guarded=False,
+                reason="the solver timed out on the predicate")
 
     def _term_source_fact(
         self, smt: SmtContext, source_ty: Type, term: z3.ExprRef,
@@ -6792,7 +6881,8 @@ class ContractVerifier:
                     # no codegen guard, so this is an unguarded E506 Tier-3
                     # (excluded from totals), not a silent pass (R7).
                     self._record_refined_bind_tier3(
-                        decl, scrutinee, "ADT sub-pattern bind", guarded=False)
+                        decl, scrutinee, "ADT sub-pattern bind", guarded=False,
+                        reason=_OPAQUE_SCRUTINEE_REASON)
                 continue
             if (self._is_nat_type(target)
                     and not self._is_nat_type(field_ty)):
@@ -6879,7 +6969,8 @@ class ContractVerifier:
             if (self._is_refined_type(target)
                     and self._refined_field_narrows(target, field_ty)):
                 self._record_refined_bind_tier3(
-                    decl, scrutinee, "ADT sub-pattern bind", guarded=False)
+                    decl, scrutinee, "ADT sub-pattern bind", guarded=False,
+                    reason=_OPAQUE_SCRUTINEE_REASON)
             elif (self._is_nat_type(target)
                     and not self._is_nat_type(field_ty)):
                 self._record_nat_bind_tier3(
@@ -6972,7 +7063,13 @@ class ContractVerifier:
                     guarded=True)
             for _ in refined_narrowing:
                 self._record_refined_bind_tier3(
-                    decl, stmt.value, "tuple destructure", guarded=False)
+                    decl, stmt.value, "tuple destructure", guarded=False,
+                    reason=(
+                        "the destructured value cannot be projected into its "
+                        "components (an effect-op result, or another term the "
+                        "SMT layer models opaquely), so the component the "
+                        "predicate is about was never formed"
+                    ))
             for _ in int_widening:
                 # #813: codegen does not guard a tuple-destructure component
                 # widening (like tuple construction), so disclose E531.
@@ -7500,6 +7597,7 @@ class ContractVerifier:
         decl: ast.FnDecl,
         node: ast.Expr,
         site: str,
+        reason: str,
     ) -> None:
         """Emit an informational E506 warning for a refinement narrowing the
         SMT layer could not discharge but codegen runtime-guards (#746).
@@ -7521,12 +7619,10 @@ class ContractVerifier:
                 "predicate or guard the binding with an `if`."
             ),
             rationale=(
-                "The refinement predicate is outside Z3's decidable fragment "
-                "(a non-primitive base such as Array, an undecidable "
-                "construct, or a solver timeout), so it could not be "
-                "discharged statically.  Codegen emits a runtime predicate "
-                "guard at the function boundary, so the narrowing is checked "
-                "at run time (Tier 3) rather than silently accepted."
+                f"The refinement predicate was not discharged statically: "
+                f"{reason}.  Codegen emits a runtime predicate guard at the "
+                "function boundary, so the narrowing is checked at run time "
+                "(Tier 3) rather than silently accepted."
             ),
             spec_ref=(
                 'Chapter 2, Section 2.6 "Refinement Types" and Chapter 6, '
@@ -7541,6 +7637,7 @@ class ContractVerifier:
         decl: ast.FnDecl,
         node: ast.Expr,
         site: str,
+        reason: str,
     ) -> None:
         """Emit an E506 warning for a refinement narrowing the SMT layer could
         not discharge and codegen does NOT runtime-guard (#746).
@@ -7562,13 +7659,11 @@ class ContractVerifier:
                 "return (which is runtime-guarded)."
             ),
             rationale=(
-                "The refinement predicate is outside Z3's decidable fragment "
-                "(a non-primitive base such as Array, an undecidable "
-                "construct, or a solver timeout), so it could not be "
-                "discharged statically.  Codegen runtime-guards refinements "
-                "only at the function boundary (parameter entry / return "
-                "exit), not at this internal narrowing site, so it is neither "
-                "statically proven nor runtime-checked."
+                f"The refinement predicate was not discharged statically: "
+                f"{reason}.  Codegen runtime-guards refinements only at the "
+                "function boundary (parameter entry / return exit), not at "
+                "this internal narrowing site, so it is neither statically "
+                "proven nor runtime-checked."
             ),
             spec_ref=(
                 'Chapter 2, Section 2.6 "Refinement Types" and Chapter 6, '
