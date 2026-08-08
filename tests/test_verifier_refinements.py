@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import pathlib
 
+import pytest
+
 from vera.parser import parse_to_ast
 
 from tests.verifier_helpers import (
@@ -1781,6 +1783,7 @@ public fn main(@Unit -> @Int)
         result = _verify(self._STATE_INIT)
         warns = self._e506(result)
         assert len(warns) == 1, [d.description[:90] for d in result.diagnostics]
+        assert warns[0].severity == "warning", warns[0].severity
         rationale = warns[0].rationale
         assert "Byte" in rationale, rationale
         assert "does not model" in rationale, rationale
@@ -1817,6 +1820,7 @@ public fn use(@String -> @Int)
 """)
         warns = self._e506(result)
         assert len(warns) == 1, [d.description[:90] for d in result.diagnostics]
+        assert warns[0].severity == "warning", warns[0].severity
         rationale = warns[0].rationale
         assert "predicate is outside" in rationale, rationale
         assert "does not model" not in rationale, rationale
@@ -1864,7 +1868,9 @@ class TestANonVerdictIsAttributedToTheRightOutcome:
         assert "timed out" not in opaque, opaque
         assert "timed out" not in unknown, unknown
 
-    def test_the_branch_reports_opaque_as_opaque(self, monkeypatch) -> None:
+    def test_the_branch_reports_opaque_as_opaque(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         """Driven directly: force the #1199 verdict and read the disclosure.
 
         The reviewer could not construct a program that reaches these branches,
@@ -1891,7 +1897,8 @@ public fn mk(@Int -> @Int)
 }
 """)
         warns = [d for d in result.diagnostics if d.error_code == "E506"]
-        assert warns, [d.description[:90] for d in result.diagnostics]
+        assert len(warns) == 1, [d.description[:90] for d in result.diagnostics]
+        assert warns[0].severity == "warning", warns[0].severity
         rationale = warns[0].rationale
         assert "stand-in" in rationale, rationale
         assert "timed out" not in rationale, rationale
