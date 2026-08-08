@@ -364,7 +364,9 @@ public fn main(@Unit -> @Int)
 # The code comment's own worked example: two refined formals of one type.
 # `R`'s predicate holds a single `AnonFn` node, and each formal's boundary
 # guard lifts it — twice, siblings rather than ancestor and descendant.
-# f(9, 4) = 13, a value neither predicate's argument (4) nor any default.
+# The operands are WEIGHTED, not summed: `@R.0` is the most recent binding
+# (the SECOND parameter, 4) and `@R.1` the first (9), so `f(9, 4)` = 17 and
+# a slot-order regression reads 22 rather than hiding behind `9 + 4 = 4 + 9`.
 _TWO_REFINED_FORMALS_OF_ONE_TYPE = """
 type R = { @Int | @Int.0 > 0 && apply_fn(fn(@Int -> @Int)
   effects(pure) { @Int.0 }, 4) > 0 };
@@ -374,7 +376,7 @@ private fn f(@R, @R -> @Int)
   ensures(true)
   effects(pure)
 {
-  @R.0 + @R.1
+  @R.0 * 2 + @R.1
 }
 
 public fn main(@Unit -> @Int)
@@ -389,7 +391,11 @@ public fn main(@Unit -> @Int)
 # A diamond: `Outer`'s predicate closure is refined by `Inner`, and the
 # same function ALSO takes an `@Inner` formal directly — so `Inner`'s
 # closure is reached by two routes, once as a descendant of `Outer`'s lift
-# and once at the top of its own.  Finite, and it must run: g(9, 4) = 13.
+# and once at the top of its own.  Finite, and it must run.  Weighted like
+# the fixture above — and by a DIFFERENT factor, so neither fixture can
+# pass the other's oracle: the two slots here bind two different refined
+# types, so a swap would also swap which boundary guard sees which value,
+# and `g(9, 4)` = 94 where a swap reads 49.
 _DIAMOND_ANCESTRY = """
 type Inner = { @Int | @Int.0 > 0 && apply_fn(fn(@Int -> @Int)
   effects(pure) { @Int.0 }, 4) > 0 };
@@ -402,7 +408,7 @@ private fn g(@Outer, @Inner -> @Int)
   ensures(true)
   effects(pure)
 {
-  @Outer.0 + @Inner.0
+  @Outer.0 * 10 + @Inner.0
 }
 
 public fn main(@Unit -> @Int)
@@ -519,20 +525,24 @@ class TestTheLiftQueueIsCycleGuarded:
         `fn f(@R, @R -> @Int)` guards two formals of one refined type, so
         `R`'s single `AnonFn` node is lifted twice — as siblings, neither
         one an ancestor of the other.  A module-wide seen-set refuses the
-        second and drops `f`; the chain key does not.
+        second and drops `f`; the chain key does not.  The oracle is
+        weighted (`@R.0 * 2 + @R.1`), so it pins WHICH slot each guard saw
+        as well as that both lifts happened.
         """
         _check_ok(_TWO_REFINED_FORMALS_OF_ONE_TYPE)
-        assert _run(_TWO_REFINED_FORMALS_OF_ONE_TYPE) == 13
+        assert _run(_TWO_REFINED_FORMALS_OF_ONE_TYPE) == 17
 
     def test_a_diamond_reaches_one_refinement_by_two_routes(self) -> None:
         """`Inner` is reached under `Outer`'s lift AND at the top of its own.
 
         The second reach is a descendant of the first in one route and a
         root in the other — finite either way, and a seen-set cannot tell
-        that from a cycle.
+        that from a cycle.  Weighted (`@Outer.0 * 10 + @Inner.0`) because
+        the two slots bind two DIFFERENT refined types here: a swap would
+        also swap which boundary guard saw which value.
         """
         _check_ok(_DIAMOND_ANCESTRY)
-        assert _run(_DIAMOND_ANCESTRY) == 13
+        assert _run(_DIAMOND_ANCESTRY) == 94
 
 
 # =====================================================================

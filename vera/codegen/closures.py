@@ -76,6 +76,13 @@ class ClosureLiftingMixin:
             for anon_fn, captures, closure_id in ctx._pending_closures
         )
         ctx._pending_closures = []
+        # INVARIANT: the ancestry keys are `id()` values, so every node they
+        # name must stay strongly referenced for as long as its key is in
+        # play — which the worklist entries provide, each holding its own
+        # `AnonFn`.  Never retain an ancestry (or any set of these ids)
+        # beyond the worklist that holds the nodes: CPython reuses an id
+        # once its object is collected, and a recycled id silently reads as
+        # a cycle in a set that outlived its referents.
         # Snapshot `_next_closure_id` BEFORE this fn's worklist so we
         # can recycle the consumed range on failure.  closure_id is
         # module-monotonic and is stored as `func_table_idx` in each

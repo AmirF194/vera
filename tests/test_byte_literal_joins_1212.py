@@ -653,6 +653,19 @@ def test_a_heterogeneous_join_at_a_byte_return_agrees_with_itself(
     assert _run(source) == expected
 
 
+def test_the_match_return_joins_reach_their_literal_arm() -> None:
+    """The `None` arm — the one the marking fix exists for.
+
+    Both match fixtures above drive an in-range value, so `int_to_byte`
+    returns `Some` and only the i32 `@Byte`-slot arm ever executes.  300 is
+    out of range, so `int_to_byte` returns `None` and the arm taken is the
+    bare literal `0` at the `@Byte` return boundary — the value whose width
+    the marking decides.
+    """
+    assert _run(_RETURN_HETERO_MATCH_NAMED.replace("g(207)", "g(300)")) == 0
+    assert _run(_RETURN_HETERO_MATCH_CLOSURE.replace("f(207)", "f(300)")) == 0
+
+
 def test_both_arm_orders_of_the_return_join_are_fixed() -> None:
     """Arm ORDER decided which way it failed, so both orders are pinned.
 
