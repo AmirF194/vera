@@ -249,6 +249,14 @@ class CodeGenerator(
 
         # ADT layout metadata (populated during registration)
         self._adt_layouts: dict[str, dict[str, ConstructorLayout]] = {}
+        # #1227: the namespace each absorbed ADT was DECLARED in.  The layout
+        # map above is one space across every module — layouts are structural,
+        # and a module's own bodies compile against this generator's copy — but
+        # the declaration-index space is per namespace (§8.4.1, PR #1224), so
+        # an imported ADT has to be ordered where its own module declared it.
+        # Only module-owned ADTs are recorded; a main-file declaration is in
+        # `_decl_order` and a built-in or prelude ADT takes the reserved floor.
+        self._adt_layout_owners: dict[str, tuple[str, ...]] = {}
         self._needs_alloc: bool = False
         # Constructor type-param index mapping: ctor_name → tuple of ADT type-param
         # indices (or None for concrete fields).  Used by the monomorphizer and WASM
@@ -1258,7 +1266,7 @@ class CodeGenerator(
             aliases=dict(self._type_aliases),
             alias_params=dict(self._type_alias_params),
             data_types={
-                name: order.get(name, _BUILTIN_DECL_INDEX)
+                name: self._adt_decl_index(name, order)
                 for name in self._adt_layouts
             },
             _order={
@@ -1266,6 +1274,29 @@ class CodeGenerator(
                 for name in self._type_aliases
             },
         )
+
+    def _adt_decl_index(self, name: str, order: dict[str, int]) -> int:
+        """Where *name* sits in the declaration-index space *order* keys (#1227).
+
+        ``_adt_layouts`` is one map across every absorbed namespace, so the
+        active space is asked first: a name it stamped is a declaration of
+        this namespace, at that position.  A name it did not stamp may still
+        be a declaration of ANOTHER module — imported ADTs are visible to the
+        importer (the checker registers them, carrying the index their own
+        module gave them), and they must arrive with that index or a main-file
+        alias naming one resolves through a declaration the checker's binding
+        table treats as coming later.  Only what no namespace declared —
+        built-ins, and the prelude's own ADTs — takes the reserved floor.
+        """
+        idx = order.get(name)
+        if idx is not None:
+            return idx
+        owner = self._adt_layout_owners.get(name)
+        if owner is not None:
+            owner_idx = self._module_decl_order.get(owner, {}).get(name)
+            if owner_idx is not None:
+                return owner_idx
+        return _BUILTIN_DECL_INDEX
 
     def _stamp_decl_order(self, name: str, *, prelude: bool = False) -> None:
         """Record *name*'s position in the ACTIVE declaration-index space.

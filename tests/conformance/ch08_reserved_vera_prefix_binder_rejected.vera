@@ -1,0 +1,15 @@
+-- Conformance: binding a reserved prelude-namespace type name is a checker error (Chapter 8, Section 8.4.1)
+-- Tests: E154 — a type PARAMETER in the prelude's reserved `Vera` namespace is
+-- rejected where it is bound (#1221 review).  A `forall` variable is neither a
+-- declaration nor a reference: it BINDS the name for one declaration's body,
+-- and type-parameter scope is consulted before either other rail, so a binder
+-- here made every mention inside this function resolve to the type variable
+-- while code generation resolved the same spelling to the prelude's own
+-- declaration.  The reservation is closed at the binder too.
+public forall<VeraOptionMapFn> fn pick(@VeraOptionMapFn -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  1
+}

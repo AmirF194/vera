@@ -3515,12 +3515,12 @@ class TestPreludeFnTypeAliasCollision:
 
     The prelude spells its closure-taking combinators' parameters
     through type aliases (``option_map(@Option<VeraA>,
-    @OptionMapFn<VeraA, VeraB>)``) because a slot reference needs a type
-    *name*.  Those names used to live in the same namespace user code
-    writes into, so a user (or module) alias of the same name re-typed
-    the PRELUDE's declaration — the mirror image of the #1111 defect
-    that spec §8.4.1 forbids in the other direction (a main-file alias
-    must never re-type a module's declarations).
+    @VeraOptionMapFn<VeraA, VeraB>)``) because a slot reference needs a
+    type *name*.  Those names used to live in the same namespace user
+    code writes into, so a user (or module) alias of the same name
+    re-typed the PRELUDE's declaration — the mirror image of the #1111
+    defect that spec §8.4.1 forbids in the other direction (a main-file
+    alias must never re-type a module's declarations).
 
     Pre-fix the two namespaces disagreed about it, and neither was
     right:
@@ -3539,8 +3539,13 @@ class TestPreludeFnTypeAliasCollision:
     The fix gives the prelude's own combinators reserved ``Vera``-
     prefixed spellings of those aliases (the #869 remedy, applied to the
     alias names rather than the type-parameter names), so no user alias
-    can reach them from any scope.  The user-facing alias names stay
-    injected and stay the user's to shadow.
+    can reach them from any scope.  #1221 then retired the user-facing
+    spellings altogether: the prelude injects nothing outside the
+    reserved namespace, so the names these tests declare are ordinary
+    user aliases that collide with nothing.  They stay parametrized over
+    those names because that is the shape a program in the wild has —
+    each one must keep meaning exactly what the user wrote while the
+    combinators keep working beside it.
     """
 
     _resolved = staticmethod(TestCrossModuleCodegen._resolved)
@@ -3684,16 +3689,16 @@ public fn main(@Unit -> @Int)
 
     @pytest.mark.parametrize("alias", ["OptionMapFn", "OptionBindFn"])
     def test_shadowing_every_option_alias_at_once(self, alias: str) -> None:
-        """Both user-facing Option alias names taken in one program.
+        """Both Option-combinator alias names taken in one program.
 
         Distinct door from the single-alias tests: ``inject_prelude``
-        gates the user-facing alias block on the user having shadowed
-        *all* of a group's names, so shadowing one name still injects
-        the block (and its reserved twins with it) while shadowing both
-        skips it entirely.  The twins have to arrive with the
-        combinator bodies that need them, not with the block a user can
-        suppress.  ``ResultMapFn`` is a one-name group, so its own
-        parametrized cases already cross this threshold."""
+        used to gate a user-facing alias block on the user having taken
+        *all* of a group's names, so taking one name still injected the
+        block while taking both skipped it entirely — and the
+        declarations the combinators resolve through went with it.  The
+        aliases now arrive with the combinator bodies that need them,
+        unconditionally and under reserved names (#1221), which is what
+        this pair of declarations pins."""
         decl = "type OptionMapFn = Int;\ntype OptionBindFn = String;\n\n"
         assert self._run_as_main(alias, decl) == 42
         assert self._run_as_module(alias, decl) == 42
@@ -3795,17 +3800,20 @@ public fn main(@Unit -> @Int)
         ``len(params) == len(type_args)``, so the stale pair is a live
         wrong-substitution door for any consumer that reaches the name
         with two type args — which is exactly how the prelude's own
-        ``@OptionMapFn<VeraA, VeraB>`` parameter used to resolve to the
-        module's ``Int``.  Asserted on the maps rather than end-to-end:
-        after the reserved-name fix no prelude declaration spells a
-        shadowable alias, so the pairing is defence-in-depth against the
-        next consumer that does."""
+        ``@VeraOptionMapFn<VeraA, VeraB>`` parameter used to resolve to
+        the module's ``Int``.  Asserted on the maps rather than end to
+        end, and driven straight at ``CodeGenerator``: every prelude
+        alias now lives in the reserved namespace (#1221), so the module
+        below is a shape ``vera check`` refuses (E154) and only this
+        layer can still be handed.  The pairing is what keeps that
+        refusal from being the only thing standing between a module
+        alias and the prelude's parameter list."""
         import tempfile
 
         from vera.codegen.core import CodeGenerator
 
         mods = [self._resolved(("mc",), """\
-type OptionMapFn = Int;
+type VeraOptionMapFn = Int;
 
 public fn ident(@Int -> @Int)
   requires(true)
@@ -3837,17 +3845,17 @@ public fn main(@Unit -> @Int)
 
         # The prelude's own entry is parameterized, so a stale param
         # list is distinguishable from a correctly paired override.
-        assert gen._prelude_type_alias_params.get("OptionMapFn") == (
+        assert gen._prelude_type_alias_params.get("VeraOptionMapFn") == (
             "VeraA", "VeraB",
         ), "prelude alias params missing — test no longer probes the hole"
 
         with gen._module_alias_scope(("mc",)):
             assert isinstance(
-                gen._type_aliases["OptionMapFn"], ast.NamedType,
-            ) and gen._type_aliases["OptionMapFn"].name == "Int", (
+                gen._type_aliases["VeraOptionMapFn"], ast.NamedType,
+            ) and gen._type_aliases["VeraOptionMapFn"].name == "Int", (
                 "module alias lost its own target inside its scope"
             )
-            assert "OptionMapFn" not in gen._type_alias_params, (
+            assert "VeraOptionMapFn" not in gen._type_alias_params, (
                 "module's non-parameterized alias is paired with the "
                 "prelude's stale param list"
             )
@@ -3858,10 +3866,9 @@ public fn main(@Unit -> @Int)
         The pairing invariant's other branch: `type OptionMapFn<A> =
         Option<A>;` in a module must resolve at arity 1 inside that
         module.  Dropping the `_type_alias_params.update(mod_params)`
-        overlay would leave the prelude's stale `("VeraA", "VeraB")`
-        paired with the module's target, and the arity-1 use below would
-        stop substituting — the differing arity makes the stale pairing
-        loud, end to end.
+        overlay leaves the module's target with no parameter list at
+        all, and the arity-1 use below stops substituting — the missing
+        pairing is loud, end to end.
         """
         import tempfile
 

@@ -439,6 +439,14 @@ class CrossModuleMixin:
                     # both positions (E210 expression / E320 pattern), and
                     # importer VISIBILITY below stays public + in-filter.
                     self._adt_layouts.setdefault(adt_name, layouts)
+                    # #1227: and the namespace that declared it, so the
+                    # naming env can order it where its own module did
+                    # rather than at the built-in floor.  `setdefault`
+                    # matches the layout above — the first module to
+                    # register a name owns it, and a MAIN-file declaration
+                    # of the same name is never routed here (it stamps
+                    # `_decl_order`, which `_adt_decl_index` asks first).
+                    self._adt_layout_owners.setdefault(adt_name, mod.path)
                     # #912: propagate the imported ADT's type-parameter
                     # metadata alongside its layout.  Without these, an imported
                     # generic ADT (`Box<T>`) reached codegen with a layout but

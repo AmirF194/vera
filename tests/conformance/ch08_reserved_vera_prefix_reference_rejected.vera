@@ -1,0 +1,15 @@
+-- Conformance: mentioning a reserved prelude-namespace type is a checker error (Chapter 8, Section 8.4.1)
+-- Tests: E154 — a type REFERENCE to a name in the prelude's reserved `Vera`
+-- namespace is rejected where it is written (#1221).  The prelude injects the
+-- aliases its combinators resolve through at code generation, never at the
+-- checker, so a program that mentions one names a type the checker cannot see
+-- and code generation can: the two partition this function's parameters
+-- differently and the compiled export reads the wrong one.  Reserving the
+-- namespace for references as well as declarations closes the divergence.
+public fn f(@VeraOptionMapFn<Int, Bool> -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  0
+}

@@ -8,6 +8,7 @@ _unify_for_inference methods extracted from TypeChecker.
 from __future__ import annotations
 
 from vera import ast, naming
+from vera.checker.registration import _RESERVED_TYPE_PREFIX_RE
 from vera.types import (
     PRIMITIVES,
     REMOVED_ALIASES,
@@ -242,6 +243,52 @@ class ResolutionMixin:
                                f"use '{canonical}' instead."),
                     fix=f"Replace '{name}' with '{canonical}'.",
                     spec_ref='Chapter 2, Section 2.2 "Primitive Types"',
+                )
+            return UnknownType()
+
+        # Reserved prelude namespace? — the reference half of E154 (#1221).
+        # Reaching here means nothing the checker knows carries this name, so
+        # it would become an opaque head.  Codegen knows better: the prelude
+        # injects its closure-parameter aliases under exactly these names, at
+        # codegen and at the verifier's mono discovery but never at check, so
+        # a `VeraOptionMapFn<Int, Bool>` parameter is one stack here and a
+        # resolved function type there — codegen merges parameters this
+        # binding table keeps apart and the export reads the wrong one.  The
+        # declaration gate alone cannot close that: it stops a user DEFINING
+        # a reserved name, not MENTIONING one the prelude defines.  Anchored
+        # on the same regex the declaration gate uses, so the two halves of
+        # the reservation cannot drift apart.
+        if _RESERVED_TYPE_PREFIX_RE.match(name):
+            if name not in self._reported_reserved_type_refs:
+                self._reported_reserved_type_refs.add(name)
+                self._error(
+                    te,
+                    f"Type '{name}' is reserved for the prelude.",
+                    rationale=(
+                        "Names beginning with 'Vera' followed by an "
+                        "uppercase letter or digit are the prelude's "
+                        "internal namespace — the declarations its "
+                        "combinators resolve through, injected at code "
+                        "generation and never visible to the type checker. "
+                        "A user program that mentions one names a type this "
+                        "checker cannot see and code generation can: the two "
+                        "then partition a function's parameters differently, "
+                        "and the compiled export reads a parameter the "
+                        "binding table assigns to a different slot."
+                    ),
+                    fix=(
+                        "Write out the type this name stands for — a "
+                        "function type is spelled `fn(A -> B) "
+                        "effects(pure)` — or declare your own alias for it "
+                        "under a name outside the reserved namespace: any "
+                        "name that does not start with 'Vera' followed by "
+                        "an uppercase letter or digit. Stripping the prefix "
+                        "is not a fix by itself; the reserved name is not a "
+                        "declaration this program can reach under any "
+                        "spelling."
+                    ),
+                    spec_ref='Chapter 8, Section 8.4.1 "Visibility Rules"',
+                    error_code="E154",
                 )
             return UnknownType()
 

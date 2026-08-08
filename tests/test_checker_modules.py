@@ -920,9 +920,89 @@ class TestReservedTypePrefix:
             assert "E154" not in codes, (src, codes)
 
     def test_unprefixed_prelude_alias_shadow_stays_legal(self) -> None:
-        """PR #1191's core guarantee: shadowing `OptionMapFn` is fine."""
+        """An unprefixed name outside the reservation is the user's.
+
+        PR #1191 stated this as "shadowing `OptionMapFn` is fine" — the
+        prelude then injected that spelling, so the declaration really
+        did shadow one.  #1221 retired the six user-facing spellings into
+        the reserved namespace, so `OptionMapFn` shadows nothing and the
+        claim would be a tautology; what still needs a rail is that the
+        reservation stops where it is anchored.  `Option` is a name the
+        prelude DOES still inject (its ADT), so this keeps exercising a
+        real shadow, and the reserved twin the combinators resolve
+        through is the negative beside it.
+        """
         codes = self._codes("type OptionMapFn = Int;\n")
         assert "E154" not in codes, codes
+        codes = self._codes("data Option<T> { None, Some(T) }\n")
+        assert "E154" not in codes, codes
+
+    # -----------------------------------------------------------------
+    # Type-PARAMETER binders (#1221 review, finding 1)
+    # -----------------------------------------------------------------
+
+    def test_forall_binder_in_the_reserved_namespace_is_E154(self) -> None:
+        """A `forall` variable is a type binder, and binds ahead of the gate.
+
+        `_resolve_named_type` consults `env.type_params` before it reaches
+        the reserved-namespace check, so a generic declaring
+        `forall<VeraOptionMapFn>` made every mention of that name resolve
+        to the type variable — the reservation held at neither end.  One
+        error per offending binder.
+        """
+        src = (
+            "public forall<VeraOptionMapFn, VeraArrayMapFn> "
+            "fn pick(@VeraOptionMapFn, @VeraArrayMapFn -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ 1 }\n"
+        )
+        diags = typecheck(parse_to_ast(src), source=src)
+        e154 = [d for d in diags if d.error_code == "E154"]
+        assert len(e154) == 2, [d.description for d in diags]
+        assert {"VeraOptionMapFn", "VeraArrayMapFn"} == {
+            name for name in ("VeraOptionMapFn", "VeraArrayMapFn")
+            if any(name in d.description for d in e154)
+        }
+
+    def test_where_helper_forall_binder_is_gated(self) -> None:
+        """The helper declares its own `forall`, one scope deeper."""
+        src = (
+            "public fn outer(@Int -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ inner(@Int.0) }\n"
+            "where {\n"
+            "  forall<VeraT> fn inner(@VeraT -> @Int)\n"
+            "    requires(true) ensures(true) effects(pure)\n"
+            "  { 1 }\n"
+            "}\n"
+        )
+        codes = self._codes(src)
+        assert "E154" in codes, codes
+
+    def test_data_and_alias_type_params_are_gated(self) -> None:
+        """The other declaration surfaces that bind a type name."""
+        assert "E154" in self._codes("data Box<VeraA> { MkBox(VeraA) }\n")
+        assert "E154" in self._codes("type Pair<VeraA> = Option<VeraA>;\n")
+
+    def test_effect_and_ability_type_params_are_gated(self) -> None:
+        """Their parameters are type binders too, in the same namespace."""
+        assert "E154" in self._codes(
+            "effect Logger<VeraT> {\n  op log(VeraT -> Unit);\n}\n"
+        )
+        assert "E154" in self._codes(
+            "ability Sized<VeraT> {\n  op size(VeraT -> Int);\n}\n"
+        )
+
+    def test_ordinary_binders_stay_legal(self) -> None:
+        """The anchoring, on the binder surface: `T`, `Veranda`, `Vera`."""
+        for binder in ("T", "Veranda", "Vera", "Vera_thing"):
+            src = (
+                f"public forall<{binder}> fn ident(@{binder} -> @Int)\n"
+                "  requires(true) ensures(true) effects(pure)\n"
+                "{ 1 }\n"
+            )
+            codes = self._codes(src)
+            assert "E154" not in codes, (binder, codes)
 
     def test_module_declaration_surfaces_E154(self) -> None:
         mod_src = "module vmod;\ntype VeraResultMapFn = Int;\n"
