@@ -9,7 +9,7 @@
 -- nonzero exit.
 private fn transform_get(@Unit -> @Int)
   requires(true)
-  ensures(true)
+  ensures(@Int.result == 105)
   effects(pure)
 {
   handle[State<Int>](@Int = 0) {
@@ -23,7 +23,7 @@ private fn transform_get(@Unit -> @Int)
 
 private fn override_store(@Unit -> @Int)
   requires(true)
-  ensures(true)
+  ensures(@Int.result == 10)
   effects(pure)
 {
   handle[State<Int>](@Int = 0) {
@@ -37,7 +37,7 @@ private fn override_store(@Unit -> @Int)
 
 private fn keep_old(@Unit -> @Int)
   requires(true)
-  ensures(true)
+  ensures(@Int.result == 7)
   effects(pure)
 {
   handle[State<Int>](@Int = 7) {

@@ -4,7 +4,7 @@
 -- the full canonical slot name so @Option<Int>.0 resolves in the handler (#914).
 public fn caught_composite(@Unit -> @Int)
   requires(true)
-  ensures(true)
+  ensures(@Int.result == 9)
   effects(pure)
 {
   handle[Exn<Option<Int>>] {

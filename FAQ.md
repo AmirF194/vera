@@ -189,7 +189,7 @@ Mandatory parity tests enforce that the browser runtime produces identical resul
 
 The process works in three steps:
 
-1. **Input generation**: The compiler reads each function's `requires()` clause and uses Z3 to generate concrete values that satisfy the precondition. For example, if a function requires `@Int.1 != 0`, Z3 produces pairs of integers where the second is non-zero. It generates up to 100 trials per function by default (configurable with `--trials`). Whether a parameter can be generated for is decided on its *resolved* type, not its spelling, so an alias of a generatable type (`type Cnt = Int;`) is trialled rather than skipped, and an alias-spelled precondition still constrains the inputs.
+1. **Input generation**: The compiler reads each function's `requires()` clause and uses Z3 to generate concrete values that satisfy the precondition. For example, if a function requires `@Int.1 != 0`, Z3 produces pairs of integers where the second is non-zero. It generates up to 100 trials per function by default (configurable with `--trials`). Whether a parameter can be generated for is decided on its *resolved* type, not its spelling, so an alias of a generatable type (`type Cnt = Int;`) is trialled rather than skipped, and an alias-spelled precondition still constrains the inputs. "Satisfy the precondition" is exact rather than best-effort, for the functions that reach trials at all: among the Tier-3 targets, if any conjunct — or any refined parameter's predicate — falls outside the SMT layer's decidable fragment, Z3 could not constrain the inputs by it, so the function is *skipped* with the blocking conjunct named instead of being exercised on inputs its own guard would reject. A function the verifier proved at Tier 1 is reported `VERIFIED` and never trialled, so the question does not arise for it.
 
 2. **Execution**: Each generated input is compiled to WASM and executed via wasmtime. The function runs with real values, not symbolic ones.
 
@@ -234,7 +234,7 @@ None of this is Vera-specific, but it validates the design choices. The thesis i
 
 This is a real concern. LLMs are trained on trillions of tokens of Python, TypeScript, and JavaScript. A MojoBench study (NAACL 2025) found that even fine-tuned models achieved only 30–35% improvement over base models on Mojo code generation, illustrating the cold-start problem for new languages.
 
-Vera's approach has three parts. First, the agent-facing documentation (SKILL.md) is designed to be dropped into a model's context window, so the model works from the language specification rather than training data recall. Second, Vera's syntax is deliberately simple and regular — fewer constructs, each with exactly one canonical form — which reduces the surface area a model needs to learn. Third, the conformance test suite (203 programs covering every language feature) gives models concrete examples to learn from and conform to. Simon Willison's December 2025 JustHTML write-up illustrates the same point in practice: an LLM-assisted implementation, guided by the html5lib conformance suite, conformed to the HTML parsing spec by running against its tests — a comprehensive test suite is a strong scaffold for a model implementing to a specification.
+Vera's approach has three parts. First, the agent-facing documentation (SKILL.md) is designed to be dropped into a model's context window, so the model works from the language specification rather than training data recall. Second, Vera's syntax is deliberately simple and regular — fewer constructs, each with exactly one canonical form — which reduces the surface area a model needs to learn. Third, the conformance test suite (204 programs covering every language feature) gives models concrete examples to learn from and conform to. Simon Willison's December 2025 JustHTML write-up illustrates the same point in practice: an LLM-assisted implementation, guided by the html5lib conformance suite, conformed to the HTML parsing spec by running against its tests — a comprehensive test suite is a strong scaffold for a model implementing to a specification.
 
 
 ## How does Vera compare to Dafny / Lean / Koka / F*?
@@ -277,7 +277,7 @@ The reference compiler is under active development. The current release includes
 
 - A seven-stage pipeline: parse, transform, resolve, typecheck, verify, compile, execute
 - A 14-chapter formal specification
-- 9,699 tests, including a 203-program conformance suite
+- 9,966 tests, including a 204-program conformance suite
 - 42 working example programs
 - 164 built-in functions covering strings, arrays, math, parsing, and data types
 - Four built-in abilities (Eq, Ord, Hash, Show) with constrained generics and ADT auto-derivation

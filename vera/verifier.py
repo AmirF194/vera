@@ -77,6 +77,15 @@ _I64_MIN = -(2**63)
 _I64_MAX = 2**63 - 1
 _U64_MAX = 2**64 - 1
 
+#: The E506 reason shared by the two sub-pattern sites whose SCRUTINEE the SMT
+#: layer cannot project (#1251).  Nothing about the predicate or its base is at
+#: fault there — the field the predicate is about was never formed — so saying
+#: "outside Z3's decidable fragment" pointed the reader at the wrong thing.
+_OPAQUE_SCRUTINEE_REASON = (
+    "the matched value is opaque to the SMT layer, so its field could not be "
+    "projected and the predicate was never given a value to reason about"
+)
+
 
 def _walk_fn_decls(program: ast.Program) -> Iterator[ast.FnDecl]:
     """Every function *declaration* in *program*, ``where``-helpers included.
@@ -133,6 +142,16 @@ def summarize(obligations: list[ProofObligation]) -> VerifySummary:
     ``total`` is exactly ``tier1_verified + tier3_runtime`` — the count of
     obligations that discharged to *some* tier — so the summary is internally
     arithmetic-consistent by construction.
+
+    The three buckets PARTITION the stream, which is the other half of the
+    contract ``verify --json`` documents (#1242): a consumer reproduces the
+    counts by filtering on ``status``, never by taking the array's length, and
+    the full accounting is ``len(obligations) == total + violated +
+    tier3_unguarded``.  Read as ``len == total`` instead, a program with one
+    refuted contract looks like a summary that disagrees with its own stream
+    (``ch08_transitive_module_import_base``: three obligations, ``total`` 2).
+    ``tests/test_obligations.py`` asserts both directions over every corpus
+    program the verifier runs on.
     """
     tier1 = sum(1 for o in obligations if o.status == "verified")
     tier3 = sum(1 for o in obligations if o.status in ("tier3", "timeout"))
@@ -797,10 +816,29 @@ class ContractVerifier:
         self.env.type_params = saved_params
 
     def _register_alias(self, decl: ast.TypeAliasDecl) -> None:
-        """Register a type alias."""
+        """Register a type alias.
+
+        A parameterised alias's own type parameters are bound as TYPE VARIABLES
+        for the resolution of its body, exactly as :meth:`_register_data` binds
+        an ADT's and as the checker's ``_register_alias`` does (#1237).  Without
+        it ``type Box<T> = T;`` fell through ``_resolve_type``'s unknown-name
+        fallback and registered ``AdtType('T')`` — the binder wearing an ADT's
+        name — which no substitution can eliminate, since
+        :func:`~vera.types.substitute` maps type variables.  Every application
+        of the alias then resolved to that phantom ADT, and a refinement over
+        it failed the modelled-primitive gate: the refined-return fact was
+        dropped and a valid program rejected with a spurious E501.
+        """
         from vera.environment import TypeAliasInfo
         decl_index = self.env.next_decl_index()
-        resolved = self._resolve_type(decl.type_expr)
+        saved_params = dict(self.env.type_params)
+        if decl.type_params:
+            for tv in decl.type_params:
+                self.env.type_params[tv] = TypeVar(tv)
+        try:
+            resolved = self._resolve_type(decl.type_expr)
+        finally:
+            self.env.type_params = saved_params
         self.env.type_aliases[decl.name] = TypeAliasInfo(
             name=decl.name,
             type_params=decl.type_params,
@@ -1251,6 +1289,29 @@ class ContractVerifier:
             # Check type aliases
             if te.name in self.env.type_aliases:
                 alias = self.env.type_aliases[te.name]
+                # An APPLICATION substitutes its arguments into the alias's
+                # body (#1237) — the same rule the checker applies in
+                # `vera/checker/resolution.py::_resolve_named_type` (#660), and
+                # the same substitute-before-you-ask-what-a-type-is discipline
+                # `vera.naming` applies on the naming side.  Ignoring
+                # `te.type_args` handed back the alias's registered body with
+                # its own parameters still in it, so `Box<Cnt>` under
+                # `type Box<T> = T;` resolved to `T` rather than to `Nat`.  The
+                # arguments resolve HERE (in the use site's scope) before they
+                # are substituted, so an argument that is itself an application
+                # is already fully resolved when it lands in the body.  Arity is
+                # the CHECKER's error (E133) and a mismatch cannot reach a
+                # verified program; `zip` truncating on one would substitute a
+                # prefix, which is the pre-#1237 behaviour for the un-mapped
+                # tail and no worse.
+                if te.type_args and alias.type_params:
+                    alias_args = tuple(
+                        self._resolve_type(a) for a in te.type_args
+                    )
+                    return substitute(
+                        alias.resolved_type,
+                        dict(zip(alias.type_params, alias_args)),
+                    )
                 return alias.resolved_type
             # Check ADTs
             if te.name in self.env.data_types:
@@ -3033,12 +3094,16 @@ class ContractVerifier:
                 if body_expr is not None else None
             )
             if goal is None:
-                # Untranslatable body / predicate / non-primitive base — Tier 3
-                # checked by the codegen return guard (guarded), never a silent
-                # pass (R7).
+                # No goal to check: the body did not translate, the base is
+                # one the verifier does not model, or the predicate is outside
+                # the fragment — Tier 3 checked by the codegen return guard
+                # (guarded), never a silent pass (R7).  Which of the three it
+                # was decides what the reader should go and change, so the
+                # disclosure says (#1251).
                 self._record_refined_bind_tier3(
                     decl, ret_node, "return type",
-                    guarded=self._refined_boundary_codegen_guardable(ret_type))
+                    guarded=self._refined_boundary_codegen_guardable(ret_type),
+                    reason=self._refined_bail_reason(ret_type, body_expr))
             else:
                 ret_result = smt.check_valid(goal, list(assumptions))
                 if ret_result.status == "verified":
@@ -3055,14 +3120,18 @@ class ContractVerifier:
                         ret_result.counterexample,
                     )
                 else:
-                    # Solver timeout — or, #1199, a countermodel over an
-                    # opaque effect-op stand-in, which refutes nothing the
-                    # effect actually produces: both demote to the guarded
-                    # Tier-3 leg rather than claiming a definite E505.
+                    # No verdict: the solver declined to decide, or — #1199 —
+                    # the only countermodel ran over an opaque effect-op
+                    # stand-in, which refutes nothing the effect actually
+                    # produces.  Both demote to the guarded Tier-3 leg rather
+                    # than claiming a definite E505; which one it was decides
+                    # what the disclosure says (#1251).
                     self._record_refined_bind_tier3(
                         decl, ret_node, "return type",
                         guarded=self._refined_boundary_codegen_guardable(
-                            ret_type))
+                            ret_type),
+                        reason=self._refined_undecided_reason(
+                            ret_result.status))
 
         # 7c. #813: a bare @Nat body widening into an @Int return reinterprets
         #     its bit pattern above i64.MAX (u64.MAX -> -1), so a Tier-1 proof
@@ -4428,6 +4497,11 @@ class ContractVerifier:
                     decl, expr.body, "closure return",
                     guarded=self._refined_boundary_codegen_guardable(
                         resolved_ret),
+                    reason=(
+                        "a closure body is opaque to the verifier, so its "
+                        "returned value is never translated and the predicate "
+                        "has nothing to be tested against"
+                    ),
                 )
                 # #820 INTERSECTION: a refinement OVER @Int whose body is
                 # intrinsically @Nat gets codegen's widen guard ALONGSIDE the
@@ -6134,12 +6208,24 @@ class ContractVerifier:
         ``smt._path_conditions``): on success ``tier1_verified``; on a Z3
         counterexample an E505 error.
 
-        An untranslatable value, an untranslatable / non-primitive-base
-        predicate, or a solver timeout is surfaced as an E506 warning, never a
-        silent ``tier1_verified`` (R7).  *guarded* says whether codegen
-        runtime-guards this site (a call argument, caught by the callee's entry
-        guard, is ``True``; an internal narrowing is ``False``) — see
-        :py:meth:`_record_refined_bind_tier3`.
+        Anything short of a verdict is surfaced as an E506 warning, never a
+        silent ``tier1_verified`` (R7), and the warning NAMES which of them it
+        was (#1251) — the four causes ask the reader to change different
+        things, so folding them into one sentence misinforms whichever reader
+        gets the other one:
+
+        * the VALUE did not translate, so there is no term to test against;
+        * the refinement's BASE is one the verifier does not model, so the
+          predicate was never handed a value — see
+          :py:meth:`_refined_untranslatable_reason`, which names the base;
+        * the PREDICATE is outside the decidable fragment; or
+        * the solver returned no verdict — ``unknown``, or the #1199
+          ``opaque`` countermodel, distinguished by
+          :py:meth:`_refined_undecided_reason`.
+
+        *guarded* says whether codegen runtime-guards this site (a call
+        argument, caught by the callee's entry guard, is ``True``; an internal
+        narrowing is ``False``) — see :py:meth:`_record_refined_bind_tier3`.
         """
         # A `@Unit` refinement is codegen-UNguarded (erased binder), so its
         # Tier-3 fallback must not claim a runtime guard (CR db24433).
@@ -6150,13 +6236,21 @@ class ContractVerifier:
         val = smt.translate_expr(value_node, slot_env)
         if val is None:
             self._record_refined_bind_tier3(
-                decl, value_node, site, guarded=eff_guarded)
+                decl, value_node, site, guarded=eff_guarded,
+                reason=(
+                    "the value being narrowed is outside the SMT layer's "
+                    "decidable fragment, so there is no term to test the "
+                    "predicate against"
+                ),
+            )
             return
 
         goal = self._translate_refined_predicate(smt, refined_ty, val)
         if goal is None:
             self._record_refined_bind_tier3(
-                decl, value_node, site, guarded=eff_guarded)
+                decl, value_node, site, guarded=eff_guarded,
+                reason=self._refined_untranslatable_reason(refined_ty),
+            )
             return
 
         result = smt.check_valid(goal, list(assumptions))
@@ -6172,9 +6266,104 @@ class ContractVerifier:
             )
             self._report_refined_binding(
                 decl, value_node, refined_ty, site, result.counterexample)
-        else:  # pragma: no cover — solver timeout
+        else:  # pragma: no cover — no solver verdict (unknown / #1199 opaque)
             self._record_refined_bind_tier3(
-                decl, value_node, site, guarded=eff_guarded)
+                decl, value_node, site, guarded=eff_guarded,
+                reason=self._refined_undecided_reason(result.status),
+            )
+
+    @staticmethod
+    def _refined_undecided_reason(status: str) -> str:
+        """Why ``check_valid`` neither proved nor refuted the predicate (#1251).
+
+        :py:meth:`~vera.smt.SmtContext.check_valid` has FOUR outcomes, and the
+        two that reach a Tier-3 demotion are not the same event.  ``unknown``
+        is the solver declining to decide — a timeout, or a goal outside what
+        it can settle.  ``opaque`` is the #1199 verdict: the solver decided
+        promptly and SAT, but every countermodel ran over an effect-operation
+        stand-in (``_fresh_opaque_slot``), so it refutes nothing the effect
+        actually produces and must not be reported as a definite E505.
+
+        Collapsing the two into "the solver timed out" is the misattribution
+        this issue is about, one level down: it names an event that did not
+        happen and sends the reader to raise a timeout that was never hit.
+        One derivation, called from every site that demotes on a non-verdict,
+        so a fifth outcome cannot be silently absorbed by whichever branch
+        happens to catch it.
+
+        Every reachable status is therefore handled BY NAME and anything else
+        raises, rather than falling through to the no-decision text: a catch-all
+        ``else`` would re-create the very defect this function exists to remove,
+        one status further out.  ``verified`` and ``violated`` never arrive —
+        callers branch on them first — and ``unsupported``, which
+        :py:class:`~vera.smt.SmtResult`'s annotation once listed, is produced by
+        nothing: ``check_valid`` is the only constructor and it returns exactly
+        the four below.  A future fifth status is a decision about what to tell
+        the reader, so it fails here rather than quietly wearing wrong text.
+        """
+        if status == "opaque":
+            return (
+                "the only countermodel ran over an opaque effect-operation "
+                "stand-in, which refutes nothing the effect actually produces"
+            )
+        if status == "unknown":
+            return "the solver returned no decision on the predicate"
+        raise ValueError(
+            f"no refinement-demotion reason for solver status {status!r}: "
+            "every outcome that can reach a Tier-3 demotion must say what it "
+            "was, so add a branch here rather than letting it inherit "
+            "another outcome's text"
+        )
+
+    @staticmethod
+    def _refined_bail_reason(
+        refined_ty: Type, value_term: object | None,
+    ) -> str:
+        """Why a refined-return check bailed before reaching the solver (#1251).
+
+        The two return-position sites fold "the body did not translate" and
+        "the predicate did not translate" into one ``goal is None``, and they
+        call for opposite actions — rewrite the body, or accept that the base
+        is unmodelled.  Split by which one it was.
+        """
+        if value_term is None:
+            return (
+                "the returned expression is outside the SMT layer's decidable "
+                "fragment, so there is no term to test the predicate against"
+            )
+        return ContractVerifier._refined_untranslatable_reason(refined_ty)
+
+    @staticmethod
+    def _refined_untranslatable_reason(refined_ty: Type) -> str:
+        """Why :py:meth:`_translate_refined_predicate` returned None (#1251).
+
+        Two causes reach that None and they call for different actions, so a
+        single sentence covering both misinforms whichever reader gets the
+        other one.  The predicate may genuinely be outside the fragment — an
+        undecidable construct, or an operand the SMT layer defers on — or the
+        BASE may be one the verifier does not model, in which case the
+        predicate was never given a value to reason about and may be perfectly
+        decidable.  ``{ @Byte | @Byte.0 < 10 }`` initialised to ``200`` is the
+        second: ``200 < 10`` decides, and decides FALSE, but ``Byte`` is not
+        among the five bases :py:meth:`_base_slot_name` models, so nothing was
+        ever asked (#1251).
+        """
+        parts = ContractVerifier._refined_parts(refined_ty)
+        if parts is None:  # pragma: no cover — caller checked the shape
+            return "the refinement's shape is not one the verifier models"
+        base, _predicate = parts
+        if ContractVerifier._base_slot_name(base) is None:
+            return (
+                f"the verifier does not model `{pretty_type(base)}` as a "
+                "refinement base — only Int, Nat, Bool, Float64 and String "
+                "carry an SMT sort here — so the predicate was never given a "
+                "value to reason about; the predicate itself may well be "
+                "decidable"
+            )
+        return (
+            "the predicate is outside Z3's decidable fragment (an undecidable "
+            "construct, or an operand the SMT layer defers on)"
+        )
 
     def _record_refined_bind_tier3(
         self,
@@ -6183,12 +6372,24 @@ class ContractVerifier:
         site: str,
         *,
         guarded: bool,
+        reason: str,
     ) -> None:
-        """Record a Tier-3 ``refine_bind`` outcome — the predicate could not be
-        discharged statically (a non-primitive base such as ``Array``, an
-        undecidable construct, or a solver timeout) — distinguishing
-        codegen-guarded boundary sites from unguarded internal ones (#746),
-        mirroring :py:meth:`_record_nat_bind_tier3`.
+        """Record a Tier-3 ``refine_bind`` outcome — the predicate was not
+        discharged statically — distinguishing codegen-guarded boundary sites
+        from unguarded internal ones (#746), mirroring
+        :py:meth:`_record_nat_bind_tier3`.
+
+        *reason* is WHY, as a clause the emitters splice into the E506
+        rationale (#1251).  It is required rather than defaulted because there
+        is no honest default: the causes are an untranslatable value, a base
+        the verifier does not model, a predicate outside the fragment, an
+        opaque scrutinee or destructure source, an opaque closure body, and
+        the two non-verdicts — and a caller that has not decided which one it
+        is has not finished thinking about the branch it is on.  Callers
+        derive it from :py:meth:`_refined_untranslatable_reason`,
+        :py:meth:`_refined_bail_reason` or
+        :py:meth:`_refined_undecided_reason` wherever the answer depends on
+        state, and pass a literal only where the site itself is the cause.
 
         Codegen emits a runtime guard at the function boundary: a refined
         parameter at entry and a refined return at exit, so a *return* narrowing
@@ -6204,13 +6405,13 @@ class ContractVerifier:
                 decl.name, "refine_bind", value_node, "tier3",
                 error_code="E506",
             )
-            self._report_refined_runtime(decl, value_node, site)
+            self._report_refined_runtime(decl, value_node, site, reason)
         else:
             self._record_obligation(
                 decl.name, "refine_bind", value_node, "tier3_unguarded",
                 error_code="E506",
             )
-            self._report_refined_unguarded(decl, value_node, site)
+            self._report_refined_unguarded(decl, value_node, site, reason)
 
     def _check_generic_refined_return(
         self, decl: ast.FnDecl, ret_type: Type,
@@ -6313,7 +6514,8 @@ class ContractVerifier:
         if goal is None:
             self._record_refined_bind_tier3(
                 decl, decl.body, "return type",
-                guarded=self._refined_boundary_codegen_guardable(ret_type))
+                guarded=self._refined_boundary_codegen_guardable(ret_type),
+                reason=self._refined_bail_reason(ret_type, body_expr))
             return
         result = smt.check_valid(goal, list(assumptions))
         if result.status == "verified":
@@ -6328,10 +6530,11 @@ class ContractVerifier:
                 decl, decl.body, ret_type, "return type",
                 result.counterexample,
             )
-        else:  # pragma: no cover — solver timeout
+        else:  # pragma: no cover — no solver verdict (unknown / #1199 opaque)
             self._record_refined_bind_tier3(
                 decl, decl.body, "return type",
-                guarded=self._refined_boundary_codegen_guardable(ret_type))
+                guarded=self._refined_boundary_codegen_guardable(ret_type),
+                reason=self._refined_undecided_reason(result.status))
 
     def _check_refined_binding_obligation_term(
         self,
@@ -6358,14 +6561,19 @@ class ContractVerifier:
         them a projection from a `@Nat` field into `{ @Nat | true }` would be a
         false E505 — Z3 inventing a negative payload the field type forbids (CR
         a48cd2c).  An obligation still undischarged under those premises is a
-        genuine E505; an untranslatable predicate / non-primitive base yields an
-        E506 Tier-3 warning.  These projection sites are internal narrowings
-        with no codegen guard, hence ``guarded=False``.  *node* gives the
-        diagnostic location.
+        genuine E505.  Anything short of a verdict is an E506 Tier-3 warning
+        that NAMES its cause (#1251): a base the verifier does not model or a
+        predicate outside the fragment, via
+        :py:meth:`_refined_untranslatable_reason`, and either non-verdict via
+        :py:meth:`_refined_undecided_reason`.  These projection sites are
+        internal narrowings with no codegen guard, hence ``guarded=False``.
+        *node* gives the diagnostic location.
         """
         goal = self._translate_refined_predicate(smt, refined_ty, term)
         if goal is None:
-            self._record_refined_bind_tier3(decl, node, site, guarded=False)
+            self._record_refined_bind_tier3(
+                decl, node, site, guarded=False,
+                reason=self._refined_untranslatable_reason(refined_ty))
             return
         local_assumptions = list(assumptions)
         if source_ty is not None:
@@ -6382,8 +6590,10 @@ class ContractVerifier:
             )
             self._report_refined_binding(
                 decl, node, refined_ty, site, result.counterexample)
-        else:  # pragma: no cover — solver timeout
-            self._record_refined_bind_tier3(decl, node, site, guarded=False)
+        else:  # pragma: no cover — no solver verdict (unknown / #1199 opaque)
+            self._record_refined_bind_tier3(
+                decl, node, site, guarded=False,
+                reason=self._refined_undecided_reason(result.status))
 
     def _term_source_fact(
         self, smt: SmtContext, source_ty: Type, term: z3.ExprRef,
@@ -6740,7 +6950,8 @@ class ContractVerifier:
                     # no codegen guard, so this is an unguarded E506 Tier-3
                     # (excluded from totals), not a silent pass (R7).
                     self._record_refined_bind_tier3(
-                        decl, scrutinee, "ADT sub-pattern bind", guarded=False)
+                        decl, scrutinee, "ADT sub-pattern bind", guarded=False,
+                        reason=_OPAQUE_SCRUTINEE_REASON)
                 continue
             if (self._is_nat_type(target)
                     and not self._is_nat_type(field_ty)):
@@ -6827,7 +7038,8 @@ class ContractVerifier:
             if (self._is_refined_type(target)
                     and self._refined_field_narrows(target, field_ty)):
                 self._record_refined_bind_tier3(
-                    decl, scrutinee, "ADT sub-pattern bind", guarded=False)
+                    decl, scrutinee, "ADT sub-pattern bind", guarded=False,
+                    reason=_OPAQUE_SCRUTINEE_REASON)
             elif (self._is_nat_type(target)
                     and not self._is_nat_type(field_ty)):
                 self._record_nat_bind_tier3(
@@ -6920,7 +7132,13 @@ class ContractVerifier:
                     guarded=True)
             for _ in refined_narrowing:
                 self._record_refined_bind_tier3(
-                    decl, stmt.value, "tuple destructure", guarded=False)
+                    decl, stmt.value, "tuple destructure", guarded=False,
+                    reason=(
+                        "the destructured value cannot be projected into its "
+                        "components (an effect-op result, or another term the "
+                        "SMT layer models opaquely), so the component the "
+                        "predicate is about was never formed"
+                    ))
             for _ in int_widening:
                 # #813: codegen does not guard a tuple-destructure component
                 # widening (like tuple construction), so disclose E531.
@@ -7448,13 +7666,18 @@ class ContractVerifier:
         decl: ast.FnDecl,
         node: ast.Expr,
         site: str,
+        reason: str,
     ) -> None:
         """Emit an informational E506 warning for a refinement narrowing the
         SMT layer could not discharge but codegen runtime-guards (#746).
 
-        The predicate is outside Z3's decidable fragment — a non-primitive base
-        such as ``Array`` (Z3 cannot decide ``array_length``), an undecidable
-        construct, or a solver timeout — so it could not be proved statically.
+        *reason* is the caller's clause naming WHY it was not discharged, and
+        it is spliced into the rationale verbatim (#1251).  This method does
+        not decide the cause and must not describe one: it emitted a fixed
+        "outside Z3's decidable fragment" for every caller, which was false
+        for a decidable predicate over a base the verifier simply does not
+        model.
+
         Codegen emits a runtime predicate guard at the function boundary (a
         refined parameter at entry, a refined return at exit; call arguments
         via the callee's entry guard), so the narrowing falls to that check —
@@ -7469,12 +7692,10 @@ class ContractVerifier:
                 "predicate or guard the binding with an `if`."
             ),
             rationale=(
-                "The refinement predicate is outside Z3's decidable fragment "
-                "(a non-primitive base such as Array, an undecidable "
-                "construct, or a solver timeout), so it could not be "
-                "discharged statically.  Codegen emits a runtime predicate "
-                "guard at the function boundary, so the narrowing is checked "
-                "at run time (Tier 3) rather than silently accepted."
+                f"The refinement predicate was not discharged statically: "
+                f"{reason}.  Codegen emits a runtime predicate guard at the "
+                "function boundary, so the narrowing is checked at run time "
+                "(Tier 3) rather than silently accepted."
             ),
             spec_ref=(
                 'Chapter 2, Section 2.6 "Refinement Types" and Chapter 6, '
@@ -7489,17 +7710,22 @@ class ContractVerifier:
         decl: ast.FnDecl,
         node: ast.Expr,
         site: str,
+        reason: str,
     ) -> None:
         """Emit an E506 warning for a refinement narrowing the SMT layer could
         not discharge and codegen does NOT runtime-guard (#746).
 
+        *reason* is the caller's clause naming WHY it was not discharged, and
+        it is spliced into the rationale verbatim (#1251) — this method does
+        not decide the cause and must not describe one, for the reason its
+        guarded twin :py:meth:`_report_refined_runtime` records.
+
         Codegen guards a refined value only at the function boundary (parameter
         entry, return exit).  An *internal* narrowing — ``let`` / constructor
         field / effect-op argument / match bind / tuple-destructure / ADT
-        sub-pattern — has no such guard, so when its predicate is also outside
-        Z3's decidable fragment it is neither statically proven nor
-        runtime-checked: surfaced (R7) rather than silently passed, and excluded
-        from the discharged totals."""
+        sub-pattern — has no such guard, so an undischarged predicate here is
+        neither statically proven nor runtime-checked: surfaced (R7) rather
+        than silently passed, and excluded from the discharged totals."""
         self._warning(
             node,
             (
@@ -7510,13 +7736,11 @@ class ContractVerifier:
                 "return (which is runtime-guarded)."
             ),
             rationale=(
-                "The refinement predicate is outside Z3's decidable fragment "
-                "(a non-primitive base such as Array, an undecidable "
-                "construct, or a solver timeout), so it could not be "
-                "discharged statically.  Codegen runtime-guards refinements "
-                "only at the function boundary (parameter entry / return "
-                "exit), not at this internal narrowing site, so it is neither "
-                "statically proven nor runtime-checked."
+                f"The refinement predicate was not discharged statically: "
+                f"{reason}.  Codegen runtime-guards refinements only at the "
+                "function boundary (parameter entry / return exit), not at "
+                "this internal narrowing site, so it is neither statically "
+                "proven nor runtime-checked."
             ),
             spec_ref=(
                 'Chapter 2, Section 2.6 "Refinement Types" and Chapter 6, '

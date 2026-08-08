@@ -827,22 +827,29 @@ private fn dest_none_387(@Int, @Int -> @Int)
         assert proj == [], [(o.kind, o.status) for o in proj]
 
     # --- _obligate_subpattern_narrowings: opaque (unprojectable) scrutinee ---
-    # A `match f() { Some(@Nat) -> ... }` whose scrutinee is a function-call
-    # return: the SMT layer can't project it as a datatype (sort/idx is None),
-    # so the narrowing falls to the opaque tail branch rather than a term check.
+    # A `match op() { Some(@Nat) -> ... }` whose scrutinee is an EFFECT
+    # OPERATION's return: the SMT layer can't project it as a datatype
+    # (sort/idx is None), so the narrowing falls to the opaque tail branch
+    # rather than a term check.
+    #
+    # The scrutinee must be opaque for a STRUCTURAL reason — an effect op's
+    # return is uninterpreted.  A plain `fn` call does NOT reach this branch:
+    # its summary models the return as a datatype variable, so the sub-pattern
+    # projects and the narrowing is checked as a term.  These two fixtures
+    # used a `srcopt_387(())` call, which reached the branch only because a
+    # zero-size argument collapsed the summary (#1214) — the same accident
+    # `test_destructure_unprojectable_guarded_tier3` above already avoided.
 
     def test_opaque_nat_subpattern_guarded_tier3(self) -> None:
-        """Opaque scrutinee (call return) ``Some(@Nat)`` on ``Option<Int>`` →
-        the unprojectable nat tail (3887-3898): a GUARDED Tier-3 nat_bind
-        (codegen guards the sub-pattern bind at run time).  Pins ``tier3`` +
-        ``tier3_runtime`` and that it is NOT an error."""
+        """Opaque scrutinee (effect-op return) ``Some(@Nat)`` on
+        ``Option<Int>`` → the unprojectable nat tail (3887-3898): a GUARDED
+        Tier-3 nat_bind (codegen guards the sub-pattern bind at run time).
+        Pins ``tier3`` + ``tier3_runtime`` and that it is NOT an error."""
         result = _verify("""
-private fn srcopt_387(@Unit -> @Option<Int>)
-  requires(true) ensures(true) effects(pure)
-{ Some(1) }
+effect OptSrc387 { op mk(Unit -> Option<Int>); }
 private fn sp_opaque_nat_387(@Unit -> @Nat)
-  requires(true) ensures(true) effects(pure)
-{ match srcopt_387(()) { Some(@Nat) -> @Nat.0, None -> 0 } }
+  requires(true) ensures(true) effects(<OptSrc387>)
+{ match OptSrc387.mk(()) { Some(@Nat) -> @Nat.0, None -> 0 } }
 """)
         assert [d for d in result.diagnostics if d.severity == "error"] == [], [
             d.description for d in result.diagnostics if d.severity == "error"]
@@ -862,12 +869,10 @@ private fn sp_opaque_nat_387(@Unit -> @Nat)
         a mutation flipping the flag would mis-claim a runtime guard."""
         result = _verify("""
 type Pos387 = { @Int | @Int.0 > 0 };
-private fn srcopt2_387(@Unit -> @Option<Int>)
-  requires(true) ensures(true) effects(pure)
-{ Some(1) }
+effect OptSrc2387 { op mk(Unit -> Option<Int>); }
 private fn sp_opaque_ref_387(@Unit -> @Int)
-  requires(true) ensures(true) effects(pure)
-{ match srcopt2_387(()) { Some(@Pos387) -> @Pos387.0, None -> 1 } }
+  requires(true) ensures(true) effects(<OptSrc2387>)
+{ match OptSrc2387.mk(()) { Some(@Pos387) -> @Pos387.0, None -> 1 } }
 """)
         assert [d for d in result.diagnostics if d.severity == "error"] == [], [
             d.description for d in result.diagnostics if d.severity == "error"]

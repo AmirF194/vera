@@ -343,7 +343,7 @@ private fn sum(@List<Int> -> @Int)
         assert result.summary.tier1_verified == 8
 
     def test_overall_tier_counts(self) -> None:
-        """All examples together: 359 T1 / 125 T3 / 484 total (current).
+        """All examples together: 364 T1 / 120 T3 / 484 total (current).
 
         Counts move when examples are added or their contracts become
         more / less verifiable.  Trajectory:
@@ -644,8 +644,17 @@ private fn sum(@List<Int> -> @Int)
         # fresh-scope env can neither prove a false Tier-1 nor lose an
         # existing proof: +0 T1, +22 T3, +22 total: 359/103/462 ->
         # 359/125/484.
-        assert t1 == 359, f"Expected 359 T1, got {t1}"
-        assert t3 == 125, f"Expected 125 T3, got {t3}"
+        #
+        # #1214: a zero-size call argument no longer collapses the call
+        # summary, so a call spelled `f(())` is modelled exactly as `f(1)`
+        # already was.  Five obligations that could only be runtime-checked
+        # while such a call was opaque now discharge statically — in
+        # `collections.vera` (one) and `array_utilities.vera` (four, once its
+        # helpers state the values their caller's `ensures` had been asserting
+        # about them).  The obligation SET is unchanged, only the tier:
+        # +5 T1, -5 T3, +0 total: 359/125/484 -> 364/120/484.
+        assert t1 == 364, f"Expected 364 T1, got {t1}"
+        assert t3 == 120, f"Expected 120 T3, got {t3}"
         assert total == 484, f"Expected 484 total, got {total}"
         assert t3u == 0, f"Expected 0 tier3_unguarded, got {t3u}"
 

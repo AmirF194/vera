@@ -28,6 +28,7 @@ from vera.types import (
     Type,
     TypeVar,
     contains_typevar,
+    erases_to_unit,
     BOOL,
     FLOAT64,
     INT,
@@ -155,7 +156,12 @@ class SlotEnv:
 class SmtResult:
     """Outcome of a Z3 validity check."""
 
-    status: str  # "verified" | "violated" | "unknown" | "unsupported" | "opaque"
+    #: The four outcomes ``check_valid`` produces — its only constructor, so
+    #: this list is exhaustive.  Consumers that map a status to user-facing
+    #: text handle each by name and reject the rest (see
+    #: ``ContractVerifier._refined_undecided_reason``); a fifth added here is a
+    #: decision they have to make, not one to inherit.
+    status: str  # "verified" | "violated" | "unknown" | "opaque"
     counterexample: dict[str, str] | None = None  # slot_name → value
 
 
@@ -1835,19 +1841,61 @@ class SmtContext:
             callee_info, call.name, call.args, call, env,
         )
 
-    def _translate_call_args(
-        self, args: tuple[ast.Expr, ...], env: SlotEnv,
-    ) -> list[z3.ExprRef] | None:
-        """Translate every actual argument in the caller's env (#882 helper).
+    def _zero_size_params(self, callee_info: Any) -> tuple[bool, ...]:
+        """Which of *callee_info*'s formals have NO runtime representation (#1214).
 
-        Returns the Z3 argument list, or None if any argument uses a construct
-        outside the decidable fragment.  Factored out so the call translator
-        can attempt argument translation twice: once as-is (pre-#882
-        behaviour) and once after forcing the callee's ADT sorts.
+        A zero-size parameter — ``@Unit``, an alias of it, ``Future<Unit>`` —
+        carries no information: there is exactly one value, so an argument in
+        that position tells the summary nothing that the signature did not
+        already say.  It also has no Z3 sort, so ``translate_expr`` returns
+        None for it, and the call translator read that None as "this call
+        cannot be modelled at all" and dropped the whole summary.  Two
+        semantically identical spellings then produced different obligation
+        strength: with ``mk(1)`` a refined destructure of the result was a
+        provable E505 violation, and with ``mk(())`` — same function, zero-size
+        parameter — the same obligation demoted to Tier-3.
+
+        Resolved in the CALLEE's namespace (#1208): the formals are written in
+        the module that declared them, so an alias of ``Unit`` there is
+        zero-size whatever the importer's same-named alias happens to be.
+
+        One derivation, computed once per call and threaded to both consumers,
+        because the argument list and the callee's parameter stack have to drop
+        the SAME positions — a mask computed twice could be computed in two
+        scopes, and the two sides would then pair argument *i* with formal
+        *i+1*.
+        """
+        with self._callee_contract_scope(callee_info):
+            return tuple(
+                erases_to_unit(naming.resolve_type_expr(pte, self._alias_env))
+                for pte in callee_info.param_type_exprs
+            )
+
+    def _translate_call_args(
+        self,
+        args: tuple[ast.Expr, ...],
+        env: SlotEnv,
+        zero_size: tuple[bool, ...],
+    ) -> list[z3.ExprRef] | None:
+        """Translate every INFORMATIVE actual argument in the caller's env.
+
+        Returns the Z3 argument list, or None if an argument in a non-zero-size
+        position uses a construct outside the decidable fragment (#882).
+        Factored out so the call translator can attempt argument translation
+        twice: once as-is (pre-#882 behaviour) and once after forcing the
+        callee's ADT sorts.
+
+        A zero-size position is dropped rather than failing the whole list
+        (#1214) — see :meth:`_zero_size_params`.  Its argument is still
+        translated first, and only its RESULT discarded: the walk is what
+        records a nested call's own precondition obligation, and an argument
+        that happens to be `Unit`-typed must not make one vanish.
         """
         z3_args: list[z3.ExprRef] = []
-        for arg_expr in args:
+        for i, arg_expr in enumerate(args):
             z3_arg = self.translate_expr(arg_expr, env)
+            if i < len(zero_size) and zero_size[i]:
+                continue
             if z3_arg is None:
                 return None
             z3_args.append(z3_arg)
@@ -1899,6 +1947,7 @@ class SmtContext:
         self,
         callee_info: Any,
         z3_args: list[z3.ExprRef],
+        zero_size: tuple[bool, ...],
     ) -> SlotEnv | None:
         """Build the callee's SlotEnv by pushing each parameter's Z3 argument
         in declaration order (#882 helper).
@@ -1907,12 +1956,24 @@ class SmtContext:
         :meth:`_callee_contract_scope`) — they key the stack every reference in
         the callee's contract resolves against.
 
+        *zero_size* is :meth:`_zero_size_params`' mask, and the formals it
+        marks are dropped here exactly as ``_translate_call_args`` dropped
+        their arguments (#1214) — the two must drop the same positions or the
+        ``zip`` below pairs argument *i* with formal *i+1*.  Dropping a formal
+        cannot disturb any other parameter's De Bruijn index: a slot stack is
+        keyed by the parameter's type name, so removing a zero-size formal
+        empties only its own stack.
+
         Returns None if a parameter type expression has no slot name (a shape
         the checker rules out; guarded for safety).
         """
         callee_env = SlotEnv()
+        informative = [
+            pte for i, pte in enumerate(callee_info.param_type_exprs)
+            if not (i < len(zero_size) and zero_size[i])
+        ]
         with self._callee_contract_scope(callee_info):
-            for param_te, z3_arg in zip(callee_info.param_type_exprs, z3_args):
+            for param_te, z3_arg in zip(informative, z3_args):
                 slot_name = self._type_expr_to_slot_name(param_te)
                 if slot_name is None:  # pragma: no cover
                     return None
@@ -1925,6 +1986,7 @@ class SmtContext:
         callee_name: str,
         z3_args: list[z3.ExprRef],
         call_node: ast.FnCall | ast.ModuleCall,
+        zero_size: tuple[bool, ...],
     ) -> bool:
         """Check each of the callee's preconditions at this call site.
 
@@ -1934,7 +1996,7 @@ class SmtContext:
         path and the #882 opaque-return path so both check the obligation with
         identical dedup semantics.
         """
-        callee_env = self._build_callee_env(callee_info, z3_args)
+        callee_env = self._build_callee_env(callee_info, z3_args, zero_size)
         if callee_env is None:  # pragma: no cover
             return False
 
@@ -2060,11 +2122,16 @@ class SmtContext:
         if len(args) != len(callee_info.param_type_exprs):
             return None
 
+        # Which formals carry no information (#1214).  Computed ONCE and
+        # threaded to every consumer, because the argument list and the
+        # callee's parameter stack have to drop the same positions.
+        zero_size = self._zero_size_params(callee_info)
+
         # Translate actual arguments in the caller's env.  First WITHOUT
         # forcing any ADT sort — this is the exact pre-#882 attempt.  When it
         # succeeds the call is modelled as before (return value assumed from
         # the callee's ensures below), so no existing behaviour changes.
-        z3_args = self._translate_call_args(args, env)
+        z3_args = self._translate_call_args(args, env, zero_size)
 
         # #882: a constructor-call argument (`MkP(1)`) only translates once the
         # callee's concrete ADT sort exists.  In a caller context that never
@@ -2074,7 +2141,7 @@ class SmtContext:
         # ONLY to CHECK the precondition, not to newly model the return value.
         if z3_args is None:
             self._ensure_call_arg_sorts(callee_info.param_type_exprs)
-            forced_args = self._translate_call_args(args, env)
+            forced_args = self._translate_call_args(args, env, zero_size)
             if forced_args is not None:
                 # Arguments now translate.  Check the call-site precondition
                 # against them (records E501 / discharges), then return None so
@@ -2083,7 +2150,7 @@ class SmtContext:
                 # ensures before, and still does; the *only* new behaviour is
                 # the precondition obligation.
                 self._check_call_preconditions(
-                    callee_info, callee_name, forced_args, call_node,
+                    callee_info, callee_name, forced_args, call_node, zero_size,
                 )
                 return None
             # Still untranslatable (a host-handle field like `Map`).  A real
@@ -2098,13 +2165,13 @@ class SmtContext:
         # opaque — return None so the enclosing postcondition demotes to
         # Tier-3, unchanged from before this refactor.
         if not self._check_call_preconditions(
-            callee_info, callee_name, z3_args, call_node,
+            callee_info, callee_name, z3_args, call_node, zero_size,
         ):
             return None
 
         # Rebuild the callee env for the ensures-assumption step below (the
         # postcondition may reference the callee's own parameters).
-        callee_env = self._build_callee_env(callee_info, z3_args)
+        callee_env = self._build_callee_env(callee_info, z3_args, zero_size)
         if callee_env is None:  # pragma: no cover
             return None
 

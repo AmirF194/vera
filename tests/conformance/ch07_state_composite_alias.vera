@@ -9,7 +9,7 @@ type MaybeInt = Option<Int>;
 
 public fn roundtrip(@Unit -> @Int)
   requires(true)
-  ensures(true)
+  ensures(@Int.result == 3)
   effects(pure)
 {
   handle[State<MaybeInt>](@MaybeInt = Some(3)) {
@@ -25,7 +25,7 @@ public fn roundtrip(@Unit -> @Int)
 
 public fn put_then_read(@Unit -> @Int)
   requires(true)
-  ensures(true)
+  ensures(@Int.result == 42)
   effects(pure)
 {
   handle[State<MaybeInt>](@MaybeInt = None) {

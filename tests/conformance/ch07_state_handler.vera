@@ -2,7 +2,7 @@
 -- Tests: handle[State<T>], get, put, with clause
 public fn test_counter(@Unit -> @Int)
   requires(true)
-  ensures(true)
+  ensures(@Int.result == 3)
   effects(pure)
 {
   handle[State<Int>](@Int = 0) {

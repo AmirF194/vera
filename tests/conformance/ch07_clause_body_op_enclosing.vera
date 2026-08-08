@@ -11,7 +11,7 @@
 -- cell, so the Nat cell keeps 3 and the Int cell becomes 1000: 3 * 100000 + 1000.
 private fn cross_family(@Unit -> @Int)
   requires(true)
-  ensures(true)
+  ensures(@Int.result == 301000)
   effects(pure)
 {
   handle[State<Int>](@Int = 111) {
@@ -34,7 +34,7 @@ private fn cross_family(@Unit -> @Int)
 -- times the 7 just stored: 40 * 100 + 4.
 private fn with_expr(@Unit -> @Int)
   requires(true)
-  ensures(true)
+  ensures(@Int.result == 4004)
   effects(pure)
 {
   handle[State<Nat>](@Nat = 4) {
@@ -61,7 +61,7 @@ private fn with_expr(@Unit -> @Int)
 -- final `if` reads.
 private fn depth_three(@Unit -> @Int)
   requires(true)
-  ensures(true)
+  ensures(@Int.result == 2033007)
   effects(pure)
 {
   handle[State<Bool>](@Bool = false) {

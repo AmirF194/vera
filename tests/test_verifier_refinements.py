@@ -4,6 +4,10 @@ Split from tests/test_verifier.py (#839). Shared helpers live in tests/verifier_
 """
 from __future__ import annotations
 
+import pathlib
+
+import pytest
+
 from vera.parser import parse_to_ast
 
 from tests.verifier_helpers import (
@@ -1460,3 +1464,559 @@ public forall<T> fn echo_f(@Float64, @T -> @NotHalf)
 { @Float64.0 }
 """, "may violate the refinement predicate")
         assert any(e.error_code == "E505" for e in errs)
+
+
+class TestZeroSizeCallArgumentKeepsTheSummary:
+    """A zero-size call argument does not weaken the call summary (#1214).
+
+    Two spellings of one call, semantically identical: `mk(1)` proved a
+    violating refined destructure of the result (a loud E505), while `mk(())`
+    — the same function with a `@Unit` parameter — demoted the SAME obligation
+    to an unguarded Tier-3 E506.  ``@Unit`` has no Z3 sort, so
+    ``translate_expr`` returned None for the argument and the call translator
+    read that None as "this call cannot be modelled at all", dropping the whole
+    summary.  A zero-size type has exactly one value, so an argument in that
+    position tells the summary nothing the signature did not already say; it
+    can never be a reason to know LESS.
+
+    The differential is the pin: the two spellings must produce the same
+    obligation, the same status and the same code.  Asserting the Unit
+    spelling's E505 alone would leave a "fix" that broke the Int spelling
+    green.
+    """
+
+    #: ``PARAM`` / ``ARG`` are substituted by :meth:`_src` — a Vera refinement
+    #: is written with braces, so ``str.format`` is not usable here.
+    _SRC = """\
+type PosInt = { @Int | @Int.0 > 0 };
+
+private fn mk(@PARAM -> @Tuple<Int, Int>)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  Tuple(0 - 5, 3)
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let Tuple<@PosInt, @Int> = mk(ARG);
+  @Int.0
+}
+"""
+
+    def _src(self, param: str, arg: str) -> str:
+        return self._SRC.replace("@PARAM", f"@{param}").replace("ARG", arg)
+
+    def _run(self, param: str, arg: str) -> object:
+        return _verify(self._src(param, arg))
+
+    def test_both_spellings_prove_the_same_violation(self) -> None:
+        as_int = self._run("Int", "1")
+        as_unit = self._run("Unit", "()")
+
+        def shape(result: object) -> list[tuple[str, str, str]]:
+            return [
+                (o.kind, o.status, o.error_code)
+                for o in result.obligations  # type: ignore[attr-defined]
+                if o.kind == "refine_bind"
+            ]
+
+        assert shape(as_int) == [("refine_bind", "violated", "E505")], \
+            shape(as_int)
+        assert shape(as_unit) == shape(as_int), (
+            "the zero-size spelling demoted an obligation the informative "
+            f"spelling proves: {shape(as_unit)} vs {shape(as_int)}"
+        )
+
+    def test_both_spellings_report_the_same_diagnostic(self) -> None:
+        for param, arg in (("Int", "1"), ("Unit", "()")):
+            result = self._run(param, arg)
+            codes = [
+                (d.severity, d.error_code) for d in result.diagnostics
+            ]
+            assert ("error", "E505") in codes, (param, codes)
+            assert ("warning", "E506") not in codes, (param, codes)
+
+    def test_the_tier_counts_agree(self) -> None:
+        """The summaries are equal too, so nothing was traded for the E505."""
+        as_int = self._run("Int", "1").summary
+        as_unit = self._run("Unit", "()").summary
+        assert as_unit == as_int, (as_unit, as_int)
+
+    #: A zero-size formal BESIDE an informative one.  ``@Nat`` rather than a
+    #: second ``@Int`` so the precondition's ``@Nat.0`` names one parameter
+    #: under both spellings — with two ``@Int`` formals it would name the
+    #: most recent, and the fixture would be measuring De Bruijn rather than
+    #: the mask.
+    _NEED = """\
+private fn need(@PARAM, @Nat -> @Int)
+  requires(@Nat.0 > 100)
+  ensures(true)
+  effects(pure)
+{
+  nat_to_int(@Nat.0)
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  need(FIRST, ARG)
+}
+"""
+
+    def _need_src(self, param: str, first: str, arg: str) -> str:
+        return (self._NEED
+                .replace("@PARAM", f"@{param}")
+                .replace("FIRST", first)
+                .replace("ARG", arg))
+
+    #: A zero-size argument that is ITSELF a call carrying a real
+    #: precondition.  ``INNER`` / ``PARAM`` / ``FIRST`` are substituted by
+    #: :meth:`_nested_src`.
+    _NESTED = """\
+private fn inner(@Int -> @INNER)
+  requires(@Int.0 > 100)
+  ensures(true)
+  effects(pure)
+{
+  FIRST
+}
+
+private fn outer(@PARAM, @Nat -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  nat_to_int(@Nat.0)
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  outer(inner(ARG), 7)
+}
+"""
+
+    def _nested_src(self, inner: str, first: str, arg: str) -> str:
+        return (self._NESTED
+                .replace("@INNER", f"@{inner}")
+                .replace("@PARAM", f"@{inner}")
+                .replace("FIRST", first)
+                .replace("ARG", arg))
+
+    def test_an_erased_argument_keeps_its_own_nested_obligation(self) -> None:
+        """A zero-size argument's expression is still WALKED (#1214).
+
+        Only its RESULT is discarded.  The walk is what records a nested
+        call's own precondition obligation, so dropping the argument before
+        translating it — rather than after — would make `outer(inner(5), 7)`
+        lose `inner`'s violated precondition entirely: a silent static-coverage
+        gap of exactly the kind #882 closed, reopened through the zero-size
+        door.
+
+        Asserted as a differential against the informative spelling, so
+        "records something" is not enough — it has to record the SAME thing.
+        """
+        erased = _verify(self._nested_src("Unit", "()", "5"))
+        informative = _verify(self._nested_src("Bool", "true", "5"))
+
+        def shape(result: object) -> list[tuple[str, str]]:
+            return [
+                (o.kind, o.status)
+                for o in result.obligations  # type: ignore[attr-defined]
+            ]
+
+        nested = [
+            o for o in erased.obligations
+            if o.kind == "call_pre" and o.status == "violated"
+        ]
+        assert len(nested) == 1, shape(erased)
+        assert nested[0].fn_name == "main", nested[0]
+        assert shape(erased) == shape(informative), (
+            f"the erased spelling lost or gained an obligation: "
+            f"{shape(erased)} vs {shape(informative)}"
+        )
+        assert erased.summary == informative.summary, (
+            erased.summary, informative.summary,
+        )
+        assert any(
+            d.error_code == "E501" and "inner" in d.description
+            for d in erased.diagnostics
+        ), [d.description[:80] for d in erased.diagnostics]
+
+    def test_a_satisfied_nested_obligation_discharges_under_both(self) -> None:
+        """The same shape with an argument the nested precondition allows: no
+        error under either spelling, so the test above is measuring the
+        obligation and not a call that always fails."""
+        for inner, first in (("Unit", "()"), ("Bool", "true")):
+            _verify_ok(self._nested_src(inner, first, "500"))
+
+    #: ``Future<Unit>`` is the SECOND zero-size type: `Future<T>` is
+    #: representation-transparent (#841), so it erases exactly as bare `Unit`
+    #: does and `erases_to_unit` recurses through it.  Nothing else reaches
+    #: that recursion through the call-summary mask — the existing
+    #: `Future<Unit>` fixtures are checker-side (E183/E206) — so without these
+    #: two the arm is unexercised on this path.
+    _FUTURE = """\
+private fn need(@PARAM, @Nat -> @Int)
+  requires(@Nat.0 > 100)
+  ensures(true)
+  effects(pure)
+{
+  nat_to_int(@Nat.0)
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<Async>)
+{
+  need(async(()), ARG)
+}
+"""
+
+    def _future_src(self, param: str, arg: str, prelude: str = "") -> str:
+        return prelude + (self._FUTURE
+                          .replace("@PARAM", f"@{param}")
+                          .replace("ARG", arg))
+
+    def test_a_future_unit_argument_is_zero_size_too(self) -> None:
+        """Direct `@Future<Unit>`: the formal is masked, so the informative
+        `@Nat` formal still pairs with the second argument and its precondition
+        is CHECKED.  Unmasked, `async(())` fails to translate and the whole
+        call — precondition included — is dropped."""
+        errs = _verify_err(
+            self._future_src("Future<Unit>", "5"),
+            "may violate the callee's precondition",
+        )
+        assert any(e.error_code == "E501" for e in errs), errs
+        _verify_ok(self._future_src("Future<Unit>", "500"))
+
+    def test_an_aliased_future_unit_argument_is_zero_size_too(self) -> None:
+        """... and through an alias, since the mask resolves the formal in the
+        callee's namespace rather than matching its spelling."""
+        prelude = "type Done = Future<Unit>;\n\n"
+        errs = _verify_err(
+            self._future_src("Done", "5", prelude),
+            "may violate the callee's precondition",
+        )
+        assert any(e.error_code == "E501" for e in errs), errs
+        _verify_ok(self._future_src("Done", "500", prelude))
+
+    def test_the_call_precondition_is_checked_under_both_spellings(
+        self,
+    ) -> None:
+        """The opposite verdict as well, so the differential is not "both
+        loud" — and the mask is checked for alignment while it is here.
+
+        A satisfying argument must DISCHARGE in both spellings: a summary that
+        dropped every call would satisfy the violation tests above by refusing
+        to model anything.  And the informative formal sits SECOND, after the
+        zero-size one, so the argument list and the callee's parameter stack
+        must drop the same position — a mask applied to one and not the other
+        pairs argument *i* with formal *i+1*, and the obligation would then be
+        checked against the wrong argument (or fail to translate at all).
+        """
+        for param, first in (("Bool", "true"), ("Unit", "()")):
+            errs = _verify_err(
+                self._need_src(param, first, "5"),
+                "may violate the callee's precondition",
+            )
+            assert any(e.error_code == "E501" for e in errs), (param, errs)
+            _verify_ok(self._need_src(param, first, "500"))
+
+
+class TestTheTier3DisclosureNamesItsActualCause:
+    """An E506 must say why it demoted, and be right about it (#1251).
+
+    Both E506 emitters carried one fixed rationale — "The refinement predicate
+    is outside Z3's decidable fragment (a non-primitive base such as Array, an
+    undecidable construct, or a solver timeout)" — for four different causes.
+    On `handle[State<Small>](@Small = 200)` with
+    ``type Small = { @Byte | @Byte.0 < 10 }`` that sentence is simply false:
+    ``200 < 10`` is decidable and decidably FALSE.  What actually happened is
+    that the verifier does not model ``Byte`` as a refinement base, so the
+    predicate was never given a value to reason about.
+
+    Spec §0.3 requires a diagnostic to explain itself truthfully; a rationale
+    that names the wrong cause sends a reader to rewrite a predicate that was
+    never the problem.  The demotion itself is unchanged here — attempting the
+    decidable check is #1251(b), which needs a concrete-value gate of its own
+    so a SYMBOLIC ``@Byte`` narrowing keeps its runtime-guarded disclosure
+    rather than becoming a false rejection.
+    """
+
+    _STATE_INIT = """\
+type Small = { @Byte | @Byte.0 < 10 };
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Small>](@Small = 200) {
+    get(@Unit) -> { resume(@Small.0) },
+    put(@Small) -> { resume(()) }
+  } in {
+    byte_to_int(get(()))
+  }
+}
+"""
+
+    @staticmethod
+    def _e506(result: object) -> list:
+        return [
+            d for d in result.diagnostics  # type: ignore[attr-defined]
+            if d.error_code == "E506"
+        ]
+
+    def test_an_unmodelled_base_is_not_blamed_on_undecidability(self) -> None:
+        """The issue's repro: the rationale names the BASE, not the fragment."""
+        result = _verify(self._STATE_INIT)
+        warns = self._e506(result)
+        assert len(warns) == 1, [d.description[:90] for d in result.diagnostics]
+        assert warns[0].severity == "warning", warns[0].severity
+        rationale = warns[0].rationale
+        assert "Byte" in rationale, rationale
+        assert "does not model" in rationale, rationale
+        assert "outside Z3's decidable fragment" not in rationale, rationale
+
+    def test_the_predicate_case_still_says_the_predicate(self) -> None:
+        """The control: a base the verifier DOES model, with a predicate the
+        SMT layer defers on, must still be attributed to the predicate — a
+        rationale that blamed the base for everything would be as wrong in the
+        other direction.
+
+        `string_length` over a non-literal is deliberately untranslatable
+        (#802), and `String` is a modelled base, so this separates the two.
+        """
+        result = _verify("""
+type NonEmpty = { @String | string_length(@String.0) > 0 };
+
+private fn shout(@String -> @String)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  string_concat(@String.0, "!")
+}
+
+public fn use(@String -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @NonEmpty = shout(@String.0);
+  0
+}
+""")
+        warns = self._e506(result)
+        assert len(warns) == 1, [d.description[:90] for d in result.diagnostics]
+        assert warns[0].severity == "warning", warns[0].severity
+        rationale = warns[0].rationale
+        assert "predicate is outside" in rationale, rationale
+        assert "does not model" not in rationale, rationale
+
+    def test_the_demotion_itself_is_unchanged(self) -> None:
+        """(a) is a wording fix: the obligation, its status and its code are
+        exactly what they were, so this cannot be mistaken for (b) landing."""
+        result = _verify(self._STATE_INIT)
+        binds = [o for o in result.obligations if o.kind == "refine_bind"]
+        assert len(binds) == 1, binds
+        assert binds[0].status == "tier3_unguarded", binds[0]
+        assert binds[0].error_code == "E506", binds[0]
+        assert not [
+            d for d in result.diagnostics if d.severity == "error"
+        ], [d.description[:90] for d in result.diagnostics]
+
+
+class TestANonVerdictIsAttributedToTheRightOutcome:
+    """``check_valid`` has FOUR outcomes; two of them demote (#1251).
+
+    ``unknown`` is the solver declining to decide.  ``opaque`` is the #1199
+    verdict — it decided promptly and SAT, but every countermodel ran over an
+    effect-operation stand-in, so it refutes nothing the effect actually
+    produces.  Three demotion sites reported both as "the solver timed out on
+    the predicate", which is the same misattribution #1251 is about one level
+    down: it names an event that did not happen and sends the reader to raise
+    a timeout that was never hit.
+
+    All three are latent — no whole program is known that reaches them — so
+    they are pinned where they can be reached: at the derivation, at the
+    branch (driven directly), and structurally, so a fourth site cannot
+    reintroduce a hardcoded solver reason.
+    """
+
+    def test_the_two_outcomes_get_different_reasons(self) -> None:
+        from vera.verifier import ContractVerifier
+
+        opaque = ContractVerifier._refined_undecided_reason("opaque")
+        unknown = ContractVerifier._refined_undecided_reason("unknown")
+        assert opaque != unknown, opaque
+        assert "opaque" in opaque and "stand-in" in opaque, opaque
+        assert "no decision" in unknown, unknown
+        # Neither may claim a timeout: `unknown` covers a timeout but is not
+        # only a timeout, and `opaque` is not one at all.
+        assert "timed out" not in opaque, opaque
+        assert "timed out" not in unknown, unknown
+
+    def test_the_branch_reports_opaque_as_opaque(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Driven directly: force the #1199 verdict and read the disclosure.
+
+        The reviewer could not construct a program that reaches these branches,
+        so the outcome is injected at ``check_valid`` — the one place all three
+        sites take it from. Without the split this emits the timeout text for a
+        run in which the solver never timed out.
+        """
+        from vera.smt import SmtContext, SmtResult
+
+        monkeypatch.setattr(
+            SmtContext, "check_valid",
+            lambda self, goal, assumptions: SmtResult(status="opaque"),
+        )
+        result = _verify("""
+type PosInt = { @Int | @Int.0 > 0 };
+
+public fn mk(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @PosInt = @Int.0;
+  @PosInt.0
+}
+""")
+        warns = [d for d in result.diagnostics if d.error_code == "E506"]
+        assert len(warns) == 1, [d.description[:90] for d in result.diagnostics]
+        assert warns[0].severity == "warning", warns[0].severity
+        rationale = warns[0].rationale
+        assert "stand-in" in rationale, rationale
+        assert "timed out" not in rationale, rationale
+        # ... and it is still a demotion, not a claimed refutation.
+        assert not [
+            d for d in result.diagnostics if d.error_code == "E505"
+        ], [d.description[:90] for d in result.diagnostics]
+
+    def test_no_demotion_site_hardcodes_a_solver_reason(self) -> None:
+        """Structural: a solver-outcome reason must come from the derivation.
+
+        Every ``reason=`` handed to ``_record_refined_bind_tier3`` as a fixed
+        string describes something the verifier knows without asking the
+        solver — an unmodelled base, an untranslatable value, an opaque
+        scrutinee.  Fixed text that talks about the solver is by construction
+        a branch that had ``result.status`` in hand and threw it away, which
+        is how three sites came to claim a timeout for the opaque verdict.
+
+        "Fixed" has to mean every way of writing a fixed string, or the pin
+        forbids one spelling of the defect and waves the others through.  Two
+        measured escape hatches closed: an f-string parses as ``JoinedStr``
+        and a shared module constant parses as ``Name``, and an earlier
+        version read both as "derived, therefore fine".  Anything this cannot
+        classify fails too, so a novel spelling is a red test rather than a
+        silent gap.
+        """
+        import ast as py_ast
+
+        tree, module_strings = _verifier_ast()
+        offenders: list[tuple[int, str]] = []
+        for node in py_ast.walk(tree):
+            if not isinstance(node, py_ast.Call):
+                continue
+            fn = node.func
+            if not (isinstance(fn, py_ast.Attribute)
+                    and fn.attr == "_record_refined_bind_tier3"):
+                continue
+            for kw in node.keywords:
+                if kw.arg != "reason":
+                    continue
+                if isinstance(kw.value, py_ast.Call):
+                    continue  # derived from a helper — the correct shape
+                text = _fixed_text(kw.value, module_strings)
+                if text is None:
+                    offenders.append((
+                        node.lineno,
+                        f"unclassifiable {type(kw.value).__name__} — pass a "
+                        f"helper call or an inline literal",
+                    ))
+                elif "solver" in text or "timed out" in text:
+                    offenders.append((node.lineno, text[:80]))
+        assert not offenders, (
+            "a solver-outcome reason is fixed at the call site rather than "
+            f"derived from `result.status`: {offenders}"
+        )
+
+
+def _verifier_ast() -> tuple[object, dict[str, str]]:
+    """``vera.verifier``'s parsed source, plus its module-level string consts.
+
+    The path comes from the IMPORTED module rather than a relative one, so the
+    walk cannot depend on the working directory — nor, in a layout with more
+    than one checkout, inspect a different file than the tests import.
+    """
+    import ast as py_ast
+    import inspect
+
+    import vera.verifier
+
+    path = inspect.getsourcefile(vera.verifier)
+    assert path is not None, vera.verifier
+    tree = py_ast.parse(
+        pathlib.Path(path).read_text(encoding="utf-8"))
+    consts: dict[str, str] = {}
+    for node in tree.body:
+        if not isinstance(node, py_ast.Assign):
+            continue
+        value = _string_constant(node.value)
+        if value is None:
+            continue
+        for target in node.targets:
+            if isinstance(target, py_ast.Name):
+                consts[target.id] = value
+    return tree, consts
+
+
+def _string_constant(node: object) -> str | None:
+    """*node*'s value when it is a plain string literal, else None.
+
+    Implicit concatenation ("a" "b") is already one ``Constant`` by parse
+    time, so it needs no handling of its own.
+    """
+    import ast as py_ast
+
+    if isinstance(node, py_ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+def _fixed_text(node: object, module_strings: dict[str, str]) -> str | None:
+    """The text *node* contributes at the call site, or None if unclassifiable.
+
+    Covers the three ways a reason can be fixed rather than derived: a literal,
+    an f-string (whose literal parts are the fixed half — the interpolations
+    are not, and a solver word in the fixed half is the defect either way), and
+    a reference to a module-level string constant.
+    """
+    import ast as py_ast
+
+    literal = _string_constant(node)
+    if literal is not None:
+        return literal
+    if isinstance(node, py_ast.JoinedStr):
+        parts = [
+            v.value for v in node.values
+            if isinstance(v, py_ast.Constant) and isinstance(v.value, str)
+        ]
+        return "".join(parts)
+    if isinstance(node, py_ast.Name):
+        return module_strings.get(node.id)
+    return None

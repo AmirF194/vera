@@ -16,7 +16,7 @@ type IdN = Id<Nat>;
 
 private fn chained(@Nat -> @Int)
   requires(true)
-  ensures(true)
+  ensures(@Int.result == nat_to_int(@Nat.0))
   effects(pure)
 {
   handle[State<A>](@A = 0) {
@@ -30,7 +30,7 @@ private fn chained(@Nat -> @Int)
 
 private fn applied(@Unit -> @Int)
   requires(true)
-  ensures(true)
+  ensures(@Int.result == 9)
   effects(pure)
 {
   handle[State<Id<Nat>>](@Id<Nat> = 4) {
@@ -43,7 +43,7 @@ private fn applied(@Unit -> @Int)
 
 private fn alias_of_applied(@Unit -> @Int)
   requires(true)
-  ensures(true)
+  ensures(@Int.result == 9)
   effects(pure)
 {
   handle[State<IdN>](@IdN = 4) {
