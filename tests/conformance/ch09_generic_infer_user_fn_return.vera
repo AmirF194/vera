@@ -21,7 +21,7 @@ private fn d(@String -> @Decimal)
 
 -- ================================================================
 -- test_user_fn_fallback_arg
--- option_unwrap_or(decimal_div(...), d("0")) — the fallback @VeraT is a
+-- option_unwrap_or(decimal_div(...), d("0")) — the fallback @T is a
 -- user-fn call returning @Decimal; the generic must instantiate at Decimal.
 -- 1/3 divides cleanly, so the Some branch is taken and d("0") is the type
 -- driver, not the value.
@@ -59,21 +59,21 @@ public fn test_user_fn_fallback_taken(@Unit -> @Int)
 
 -- ================================================================
 -- pick_first — a user generic whose type parameter is bound SOLELY by a
--- user-fn call in bare @VeraT argument position (no constructor, no builtin
+-- user-fn call in bare @T argument position (no constructor, no builtin
 -- to mask the resolution).
 -- ================================================================
-private forall<VeraT> fn pick_last(@VeraT, @VeraT -> @VeraT)
+private forall<T> fn pick_last(@T, @T -> @T)
   requires(true)
   ensures(true)
   effects(pure)
 {
-  @VeraT.0
+  @T.0
 }
 
 -- ================================================================
 -- test_bare_typevar_user_fn
--- pick_last(d("5"), d("9")) instantiates VeraT = Decimal from the user-fn
--- returns and returns the most-recent (De Bruijn @VeraT.0) argument, d("9").
+-- pick_last(d("5"), d("9")) instantiates T = Decimal from the user-fn
+-- returns and returns the most-recent (De Bruijn @T.0) argument, d("9").
 -- ================================================================
 public fn test_bare_typevar_user_fn(@Unit -> @Int)
   requires(true)

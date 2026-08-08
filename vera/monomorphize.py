@@ -2002,8 +2002,9 @@ class Monomorphizer:
         from a closure-shaped argument uniformly across both forms.
 
         Fixes #604: pre-fix, only the AnonFn form was resolved.  When a
-        prelude generic like ``option_map<A, B>(@Option<A>, @OptionMapFn<A, B>)``
-        was called with a ``SlotRef`` typed as an FnType alias instead
+        prelude generic like ``option_map<VeraA, VeraB>(@Option<VeraA>,
+        @VeraOptionMapFn<VeraA, VeraB>)`` was called with a ``SlotRef``
+        typed as an FnType alias instead
         of an inline ``AnonFn``, ``B`` failed to bind and defaulted to
         ``Bool`` (the phantom-var fallback in :meth:`_infer_type_args_from_call`),
         producing the wrong mono suffix (``option_map$Int_JBool``) and
@@ -2037,7 +2038,7 @@ class Monomorphizer:
     ) -> tuple[str, ...] | None:
         """Infer concrete types for a type alias's params from a callable arg.
 
-        When ``param_te`` is e.g. ``NamedType("OptionMapFn", [A, B])``
+        When ``param_te`` is e.g. ``NamedType("MapFn", [A, B])``
         which aliases ``fn(A -> B)``, and the argument is callable (an
         ``AnonFn`` literal or a ``SlotRef`` typed as an FnType alias)
         with concrete param/return types, infer one concrete type name

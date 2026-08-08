@@ -261,9 +261,6 @@ class ResolutionMixin:
         if _RESERVED_TYPE_PREFIX_RE.match(name):
             if name not in self._reported_reserved_type_refs:
                 self._reported_reserved_type_refs.add(name)
-                suggestion = name.removeprefix("Vera")
-                if not suggestion[:1].isupper():
-                    suggestion = f"My{name}"
                 self._error(
                     te,
                     f"Type '{name}' is reserved for the prelude.",
@@ -280,11 +277,15 @@ class ResolutionMixin:
                         "binding table assigns to a different slot."
                     ),
                     fix=(
-                        f"Use the type this name stands for — a function "
-                        f"type is written out as `fn(A -> B) effects(pure)` "
-                        f"— or declare your own alias for it under a name "
-                        f"that does not start with 'Vera' plus an uppercase "
-                        f"letter or digit (for example '{suggestion}')."
+                        "Write out the type this name stands for — a "
+                        "function type is spelled `fn(A -> B) "
+                        "effects(pure)` — or declare your own alias for it "
+                        "under a name outside the reserved namespace: any "
+                        "name that does not start with 'Vera' followed by "
+                        "an uppercase letter or digit. Stripping the prefix "
+                        "is not a fix by itself; the reserved name is not a "
+                        "declaration this program can reach under any "
+                        "spelling."
                     ),
                     spec_ref='Chapter 8, Section 8.4.1 "Visibility Rules"',
                     error_code="E154",

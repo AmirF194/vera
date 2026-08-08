@@ -2073,7 +2073,7 @@ class InferenceMixin:
 
           - `SlotRef` into a `FnType` type alias (let-bound closure
             ref, possibly with generic type_args bound at the call
-            site like `OptionMapFn<Int, String>`).
+            site like a user `MapFn<Int, String>`).
           - `AnonFn` (inline closure literal).
 
         Future closure-arg shapes with a single `return_type` field

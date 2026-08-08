@@ -166,6 +166,9 @@ class RegistrationMixin:
             # control flow, so the two rules stay independent.
             if isinstance(tld.decl, ast.FnDecl):
                 self._check_reserved_fn_name(tld.decl)
+                # #1221 review: and its `forall` binders, which bind into
+                # the same type namespace the two other E154 rails guard.
+                self._check_reserved_type_params(tld.decl)
             # #815: redefining a built-in is a one-canonical-form violation
             # (and a silent verifier↔runtime unsoundness for the
             # verifier-modelled built-ins).  Covers top-level and module
@@ -306,6 +309,65 @@ class RegistrationMixin:
             spec_ref='Chapter 8, Section 8.4.1 "Visibility Rules"',
             error_code="E154",
         )
+
+    def _check_reserved_type_params(
+        self,
+        decl: (ast.FnDecl | ast.DataDecl | ast.TypeAliasDecl
+               | ast.EffectDecl | ast.AbilityDecl),
+    ) -> None:
+        """Emit E154 for a type-PARAMETER binder in the prelude's namespace.
+
+        The declaration gate above covers the names a program *declares* as
+        types, and the reference gate in ``_resolve_named_type`` covers the
+        names it *mentions* — but a ``forall`` variable is neither: it BINDS
+        a type name for the body of one declaration.  ``_resolve_named_type``
+        consults ``env.type_params`` first, precisely so a binder shadows an
+        outer alias, so ``forall<VeraOptionMapFn>`` made every mention of the
+        reserved name resolve to the type variable and the reservation held
+        at neither end (#1221 review).  Gated where the name is BOUND, which
+        is the one place both other gates can then rely on.
+
+        Every surface that binds a type name is covered, because they all
+        feed the same ``env.type_params`` scope: a function's ``forall``
+        variables (and a ``where`` helper's own, one scope deeper — the
+        recursion mirrors :meth:`_check_reserved_fn_name`'s), and the type
+        parameters of ``data``, ``type``, ``effect`` and ``ability``
+        declarations.  This is the type namespace only; the effect, ability
+        and constructor NAME namespaces are deliberately untouched here.
+        """
+        if isinstance(decl, ast.FnDecl):
+            binders = decl.forall_vars or ()
+        else:
+            binders = decl.type_params or ()
+        for name in binders:
+            if not _RESERVED_TYPE_PREFIX_RE.match(name):
+                continue
+            self._error(
+                decl,
+                f"Type parameter '{name}' is reserved for the prelude.",
+                rationale=(
+                    "Names beginning with 'Vera' followed by an uppercase "
+                    "letter or digit are the prelude's internal namespace — "
+                    "the declarations and type parameters its combinators "
+                    "resolve through, injected at code generation and never "
+                    "visible to the type checker. A binder in that namespace "
+                    "makes every mention of the name inside this declaration "
+                    "resolve to the type variable, so neither the "
+                    "declaration nor the reference rail can see it, and code "
+                    "generation resolves the same spelling to the prelude's "
+                    "own declaration."
+                ),
+                fix=(
+                    "Rename the type parameter to anything outside the "
+                    "reserved namespace — any name that does not start with "
+                    "'Vera' followed by an uppercase letter or digit."
+                ),
+                spec_ref='Chapter 8, Section 8.4.1 "Visibility Rules"',
+                error_code="E154",
+            )
+        if isinstance(decl, ast.FnDecl):
+            for wfn in decl.where_fns or ():
+                self._check_reserved_type_params(wfn)
 
     def _check_reserved_fn_name(self, decl: ast.FnDecl) -> None:
         """Emit E153 if ``decl`` — or a nested where-helper — is named after a
@@ -605,6 +667,7 @@ class RegistrationMixin:
     ) -> None:
         """Register an ADT and its constructors."""
         self._check_reserved_type_name(decl)
+        self._check_reserved_type_params(decl)
         # #1208: allocate the declaration index BEFORE resolving anything, so
         # data and alias registrations interleave in source order.
         decl_index = self.env.next_decl_index()
@@ -642,6 +705,7 @@ class RegistrationMixin:
     def _register_alias(self, decl: ast.TypeAliasDecl) -> None:
         """Register a type alias."""
         self._check_reserved_type_name(decl)
+        self._check_reserved_type_params(decl)
         decl_index = self.env.next_decl_index()
         saved_params = dict(self.env.type_params)
         if decl.type_params:
@@ -661,6 +725,7 @@ class RegistrationMixin:
 
     def _register_effect(self, decl: ast.EffectDecl) -> None:
         """Register an effect and its operations."""
+        self._check_reserved_type_params(decl)
         saved_params = dict(self.env.type_params)
         if decl.type_params:
             for tv in decl.type_params:
@@ -687,6 +752,7 @@ class RegistrationMixin:
 
     def _register_ability(self, decl: ast.AbilityDecl) -> None:
         """Register an ability and its operations."""
+        self._check_reserved_type_params(decl)
         saved_params = dict(self.env.type_params)
         if decl.type_params:
             for tv in decl.type_params:

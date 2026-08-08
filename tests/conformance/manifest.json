@@ -1711,6 +1711,21 @@
     ]
   },
   {
+    "id": "ch08_reserved_vera_prefix_binder_rejected",
+    "file": "ch08_reserved_vera_prefix_binder_rejected.vera",
+    "chapter": 8,
+    "title": "A type parameter bound in the prelude's reserved Vera namespace is a checker error (#1221 review)",
+    "level": "check",
+    "spec_ref": "Section 8.4.1",
+    "expected_error": "E154",
+    "features": [
+      "reserved_type_name",
+      "generics",
+      "prelude",
+      "check_error"
+    ]
+  },
+  {
     "id": "ch09_map",
     "file": "ch09_map.vera",
     "chapter": 9,
