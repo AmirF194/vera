@@ -1361,11 +1361,17 @@ public fn g(@Nat -> @MyInt)
         """The gained guard fires on violations only — 7 still returns 7."""
         assert _run(self._NARROW, fn="f", args=[7]) == 7
 
+    # The parameter is `@Int`, NOT `@Nat`: the body must actually NARROW for
+    # the exclusion to have anything to exclude.  A `@Nat` body into a
+    # `@Nat`-based return is no narrowing leaf at all, so
+    # `_collect_narrowing_return_leaves` returns nothing and the absence of
+    # `i64.lt_s` below holds whether or not the conjunct is there —
+    # measured, and the reason this fixture is spelled the harder way.
     _REFINED_OVER_APPLICATION = _PARAM_ALIAS + """
 type Grown = { @Ident<Nat> | @Ident<Nat>.0 >= 18 };
-public fn f(@Nat -> @Grown)
-  requires(@Nat.0 >= 18) ensures(true) effects(pure)
-{ @Nat.0 }
+public fn f(@Int -> @Grown)
+  requires(@Int.0 >= 18) ensures(true) effects(pure)
+{ @Int.0 }
 """
 
     def test_a_refinement_over_an_application_is_not_double_guarded(
@@ -1379,9 +1385,20 @@ public fn f(@Nat -> @Grown)
         is not: the `_refinement_guard_parts` conjunct beside it is what
         keeps a refined return on its single 7b boundary guard, and this is
         the shape that proves the swap left that conjunct doing its job.
-        This is `tests/conformance/ch02_refinement_base_param_alias.vera`'s
-        return type, the one corpus program whose base spelling the swap
-        moves (`T` to `Nat`) — inert there for exactly this reason.
+        The return type is
+        `tests/conformance/ch02_refinement_base_param_alias.vera`'s — the one
+        corpus program whose base spelling the swap moves (`T` to `Nat`),
+        inert there for exactly this reason.
+
+        Mutation-measured over the whole suite, dropping the conjunct:
+        `i64.lt_s` appears and this goes red, together with #983's
+        unparameterised twin `test_alias_to_refinement_return_single_guard_
+        not_double` — those two and nothing else, which is what says the
+        exclusion is tested at both spellings and by nothing incidental.
+        That measurement is also why the parameter is `@Int`: with the
+        conformance program's own `@Nat` parameter the body narrows nothing,
+        the leaf collector returns empty, and the assertion held with the
+        conjunct gone.  A control that cannot go red is not a control.
         """
         body = _fn_body(_compile_ok(self._REFINED_OVER_APPLICATION).wat, "f")
         assert "vera.contract_fail" in body, body

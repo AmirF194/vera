@@ -517,6 +517,15 @@ class CallsMixin:
             # so this is a no-op for them; the declaration-row producer
             # (`codegen/functions.py`) has no `_resolve_base_type_name` to
             # reach, which is the only reason the hop still lives here.
+            #
+            # UNTESTED as of #1273: deleting the chase leaves the suite green,
+            # because `family_base_name` already answers `Byte` for every
+            # refinement and alias reachable today, so no producer stores a
+            # base that still needs chasing.  It is defence for the residue
+            # `family_fallback_name` can return (a function or unknown type),
+            # which no boundary that asks this question can currently carry.
+            # A fixture exercising it needs a producer that stores an
+            # UNCHASED base — construct one and this becomes testable.
             base = (
                 self._resolve_base_type_name(cell.base)
                 if (is_state_put or is_exn_throw) and cell is not None
