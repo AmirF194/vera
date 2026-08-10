@@ -17,8 +17,8 @@ from vera.slots import effect_op_result_names, type_expr_slot_name
 from vera.wasm import WasmContext, WasmSlotEnv
 from vera.wasm.helpers import (
     CellNames,
-    _is_host_handle_type,
     gc_shadow_push,
+    is_gc_pointer_base,
 )
 
 if TYPE_CHECKING:
@@ -121,15 +121,12 @@ class FunctionCompilationMixin:
         path (`_compile_fn`) and the closure path
         (`_compile_lifted_closure`) so the two cannot decide a return width
         differently — which is exactly what the ninth and tenth shapes were.
-        Resolves the declared return through the alias chain first
-        (`_resolve_base_type_name`), so a refined `@Byte` alias is a Byte
-        boundary here as it is at every other one.
+        The declared return resolves through `WasmContext._boundary_base`,
+        the ONE representation-base derivation every #1212 boundary now
+        shares (#1256), so a refined `@Byte` alias is a Byte boundary here
+        as it is at the `apply_fn` argument and the `throw` payload.
         """
-        ctx._mark_byte_write_value(
-            body,
-            ctx._resolve_base_type_name(
-                self._type_expr_to_slot_name(return_type) or ""),
-        )
+        ctx._mark_byte_write_value(body, ctx._boundary_base(return_type))
 
     def _lift_closures_or_drop(
         self, ctx: WasmContext, decl: ast.FnDecl,
@@ -391,11 +388,22 @@ class FunctionCompilationMixin:
                             and "throw" not in effect_ops):
                         # The tag name resolves like the State import
                         # family (matching `_check_exn_type`, #1205/#1209).
+                        # IDENTITY names the tag; REPRESENTATION rides
+                        # beside it in `effect_op_cells` exactly as the
+                        # State pair above (#1218), because the throw call
+                        # site is a WRITE boundary and needs the payload's
+                        # width: `throw(5)` into `Exn<{ @Byte | … }>` put an
+                        # `i64.const` under an i32 tag and the module failed
+                        # WASM validation (#1269).
+                        exn_cell = CellNames(
+                            family=self._family_name_te(eff.type_args[0]),
+                            base=self._family_base_te(eff.type_args[0]),
+                        )
                         effect_ops["throw"] = (
-                            f"$exn_"
-                            f"{mangle_type_name(self._family_name_te(eff.type_args[0]))}",
+                            f"$exn_{mangle_type_name(exn_cell.family)}",
                             False,
                         )
+                        effect_op_cells["throw"] = exn_cell
 
         # Flatten ADT layouts into ctor_name -> layout for WasmContext
         ctor_layouts = {}
@@ -571,17 +579,14 @@ class FunctionCompilationMixin:
             # PR-review).
             if self._resolve_tuple_type(param_te) is not None:
                 component_param_checks.append((local_idx, param_te))
-            # Track i32 pointer params (ADT/closure, not Bool/Byte,
-            # not opaque host handles — Map/Set/Decimal are i32
-            # indices into Python-side stores, not Vera-heap
-            # pointers; pushing them onto the GC shadow stack wastes
-            # space and a handle value that lands in the heap-pointer
-            # range with valid alignment would spuriously mark an
-            # unrelated heap object as live (#347).
-            if (
-                wt == "i32"
-                and type_name not in ("Bool", "Byte", None)
-                and not _is_host_handle_type(type_name)
+            # Track i32 pointer params.  `is_gc_pointer_base` over the
+            # formal's REPRESENTATION base (#1255) — the closure path's
+            # twin, and the slot name pushed above is deliberately NOT the
+            # input: that one is the syntactic head (it has to be, it keys
+            # the binding table), which classified a refined or aliased
+            # `@Byte` formal as a heap pointer.
+            if wt == "i32" and is_gc_pointer_base(
+                self._family_base_te(param_te)
             ):
                 gc_pointer_params.append(local_idx)
 
@@ -655,18 +660,25 @@ class FunctionCompilationMixin:
         # descent), instead of wrapping the WHOLE body — which reverted EVERY
         # `return_call` and broke TCO for a non-narrowing @Nat->@Nat recursive
         # tail call (`drain`, which stack-exhausted at depth).  Alias-aware
-        # (`type Count = Nat`) via `_resolve_base_type_name` and refined-excluded
-        # (`{ @Nat | P }` / an alias to one stays on the 7b refinement-boundary
-        # path) via `_refinement_guard_parts`, exactly as the whole-body
+        # (`type Count = Nat`) via `_boundary_base` — the ONE representation-base
+        # derivation the `throw` payload and the `apply_fn` signature also ask
+        # (#1256).  It resolves the type EXPRESSION, where the
+        # `_resolve_base_type_name(_type_expr_to_slot_name(...))` spelling it
+        # replaces chased the alias by NAME and dropped its type arguments:
+        # `type Ident<T> = T; type Count = Ident<Nat>;` answered the bare head
+        # `Ident`, this gate stayed shut, and `f(0 - 5)` returned -5 through the
+        # `@Nat` slot — the #983 silent negative, one spelling over.  Still
+        # refined-excluded (`{ @Nat | P }` / an alias to one stays on the 7b
+        # refinement-boundary path) via `_refinement_guard_parts`, a SEPARATE
+        # conjunct untouched by the base swap even though `_boundary_base`
+        # strips the refinement wrapper.  Exactly as the whole-body
         # narrow-return gate below.  A narrowing leaf that is itself a tail call
         # (an @Int-returning call) is removed from `tail_sites` so it lowers to
         # a plain `call` — the appended guard runs AFTER it, which `return_call`
         # would skip.
         nat_leaf_ids: set[int] = set()
         if (decl.body is not None
-                and ctx._resolve_base_type_name(
-                    self._type_expr_to_slot_name(decl.return_type) or "")
-                == "Nat"
+                and ctx._boundary_base(decl.return_type) == "Nat"
                 and self._refinement_guard_parts(decl.return_type) is None):
             nat_leaf_ids = ctx._collect_narrowing_return_leaves(decl.body)
         ctx._nat_return_leaf_ids = nat_leaf_ids
@@ -973,16 +985,22 @@ class FunctionCompilationMixin:
         # so trap rather than silently return it — the runtime backstop for the
         # verifier's nat_to_int_coerce obligation (7c).  @Int is i64, so this
         # runs before (and is unaffected by) the i32 coercion below.
-        # Alias-aware (`type MyInt = Int`) via `_resolve_base_type_name` so an
-        # alias-typed @Int return is guarded too — matching the verifier's 7c
-        # gate (`_is_int_type` over the *resolved* return type), whereas the raw
-        # `_type_expr_to_slot_name` returns the opaque alias name and missed it
-        # (#983 review, the widen sibling of the alias-blind narrow gate).  A
-        # refinement over @Int stays here (the verifier's 7c fires on refined
-        # @Int too: the `<= i64.MAX` bound is not subsumed by the predicate).
+        # Alias-aware via `_boundary_base` so an alias-typed @Int return is
+        # guarded too — matching the verifier's 7c gate (`_is_int_type` over the
+        # *resolved* return type).  The raw `_type_expr_to_slot_name` returned
+        # the opaque alias name and missed `type MyInt = Int` entirely (#983
+        # review, the widen sibling of the alias-blind narrow gate); the
+        # name-only chase that replaced it still dropped an APPLICATION's type
+        # arguments, so `type MyInt = Ident<Int>` answered the head `Ident` and
+        # the widen guard went missing again (#1256, measured against the plain
+        # spelling's).  `_boundary_base` resolves the type expression, so both
+        # spellings answer `Int` — the same derivation the narrow gate above,
+        # the `throw` payload and the `apply_fn` signature ask.  A refinement
+        # over @Int stays here (the verifier's 7c fires on refined @Int too: the
+        # `<= i64.MAX` bound is not subsumed by the predicate), which the
+        # wrapper-stripping resolution preserves rather than changes.
         widen_guarded = (
-            ctx._resolve_base_type_name(
-                self._type_expr_to_slot_name(decl.return_type) or "") == "Int"
+            ctx._boundary_base(decl.return_type) == "Int"
             and ctx._result_is_nat(decl.body)
         )
         if widen_guarded:
@@ -1298,15 +1316,13 @@ class FunctionCompilationMixin:
             for pidx in gc_pointer_params:
                 gc_prologue.extend(gc_shadow_push(pidx))
 
-            # Determine if return type is a heap pointer
-            ret_type_name = self._type_expr_to_slot_name(decl.return_type)
+            # Determine if return type is a heap pointer (#1255: from the
+            # REPRESENTATION base, the closure return's twin).
             ret_is_pointer = False
-            if (
-                ret_wt == "i32"
-                and ret_type_name not in ("Bool", "Byte", None)
-                and not _is_host_handle_type(ret_type_name)
-            ):
-                ret_is_pointer = True
+            if ret_wt == "i32":
+                ret_is_pointer = is_gc_pointer_base(
+                    self._family_base_te(decl.return_type),
+                )
             elif ret_wt == "i32_pair":
                 ret_is_pointer = True
 

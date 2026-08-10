@@ -2234,6 +2234,27 @@ class InferenceMixin:
         return naming.family_base_name(
             te, self._alias_env, family_fallback_name(te))
 
+    def _boundary_base(self, te: ast.TypeExpr) -> str:
+        """The REPRESENTATION base name of a declared WRITE boundary (#1256).
+
+        ONE derivation for every #1212 marking site that holds a type
+        expression — the named and closure RETURN, the ``apply_fn``
+        argument, the ``throw`` payload.  Composes the two hops each site
+        used to spell for itself: :meth:`_family_base` resolves the type
+        expression to its representation (an alias chased, a refinement
+        stripped), and :meth:`_resolve_base_type_name` chases the one
+        residue that can survive it — :func:`vera.slots.family_fallback_name`
+        returns a syntactic name when the resolution reaches a function or
+        unknown type.  ``_translate_handle_exn`` already wrote exactly this
+        composition; the return boundary wrote a different one (slot name
+        then resolve), which is two derivations of one fact and the shape
+        #1213 is about.
+
+        Never a cell IDENTITY: a refined boundary and its base share a
+        width and share this answer, which is the whole point.
+        """
+        return self._resolve_base_type_name(self._family_base(te))
+
     def _state_effect_family(self, effect_ref: ast.EffectRefNode) -> str:
         """The cell FAMILY named by a ``State<T>`` effect REFERENCE (#1209).
 

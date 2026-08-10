@@ -27,6 +27,14 @@ from vera.wasm.helpers import (
 )
 
 
+# The built-in ``State<T>`` operations, by the bare names §7.4 gives them.
+# The ONE place they are enumerated for codegen's "is this a State op?"
+# questions — the addressability gate below asks it, and asking instead
+# whether the op has a recorded cell was correct only while `State` was the
+# sole cell-carrying effect (#1269).
+_STATE_OP_NAMES = frozenset({"get", "put"})
+
+
 class _ShowHashUnsupported(Exception):
     """Internal signal: a field is not showable/hashable here (#911).
 
@@ -1463,13 +1471,13 @@ class CallsHandlersMixin:
         # and is what every width / pointer-ness / write-guard decision
         # below uses, because all three refinements of one base share those.
         family = self._family_name(type_arg)
-        # Alias-resolved, matching the bare-`put` path's
-        # `_resolve_base_type_name(cell.base)` (PR #1238 review): both
-        # dispatch paths must classify one cell the same way, and
-        # `family_fallback_name`'s residue can leave a syntactic alias
-        # here.  A no-op on every resolved family.
-        family_base = self._resolve_base_type_name(
-            self._family_base(type_arg))
+        # The boundary's REPRESENTATION base, matching the bare-`put` path
+        # (PR #1238 review): both dispatch paths must classify one cell the
+        # same way, and `family_fallback_name`'s residue can leave a
+        # syntactic alias behind the first hop.  `_boundary_base` is that
+        # two-hop composition, named once (#1256) rather than spelled out
+        # at each of the sites that need it.
+        family_base = self._boundary_base(type_arg)
         mangled = mangle_type_name(family)
 
         put_import = f"$vera.state_put_{mangled}"
@@ -1723,6 +1731,17 @@ class CallsHandlersMixin:
         """
         shadowed = self._pushed_cell_families[self._addressable_from:]
         if not shadowed:
+            return
+        # The refusal is about the State HOST INTRINSICS, which address only
+        # the innermost cell — so the gate asks whether this is a State op,
+        # not whether the op happens to have a cell recorded.  Those were
+        # the same question only by accident: `_effect_op_cells` held State
+        # entries alone until `throw` joined it (#1269), and
+        # `_pushed_cell_families` carries FAMILY names, so `throw` under
+        # `Exn<Int>` inside a `State<Int>` clause body compared equal and
+        # the gate refused a program that has no addressing problem at all
+        # (`throw` is a WASM tag, not a host cell).
+        if call.name not in _STATE_OP_NAMES:
             return
         # ONE canonical family on both sides, and no mangling anywhere in the
         # comparison (#1218).  Round 5 of #1233 had the two sides in two
@@ -2224,8 +2243,7 @@ class CallsHandlersMixin:
         # caught-value SLOT binding below stays source-level (the checker
         # binds the clause pattern's own name).
         family = self._family_name(type_arg)
-        family_base = self._resolve_base_type_name(
-            self._family_base(type_arg))
+        family_base = self._boundary_base(type_arg)
         tag_name = f"$exn_{mangle_type_name(family)}"
         # Pair-ness is the BASE's question (#1218): `Exn<Short>` under
         # `type Short = {@String | ...}` is its own tag and still carries a
@@ -2264,8 +2282,19 @@ class CallsHandlersMixin:
         # translation raises `CodegenSkip` for any unsupported shape, and an
         # in-place `self._effect_ops["throw"] = …` would leave that entry in
         # a dict an enclosing scope still holds.
+        #
+        # The cell rides in lock-step (#1218's discipline, #1269's need): a
+        # `throw` written INSIDE the handled body takes its dispatch target
+        # from HERE rather than from the enclosing declaration's effect row,
+        # so the payload's REPRESENTATION has to arrive by the same route
+        # or the write boundary at the call site has nothing to ask.
         saved_ops = self._effect_ops
+        saved_cells = self._effect_op_cells
         self._effect_ops = {**saved_ops, "throw": (tag_name, False)}
+        self._effect_op_cells = {
+            **saved_cells,
+            "throw": CellNames(family=family, base=family_base),
+        }
 
         # Compile body
         try:
@@ -2273,6 +2302,7 @@ class CallsHandlersMixin:
         finally:
             # Restore effect_ops
             self._effect_ops = saved_ops
+            self._effect_op_cells = saved_cells
 
         if body_instrs is None:
             return None

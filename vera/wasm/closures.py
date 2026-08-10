@@ -156,6 +156,20 @@ class ClosuresMixin:
         # Translate and push remaining arguments
         arg_wasm_types: list[str] = []
         for i, arg in enumerate(value_args):
+            formal_te = (
+                formal_types[i]
+                if formal_types is not None and i < len(formal_types)
+                else None
+            )
+            # #1212/#1256: the declared formal is a WRITE boundary like any
+            # other, so an int literal (or the literal leaves of an `if` /
+            # `match` argument) flowing into a `@Byte` formal is marked to
+            # lower at i32 BEFORE the argument is translated.  Without it
+            # the signature below would say i32 while the pushed value was
+            # an `i64.const` — the same disagreement one level down.
+            if formal_te is not None:
+                self._mark_byte_write_value(
+                    arg, self._boundary_base(formal_te))
             arg_instrs = self.translate_expr(arg, env)
             if arg_instrs is None:
                 return None
@@ -164,35 +178,54 @@ class ClosuresMixin:
             # otherwise enter the formal reinterpreted (silently) — guard it at
             # the call_indirect boundary, exactly as the verifier's apply_fn
             # branch now obligates it.
-            if (formal_types is not None and i < len(formal_types)
-                    and self._type_expr_base_is_nat(formal_types[i])
+            if (formal_te is not None
+                    and self._type_expr_base_is_nat(formal_te)
                     and self._narrows_into_nat(arg)):
                 arg_instrs = self._emit_nat_bind_guard(arg_instrs)
-            elif (formal_types is not None and i < len(formal_types)
-                    and self._type_expr_base_is_int(formal_types[i])
+            elif (formal_te is not None
+                    and self._type_expr_base_is_int(formal_te)
                     and self._result_is_nat(arg)):
                 arg_instrs = self._emit_int_widen_guard(arg_instrs)
             instructions.extend(arg_instrs)
-            # Infer WASM type for call_indirect type signature.
+            # The parameter's width in the `call_indirect` signature is the
+            # DECLARED formal's, not the argument's (#1256).  Both sides of
+            # an indirect call must name one type, and the lifted closure's
+            # own signature is built from these same type expressions
+            # (`_compile_lifted_closure`) — deriving the call site's from
+            # the argument instead registered a second, incompatible
+            # `$closure_sig` for a `@Byte` formal fed an int literal, and
+            # `wasm trap: indirect call type mismatch` at every call.  The
+            # RESULT has come from the closure type since #630
+            # (`_infer_apply_fn_return_type` below); this is the parameter
+            # half of the same rule.  Falls back to the argument only when
+            # the formal is unrecoverable — a `SlotRef` whose alias chain
+            # reaches no `FnType`.
             # Pair types (String, Array) push two i32 values onto the stack.
-            wt = self._infer_expr_wasm_type(arg)
+            wt = (
+                self._canonical_wasm_type(formal_te) if formal_te is not None
+                else self._infer_expr_wasm_type(arg)
+            )
             if wt == "i32_pair":
                 arg_wasm_types.extend(["i32", "i32"])
             elif wt is None:
-                # Unit arg: `_infer_expr_wasm_type` returns None and
-                # `translate_expr` pushed nothing onto the stack
-                # above, so this entry must NOT contribute a phantom
-                # param to the call_indirect sig.  The closure-lift
-                # side at `vera/codegen/closures.py:85` likewise skips
-                # Unit params, so the two sides agree on omitting
-                # them (#586).  Per the type-checker invariant, the
-                # only well-typed expression for which
-                # `_infer_expr_wasm_type` returns None is a Unit-typed
-                # one — anything else would have failed type-check
-                # before reaching codegen, so an explicit branch here
-                # documents the intent without needing a runtime
-                # assert (which would have to re-run type inference
-                # to verify Unit-typedness, defeating the purpose).
+                # Unit formal: `translate_expr` pushed nothing onto the
+                # stack above, so this entry must NOT contribute a phantom
+                # param to the call_indirect sig.  The closure-lift side
+                # (`vera/codegen/closures.py`) likewise skips Unit params,
+                # so the two sides agree on omitting them (#586).
+                #
+                # `None` still means Unit and nothing else on BOTH branches
+                # of the width above (#1256 moved the common one).  Through
+                # `_canonical_wasm_type` it is the `Unit` arm of
+                # `_named_type_to_wasm`, the one name mapped to `None` —
+                # every other resolution returns a width string, and a
+                # walker that reaches no `NamedType` defaults to `"i64"`.
+                # Through the `_infer_expr_wasm_type` fallback it is the
+                # type-checker invariant that the only well-typed
+                # expression it answers `None` for is a Unit-typed one.
+                # Either way an explicit branch documents the intent
+                # without a runtime assert (which would have to re-run
+                # type inference to verify Unit-ness, defeating the point).
                 pass
             else:
                 arg_wasm_types.append(wt)

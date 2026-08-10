@@ -130,7 +130,17 @@ class TestTheConcreteGateReachesTheThrowPayload:
         ]
 
     def test_a_satisfying_literal_over_an_unmodelled_base_proves(self) -> None:
-        """The passing twin, so the gate is not "reject every thrown literal"."""
+        """The passing twin, so the gate is not "reject every thrown literal".
+
+        Static AND run.  This was static-only when it landed, because a
+        `@Byte` payload emitted an `i64.const` under the tag's i32 parameter
+        and the module failed WASM validation before any of it could run
+        (#1269, PR #1270's review).  With the throw payload marked as the
+        write boundary it is, the program the verifier proved is also the
+        program that runs — which is what a Tier-1 proof is FOR, and the
+        only way to see that the proved value and the delivered one are the
+        same 5.
+        """
         src = _thrower("Small", "5", prelude=_SMALL,
                        handler_body="byte_to_int(@Small.0)")
         result = _verify(src)
@@ -139,6 +149,7 @@ class TestTheConcreteGateReachesTheThrowPayload:
         assert not [
             d for d in result.diagnostics if d.severity == "error"
         ], [d.description[:90] for d in result.diagnostics]
+        assert _run(src) == 5
 
 
 class TestTheThrowPayloadObligationMatchesEveryOtherSite:
