@@ -6,8 +6,11 @@ from __future__ import annotations
 
 import pathlib
 
+from typing import ClassVar
+
 import pytest
 
+from vera import ast as ast_mod
 from vera.parser import parse_to_ast
 
 from tests.verifier_helpers import (
@@ -1973,6 +1976,84 @@ public fn main(@Unit -> @Int)
             d for d in result.diagnostics if d.severity == "error"
         ], [d.description[:90] for d in result.diagnostics]
 
+    _GUARDED = """\
+type Small = {{ @Byte | @Byte.0 < 10 }};
+
+public fn f(@Int -> @Int)
+  requires(@Int.0 > 0)
+  ensures(true)
+  effects(pure)
+{{
+  if @Int.0 {cmp} 0 then {{
+    let @Small = 200;
+    0
+  }} else {{
+    1
+  }}
+}}
+"""
+
+    def test_a_narrowing_the_path_condition_excludes_discharges(self) -> None:
+        """An unreachable narrowing is discharged vacuously, not rejected.
+
+        The obligation is conditional — "IF control reaches this site, P holds
+        of the value" — and `check_valid` discharges it by folding the path
+        conditions, so a branch the premises exclude discharges whatever the
+        value is.  A MODELLED base has always behaved that way; folding the
+        predicate alone answered the unconditional question instead, and made
+        `200` under `if @Int.0 < 0` with `requires(@Int.0 > 0)` a rejection
+        the base-modelled twin accepts.  A false rejection on dead code is
+        exactly the false-rejection class the concrete gate was scoped to
+        avoid, arriving through the path conditions rather than the base.
+        """
+        result = _verify(self._GUARDED.format(cmp="<"))
+        assert not [
+            d for d in result.diagnostics if d.severity == "error"
+        ], [d.description[:90] for d in result.diagnostics]
+        binds = [o for o in result.obligations if o.kind == "refine_bind"]
+        assert [o.status for o in binds] == ["verified"], binds
+
+    def test_a_narrowing_the_path_condition_admits_is_still_rejected(
+        self,
+    ) -> None:
+        """The control that keeps the vacuity from swallowing real violations:
+        the same program with the branch REACHABLE is still an E505."""
+        errs = _verify_err(
+            self._GUARDED.format(cmp=">"), "violates the refinement")
+        assert any(e.error_code == "E505" for e in errs), [
+            (e.error_code, e.description[:80]) for e in errs
+        ]
+
+    def test_the_modelled_base_twin_is_the_oracle(self) -> None:
+        """Both verdicts above are what a base the verifier DOES model gives
+        for the same shape, which is the standard being met rather than a
+        preference: an unmodelled base must not be stricter than a modelled
+        one about which paths exist."""
+        modelled = """\
+type Pos = { @Int | @Int.0 > 0 };
+
+public fn f(@Int -> @Int)
+  requires(@Int.0 > 0)
+  ensures(true)
+  effects(pure)
+{
+  if @Int.0 %s 0 then {
+    let @Pos = 0 - 5;
+    0
+  } else {
+    1
+  }
+}
+"""
+        dead = _verify(modelled % "<")
+        assert not [
+            d for d in dead.diagnostics if d.severity == "error"
+        ], [d.description[:90] for d in dead.diagnostics]
+        assert [o.status for o in dead.obligations
+                if o.kind == "refine_bind"] == ["verified"], dead.obligations
+        live = _verify_err(modelled % ">", "refinement predicate")
+        assert any(e.error_code == "E505" for e in live), live
+
     def test_the_byte_refinement_conformance_program_is_unmoved(self) -> None:
         """The canary, pinned whole: verdict, counts AND per-obligation status.
 
@@ -1993,6 +2074,79 @@ public fn main(@Unit -> @Int)
         assert {o.error_code for o in binds} == {"E506"}, binds
         assert result.summary.tier1_verified == 10, result.summary
         assert result.summary.tier3_runtime == 4, result.summary
+
+
+class TestTheConcretenessGateCoversEverySortALiteralArrivesIn:
+    """`_is_z3_literal` must accept every sort a base's literal reaches it in.
+
+    The gate's whole safety argument is "symbolic terms are excluded", which
+    is only half of a correctness claim: a sort it fails to recognise makes it
+    silently decline a value it should decide, and there is no diagnostic for
+    that — the site just keeps its Tier-3 disclosure and nobody learns why.
+    So the inventory is enumerated per base rather than asserted in the
+    abstract.
+
+    It is also the evidence for what is NOT in the list.  `is_rational_value`
+    was carried on the assumption that `@Float64` is a Real; it declares as an
+    FP sort, so the arm was unreachable.  Removing an unreachable branch on
+    "no test covers it" is backwards, so the pin is the distinguishing fact
+    instead: no base's literal is a rational.  Should a sort change make one,
+    this goes red at the base that changed and the arm goes back.
+    """
+
+    _LITERALS: ClassVar[dict[str, tuple[object, str]]] = {
+        "Int": (ast_mod.IntLit(7), "int"),
+        "Float64": (ast_mod.FloatLit(1.5), "fp"),
+        "Bool": (ast_mod.BoolLit(True), "bool"),
+        "String": (ast_mod.StringLit("x"), "string"),
+    }
+
+    @staticmethod
+    def _classify(term: object) -> set[str]:
+        import z3
+
+        simplified = z3.simplify(term)
+        return {
+            name for name, holds in (
+                ("int", z3.is_int_value(simplified)),
+                ("rational", z3.is_rational_value(simplified)),
+                ("bool", z3.is_true(simplified) or z3.is_false(simplified)),
+                ("string", z3.is_string_value(simplified)),
+                ("fp", z3.is_fp_value(simplified)),
+            ) if holds
+        }
+
+    @pytest.mark.parametrize("base", sorted(_LITERALS))
+    def test_each_bases_literal_is_recognised_and_is_not_a_rational(
+        self, base: str,
+    ) -> None:
+        from vera.smt import SlotEnv, SmtContext
+        from vera.verifier import ContractVerifier
+
+        node, expected = self._LITERALS[base]
+        term = SmtContext().translate_expr(node, SlotEnv())
+        assert term is not None, base
+        kinds = self._classify(term)
+        assert expected in kinds, (base, kinds)
+        assert "rational" not in kinds, (base, kinds)
+        assert ContractVerifier._is_z3_literal(term), (base, kinds)
+
+    def test_a_symbolic_term_is_not_a_literal(self) -> None:
+        """The other half: the gate must REJECT what it exists to exclude.
+
+        Without this the inventory above is satisfied by a predicate that
+        returns True for everything, which would route every symbolic
+        narrowing into the decided path — the false-rejection class the gate
+        was built to avoid.
+        """
+        from vera.smt import SmtContext
+        from vera.verifier import ContractVerifier
+
+        smt = SmtContext()
+        for var in (smt.declare_int("@Int.0"), smt.declare_bool("@Bool.0"),
+                    smt.declare_string("@String.0"),
+                    smt.declare_float64("@Float64.0")):
+            assert not ContractVerifier._is_z3_literal(var), var
 
 
 class TestANonVerdictIsAttributedToTheRightOutcome:
@@ -2154,8 +2308,16 @@ public fn mk(@Int -> @Int)
             always_guarded = (
                 isinstance(guarded, py_ast.Constant) and guarded.value is True
             )
-            if not always_guarded and "reason" not in kwargs:
-                offenders.append((node.lineno, fn.attr))
+            if always_guarded:
+                continue
+            reason = kwargs.get("reason")
+            if reason is None:
+                offenders.append((node.lineno, f"{fn.attr}: no reason"))
+            elif _string_constant(reason) == "":
+                # An EMPTY literal satisfies "a reason was passed" while
+                # saying nothing — the same defect one spelling over, and it
+                # renders a broken sentence rather than a wrong one.
+                offenders.append((node.lineno, f"{fn.attr}: empty reason"))
         # A renamed recorder would make both structural pins vacuous — they
         # would walk the file, match nothing and pass — so the roster is
         # checked against the source it claims to be about.

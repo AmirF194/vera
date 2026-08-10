@@ -308,6 +308,117 @@ public fn main(@Unit -> @Int)
         ], [d.description[:90] for d in result.diagnostics]
 
 
+class TestABareOpArgumentIsObligatedByStructureNotByName:
+    """The fallback is keyed on "this resolves to an effect operation".
+
+    Its first version listed the two built-in op NAMES that take a value, and
+    a name list is a claim about every other name.  A user effect's op called
+    bare is the same narrowing at the same site, and it was obligated iff it
+    happened to be spelled `put` — `emit` was silent for the identical value
+    against the identical refinement.  That falsifies the two places the rule
+    is written down: spec §2.6.4 lists effect-operation arguments among the
+    sites every narrowing is obligated at, and KNOWN_ISSUES.md's #754 row
+    says every narrowing binding site is statically obligated.
+
+    Resolving the operation is the structural question, and the code already
+    resolved it one line below the gate to compute guardedness.
+    """
+
+    _USER_OP = """
+type Pos = { @Int | @Int.0 > 0 };
+
+effect Log {
+  op %(name)s(Pos -> Unit);
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[Log] {
+    %(name)s(@Pos) -> { resume(()) }
+  } in {
+    %(name)s(0 - 5);
+    0
+  }
+}
+"""
+
+    @pytest.mark.parametrize("name", ["emit", "put"])
+    def test_a_bare_user_op_argument_is_obligated_whatever_its_name(
+        self, name: str,
+    ) -> None:
+        """Both spellings are loud.  `put` was already, by coincidence."""
+        errs = _verify_err(self._USER_OP % {"name": name},
+                           "refinement predicate")
+        assert any(e.error_code == "E505" for e in errs), [
+            (e.error_code, e.description[:80]) for e in errs
+        ]
+
+    def test_a_user_op_is_not_claimed_runtime_guarded(self) -> None:
+        """Guardedness stays keyed on the PARENT EFFECT, so a user effect's
+        op — of either name — is the unguarded class and discloses E504
+        rather than claiming the built-in `State` store's runtime guard.
+
+        Named `put` deliberately: the coincidence that made the old gate look
+        right is the same coincidence that would make a name-keyed
+        guardedness computation look right.
+        """
+        result = _verify("""
+effect Log {
+  op put(Nat -> Unit);
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[Log] {
+    put(@Nat) -> { resume(()) }
+  } in {
+    put(array_length(string_lines("a\\nb")));
+    0
+  }
+}
+""")
+        binds = [o for o in result.obligations if o.kind == "nat_bind"]
+        assert [o.status for o in binds] == ["tier3_unguarded"], binds
+        assert [o.error_code for o in binds] == ["E504"], binds
+        assert result.summary.tier3_runtime == 0, result.summary
+
+    def test_a_resume_value_is_obligated_exactly_once(self) -> None:
+        """A `State` get clause's tail `resume(v)` is obligated from the
+        HandleExpr arm, where the clause's effect identity is known.  Widening
+        the bare-call gate must not let the walk obligate it a SECOND time
+        from the call site — one violation, one diagnostic.
+        """
+        result = _verify("""
+type Pos = { @Int | @Int.0 > 0 };
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Pos>](@Pos = 1) {
+    get(@Unit) -> { resume(0 - 5) },
+    put(@Pos) -> { resume(()) }
+  } in {
+    get(())
+  }
+}
+""")
+        binds = [o for o in result.obligations
+                 if o.kind == "refine_bind" and o.status == "violated"]
+        assert len(binds) == 1, binds
+        assert len([d for d in result.diagnostics
+                    if d.error_code == "E505"]) == 1, [
+            d.description[:80] for d in result.diagnostics
+        ]
+
+
 @pytest.mark.parametrize("program", [
     "ch07_exn_handler.vera",
     "ch07_exn_string.vera",

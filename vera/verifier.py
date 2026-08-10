@@ -86,18 +86,6 @@ _OPAQUE_SCRUTINEE_REASON = (
     "projected and the predicate was never given a value to reason about"
 )
 
-#: The bare built-in effect operations that TAKE a value, and therefore carry a
-#: binding obligation on it.  They are spelled without a qualifier and have no
-#: entry in the function registry, so the argument loop that obligates an
-#: ordinary call's arguments never sees them and they need the table-driven
-#: fallback instead (#1203 for ``put``, #1268 for ``throw`` — the second was
-#: missed because the fallback was keyed on the one name that motivated it,
-#: and `throw(0 - 5)` under ``effects(<Exn<Nat>>)`` then verified at 4/4
-#: Tier 1 while `vera run` returned -5 through the ``@Nat`` payload).  ``get``
-#: takes no value; a ``resume`` value is obligated from the ``HandleExpr`` arm
-#: instead, where the clause's effect identity is known.
-_BARE_BUILTIN_OP_ARGS = ("put", "throw")
-
 
 def _walk_fn_decls(program: ast.Program) -> Iterator[ast.FnDecl]:
     """Every function *declaration* in *program*, ``where``-helpers included.
@@ -4320,7 +4308,8 @@ class ContractVerifier:
         constructor-field, and *all* call-arguments — concrete directly,
         generic on the monomorphised callee) are recorded ``tier3_runtime``
         (backed by the codegen ``i64.lt_s`` guard), while the genuinely
-        unguarded narrowings — the *user-effect* operation argument and
+        unguarded narrowings — the operation argument of a user-declared
+        effect or of the builtin ``Exn`` ``throw`` (#1268), and
         the generic-instantiated constructor field (constructors carry no
         per-field @Nat mono metadata) — are surfaced as E504, neither
         statically proven nor runtime-checked (#747; the ``guarded`` flag
@@ -4569,35 +4558,51 @@ class ContractVerifier:
             else:
                 callee = self._lookup_module_function(expr.path, expr.name)
             param_types = getattr(callee, "param_types", None)
-            if (param_types is None and isinstance(expr, ast.FnCall)
-                    and expr.name in _BARE_BUILTIN_OP_ARGS):
-                # #1203/#1268: a bare built-in op has no function-registry
-                # entry, so the formal loop below never fired and its
-                # argument carried no obligation at all — `put(@Int.0)`
-                # against a @Nat cell was verify-clean while `vera run`
-                # stored a negative, and `throw(0 - 5)` under
+            if param_types is None and isinstance(expr, ast.FnCall):
+                # #1203/#1268: a BARE effect operation has no
+                # function-registry entry, so the formal loop below never
+                # fired and its argument carried no obligation at all —
+                # `put(@Int.0)` against a @Nat cell was verify-clean while
+                # `vera run` stored a negative, and `throw(0 - 5)` under
                 # `effects(<Exn<Nat>>)` was verify-clean while `vera run`
-                # returned -5 through the @Nat payload.  The checker's #747
-                # side-table records the instantiated target, so the
-                # refined/nat/widen triple runs with formal=None
-                # (table-driven).  The guarded flag is COMPUTED, not
-                # hardcoded (PR #1202 adversarial round — a hardcoded True
-                # claimed a runtime check the bare intrinsic path did not
-                # have): the builtin State ops are guarded on both dispatch
-                # paths (the clause-inlined store and the bare intrinsic
-                # call, which keys the guard off the dispatch target's cell
-                # type), which is why the test is the op's PARENT EFFECT
-                # rather than its name.  Everything else is the #754
-                # unguarded class and discloses E504/E531 — a user-effect op
-                # of either name (its handler does not compile today, E602),
-                # and `throw`, which lowers straight to `throw
-                # $exn_<family>` with the payload on the stack and no guard
-                # anywhere on that path (measured by run, #1268).  The
-                # refined branch is ALWAYS unguarded — no handler or throw
-                # boundary emits a refined-predicate guard (only sign-bit
-                # pairs) — so it discloses E506 honestly.  `resume` values
-                # are obligated from the HandleExpr arm instead, where the
-                # clause's effect identity is known.
+                # returned -5 through the @Nat payload.  The gate is
+                # STRUCTURAL — does this name resolve to an operation —
+                # rather than a list of the built-in names that motivated
+                # each fix: a list is a claim about every name not on it, and
+                # the first version's claim was false, obligating a bare
+                # user-effect op spelled `put` while the same narrowing
+                # through one spelled `emit` stayed silent (PR review round
+                # 1).  Both spec §2.6.4 and KNOWN_ISSUES' #754 row say every
+                # narrowing binding site is obligated, effect-operation
+                # arguments included, so the name-keyed version contradicted
+                # the documented rule as well as itself.  Resolution is the
+                # innermost handled effect declaring the name, else the
+                # ordered registry; a bare call the checker accepted that
+                # resolves to no operation (a built-in function, say) simply
+                # obligates nothing.  The checker's #747 side-table records
+                # the instantiated target, so the refined/nat/widen triple
+                # runs with formal=None (table-driven).
+                #
+                # The guarded flag is COMPUTED, not hardcoded (PR #1202
+                # adversarial round — a hardcoded True claimed a runtime
+                # check the bare intrinsic path did not have): the builtin
+                # State ops are guarded on both dispatch paths (the
+                # clause-inlined store and the bare intrinsic call, which
+                # keys the guard off the dispatch target's cell type), which
+                # is why the test is the op's PARENT EFFECT and not its name
+                # — a user effect's `put` is no more guarded than its
+                # `emit`.  Everything else is the #754 unguarded class and
+                # discloses E504/E531: a user-effect op of any name (its
+                # handler does not compile today, E602), and `throw`, which
+                # lowers straight to `throw $exn_<family>` with the payload
+                # on the stack and no guard anywhere on that path (measured
+                # by run, #1268).  The refined branch is ALWAYS unguarded —
+                # no handler or throw boundary emits a refined-predicate
+                # guard (only sign-bit pairs) — so it discloses E506
+                # honestly.  A `resume` value is obligated from the
+                # HandleExpr arm instead, where the clause's effect identity
+                # is known; `resume` resolves to no operation here, so the
+                # two cannot both fire.
                 op = None
                 for eff_name in reversed(self._walk_handled_effects):
                     info = self.env.lookup_effect(eff_name)
@@ -4606,16 +4611,16 @@ class ContractVerifier:
                         break
                 if op is None:
                     op = self.env.lookup_effect_op(expr.name)
-                op_guarded = (op is not None
-                              and op.parent_effect == "State")
-                op_site = ("State-op argument" if op_guarded
-                           else "effect-operation argument")
-                for arg in expr.args:
-                    self._obligate_binding_triple(
-                        decl, arg, None, smt, slot_env, assumptions,
-                        site=op_site,
-                        nat_guarded=op_guarded, widen_guarded=op_guarded,
-                    )
+                if op is not None:
+                    op_guarded = op.parent_effect == "State"
+                    op_site = ("State-op argument" if op_guarded
+                               else "effect-operation argument")
+                    for arg in expr.args:
+                        self._obligate_binding_triple(
+                            decl, arg, None, smt, slot_env, assumptions,
+                            site=op_site,
+                            nat_guarded=op_guarded, widen_guarded=op_guarded,
+                        )
             if param_types is not None:
                 # A generic function whose `TypeVar` formal is fixed to @Nat
                 # by context (e.g. `T = Nat`) is recovered from the checker's
@@ -6076,14 +6081,26 @@ class ContractVerifier:
         """Record a Tier-3 ``nat_to_int_coerce`` outcome, the #813 dual of
         :py:meth:`_record_nat_bind_tier3`.  A codegen-guarded widening
         (``guarded=True`` — return, let, call-arg, concrete @Int constructor
-        field, and the #820 per-component sites: tuple component, array
-        element, heterogeneous if/match arm, closure argument/return/capture)
-        genuinely falls to a runtime coercion trap (``tier3_runtime``).  The
-        sole unguarded case (``guarded=False`` — the generic-instantiated @Int
-        field, which erases to i64 with no per-field mono metadata) is neither
-        statically proven nor runtime-checked, so surfaces an E531 warning and
-        is excluded from the discharged totals rather than silently counting
-        a runtime check it never gets.
+        field, the built-in ``State`` boundaries, and the #820 per-component
+        sites: tuple component, array element, heterogeneous if/match arm,
+        closure argument/return/capture) genuinely falls to a runtime coercion
+        trap (``tier3_runtime``).  The unguarded cases (``guarded=False``) are
+        neither statically proven nor runtime-checked, so they surface an E531
+        warning and are excluded from the discharged totals rather than
+        silently counting a runtime check they never get.  There are three,
+        and the enumeration is derived from which callers can pass
+        ``guarded=False`` rather than from which one motivated the code — it
+        read "the sole unguarded case" while naming one of two, and #1268
+        added the third:
+
+        * an EFFECT-OPERATION argument — a user-declared effect's operation of
+          any name, or the built-in ``Exn`` ``throw`` payload (#1268), neither
+          of which has a guard emitted anywhere on its path;
+        * a TUPLE-DESTRUCTURE component, on both the projectable and the
+          unprojectable path — codegen does not guard the component coercion,
+          as it does not for tuple construction;
+        * a GENERIC-INSTANTIATED @Int constructor field, which erases to i64
+          with no per-field mono metadata to key a guard on.
 
         *reason* is WHY the obligation was not discharged, spliced into the
         E531 rationale (#1251).  Required on the UNGUARDED leg (and refused by
@@ -6096,7 +6113,11 @@ class ContractVerifier:
             self._record_obligation(
                 decl.name, "nat_to_int_coerce", value_node, status)
         else:
-            if reason is None:
+            # `not reason` rather than `is None`: an EMPTY reason renders a
+            # broken sentence ("could not be discharged: .") and is a caller
+            # that has not decided, which is the same defect the parameter
+            # exists to prevent — a default by another spelling.
+            if not reason:
                 raise ValueError(
                     "an unguarded @Nat -> @Int widening emits an E531 that "
                     f"must say why (site {site!r} in {decl.name!r}): pass "
@@ -6141,10 +6162,12 @@ class ContractVerifier:
                 "Codegen runtime-guards every concrete @Int "
                 "coercion site (return, let, call-argument, constructor field, "
                 "tuple component, array element, heterogeneous arm, closure "
-                "argument/return/capture) but not this one — a "
-                "generic-instantiated @Int field with no per-field mono "
-                "metadata — so here the widening is neither statically proven "
-                "nor runtime-checked."
+                "argument/return/capture) but not this one — an "
+                "effect-operation argument (a user-declared effect's "
+                "operation, or an Exn `throw` payload), a tuple-destructure "
+                "component, or a generic-instantiated @Int field with no "
+                "per-field mono metadata — so here the widening is neither "
+                "statically proven nor runtime-checked."
             ),
             spec_ref='Chapter 11, Section 11.2.1 "Nat as i64"',
             error_code="E531",
@@ -6318,16 +6341,17 @@ class ContractVerifier:
                     reason=self._refined_untranslatable_reason(refined_ty),
                 )
             elif concrete[0]:
+                # P holds of the value, so `premises => P` is valid whatever
+                # the premises are — including premises no state satisfies.
+                # Nothing the path can say changes that, which is why this
+                # side needs no reachability question (and why asking one
+                # could only add a timeout to a settled answer).
                 self._record_obligation(
                     decl.name, "refine_bind", value_node, "verified")
             else:
-                self._record_obligation(
-                    decl.name, "refine_bind", value_node, "violated",
-                    error_code="E505",
-                )
-                self._report_refined_binding(
-                    decl, value_node, refined_ty, site, None,
-                    concrete_value=concrete[1],
+                self._reject_or_excuse_concrete_violation(
+                    decl, value_node, refined_ty, smt, assumptions,
+                    site=site, guarded=eff_guarded, value=concrete[1],
                 )
             return
 
@@ -6349,6 +6373,84 @@ class ContractVerifier:
                 decl, value_node, site, guarded=eff_guarded,
                 reason=self._undecided_reason(result.status),
             )
+
+    def _reject_or_excuse_concrete_violation(
+        self,
+        decl: ast.FnDecl,
+        value_node: ast.Expr,
+        refined_ty: Type,
+        smt: SmtContext,
+        assumptions: list[object],
+        *,
+        site: str,
+        guarded: bool,
+        value: str,
+    ) -> None:
+        """Report a literal that fails its predicate — unless it cannot run.
+
+        A binding obligation is CONDITIONAL: *if* control reaches this site,
+        the value satisfies the predicate.  :py:meth:`SmtContext.check_valid`
+        discharges it as ``premises => goal`` with ``smt._path_conditions``
+        folded in, so premises no state satisfies discharge it vacuously —
+        which is why a base the verifier DOES model accepts a violating value
+        under ``if @Int.0 < 0`` beneath ``requires(@Int.0 > 0)``.
+
+        Folding the predicate on the literal answers the UNCONDITIONAL
+        question instead, and on a dead branch the two disagree.  Rejecting
+        there is a false rejection of exactly the kind the concrete gate was
+        scoped to avoid, arriving through the path conditions rather than
+        through the base — and it would make an unmodelled base STRICTER
+        about which paths exist than a modelled one, which no reading of
+        §2.6.4 supports.
+
+        So where the predicate is false, ask the solver the one question that
+        remains: is this site reachable at all — ``premises => False``, valid
+        exactly when the premises are unsatisfiable.  Its three answers are
+        the three a modelled base would give for the same site, which is the
+        point: ``verified`` means unreachable, so the obligation discharges
+        vacuously; ``violated`` means the solver exhibited a state satisfying
+        the premises, so the violation is real and loud; and no verdict means
+        the solver could not settle reachability, where a definite E505 would
+        claim a refutation nothing backs, so the site discloses instead.
+
+        The satisfied direction takes none of this: ``premises => True`` is
+        valid however the premises turn out, so its answer is already final
+        (see the caller).
+        """
+        reachable = smt.check_valid(z3.BoolVal(False), list(assumptions))
+        if reachable.status == "verified":
+            self._record_obligation(
+                decl.name, "refine_bind", value_node, "verified")
+            return
+        if reachable.status != "violated":  # pragma: no cover — see docstring
+            self._record_refined_bind_tier3(
+                decl, value_node, site, guarded=guarded,
+                reason=self._unsettled_reachability_reason(
+                    value, reachable.status),
+            )
+            return
+        self._record_obligation(
+            decl.name, "refine_bind", value_node, "violated",
+            error_code="E505",
+        )
+        self._report_refined_binding(
+            decl, value_node, refined_ty, site, None, concrete_value=value)
+
+    @staticmethod
+    def _unsettled_reachability_reason(value: str, status: str) -> str:
+        """Why a failing literal was disclosed rather than rejected (#1251).
+
+        The predicate is decided — it is false of *value* — and what is not
+        decided is whether the narrowing can be reached, so the disclosure
+        says exactly that rather than implying the predicate was the obstacle.
+        Derived, not fixed, because the solver-outcome half comes from
+        :py:meth:`_undecided_reason` like every other non-verdict text.
+        """
+        return (
+            f"the value {value} does not satisfy the predicate, but whether "
+            "this narrowing can be reached at all could not be settled: "
+            + ContractVerifier._undecided_reason(status)
+        )
 
     @staticmethod
     def _undecided_reason(status: str) -> str:
@@ -6509,7 +6611,16 @@ class ContractVerifier:
         narrowing — ``let`` / constructor-field / effect-op-arg / match-bind /
         tuple-destructure / ADT-sub-pattern — has no codegen guard, so it is
         ``guarded=False`` — surfaced as an E506 warning and excluded from the
-        totals rather than overstating a runtime check it never gets (R7)."""
+        totals rather than overstating a runtime check it never gets (R7).
+
+        Required and non-EMPTY: an empty string is a caller that has not
+        decided wearing the shape of one that has, and it renders the same
+        broken sentence a missing reason would."""
+        if not reason:
+            raise ValueError(
+                "a refinement Tier-3 demotion emits an E506 that must say "
+                f"why (site {site!r} in {decl.name!r}): `reason` is empty"
+            )
         if guarded:
             self._record_obligation(
                 decl.name, "refine_bind", value_node, "tier3",
@@ -7307,8 +7418,9 @@ class ContractVerifier:
         *all* call-arguments — concrete directly, generic on the
         monomorphised callee (#747), so a Tier-3 narrowing there genuinely
         falls to a runtime check (``tier3_runtime``).  The unguarded cases —
-        the *user-effect* operation argument (the builtin State-op sites
-        are guarded since #1203) and the generic-instantiated
+        the operation argument of a user-declared effect or of the builtin
+        ``Exn`` ``throw`` (#1268; the builtin State-op sites are guarded
+        since #1203) and the generic-instantiated
         constructor field (constructors carry no per-field @Nat mono
         metadata) — may be neither statically proven nor runtime-checked, so
         surface an E504 warning and exclude them from the discharged totals
@@ -7330,7 +7442,11 @@ class ContractVerifier:
         if guarded:
             self._record_obligation(decl.name, "nat_bind", value_node, status)
         else:
-            if reason is None:
+            # `not reason` rather than `is None`: an EMPTY reason renders a
+            # broken sentence ("could not be discharged: .") and is a caller
+            # that has not decided, which is the same defect the parameter
+            # exists to prevent — a default by another spelling.
+            if not reason:
                 raise ValueError(
                     "an unguarded nat_bind demotion emits an E504 that must "
                     f"say why (site {site!r} in {decl.name!r}): pass `reason`"
@@ -7372,8 +7488,10 @@ class ContractVerifier:
                 "the concrete @Nat binding sites (let, destructure, match, "
                 "sub-pattern, concrete field) and all call-arguments (generic "
                 "ones on the monomorphised callee) but not this one — an "
-                "effect-operation argument, or a generic-instantiated "
-                "constructor field with no per-field mono metadata — so here "
+                "effect-operation argument (a user-declared effect's "
+                "operation, or an Exn `throw` payload), or a "
+                "generic-instantiated constructor field with no per-field "
+                "mono metadata — so here "
                 "the narrowing is neither statically proven nor "
                 "runtime-checked."
             ),
@@ -8935,18 +9053,39 @@ class ContractVerifier:
         So the gate is the VALUE, in the constant discipline
         :py:meth:`_check_float_to_int_domain_obligation` already uses: simplify,
         and proceed only for a Z3 literal.  Assumptions are deliberately not
-        consulted — nothing a precondition can assert changes the value of a
-        literal — and the answer is taken only from a fold that lands on
-        ``True`` or ``False``.  A predicate whose operands the SMT layer models
-        by something other than evaluation (a call, modelled by the callee's
-        contract) does not fold, and undecided stays undecided: the caller
-        keeps its runtime-guarded disclosure rather than guessing a verdict.
+        consulted for the PREDICATE — nothing a precondition can assert changes
+        the value of a literal — and the answer is taken only from a fold that
+        lands on ``True`` or ``False``.  A predicate whose operands the SMT
+        layer models by something other than evaluation (a call, modelled by
+        the callee's contract) does not fold, and undecided stays undecided:
+        the caller keeps its runtime-guarded disclosure rather than guessing a
+        verdict.  What the premises DO decide is whether the site runs at all,
+        which is why a false fold is not a rejection on its own — see
+        :py:meth:`_reject_or_excuse_concrete_violation`.
+
+        The fold is Z3's, over unbounded integers, where the machine the
+        predicate will run on is not.  For a literal that gap is closed by
+        the checker, which admits an integer literal into a base only within
+        that base's range (a ``@Byte`` literal is 0..255, and 300 is a type
+        error before verification runs), so the folded comparison is the one
+        the emitted guard performs.  Where a predicate could still put an
+        unbounded intermediate between the literal and the comparison, that is
+        the standing prover-vs-machine gap (#1222's class) and it is already
+        how a MODELLED base behaves here — this gate inherits that exposure,
+        it does not widen it.
 
         Returns ``(holds, rendered_value)``, or None when the value is not
         concrete or the fold settles nothing.  Restricted to a PRIMITIVE base:
         a composite literal does not reduce to a Z3 value, so this would return
         None for it anyway, and gating explicitly keeps a future sort whose
         literals DO reduce from inheriting the decision by accident.
+
+        Reached from the expression-valued binding sites only, not from
+        :py:meth:`_check_refined_binding_obligation_term`.  That is not an
+        exclusion by policy: a projection site holds an accessor term — a
+        field or tuple component — which is symbolic by construction, so the
+        concreteness gate would decline it on every call.  Wiring it there
+        would add a branch nothing can take.
         """
         parts = ContractVerifier._refined_parts(refined_ty)
         if parts is None:  # pragma: no cover — caller checked the shape
@@ -8968,6 +9107,15 @@ class ContractVerifier:
         translated = smt.translate_expr(predicate, inner_env)
         if translated is None:
             return None
+        # Membership is "the value is a valid @Base" AND the predicate, and
+        # `_translate_refined_predicate` conjoins the one base that carries an
+        # intrinsic (`@Nat`'s `>= 0`).  Carried here for the same reason: the
+        # goal must be the SAME goal on both paths.  A `@Nat` base is modelled
+        # and so never reaches this gate today, which is exactly why the
+        # omission was invisible — and re-deriving it costs one fold on a
+        # closed term.
+        if base == NAT:
+            translated = z3.And(literal >= 0, translated)
         folded = z3.simplify(translated)
         if z3.is_true(folded):
             return (True, str(literal))
@@ -8980,14 +9128,21 @@ class ContractVerifier:
         """True iff *term* is a Z3 VALUE rather than a symbolic expression.
 
         The concreteness half of :py:meth:`_concrete_refined_verdict`'s gate,
-        covering every sort a refinement base can carry a literal in.  A
-        symbolic term — a slot variable, an accessor, an uninterpreted
-        application — is none of these, which is what keeps a runtime-guarded
-        narrowing out of the decided path.
+        covering every sort a refinement base's literal reaches it in — Int,
+        Bool, String, and the FP sort ``@Float64`` declares as.  A symbolic
+        term — a slot variable, an accessor, an uninterpreted application — is
+        none of these, which is what keeps a runtime-guarded narrowing out of
+        the decided path.
+
+        There is deliberately no ``is_rational_value`` arm.  Reals reach the
+        verifier only where it converts one (``fpToReal`` in the
+        ``float_to_int`` domain check); no literal any base can carry
+        translates to one, which
+        :class:`~tests.test_verifier_refinements.TestTheConcretenessGateCoversEverySortALiteralArrivesIn`
+        pins per base, so an arm for them would be unreachable.
         """
         return bool(
             z3.is_int_value(term)
-            or z3.is_rational_value(term)
             or z3.is_true(term)
             or z3.is_false(term)
             or z3.is_string_value(term)
