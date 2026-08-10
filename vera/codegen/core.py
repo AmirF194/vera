@@ -349,6 +349,27 @@ class CodeGenerator(
         # look-up-another split #1208 closes.  `_sync_alias_env` re-derives it
         # wherever the maps change.
         self._alias_env: AliasEnv = EMPTY_ALIAS_ENV
+        # #1253: which ADT NAMES are members of each namespace — the module
+        # path (``None`` = this program) → the names visible there.
+        # ``_adt_layouts`` is one map across every absorbed namespace, so
+        # deriving the naming env's `data_types` set from all of it made a
+        # sibling module's ADTs members of a module that never imported them,
+        # where the checker keeps the name opaque: the two sides then disagree
+        # about what a NAME MEANS.  Membership is the owning namespace plus
+        # that namespace's OWN imports (public and in-filter, the checker's
+        # view), computed once in `_register_modules`.  Empty until then, and
+        # empty for a single-file program — `_adt_members_in_scope` reads that
+        # as "no module structure", which is the whole map.
+        self._adt_namespace_members: dict[
+            tuple[str, ...] | None, frozenset[str]
+        ] = {}
+        # The builtin/prelude ADTs, members of every namespace (they are global
+        # infrastructure, owned by no module — the same set `_register_modules`
+        # exempts from the E609/E610 collision rails).
+        self._builtin_adt_names: frozenset[str] = frozenset()
+        # The namespace `_module_alias_scope` currently has installed, so
+        # `_sync_alias_env` knows whose membership to apply.
+        self._active_module_path: tuple[str, ...] | None = None
 
         # Diagnostics already reported by `_error_once` (PR #1224 review).  The
         # boundary-guard layer's errors fire from several call sites per
@@ -1262,18 +1283,43 @@ class CodeGenerator(
         declaration, while this describes the module.
         """
         order = self._decl_order
+        members = self._adt_members_in_scope()
         self._alias_env = AliasEnv(
             aliases=dict(self._type_aliases),
             alias_params=dict(self._type_alias_params),
             data_types={
                 name: self._adt_decl_index(name, order)
                 for name in self._adt_layouts
+                if members is None or name in members
             },
             _order={
                 name: order.get(name, _BUILTIN_DECL_INDEX)
                 for name in self._type_aliases
             },
         )
+
+    def _adt_members_in_scope(self) -> frozenset[str] | None:
+        """The ADT names visible in the namespace now installed (#1253).
+
+        ``None`` means "no module structure to scope by" — a single-file
+        program, or a point before ``_register_modules`` has computed the
+        membership sets — and the caller then takes every registered layout,
+        which is what codegen did everywhere before this.
+
+        Otherwise it is the owning namespace's own ADTs plus the ones it
+        IMPORTS, public and in-filter: the checker's view of that module,
+        which is the whole point.  A namespace with no computed entry (a
+        module the resolver reached but nothing recorded) falls back to the
+        same permissive whole-map answer rather than to an empty set — a
+        wrongly-empty membership would silently re-open the divergence in the
+        other direction, rendering a name the module DOES own as opaque.
+        """
+        if not self._adt_namespace_members:
+            return None
+        members = self._adt_namespace_members.get(self._active_module_path)
+        if members is None:
+            return None
+        return members | self._builtin_adt_names
 
     def _adt_decl_index(self, name: str, order: dict[str, int]) -> int:
         """Where *name* sits in the declaration-index space *order* keys (#1227).
