@@ -245,6 +245,15 @@ class ContractVerifier:
     #: carries, so a line number and the file it numbers cannot disagree.
     _decl_file: str | None = None
 
+    #: #1241: ... and its FUNCTION REGISTRY, the namespace a bare call in the
+    #: declaration under verification resolves in.  The fourth half of "which
+    #: file is this?", travelling with the other three: a clone body reading
+    #: the importer's registry calls the importer's same-named function, so
+    #: the module's contract is proved against a body it never mentions —
+    #: verify-clean, and the run produces the other function's answer.  Class
+    #: default for the same reason as its three siblings.
+    _decl_fn_scope: CalleeScope | None = None
+
     def __init__(
         self,
         source: str = "",
@@ -292,6 +301,14 @@ class ContractVerifier:
         # named the entry file while carrying a line number from another one
         # sent a reader to the wrong file's wrong line (PR #1239 review).
         self._module_files: dict[tuple[str, ...], str | None] = {}
+        # #1241: ... and its own function-resolution scope (naming env +
+        # registry), so a body DECLARED in that module resolves its bare
+        # calls where it wrote them.  The same `CalleeScope` pinned per
+        # `FunctionInfo` in `_fn_origins` below, keyed by module instead of
+        # by callee — the contract-READING pin (#1225) and this body-WALKING
+        # pin are one value, so the two cannot come to disagree about what a
+        # module's namespace is.
+        self._module_scopes: dict[tuple[str, ...], CalleeScope] = {}
         # #1208/#1225: the scope a harvested `FunctionInfo`'s own contract is
         # READ in — its declaring module's naming env AND function registry —
         # keyed by object identity.  `FunctionInfo` is an unhashable mutable
@@ -319,6 +336,7 @@ class ContractVerifier:
         self._decl_alias_env = None
         self._decl_source = None
         self._decl_file = None
+        self._decl_fn_scope = None
         self.source = source
         self.file = file
         self.timeout_ms = timeout_ms
@@ -739,6 +757,17 @@ class ContractVerifier:
         imports).  This makes the verifier resolve helper calls the same way
         codegen does after parent-qualified mangling — so a diamond of
         same-named helpers proves each parent against its OWN helper's contract.
+
+        #1241: past the lexical helpers, the two flat steps are the DECLARING
+        module's when one is in force — an imported generic's clone, verified
+        inside :meth:`_declaring_module_scope`.  A module's body calls the
+        names ITS file declares and imports (spec §8.5.1), so falling through
+        to this program's top-level table and registry resolved a bare call
+        onto the importer's same-named function: the module's own contract
+        proved against a body it never mentions, and the compiled clone
+        returning the importer's answer.  Its codegen twin is the intra-rename
+        map threaded at the clone-emission door (#1243) — one routing rule, so
+        neither side can call what the other did not verify.
         """
         # Nearest scope first: decl's own where_fns, then each ancestor's,
         # innermost (direct parent) before outermost.
@@ -749,6 +778,10 @@ class ContractVerifier:
                 for wfn in group.where_fns or ():
                     if wfn.name == name:
                         return self._fn_info_for_decl(wfn)
+            declaring = self._decl_fn_scope
+            if declaring is not None and declaring.fn_lookup is not None:
+                found: FunctionInfo | None = declaring.fn_lookup(name)
+                return found
             top = self._top_level_fn_infos.get(name)
             if top is not None:
                 return top
@@ -982,6 +1015,14 @@ class ContractVerifier:
             # call to a private helper falling through to the importer's
             # registry, which is the bug (#1225).
             mod_scope = CalleeScope(mod_alias_env, temp.env.lookup_function)
+            # #1241: and the scope every BODY this module declares resolves
+            # its bare calls in.  `_declaring_module_scope` already swapped
+            # the naming env and the source buffer for an imported generic's
+            # clone; without the registry beside them the clone's own body
+            # call fell through to the IMPORTER's `env.lookup_function` and
+            # picked up a same-named importer function — the module's
+            # contract proved against a body it never mentions.
+            self._module_scopes[mod.path] = mod_scope
             # Pinned for every module-declared function, before the `direct`
             # gate and irrespective of visibility: a contract read in this
             # scope resolves to the module's OWN infos, and each of those is a
@@ -1173,20 +1214,26 @@ class ContractVerifier:
 
         Every half of "which file is this?" rides this one scope: the naming
         env its slots render against (#1208), the source buffer its clauses are
-        quoted from, and the file name its diagnostics point at (#1220).
-        ``None`` is a main-file declaration and keeps this program's.  Entered
-        and left together, so a clone named in one module can never quote
-        another's text or send a reader to another's line number.
+        quoted from, the file name its diagnostics point at (#1220), and the
+        function registry its bare calls resolve in (#1241).  ``None`` is a
+        main-file declaration and keeps this program's.  Entered and left
+        together, so a clone named in one module can never quote another's
+        text, send a reader to another's line number, or call another's
+        same-named function.
         """
-        saved = (self._decl_alias_env, self._decl_source, self._decl_file)
+        saved = (self._decl_alias_env, self._decl_source, self._decl_file,
+                 self._decl_fn_scope)
         self._decl_alias_env = self._alias_env_for_module(origin)
         self._decl_source = self._source_for_module(origin)
         self._decl_file = self._file_for_module(origin)
+        self._decl_fn_scope = (
+            None if origin is None else self._module_scopes.get(origin)
+        )
         try:
             yield
         finally:
             (self._decl_alias_env, self._decl_source,
-             self._decl_file) = saved
+             self._decl_file, self._decl_fn_scope) = saved
 
     def _alias_env_for_module(self, origin: tuple[str, ...] | None) -> AliasEnv:
         """Module *origin*'s naming env; this program's for ``None`` or an

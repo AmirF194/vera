@@ -1744,6 +1744,17 @@ class CodeGenerator(
             # resolved location precisely because it carries the owning file,
             # so two modules declaring a nested refinement at coinciding
             # coordinates collapsed to ONE diagnostic.
+            # #1243: and its bare sibling calls belong to that module's
+            # namespace.  This was the one emission door that did not thread
+            # the intra-rename map Passes 2.5/2.6 thread — so a clone of an
+            # imported generic whose body calls one of ITS module's functions
+            # by bare name landed on the IMPORTER's same-named function
+            # instead: `glib`'s `gen` ran the importer's `need` (999 where
+            # glib's returns 111), and on a type-discriminating pair
+            # (`@Int` vs `@Bool`) emitted invalid WASM from check-green
+            # source.  The map is empty for a local clone (no origin) and for
+            # any module name the importer does not shadow, so nothing else
+            # moves.
             with (
                 self._module_alias_scope(origin),
                 self._module_source_scope(origin),
@@ -1751,6 +1762,10 @@ class CodeGenerator(
                 fn_wat = self._compile_fn_tracked(
                     mdecl, export=is_public,
                     imported=origin is not None,
+                    module_renames=(
+                        self._module_intra_renames.get(origin, {})
+                        if origin is not None else None
+                    ),
                     module_tables=(
                         self._module_artifacts.get(origin)
                         if origin is not None else None
