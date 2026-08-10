@@ -660,18 +660,25 @@ class FunctionCompilationMixin:
         # descent), instead of wrapping the WHOLE body — which reverted EVERY
         # `return_call` and broke TCO for a non-narrowing @Nat->@Nat recursive
         # tail call (`drain`, which stack-exhausted at depth).  Alias-aware
-        # (`type Count = Nat`) via `_resolve_base_type_name` and refined-excluded
-        # (`{ @Nat | P }` / an alias to one stays on the 7b refinement-boundary
-        # path) via `_refinement_guard_parts`, exactly as the whole-body
+        # (`type Count = Nat`) via `_boundary_base` — the ONE representation-base
+        # derivation the `throw` payload and the `apply_fn` signature also ask
+        # (#1256).  It resolves the type EXPRESSION, where the
+        # `_resolve_base_type_name(_type_expr_to_slot_name(...))` spelling it
+        # replaces chased the alias by NAME and dropped its type arguments:
+        # `type Ident<T> = T; type Count = Ident<Nat>;` answered the bare head
+        # `Ident`, this gate stayed shut, and `f(0 - 5)` returned -5 through the
+        # `@Nat` slot — the #983 silent negative, one spelling over.  Still
+        # refined-excluded (`{ @Nat | P }` / an alias to one stays on the 7b
+        # refinement-boundary path) via `_refinement_guard_parts`, a SEPARATE
+        # conjunct untouched by the base swap even though `_boundary_base`
+        # strips the refinement wrapper.  Exactly as the whole-body
         # narrow-return gate below.  A narrowing leaf that is itself a tail call
         # (an @Int-returning call) is removed from `tail_sites` so it lowers to
         # a plain `call` — the appended guard runs AFTER it, which `return_call`
         # would skip.
         nat_leaf_ids: set[int] = set()
         if (decl.body is not None
-                and ctx._resolve_base_type_name(
-                    self._type_expr_to_slot_name(decl.return_type) or "")
-                == "Nat"
+                and ctx._boundary_base(decl.return_type) == "Nat"
                 and self._refinement_guard_parts(decl.return_type) is None):
             nat_leaf_ids = ctx._collect_narrowing_return_leaves(decl.body)
         ctx._nat_return_leaf_ids = nat_leaf_ids
@@ -978,16 +985,22 @@ class FunctionCompilationMixin:
         # so trap rather than silently return it — the runtime backstop for the
         # verifier's nat_to_int_coerce obligation (7c).  @Int is i64, so this
         # runs before (and is unaffected by) the i32 coercion below.
-        # Alias-aware (`type MyInt = Int`) via `_resolve_base_type_name` so an
-        # alias-typed @Int return is guarded too — matching the verifier's 7c
-        # gate (`_is_int_type` over the *resolved* return type), whereas the raw
-        # `_type_expr_to_slot_name` returns the opaque alias name and missed it
-        # (#983 review, the widen sibling of the alias-blind narrow gate).  A
-        # refinement over @Int stays here (the verifier's 7c fires on refined
-        # @Int too: the `<= i64.MAX` bound is not subsumed by the predicate).
+        # Alias-aware via `_boundary_base` so an alias-typed @Int return is
+        # guarded too — matching the verifier's 7c gate (`_is_int_type` over the
+        # *resolved* return type).  The raw `_type_expr_to_slot_name` returned
+        # the opaque alias name and missed `type MyInt = Int` entirely (#983
+        # review, the widen sibling of the alias-blind narrow gate); the
+        # name-only chase that replaced it still dropped an APPLICATION's type
+        # arguments, so `type MyInt = Ident<Int>` answered the head `Ident` and
+        # the widen guard went missing again (#1256, measured against the plain
+        # spelling's).  `_boundary_base` resolves the type expression, so both
+        # spellings answer `Int` — the same derivation the narrow gate above,
+        # the `throw` payload and the `apply_fn` signature ask.  A refinement
+        # over @Int stays here (the verifier's 7c fires on refined @Int too: the
+        # `<= i64.MAX` bound is not subsumed by the predicate), which the
+        # wrapper-stripping resolution preserves rather than changes.
         widen_guarded = (
-            ctx._resolve_base_type_name(
-                self._type_expr_to_slot_name(decl.return_type) or "") == "Int"
+            ctx._boundary_base(decl.return_type) == "Int"
             and ctx._result_is_nat(decl.body)
         )
         if widen_guarded:

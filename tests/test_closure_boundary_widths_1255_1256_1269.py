@@ -49,12 +49,21 @@ luck.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 import pytest
 
 from tests.codegen_helpers import _compile_ok, _run
-from vera.codegen import assembly
+from vera.codegen import (
+    CompileResult,
+    assembly,
+    compile as _vera_compile,
+    execute,
+)
+from vera.parser import parse_file
+from vera.resolver import ModuleResolver
 from vera.skip import CodegenInvariantError
+from vera.transform import transform
 from vera.wasm.helpers import MAX_INLINE_I32_VALUE
 
 # =====================================================================
@@ -753,3 +762,188 @@ class TestTheThrowPayloadIsAByteWriteBoundary:
         tags = re.findall(r"\(tag \$exn_\S+ \(param ([^)]*)\)\)", wat)
         assert tags == ["i32"], tags
         assert "i32.const 5\n    throw $exn_" in wat, _fn_body(wat, "boom")
+
+
+# =====================================================================
+# Cross-module registration parity (#1269)
+# =====================================================================
+
+# `Small` is declared and used in `xmodlib`, whose alias environment is the
+# only one that can resolve it.  The IMPORTER declares its own `Small` over a
+# DIFFERENT base — the decoy that makes this a parity test rather than a
+# smoke test: a type alias is module-local (spec 8.4.1), so if either side of
+# the payload derivation read the importer's environment it would answer
+# `Int` (i64) where the other answered `Byte` (i32), and the two would
+# disagree exactly the way #1269's two widths did.
+_XMOD_LIB = """\
+module xmodlib;
+
+type Small = { @Byte | @Byte.0 < 10 };
+
+private fn boom(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<Exn<Small>>)
+{
+  throw(5)
+}
+
+public fn catch_it(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[Exn<Small>] {
+    throw(@Small) -> { byte_to_int(@Small.0) }
+  } in {
+    boom(())
+  }
+}
+"""
+
+_XMOD_MAIN = """\
+import xmodlib;
+
+type Small = Int;
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Small = catch_it(());
+  @Small.0
+}
+"""
+
+# The single-module twin, the same declarations with no module boundary
+# between them.  It is the ORACLE: the claim is that crossing a module
+# boundary changes nothing about the emitted throw, and only a comparison
+# can say that.
+_XMOD_SAME_MODULE = """\
+type Small = { @Byte | @Byte.0 < 10 };
+
+private fn boom(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<Exn<Small>>)
+{
+  throw(5)
+}
+
+public fn catch_it(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[Exn<Small>] {
+    throw(@Small) -> { byte_to_int(@Small.0) }
+  } in {
+    boom(())
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  catch_it(())
+}
+"""
+
+
+def _compile_xmod(tmp_path: Path) -> CompileResult:
+    """Resolve and compile the two-module program through the real resolver."""
+    (tmp_path / "xmodlib.vera").write_text(_XMOD_LIB, encoding="utf-8")
+    main_file = tmp_path / "main.vera"
+    main_file.write_text(_XMOD_MAIN, encoding="utf-8")
+    tree = parse_file(str(main_file))
+    prog = transform(tree)
+    resolver = ModuleResolver(_root=tmp_path)
+    resolved = resolver.resolve_imports(prog, main_file)
+    assert not resolver.errors, [e.description for e in resolver.errors]
+    result = _vera_compile(
+        prog,
+        source=main_file.read_text(encoding="utf-8"),
+        file=str(main_file),
+        resolved_modules=resolved,
+    )
+    errors = [d for d in result.diagnostics if d.severity == "error"]
+    assert not errors, [d.description for d in errors]
+    return result
+
+
+class TestTheThrowPayloadResolvesInItsOwnModule:
+    """#1269's not-probed axis: the two producers read different alias envs.
+
+    The payload's representation is derived on the CodeGenerator side
+    (`_family_base_te`, over the generator's `_alias_env`, scoped to the
+    declaring module) and again on the WasmContext side (`_family_base`, over
+    the context's own copy).  Nothing forces those two objects to hold the
+    same aliases within one compilation of many modules, so "they agree" is a
+    claim about the scoping — and a single-module program cannot test it,
+    there being only one environment for both to read.
+    """
+
+    def test_the_emitted_throw_is_identical_across_the_module_boundary(
+        self, tmp_path: Path,
+    ) -> None:
+        """Same declarations, one module or two: the same throw sequence.
+
+        A structural equality, not a spot check — if either producer read the
+        importer's `type Small = Int` the tag would take an i64 parameter or
+        the value would be an `i64.const`, and the two bodies would differ.
+        """
+        xmod = _fn_body(_compile_xmod(tmp_path).wat, "boom")
+        same = _fn_body(_compile_ok(_XMOD_SAME_MODULE).wat, "boom")
+        assert xmod == same, (xmod, same)
+        assert "i32.const 5" in xmod, xmod
+
+    def test_the_tag_is_i32_and_the_program_returns_the_payload(
+        self, tmp_path: Path,
+    ) -> None:
+        """The value oracle, so the agreement is on the RIGHT width.
+
+        5 is the payload.  It cannot coincide with the importer's decoy
+        `type Small = Int` being read instead: that spelling is i64, which
+        either fails validation against the i32 tag or delivers a different
+        number.
+        """
+        result = _compile_xmod(tmp_path)
+        tags = re.findall(
+            r"\(tag \$exn_\S+ \(param ([^)]*)\)\)", result.wat)
+        assert tags == ["i32"], tags
+        exec_result = execute(result, fn_name="main")
+        assert exec_result.value == 5, exec_result.value
+
+    def test_the_width_assertion_can_go_red(self, tmp_path: Path) -> None:
+        """The companion that makes the two above mean something.
+
+        Both assert i32.  If the payload width were i32 for every spelling
+        the tests would pass without discriminating anything, so the same
+        two-module program is compiled with the LIBRARY's `Small` changed to
+        `Int` — the value the importer's decoy would supply if a producer
+        read the wrong environment.  That must emit an i64 tag and an
+        `i64.const`; the assertions above are therefore reading a width that
+        genuinely tracks the declaring module's alias.
+        """
+        (tmp_path / "xmodlib.vera").write_text(
+            _XMOD_LIB.replace(
+                "type Small = { @Byte | @Byte.0 < 10 };", "type Small = Int;")
+            .replace("byte_to_int(@Small.0)", "@Small.0"),
+            encoding="utf-8")
+        main_file = tmp_path / "main.vera"
+        main_file.write_text(_XMOD_MAIN, encoding="utf-8")
+        tree = parse_file(str(main_file))
+        prog = transform(tree)
+        resolver = ModuleResolver(_root=tmp_path)
+        resolved = resolver.resolve_imports(prog, main_file)
+        assert not resolver.errors, [e.description for e in resolver.errors]
+        result = _vera_compile(
+            prog, source=main_file.read_text(encoding="utf-8"),
+            file=str(main_file), resolved_modules=resolved)
+        tags = re.findall(
+            r"\(tag \$exn_\S+ \(param ([^)]*)\)\)", result.wat)
+        assert tags == ["i64"], tags
+        assert "i64.const 5" in _fn_body(result.wat, "boom")

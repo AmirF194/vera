@@ -1471,13 +1471,13 @@ class CallsHandlersMixin:
         # and is what every width / pointer-ness / write-guard decision
         # below uses, because all three refinements of one base share those.
         family = self._family_name(type_arg)
-        # Alias-resolved, matching the bare-`put` path's
-        # `_resolve_base_type_name(cell.base)` (PR #1238 review): both
-        # dispatch paths must classify one cell the same way, and
-        # `family_fallback_name`'s residue can leave a syntactic alias
-        # here.  A no-op on every resolved family.
-        family_base = self._resolve_base_type_name(
-            self._family_base(type_arg))
+        # The boundary's REPRESENTATION base, matching the bare-`put` path
+        # (PR #1238 review): both dispatch paths must classify one cell the
+        # same way, and `family_fallback_name`'s residue can leave a
+        # syntactic alias behind the first hop.  `_boundary_base` is that
+        # two-hop composition, named once (#1256) rather than spelled out
+        # at each of the sites that need it.
+        family_base = self._boundary_base(type_arg)
         mangled = mangle_type_name(family)
 
         put_import = f"$vera.state_put_{mangled}"
@@ -2243,8 +2243,7 @@ class CallsHandlersMixin:
         # caught-value SLOT binding below stays source-level (the checker
         # binds the clause pattern's own name).
         family = self._family_name(type_arg)
-        family_base = self._resolve_base_type_name(
-            self._family_base(type_arg))
+        family_base = self._boundary_base(type_arg)
         tag_name = f"$exn_{mangle_type_name(family)}"
         # Pair-ness is the BASE's question (#1218): `Exn<Short>` under
         # `type Short = {@String | ...}` is its own tag and still carries a

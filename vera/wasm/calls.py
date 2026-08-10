@@ -509,6 +509,14 @@ class CallsMixin:
                 call.name == "throw" and len(call.args) == 1
                 and cell is not None
             )
+            # `_boundary_base`'s composition with its FIRST hop already
+            # performed, at registration: the registry carries a name, not
+            # the type expression, so this site cannot call the named helper
+            # and applies the residue chase itself.  Two of the three
+            # producers (both `handle` sites) store an already-chased base,
+            # so this is a no-op for them; the declaration-row producer
+            # (`codegen/functions.py`) has no `_resolve_base_type_name` to
+            # reach, which is the only reason the hop still lives here.
             base = (
                 self._resolve_base_type_name(cell.base)
                 if (is_state_put or is_exn_throw) and cell is not None

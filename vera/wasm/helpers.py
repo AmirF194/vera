@@ -475,7 +475,7 @@ _NON_POINTER_I32_BASES = frozenset({"Bool", "Byte"})
 MAX_INLINE_I32_VALUE = 255
 
 
-def is_gc_pointer_base(base_name: str | None) -> bool:
+def is_gc_pointer_base(base_name: str) -> bool:
     """Whether an ``i32``-lowered value is a Vera-heap pointer to be rooted.
 
     THE pointer-ness rule (#1255), stated once.  An ``i32`` is either an
@@ -498,13 +498,15 @@ def is_gc_pointer_base(base_name: str | None) -> bool:
     in ``vera/codegen/assembly.py``) — but a classification rule cannot
     rely on a downstream range check to be right.
 
-    ``None`` — a type expression with no nameable slot form — is NOT a
-    pointer: the boundaries that can produce it (a bare type variable in an
-    uninstantiated generic template) are dropped before they run, and
-    guessing "pointer" there would push an uninitialised local.
+    The parameter is a plain ``str``, not ``str | None``: both admissible
+    producers are total — ``family_base_name`` falls back to
+    :func:`vera.slots.family_fallback_name` rather than returning ``None``,
+    and ``_resolve_base_type_name`` returns its input unchanged when it
+    resolves no further.  An optional parameter here would have been a
+    branch no caller can reach, and one that quietly invited a caller to
+    hand over ``_type_expr_to_slot_name``'s optional result — the very
+    syntactic-head spelling this replaces.
     """
-    if base_name is None:
-        return False
     return (base_name not in _NON_POINTER_I32_BASES
             and not _is_host_handle_type(base_name))
 

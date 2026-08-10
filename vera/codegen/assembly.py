@@ -451,7 +451,7 @@ class AssemblyMixin:
             # which is exactly when the argument needs re-deriving.  A raise
             # rather than an assert: `python -O` must not strip it (ruff S).
             if gc_heap_start <= MAX_INLINE_I32_VALUE + 4:
-                raise CodegenInvariantError(  # pragma: no cover — see above
+                raise CodegenInvariantError(
                     f"GC heap starts at {gc_heap_start}, inside the inline "
                     f"i32 scalar range (0..{MAX_INLINE_I32_VALUE}): the "
                     "conservative mark phase could not distinguish a @Byte "
