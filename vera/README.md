@@ -83,7 +83,7 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `checker/` | 6,684 | Type check | Two-pass type checker (mixin package) | `typecheck()` |
 | `  core.py` | 1,032 | | TypeChecker class, orchestration, contracts, constraint validation | |
 | `  resolution.py` | 486 | | AST TypeExpr → semantic Type, inference | |
-| `  modules.py` | 189 | | Cross-module registration (C7b/C7c) | |
+| `  modules.py` | 285 | | Cross-module registration (C7b/C7c), plus the per-module body check that makes a module's diagnostics independent of which file `vera check` was given (#1244) | |
 | `  registration.py` | 727 | | Pass 1 forward declarations, ability registration | |
 | `  expressions.py` | 1,405 | | Expression synthesis (bidirectional), operators, statements | |
 | `  eq_ability.py` | 199 | | Eq ability derivation checks | |

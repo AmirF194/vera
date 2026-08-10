@@ -1719,15 +1719,22 @@ public fn main(-> @Unit)
 """
         prog = parse_to_ast(source)
         diags = typecheck(prog, source=source, resolved_modules=[mod])
-        # Exactly E152, not merely "E152 among others": the module's own
-        # divergent `IO.print(a, b)` call must NOT cascade a second diagnostic
-        # into the importer.  Only E151/E152 are harvested from the module's
-        # isolated check, so a cascade here would mean the rejected block had
-        # been registered after all.
+        # EXACTLY what `vera check shouty.vera` reports standalone, which
+        # since #1244 is what an importer reports too — the module's bodies
+        # are checked under the module's own import filter regardless of
+        # entry point, so its `IO.print(a, b)` is diagnosed here as well.
+        # E203 is the load-bearing half: it names the CANONICAL built-in's
+        # arity ("expects 1 argument(s), got 2"), so the pre-#1244 property
+        # this case was written for — the rejected block is not registered —
+        # is asserted more directly than by its absence.
         codes = [d.error_code for d in diags if d.severity == "error"]
-        assert codes == ["E152"], [
+        assert codes == ["E152", "E203"], [
             (d.error_code, d.description) for d in diags
         ]
+        assert any(
+            "expects 1 argument" in d.description
+            for d in diags if d.error_code == "E203"
+        ), [d.description for d in diags]
 
     def test_module_user_effect_still_accepted(self) -> None:
         """The negative control: a module's own effect name is untouched."""
