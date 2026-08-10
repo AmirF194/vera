@@ -6422,7 +6422,7 @@ class ContractVerifier:
             self._record_obligation(
                 decl.name, "refine_bind", value_node, "verified")
             return
-        if reachable.status != "violated":  # pragma: no cover — see docstring
+        if reachable.status != "violated":
             self._record_refined_bind_tier3(
                 decl, value_node, site, guarded=guarded,
                 reason=self._unsettled_reachability_reason(
@@ -6444,16 +6444,19 @@ class ContractVerifier:
         decided is whether the narrowing can be reached, so the disclosure
         says exactly that rather than implying the predicate was the obstacle.
         Derived, not fixed, because the solver-outcome half comes from
-        :py:meth:`_undecided_reason` like every other non-verdict text.
+        :py:meth:`_undecided_reason` like every other non-verdict text — named
+        for THAT QUESTION rather than for "the obligation", since the
+        obligation is not what went undecided here: the query that came back
+        without a verdict was the reachability one.
         """
         return (
             f"the value {value} does not satisfy the predicate, but whether "
             "this narrowing can be reached at all could not be settled: "
-            + ContractVerifier._undecided_reason(status)
+            + ContractVerifier._undecided_reason(status, subject="that question")
         )
 
     @staticmethod
-    def _undecided_reason(status: str) -> str:
+    def _undecided_reason(status: str, subject: str = "the obligation") -> str:
         """Why ``check_valid`` neither proved nor refuted the obligation (#1251).
 
         :py:meth:`~vera.smt.SmtContext.check_valid` has FOUR outcomes, and the
@@ -6469,6 +6472,13 @@ class ContractVerifier:
         the wording names the OBLIGATION rather than any one family's goal.
         The two coercion families carried the same conflated sentence the
         refinement family did until this derivation reached them.
+
+        *subject* is what the solver returned no decision ABOUT, and it is a
+        parameter because one caller does not ask about the obligation at all:
+        :py:meth:`_unsettled_reachability_reason` asks whether the site can be
+        reached, and splicing "no decision on the obligation" there would name
+        the wrong undecided question in a text whose entire purpose is naming
+        the right one.  Every other caller takes the default.
 
         Collapsing the two into "the solver timed out" is the misattribution
         this issue is about, one level down: it names an event that did not
@@ -6493,7 +6503,7 @@ class ContractVerifier:
                 "stand-in, which refutes nothing the effect actually produces"
             )
         if status == "unknown":
-            return "the solver returned no decision on the obligation"
+            return f"the solver returned no decision on {subject}"
         raise ValueError(
             f"no demotion reason for solver status {status!r}: "
             "every outcome that can reach a Tier-3 demotion must say what it "

@@ -2227,6 +2227,91 @@ public fn mk(@Int -> @Int)
         "_record_nat_bind_tier3",
     )
 
+    _UNREACHABLE_QUESTION = """\
+type Small = {{ @Byte | @Byte.0 < 10 }};
+
+private fn narrow(@Small -> @Byte)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{{
+  @Small.0
+}}
+
+public fn f(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{{
+  {body}
+}}
+"""
+
+    @pytest.mark.parametrize(
+        ("body", "status"),
+        [
+            # An internal narrowing — no codegen guard, so the demotion lands
+            # on the unguarded leg...
+            ("let @Small = 200;\n  0", "tier3_unguarded"),
+            # ... and a call argument, which the callee's entry guard covers,
+            # on the runtime-guarded one.  Both must demote, and neither may
+            # keep the rejection the reachability question failed to justify.
+            ("byte_to_int(narrow(200))", "tier3"),
+        ],
+    )
+    def test_an_unsettled_reachability_question_discloses(
+        self, monkeypatch: pytest.MonkeyPatch, body: str, status: str,
+    ) -> None:
+        """A failing literal whose REACHABILITY the solver cannot settle.
+
+        The three-way's third leg.  When the predicate folds false, the site
+        is rejected only if the solver exhibits a state satisfying the
+        premises; where it returns no verdict on that question, a definite
+        E505 would claim a refutation nothing backs, so the narrowing
+        discloses instead.
+
+        The leg is reachable from a whole program — the review drove it with
+        premises heavy enough to time the reachability query out — but only
+        expensively, so the outcome is injected at the ONE query this path
+        makes.  Only the reachability goal is intercepted: `check_valid` is
+        left alone for every other obligation, so the program around the
+        narrowing still verifies normally and the assertion is about this
+        branch rather than about a verifier with no solver.
+        """
+        import z3
+
+        from vera.smt import SmtContext, SmtResult
+
+        original = SmtContext.check_valid
+
+        def _no_verdict_on_reachability(self, goal, assumptions):
+            if z3.is_false(goal):
+                return SmtResult(status="unknown")
+            return original(self, goal, assumptions)
+
+        monkeypatch.setattr(SmtContext, "check_valid",
+                            _no_verdict_on_reachability)
+        result = _verify(self._UNREACHABLE_QUESTION.format(body=body))
+        binds = [o for o in result.obligations if o.kind == "refine_bind"]
+        assert [o.status for o in binds] == [status], binds
+        assert not [
+            d for d in result.diagnostics if d.error_code == "E505"
+        ], [d.description[:90] for d in result.diagnostics]
+        warns = [d for d in result.diagnostics if d.error_code == "E506"]
+        assert len(warns) == 1, [
+            (d.error_code, d.description[:70]) for d in result.diagnostics
+        ]
+        rationale = warns[0].rationale
+        # It names the value, so the reader knows the predicate WAS decided...
+        assert "200" in rationale, rationale
+        # ... names what was not — and does so as a question about reaching
+        # the site, not about the obligation, which is the one thing that did
+        # get an answer here.
+        assert "can be reached" in rationale, rationale
+        assert "no decision on that question" in rationale, rationale
+        # ... and claims no timeout, the misattribution this issue is about.
+        assert "timed out" not in rationale, rationale
+
     def test_no_demotion_site_hardcodes_a_solver_reason(self) -> None:
         """Structural: a solver-outcome reason must come from the derivation.
 
