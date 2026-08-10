@@ -86,6 +86,18 @@ _OPAQUE_SCRUTINEE_REASON = (
     "projected and the predicate was never given a value to reason about"
 )
 
+#: The bare built-in effect operations that TAKE a value, and therefore carry a
+#: binding obligation on it.  They are spelled without a qualifier and have no
+#: entry in the function registry, so the argument loop that obligates an
+#: ordinary call's arguments never sees them and they need the table-driven
+#: fallback instead (#1203 for ``put``, #1268 for ``throw`` — the second was
+#: missed because the fallback was keyed on the one name that motivated it,
+#: and `throw(0 - 5)` under ``effects(<Exn<Nat>>)`` then verified at 4/4
+#: Tier 1 while `vera run` returned -5 through the ``@Nat`` payload).  ``get``
+#: takes no value; a ``resume`` value is obligated from the ``HandleExpr`` arm
+#: instead, where the clause's effect identity is known.
+_BARE_BUILTIN_OP_ARGS = ("put", "throw")
+
 
 def _walk_fn_decls(program: ast.Program) -> Iterator[ast.FnDecl]:
     """Every function *declaration* in *program*, ``where``-helpers included.
@@ -4558,44 +4570,51 @@ class ContractVerifier:
                 callee = self._lookup_module_function(expr.path, expr.name)
             param_types = getattr(callee, "param_types", None)
             if (param_types is None and isinstance(expr, ast.FnCall)
-                    and expr.name == "put"):
-                # #1203: the State `put` has no function-registry entry, so
-                # the formal loop below never fired and a narrowing
-                # argument (`put(@Int.0)` against the @Nat cell) carried no
-                # obligation at all — verify-clean while `vera run` stored
-                # a negative.  The checker's #747 side-table records the
-                # instantiated target, so the refined/nat/widen triple runs
-                # with formal=None (table-driven).  The guarded flag is
-                # COMPUTED, not hardcoded (PR #1202 adversarial round —
-                # a hardcoded True claimed a runtime check the bare
-                # intrinsic path did not have): the builtin State put is
-                # guarded on both dispatch paths (the clause-inlined store
-                # and the bare intrinsic call, which keys the guard off the
-                # dispatch target's cell type); a user-effect op named
-                # `put` is the #754 unguarded class (its handler does not
-                # compile today, E602) and discloses E504/E531.  The
-                # refined branch is ALWAYS unguarded — no handler boundary
-                # emits a refined-predicate guard (only sign-bit pairs) —
-                # so it discloses E506 honestly.  `resume` values are
-                # obligated from the HandleExpr arm instead, where the
+                    and expr.name in _BARE_BUILTIN_OP_ARGS):
+                # #1203/#1268: a bare built-in op has no function-registry
+                # entry, so the formal loop below never fired and its
+                # argument carried no obligation at all — `put(@Int.0)`
+                # against a @Nat cell was verify-clean while `vera run`
+                # stored a negative, and `throw(0 - 5)` under
+                # `effects(<Exn<Nat>>)` was verify-clean while `vera run`
+                # returned -5 through the @Nat payload.  The checker's #747
+                # side-table records the instantiated target, so the
+                # refined/nat/widen triple runs with formal=None
+                # (table-driven).  The guarded flag is COMPUTED, not
+                # hardcoded (PR #1202 adversarial round — a hardcoded True
+                # claimed a runtime check the bare intrinsic path did not
+                # have): the builtin State ops are guarded on both dispatch
+                # paths (the clause-inlined store and the bare intrinsic
+                # call, which keys the guard off the dispatch target's cell
+                # type), which is why the test is the op's PARENT EFFECT
+                # rather than its name.  Everything else is the #754
+                # unguarded class and discloses E504/E531 — a user-effect op
+                # of either name (its handler does not compile today, E602),
+                # and `throw`, which lowers straight to `throw
+                # $exn_<family>` with the payload on the stack and no guard
+                # anywhere on that path (measured by run, #1268).  The
+                # refined branch is ALWAYS unguarded — no handler or throw
+                # boundary emits a refined-predicate guard (only sign-bit
+                # pairs) — so it discloses E506 honestly.  `resume` values
+                # are obligated from the HandleExpr arm instead, where the
                 # clause's effect identity is known.
                 op = None
                 for eff_name in reversed(self._walk_handled_effects):
                     info = self.env.lookup_effect(eff_name)
-                    if info is not None and "put" in info.operations:
-                        op = info.operations["put"]
+                    if info is not None and expr.name in info.operations:
+                        op = info.operations[expr.name]
                         break
                 if op is None:
-                    op = self.env.lookup_effect_op("put")
-                put_guarded = (op is not None
-                               and op.parent_effect == "State")
-                put_site = ("State-op argument" if put_guarded
-                            else "effect-operation argument")
+                    op = self.env.lookup_effect_op(expr.name)
+                op_guarded = (op is not None
+                              and op.parent_effect == "State")
+                op_site = ("State-op argument" if op_guarded
+                           else "effect-operation argument")
                 for arg in expr.args:
                     self._obligate_binding_triple(
                         decl, arg, None, smt, slot_env, assumptions,
-                        site=put_site,
-                        nat_guarded=put_guarded, widen_guarded=put_guarded,
+                        site=op_site,
+                        nat_guarded=op_guarded, widen_guarded=op_guarded,
                     )
             if param_types is not None:
                 # A generic function whose `TypeVar` formal is fixed to @Nat
