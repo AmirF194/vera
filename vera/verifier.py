@@ -3130,7 +3130,7 @@ class ContractVerifier:
                         decl, ret_node, "return type",
                         guarded=self._refined_boundary_codegen_guardable(
                             ret_type),
-                        reason=self._refined_undecided_reason(
+                        reason=self._undecided_reason(
                             ret_result.status))
 
         # 7c. #813: a bare @Nat body widening into an @Int return reinterprets
@@ -5906,7 +5906,11 @@ class ContractVerifier:
         val = smt.translate_expr(value_node, slot_env)
         if val is None:
             self._record_nat_bind_tier3(
-                decl, value_node, site, "tier3", guarded=guarded)
+                decl, value_node, site, "tier3", guarded=guarded,
+                reason=(
+                    "the narrowed value is outside the SMT layer's decidable "
+                    "fragment, so there is no term to test `>= 0` against"
+                ))
             return
 
         obligation = val >= 0
@@ -5931,7 +5935,8 @@ class ContractVerifier:
             self._record_nat_bind_tier3(
                 decl, value_node, site,
                 "tier3" if result.status == "opaque" else "timeout",
-                guarded=guarded)
+                guarded=guarded,
+                reason=self._undecided_reason(result.status))
 
     def _check_nat_binding_obligation_term(
         self,
@@ -6010,7 +6015,12 @@ class ContractVerifier:
         val = smt.translate_expr(value_node, slot_env)
         if val is None:  # standard path under the #779 empty env
             self._record_int_widen_tier3(
-                decl, value_node, site, "tier3", guarded=guarded)
+                decl, value_node, site, "tier3", guarded=guarded,
+                reason=(
+                    "the widened value is outside the SMT layer's decidable "
+                    "fragment, so there is no term to test `<= i64.MAX` "
+                    "against"
+                ))
             return
 
         hi = z3.IntVal(_I64_MAX)
@@ -6030,7 +6040,9 @@ class ContractVerifier:
             self._report_nat_to_int(decl, value_node, site, safe.counterexample)
         else:
             self._record_int_widen_tier3(
-                decl, value_node, site, "tier3", guarded=guarded)
+                decl, value_node, site, "tier3", guarded=guarded,
+                reason=self._int_widen_undischarged_reason(
+                    safe.status, bad.status))
 
     def _record_int_widen_tier3(
         self,
@@ -6040,6 +6052,7 @@ class ContractVerifier:
         status: ObligationStatus,
         *,
         guarded: bool,
+        reason: str | None = None,
     ) -> None:
         """Record a Tier-3 ``nat_to_int_coerce`` outcome, the #813 dual of
         :py:meth:`_record_nat_bind_tier3`.  A codegen-guarded widening
@@ -6051,26 +6064,48 @@ class ContractVerifier:
         field, which erases to i64 with no per-field mono metadata) is neither
         statically proven nor runtime-checked, so surfaces an E531 warning and
         is excluded from the discharged totals rather than silently counting
-        a runtime check it never gets."""
+        a runtime check it never gets.
+
+        *reason* is WHY the obligation was not discharged, spliced into the
+        E531 rationale (#1251).  Required on the UNGUARDED leg (and refused by
+        a raise if missing) for the reason
+        :py:meth:`_record_nat_bind_tier3` states: that leg emits a disclosure
+        which has to name a cause, and the causes here — an untranslatable
+        value, a value bounded on neither side, an unprojectable destructure
+        source — call for different responses."""
         if guarded:
             self._record_obligation(
                 decl.name, "nat_to_int_coerce", value_node, status)
         else:
+            if reason is None:
+                raise ValueError(
+                    "an unguarded @Nat -> @Int widening emits an E531 that "
+                    f"must say why (site {site!r} in {decl.name!r}): pass "
+                    "`reason`"
+                )
             self._record_obligation(
                 decl.name, "nat_to_int_coerce", value_node, "tier3_unguarded",
                 error_code="E531",
             )
-            self._report_int_widen_unguarded(decl, value_node, site)
+            self._report_int_widen_unguarded(decl, value_node, site, reason)
 
     def _report_int_widen_unguarded(
         self,
         decl: ast.FnDecl,
         node: ast.Expr,
         site: str,
+        reason: str,
     ) -> None:
         """Emit an E531 warning for a @Nat -> @Int widening the SMT layer
         could not discharge and codegen does not guard (#813) — the dual of
-        :py:meth:`_report_nat_binding_unguarded`'s E504."""
+        :py:meth:`_report_nat_binding_unguarded`'s E504.
+
+        *reason* names WHY it was not discharged and is spliced in verbatim
+        (#1251).  This method does not decide the cause and must not describe
+        one: it emitted a fixed "outside Z3's decidable fragment
+        (untranslatable or the solver timed out)" for every caller, and the
+        site it is most often reached from is neither — an unbounded @Nat the
+        solver answered about promptly and correctly, twice."""
         self._warning(
             node,
             (
@@ -6082,10 +6117,9 @@ class ContractVerifier:
             ),
             rationale=(
                 "@Nat is u64 and @Int is i64, so a @Nat above i64.MAX "
-                "reinterprets to a negative @Int when widened.  The value is "
-                "outside Z3's decidable fragment (untranslatable or the solver "
-                "timed out), so the `<= i64.MAX` obligation could not be "
-                "discharged.  Codegen runtime-guards every concrete @Int "
+                "reinterprets to a negative @Int when widened.  The "
+                f"`<= i64.MAX` obligation could not be discharged: {reason}.  "
+                "Codegen runtime-guards every concrete @Int "
                 "coercion site (return, let, call-argument, constructor field, "
                 "tuple component, array element, heterogeneous arm, closure "
                 "argument/return/capture) but not this one — a "
@@ -6136,7 +6170,9 @@ class ContractVerifier:
             self._report_nat_to_int(decl, node, site, safe.counterexample)
         else:
             self._record_int_widen_tier3(
-                decl, node, site, "tier3", guarded=guarded)
+                decl, node, site, "tier3", guarded=guarded,
+                reason=self._int_widen_undischarged_reason(
+                    safe.status, bad.status))
 
     def _closure_arg_param_types(
         self, closure_arg: ast.Expr,
@@ -6208,6 +6244,12 @@ class ContractVerifier:
         ``smt._path_conditions``): on success ``tier1_verified``; on a Z3
         counterexample an E505 error.
 
+        When the predicate has no SMT sort to reason over, a CONCRETE value is
+        still decided rather than disclosed — :py:meth:`_concrete_refined_verdict`
+        (#1251(b)) — so ``handle[State<Small>](@Small = 200)`` over
+        ``{ @Byte | @Byte.0 < 10 }`` is an E505 naming 200 instead of a Tier-3
+        that lets the program run and return a value the refinement forbids.
+
         Anything short of a verdict is surfaced as an E506 warning, never a
         silent ``tier1_verified`` (R7), and the warning NAMES which of them it
         was (#1251) — the four causes ask the reader to change different
@@ -6221,7 +6263,7 @@ class ContractVerifier:
         * the PREDICATE is outside the decidable fragment; or
         * the solver returned no verdict — ``unknown``, or the #1199
           ``opaque`` countermodel, distinguished by
-          :py:meth:`_refined_undecided_reason`.
+          :py:meth:`_undecided_reason`.
 
         *guarded* says whether codegen runtime-guards this site (a call
         argument, caught by the callee's entry guard, is ``True``; an internal
@@ -6247,10 +6289,27 @@ class ContractVerifier:
 
         goal = self._translate_refined_predicate(smt, refined_ty, val)
         if goal is None:
-            self._record_refined_bind_tier3(
-                decl, value_node, site, guarded=eff_guarded,
-                reason=self._refined_untranslatable_reason(refined_ty),
-            )
+            # #1251(b): the predicate has no SMT sort to reason over, but the
+            # VALUE may still be a literal — and a predicate instantiated on a
+            # literal is arithmetic, not inference.  `200 < 10` decides.
+            concrete = self._concrete_refined_verdict(smt, refined_ty, val)
+            if concrete is None:
+                self._record_refined_bind_tier3(
+                    decl, value_node, site, guarded=eff_guarded,
+                    reason=self._refined_untranslatable_reason(refined_ty),
+                )
+            elif concrete[0]:
+                self._record_obligation(
+                    decl.name, "refine_bind", value_node, "verified")
+            else:
+                self._record_obligation(
+                    decl.name, "refine_bind", value_node, "violated",
+                    error_code="E505",
+                )
+                self._report_refined_binding(
+                    decl, value_node, refined_ty, site, None,
+                    concrete_value=concrete[1],
+                )
             return
 
         result = smt.check_valid(goal, list(assumptions))
@@ -6269,12 +6328,12 @@ class ContractVerifier:
         else:  # pragma: no cover — no solver verdict (unknown / #1199 opaque)
             self._record_refined_bind_tier3(
                 decl, value_node, site, guarded=eff_guarded,
-                reason=self._refined_undecided_reason(result.status),
+                reason=self._undecided_reason(result.status),
             )
 
     @staticmethod
-    def _refined_undecided_reason(status: str) -> str:
-        """Why ``check_valid`` neither proved nor refuted the predicate (#1251).
+    def _undecided_reason(status: str) -> str:
+        """Why ``check_valid`` neither proved nor refuted the obligation (#1251).
 
         :py:meth:`~vera.smt.SmtContext.check_valid` has FOUR outcomes, and the
         two that reach a Tier-3 demotion are not the same event.  ``unknown``
@@ -6283,6 +6342,12 @@ class ContractVerifier:
         promptly and SAT, but every countermodel ran over an effect-operation
         stand-in (``_fresh_opaque_slot``), so it refutes nothing the effect
         actually produces and must not be reported as a definite E505.
+
+        Shared by all three demotion families — the refinement predicate, the
+        ``>= 0`` narrowing (E504) and the ``<= i64.MAX`` widening (E531) — so
+        the wording names the OBLIGATION rather than any one family's goal.
+        The two coercion families carried the same conflated sentence the
+        refinement family did until this derivation reached them.
 
         Collapsing the two into "the solver timed out" is the misattribution
         this issue is about, one level down: it names an event that did not
@@ -6307,12 +6372,38 @@ class ContractVerifier:
                 "stand-in, which refutes nothing the effect actually produces"
             )
         if status == "unknown":
-            return "the solver returned no decision on the predicate"
+            return "the solver returned no decision on the obligation"
         raise ValueError(
-            f"no refinement-demotion reason for solver status {status!r}: "
+            f"no demotion reason for solver status {status!r}: "
             "every outcome that can reach a Tier-3 demotion must say what it "
             "was, so add a branch here rather than letting it inherit "
             "another outcome's text"
+        )
+
+    @staticmethod
+    def _int_widen_undischarged_reason(
+        safe_status: str, bad_status: str,
+    ) -> str:
+        """Why neither ``<= i64.MAX`` nor ``> i64.MAX`` was proved (#1251).
+
+        :py:meth:`_check_int_widening_obligation` asks the solver twice, and
+        reaching Tier 3 means neither question came back valid.  Almost always
+        that is the solver answering both promptly and correctly about a value
+        with no upper bound: a bare ``@Nat`` is [0, u64.MAX], so it is neither
+        provably inside i64's range nor provably outside it.  That is a fact
+        about the PROGRAM — bound the value — and the old text sent the reader
+        to look for a solver problem instead.
+
+        A genuine non-verdict on either question is a different event, and is
+        reported as itself via :py:meth:`_undecided_reason`.
+        """
+        for status in (safe_status, bad_status):
+            if status in ("unknown", "opaque"):
+                return ContractVerifier._undecided_reason(status)
+        return (
+            "the value is not provably within i64's range, and not provably "
+            "outside it either — an unconstrained @Nat leaves countermodels "
+            "on both sides"
         )
 
     @staticmethod
@@ -6388,7 +6479,7 @@ class ContractVerifier:
         is has not finished thinking about the branch it is on.  Callers
         derive it from :py:meth:`_refined_untranslatable_reason`,
         :py:meth:`_refined_bail_reason` or
-        :py:meth:`_refined_undecided_reason` wherever the answer depends on
+        :py:meth:`_undecided_reason` wherever the answer depends on
         state, and pass a literal only where the site itself is the cause.
 
         Codegen emits a runtime guard at the function boundary: a refined
@@ -6534,7 +6625,7 @@ class ContractVerifier:
             self._record_refined_bind_tier3(
                 decl, decl.body, "return type",
                 guarded=self._refined_boundary_codegen_guardable(ret_type),
-                reason=self._refined_undecided_reason(result.status))
+                reason=self._undecided_reason(result.status))
 
     def _check_refined_binding_obligation_term(
         self,
@@ -6565,7 +6656,7 @@ class ContractVerifier:
         that NAMES its cause (#1251): a base the verifier does not model or a
         predicate outside the fragment, via
         :py:meth:`_refined_untranslatable_reason`, and either non-verdict via
-        :py:meth:`_refined_undecided_reason`.  These projection sites are
+        :py:meth:`_undecided_reason`.  These projection sites are
         internal narrowings with no codegen guard, hence ``guarded=False``.
         *node* gives the diagnostic location.
         """
@@ -6593,7 +6684,7 @@ class ContractVerifier:
         else:  # pragma: no cover — no solver verdict (unknown / #1199 opaque)
             self._record_refined_bind_tier3(
                 decl, node, site, guarded=False,
-                reason=self._refined_undecided_reason(result.status))
+                reason=self._undecided_reason(result.status))
 
     def _term_source_fact(
         self, smt: SmtContext, source_ty: Type, term: z3.ExprRef,
@@ -7144,7 +7235,13 @@ class ContractVerifier:
                 # widening (like tuple construction), so disclose E531.
                 self._record_int_widen_tier3(
                     decl, stmt.value, "tuple destructure", "tier3",
-                    guarded=False)
+                    guarded=False,
+                    reason=(
+                        "the destructured value cannot be projected into its "
+                        "components (an effect-op result, or another term the "
+                        "SMT layer models opaquely), so the component being "
+                        "widened was never formed"
+                    ))
             return
         # `i` is a valid field index (filtered against `source_args`, whose
         # length matches the tuple sort's fields), so each accessor is safe
@@ -7180,6 +7277,7 @@ class ContractVerifier:
         status: ObligationStatus,
         *,
         guarded: bool,
+        reason: str | None = None,
     ) -> None:
         """Record a Tier-3 nat_bind outcome (untranslatable value or solver
         timeout), distinguishing codegen-guarded narrowings from unguarded
@@ -7200,24 +7298,46 @@ class ContractVerifier:
         get.  The caller knows which case applies (it has the formal /
         field type), so it passes *guarded* rather than inferring it from
         the broad *site* string.
+
+        *reason* is WHY the obligation was not discharged, spliced into the
+        E504 rationale (#1251).  It is required on the UNGUARDED leg and
+        refused-by-raise if missing, because that leg emits a disclosure that
+        has to state a cause and there is no honest default: the value may not
+        have translated, or the solver may have returned no verdict, and those
+        ask the reader to change different things.  The GUARDED leg emits no
+        disclosure at all, so it neither needs the text nor should carry dead
+        text for the sake of a uniform signature.
         """
         if guarded:
             self._record_obligation(decl.name, "nat_bind", value_node, status)
         else:
+            if reason is None:
+                raise ValueError(
+                    "an unguarded nat_bind demotion emits an E504 that must "
+                    f"say why (site {site!r} in {decl.name!r}): pass `reason`"
+                )
             self._record_obligation(
                 decl.name, "nat_bind", value_node, "tier3_unguarded",
                 error_code="E504",
             )
-            self._report_nat_binding_unguarded(decl, value_node, site)
+            self._report_nat_binding_unguarded(decl, value_node, site, reason)
 
     def _report_nat_binding_unguarded(
         self,
         decl: ast.FnDecl,
         node: ast.Expr,
         site: str,
+        reason: str,
     ) -> None:
         """Emit an E504 warning for a non-let @Nat narrowing the SMT layer
-        could not discharge and codegen does not guard (#747)."""
+        could not discharge and codegen does not guard (#747).
+
+        *reason* names WHY it was not discharged and is spliced in verbatim
+        (#1251).  This method does not decide the cause and must not describe
+        one: it emitted a fixed "outside Z3's decidable fragment
+        (untranslatable or the solver timed out)" for every caller — two
+        different events, neither of which is what happens at the site this
+        warning is actually reachable from."""
         self._warning(
             node,
             (
@@ -7228,9 +7348,8 @@ class ContractVerifier:
                 "`if ... >= 0 then ... else ...`."
             ),
             rationale=(
-                "The narrowed value is outside Z3's decidable fragment "
-                "(untranslatable or the solver timed out), so the `>= 0` "
-                "obligation could not be discharged.  Codegen runtime-guards "
+                f"The `>= 0` obligation could not be discharged: {reason}.  "
+                "Codegen runtime-guards "
                 "the concrete @Nat binding sites (let, destructure, match, "
                 "sub-pattern, concrete field) and all call-arguments (generic "
                 "ones on the monomorphised callee) but not this one — an "
@@ -7602,12 +7721,22 @@ class ContractVerifier:
         refined_ty: Type,
         site: str,
         counterexample: dict[str, str] | None,
+        *,
+        concrete_value: str | None = None,
     ) -> None:
         """Emit an E505 diagnostic for an undischarged refinement narrowing.
 
         Renders the refinement's actual predicate source (via
         :py:func:`ast.format_expr`) plus the counterexample, mirroring
-        :py:meth:`_report_nat_binding` (#746)."""
+        :py:meth:`_report_nat_binding` (#746).
+
+        *concrete_value* is set when the narrowing was decided on a LITERAL
+        (#1251(b)) rather than refuted by a solver search.  That is a different
+        claim and gets different words: the value MAY violate the predicate
+        only when the solver found some input where it does, whereas a literal
+        simply does — and the standing fix, "add a precondition implying the
+        predicate", cannot constrain a literal, so it would send the reader
+        somewhere that does not help."""
         ce_lines: list[str] = []
         if counterexample:
             ce_lines.append("Counterexample:")
@@ -7630,10 +7759,17 @@ class ContractVerifier:
         else:
             pred_src = "the predicate"
 
-        description = (
-            f"Value narrowing into a refined {site} in '{decl.name}' "
-            f"may violate the refinement predicate `{pred_src}`."
-        )
+        if concrete_value is not None:
+            description = (
+                f"Value narrowing into a refined {site} in '{decl.name}' "
+                f"violates the refinement predicate `{pred_src}`: the value "
+                f"is {concrete_value}."
+            )
+        else:
+            description = (
+                f"Value narrowing into a refined {site} in '{decl.name}' "
+                f"may violate the refinement predicate `{pred_src}`."
+            )
         if ce_text:
             description += f"\n  {ce_text}"
 
@@ -7645,10 +7781,18 @@ class ContractVerifier:
                 "that every inhabitant satisfies its predicate P, but the "
                 "type checker permits the underlying base value to narrow "
                 "into the refined slot and defers the proof to verification. "
-                "The SMT solver found inputs where the narrowed value does "
-                "not satisfy the predicate."
+                + (
+                    "The narrowed value is a literal, so the predicate was "
+                    "evaluated on it directly and is false."
+                    if concrete_value is not None else
+                    "The SMT solver found inputs where the narrowed value does "
+                    "not satisfy the predicate."
+                )
             ),
             fix=(
+                f"Narrow a value the predicate admits — {concrete_value} does "
+                "not satisfy it — or widen the refinement so it does."
+                if concrete_value is not None else
                 "Add a precondition implying the predicate, e.g. "
                 f"`requires({pred_src})`.  Alternatively, guard the binding "
                 "with an `if` whose condition is the predicate — the path "
@@ -8751,6 +8895,85 @@ class ContractVerifier:
         if base == NAT:
             return z3.And(value_term >= 0, translated)
         return translated
+
+    @staticmethod
+    def _concrete_refined_verdict(
+        smt: "SmtContext", refined_ty: Type, value_term: z3.ExprRef,
+    ) -> tuple[bool, str] | None:
+        """Decide the refinement predicate on a CONCRETE value (#1251(b)).
+
+        :py:meth:`_translate_refined_predicate` declines a base it does not
+        model, because a SYMBOLIC value of that base would translate without
+        its base semantics — ``Byte``'s ``0..255`` range is never asserted —
+        and the boundary narrowings codegen runtime-guards would come back as
+        false E505s (``ch02_byte_refinement`` is the measured case).  None of
+        that applies to a LITERAL: substituting the value leaves a closed
+        formula, and evaluating it is arithmetic rather than inference.
+        ``{ @Byte | @Byte.0 < 10 }`` initialised to ``200`` asks ``200 < 10``,
+        which decides, and decides FALSE — the program it was disclosed on ran
+        to completion and returned a value the refinement forbids.
+
+        So the gate is the VALUE, in the constant discipline
+        :py:meth:`_check_float_to_int_domain_obligation` already uses: simplify,
+        and proceed only for a Z3 literal.  Assumptions are deliberately not
+        consulted — nothing a precondition can assert changes the value of a
+        literal — and the answer is taken only from a fold that lands on
+        ``True`` or ``False``.  A predicate whose operands the SMT layer models
+        by something other than evaluation (a call, modelled by the callee's
+        contract) does not fold, and undecided stays undecided: the caller
+        keeps its runtime-guarded disclosure rather than guessing a verdict.
+
+        Returns ``(holds, rendered_value)``, or None when the value is not
+        concrete or the fold settles nothing.  Restricted to a PRIMITIVE base:
+        a composite literal does not reduce to a Z3 value, so this would return
+        None for it anyway, and gating explicitly keeps a future sort whose
+        literals DO reduce from inheriting the decision by accident.
+        """
+        parts = ContractVerifier._refined_parts(refined_ty)
+        if parts is None:  # pragma: no cover — caller checked the shape
+            return None
+        base, predicate = parts
+        if not isinstance(base, PrimitiveType):
+            return None
+        literal = z3.simplify(value_term)
+        if not ContractVerifier._is_z3_literal(literal):
+            return None
+        # Bound exactly as `_translate_refined_predicate` binds it, under the
+        # base type-name and (when it differs) the syntactic alias binder, so
+        # the two paths cannot disagree about which key the predicate reads.
+        inner_env = SlotEnv().push(base.name, literal)
+        binder_key = ContractVerifier._predicate_binder_key(
+            predicate, smt._alias_env)
+        if binder_key is not None and binder_key != base.name:
+            inner_env = inner_env.push(binder_key, literal)
+        translated = smt.translate_expr(predicate, inner_env)
+        if translated is None:
+            return None
+        folded = z3.simplify(translated)
+        if z3.is_true(folded):
+            return (True, str(literal))
+        if z3.is_false(folded):
+            return (False, str(literal))
+        return None
+
+    @staticmethod
+    def _is_z3_literal(term: z3.ExprRef) -> bool:
+        """True iff *term* is a Z3 VALUE rather than a symbolic expression.
+
+        The concreteness half of :py:meth:`_concrete_refined_verdict`'s gate,
+        covering every sort a refinement base can carry a literal in.  A
+        symbolic term — a slot variable, an accessor, an uninterpreted
+        application — is none of these, which is what keeps a runtime-guarded
+        narrowing out of the decided path.
+        """
+        return bool(
+            z3.is_int_value(term)
+            or z3.is_rational_value(term)
+            or z3.is_true(term)
+            or z3.is_false(term)
+            or z3.is_string_value(term)
+            or z3.is_fp_value(term)
+        )
 
     @staticmethod
     def _count_slots(env: SlotEnv, type_name: str) -> int:
