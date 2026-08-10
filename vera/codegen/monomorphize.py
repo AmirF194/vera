@@ -130,6 +130,12 @@ class MonomorphizationMixin:
             # let discovery recover a user fn's parameterized return in
             # `Option<T>` argument position, mirroring the WASM call-rewrite.
             fn_ret_type_exprs=dict(self._fn_ret_type_exprs),
+            # #1207: the very table the `_effect_ops` shadow guard in
+            # `_compile_function` consults, so discovery decides "is this
+            # `get` an effect op or a user function?" the same way the
+            # rewrite does.  `_fn_sigs` — not `fn_ret_types` above, which
+            # drops any name whose return WAT type has no Vera collapse.
+            fn_names=frozenset(self._fn_sigs),
         )
 
     def _monomorphize(

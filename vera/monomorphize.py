@@ -35,7 +35,7 @@ from typing import Any, cast
 
 from vera import ast, naming
 from vera.naming import EMPTY_ALIAS_ENV, AliasEnv
-from vera.slots import fn_slot_scope
+from vera.slots import effect_op_result_names, fn_slot_scope
 
 
 def substitute_type_vars(
@@ -1155,6 +1155,16 @@ class MonoContext:
       Optional (defaults empty): a consumer that doesn't populate it simply
       loses the user-fn parameterized-return recovery, degrading to the prior
       (bare-name) behaviour rather than erroring.
+    * ``fn_names`` — every function name this consumer's own table owns, used
+      for ONE decision: whether a declared effect row's ``get``/``put`` is an
+      effect operation here at all (#1207).  Codegen keeps an op out of
+      ``_effect_ops`` when ``_fn_sigs`` already owns the name, so a program
+      declaring its own ``get`` resolves that call through the ordinary
+      function path; discovery has to make the same call or the two consultors
+      desync again in the shadowed direction.  Optional (defaults empty): a
+      consumer that doesn't populate it treats no name as shadowed, which is
+      exactly the handler-expression rule (an op inside a ``handle`` body owns
+      its name unconditionally, matching ``_translate_handle_state``).
     """
 
     generic_decls: dict[str, ast.FnDecl]
@@ -1170,6 +1180,8 @@ class MonoContext:
     # declared-ADT names.  Defaulted empty so a consumer that has not been
     # threaded yet behaves exactly as before.
     alias_env: AliasEnv = EMPTY_ALIAS_ENV
+    # #1207: the consumer's own function-name table (see the docstring).
+    fn_names: frozenset[str] = frozenset()
 
 
 class Monomorphizer:
@@ -1184,6 +1196,15 @@ class Monomorphizer:
 
     def __init__(self, ctx: MonoContext) -> None:
         self.ctx = ctx
+        # #1207: the effect-op result-type registry IN SCOPE at the point the
+        # discovery walk has reached — the discovery-side twin of codegen's
+        # `_effect_op_result_vera`, replaced (not merged) at each `handle`
+        # exactly as `_translate_handle_state` replaces it, and seeded from a
+        # function's declared effect row by `collect_calls_in_node`.  Walk
+        # state, not context: it is pushed and popped by `_collect_calls` and
+        # is empty outside a walk, so `Monomorphizer` stays re-entrant per
+        # pass in the way its docstring promises.
+        self._op_result_types: dict[str, str] = {}
 
     def collect_calls_in_expr(
         self,
@@ -1228,6 +1249,39 @@ class Monomorphizer:
         (a ``CodegenSkip`` at run time) and diverge from the verifier, which does
         walk contracts and helpers (PR #767 review).
         """
+        # #1207: the function's DECLARED effect row is the outermost
+        # effect-op scope for everything below — codegen's per-function
+        # `effect_op_result_vera` (codegen/functions.py), rebuilt from the
+        # same shared derivation, with this site's `_fn_sigs` shadow guard
+        # spelled as `ctx.fn_names`.  Saved and restored so a `where` helper
+        # (walked recursively below) cannot leak its own row outwards.
+        saved_ops = self._op_result_types
+        self._op_result_types = self._row_op_result_types(fn)
+        try:
+            self._collect_calls_in_node_scoped(
+                fn, generic_decls, ctor_to_adt, instances,
+            )
+        finally:
+            self._op_result_types = saved_ops
+
+    def _row_op_result_types(self, fn: ast.FnDecl) -> dict[str, str]:
+        """The effect-op result registry a function's declared row installs."""
+        if not isinstance(fn.effect, ast.EffectSet):
+            return {}
+        return {
+            op: name
+            for op, name in effect_op_result_names(fn.effect.effects).items()
+            if op not in self.ctx.fn_names
+        }
+
+    def _collect_calls_in_node_scoped(
+        self,
+        fn: ast.FnDecl,
+        generic_decls: dict[str, ast.FnDecl],
+        ctor_to_adt: dict[str, str],
+        instances: dict[str, set[tuple[str, ...]]],
+    ) -> None:
+        """:meth:`collect_calls_in_node`'s walk, with the op scope already set."""
         self.collect_calls_in_expr(
             fn.body, generic_decls, ctor_to_adt, instances,
         )
@@ -1342,6 +1396,30 @@ class Monomorphizer:
             )
             if type_args is not None:
                 instances[node.right.name].add(type_args)
+        # #1207: a `handle[State<T>]` installs its op registry over its BODY
+        # only.  The state-init expression and the clause bodies belong to the
+        # ENCLOSING context — the checker checks clauses before the handled
+        # effect joins the row, and codegen threads the declaration-time
+        # snapshot into every clause (#1211) — so a `get(())` there names the
+        # OUTER cell.  Walking those children under this handler's scope would
+        # make discovery pick the inner cell's clone where the rewrite calls
+        # the outer's: the desync again, one level in.
+        if isinstance(node, ast.HandleExpr):
+            saved_ops = self._op_result_types
+            for child in (node.effect, node.state, node.clauses):
+                self._collect_calls(
+                    child, generic_decls, ctor_to_adt, instances,
+                )
+            self._op_result_types = {
+                **saved_ops, **effect_op_result_names([node.effect]),
+            }
+            try:
+                self._collect_calls(
+                    node.body, generic_decls, ctor_to_adt, instances,
+                )
+            finally:
+                self._op_result_types = saved_ops
+            return
         if isinstance(node, ast.Node):
             for f in fields(node):
                 if f.name == "span":
@@ -1645,6 +1723,17 @@ class Monomorphizer:
             return "String"
         if isinstance(expr, ast.ArrayLit):
             return "Array"
+        # #1207: an effect operation in a value position is not in any fn
+        # table, so it has to be answered from the op registry in scope —
+        # the same table (`vera.slots.effect_op_result_names`) the WASM
+        # call-rewrite consults at `_infer_vera_type`'s matching arm.  Before
+        # this, a `get(())` fixing a generic's type variable fell through to
+        # `fn_ret_types` / the builtin table, missed both, and left the
+        # instantiation to the phantom default while the rewrite named the
+        # cell's type: the clone discovery emitted dangled at the call the
+        # rewrite emitted (loud E602, caller dropped with E620).
+        if isinstance(expr, ast.FnCall) and expr.name in self._op_result_types:
+            return self._op_result_types[expr.name]
         if isinstance(expr, ast.FnCall) and generic_decls:
             return self._infer_fncall_vera_type(
                 expr, ctor_to_adt, generic_decls)

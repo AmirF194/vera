@@ -13,7 +13,7 @@ from vera.skip import AdtEqNotDerivableError, CodegenInvariantError, CodegenSkip
 from vera.codegen.compilability import contract_exprs
 from vera.codegen.tail_position import compute_tail_call_sites
 from vera.monomorphize import mangle_type_name
-from vera.slots import type_expr_slot_name
+from vera.slots import effect_op_result_names, type_expr_slot_name
 from vera.wasm import WasmContext, WasmSlotEnv
 from vera.wasm.helpers import (
     CellNames,
@@ -313,6 +313,16 @@ class FunctionCompilationMixin:
         effect_op_result_wt: dict[str, str | None] = {}
         effect_op_result_vera: dict[str, str | None] = {}
         effect_op_cells: dict[str, CellNames] = {}
+        # #1207: the op → Vera result-type table, from the ONE derivation
+        # mono discovery also reads.  Source-order-first-wins and the
+        # unnameable-argument skip live in the shared builder, so the two
+        # consultors cannot drift; the `_fn_sigs` shadow guard below is
+        # this site's own (an op the row declares but a user function
+        # already owns is not injected here, and discovery mirrors that).
+        row_op_results = (
+            effect_op_result_names(decl.effect.effects)
+            if isinstance(decl.effect, ast.EffectSet) else {}
+        )
         if isinstance(decl.effect, ast.EffectSet):
             # SOURCE ORDER, first wins — the checker's rule for a bare op
             # (spec §7.4) and for its type arguments, so the two agree on
@@ -363,7 +373,11 @@ class FunctionCompilationMixin:
                             # #1006: the VERA-name mirror — `_infer_vera_type`
                             # needs it to type a `get(())` array-literal
                             # element (the WAT type above is layout-ambiguous).
-                            effect_op_result_vera["get"] = type_name
+                            # #1207: read from the shared table rather than
+                            # re-derived here, so mono discovery's copy of
+                            # this answer is the SAME answer.
+                            effect_op_result_vera["get"] = row_op_results.get(
+                                "get")
                             effect_op_cells["get"] = cell
                         if "put" not in self._fn_sigs and "put" not in effect_ops:
                             effect_ops["put"] = (

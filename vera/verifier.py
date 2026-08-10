@@ -1528,6 +1528,16 @@ class ContractVerifier:
         # argument position identically to codegen and the WASM call-rewrite.
         fn_ret_type_exprs: dict[str, ast.TypeExpr] = {}
 
+        # #1207: every function name this program owns — codegen's `_fn_sigs`
+        # membership, rebuilt from the AST.  ONE decision rides on it: whether
+        # a declared effect row's `get`/`put` is an effect operation at all, or
+        # a user function of that name shadowing it (codegen's `_fn_sigs` guard
+        # in `_compile_function`).  Membership must mirror codegen's or the two
+        # discoveries desync in the shadowed direction, so it is populated from
+        # the same recursion — locals, `where` helpers, and imports — rather
+        # than from `fn_ret_types`, which drops any name with no simple return.
+        fn_names: set[str] = set()
+
         def record_fn_ret_type(fn: ast.FnDecl) -> None:
             # Include `where` helpers, keyed by bare name exactly as codegen
             # does.  Codegen registers each where-helper's WAT signature in
@@ -1550,6 +1560,7 @@ class ContractVerifier:
             # this side would not miss anything (it would be a sound superset)
             # but would diverge the verifier from codegen for no soundness gain
             # while leaving the codegen side unfixed (PR #767 review).
+            fn_names.add(fn.name)
             ret_name = self._simple_type_name(fn.return_type)
             if ret_name is not None:
                 fn_ret_types[fn.name] = ret_name
@@ -1583,6 +1594,7 @@ class ContractVerifier:
             for tld in mod.program.declarations:
                 idecl = tld.decl
                 if isinstance(idecl, ast.FnDecl):
+                    fn_names.add(idecl.name)
                     iret = self._simple_type_name(idecl.return_type)
                     if iret is not None:
                         fn_ret_types.setdefault(idecl.name, iret)
@@ -1610,6 +1622,8 @@ class ContractVerifier:
             alias_env=self._alias_env,
             fn_ret_types=fn_ret_types,
             fn_ret_type_exprs=fn_ret_type_exprs,
+            # #1207: see the `fn_names` comment above.
+            fn_names=frozenset(fn_names),
         )
 
     @staticmethod
