@@ -29,7 +29,7 @@ instantiation sets in agreement.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, fields, replace
 from typing import Any, cast
 
@@ -1338,15 +1338,44 @@ class Monomorphizer:
         }
         if not generic_helpers:
             return {}
-        found: dict[str, set[tuple[str, ...]]] = {
-            name: set() for name in generic_helpers
-        }
-        self.collect_calls_in_node(clone, generic_helpers, ctor_to_adt, found)
+        found = self.collect_generic_helper_instances(
+            generic_helpers, (clone,), ctor_to_adt,
+        )
         return {
             name: (generic_helpers[name], cts)
             for name, cts in found.items()
             if cts
         }
+
+    def collect_generic_helper_instances(
+        self,
+        helpers: dict[str, ast.FnDecl],
+        bodies: Iterable[ast.FnDecl],
+        ctor_to_adt: dict[str, str],
+    ) -> dict[str, set[tuple[str, ...]]]:
+        """Instantiations of *helpers* called from any of *bodies* (#1223).
+
+        The leaf under :meth:`collect_clone_nested_generic_instances`, exposed
+        separately because a helper family is not fully discovered from the
+        ancestor clone alone.  A helper's own CONCRETE clone can call a SIBLING
+        helper at a type only that clone knows: inside the still-generic
+        ``outer<U>``, ``inner(@U.1, @U.0)`` binds ``inner``'s variable to the
+        NAME ``U``, and the real ``inner<Bool>`` appears only once ``outer`` is
+        monomorphized at ``Bool``.  Both sides therefore drive this over a
+        GROWING body set — each clone produced is fed back in — rather than
+        over the ancestor once, and they must drive the same leaf or the
+        verifier stops covering what codegen emits.
+
+        Returns ``{helper name: {concrete type vectors}}``, one entry per
+        helper (possibly empty), so a caller can diff against what it has
+        already emitted.
+        """
+        found: dict[str, set[tuple[str, ...]]] = {
+            name: set() for name in helpers
+        }
+        for body in bodies:
+            self.collect_calls_in_node(body, helpers, ctor_to_adt, found)
+        return found
 
     def _collect_calls(
         self,

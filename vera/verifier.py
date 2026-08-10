@@ -1955,11 +1955,19 @@ class ContractVerifier:
         # superset of what codegen emits.
         nested_result: dict[str, set[tuple[str, ...]]] = {}
         nested_seen: set[tuple[str, tuple[str, ...]]] = set()
+        # #1223: top-level instantiations reached only from a nested helper's
+        # CONCRETE clone body.  Drained into the worklist below, so such a
+        # clone is verified exactly as codegen emits it.
+        pending_top: list[tuple[str, tuple[str, ...]]] = []
 
         def record_nested(clone: ast.FnDecl, base_chain: str) -> None:
-            found = mono.collect_clone_nested_generic_instances(
-                clone, ctor_to_adt,
-            )
+            helpers = {
+                wfn.name: wfn
+                for wfn in (clone.where_fns or ())
+                if wfn.forall_vars
+            }
+            if not helpers:
+                return
             # #1208: a nested helper is declared in the same module as the
             # ancestor whose chain names it, so it recounts in that env.  The
             # WHOLE chain is handed over — `_alias_env_for_generic` walks to
@@ -1967,16 +1975,43 @@ class ContractVerifier:
             # nested under a non-generic function is recorded under the chain,
             # not under its outermost segment (#1208 round 2, probe ``m4``).
             env = self._alias_env_for_generic(base_chain)
-            for h_name, (h_decl, h_cts) in found.items():
-                chain_key = f"{base_chain}$where${h_name}"
-                for h_ct in h_cts:
-                    if (chain_key, h_ct) in nested_seen:
-                        continue
-                    nested_seen.add((chain_key, h_ct))
-                    nested_result.setdefault(chain_key, set()).add(h_ct)
-                    record_nested(
-                        mono.monomorphize_fn(h_decl, h_ct, env), chain_key,
-                    )
+            # #1223: the FAMILY at once, over a GROWING body set, mirroring
+            # codegen's `_instantiate_hoisted_generics` and driving the same
+            # discovery leaf.  A helper's concrete clone can call a SIBLING
+            # helper at a type only that clone knows (inside the generic
+            # `outer<U>`, `inner(@U.1, @U.0)` binds `inner`'s variable to the
+            # type variable's NAME), so scanning the ancestor alone missed
+            # every such instantiation while codegen emitted it — a false
+            # Tier-1 the moment codegen's own rescan landed.
+            scan: list[ast.FnDecl] = [clone]
+            while scan:
+                found = mono.collect_generic_helper_instances(
+                    helpers, scan, ctor_to_adt,
+                )
+                scan = []
+                for h_name, h_cts in found.items():
+                    chain_key = f"{base_chain}$where${h_name}"
+                    for h_ct in h_cts:
+                        if (chain_key, h_ct) in nested_seen:
+                            continue
+                        nested_seen.add((chain_key, h_ct))
+                        nested_result.setdefault(chain_key, set()).add(h_ct)
+                        h_clone = mono.monomorphize_fn(
+                            helpers[h_name], h_ct, env,
+                        )
+                        scan.append(h_clone)
+                        record_nested(h_clone, chain_key)
+                        # #1223: the helper clone's own TOP-LEVEL generic
+                        # callees.  Only the concrete clone names them — the
+                        # generic spelling binds the enclosing type variable.
+                        top: dict[str, set[tuple[str, ...]]] = {
+                            name: set() for name in generic_decls
+                        }
+                        collect_calls_in_fn(h_clone, top)
+                        for t_name, t_cts in top.items():
+                            pending_top.extend(
+                                (t_name, t_ct) for t_ct in t_cts
+                            )
 
         # Transitive closure: monomorphize each, rescan its body.  Mirrors the
         # codegen worklist exactly, minus the constraint filter.
@@ -2006,6 +2041,11 @@ class ContractVerifier:
                 for t_ct in t_types:
                     if (t_name, t_ct) not in discovered:
                         worklist.append((t_name, t_ct))
+            # #1223: whatever the nested helpers' concrete clones reached.
+            while pending_top:
+                top_key = pending_top.pop()
+                if top_key not in discovered:
+                    worklist.append(top_key)
 
         result: dict[str, set[tuple[str, ...]]] = {
             name: set() for name in generic_decls
