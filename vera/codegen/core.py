@@ -1331,9 +1331,21 @@ class CodeGenerator(
         ``TypeEnv`` carries all of them from the start, so the miss was an
         asymmetry between the two sides' notions of "builtin").  Subtracting
         what the namespaces declare cannot go stale with registration order.
-        The builtin snapshot is unioned in as well, so a module declaring an
-        ADT that shares a built-in's name cannot hide the built-in from
-        everyone else.
+
+        The builtin snapshot is unioned in as well, but it protects only what
+        it contains — the Pass-0.5 built-ins (``Option``, ``Result``,
+        ``Tuple``, …).  It does NOT cover the four demand-injected prelude
+        ADTs above, which is the same Pass-0.5-vs-1.2 asymmetry one layer
+        down: a module declaring ``data Json`` puts ``Json`` into the
+        declared set, subtracting it from infrastructure and hiding the
+        PRELUDE ``Json`` from every namespace but that module's (measured;
+        the entry program's members lose it).  No E609/E610 collision rail
+        fires on such a declaration either, since those rails are keyed on
+        the same Pass-0.5 snapshot.  Inert today for the reason the rest of
+        this membership rule is inert — ``data_types`` changes an answer only
+        for ``Decimal`` and ``REMOVED_ALIASES`` — but it is a real constraint
+        on any future consumer, and closing it means teaching Pass 0.5 which
+        prelude ADTs the program will demand.
         """
         if not self._adt_namespace_members:
             return None

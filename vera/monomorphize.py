@@ -1456,6 +1456,18 @@ class Monomorphizer:
                 self._collect_calls(
                     child, generic_decls, ctor_to_adt, instances,
                 )
+            # MERGED over the enclosing registry, not swapped for it — and
+            # deliberately, because codegen merges too (`_translate_handle_state`
+            # writes `{**saved_result_vera, **effect_op_result_names(...)}`, and
+            # `_translate_handle_exn` leaves the registry untouched).  A handler
+            # that contributes no result type must therefore leave the enclosing
+            # one answering: `pick([get(()), 4], 9)` inside an `Exn` handler
+            # nested in a `State<Nat>` one names `pick$Nat` on both sides.
+            # Replacing here instead names `pick$Int` against the rewrite's
+            # `pick$Nat` — measured: E602, `main` dropped, #1207 exactly.  The
+            # inner entry still wins for a key it DOES supply, the merge being
+            # ordered.  Pinned by `exn_nested_in_state` in
+            # tests/test_mono_effect_op_naming_1207.py.
             self._op_result_types = {
                 **saved_ops, **effect_op_result_names([node.effect]),
             }

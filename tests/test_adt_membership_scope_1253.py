@@ -200,13 +200,24 @@ def test_prelude_adts_are_members_of_every_namespace(tmp_path: Path) -> None:
     "built-in", and the membership rule now derives infrastructure by
     subtracting what the namespaces DECLARE rather than snapshotting.
 
-    Asserted on the membership SET rather than on a rendering, honestly:
-    `AliasEnv.data_types` changes an answer in exactly one place
+    Asserted on `AliasEnv.data_types` — the membership set as every
+    consumer actually receives it — rather than on a rendering, honestly:
+    that map changes an answer in exactly one place
     (`naming._resolve_named`), and only for `Decimal` and the names in
-    `REMOVED_ALIASES` (`Float` alone) — so for `Json` the absence was inert
-    at today's only consumer, and no rendering assertion could distinguish
+    `REMOVED_ALIASES` (`Float` alone), so for `Json` the absence was inert
+    at today's only consumer and no rendering assertion could distinguish
     it.  What is guarded here is the set being FACTUALLY right, which is
     what a future consumer would read.
+
+    Reading `_alias_env` under the pre-existing `_module_alias_scope` (and
+    not the membership helpers this fix adds) is what keeps the case
+    runnable at any baseline: it degrades to its assertion instead of
+    dying on an `AttributeError`, which is the pattern the rest of this
+    module was restructured to remove.  The meaningful RED baseline is the
+    PRE-FIX BRANCH TIP, where the scoping exists and omits these names.  At
+    the branch base, before any of #1253, there is no membership filter at
+    all — every registered layout is a member — so the case passes there,
+    correctly: the defect it pins does not exist yet.
     """
     files = {
         "plib.vera": """
@@ -257,20 +268,20 @@ public fn main(@Unit -> @Int)
     # unmentioned ones would be asserting that unregistered names are
     # members, which is not the claim.
     assert "Json" in gen._adt_layouts, sorted(gen._adt_layouts)
+    registered = frozenset(gen._adt_layouts)
     for scope in (None, ("plib",)):
-        gen._active_module_path = scope
-        members = gen._adt_members_in_scope()
-        assert members is not None, scope
+        with gen._module_alias_scope(scope):
+            members = frozenset(gen._alias_env.data_types)
         assert "Json" in members, (
             f"namespace {scope}: the prelude-injected `Json` is not a member; "
             f"members = {sorted(members)}"
         )
-        # The general invariant behind that case: every registered layout no
-        # namespace DECLARES is global infrastructure and belongs to every
-        # namespace — which is what makes the rule independent of the pass
-        # that happened to register it.
-        undeclared = frozenset(gen._adt_layouts) - gen._namespace_declared_adts
-        assert undeclared <= members, sorted(undeclared - members)
+        # The general invariant behind that case, stated from the FIXTURE
+        # rather than from the implementation's own bookkeeping: neither file
+        # here declares an ADT, so every registered layout is global
+        # infrastructure and belongs to every namespace — which is what makes
+        # the rule independent of the pass that happened to register it.
+        assert registered <= members, sorted(registered - members)
         # The built-in floor is still there — the fix widens infrastructure,
         # it does not loosen membership.
         assert {"Option", "Result", "Tuple"} <= members

@@ -142,12 +142,96 @@ public fn main(@Unit -> @Int)
 }
 """
 
+# --- the nesting shapes: what a handler's registry does to the enclosing one
+# The registry is MERGED over the enclosing one for the handler's BODY, not
+# swapped for it, on BOTH sides — discovery here and
+# `_translate_handle_state` in codegen.  These three pin why, because the
+# suite otherwise passes with discovery flipped to replace-semantics
+# (measured), which would put the two consultors back out of step.
+
+# An `Exn` handler contributes NO operation result type, so it is the case
+# that separates merge from replace: the enclosing `State<Nat>` cell must
+# still answer `get` inside the inner body.  Codegen agrees by construction
+# — `_translate_handle_exn` never touches the registry at all — so replacing
+# here would name `pick$Int` against the rewrite's `pick$Nat`: #1207 again.
+_EXN_IN_STATE = _PICK + """
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@Nat = 2) {
+    put(@Nat) -> { resume(()) }
+  } in {
+    put(6);
+    nat_to_int(handle[Exn<Int>] {
+      throw(@Int) -> { 0 }
+    } in {
+      pick([get(()), 4], 9)
+    })
+  }
+}
+"""
+
+# Two State cells of DIFFERENT types: the inner one owns `get` for its own
+# body (the merge is ordered so the inner entry wins), and the outer answers
+# outside it.  6 from the outer cell + 9 from `pick`'s second parameter.
+_NESTED_DISTINCT_STATE = _PICK + """
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@Nat = 2) {
+    put(@Nat) -> { resume(()) }
+  } in {
+    put(6);
+    nat_to_int(get(())) + handle[State<Int>](@Int = 5) {
+      put(@Int) -> { resume(()) }
+    } in {
+      pick([get(()), 4], 9)
+    }
+  }
+}
+"""
+
+# A user function named `get` INSIDE a handler body: the operation wins,
+# matching codegen's unconditional `_effect_ops` overwrite in
+# `_translate_handle_state` (unlike the declared-row site below, where the
+# function wins).  Its `@Int` return is what makes the case discriminate —
+# resolving to the function would name `pick$Int`, the cell names `pick$Nat`.
+_USER_GET_UNDER_HANDLER = """
+private fn get(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  77
+}
+""" + _PICK + """
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Nat>](@Nat = 2) {
+    put(@Nat) -> { resume(()) }
+  } in {
+    put(6);
+    nat_to_int(pick([get(()), 4], 9))
+  }
+}
+"""
+
 # (case id, source, expected clone name, expected run value)
 _CASES = [
     ("handler_plain", _HANDLER_PLAIN, "pick$Nat", 9),
     ("handler_alias", _HANDLER_ALIAS, "pick$Count", 9),
     ("effect_row", _EFFECT_ROW, "pick$Nat", 9),
     ("direct_arg", _DIRECT_ARG, "second$Nat", 9),
+    ("exn_nested_in_state", _EXN_IN_STATE, "pick$Nat", 9),
+    ("nested_distinct_state", _NESTED_DISTINCT_STATE, "pick$Int", 15),
+    ("user_get_under_handler", _USER_GET_UNDER_HANDLER, "pick$Nat", 9),
 ]
 
 # The BUILTIN sibling of the same value position: `get(())` as an
