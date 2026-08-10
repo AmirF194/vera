@@ -973,6 +973,41 @@ public fn f(@Unit -> @Unit)
                        if o.kind == "nat_bind")
         assert result.summary.tier3_runtime == 0
 
+    def test_the_unguarded_disclosure_names_its_actual_cause(self) -> None:
+        """The E504 rationale must not claim a cause it did not have (#1251).
+
+        It read "The narrowed value is outside Z3's decidable fragment
+        (untranslatable or the solver timed out)" for every demotion — the
+        exact conflation #1251 removed from E506, in a family that had no
+        reason plumbing at all.  Here the value genuinely did not translate,
+        and no solver call was made, let alone timed out; a reader following
+        that sentence would go looking for a timeout to raise.
+
+        The same fixture as the test above, read for what it SAYS rather than
+        which tier it lands in.
+        """
+        result = _verify('''
+effect E {
+  op wait(Nat -> Unit);
+}
+
+public fn f(@Unit -> @Unit)
+  requires(true)
+  ensures(true)
+  effects(<E>)
+{
+  E.wait(array_length(string_lines("a\\nb")))
+}
+''')
+        warns = [d for d in result.diagnostics if d.error_code == "E504"]
+        assert len(warns) == 1, [
+            (d.error_code, d.description[:70]) for d in result.diagnostics
+        ]
+        rationale = warns[0].rationale
+        assert "no term to test" in rationale, rationale
+        assert "timed out" not in rationale, rationale
+        assert "outside Z3's decidable fragment" not in rationale, rationale
+
     def test_call_arg_nat_minus_nat_is_sub_not_bind(self) -> None:
         """A `@Nat - @Nat` *call argument* is #520's obligation (nat_sub),
         not #552's — the disjointness holds at a non-let site too, where

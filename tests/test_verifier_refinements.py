@@ -6,8 +6,11 @@ from __future__ import annotations
 
 import pathlib
 
+from typing import ClassVar
+
 import pytest
 
+from vera import ast as ast_mod
 from vera.parser import parse_to_ast
 
 from tests.verifier_helpers import (
@@ -1748,21 +1751,25 @@ class TestTheTier3DisclosureNamesItsActualCause:
 
     Spec §0.3 requires a diagnostic to explain itself truthfully; a rationale
     that names the wrong cause sends a reader to rewrite a predicate that was
-    never the problem.  The demotion itself is unchanged here — attempting the
-    decidable check is #1251(b), which needs a concrete-value gate of its own
-    so a SYMBOLIC ``@Byte`` narrowing keeps its runtime-guarded disclosure
-    rather than becoming a false rejection.
+    never the problem.
+
+    The fixture here is the SYMBOLIC twin of that repro — the init reads a
+    ``@Byte`` parameter rather than a literal.  The literal one is now decided
+    outright (#1251(b), :class:`TestAConcreteRefinedNarrowingIsDecided`), so
+    the symbolic narrowing is what still demotes, and it is the case whose
+    rationale has to name the unmodelled base: it is exactly the shape codegen
+    guards at the boundary and the verifier must not turn into a rejection.
     """
 
     _STATE_INIT = """\
 type Small = { @Byte | @Byte.0 < 10 };
 
-public fn main(@Unit -> @Int)
+public fn use(@Byte -> @Int)
   requires(true)
   ensures(true)
   effects(pure)
 {
-  handle[State<Small>](@Small = 200) {
+  handle[State<Small>](@Small = @Byte.0) {
     get(@Unit) -> { resume(@Small.0) },
     put(@Small) -> { resume(()) }
   } in {
@@ -1825,9 +1832,13 @@ public fn use(@String -> @Int)
         assert "predicate is outside" in rationale, rationale
         assert "does not model" not in rationale, rationale
 
-    def test_the_demotion_itself_is_unchanged(self) -> None:
-        """(a) is a wording fix: the obligation, its status and its code are
-        exactly what they were, so this cannot be mistaken for (b) landing."""
+    def test_the_symbolic_demotion_survives_the_concrete_gate(self) -> None:
+        """A symbolic narrowing keeps its obligation, status and code.
+
+        The measured constraint on #1251(b): conjoining or assuming the base
+        invariant for a SYMBOLIC ``@Byte`` turns every boundary narrowing into
+        a false E505, so the concrete gate must leave this untouched.
+        """
         result = _verify(self._STATE_INIT)
         binds = [o for o in result.obligations if o.kind == "refine_bind"]
         assert len(binds) == 1, binds
@@ -1836,6 +1847,306 @@ public fn use(@String -> @Int)
         assert not [
             d for d in result.diagnostics if d.severity == "error"
         ], [d.description[:90] for d in result.diagnostics]
+
+
+class TestAConcreteRefinedNarrowingIsDecided:
+    """#1251(b): a LITERAL narrowing over an unmodelled base is decided.
+
+    ``handle[State<Small>](@Small = 200)`` with
+    ``type Small = { @Byte | @Byte.0 < 10 }`` ran to completion returning 200 —
+    a value the cell's refinement forbids — because ``Byte`` is not a base the
+    verifier models, so ``200 < 10`` was never asked.  Level (a) made the
+    disclosure name that cause; level (b) asks the question.
+
+    The gate is the value, not the base: a literal is substituted into the
+    predicate and FOLDED, so a provable violation is an E505 carrying the
+    concrete value and a provable satisfaction is Tier 1, while anything the
+    fold does not settle — every symbolic narrowing, and a predicate whose
+    operands the SMT layer models opaquely — keeps today's runtime-guarded
+    disclosure.  Widening the base itself instead was measured to break
+    ``ch02_byte_refinement``'s four boundary narrowings into false rejections.
+    """
+
+    @staticmethod
+    def _src(init: str, *, cell: str = "Small", extra: str = "") -> str:
+        """A State handler whose cell is a refinement over ``@Byte``."""
+        return f"""\
+type Small = {{ @Byte | @Byte.0 < 10 }};
+{extra}
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{{
+  handle[State<{cell}>](@{cell} = {init}) {{
+    get(@Unit) -> {{ resume(@{cell}.0) }},
+    put(@{cell}) -> {{ resume(()) }}
+  }} in {{
+    byte_to_int(get(()))
+  }}
+}}
+"""
+
+    def test_the_issue_repro_is_rejected_and_names_the_value(self) -> None:
+        """The headline: `@Small = 200` is an error, and says which value."""
+        errs = _verify_err(self._src("200"), "violates the refinement")
+        assert any(e.error_code == "E505" for e in errs), [
+            (e.error_code, e.description[:80]) for e in errs
+        ]
+        assert any("200" in e.description for e in errs), [
+            e.description[:120] for e in errs
+        ]
+        result = _verify(self._src("200"))
+        binds = [o for o in result.obligations if o.kind == "refine_bind"]
+        assert len(binds) == 1, binds
+        assert binds[0].status == "violated", binds[0]
+        assert binds[0].error_code == "E505", binds[0]
+        # ... and it is a decision, not a demotion dressed up as one.
+        assert not [
+            d for d in result.diagnostics if d.error_code == "E506"
+        ], [d.description[:90] for d in result.diagnostics]
+
+    def test_a_satisfying_literal_proves_at_tier_1(self) -> None:
+        """The passing twin, so the gate is not "reject every literal".
+
+        5 is a value the refinement admits, and the site has no codegen guard,
+        so proving it is the whole point: a gate that only ever rejected would
+        satisfy the test above while leaving every valid program disclosed.
+        """
+        _verify_ok(self._src("5"))
+        result = _verify(self._src("5"))
+        binds = [o for o in result.obligations if o.kind == "refine_bind"]
+        assert len(binds) == 1, binds
+        assert binds[0].status == "verified", binds[0]
+        assert not [
+            d for d in result.diagnostics if d.error_code in ("E505", "E506")
+        ], [d.description[:90] for d in result.diagnostics]
+
+    def test_the_alias_spelling_is_decided_too(self) -> None:
+        """`type Cell = Small` reaches the same obligation, so it decides too.
+
+        The cell type is resolved through the alias chain before the predicate
+        is instantiated; a gate keyed on the syntactic spelling would let the
+        aliased cell keep running with a forbidden value.
+        """
+        src = self._src("200", cell="Cell", extra="\ntype Cell = Small;\n")
+        errs = _verify_err(src, "violates the refinement")
+        assert any(e.error_code == "E505" for e in errs), [
+            (e.error_code, e.description[:80]) for e in errs
+        ]
+        binds = [o for o in _verify(src).obligations if o.kind == "refine_bind"]
+        assert [o.status for o in binds] == ["violated"], binds
+
+    def test_a_predicate_the_fold_cannot_settle_stays_disclosed(self) -> None:
+        """The gate DECIDES by folding; it does not widen the base.
+
+        `SmallVia`'s predicate routes the byte through a function call, which
+        the SMT layer models by the callee's contract rather than by
+        evaluation, so `ident(5) < 10` does not fold even though 5 is a
+        literal.  Undecided is undecided: the runtime-guarded disclosure
+        stands rather than a guessed verdict in either direction.
+        """
+        result = _verify("""
+type SmallVia = { @Byte | ident(@Byte.0) < 10 };
+
+private fn ident(@Byte -> @Byte)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  @Byte.0
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<SmallVia>](@SmallVia = 5) {
+    get(@Unit) -> { resume(@SmallVia.0) },
+    put(@SmallVia) -> { resume(()) }
+  } in {
+    byte_to_int(get(()))
+  }
+}
+""")
+        binds = [o for o in result.obligations if o.kind == "refine_bind"]
+        assert [o.status for o in binds] == ["tier3_unguarded"], binds
+        assert not [
+            d for d in result.diagnostics if d.severity == "error"
+        ], [d.description[:90] for d in result.diagnostics]
+
+    _GUARDED = """\
+type Small = {{ @Byte | @Byte.0 < 10 }};
+
+public fn f(@Int -> @Int)
+  requires(@Int.0 > 0)
+  ensures(true)
+  effects(pure)
+{{
+  if @Int.0 {cmp} 0 then {{
+    let @Small = 200;
+    0
+  }} else {{
+    1
+  }}
+}}
+"""
+
+    def test_a_narrowing_the_path_condition_excludes_discharges(self) -> None:
+        """An unreachable narrowing is discharged vacuously, not rejected.
+
+        The obligation is conditional — "IF control reaches this site, P holds
+        of the value" — and `check_valid` discharges it by folding the path
+        conditions, so a branch the premises exclude discharges whatever the
+        value is.  A MODELLED base has always behaved that way; folding the
+        predicate alone answered the unconditional question instead, and made
+        `200` under `if @Int.0 < 0` with `requires(@Int.0 > 0)` a rejection
+        the base-modelled twin accepts.  A false rejection on dead code is
+        exactly the false-rejection class the concrete gate was scoped to
+        avoid, arriving through the path conditions rather than the base.
+        """
+        result = _verify(self._GUARDED.format(cmp="<"))
+        assert not [
+            d for d in result.diagnostics if d.severity == "error"
+        ], [d.description[:90] for d in result.diagnostics]
+        binds = [o for o in result.obligations if o.kind == "refine_bind"]
+        assert [o.status for o in binds] == ["verified"], binds
+
+    def test_a_narrowing_the_path_condition_admits_is_still_rejected(
+        self,
+    ) -> None:
+        """The control that keeps the vacuity from swallowing real violations:
+        the same program with the branch REACHABLE is still an E505."""
+        errs = _verify_err(
+            self._GUARDED.format(cmp=">"), "violates the refinement")
+        assert any(e.error_code == "E505" for e in errs), [
+            (e.error_code, e.description[:80]) for e in errs
+        ]
+
+    def test_the_modelled_base_twin_is_the_oracle(self) -> None:
+        """Both verdicts above are what a base the verifier DOES model gives
+        for the same shape, which is the standard being met rather than a
+        preference: an unmodelled base must not be stricter than a modelled
+        one about which paths exist."""
+        modelled = """\
+type Pos = { @Int | @Int.0 > 0 };
+
+public fn f(@Int -> @Int)
+  requires(@Int.0 > 0)
+  ensures(true)
+  effects(pure)
+{
+  if @Int.0 %s 0 then {
+    let @Pos = 0 - 5;
+    0
+  } else {
+    1
+  }
+}
+"""
+        dead = _verify(modelled % "<")
+        assert not [
+            d for d in dead.diagnostics if d.severity == "error"
+        ], [d.description[:90] for d in dead.diagnostics]
+        assert [o.status for o in dead.obligations
+                if o.kind == "refine_bind"] == ["verified"], dead.obligations
+        live = _verify_err(modelled % ">", "refinement predicate")
+        assert any(e.error_code == "E505" for e in live), live
+
+    def test_the_byte_refinement_conformance_program_is_unmoved(self) -> None:
+        """The canary, pinned whole: verdict, counts AND per-obligation status.
+
+        ``ch02_byte_refinement`` is the program the naive fix breaks — four
+        boundary narrowings that codegen runtime-guards and the verifier must
+        keep disclosing.  Counts alone would not catch a swap (a rejection
+        here plus a new proof there nets to the same totals), so the statuses
+        are pinned in order.
+        """
+        path = (pathlib.Path(__file__).parent / "conformance"
+                / "ch02_byte_refinement.vera")
+        result = _verify(path.read_text(encoding="utf-8"))
+        assert not [
+            d for d in result.diagnostics if d.severity == "error"
+        ], [d.description[:90] for d in result.diagnostics]
+        binds = [o for o in result.obligations if o.kind == "refine_bind"]
+        assert [o.status for o in binds] == ["tier3"] * 4, binds
+        assert {o.error_code for o in binds} == {"E506"}, binds
+        assert result.summary.tier1_verified == 10, result.summary
+        assert result.summary.tier3_runtime == 4, result.summary
+
+
+class TestTheConcretenessGateCoversEverySortALiteralArrivesIn:
+    """`_is_z3_literal` must accept every sort a base's literal reaches it in.
+
+    The gate's whole safety argument is "symbolic terms are excluded", which
+    is only half of a correctness claim: a sort it fails to recognise makes it
+    silently decline a value it should decide, and there is no diagnostic for
+    that — the site just keeps its Tier-3 disclosure and nobody learns why.
+    So the inventory is enumerated per base rather than asserted in the
+    abstract.
+
+    It is also the evidence for what is NOT in the list.  `is_rational_value`
+    was carried on the assumption that `@Float64` is a Real; it declares as an
+    FP sort, so the arm was unreachable.  Removing an unreachable branch on
+    "no test covers it" is backwards, so the pin is the distinguishing fact
+    instead: no base's literal is a rational.  Should a sort change make one,
+    this goes red at the base that changed and the arm goes back.
+    """
+
+    _LITERALS: ClassVar[dict[str, tuple[object, str]]] = {
+        "Int": (ast_mod.IntLit(7), "int"),
+        "Float64": (ast_mod.FloatLit(1.5), "fp"),
+        "Bool": (ast_mod.BoolLit(True), "bool"),
+        "String": (ast_mod.StringLit("x"), "string"),
+    }
+
+    @staticmethod
+    def _classify(term: object) -> set[str]:
+        import z3
+
+        simplified = z3.simplify(term)
+        return {
+            name for name, holds in (
+                ("int", z3.is_int_value(simplified)),
+                ("rational", z3.is_rational_value(simplified)),
+                ("bool", z3.is_true(simplified) or z3.is_false(simplified)),
+                ("string", z3.is_string_value(simplified)),
+                ("fp", z3.is_fp_value(simplified)),
+            ) if holds
+        }
+
+    @pytest.mark.parametrize("base", sorted(_LITERALS))
+    def test_each_bases_literal_is_recognised_and_is_not_a_rational(
+        self, base: str,
+    ) -> None:
+        from vera.smt import SlotEnv, SmtContext
+        from vera.verifier import ContractVerifier
+
+        node, expected = self._LITERALS[base]
+        term = SmtContext().translate_expr(node, SlotEnv())
+        assert term is not None, base
+        kinds = self._classify(term)
+        assert expected in kinds, (base, kinds)
+        assert "rational" not in kinds, (base, kinds)
+        assert ContractVerifier._is_z3_literal(term), (base, kinds)
+
+    def test_a_symbolic_term_is_not_a_literal(self) -> None:
+        """The other half: the gate must REJECT what it exists to exclude.
+
+        Without this the inventory above is satisfied by a predicate that
+        returns True for everything, which would route every symbolic
+        narrowing into the decided path — the false-rejection class the gate
+        was built to avoid.
+        """
+        from vera.smt import SmtContext
+        from vera.verifier import ContractVerifier
+
+        smt = SmtContext()
+        for var in (smt.declare_int("@Int.0"), smt.declare_bool("@Bool.0"),
+                    smt.declare_string("@String.0"),
+                    smt.declare_float64("@Float64.0")):
+            assert not ContractVerifier._is_z3_literal(var), var
 
 
 class TestANonVerdictIsAttributedToTheRightOutcome:
@@ -1858,8 +2169,8 @@ class TestANonVerdictIsAttributedToTheRightOutcome:
     def test_the_two_outcomes_get_different_reasons(self) -> None:
         from vera.verifier import ContractVerifier
 
-        opaque = ContractVerifier._refined_undecided_reason("opaque")
-        unknown = ContractVerifier._refined_undecided_reason("unknown")
+        opaque = ContractVerifier._undecided_reason("opaque")
+        unknown = ContractVerifier._undecided_reason("unknown")
         assert opaque != unknown, opaque
         assert "opaque" in opaque and "stand-in" in opaque, opaque
         assert "no decision" in unknown, unknown
@@ -1907,10 +2218,104 @@ public fn mk(@Int -> @Int)
             d for d in result.diagnostics if d.error_code == "E505"
         ], [d.description[:90] for d in result.diagnostics]
 
+    _RECORDERS = (
+        "_record_refined_bind_tier3",
+        # The E531/E504 families, swept onto the same derivation (#1251).
+        # Both carried a fixed "untranslatable or the solver timed out" for
+        # every demotion, so they are exactly what this pin exists to catch.
+        "_record_int_widen_tier3",
+        "_record_nat_bind_tier3",
+    )
+
+    _UNREACHABLE_QUESTION = """\
+type Small = {{ @Byte | @Byte.0 < 10 }};
+
+private fn narrow(@Small -> @Byte)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{{
+  @Small.0
+}}
+
+public fn f(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{{
+  {body}
+}}
+"""
+
+    @pytest.mark.parametrize(
+        ("body", "status"),
+        [
+            # An internal narrowing — no codegen guard, so the demotion lands
+            # on the unguarded leg...
+            ("let @Small = 200;\n  0", "tier3_unguarded"),
+            # ... and a call argument, which the callee's entry guard covers,
+            # on the runtime-guarded one.  Both must demote, and neither may
+            # keep the rejection the reachability question failed to justify.
+            ("byte_to_int(narrow(200))", "tier3"),
+        ],
+    )
+    def test_an_unsettled_reachability_question_discloses(
+        self, monkeypatch: pytest.MonkeyPatch, body: str, status: str,
+    ) -> None:
+        """A failing literal whose REACHABILITY the solver cannot settle.
+
+        The three-way's third leg.  When the predicate folds false, the site
+        is rejected only if the solver exhibits a state satisfying the
+        premises; where it returns no verdict on that question, a definite
+        E505 would claim a refutation nothing backs, so the narrowing
+        discloses instead.
+
+        The leg is reachable from a whole program — the review drove it with
+        premises heavy enough to time the reachability query out — but only
+        expensively, so the outcome is injected at the ONE query this path
+        makes.  Only the reachability goal is intercepted: `check_valid` is
+        left alone for every other obligation, so the program around the
+        narrowing still verifies normally and the assertion is about this
+        branch rather than about a verifier with no solver.
+        """
+        import z3
+
+        from vera.smt import SmtContext, SmtResult
+
+        original = SmtContext.check_valid
+
+        def _no_verdict_on_reachability(self, goal, assumptions):
+            if z3.is_false(goal):
+                return SmtResult(status="unknown")
+            return original(self, goal, assumptions)
+
+        monkeypatch.setattr(SmtContext, "check_valid",
+                            _no_verdict_on_reachability)
+        result = _verify(self._UNREACHABLE_QUESTION.format(body=body))
+        binds = [o for o in result.obligations if o.kind == "refine_bind"]
+        assert [o.status for o in binds] == [status], binds
+        assert not [
+            d for d in result.diagnostics if d.error_code == "E505"
+        ], [d.description[:90] for d in result.diagnostics]
+        warns = [d for d in result.diagnostics if d.error_code == "E506"]
+        assert len(warns) == 1, [
+            (d.error_code, d.description[:70]) for d in result.diagnostics
+        ]
+        rationale = warns[0].rationale
+        # It names the value, so the reader knows the predicate WAS decided...
+        assert "200" in rationale, rationale
+        # ... names what was not — and does so as a question about reaching
+        # the site, not about the obligation, which is the one thing that did
+        # get an answer here.
+        assert "can be reached" in rationale, rationale
+        assert "no decision on that question" in rationale, rationale
+        # ... and claims no timeout, the misattribution this issue is about.
+        assert "timed out" not in rationale, rationale
+
     def test_no_demotion_site_hardcodes_a_solver_reason(self) -> None:
         """Structural: a solver-outcome reason must come from the derivation.
 
-        Every ``reason=`` handed to ``_record_refined_bind_tier3`` as a fixed
+        Every ``reason=`` handed to one of the Tier-3 recorders as a fixed
         string describes something the verifier knows without asking the
         solver — an unmodelled base, an untranslatable value, an opaque
         scrutinee.  Fixed text that talks about the solver is by construction
@@ -1934,7 +2339,7 @@ public fn mk(@Int -> @Int)
                 continue
             fn = node.func
             if not (isinstance(fn, py_ast.Attribute)
-                    and fn.attr == "_record_refined_bind_tier3"):
+                    and fn.attr in self._RECORDERS):
                 continue
             for kw in node.keywords:
                 if kw.arg != "reason":
@@ -1953,6 +2358,59 @@ public fn mk(@Int -> @Int)
         assert not offenders, (
             "a solver-outcome reason is fixed at the call site rather than "
             f"derived from `result.status`: {offenders}"
+        )
+
+    def test_every_possibly_unguarded_demotion_supplies_a_reason(self) -> None:
+        """Structural: the leg that emits a disclosure must state a cause.
+
+        The E504 and E531 families take ``reason`` as an optional keyword —
+        the GUARDED leg records an obligation and emits nothing, so text there
+        would be dead — and the recorders raise when an unguarded demotion
+        arrives without one.  That raise only fires on the paths a test
+        happens to walk, so the same invariant is pinned over the source: any
+        call that is not literally ``guarded=True`` can reach the disclosure
+        and must carry a reason.
+
+        Without it the two families drift straight back to where #1251 found
+        them — a disclosure whose stated cause was chosen once, by whoever
+        wrote the reporter, for every branch that reaches it.
+        """
+        import ast as py_ast
+
+        tree, _ = _verifier_ast()
+        offenders: list[tuple[int, str]] = []
+        seen: set[str] = set()
+        for node in py_ast.walk(tree):
+            if not isinstance(node, py_ast.Call):
+                continue
+            fn = node.func
+            if not (isinstance(fn, py_ast.Attribute)
+                    and fn.attr in self._RECORDERS):
+                continue
+            seen.add(fn.attr)
+            kwargs = {kw.arg: kw.value for kw in node.keywords}
+            guarded = kwargs.get("guarded")
+            always_guarded = (
+                isinstance(guarded, py_ast.Constant) and guarded.value is True
+            )
+            if always_guarded:
+                continue
+            reason = kwargs.get("reason")
+            if reason is None:
+                offenders.append((node.lineno, f"{fn.attr}: no reason"))
+            elif _string_constant(reason) == "":
+                # An EMPTY literal satisfies "a reason was passed" while
+                # saying nothing — the same defect one spelling over, and it
+                # renders a broken sentence rather than a wrong one.
+                offenders.append((node.lineno, f"{fn.attr}: empty reason"))
+        # A renamed recorder would make both structural pins vacuous — they
+        # would walk the file, match nothing and pass — so the roster is
+        # checked against the source it claims to be about.
+        assert seen == set(self._RECORDERS), sorted(set(self._RECORDERS) - seen)
+        assert not offenders, (
+            "a demotion that can reach the unguarded disclosure passes no "
+            f"`reason`, so the disclosure would state a cause it does not "
+            f"know: {offenders}"
         )
 
 

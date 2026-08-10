@@ -159,7 +159,7 @@ class SmtResult:
     #: The four outcomes ``check_valid`` produces — its only constructor, so
     #: this list is exhaustive.  Consumers that map a status to user-facing
     #: text handle each by name and reject the rest (see
-    #: ``ContractVerifier._refined_undecided_reason``); a fifth added here is a
+    #: ``ContractVerifier._undecided_reason``); a fifth added here is a
     #: decision they have to make, not one to inherit.
     status: str  # "verified" | "violated" | "unknown" | "opaque"
     counterexample: dict[str, str] | None = None  # slot_name → value
