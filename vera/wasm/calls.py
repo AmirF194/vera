@@ -497,15 +497,31 @@ class CallsMixin:
                 call.name == "put" and len(call.args) == 1
                 and cell is not None
             )
+            # `throw`'s payload is the OTHER cell-carrying write boundary
+            # (#1269).  The `Exn<E>` tag is declared at the payload's
+            # representation width — i32 for a `@Byte` payload, refined or
+            # not — while an int literal defaults to `i64.const`, so
+            # `throw(5)` into `Exn<{ @Byte | … }>` emitted a module WASM
+            # validation rejects at load.  Same marking, same derivation,
+            # different op; the #1268 narrowing GUARD on this payload is a
+            # separate obligation and is deliberately NOT added here.
+            is_exn_throw = (
+                call.name == "throw" and len(call.args) == 1
+                and cell is not None
+            )
             base = (
                 self._resolve_base_type_name(cell.base)
-                if is_state_put and cell is not None else None
+                if (is_state_put or is_exn_throw) and cell is not None
+                else None
             )
-            if is_state_put:
+            if is_state_put or is_exn_throw:
                 # #865/#1212: mark the Byte width BEFORE the argument is
                 # translated, so a literal — or the literal leaves of an
                 # `if` / `match` argument — lowers at the cell's i32 width.
-                self._mark_state_byte_write(call.args[0], base or "")
+                # The general entry rather than `_mark_state_byte_write`,
+                # which names the State cell this branch no longer only
+                # serves.
+                self._mark_byte_write_value(call.args[0], base or "")
             for arg in call.args:
                 arg_instrs = self.translate_expr(arg, env)
                 if arg_instrs is None:
@@ -646,6 +662,19 @@ class CallsMixin:
             # dispatch to the USER fn (round-5 review) — the unresolved
             # case falls through to the legacy path's loud
             # unknown-func failure instead.
+            return self._translate_call(
+                ast.FnCall(name=call.name, args=call.args, span=call.span),
+                env,
+            )
+        if (call.qualifier == "Exn" and call.name == "throw"
+                and "throw" in self._effect_ops):
+            # `Exn.throw(x)` delegates for exactly the reason `State.put(x)`
+            # does: the payload's #1212 Byte marking lives on the bare
+            # dispatcher (#1269), and a qualified spelling that skipped it
+            # emitted an `i64.const` under an i32 tag while the bare one
+            # compiled.  Guarded on the op resolving, same as the State
+            # twin — an unresolved `throw` falls through to the legacy path
+            # below rather than synthesizing a bare call that would miss.
             return self._translate_call(
                 ast.FnCall(name=call.name, args=call.args, span=call.span),
                 env,

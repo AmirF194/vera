@@ -428,6 +428,25 @@ def _compile_within(source: str, budget_s: float) -> object:
     so an unfixed compiler leaves a live thread that never blocks
     interpreter exit while this assertion fails immediately.  ``pytest.fail``
     rather than ``assert`` so the message survives ``python -O``.
+
+    **The leaked thread is accepted, deliberately** (PR #1250's closeout
+    left the question open; this is the answer).  When the guard holds — the
+    only state the suite is ever green in — the compile finishes in
+    milliseconds, the thread is joined, and nothing leaks.  A leak requires
+    the guard to be BROKEN, in which case the run is already failing and its
+    only remaining job is to report why rather than hang CI until the job
+    timeout.  A leaked daemon thread spinning in the compiler for the rest
+    of a red run costs CPU and nothing else: it holds no lock the main
+    thread waits on, and daemon threads do not block interpreter exit.
+
+    A subprocess would remove even that, and was considered and rejected:
+    the worker returns a ``CompileResult`` the caller inspects, so a
+    subprocess must either serialize it — it holds ``Diagnostic`` objects
+    carrying AST nodes, so no safe format round-trips it as-is — or
+    re-derive every assertion from process output, and Windows' spawn start
+    method would re-import this fixture module in the child.  That is real
+    machinery, load-bearing only in runs that are already failing, which is
+    the wrong trade.
     """
     box: list[object] = []
     err: list[BaseException] = []

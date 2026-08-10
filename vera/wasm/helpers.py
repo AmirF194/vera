@@ -461,6 +461,54 @@ def _is_host_handle_type(type_name: str | None) -> bool:
     return head in _HOST_HANDLE_TYPES
 
 
+# The inline i32 scalars, as a REPRESENTATION question — `Unit` is absent
+# because it has no WASM value at all, so no boundary ever asks whether one
+# is a pointer (`_INLINE_I32_TYPES` above answers the different question of
+# which BINDINGS need no push, and a Unit binding is one of them).
+_NON_POINTER_I32_BASES = frozenset({"Bool", "Byte"})
+
+# The largest value an inline i32 scalar can hold: `@Byte` is 0..255 and
+# `@Bool` is 0/1 (spec §11).  Read by the heap-layout guard in
+# `vera/codegen/assembly.py`, which keeps the GC heap above this range so a
+# scalar that reached the shadow stack could never be mistaken for a
+# pointer by the conservative mark phase.
+MAX_INLINE_I32_VALUE = 255
+
+
+def is_gc_pointer_base(base_name: str | None) -> bool:
+    """Whether an ``i32``-lowered value is a Vera-heap pointer to be rooted.
+
+    THE pointer-ness rule (#1255), stated once.  An ``i32`` is either an
+    inline scalar (``@Bool`` / ``@Byte``), an opaque host handle, or a
+    pointer into the GC heap; only the last must go on the shadow stack,
+    and pushing one of the others costs a slot and a spurious mark
+    candidate.  Callers pair it with their own ``wt == "i32"`` test — the
+    pair convention (String / Array) is a pointer by construction and is
+    decided by width, not by name.
+
+    *base_name* MUST be the REPRESENTATION base — the name after alias
+    chasing and refinement stripping, which is
+    :func:`vera.naming.family_base_name` from a type expression and
+    ``WasmContext._resolve_base_type_name`` from a slot name.  The
+    syntactic head is what #1255 was: ``type SmallByte = { @Byte | … }``
+    answers ``SmallByte``, which is in neither set, so every closure
+    parameter, return and capture of a refined or aliased scalar was rooted
+    as though it were a heap pointer.  Inert, because the mark phase's
+    first guard rejects anything below the heap (see the layout invariant
+    in ``vera/codegen/assembly.py``) — but a classification rule cannot
+    rely on a downstream range check to be right.
+
+    ``None`` — a type expression with no nameable slot form — is NOT a
+    pointer: the boundaries that can produce it (a bare type variable in an
+    uninstantiated generic template) are dropped before they run, and
+    guessing "pointer" there would push an uninitialised local.
+    """
+    if base_name is None:
+        return False
+    return (base_name not in _NON_POINTER_I32_BASES
+            and not _is_host_handle_type(base_name))
+
+
 def _element_mem_size(elem_type: str) -> int | None:
     """Get memory size in bytes for an array element type.
 

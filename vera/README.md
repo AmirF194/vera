@@ -96,7 +96,7 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `verifier.py` | 9,177 | Verify | Contract verification; owns the per-module registries every rendering goes through — an imported callee's contract and an imported generic's clone are named, resolved, and quoted in the module that **declared** them (#1208, #1220, #1225) | `verify()` |
 | `wasm/` | 26,604 | Compile | WASM translation layer (package) | `WasmContext`, `WasmSlotEnv`, `StringPool` |
 | ` ├ context.py` | 1,118 | | Composed WasmContext, expression dispatcher, block translation | |
-| ` ├ helpers.py` | 548 | | WasmSlotEnv, StateClauseEntry, StringPool, type mapping, array element helpers | |
+| ` ├ helpers.py` | 641 | | WasmSlotEnv, StateClauseEntry, StringPool, type mapping, array element helpers | |
 | ` ├ inference.py` | 2,518 | | Type inference, slot/type utilities, operator tables | |
 | ` ├ operators.py` | 2,778 | | Binary/unary operators, if, quantifiers, assert/assume, old/new | |
 | ` ├ calls.py` | 1,196 | | Core dispatcher for `_translate_call` / `_translate_qualified_call`, generic resolution, shared element-type inference (domain mixins below) | |

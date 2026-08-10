@@ -12,7 +12,7 @@ from vera import ast
 from vera.codegen.memory import ConstructorLayout, _align_up
 from vera.skip import CodegenInvariantError, CodegenSkip
 from vera.wasm import WasmContext, WasmSlotEnv
-from vera.wasm.helpers import _is_host_handle_type, gc_shadow_push
+from vera.wasm.helpers import gc_shadow_push, is_gc_pointer_base
 
 
 class ClosureLiftingMixin:
@@ -78,11 +78,18 @@ class ClosureLiftingMixin:
         ctx._pending_closures = []
         # INVARIANT: the ancestry keys are `id()` values, so every node they
         # name must stay strongly referenced for as long as its key is in
-        # play — which the worklist entries provide, each holding its own
-        # `AnonFn`.  Never retain an ancestry (or any set of these ids)
-        # beyond the worklist that holds the nodes: CPython reuses an id
-        # once its object is collected, and a recycled id silently reads as
-        # a cycle in a set that outlived its referents.
+        # play.  It is not the worklist entries that guarantee that — an
+        # ancestry names ANCESTORS, which have already been popped — but the
+        # AST itself: every `AnonFn` an ancestry can name is a node of the
+        # `Program` this compilation is walking, reachable from the declaration
+        # being compiled, from an alias table entry (a refinement predicate's
+        # stored type expression, the #1234 cycle's own source), or from the
+        # `mono_decls` clones Pass 2 holds across the whole run.  All three
+        # outlive the lift, so an id here cannot be recycled while its key is
+        # live.  Never retain an ancestry (or any set of these ids) beyond
+        # THAT lifetime: CPython reuses an id once its object is collected,
+        # and a recycled id silently reads as a cycle in a set that outlived
+        # its referents.
         # Snapshot `_next_closure_id` BEFORE this fn's worklist so we
         # can recycle the consumed range on failure.  closure_id is
         # module-monotonic and is stored as `func_table_idx` in each
@@ -440,16 +447,15 @@ class ClosureLiftingMixin:
                 local_idx = ctx.alloc_param()
                 param_parts.append(f"(param $p{i} {wt})")
                 param_info.append((i, param_te, local_idx))
-                # Track pointer params for GC.  #347: opaque host
-                # handles (Map / Set / Decimal) are i32 indices into
-                # Python-side stores, not Vera-heap pointers — exclude
-                # from rooting (see `_is_host_handle_type` for full
-                # rationale).
-                type_name = self._type_expr_to_slot_name(param_te)
-                if (
-                    wt == "i32"
-                    and type_name not in ("Bool", "Byte", None)
-                    and not _is_host_handle_type(type_name)
+                # Track pointer params for GC.  The classification is
+                # `is_gc_pointer_base` over the formal's REPRESENTATION
+                # base (#1255): the slot name is the SYNTACTIC head, so a
+                # refined or aliased `@Byte` formal was rooted here as a
+                # heap pointer.  `_family_base_te` is the same resolution
+                # the width above (`_type_expr_to_wasm_type`) already
+                # performs, so the two conjuncts describe one type.
+                if wt == "i32" and is_gc_pointer_base(
+                    self._family_base_te(param_te)
                 ):
                     gc_pointer_params.append(local_idx)
 
@@ -915,16 +921,12 @@ class ClosureLiftingMixin:
         # ``needs_alloc=False`` so the array_map pop is always balanced.
         ret_is_pointer = False
         if ret_wt == "i32":
-            ret_type_name = self._type_expr_to_slot_name(
-                anon_fn.return_type,
+            # #1255: the REPRESENTATION base, as at the param case above —
+            # `fn(… -> @SmallByte)` under `type SmallByte = { @Byte | … }`
+            # returns a Byte, and pushing it rooted a 0..255 value.
+            ret_is_pointer = is_gc_pointer_base(
+                self._family_base_te(anon_fn.return_type),
             )
-            if (
-                ret_type_name not in ("Bool", "Byte", None)
-                and not _is_host_handle_type(ret_type_name)
-            ):
-                # #347: opaque host handles aren't Vera-heap pointers;
-                # same exclusion as param/capture cases.
-                ret_is_pointer = True
         elif ret_wt == "i32_pair":
             ret_is_pointer = True
 
@@ -942,14 +944,15 @@ class ClosureLiftingMixin:
             for (tname, cap_local), kind in zip(cap_locals, cap_local_kinds):
                 if kind == "i32_pair":
                     gc_capture_pushes.extend(gc_shadow_push(cap_local))
-                elif (
-                    kind == "i32"
-                    and tname not in ("Bool", "Byte")
-                    and not _is_host_handle_type(tname)
+                elif kind == "i32" and is_gc_pointer_base(
+                    # #1255: a capture is carried by its SLOT NAME (a free
+                    # variable has no type expression here), so the
+                    # representation base comes from the name resolver
+                    # rather than from `_family_base_te` — the same hop
+                    # `_slot_name_to_wasm_type` took to decide `kind`, so
+                    # the two conjuncts again describe one type.
+                    ctx._resolve_base_type_name(tname)
                 ):
-                    # #347: same exclusion as the param case above —
-                    # opaque host handles are i32 indices, not Vera-
-                    # heap pointers.
                     gc_capture_pushes.extend(gc_shadow_push(cap_local))
 
             if ret_wt == "i32_pair":

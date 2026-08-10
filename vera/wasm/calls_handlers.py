@@ -27,6 +27,14 @@ from vera.wasm.helpers import (
 )
 
 
+# The built-in ``State<T>`` operations, by the bare names §7.4 gives them.
+# The ONE place they are enumerated for codegen's "is this a State op?"
+# questions — the addressability gate below asks it, and asking instead
+# whether the op has a recorded cell was correct only while `State` was the
+# sole cell-carrying effect (#1269).
+_STATE_OP_NAMES = frozenset({"get", "put"})
+
+
 class _ShowHashUnsupported(Exception):
     """Internal signal: a field is not showable/hashable here (#911).
 
@@ -1724,6 +1732,17 @@ class CallsHandlersMixin:
         shadowed = self._pushed_cell_families[self._addressable_from:]
         if not shadowed:
             return
+        # The refusal is about the State HOST INTRINSICS, which address only
+        # the innermost cell — so the gate asks whether this is a State op,
+        # not whether the op happens to have a cell recorded.  Those were
+        # the same question only by accident: `_effect_op_cells` held State
+        # entries alone until `throw` joined it (#1269), and
+        # `_pushed_cell_families` carries FAMILY names, so `throw` under
+        # `Exn<Int>` inside a `State<Int>` clause body compared equal and
+        # the gate refused a program that has no addressing problem at all
+        # (`throw` is a WASM tag, not a host cell).
+        if call.name not in _STATE_OP_NAMES:
+            return
         # ONE canonical family on both sides, and no mangling anywhere in the
         # comparison (#1218).  Round 5 of #1233 had the two sides in two
         # REPRESENTATIONS — `_pushed_cell_families` and a clause entry carry
@@ -2264,8 +2283,19 @@ class CallsHandlersMixin:
         # translation raises `CodegenSkip` for any unsupported shape, and an
         # in-place `self._effect_ops["throw"] = …` would leave that entry in
         # a dict an enclosing scope still holds.
+        #
+        # The cell rides in lock-step (#1218's discipline, #1269's need): a
+        # `throw` written INSIDE the handled body takes its dispatch target
+        # from HERE rather than from the enclosing declaration's effect row,
+        # so the payload's REPRESENTATION has to arrive by the same route
+        # or the write boundary at the call site has nothing to ask.
         saved_ops = self._effect_ops
+        saved_cells = self._effect_op_cells
         self._effect_ops = {**saved_ops, "throw": (tag_name, False)}
+        self._effect_op_cells = {
+            **saved_cells,
+            "throw": CellNames(family=family, base=family_base),
+        }
 
         # Compile body
         try:
@@ -2273,6 +2303,7 @@ class CallsHandlersMixin:
         finally:
             # Restore effect_ops
             self._effect_ops = saved_ops
+            self._effect_op_cells = saved_cells
 
         if body_instrs is None:
             return None
