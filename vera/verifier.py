@@ -245,6 +245,15 @@ class ContractVerifier:
     #: carries, so a line number and the file it numbers cannot disagree.
     _decl_file: str | None = None
 
+    #: #1241: ... and its FUNCTION REGISTRY, the namespace a bare call in the
+    #: declaration under verification resolves in.  The fourth half of "which
+    #: file is this?", travelling with the other three: a clone body reading
+    #: the importer's registry calls the importer's same-named function, so
+    #: the module's contract is proved against a body it never mentions —
+    #: verify-clean, and the run produces the other function's answer.  Class
+    #: default for the same reason as its three siblings.
+    _decl_fn_scope: CalleeScope | None = None
+
     def __init__(
         self,
         source: str = "",
@@ -292,6 +301,14 @@ class ContractVerifier:
         # named the entry file while carrying a line number from another one
         # sent a reader to the wrong file's wrong line (PR #1239 review).
         self._module_files: dict[tuple[str, ...], str | None] = {}
+        # #1241: ... and its own function-resolution scope (naming env +
+        # registry), so a body DECLARED in that module resolves its bare
+        # calls where it wrote them.  The same `CalleeScope` pinned per
+        # `FunctionInfo` in `_fn_origins` below, keyed by module instead of
+        # by callee — the contract-READING pin (#1225) and this body-WALKING
+        # pin are one value, so the two cannot come to disagree about what a
+        # module's namespace is.
+        self._module_scopes: dict[tuple[str, ...], CalleeScope] = {}
         # #1208/#1225: the scope a harvested `FunctionInfo`'s own contract is
         # READ in — its declaring module's naming env AND function registry —
         # keyed by object identity.  `FunctionInfo` is an unhashable mutable
@@ -319,6 +336,7 @@ class ContractVerifier:
         self._decl_alias_env = None
         self._decl_source = None
         self._decl_file = None
+        self._decl_fn_scope = None
         self.source = source
         self.file = file
         self.timeout_ms = timeout_ms
@@ -739,6 +757,17 @@ class ContractVerifier:
         imports).  This makes the verifier resolve helper calls the same way
         codegen does after parent-qualified mangling — so a diamond of
         same-named helpers proves each parent against its OWN helper's contract.
+
+        #1241: past the lexical helpers, the two flat steps are the DECLARING
+        module's when one is in force — an imported generic's clone, verified
+        inside :meth:`_declaring_module_scope`.  A module's body calls the
+        names ITS file declares and imports (spec §8.5.1), so falling through
+        to this program's top-level table and registry resolved a bare call
+        onto the importer's same-named function: the module's own contract
+        proved against a body it never mentions, and the compiled clone
+        returning the importer's answer.  Its codegen twin is the intra-rename
+        map threaded at the clone-emission door (#1243) — one routing rule, so
+        neither side can call what the other did not verify.
         """
         # Nearest scope first: decl's own where_fns, then each ancestor's,
         # innermost (direct parent) before outermost.
@@ -749,6 +778,10 @@ class ContractVerifier:
                 for wfn in group.where_fns or ():
                     if wfn.name == name:
                         return self._fn_info_for_decl(wfn)
+            declaring = self._decl_fn_scope
+            if declaring is not None and declaring.fn_lookup is not None:
+                found: FunctionInfo | None = declaring.fn_lookup(name)
+                return found
             top = self._top_level_fn_infos.get(name)
             if top is not None:
                 return top
@@ -982,6 +1015,14 @@ class ContractVerifier:
             # call to a private helper falling through to the importer's
             # registry, which is the bug (#1225).
             mod_scope = CalleeScope(mod_alias_env, temp.env.lookup_function)
+            # #1241: and the scope every BODY this module declares resolves
+            # its bare calls in.  `_declaring_module_scope` already swapped
+            # the naming env and the source buffer for an imported generic's
+            # clone; without the registry beside them the clone's own body
+            # call fell through to the IMPORTER's `env.lookup_function` and
+            # picked up a same-named importer function — the module's
+            # contract proved against a body it never mentions.
+            self._module_scopes[mod.path] = mod_scope
             # Pinned for every module-declared function, before the `direct`
             # gate and irrespective of visibility: a contract read in this
             # scope resolves to the module's OWN infos, and each of those is a
@@ -1173,20 +1214,26 @@ class ContractVerifier:
 
         Every half of "which file is this?" rides this one scope: the naming
         env its slots render against (#1208), the source buffer its clauses are
-        quoted from, and the file name its diagnostics point at (#1220).
-        ``None`` is a main-file declaration and keeps this program's.  Entered
-        and left together, so a clone named in one module can never quote
-        another's text or send a reader to another's line number.
+        quoted from, the file name its diagnostics point at (#1220), and the
+        function registry its bare calls resolve in (#1241).  ``None`` is a
+        main-file declaration and keeps this program's.  Entered and left
+        together, so a clone named in one module can never quote another's
+        text, send a reader to another's line number, or call another's
+        same-named function.
         """
-        saved = (self._decl_alias_env, self._decl_source, self._decl_file)
+        saved = (self._decl_alias_env, self._decl_source, self._decl_file,
+                 self._decl_fn_scope)
         self._decl_alias_env = self._alias_env_for_module(origin)
         self._decl_source = self._source_for_module(origin)
         self._decl_file = self._file_for_module(origin)
+        self._decl_fn_scope = (
+            None if origin is None else self._module_scopes.get(origin)
+        )
         try:
             yield
         finally:
             (self._decl_alias_env, self._decl_source,
-             self._decl_file) = saved
+             self._decl_file, self._decl_fn_scope) = saved
 
     def _alias_env_for_module(self, origin: tuple[str, ...] | None) -> AliasEnv:
         """Module *origin*'s naming env; this program's for ``None`` or an
@@ -1528,6 +1575,27 @@ class ContractVerifier:
         # argument position identically to codegen and the WASM call-rewrite.
         fn_ret_type_exprs: dict[str, ast.TypeExpr] = {}
 
+        # #1207: every function name this program owns — codegen's `_fn_sigs`
+        # membership, rebuilt from the AST.  ONE decision rides on it: whether
+        # a declared effect row's `get`/`put` is an effect operation at all, or
+        # a user function of that name shadowing it (codegen's `_fn_sigs` guard
+        # in `_compile_function`).  Membership must mirror codegen's or the two
+        # discoveries desync in the shadowed direction, so it is populated from
+        # the same recursion — locals, `where` helpers, and imports — rather
+        # than from `fn_ret_types`, which drops any name with no simple return.
+        #
+        # LOCAL `where` helpers are collected by bare name and IMPORTED ones
+        # are not, which mirrors codegen exactly rather than diverging from it
+        # (PR review round 1): codegen keys a local helper's signature by its
+        # bare name, but #1015 hoists every IMPORTED module's helpers to
+        # parent-qualified names BEFORE registration, so `_fn_sigs` carries
+        # `outer$where$get`, never a bare `get`.  Measured on a module whose
+        # helper is named `get`: `_fn_sigs` = {`outer`, `outer$where$get`},
+        # bare `get` absent from both tables.  Adding the bare name here would
+        # CREATE the desync — suppressing the State op for a row codegen still
+        # injects it for.
+        fn_names: set[str] = set()
+
         def record_fn_ret_type(fn: ast.FnDecl) -> None:
             # Include `where` helpers, keyed by bare name exactly as codegen
             # does.  Codegen registers each where-helper's WAT signature in
@@ -1550,6 +1618,7 @@ class ContractVerifier:
             # this side would not miss anything (it would be a sound superset)
             # but would diverge the verifier from codegen for no soundness gain
             # while leaving the codegen side unfixed (PR #767 review).
+            fn_names.add(fn.name)
             ret_name = self._simple_type_name(fn.return_type)
             if ret_name is not None:
                 fn_ret_types[fn.name] = ret_name
@@ -1583,6 +1652,7 @@ class ContractVerifier:
             for tld in mod.program.declarations:
                 idecl = tld.decl
                 if isinstance(idecl, ast.FnDecl):
+                    fn_names.add(idecl.name)
                     iret = self._simple_type_name(idecl.return_type)
                     if iret is not None:
                         fn_ret_types.setdefault(idecl.name, iret)
@@ -1610,6 +1680,8 @@ class ContractVerifier:
             alias_env=self._alias_env,
             fn_ret_types=fn_ret_types,
             fn_ret_type_exprs=fn_ret_type_exprs,
+            # #1207: see the `fn_names` comment above.
+            fn_names=frozenset(fn_names),
         )
 
     @staticmethod
@@ -1941,11 +2013,19 @@ class ContractVerifier:
         # superset of what codegen emits.
         nested_result: dict[str, set[tuple[str, ...]]] = {}
         nested_seen: set[tuple[str, tuple[str, ...]]] = set()
+        # #1223: top-level instantiations reached only from a nested helper's
+        # CONCRETE clone body.  Drained into the worklist below, so such a
+        # clone is verified exactly as codegen emits it.
+        pending_top: list[tuple[str, tuple[str, ...]]] = []
 
         def record_nested(clone: ast.FnDecl, base_chain: str) -> None:
-            found = mono.collect_clone_nested_generic_instances(
-                clone, ctor_to_adt,
-            )
+            helpers = {
+                wfn.name: wfn
+                for wfn in (clone.where_fns or ())
+                if wfn.forall_vars
+            }
+            if not helpers:
+                return
             # #1208: a nested helper is declared in the same module as the
             # ancestor whose chain names it, so it recounts in that env.  The
             # WHOLE chain is handed over — `_alias_env_for_generic` walks to
@@ -1953,16 +2033,43 @@ class ContractVerifier:
             # nested under a non-generic function is recorded under the chain,
             # not under its outermost segment (#1208 round 2, probe ``m4``).
             env = self._alias_env_for_generic(base_chain)
-            for h_name, (h_decl, h_cts) in found.items():
-                chain_key = f"{base_chain}$where${h_name}"
-                for h_ct in h_cts:
-                    if (chain_key, h_ct) in nested_seen:
-                        continue
-                    nested_seen.add((chain_key, h_ct))
-                    nested_result.setdefault(chain_key, set()).add(h_ct)
-                    record_nested(
-                        mono.monomorphize_fn(h_decl, h_ct, env), chain_key,
-                    )
+            # #1223: the FAMILY at once, over a GROWING body set, mirroring
+            # codegen's `_instantiate_hoisted_generics` and driving the same
+            # discovery leaf.  A helper's concrete clone can call a SIBLING
+            # helper at a type only that clone knows (inside the generic
+            # `outer<U>`, `inner(@U.1, @U.0)` binds `inner`'s variable to the
+            # type variable's NAME), so scanning the ancestor alone missed
+            # every such instantiation while codegen emitted it — a false
+            # Tier-1 the moment codegen's own rescan landed.
+            scan: list[ast.FnDecl] = [clone]
+            while scan:
+                found = mono.collect_generic_helper_instances(
+                    helpers, scan, ctor_to_adt,
+                )
+                scan = []
+                for h_name, h_cts in found.items():
+                    chain_key = f"{base_chain}$where${h_name}"
+                    for h_ct in h_cts:
+                        if (chain_key, h_ct) in nested_seen:
+                            continue
+                        nested_seen.add((chain_key, h_ct))
+                        nested_result.setdefault(chain_key, set()).add(h_ct)
+                        h_clone = mono.monomorphize_fn(
+                            helpers[h_name], h_ct, env,
+                        )
+                        scan.append(h_clone)
+                        record_nested(h_clone, chain_key)
+                        # #1223: the helper clone's own TOP-LEVEL generic
+                        # callees.  Only the concrete clone names them — the
+                        # generic spelling binds the enclosing type variable.
+                        top: dict[str, set[tuple[str, ...]]] = {
+                            name: set() for name in generic_decls
+                        }
+                        collect_calls_in_fn(h_clone, top)
+                        for t_name, t_cts in top.items():
+                            pending_top.extend(
+                                (t_name, t_ct) for t_ct in t_cts
+                            )
 
         # Transitive closure: monomorphize each, rescan its body.  Mirrors the
         # codegen worklist exactly, minus the constraint filter.
@@ -1992,6 +2099,11 @@ class ContractVerifier:
                 for t_ct in t_types:
                     if (t_name, t_ct) not in discovered:
                         worklist.append((t_name, t_ct))
+            # #1223: whatever the nested helpers' concrete clones reached.
+            while pending_top:
+                top_key = pending_top.pop()
+                if top_key not in discovered:
+                    worklist.append(top_key)
 
         result: dict[str, set[tuple[str, ...]]] = {
             name: set() for name in generic_decls

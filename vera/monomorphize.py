@@ -29,13 +29,13 @@ instantiation sets in agreement.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, fields, replace
 from typing import Any, cast
 
 from vera import ast, naming
 from vera.naming import EMPTY_ALIAS_ENV, AliasEnv
-from vera.slots import fn_slot_scope
+from vera.slots import effect_op_result_names, fn_slot_scope
 
 
 def substitute_type_vars(
@@ -1155,6 +1155,16 @@ class MonoContext:
       Optional (defaults empty): a consumer that doesn't populate it simply
       loses the user-fn parameterized-return recovery, degrading to the prior
       (bare-name) behaviour rather than erroring.
+    * ``fn_names`` — every function name this consumer's own table owns, used
+      for ONE decision: whether a declared effect row's ``get``/``put`` is an
+      effect operation here at all (#1207).  Codegen keeps an op out of
+      ``_effect_ops`` when ``_fn_sigs`` already owns the name, so a program
+      declaring its own ``get`` resolves that call through the ordinary
+      function path; discovery has to make the same call or the two consultors
+      desync again in the shadowed direction.  Optional (defaults empty): a
+      consumer that doesn't populate it treats no name as shadowed, which is
+      exactly the handler-expression rule (an op inside a ``handle`` body owns
+      its name unconditionally, matching ``_translate_handle_state``).
     """
 
     generic_decls: dict[str, ast.FnDecl]
@@ -1170,6 +1180,8 @@ class MonoContext:
     # declared-ADT names.  Defaulted empty so a consumer that has not been
     # threaded yet behaves exactly as before.
     alias_env: AliasEnv = EMPTY_ALIAS_ENV
+    # #1207: the consumer's own function-name table (see the docstring).
+    fn_names: frozenset[str] = frozenset()
 
 
 class Monomorphizer:
@@ -1184,6 +1196,15 @@ class Monomorphizer:
 
     def __init__(self, ctx: MonoContext) -> None:
         self.ctx = ctx
+        # #1207: the effect-op result-type registry IN SCOPE at the point the
+        # discovery walk has reached — the discovery-side twin of codegen's
+        # `_effect_op_result_vera`, replaced (not merged) at each `handle`
+        # exactly as `_translate_handle_state` replaces it, and seeded from a
+        # function's declared effect row by `collect_calls_in_node`.  Walk
+        # state, not context: it is pushed and popped by `_collect_calls` and
+        # is empty outside a walk, so `Monomorphizer` stays re-entrant per
+        # pass in the way its docstring promises.
+        self._op_result_types: dict[str, str] = {}
 
     def collect_calls_in_expr(
         self,
@@ -1228,6 +1249,39 @@ class Monomorphizer:
         (a ``CodegenSkip`` at run time) and diverge from the verifier, which does
         walk contracts and helpers (PR #767 review).
         """
+        # #1207: the function's DECLARED effect row is the outermost
+        # effect-op scope for everything below — codegen's per-function
+        # `effect_op_result_vera` (codegen/functions.py), rebuilt from the
+        # same shared derivation, with this site's `_fn_sigs` shadow guard
+        # spelled as `ctx.fn_names`.  Saved and restored so a `where` helper
+        # (walked recursively below) cannot leak its own row outwards.
+        saved_ops = self._op_result_types
+        self._op_result_types = self._row_op_result_types(fn)
+        try:
+            self._collect_calls_in_node_scoped(
+                fn, generic_decls, ctor_to_adt, instances,
+            )
+        finally:
+            self._op_result_types = saved_ops
+
+    def _row_op_result_types(self, fn: ast.FnDecl) -> dict[str, str]:
+        """The effect-op result registry a function's declared row installs."""
+        if not isinstance(fn.effect, ast.EffectSet):
+            return {}
+        return {
+            op: name
+            for op, name in effect_op_result_names(fn.effect.effects).items()
+            if op not in self.ctx.fn_names
+        }
+
+    def _collect_calls_in_node_scoped(
+        self,
+        fn: ast.FnDecl,
+        generic_decls: dict[str, ast.FnDecl],
+        ctor_to_adt: dict[str, str],
+        instances: dict[str, set[tuple[str, ...]]],
+    ) -> None:
+        """:meth:`collect_calls_in_node`'s walk, with the op scope already set."""
         self.collect_calls_in_expr(
             fn.body, generic_decls, ctor_to_adt, instances,
         )
@@ -1284,15 +1338,44 @@ class Monomorphizer:
         }
         if not generic_helpers:
             return {}
-        found: dict[str, set[tuple[str, ...]]] = {
-            name: set() for name in generic_helpers
-        }
-        self.collect_calls_in_node(clone, generic_helpers, ctor_to_adt, found)
+        found = self.collect_generic_helper_instances(
+            generic_helpers, (clone,), ctor_to_adt,
+        )
         return {
             name: (generic_helpers[name], cts)
             for name, cts in found.items()
             if cts
         }
+
+    def collect_generic_helper_instances(
+        self,
+        helpers: dict[str, ast.FnDecl],
+        bodies: Iterable[ast.FnDecl],
+        ctor_to_adt: dict[str, str],
+    ) -> dict[str, set[tuple[str, ...]]]:
+        """Instantiations of *helpers* called from any of *bodies* (#1223).
+
+        The leaf under :meth:`collect_clone_nested_generic_instances`, exposed
+        separately because a helper family is not fully discovered from the
+        ancestor clone alone.  A helper's own CONCRETE clone can call a SIBLING
+        helper at a type only that clone knows: inside the still-generic
+        ``outer<U>``, ``inner(@U.1, @U.0)`` binds ``inner``'s variable to the
+        NAME ``U``, and the real ``inner<Bool>`` appears only once ``outer`` is
+        monomorphized at ``Bool``.  Both sides therefore drive this over a
+        GROWING body set — each clone produced is fed back in — rather than
+        over the ancestor once, and they must drive the same leaf or the
+        verifier stops covering what codegen emits.
+
+        Returns ``{helper name: {concrete type vectors}}``, one entry per
+        helper (possibly empty), so a caller can diff against what it has
+        already emitted.
+        """
+        found: dict[str, set[tuple[str, ...]]] = {
+            name: set() for name in helpers
+        }
+        for body in bodies:
+            self.collect_calls_in_node(body, helpers, ctor_to_adt, found)
+        return found
 
     def _collect_calls(
         self,
@@ -1342,6 +1425,59 @@ class Monomorphizer:
             )
             if type_args is not None:
                 instances[node.right.name].add(type_args)
+        # #1207: a `handle[State<T>]` installs its op registry over its BODY
+        # only.  The state-init expression and the clause bodies belong to the
+        # ENCLOSING context — the checker checks clauses before the handled
+        # effect joins the row, and codegen threads the declaration-time
+        # snapshot into every clause (#1211) — so a `get(())` there names the
+        # OUTER cell.  Walking those children under this handler's scope would
+        # make discovery pick the inner cell's clone where the rewrite calls
+        # the outer's: the desync again, one level in.
+        if isinstance(node, ast.HandleExpr):
+            saved_ops = self._op_result_types
+            # This arm hand-enumerates the children because they are walked in
+            # DIFFERENT scopes, so it cannot use the generic `fields()`
+            # recursion below.  That makes it the one place a new `HandleExpr`
+            # field would become silently invisible to discovery — a missed
+            # generic call is a dangling clone (E602) with no diagnostic
+            # pointing here — so the enumeration is checked against the
+            # dataclass rather than trusted.
+            enumerated = {"effect", "state", "clauses", "body"}
+            declared = {f.name for f in fields(node)} - {"span"}
+            if declared != enumerated:  # pragma: no cover — guard
+                msg = (
+                    f"HandleExpr fields changed: {sorted(declared)}; this arm "
+                    f"walks {sorted(enumerated)}.  Add the new field to the "
+                    f"enclosing-scope group or to the handler-scope body walk "
+                    f"— an unwalked child hides every generic call inside it."
+                )
+                raise AssertionError(msg)
+            for child in (node.effect, node.state, node.clauses):
+                self._collect_calls(
+                    child, generic_decls, ctor_to_adt, instances,
+                )
+            # MERGED over the enclosing registry, not swapped for it — and
+            # deliberately, because codegen merges too (`_translate_handle_state`
+            # writes `{**saved_result_vera, **effect_op_result_names(...)}`, and
+            # `_translate_handle_exn` leaves the registry untouched).  A handler
+            # that contributes no result type must therefore leave the enclosing
+            # one answering: `pick([get(()), 4], 9)` inside an `Exn` handler
+            # nested in a `State<Nat>` one names `pick$Nat` on both sides.
+            # Replacing here instead names `pick$Int` against the rewrite's
+            # `pick$Nat` — measured: E602, `main` dropped, #1207 exactly.  The
+            # inner entry still wins for a key it DOES supply, the merge being
+            # ordered.  Pinned by `exn_nested_in_state` in
+            # tests/test_mono_effect_op_naming_1207.py.
+            self._op_result_types = {
+                **saved_ops, **effect_op_result_names([node.effect]),
+            }
+            try:
+                self._collect_calls(
+                    node.body, generic_decls, ctor_to_adt, instances,
+                )
+            finally:
+                self._op_result_types = saved_ops
+            return
         if isinstance(node, ast.Node):
             for f in fields(node):
                 if f.name == "span":
@@ -1645,6 +1781,17 @@ class Monomorphizer:
             return "String"
         if isinstance(expr, ast.ArrayLit):
             return "Array"
+        # #1207: an effect operation in a value position is not in any fn
+        # table, so it has to be answered from the op registry in scope —
+        # the same table (`vera.slots.effect_op_result_names`) the WASM
+        # call-rewrite consults at `_infer_vera_type`'s matching arm.  Before
+        # this, a `get(())` fixing a generic's type variable fell through to
+        # `fn_ret_types` / the builtin table, missed both, and left the
+        # instantiation to the phantom default while the rewrite named the
+        # cell's type: the clone discovery emitted dangled at the call the
+        # rewrite emitted (loud E602, caller dropped with E620).
+        if isinstance(expr, ast.FnCall) and expr.name in self._op_result_types:
+            return self._op_result_types[expr.name]
         if isinstance(expr, ast.FnCall) and generic_decls:
             return self._infer_fncall_vera_type(
                 expr, ctor_to_adt, generic_decls)

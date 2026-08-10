@@ -181,20 +181,14 @@ def typecheck_with_artifacts(
     module_arts: ModuleArtifacts = {}
     diagnostics = list(checker.errors)
     if collect_module_artifacts:
-        module_arts, body_errors = _collect_module_artifacts(resolved_modules)
-        # Merge imported-body errors (Cortex #1147 Finding 2), deduped against
-        # the top-level program's own diagnostics — a module's E151, say, can be
-        # reported by both the top-level registration and its sub-check.
-        top_keys = {
-            (d.location.file, d.location.line, d.location.column,
-             d.error_code, d.description)
-            for d in diagnostics
-        }
-        for e in body_errors:
-            key = (e.location.file, e.location.line, e.location.column,
-                   e.error_code, e.description)
-            if key not in top_keys:
-                diagnostics.append(e)
+        # #1244: the imported-body DIAGNOSTICS are already in `diagnostics` —
+        # `_register_modules` checks every module's bodies under its own import
+        # filter on EVERY path, not just this one, so this pass collects
+        # artifacts only.  The memo goes over so the sub-checks here do not
+        # re-run a body check the top-level pass has already done.
+        module_arts = _collect_module_artifacts(
+            resolved_modules, checker._module_body_check_memo,
+        )
 
     return diagnostics, CheckArtifacts(
         expr_types=checker.expr_types,
@@ -208,9 +202,9 @@ def typecheck_with_artifacts(
 
 def _collect_module_artifacts(
     resolved_modules: list[ResolvedModule] | None,
-) -> tuple[ModuleArtifacts, list[Diagnostic]]:
-    """Collect each resolved module's OWN span-keyed side-tables (#987) and its
-    OWN check ERRORS (Cortex #1147 Finding 2).
+    body_check_memo: set[tuple[str, ...]] | None = None,
+) -> ModuleArtifacts:
+    """Collect each resolved module's OWN span-keyed side-tables (#987).
 
     The top-level program's ``expr_target_types`` / ``expr_semantic_types`` are
     keyed by bare span ``(line, col, end_line, end_col)`` with no file identity,
@@ -241,19 +235,39 @@ def _collect_module_artifacts(
     sub-check.  That artifact-level difference is pinned by
     ``tests/test_xmod_artifact_collection.py::TestTransitiveArtifactContent``.
 
-    Cost note (PR #997 review): this is quadratic on the codegen paths that
-    opt in — N resolved modules each get a full ``check_program`` that
-    re-registers the other N-1, so the pass is O(N^2) sub-checks (measured
-    ~85ms at 20 modules vs ~4ms for the main-file-only check).  It runs only
-    for ``vera compile``/``run``/``serve``/``test`` (``vera verify`` and the
-    warm session skip it entirely).  Memoising each module's per-check
-    registration (its declarations are re-derived identically every pass) is a
-    future optimisation candidate that would collapse it toward O(N).
+    Diagnostics are NOT collected here (#1244).  The imported-body errors this
+    pass used to surface (Cortex #1147 Finding 2 — a library whose SQL is
+    non-literal must fail the importer's compile too, E207) now reach every
+    caller from ``ModulesMixin._register_modules``, which checks each module's
+    bodies under that module's own import filter on every path rather than only
+    on the codegen ones.  Two passes deriving the same diagnostics is the #1213
+    disease; this one keeps the artifact it alone produces.
+
+    Cost note (PR #997 review, corrected for #1244): THIS pass is quadratic
+    and still codegen-only — N resolved modules each get a full
+    ``check_program`` that re-registers the other N-1, so it is O(N^2)
+    sub-checks (measured ~85ms at 20 modules vs ~4ms for the main-file-only
+    check), and it runs only when a caller asks for artifacts, i.e. for
+    ``vera compile``/``run``/``serve``/``test``.
+
+    What is no longer true is that a module's body is checked only on those
+    paths.  ``ModulesMixin._register_modules`` checks each module's bodies
+    under its own import filter (#1244), and that runs from
+    ``check_program`` — so ``vera check``, ``vera verify`` and the warm
+    ``VerificationSession`` all pay one full sub-check per resolved module,
+    and the session pays it again on every re-check (it calls
+    ``typecheck_with_artifacts`` per verify).  ``body_check_memo`` is that
+    pass's memo, threaded into each sub-checker here so a body check the
+    top-level pass has already run is not repeated per sub-check — without
+    it, this O(N^2) pass would multiply the #1244 pass by N.
+
+    Memoising each module's per-check REGISTRATION (its declarations are
+    re-derived identically every pass) is the optimisation candidate that
+    would collapse both toward O(N); it is tracked as
+    [#1275](https://github.com/aallan/vera/issues/1275).
     """
     mods = resolved_modules or []
     result: ModuleArtifacts = {}
-    body_errors: list[Diagnostic] = []
-    seen: set[tuple[str | None, int, int, str, str]] = set()
     for mod in mods:
         mod_direct = {imp.path for imp in mod.program.imports}
         sub_resolved = [
@@ -268,27 +282,14 @@ def _collect_module_artifacts(
             file=str(mod.file_path),
             resolved_modules=sub_resolved,
         )
+        sub._module_body_check_memo = body_check_memo
         sub.expr_types = {}
         sub.expr_semantic_types = sub_semantic
         sub.expr_target_types = sub_target
         sub.hole_sites = []
         sub.check_program(mod.program)
         result[mod.path] = (sub_semantic, sub_target)
-        # Cortex #1147 Finding 2: surface each imported body's OWN check ERRORS.
-        # The body is compiled into the flat WASM module, so a body that fails
-        # its standalone check — e.g. a library whose SQL is non-literal (E207)
-        # — must fail the compile too; dropping ``sub.errors`` let an injection
-        # slip through the import door.  ERRORS only (warnings stay with the
-        # body's own ``vera check``); deduped by location + code + text.
-        for e in sub.errors:
-            if e.severity != "error":
-                continue
-            key = (e.location.file, e.location.line, e.location.column,
-                   e.error_code, e.description)
-            if key not in seen:
-                seen.add(key)
-                body_errors.append(e)
-    return result, body_errors
+    return result
 
 
 # =====================================================================
@@ -433,6 +434,11 @@ class TypeChecker(
         self._import_names: dict[
             tuple[str, ...], set[str] | None
         ] = {}
+        # #1244: paths whose BODIES this run has already checked under their
+        # own import filter, shared down the nested checkers so a module
+        # reached from several importers is checked once and an import cycle
+        # terminates.  ``None`` until the first module is reached.
+        self._module_body_check_memo: set[tuple[str, ...]] | None = None
         # C7c: unfiltered module declarations (for "is private" errors).
         self._module_all_functions: dict[
             tuple[str, ...], dict[str, object]

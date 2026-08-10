@@ -50,10 +50,18 @@ while the empty-clause-list `handle[State<Nat>] { } in { … }` probe is
 superseded by its own valid-syntax sibling `p1_put_no_clause.vera`, which
 takes the same bare path through a get-only handler.
 
+So have the **instantiation-driving** shapes ([#1207](https://github.com/aallan/vera/issues/1207)):
+the `alias_families/` `p15*` trio is retired.  A `get(())` that fixes a
+generic's type argument — as an array-literal element or a direct
+argument, under a plain cell, an alias cell, and a declared effect row —
+lives in `tests/conformance/` as
+`ch07_state_op_generic_instantiation`, with the discovery-vs-rewrite
+clone-name differential and the `array_append` builtin-argument control
+in `tests/test_mono_effect_op_naming_1207.py`.
+
 **Not wired into CI.** These are probe programs, not curated fixtures:
 some deliberately fail (`check`, `verify`, or `run`) to demonstrate a
-defect that is now fixed, some pin the open issue [#1207](https://github.com/aallan/vera/issues/1207),
-and some were superseded mid-round.  Each
+defect that is now fixed, and some were superseded mid-round.  Each
 file's leading comment states what it probes and what the
 expected-vs-observed behaviour was AT THE TIME it was written; the
 tracked regression suites
@@ -87,7 +95,7 @@ comment; headerless files are summarised from the program itself.  Origin
 is the review-round directory the file lived in before the
 purpose-directory reorganisation.
 
-### alias_families/ (16 files)
+### alias_families/ (13 files)
 
 | File | What it probes | Origin |
 |---|---|---|
@@ -95,9 +103,6 @@ purpose-directory reorganisation.
 | `p1205.vera` | #1205 repro: `State<Count>` (`Count = Nat`) canonical handler — the scalar-alias cell must collapse to Nat | session |
 | `p12a_verify_nat_cell.vera` | Obligation-parity baseline: plain Nat cell + a narrowing `let` in the handled body | round3_naming |
 | `p12b_verify_alias_cell.vera` | Identical program spelled `State<Id<Nat>>` — the obligation stream must match p12a | round3_naming |
-| `p15_generic_elem.vera` | `get(())` as an array element in a generic call, under an alias cell | round2_family |
-| `p15b_append.vera` | `get(())` as an `array_append` argument under an alias cell — builtin call-site typing | round2_family |
-| `p15c_direct.vera` | p15_generic_elem respelled with a plain `State<Nat>` cell — no-alias control | round2_family |
 | `p16_family_split_crosstalk.vera` | Helper effects spelled `State<Id<Id<Nat>>>` vs `handle[State<Nat>]` — ops may silently bypass the cell | round3_naming |
 | `p16c_family_split_control.vera` | Single-`Id` control for p16 (`State<Id<Nat>>` spelling) — must join the handler's cell | round3_naming |
 | `p17_wrapper_alias.vera` | Wrapper alias `Two<T> = Id<Id<T>>` — head re-entry reached through one user application | round3_naming |

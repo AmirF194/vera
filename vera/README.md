@@ -78,12 +78,12 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `types.py` | 814 | Type check | Semantic type representation | `Type`, `is_subtype()` |
 | `prelude.py` | 1,004 | Type check | Standard prelude — built-in ADT and combinator injection | `inject_prelude()`, `overridable_builtin_names()` |
 | `naming.py` | 789 | Type check | The ONE slot / slot-reference-key / State-Exn-family renderer (#1208, #1209) — the checker's rendering, as a total pure function over an `AliasEnv`, consumed by the checker, the monomorphizer, the verifier, the SMT layer, codegen, the tester, the LSP, and `vera check --explain-slots`.  Also the ONE refinement-binder derivation, from the type expression for codegen's runtime guard (`refinement_binder_parts`) and from the predicate's own reference for the verifier and SMT layers (`predicate_binder_key`, #1226), both rendering through `slot_name`; and each consumer is handed the env of the module that DECLARED what it is rendering | `slot_name()`, `slot_ref_key()`, `family_name()`, `resolve_type_expr()`, `AliasEnv` |
-| `slots.py` | 283 | Type check | Presentation over `naming.py`: slot resolution tables and their text/JSON rendering, plus the two scope walks the tables need (`forall` narrowing, `where`-helper nesting).  The two walks here that are NOT naming say so in their docstrings — the alias-opaque syntactic spelling for WASM representation questions, and the last-resort name for a State/Exn cell family that resolves to none | `slot_table()`, `format_slot_table()`, `fn_slot_scope()`, `fn_scopes()`, `type_expr_slot_name()`, `family_fallback_name()` |
+| `slots.py` | 339 | Type check | Presentation over `naming.py`: slot resolution tables and their text/JSON rendering, plus the two scope walks the tables need (`forall` narrowing, `where`-helper nesting).  The two walks here that are NOT naming say so in their docstrings — the alias-opaque syntactic spelling for WASM representation questions, and the last-resort name for a State/Exn cell family that resolves to none | `slot_table()`, `format_slot_table()`, `fn_slot_scope()`, `fn_scopes()`, `type_expr_slot_name()`, `family_fallback_name()` |
 | `environment.py` | 2,424 | Type check | Type environment, scope stacks, ability registry, all built-in registrations | `TypeEnv`, `AbilityInfo` |
 | `checker/` | 6,684 | Type check | Two-pass type checker (mixin package) | `typecheck()` |
 | `  core.py` | 1,032 | | TypeChecker class, orchestration, contracts, constraint validation | |
 | `  resolution.py` | 486 | | AST TypeExpr → semantic Type, inference | |
-| `  modules.py` | 189 | | Cross-module registration (C7b/C7c) | |
+| `  modules.py` | 285 | | Cross-module registration (C7b/C7c), plus the per-module body check that makes a module's diagnostics independent of which file `vera check` was given (#1244) | |
 | `  registration.py` | 727 | | Pass 1 forward declarations, ability registration | |
 | `  expressions.py` | 1,405 | | Expression synthesis (bidirectional), operators, statements | |
 | `  eq_ability.py` | 199 | | Eq ability derivation checks | |
@@ -751,7 +751,7 @@ The `ERROR_CODES` dict in `errors.py` maps every code to a short description (15
 
 ## Test Suite
 
-Testing spans a **pytest suite** of 10,034 tests across 151 files — compiler-internals unit tests plus a **conformance suite** (206 programs in `tests/conformance/` validating every language feature against the spec) and **example programs** (42 end-to-end demos). The conformance suite is the definitive specification artifact — each program tests one feature and serves as a minimal working example.
+Testing spans a **pytest suite** of 10,079 tests across 156 files — compiler-internals unit tests plus a **conformance suite** (207 programs in `tests/conformance/` validating every language feature against the spec) and **example programs** (42 end-to-end demos). The conformance suite is the definitive specification artifact — each program tests one feature and serves as a minimal working example.
 
 See **[TESTING.md](../TESTING.md)** for the comprehensive testing reference -- test file table, conformance suite details, compiler code coverage, language feature coverage, helper conventions, validation scripts, CI pipeline, and guidelines for adding tests.
 

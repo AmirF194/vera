@@ -78,6 +78,13 @@ class CrossModuleMixin:
             **gen._prelude_decl_order,
             **gen._module_decl_order.get(mod_path, {}),
         }
+        # #1253: and so is ADT MEMBERSHIP — which names are data types HERE.
+        # `_adt_layouts` is one map across every absorbed namespace, so
+        # without this a sibling module's ADTs stayed members of this module's
+        # namespace while the checker, registering each module in isolation,
+        # never saw them: the two sides disagreeing about what a name MEANS.
+        saved_active = gen._active_module_path
+        gen._active_module_path = mod_path
         # #1208: the naming environment is part of the swapped pair — it
         # describes exactly these two maps, so it moves with them or it names
         # the module's declarations against the main file's aliases.
@@ -89,6 +96,7 @@ class CrossModuleMixin:
             gen._type_aliases = saved_aliases
             gen._type_alias_params = saved_params
             gen._decl_order = saved_order
+            gen._active_module_path = saved_active
             gen._alias_env = saved_env
 
     @contextlib.contextmanager
@@ -209,6 +217,11 @@ class CrossModuleMixin:
                 set(imp.names) if imp.names is not None else None
             )
 
+        # #1253: per-namespace ADT bookkeeping, filled in the harvest loop and
+        # folded into membership sets after it.
+        declared_adts: dict[tuple[str, ...], frozenset[str]] = {}
+        public_adts: dict[tuple[str, ...], frozenset[str]] = {}
+
         # #814 §8.5.3: names of LOCAL functions in the importing program,
         # INCLUDING (recursively) `where`-fn helpers.  A module fn whose bare
         # name appears here is shadowed for bare calls (§8.5.2); its module-
@@ -256,6 +269,21 @@ class CrossModuleMixin:
                     vis_map[tld.decl.name] = tld.visibility or "private"
                 elif isinstance(tld.decl, ast.DataDecl):
                     vis_map[tld.decl.name] = tld.visibility or "private"
+
+            # #1253: what this module DECLARES as data types, and which of
+            # those it EXPORTS.  The two sets are the input to the membership
+            # rule below — a module's namespace holds its own ADTs whatever
+            # their visibility, and an importer's holds only the public ones
+            # its filter names, which is exactly the checker's view.
+            declared_adts[mod.path] = frozenset(
+                tld.decl.name
+                for tld in mod.program.declarations
+                if isinstance(tld.decl, ast.DataDecl)
+            )
+            public_adts[mod.path] = frozenset(
+                name for name in declared_adts[mod.path]
+                if vis_map.get(name) == "public"
+            )
 
             # #1000: names of this module's PRIVATE top-level generics.  They
             # are unimportable, so a public generic reaching one transitively
@@ -654,6 +682,79 @@ class CrossModuleMixin:
         # bodies that legitimately call it (compiled in Pass 2.5, not scanned
         # by the guard rail) keep resolving to the emitted definition.
         self._transitive_only_names = transitive_contributed - importer_visible
+
+        # #1253: fold the per-namespace ADT membership sets.
+        self._builtin_adt_names = builtin_adt_names
+        self._adt_namespace_members = self._build_adt_membership(
+            program, import_names, declared_adts, public_adts,
+        )
+
+    def _build_adt_membership(
+        self,
+        program: ast.Program,
+        import_names: dict[tuple[str, ...], set[str] | None],
+        declared_adts: dict[tuple[str, ...], frozenset[str]],
+        public_adts: dict[tuple[str, ...], frozenset[str]],
+    ) -> dict[tuple[str, ...] | None, frozenset[str]]:
+        """Which ADT names are data types in each namespace (#1253).
+
+        A namespace holds its OWN declarations, whatever their visibility,
+        plus what it IMPORTS — public only, and only the names an explicit
+        import list mentions.  That is the checker's view of every module,
+        rebuilt here from the same declarations codegen already harvested, so
+        an unimported (or private) sibling's ADT is as opaque on this side as
+        it is on the checker's.
+
+        Keyed by module path, with ``None`` for the entry program.  Built-ins
+        are NOT included: they belong to every namespace and are added by the
+        reader (`_adt_members_in_scope`), so a namespace's entry stays a
+        statement about source declarations.
+
+        Imports are read per namespace, never inherited: §8.6.4 visibility is
+        the importer's property, so a module reached transitively from here is
+        a DIRECT import of whichever module names it, and holds exactly what
+        THAT module's import list allows.
+        """
+
+        def visible(
+            own: frozenset[str],
+            imports: dict[tuple[str, ...], set[str] | None],
+        ) -> frozenset[str]:
+            names = set(own)
+            for dep_path, name_filter in imports.items():
+                exported = public_adts.get(dep_path)
+                if exported is None:
+                    continue
+                names |= {
+                    n for n in exported
+                    if name_filter is None or n in name_filter
+                }
+            return frozenset(names)
+
+        main_own = frozenset(
+            tld.decl.name for tld in program.declarations
+            if isinstance(tld.decl, ast.DataDecl)
+        )
+        members: dict[tuple[str, ...] | None, frozenset[str]] = {
+            None: visible(main_own, import_names),
+        }
+        for mod in self._resolved_modules:
+            own_imports = {
+                tuple(imp.path): (
+                    set(imp.names) if imp.names is not None else None
+                )
+                for imp in mod.program.imports
+            }
+            members[mod.path] = visible(
+                declared_adts.get(mod.path, frozenset()), own_imports,
+            )
+        # Every ADT some namespace DECLARES.  `_adt_members_in_scope`
+        # subtracts this from the registered layouts to recover the global
+        # infrastructure — the built-ins plus the PRELUDE's own ADTs, which
+        # register after this pass runs and so cannot be snapshotted here.
+        self._namespace_declared_adts = frozenset(main_own).union(
+            *declared_adts.values()) if declared_adts else frozenset(main_own)
+        return members
 
     @staticmethod
     def _collect_local_fn_names(program: ast.Program) -> set[str]:

@@ -13,7 +13,7 @@ from dataclasses import fields, is_dataclass
 
 from vera import ast
 from vera.monomorphize import mangle_type_name
-from vera.slots import type_expr_slot_name
+from vera.slots import effect_op_result_names, type_expr_slot_name
 from vera.skip import STATE_CLAUSE_INLINE_DEPTH_CAP, CodegenSkip
 from vera.wasm.helpers import (
     CellNames,
@@ -1433,8 +1433,11 @@ class CallsHandlersMixin:
         # `state_push_Option<Int>`).  Then route through the injective
         # `mangle_type_name` (#775) so the WAT identifier is legal.
         # `type_name` is the alias-OPAQUE source spelling, and it survives
-        # for exactly one role: the #1006 Vera-name mirror below, which
-        # answers "what did the source call this?" for `_infer_vera_type`.
+        # for exactly one role: the NAMEABILITY gate below.  The #1006
+        # Vera-name mirror ("what did the source call this?", for
+        # `_infer_vera_type`) reads the same spelling out of the shared
+        # `effect_op_result_names` table instead, so mono discovery's copy
+        # of that answer is derived once rather than twice (#1207).
         type_name = type_expr_slot_name(type_arg)
         if type_name is None:  # pragma: no cover — NamedType always resolves
             raise CodegenSkip(
@@ -1515,8 +1518,8 @@ class CallsHandlersMixin:
             # annotation, which can diverge (#1206) and, as a
             # RefinementType, has no `name` at all (PR #1202 review: the
             # getattr skipped both branches for refined binders while the
-            # verifier recorded the obligation).  `type_name` survives for
-            # the #1006 Vera-name mirror alone.
+            # verifier recorded the obligation).  `type_name` survives as
+            # the nameability gate alone.
             if (family_base == "Nat"
                     and self._narrows_into_nat(expr.state.init_expr)):
                 init_instrs = self._emit_nat_bind_guard(init_instrs)
@@ -1583,9 +1586,15 @@ class CallsHandlersMixin:
         }
         # #1006: the VERA-name mirror of the WT record above —
         # `_infer_vera_type` needs the Vera name (not the layout-ambiguous
-        # WAT type) to type a `get(())` array-literal element.
+        # WAT type) to type a `get(())` array-literal element.  #1207: from
+        # the shared derivation, which mono discovery pushes for the same
+        # `handle` expression — one table, so the clone discovery emits is
+        # the clone the rewrite below calls.  No shadow guard here, matching
+        # the unconditional `_effect_ops` overwrite above: inside a handler
+        # body the op owns the name.
         self._effect_op_result_vera = {
-            **saved_result_vera, "get": type_name,
+            **saved_result_vera,
+            **effect_op_result_names([expr.effect]),
         }
         # #976 option C: register the clauses so each get/put CALL SITE in
         # the body inlines its clause body (intrinsic-hybrid semantics)

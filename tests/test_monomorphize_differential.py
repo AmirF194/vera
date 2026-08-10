@@ -52,6 +52,55 @@ _REPO_CORPUS = [
 
 # Targeted cases for the soundness-critical scenarios.
 _INLINE_CORPUS = {
+    # #1223: a generic `where`-helper under a GENERIC parent, whose own body
+    # calls a TOP-LEVEL generic (`gug_pick`) and a SIBLING generic helper.
+    # Neither instantiation exists until the helper itself is monomorphized —
+    # in its still-generic spelling the argument's type is the enclosing type
+    # VARIABLE — so both sides had to grow the same rescan.  This entry is
+    # what makes the two halves land together: the codegen half alone makes
+    # `gug_pick<Bool>` an emitted instantiation the verifier does not
+    # discover, which is a false Tier-1 and turns this check red.
+    "generic_under_generic_callees_1223": """
+private forall<W> fn gug_pick(@W, @W -> @W)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  @W.0
+}
+
+private forall<T> fn gug_parent(@T -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  if gug_outer(true, false) then { 7 } else { 3 }
+}
+where {
+  forall<U> fn gug_outer(@U, @U -> @U)
+    requires(true)
+    ensures(true)
+    effects(pure)
+  {
+    gug_inner(@U.1, @U.0)
+  }
+  forall<V> fn gug_inner(@V, @V -> @V)
+    requires(true)
+    ensures(true)
+    effects(pure)
+  {
+    gug_pick(@V.1, @V.0)
+  }
+}
+
+public fn use_gug(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  gug_parent(1)
+}
+""",
     # Two type vars collapse to the same concrete type (A=B=Int) — exercises
     # the De Bruijn reindex inside _monomorphize_fn during discovery.
     "collapsed_typevars": """

@@ -1214,6 +1214,22 @@
     ]
   },
   {
+    "id": "ch07_state_op_generic_instantiation",
+    "file": "ch07_state_op_generic_instantiation.vera",
+    "chapter": 7,
+    "title": "State operation fixes a generic's type argument (#1207)",
+    "level": "run",
+    "spec_ref": "Section 7.3",
+    "features": [
+      "state_effect",
+      "handler",
+      "handler_clause",
+      "generics",
+      "type_alias",
+      "array_literal"
+    ]
+  },
+  {
     "id": "ch07_exn_handler",
     "file": "ch07_exn_handler.vera",
     "chapter": 7,
