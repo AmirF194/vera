@@ -363,10 +363,17 @@ class CodeGenerator(
         self._adt_namespace_members: dict[
             tuple[str, ...] | None, frozenset[str]
         ] = {}
-        # The builtin/prelude ADTs, members of every namespace (they are global
+        # The builtin ADTs, members of every namespace (they are global
         # infrastructure, owned by no module — the same set `_register_modules`
-        # exempts from the E609/E610 collision rails).
+        # exempts from the E609/E610 collision rails).  A FLOOR, not the whole
+        # infrastructure set: it is snapshotted in Pass 0.5 and the prelude's
+        # own ADTs register in Pass 1.2, so `_adt_members_in_scope` derives the
+        # rest by subtracting what the namespaces declare.
         self._builtin_adt_names: frozenset[str] = frozenset()
+        # Every ADT name SOME namespace declares — the main program's and each
+        # module's own declarations.  Whatever `_adt_layouts` holds beyond this
+        # is global infrastructure and belongs to every namespace.
+        self._namespace_declared_adts: frozenset[str] = frozenset()
         # The namespace `_module_alias_scope` currently has installed, so
         # `_sync_alias_env` knows whose membership to apply.
         self._active_module_path: tuple[str, ...] | None = None
@@ -1313,13 +1320,30 @@ class CodeGenerator(
         same permissive whole-map answer rather than to an empty set — a
         wrongly-empty membership would silently re-open the divergence in the
         other direction, rendering a name the module DOES own as opaque.
+
+        GLOBAL INFRASTRUCTURE is a member of every namespace, and is derived
+        rather than snapshotted: any registered layout that NO namespace
+        declares.  The ``_register_builtin_adts`` set (``Option``, ``Result``,
+        ``Tuple``, …) is only half of it — ``Json``, ``HtmlNode``, ``Request``
+        and ``Response`` are registered by the PRELUDE injection in Pass 1.2,
+        after ``_register_modules`` computes these sets in Pass 0.5, so a
+        snapshot taken there necessarily misses them (the checker's
+        ``TypeEnv`` carries all of them from the start, so the miss was an
+        asymmetry between the two sides' notions of "builtin").  Subtracting
+        what the namespaces declare cannot go stale with registration order.
+        The builtin snapshot is unioned in as well, so a module declaring an
+        ADT that shares a built-in's name cannot hide the built-in from
+        everyone else.
         """
         if not self._adt_namespace_members:
             return None
         members = self._adt_namespace_members.get(self._active_module_path)
         if members is None:
             return None
-        return members | self._builtin_adt_names
+        infrastructure = (
+            frozenset(self._adt_layouts) - self._namespace_declared_adts
+        )
+        return members | infrastructure | self._builtin_adt_names
 
     def _adt_decl_index(self, name: str, order: dict[str, int]) -> int:
         """Where *name* sits in the declaration-index space *order* keys (#1227).

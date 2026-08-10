@@ -243,18 +243,28 @@ def _collect_module_artifacts(
     on the codegen ones.  Two passes deriving the same diagnostics is the #1213
     disease; this one keeps the artifact it alone produces.
 
-    Cost note (PR #997 review): this is quadratic on the codegen paths that
-    opt in — N resolved modules each get a full ``check_program`` that
-    re-registers the other N-1, so the pass is O(N^2) sub-checks (measured
-    ~85ms at 20 modules vs ~4ms for the main-file-only check).  It runs only
-    for ``vera compile``/``run``/``serve``/``test`` (``vera verify`` and the
-    warm session skip it entirely).  ``body_check_memo`` is the caller's
-    #1244 memo, threaded into each sub-checker so a body check the top-level
-    pass has already run is not run again per sub-check — without it the
-    sub-checks would multiply that pass by N.  Memoising each module's
-    per-check REGISTRATION (its declarations are re-derived identically every
-    pass) is a further optimisation candidate that would collapse this toward
-    O(N).
+    Cost note (PR #997 review, corrected for #1244): THIS pass is quadratic
+    and still codegen-only — N resolved modules each get a full
+    ``check_program`` that re-registers the other N-1, so it is O(N^2)
+    sub-checks (measured ~85ms at 20 modules vs ~4ms for the main-file-only
+    check), and it runs only when a caller asks for artifacts, i.e. for
+    ``vera compile``/``run``/``serve``/``test``.
+
+    What is no longer true is that a module's body is checked only on those
+    paths.  ``ModulesMixin._register_modules`` checks each module's bodies
+    under its own import filter (#1244), and that runs from
+    ``check_program`` — so ``vera check``, ``vera verify`` and the warm
+    ``VerificationSession`` all pay one full sub-check per resolved module,
+    and the session pays it again on every re-check (it calls
+    ``typecheck_with_artifacts`` per verify).  ``body_check_memo`` is that
+    pass's memo, threaded into each sub-checker here so a body check the
+    top-level pass has already run is not repeated per sub-check — without
+    it, this O(N^2) pass would multiply the #1244 pass by N.
+
+    Memoising each module's per-check REGISTRATION (its declarations are
+    re-derived identically every pass) is the optimisation candidate that
+    would collapse both toward O(N); it is tracked as
+    [#1275](https://github.com/aallan/vera/issues/1275).
     """
     mods = resolved_modules or []
     result: ModuleArtifacts = {}

@@ -64,29 +64,54 @@ def _cli(*args: str) -> subprocess.CompletedProcess[str]:
     env["PYTHONPATH"] = (
         f"{_PKG_PARENT}{os.pathsep}{existing}" if existing else _PKG_PARENT
     )
+    # A finite timeout: a hung CLI must fail this test rather than wedge the
+    # suite.  Generous enough for a cold Z3 verify on a slow CI runner.
     return subprocess.run(
         [sys.executable, "-m", "vera.cli", *args],
         capture_output=True, text=True, encoding="utf-8", check=False,
-        env=env,
+        env=env, timeout=300,
     )
 
 
 def _verify_codes(path: Path) -> list[str]:
-    """The error codes `vera verify --json` reports for *path*."""
+    """The error codes `vera verify --json` reports for *path*.
+
+    A crash or a non-JSON stdout is surfaced as itself rather than as a
+    `JSONDecodeError` with no context: the whole point of these cases is
+    which diagnostics appear, and "the CLI died" must not read as "no
+    diagnostics".
+    """
     proc = _cli("verify", "--json", str(path))
-    payload = json.loads(proc.stdout)
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        msg = (
+            f"`vera verify --json` produced no JSON (exit {proc.returncode}): "
+            f"{exc}\n--- stdout ---\n{proc.stdout[-600:]}"
+            f"\n--- stderr ---\n{proc.stderr[-600:]}"
+        )
+        raise AssertionError(msg) from None
     return [d["error_code"] for d in payload["diagnostics"]]
 
 
 def _run_value(path: Path, fn: str | None = None) -> str:
-    """`vera run`'s stdout, or a marker naming how it failed."""
+    """`vera run`'s last stdout line, or a marker naming how it failed.
+
+    Every non-value outcome gets a distinct marker so an assertion failure
+    says which one happened: a non-zero exit, and — separately — a zero exit
+    that printed nothing, which would otherwise raise `IndexError` off the
+    end of an empty `splitlines()` and hide the real story.
+    """
     args = ["run", str(path)]
     if fn is not None:
         args += ["--fn", fn]
     proc = _cli(*args)
     if proc.returncode != 0:
         return f"FAILED: {(proc.stdout + proc.stderr).strip()[-400:]}"
-    return proc.stdout.strip().splitlines()[-1]
+    lines = proc.stdout.strip().splitlines()
+    if not lines:
+        return f"NO OUTPUT (exit 0); stderr: {proc.stderr.strip()[-200:]}"
+    return lines[-1]
 
 
 # --- the value shape -------------------------------------------------
@@ -142,36 +167,13 @@ public fn main(@Unit -> @Int)
 """
 
 # --- the type-discriminating shape -----------------------------------
-# The importer's `need` returns `@Bool` (i32) where `glib`'s returns
-# `@Int` (i64).  The checker accepts the program, which by itself proves
-# the clone body means glib's `need`; codegen calling the importer's
-# emitted invalid WASM from that check-green source.
-_GLIB_TYPED = """
-private fn need(@Int -> @Int)
-  requires(true)
-  ensures(@Int.result == 111)
-  effects(pure)
-{
-  111
-}
-
-public forall<T> fn gen(@T -> @Int)
-  requires(true)
-  ensures(@Int.result == 111)
-  effects(pure)
-{
-  need(0)
-}
-
-public fn glib_main(@Unit -> @Int)
-  requires(true)
-  ensures(true)
-  effects(pure)
-{
-  gen(1)
-}
-"""
-
+# The module is the SAME one the value shape uses — all the discrimination
+# lives on the importer's side, so there is one definition of `glib` to
+# keep correct rather than two that could drift apart.  The importer's
+# `need` returns `@Bool` (i32) where `glib`'s returns `@Int` (i64).  The
+# checker accepts the program, which by itself proves the clone body means
+# glib's `need`; routing to the importer's instead emitted invalid WASM
+# from that check-green source.
 _APP_TYPED = """
 import glib(gen);
 
@@ -192,10 +194,11 @@ public fn main(@Unit -> @Int)
 }
 """
 
-# --- the where-helper shape ------------------------------------------
-# The module function the clone reaches is a `where` helper of another of
-# the module's functions rather than a top-level private — the same
-# routing question one nesting level in.
+# --- the two-hop shape ------------------------------------------------
+# The clone does not call the shadowed function directly: it calls `mid`,
+# which calls `need`.  Both are top-level privates of the module, and the
+# IMPORTER declares a same-named pair, so the routing has to hold for the
+# call the clone makes AND for the one that call makes in turn.
 _GLIB_CHAIN = """
 private fn mid(@Int -> @Int)
   requires(true)
@@ -305,9 +308,11 @@ def test_type_discriminating_callee_compiles(tmp_path: Path) -> None:
     `@Bool` (i32).  The checker accepts the program — which is itself the
     proof that the clone body means glib's `need` (§8.5.1) — so codegen
     must emit a module that loads and runs.  Routing to the importer's
-    emitted invalid WASM from check-green source.
+    `@Bool` function instead emitted invalid WASM from that check-green
+    source: `type mismatch: expected i64, found i32` at instantiation, so
+    the failure is a trap on load rather than a wrong value.
     """
-    _write(tmp_path, {"glib.vera": _GLIB_TYPED, "app.vera": _APP_TYPED})
+    _write(tmp_path, {"glib.vera": _GLIB_VALUE, "app.vera": _APP_TYPED})
     check = _cli("check", "--quiet", str(tmp_path / "app.vera"))
     assert check.returncode == 0, check.stdout + check.stderr
     assert _verify_codes(tmp_path / "app.vera") == []

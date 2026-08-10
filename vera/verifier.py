@@ -1583,6 +1583,17 @@ class ContractVerifier:
         # discoveries desync in the shadowed direction, so it is populated from
         # the same recursion — locals, `where` helpers, and imports — rather
         # than from `fn_ret_types`, which drops any name with no simple return.
+        #
+        # LOCAL `where` helpers are collected by bare name and IMPORTED ones
+        # are not, which mirrors codegen exactly rather than diverging from it
+        # (PR review round 1): codegen keys a local helper's signature by its
+        # bare name, but #1015 hoists every IMPORTED module's helpers to
+        # parent-qualified names BEFORE registration, so `_fn_sigs` carries
+        # `outer$where$get`, never a bare `get`.  Measured on a module whose
+        # helper is named `get`: `_fn_sigs` = {`outer`, `outer$where$get`},
+        # bare `get` absent from both tables.  Adding the bare name here would
+        # CREATE the desync — suppressing the State op for a row codegen still
+        # injects it for.
         fn_names: set[str] = set()
 
         def record_fn_ret_type(fn: ast.FnDecl) -> None:

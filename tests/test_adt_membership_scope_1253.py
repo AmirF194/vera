@@ -27,6 +27,7 @@ of cross-module ADTs rather than the visibility rule it implements.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -113,14 +114,21 @@ def _slot_tables(
     mod = next(m for m in mods if m.path == (module,))
     params = _params(mod.program, fn)
 
-    # The checker's view: the module checked as ITSELF, with its own
-    # imports — the same construction `ModulesMixin._check_module_bodies`
-    # uses (#1244), so this reads the environment the checker really binds
-    # that module's declarations in rather than a rebuild of it.
-    host = TypeChecker(resolved_modules=mods)
+    # The checker's view: the module checked as ITSELF, with its own imports
+    # and `direct` re-derived against IT (§8.6.4 visibility belongs to the
+    # importer).  Spelled out here rather than routed through
+    # `ModulesMixin._modules_visible_to`, which this PR's #1244 commit adds:
+    # a test whose RED/GREEN claim is about the state BEFORE that commit has
+    # to be runnable there, and calling a method the branch introduces makes
+    # the claim unreproducible from the artifact.  This is the same
+    # construction `_collect_module_artifacts` has used since #987.
+    mod_direct = {imp.path for imp in mod.program.imports}
     scoped = TypeChecker(
         source=mod.source, file=str(mod.file_path),
-        resolved_modules=host._modules_visible_to(mod),
+        resolved_modules=[
+            replace(other, direct=other.path in mod_direct)
+            for other in mods if other.path != mod.path
+        ],
     )
     scoped.check_program(mod.program)
     checker = [
@@ -179,6 +187,93 @@ def test_module_slot_tables_agree(
         f"checker {checker} vs codegen {codegen}: the two sides disagree "
         f"about what the name MEANS in this module"
     )
+
+
+def test_prelude_adts_are_members_of_every_namespace(tmp_path: Path) -> None:
+    """`Json` and friends belong to every namespace, module or entry program.
+
+    They are registered by the PRELUDE injection in Pass 1.2 — after
+    `_register_modules` computes the membership sets in Pass 0.5 — so a
+    membership set built from a snapshot of the built-in ADTs taken there
+    necessarily omits them, while the checker's `TypeEnv` has carried them
+    from the start.  That is an asymmetry between the two sides' notions of
+    "built-in", and the membership rule now derives infrastructure by
+    subtracting what the namespaces DECLARE rather than snapshotting.
+
+    Asserted on the membership SET rather than on a rendering, honestly:
+    `AliasEnv.data_types` changes an answer in exactly one place
+    (`naming._resolve_named`), and only for `Decimal` and the names in
+    `REMOVED_ALIASES` (`Float` alone) — so for `Json` the absence was inert
+    at today's only consumer, and no rendering assertion could distinguish
+    it.  What is guarded here is the set being FACTUALLY right, which is
+    what a future consumer would read.
+    """
+    files = {
+        "plib.vera": """
+public fn wrap(@Array<Json>, @Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  @Int.0
+}
+""",
+        # `inject_prelude` is demand-driven off the ENTRY program, so the
+        # entry names `Json` too — otherwise the prelude never registers it
+        # and there is nothing to be a member of anything.
+        "main.vera": """
+import plib(wrap);
+
+public fn depth(@Json -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  1
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  1
+}
+""",
+    }
+    for name, text in files.items():
+        (tmp_path / name).write_text(text, encoding="utf-8")
+    main_path = tmp_path / "main.vera"
+    program = transform(parse_file(str(main_path)))
+    mods = ModuleResolver(tmp_path).resolve_imports(program, main_path)
+    gen = CodeGenerator(
+        source=main_path.read_text(encoding="utf-8"), file=str(main_path),
+    )
+    gen._resolved_modules = mods
+    gen.compile_program(program)
+
+    # `inject_prelude` is demand-driven, so only the prelude ADTs this
+    # program mentions are registered at all — `Json` here.  Asserting the
+    # unmentioned ones would be asserting that unregistered names are
+    # members, which is not the claim.
+    assert "Json" in gen._adt_layouts, sorted(gen._adt_layouts)
+    for scope in (None, ("plib",)):
+        gen._active_module_path = scope
+        members = gen._adt_members_in_scope()
+        assert members is not None, scope
+        assert "Json" in members, (
+            f"namespace {scope}: the prelude-injected `Json` is not a member; "
+            f"members = {sorted(members)}"
+        )
+        # The general invariant behind that case: every registered layout no
+        # namespace DECLARES is global infrastructure and belongs to every
+        # namespace — which is what makes the rule independent of the pass
+        # that happened to register it.
+        undeclared = frozenset(gen._adt_layouts) - gen._namespace_declared_adts
+        assert undeclared <= members, sorted(undeclared - members)
+        # The built-in floor is still there — the fix widens infrastructure,
+        # it does not loosen membership.
+        assert {"Option", "Result", "Tuple"} <= members
 
 
 def test_main_file_still_sees_its_own_imports(tmp_path: Path) -> None:

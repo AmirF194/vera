@@ -731,14 +731,12 @@ class CrossModuleMixin:
                 }
             return frozenset(names)
 
+        main_own = frozenset(
+            tld.decl.name for tld in program.declarations
+            if isinstance(tld.decl, ast.DataDecl)
+        )
         members: dict[tuple[str, ...] | None, frozenset[str]] = {
-            None: visible(
-                frozenset(
-                    tld.decl.name for tld in program.declarations
-                    if isinstance(tld.decl, ast.DataDecl)
-                ),
-                import_names,
-            ),
+            None: visible(main_own, import_names),
         }
         for mod in self._resolved_modules:
             own_imports = {
@@ -750,6 +748,12 @@ class CrossModuleMixin:
             members[mod.path] = visible(
                 declared_adts.get(mod.path, frozenset()), own_imports,
             )
+        # Every ADT some namespace DECLARES.  `_adt_members_in_scope`
+        # subtracts this from the registered layouts to recover the global
+        # infrastructure — the built-ins plus the PRELUDE's own ADTs, which
+        # register after this pass runs and so cannot be snapshotted here.
+        self._namespace_declared_adts = frozenset(main_own).union(
+            *declared_adts.values()) if declared_adts else frozenset(main_own)
         return members
 
     @staticmethod

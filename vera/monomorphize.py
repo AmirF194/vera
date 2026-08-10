@@ -1435,6 +1435,23 @@ class Monomorphizer:
         # the outer's: the desync again, one level in.
         if isinstance(node, ast.HandleExpr):
             saved_ops = self._op_result_types
+            # This arm hand-enumerates the children because they are walked in
+            # DIFFERENT scopes, so it cannot use the generic `fields()`
+            # recursion below.  That makes it the one place a new `HandleExpr`
+            # field would become silently invisible to discovery — a missed
+            # generic call is a dangling clone (E602) with no diagnostic
+            # pointing here — so the enumeration is checked against the
+            # dataclass rather than trusted.
+            enumerated = {"effect", "state", "clauses", "body"}
+            declared = {f.name for f in fields(node)} - {"span"}
+            if declared != enumerated:  # pragma: no cover — guard
+                msg = (
+                    f"HandleExpr fields changed: {sorted(declared)}; this arm "
+                    f"walks {sorted(enumerated)}.  Add the new field to the "
+                    f"enclosing-scope group or to the handler-scope body walk "
+                    f"— an unwalked child hides every generic call inside it."
+                )
+                raise AssertionError(msg)
             for child in (node.effect, node.state, node.clauses):
                 self._collect_calls(
                     child, generic_decls, ctor_to_adt, instances,

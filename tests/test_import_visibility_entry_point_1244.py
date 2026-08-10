@@ -113,10 +113,13 @@ def _cli(*args: str) -> subprocess.CompletedProcess[str]:
     env["PYTHONPATH"] = (
         f"{_PKG_PARENT}{os.pathsep}{existing}" if existing else _PKG_PARENT
     )
+    # A finite timeout: the cycle cases below exist because an unbounded
+    # recursion is a real possibility here, and a hung CLI must fail this
+    # test rather than wedge the suite.
     return subprocess.run(
         [sys.executable, "-m", "vera.cli", *args],
         capture_output=True, text=True, encoding="utf-8", check=False,
-        env=env,
+        env=env, timeout=300,
     )
 
 
