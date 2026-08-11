@@ -881,7 +881,7 @@ class TestInferenceProviderDispatch:
 
     @pytest.mark.parametrize("earlier", _PROVIDERS_BEFORE_XAI)
     def test_xai_key_does_not_preempt_earlier_provider(self, earlier: str) -> None:
-        """xAI is last in the registry, so *every* earlier provider's key wins.
+        """Every provider ahead of xai in the registry beats the xAI key.
 
         One case per provider ahead of xai, so moving the row up fails exactly
         the providers it jumped instead of only the first one — appending must
@@ -905,6 +905,69 @@ class TestInferenceProviderDispatch:
             # asserting the name alone would pass on a dispatch that picked
             # the right row and then read xai's key out of the environment.
             assert mock_provider.call_args[0][3] == "sk-earlier-test"
+
+    def test_deepseek_provider(self) -> None:
+        """DeepSeek branch uses correct endpoint, default model, OpenAI-compatible format."""
+        import json
+        from unittest.mock import patch, MagicMock
+        from vera.runtime.inference import _call_inference_provider
+
+        body = json.dumps({"choices": [{"message": {"content": "deepseek"}}]})
+        mock_urlopen = MagicMock(return_value=self._make_response(body))
+        with patch("urllib.request.urlopen", mock_urlopen):
+            result = _call_inference_provider("deepseek", "prompt", "", "sk-deepseek")
+        assert result == "deepseek"
+        req = mock_urlopen.call_args[0][0]
+        assert req.full_url == "https://api.deepseek.com/v1/chat/completions"
+        # Bearer auth (OpenAI-compatible), not Anthropic-style key header
+        assert req.get_header("Authorization") == "Bearer sk-deepseek"
+        assert req.get_header("X-api-key") is None
+        sent_body = json.loads(req.data.decode())
+        assert sent_body["model"] == "deepseek-v4-flash"
+        # The exact turn list, not just the key: a presence check stays green
+        # with the role flipped, the content dropped, or the list emptied.
+        assert sent_body["messages"] == [{"role": "user", "content": "prompt"}]
+        # OpenAI-compatible body carries no Anthropic "max_tokens"
+        assert "max_tokens" not in sent_body
+
+    def test_deepseek_auto_detect(self) -> None:
+        """DeepSeek key auto-detected when no other keys are set."""
+        from unittest.mock import patch
+
+        result_src = _compile_ok(TestInferenceCollection._CLASSIFY_SOURCE)
+        with patch(
+            "vera.runtime.inference._call_inference_provider",
+            return_value="ok",
+        ) as mock_provider:
+            execute(
+                result_src,
+                env_vars={"VERA_DEEPSEEK_API_KEY": "sk-deepseek-test"},
+            )
+            assert mock_provider.call_args[0][0] == "deepseek"
+
+    #: Every provider that precedes deepseek in the registry, listed literally
+    #: rather than sliced out of _PROVIDERS: a derived list would shrink to
+    #: match a relocated deepseek row and pass vacuously, and a single
+    #: hardcoded 'anthropic' case would stay green while openai, moonshot,
+    #: mistral silently lost precedence.
+    _PROVIDERS_BEFORE_DEEPSEEK = ("anthropic", "openai", "moonshot", "mistral")
+
+    @pytest.mark.parametrize("earlier", _PROVIDERS_BEFORE_DEEPSEEK)
+    def test_deepseek_key_does_not_preempt_earlier_provider(self, earlier: str) -> None:
+        """DeepSeek is last in the registry, so *every* earlier provider's key wins."""
+        from unittest.mock import patch
+        from vera.runtime.inference import _PROVIDERS
+
+        result_src = _compile_ok(TestInferenceCollection._CLASSIFY_SOURCE)
+        with patch(
+            "vera.runtime.inference._call_inference_provider",
+            return_value="ok",
+        ) as mock_provider:
+            execute(result_src, env_vars={
+                _PROVIDERS[earlier].env_key: "sk-earlier-test",
+                "VERA_DEEPSEEK_API_KEY": "sk-deepseek-test",
+            })
+            assert mock_provider.call_args[0][0] == earlier
 
     def test_multi_key_auto_detect_respects_provider_order(self) -> None:
         """When multiple keys are set, _PROVIDERS insertion order determines which wins.
