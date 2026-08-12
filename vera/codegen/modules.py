@@ -12,7 +12,10 @@ from typing import TYPE_CHECKING
 
 from vera import ast
 from vera.errors import Diagnostic, SourceLocation
-from vera.monomorphize import canonicalize_type_aliases
+from vera.monomorphize import (
+    canonicalize_type_aliases,
+    module_qualified_generic_names,
+)
 
 if TYPE_CHECKING:
     from vera.codegen.core import CodeGenerator
@@ -285,24 +288,25 @@ class CrossModuleMixin:
                 if vis_map.get(name) == "public"
             )
 
-            # #1000: names of this module's PRIVATE top-level generics.  They
-            # are unimportable, so a public generic reaching one transitively
-            # must route to the module's own version (``mod$<path>$inner``) — a
-            # bare ``inner`` in the importer's flat namespace either dangles or
-            # (a same-named local) is captured.  Rerouted below to a synthetic
-            # ``ModuleCall`` so the existing shadowed-generic discovery finds it
-            # and the ModuleCall desugar resolves it to the qualified clone.
-            module_private_generics: set[str] = {
-                tld.decl.name
-                for tld in mod.program.declarations
-                if isinstance(tld.decl, ast.FnDecl)
-                and tld.decl.forall_vars
-                and (tld.visibility or "private") != "public"
-            }
-
             # Harvest function sigs — include all (public + private) so
             # private helpers called by imported public fns are available.
             name_filter = import_names.get(mod.path)
+
+            # #1000, widened by #1274: names of this module's QUALIFIED-ONLY
+            # top-level generics — the ones whose bare name in the importer's
+            # flat namespace does NOT denote this module's declaration (private,
+            # outside the import filter, or shadowed by a local).  A bare call to
+            # one of them from this module's own bodies either dangles or is
+            # captured by the importer's same-named generic, so each is rerouted
+            # below to a synthetic ``ModuleCall`` — the existing shadowed-generic
+            # discovery then finds it and the desugar resolves it to the
+            # ``mod$<path>$name`` clone.  The SAME predicate splits the generic
+            # registration below, and the verifier drives it too, so the two
+            # sides of the #732 differential can never disagree about which
+            # namespace a module generic's clone lives in.
+            module_qualified_generics = module_qualified_generic_names(
+                mod.program, name_filter, local_fn_names,
+            )
             for fn_name, sig in temp._fn_sigs.items():
                 # Collision detection: same name from different module
                 if fn_name in fn_provenance:
@@ -567,9 +571,9 @@ class CrossModuleMixin:
                 if not isinstance(tld.decl, ast.FnDecl):
                     continue
                 # #1029: reroute EVERY imported decl's bare calls to this
-                # module's private generics ONCE at the loop top, and use the
-                # rerouted copy in ALL branches below.  Pre-fix only the PUBLIC
-                # generic branch rerouted (#1000), so a NON-generic caller
+                # module's qualified-only generics ONCE at the loop top, and use
+                # the rerouted copy in ALL branches below.  Pre-#1029 only the
+                # PUBLIC generic branch rerouted (#1000), so a NON-generic caller
                 # (``use_it`` → private ``inner``), a private→private chain
                 # (private ``A`` → private ``B``), and a private generic's own
                 # body all kept the bare call — which dangled (``unknown func``)
@@ -578,53 +582,41 @@ class CrossModuleMixin:
                 # call), so it never captures a lexically-nearer helper.  Only
                 # the call nodes change; name/params/sig are untouched, so the
                 # ``temp._fn_sigs``-keyed registration lookups below stay valid.
-                routed = self._reroute_private_generic_calls(
-                    tld.decl, mod.path, module_private_generics,
+                routed = self._reroute_module_qualified_generic_calls(
+                    tld.decl, mod.path, module_qualified_generics,
                 )
                 # #774: an imported PUBLIC generic is monomorphized by the
                 # importer (Pass 1.5) at its own call sites — it can't be
                 # emitted verbatim under a bare/mangled name in Pass 2.5, but
                 # its concrete clones can.  Harvest its FnDecl here so
                 # `_monomorphize` can discover instantiations of it and clone
-                # its body; a private module generic is not callable from the
-                # importer, so it never needs harvesting.  Split by local
-                # shadowing (§8.5.2): an unshadowed generic routes bare +
-                # qualified through `_generic_fn_info`; a shadowed one is
-                # qualified-only (the bare name stays on the local).
+                # its body.  Split by the ONE naming predicate (§8.5.2): a
+                # generic that owns the importer's bare name routes bare +
+                # qualified through `_generic_fn_info`; every other module
+                # generic is qualified-only and harvested under the
+                # module-qualified shadowed-generic identity
+                # (``mod$<path>$name``) — NEVER the bare
+                # ``_imported_generic_decls``, where a bare-name entry would
+                # hijack a same-named local fn (E608's import-only provenance
+                # can't catch that).  #1029: the rerouted copy is what is
+                # harvested, so a qualified-only → qualified-only chain (this
+                # generic calls ANOTHER of its module's) reaches the sibling's
+                # ``mod$<path>$sibling`` clone.
                 if tld.decl.forall_vars:
-                    is_public = (tld.visibility or "private") == "public"
-                    in_filter = (
-                        name_filter is None or tld.decl.name in name_filter
-                    )
-                    if is_public and in_filter:
-                        if tld.decl.name in local_fn_names:
-                            self._shadowed_imported_generic_decls.setdefault(
-                                mod.path, {},
-                            ).setdefault(tld.decl.name, routed)
-                        else:
-                            self._imported_generic_decls.setdefault(
-                                tld.decl.name, routed,
-                            )
-                            # #998: same first-seen-wins order as the decl
-                            # registry, so a clone of this generic compiles
-                            # against ITS module's span tables.
-                            self._imported_generic_origins.setdefault(
-                                tld.decl.name, mod.path,
-                            )
-                    elif not is_public:
-                        # #1000: a PRIVATE module generic is reachable only
-                        # transitively (through a public generic's body).
-                        # Harvest it under the module-qualified shadowed-generic
-                        # identity (``mod$<path>$name`` via the shared shadowed
-                        # machinery) — NEVER the bare ``_imported_generic_decls``,
-                        # where a bare-name entry would hijack a same-named local
-                        # fn (E608's import-only provenance can't catch that).
-                        # #1029: use the rerouted copy so a private→private chain
-                        # (this private generic calls ANOTHER private generic)
-                        # reaches the sibling's ``mod$<path>$sibling`` clone.
+                    if tld.decl.name in module_qualified_generics:
                         self._shadowed_imported_generic_decls.setdefault(
                             mod.path, {},
                         ).setdefault(tld.decl.name, routed)
+                    else:
+                        self._imported_generic_decls.setdefault(
+                            tld.decl.name, routed,
+                        )
+                        # #998: same first-seen-wins order as the decl
+                        # registry, so a clone of this generic compiles
+                        # against ITS module's span tables.
+                        self._imported_generic_origins.setdefault(
+                            tld.decl.name, mod.path,
+                        )
                     continue
                 is_public = (tld.visibility or "private") == "public"
                 in_filter = name_filter is None or tld.decl.name in name_filter
@@ -860,20 +852,22 @@ class CrossModuleMixin:
             self._module_qualified_targets[(mod_path, fn_name)] = mangled
 
     @staticmethod
-    def _reroute_private_generic_calls(
+    def _reroute_module_qualified_generic_calls(
         decl: ast.FnDecl,
         module_path: tuple[str, ...],
-        private_generics: set[str],
+        qualified_generics: set[str],
     ) -> ast.FnDecl:
-        """Rewrite bare calls to a module's PRIVATE generics into synthetic
-        ``ModuleCall``s (#1000).
+        """Rewrite bare calls to a module's QUALIFIED-ONLY generics into
+        synthetic ``ModuleCall``s (#1000, widened by #1274).
 
-        A public imported generic's body may transitively call one of its
-        module's private generics by bare name.  Once the importer clones that
-        body, the bare name is ambiguous — it dangles (the private generic is
-        unimportable) or a same-named local captures it.  Rewriting each such
-        ``FnCall`` to ``ModuleCall(module_path, name)`` routes it through the
-        existing shadowed-generic discovery + desugar
+        An imported body may call one of its module's own generics by bare name.
+        Once the importer clones that body, the bare name is resolved in the
+        IMPORTER's flat namespace — where it dangles (the generic is
+        unimportable or outside the filter) or a same-named local captures it,
+        unless the generic owns that name outright
+        (:func:`vera.monomorphize.module_qualified_generic_names`).  Rewriting
+        each such ``FnCall`` to ``ModuleCall(module_path, name)`` routes it
+        through the existing shadowed-generic discovery + desugar
         (``_resolve_module_call_wasm_name`` → ``_module_qualified_generic_bases``
         → the ``mod$<path>$name`` clone), so it reaches the module's own version.
         Only the call NODE changes (``FnCall`` → ``ModuleCall`` with the same
@@ -881,16 +875,16 @@ class CrossModuleMixin:
         ``AnonFn`` / ``where`` bodies — is structurally preserved with its span.
 
         Delegates to the shared shadow-aware walk
-        (:func:`vera.monomorphize.reroute_module_private_generic_calls`) so this
-        codegen reroute and the verifier's #732 mirror can never drift (#1029) —
-        the two differ only in the terminal node each builds (codegen a
+        (:func:`vera.monomorphize.reroute_module_qualified_generic_calls`) so
+        this codegen reroute and the verifier's #732 mirror can never drift
+        (#1029) — the two differ only in the terminal node each builds (codegen a
         ``ModuleCall`` resolved by the desugar; the verifier a name-renamed
         ``FnCall`` keyed to the same ``mod$…`` discovery base).
         """
-        from vera.monomorphize import reroute_module_private_generic_calls
+        from vera.monomorphize import reroute_module_qualified_generic_calls
 
-        return reroute_module_private_generic_calls(
-            decl, private_generics,
+        return reroute_module_qualified_generic_calls(
+            decl, qualified_generics,
             lambda call, args: ast.ModuleCall(
                 path=module_path, name=call.name, args=args, span=call.span,
             ),

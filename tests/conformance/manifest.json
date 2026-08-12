@@ -2353,6 +2353,52 @@
     ]
   },
   {
+    "id": "ch09_generic_under_generic_callee",
+    "file": "ch09_generic_under_generic_callee.vera",
+    "chapter": 9,
+    "title": "A generic where-helper under a generic parent instantiates its own generic callee (#1223, #1271)",
+    "level": "run",
+    "spec_ref": "Section 11.10.3",
+    "features": [
+      "generic_function",
+      "monomorphization",
+      "forall_where",
+      "generic_under_generic",
+      "where_block"
+    ]
+  },
+  {
+    "id": "ch09_generic_under_generic_prelude_callee",
+    "file": "ch09_generic_under_generic_prelude_callee.vera",
+    "chapter": 9,
+    "title": "A generic where-helper under a generic parent instantiates a PRELUDE generic callee (#1223, #1271)",
+    "level": "run",
+    "spec_ref": "Section 11.10.3",
+    "features": [
+      "generic_function",
+      "monomorphization",
+      "forall_where",
+      "generic_under_generic",
+      "prelude",
+      "option"
+    ]
+  },
+  {
+    "id": "ch09_generic_under_generic_depth_two",
+    "file": "ch09_generic_under_generic_depth_two.vera",
+    "chapter": 9,
+    "title": "Two levels of generic where-helper nesting under a generic parent (#1223, #1271)",
+    "level": "run",
+    "spec_ref": "Section 11.10.3",
+    "features": [
+      "generic_function",
+      "monomorphization",
+      "forall_where",
+      "generic_under_generic",
+      "nested_where"
+    ]
+  },
+  {
     "id": "ch09_generic_where_nongeneric_parent",
     "file": "ch09_generic_where_nongeneric_parent.vera",
     "chapter": 9,

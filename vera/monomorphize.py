@@ -29,6 +29,7 @@ instantiation sets in agreement.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, fields, replace
 from typing import Any, cast
@@ -36,6 +37,11 @@ from typing import Any, cast
 from vera import ast, naming
 from vera.naming import EMPTY_ALIAS_ENV, AliasEnv
 from vera.slots import effect_op_result_names, fn_slot_scope
+
+# Identifier tokens inside a rendered type name (`Map<String, Int>` →
+# `Map`, `String`, `Int`).  #1271 matches type-variable names against these
+# rather than by substring, so `Unit` never reads as a mention of `U`.
+_TYPE_NAME_TOKENS = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
 
 
 def substitute_type_vars(
@@ -574,26 +580,75 @@ def rewrite_fn_call_names(node: object, rename: dict[str, str]) -> object:
     return node
 
 
-def reroute_module_private_generic_calls(
+def module_qualified_generic_names(
+    module_program: ast.Program,
+    name_filter: set[str] | None,
+    local_fn_names: set[str],
+) -> set[str]:
+    """The module's top-level generics reached ONLY under ``mod$<path>$name``.
+
+    One predicate, shared by codegen and the verifier, for the naming rule
+    non-generic module functions already follow (``_register_shadowed_import``):
+    a module function keeps the importer's BARE name only when that name in the
+    importer's flat namespace denotes this very declaration — public, inside the
+    importer's import filter, and unshadowed by a local declaration.  Anything
+    else is qualified-only: its clones are emitted (and discovered) under
+    ``mod$<path>$name``, and every bare call to it from its own module's bodies
+    is rerouted onto that identity.
+
+    Pre-#1274 the rule for generics was ``private`` alone (#1000 / #1029), which
+    covered only the case where the bare name could not POSSIBLY denote the
+    module's generic.  The other two qualified-only cases were silently wrong:
+
+    * **public but locally shadowed** — the module's own bare call resolved to
+      the IMPORTER's same-named generic, so both modules' ``gen2`` mangled to one
+      ``gen2$Bool``, one overwrote the other, and the module ran the importer's
+      body with the module's proved contract (a false Tier-1, and invalid WASM
+      where the two clones' WAT types differ);
+    * **public but outside the import filter** — registered in no clone
+      namespace at all, so the module's own bare call assembled to an
+      ``unknown func``.
+
+    ``local_fn_names`` is the importer's occupied bare-name set (the same one
+    ``_register_shadowed_import`` consults); ``name_filter`` is ``None`` for a
+    wildcard import.
+    """
+    out: set[str] = set()
+    for tld in module_program.declarations:
+        decl = tld.decl
+        if not isinstance(decl, ast.FnDecl) or not decl.forall_vars:
+            continue
+        owns_bare_name = (
+            (tld.visibility or "private") == "public"
+            and (name_filter is None or decl.name in name_filter)
+            and decl.name not in local_fn_names
+        )
+        if not owns_bare_name:
+            out.add(decl.name)
+    return out
+
+
+def reroute_module_qualified_generic_calls(
     decl: ast.FnDecl,
-    private_generics: set[str],
+    qualified_generics: set[str],
     make_call: Callable[[ast.FnCall, tuple[ast.Expr, ...]], ast.Node],
 ) -> ast.FnDecl:
-    """Shadow-aware rewrite of bare calls to a module's PRIVATE top-level
-    generics (#1000).
+    """Shadow-aware rewrite of bare calls to a module's QUALIFIED-ONLY top-level
+    generics (#1000, widened by #1274).
 
-    An imported body (a public generic, a non-generic fn, or another private
-    generic) may transitively call one of its module's private generics by bare
-    name.  Once the importer clones or discovers that body the bare name is
-    ambiguous — the private generic is unimportable, or a same-named local
-    captures it — so each such ``FnCall`` is replaced by ``make_call(node,
+    An imported body (a generic, a non-generic fn, or another generic) may call
+    one of its module's own generics by bare name.  Once the importer clones or
+    discovers that body, the bare name is resolved in the IMPORTER's flat
+    namespace — where it denotes the module's generic only when that generic
+    owns it (see :func:`module_qualified_generic_names`).  For every generic
+    that does NOT, each such ``FnCall`` is replaced by ``make_call(node,
     rerouted_args)``: codegen builds an ``ast.ModuleCall`` (resolved by the
     desugar to the module's ``mod$<path>$name`` clone), while the verifier
     builds a name-renamed ``FnCall`` keyed to that same ``mod$…`` discovery
     base.  The SHARED shadow-aware walk is what keeps the two sides' routing (and
     thus the #732 differential) in lockstep.
 
-    Shadow-aware (PR #1029 review): a ``where``-helper sharing a private
+    Shadow-aware (PR #1029 review): a ``where``-helper sharing a module
     generic's name lexically owns the bare call for its whole scope (spec §5), so
     rerouting it would run/verify the module generic instead of the
     lexically-nearer helper (a wrong body / wrong contract).  Each ``FnDecl``
@@ -602,7 +657,7 @@ def reroute_module_private_generic_calls(
     node — including nested ``AnonFn`` / ``where`` bodies — is structurally
     preserved with its span.
     """
-    if not private_generics:
+    if not qualified_generics:
         return decl
 
     def walk(node: object, shadowed: frozenset[str]) -> object:
@@ -620,7 +675,7 @@ def reroute_module_private_generic_calls(
                 return replace(node, **changes)
             return node
         if (isinstance(node, ast.FnCall)
-                and node.name in private_generics
+                and node.name in qualified_generics
                 and node.name not in shadowed):
             new_args = tuple(
                 cast("ast.Expr", walk(a, shadowed)) for a in node.args
@@ -1205,6 +1260,11 @@ class Monomorphizer:
         # is empty outside a walk, so `Monomorphizer` stays re-entrant per
         # pass in the way its docstring promises.
         self._op_result_types: dict[str, str] = {}
+        # #1271: the type VARIABLES in scope at the point the discovery walk has
+        # reached — every enclosing ``forall`` binder, pushed and popped by
+        # `collect_calls_in_node` exactly as `_op_result_types` is.  Walk state,
+        # not context: empty outside a walk.
+        self._scope_type_vars: frozenset[str] = frozenset()
 
     def collect_calls_in_expr(
         self,
@@ -1257,12 +1317,73 @@ class Monomorphizer:
         # (walked recursively below) cannot leak its own row outwards.
         saved_ops = self._op_result_types
         self._op_result_types = self._row_op_result_types(fn)
+        # #1271: this function's own ``forall`` binders join the enclosing
+        # scope's for the whole subtree (body, contracts, `where` helpers).
+        # A helper under a generic ancestor is walked through this same door,
+        # so the set accumulates down the nesting exactly as the binders do.
+        saved_vars = self._scope_type_vars
+        self._scope_type_vars = saved_vars | frozenset(fn.forall_vars or ())
         try:
             self._collect_calls_in_node_scoped(
                 fn, generic_decls, ctor_to_adt, instances,
             )
         finally:
             self._op_result_types = saved_ops
+            self._scope_type_vars = saved_vars
+
+    def _binds_a_type_var(
+        self,
+        type_args: tuple[str, ...],
+        decl: ast.FnDecl,
+        generic_decls: dict[str, ast.FnDecl],
+    ) -> bool:
+        """Is *type_args* a phantom instantiation — one that binds a type
+        VARIABLE rather than a type (#1271)?
+
+        Discovery infers a callee's type arguments from its argument
+        expressions.  Inside a still-generic scope those expressions can be
+        typed by a variable rather than a type: ``pick(@U.1, @U.0)`` in
+        ``forall<U> fn helper`` binds ``pick``'s variable to the NAME ``U``, and
+        a callee's own declared return type can leak the same way
+        (``b(leaf(…), …)`` binds ``b``'s variable to ``leaf``'s ``W``).  Neither
+        is an instantiation: the resulting clone's parameter has no WASM type, so
+        codegen emitted it only to skip it with a loud ``[E604]``, and the
+        verifier discovered a matching phantom.  The REAL instantiation appears
+        once the enclosing scope is bound — ``helper$Bool``'s body yields
+        ``pick$Bool`` — which is why filtering here loses nothing.
+
+        A name counts as a type variable when some ``forall`` in play binds it —
+        the scope's own binders, the callee's, and those of every generic
+        discovery is keyed on — and no declaration in this namespace makes it a
+        TYPE.  That subtraction is what keeps a program whose data type happens
+        to share a binder's spelling (``data T``) instantiating normally: a name
+        that names a type is a type here, whatever some other signature calls
+        its variable.
+
+        Components are matched by identifier token, never by substring, so
+        ``Option<U>`` is phantom while ``Unit`` is not.
+        """
+        type_vars = self._scope_type_vars | frozenset(decl.forall_vars or ())
+        for gdecl in (*self.ctx.generic_decls.values(), *generic_decls.values()):
+            type_vars |= frozenset(gdecl.forall_vars or ())
+        type_vars -= self._declared_type_names()
+        if not type_vars:
+            return False
+        return any(
+            token in type_vars
+            for arg in type_args
+            for token in _TYPE_NAME_TOKENS.findall(arg)
+        )
+
+    def _declared_type_names(self) -> frozenset[str]:
+        """Every name this namespace makes a TYPE — ADTs and type aliases.
+
+        The subtrahend of the #1271 type-variable test: a `forall` binder's
+        spelling is only evidence of a variable where nothing declares it.
+        """
+        return frozenset(self.ctx.adt_tp_counts) | frozenset(
+            self.ctx.ctor_to_adt.values(),
+        ) | frozenset(self.ctx.type_aliases)
 
     def _row_op_result_types(self, fn: ast.FnDecl) -> dict[str, str]:
         """The effect-op result registry a function's declared row installs."""
@@ -1398,7 +1519,9 @@ class Monomorphizer:
             type_args = self._infer_type_args_from_args(
                 decl, node.args, ctor_to_adt, generic_decls,
             )
-            if type_args is not None:
+            if type_args is not None and not self._binds_a_type_var(
+                type_args, decl, generic_decls,
+            ):
                 instances[node.name].add(type_args)
         # #913: a generic invoked via the ``|>`` pipe — ``x |> g(…)`` — desugars
         # to ``g(x, …)`` at BOTH the checker (`_check_pipe`) and codegen
@@ -1423,7 +1546,9 @@ class Monomorphizer:
             type_args = self._infer_type_args_from_args(
                 decl, piped_args, ctor_to_adt, generic_decls,
             )
-            if type_args is not None:
+            if type_args is not None and not self._binds_a_type_var(
+                type_args, decl, generic_decls,
+            ):
                 instances[node.right.name].add(type_args)
         # #1207: a `handle[State<T>]` installs its op registry over its BODY
         # only.  The state-init expression and the clause bodies belong to the
