@@ -451,6 +451,15 @@ class TypeChecker(
         # De-dup reserved-namespace type REFERENCES (E154, #1221) — one
         # error per name, at its first mention.
         self._reported_reserved_type_refs: set[str] = set()
+        # One range verdict per integer LITERAL (E149, #1252 / PR #1282
+        # review).  Keyed by `id(node)` — per OCCURRENCE, not per value or
+        # per message, so two distinct out-of-range literals still get two
+        # errors.  Ids are stable for the run: the program holds every node
+        # alive from parse until the check finishes.  The bool records
+        # whether the verdict was contextual (it knew the target type); see
+        # `ExpressionsMixin`'s IntLit branch for why an unconstrained
+        # verdict is provisional.
+        self._literal_range_verdict: dict[int, tuple[Diagnostic, bool]] = {}
         # Monotonic counter for fresh TypeVar names (prevents
         # self-referential mappings when different ADTs share a type
         # parameter name — see #243).
@@ -493,6 +502,50 @@ class TypeChecker(
             severity=severity,
             error_code=error_code,
         ))
+
+    def _literal_range_error(
+        self, node: ast.Node, description: str, *,
+        rationale: str, fix: str, contextual: bool,
+    ) -> None:
+        """Emit E149 for *node*, keeping ONE verdict per literal.
+
+        An integer literal can be synthesised more than once — a
+        refinement predicate's operands are typed with no expected type
+        first and against the refined base afterwards — and the two
+        passes answer with different bounds, so a single mistake drew
+        two E149s naming ``@Nat (u64)`` and ``@Byte`` (PR #1282 review).
+        ``_error``'s duplicate collapse cannot see it: the messages
+        differ, which is precisely the problem.
+
+        The unconstrained pass is provisional.  It reports the u64 bound
+        because nothing has told it the target type, not because u64 is
+        the target — so a later CONTEXTUAL verdict supersedes it rather
+        than joining it, and the earlier diagnostic is withdrawn.  The
+        reverse never happens: a guess does not overrule knowledge, and
+        an unconstrained verdict arriving second is dropped.  When the
+        unconstrained verdict is the only one, it stands — that is the
+        #812 gate, and silencing it would reopen the soundness hole.
+        """
+        prior = self._literal_range_verdict.get(id(node))
+        if prior is not None:
+            earlier, was_contextual = prior
+            if was_contextual or not contextual:
+                return
+            # Contextual supersedes provisional: withdraw the guess.  Its
+            # `_seen_diag_keys` entry stays, so the withdrawn message
+            # cannot reappear from a third synthesis of the same literal.
+            if earlier in self.errors:
+                self.errors.remove(earlier)
+        before = len(self.errors)
+        self._error(
+            node, description, rationale=rationale, fix=fix,
+            spec_ref='Chapter 4, Section 4.2 "Literals"',
+            error_code="E149",
+        )
+        if len(self.errors) > before:
+            self._literal_range_verdict[id(node)] = (
+                self.errors[-1], contextual,
+            )
 
     def _source_line(self, node: ast.Node) -> str:
         """Extract source line for a node."""

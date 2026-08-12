@@ -148,9 +148,41 @@ class VerificationSession:
         resolver_errors: list[Diagnostic] = []
         if resolved_modules is None and file is not None:
             path = Path(file)
-            resolver = ModuleResolver(_root=path.parent)
-            resolved_modules = resolver.resolve_imports(program, path)
-            resolver_errors = resolver.errors
+            # The resolver roots at the directory the DOCUMENT lives in, so
+            # it may only be built when *file* names one (#1246 review).  A
+            # path-less document — an `untitled:` buffer, a non-`file:` URI,
+            # a degenerate `file:`/`file://`, the empty string — has no
+            # directory component, and `Path("untitled:Untitled-1").parent`
+            # is `.`: the process CWD.  The resolver then searched wherever
+            # the language server happened to be started, and a document
+            # that never had a path on disk pulled in whatever importable
+            # module was lying there.  Returning such a document's URI
+            # unchanged from `uri_to_path` does not fix this — `Path("file:")`
+            # is just as directory-less as `Path("")` — so the rooting
+            # decision belongs here, where every caller of this entry point
+            # gets the same rule rather than one call site getting a
+            # special case.
+            #
+            # `resolved_modules` stays empty in that case: a relative import
+            # in a document with no location CANNOT meaningfully resolve, and
+            # the E230 module-not-found warnings then say exactly that.  The
+            # directory must also EXIST — a `vscode-vfs://host/a.vera` parses
+            # to the non-existent `vscode-vfs:/host` — so the "not found"
+            # story comes from the import check rather than from a resolver
+            # rooted at a phantom.
+            # `.` is ambiguous: it is what `Path(file).parent` gives for a
+            # path-less document AND for a genuine relative one
+            # (`Path("entry.vera").parent`), whose directory really is the
+            # CWD.  `is_file()` separates them — a relative document that
+            # exists on disk keeps its siblings, which keying on the parent
+            # alone had silently taken away (PR #1282 review).
+            parent = path.parent
+            if (parent != Path(".") or path.is_file()) and parent.is_dir():
+                resolver = ModuleResolver(_root=parent)
+                resolved_modules = resolver.resolve_imports(program, path)
+                resolver_errors = resolver.errors
+            else:
+                resolved_modules = []
 
         from vera.checker import typecheck_with_artifacts
         check_diags_raw, artifacts = typecheck_with_artifacts(

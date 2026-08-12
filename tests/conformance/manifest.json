@@ -1705,6 +1705,7 @@
     "spec_ref": "Section 8.4.1",
     "expected_error": "E154",
     "features": [
+      "reserved_name",
       "reserved_type_name",
       "type_aliases",
       "prelude",
@@ -1720,6 +1721,7 @@
     "spec_ref": "Section 8.4.1",
     "expected_error": "E154",
     "features": [
+      "reserved_name",
       "reserved_type_name",
       "type_aliases",
       "prelude",
@@ -1735,8 +1737,54 @@
     "spec_ref": "Section 8.4.1",
     "expected_error": "E154",
     "features": [
+      "reserved_name",
       "reserved_type_name",
       "generics",
+      "prelude",
+      "check_error"
+    ]
+  },
+  {
+    "id": "ch08_reserved_vera_prefix_effect_rejected",
+    "file": "ch08_reserved_vera_prefix_effect_rejected.vera",
+    "chapter": 8,
+    "title": "An effect name in the prelude's reserved Vera namespace is a checker error (#1260)",
+    "level": "check",
+    "spec_ref": "Section 8.4.1",
+    "expected_error": "E154",
+    "features": [
+      "reserved_name",
+      "effect_declaration",
+      "prelude",
+      "check_error"
+    ]
+  },
+  {
+    "id": "ch08_reserved_vera_prefix_ability_rejected",
+    "file": "ch08_reserved_vera_prefix_ability_rejected.vera",
+    "chapter": 8,
+    "title": "An ability name in the prelude's reserved Vera namespace is a checker error (#1260)",
+    "level": "check",
+    "spec_ref": "Section 8.4.1",
+    "expected_error": "E154",
+    "features": [
+      "reserved_name",
+      "ability",
+      "prelude",
+      "check_error"
+    ]
+  },
+  {
+    "id": "ch08_reserved_vera_prefix_constructor_rejected",
+    "file": "ch08_reserved_vera_prefix_constructor_rejected.vera",
+    "chapter": 8,
+    "title": "A constructor name in the prelude's reserved Vera namespace is a checker error (#1260)",
+    "level": "check",
+    "spec_ref": "Section 8.4.1",
+    "expected_error": "E154",
+    "features": [
+      "reserved_name",
+      "constructor",
       "prelude",
       "check_error"
     ]

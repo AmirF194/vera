@@ -39,6 +39,8 @@ from vera.parser import parse_file
 from vera.transform import transform
 from vera.verifier import ContractVerifier
 
+from tests.module_fixture_helpers import resolved_module as _resolved_module
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Real, known-good programs that already compile + verify.  Exercise multi
@@ -405,24 +407,6 @@ def _verifier_discovered(
     return {(name, ct) for name, cts in result.items() for ct in cts}
 
 
-def _resolved_module(path: tuple[str, ...], src: str) -> object:
-    """Build a ``ResolvedModule`` from source text (shared by the cross-module
-    differential tests, which each need one or more imported modules)."""
-    from vera.resolver import ResolvedModule
-
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".vera", delete=False, encoding="utf-8",
-    ) as f:
-        f.write(src)
-        f.flush()
-        fp = f.name
-    try:
-        return ResolvedModule(
-            path=path, file_path=Path(fp),
-            program=transform(parse_file(fp)), source=src,
-        )
-    finally:
-        os.unlink(fp)
 
 
 def _cross_module_sets(
@@ -842,8 +826,6 @@ def test_imported_generic_symmetric_between_codegen_and_verifier(
     monomorphized (both empty).  Now both monomorphize; the equality assertion is
     the lockstep the #732 differential demands.
     """
-    from vera.resolver import ResolvedModule
-
     a_src = (
         "public forall<T> fn ext_id(@T -> @T)\n"
         "  requires(true) ensures(@T.result == @T.0) effects(pure)\n"
@@ -857,22 +839,7 @@ def test_imported_generic_symmetric_between_codegen_and_verifier(
         f"{{ {call} }}\n"
     )
 
-    def _resolved(path: tuple[str, ...], src: str) -> "ResolvedModule":
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".vera", delete=False, encoding="utf-8",
-        ) as f:
-            f.write(src)
-            f.flush()
-            fp = f.name
-        try:
-            return ResolvedModule(
-                path=path, file_path=Path(fp),
-                program=transform(parse_file(fp)), source=src,
-            )
-        finally:
-            os.unlink(fp)
-
-    mod_a = _resolved(("a",), a_src)
+    mod_a = _resolved_module(("a",), a_src)
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".vera", delete=False, encoding="utf-8",
     ) as f:
@@ -1542,8 +1509,6 @@ def test_generic_typearg_from_imported_constructor_is_discovered() -> None:
     ``"Bool"`` phantom default, and it discovers ``id2<Bool>`` — MISSING
     codegen's ``id2<Box>`` clone, a false Tier-1 (PR #767 review).
     """
-    from vera.resolver import ResolvedModule
-
     a_src = "public data Box<T> {\n  MkBox(T)\n}\n"
     b_src = (
         "import a;\n\n"
@@ -1555,22 +1520,7 @@ def test_generic_typearg_from_imported_constructor_is_discovered() -> None:
         "{ id2(MkBox(7)) }\n"
     )
 
-    def _resolved(path: tuple[str, ...], src: str) -> "ResolvedModule":
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".vera", delete=False, encoding="utf-8",
-        ) as f:
-            f.write(src)
-            f.flush()
-            fp = f.name
-        try:
-            return ResolvedModule(
-                path=path, file_path=Path(fp),
-                program=transform(parse_file(fp)), source=src,
-            )
-        finally:
-            os.unlink(fp)
-
-    mod_a = _resolved(("a",), a_src)
+    mod_a = _resolved_module(("a",), a_src)
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".vera", delete=False, encoding="utf-8",
     ) as f:
@@ -1618,8 +1568,6 @@ def test_generic_typearg_from_imported_function_return_is_discovered() -> None:
     ``id_g<Int>``: an ASYMMETRIC miss = false Tier-1 (verified the wrong clone).
     Differentially confirmed (PR #767 review, CodeRabbit).
     """
-    from vera.resolver import ResolvedModule
-
     a_src = (
         "public fn make_int(@Unit -> @Int)\n"
         "  requires(true) ensures(true) effects(pure)\n"
@@ -1635,22 +1583,7 @@ def test_generic_typearg_from_imported_function_return_is_discovered() -> None:
         "{ id_g(make_int(@Unit.0)) }\n"
     )
 
-    def _resolved(path: tuple[str, ...], src: str) -> "ResolvedModule":
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".vera", delete=False, encoding="utf-8",
-        ) as f:
-            f.write(src)
-            f.flush()
-            fp = f.name
-        try:
-            return ResolvedModule(
-                path=path, file_path=Path(fp),
-                program=transform(parse_file(fp)), source=src,
-            )
-        finally:
-            os.unlink(fp)
-
-    mod_a = _resolved(("a",), a_src)
+    mod_a = _resolved_module(("a",), a_src)
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".vera", delete=False, encoding="utf-8",
     ) as f:
@@ -1702,8 +1635,6 @@ def test_imported_private_shadow_fn_return_stays_symmetric() -> None:
     avoid.  This pins the symmetry so that "fix" cannot land silently, while
     asserting only agreement (not the incidental concrete type) so a later #769
     precision fix that moves BOTH sides together still passes (PR #767 review)."""
-    from vera.resolver import ResolvedModule
-
     a_src = (
         "private fn mk(@Unit -> @Bool)\n"
         "  requires(true) ensures(true) effects(pure)\n"
@@ -1728,22 +1659,7 @@ def test_imported_private_shadow_fn_return_stays_symmetric() -> None:
         "{ id_g(mk(@Unit.0)) }\n"
     )
 
-    def _resolved(path: tuple[str, ...], src: str) -> "ResolvedModule":
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".vera", delete=False, encoding="utf-8",
-        ) as f:
-            f.write(src)
-            f.flush()
-            fp = f.name
-        try:
-            return ResolvedModule(
-                path=path, file_path=Path(fp),
-                program=transform(parse_file(fp)), source=src,
-            )
-        finally:
-            os.unlink(fp)
-
-    mods = [_resolved(("a",), a_src), _resolved(("b",), b_src)]
+    mods = [_resolved_module(("a",), a_src), _resolved_module(("b",), b_src)]
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".vera", delete=False, encoding="utf-8",
     ) as f:

@@ -19,6 +19,7 @@ from tests.codegen_helpers import (
     _compile_ok,
     _run,
 )
+from tests.module_fixture_helpers import fake_resolved_module
 
 
 # =====================================================================
@@ -866,15 +867,8 @@ public fn main(@Unit -> @Int)
     def _boxes_module() -> object:
         """A resolved `boxes` module declaring `data NatBox { WrapN(Nat) }`
         for the cross-module imported-constructor guard tests (#747 site 4)."""
-        from pathlib import Path
-
-        from vera.parser import parse_to_ast
-        from vera.resolver import ResolvedModule
-
-        src = "public data NatBox {\n  WrapN(Nat)\n}\n"
-        return ResolvedModule(
-            path=("boxes",), file_path=Path("/fake/boxes.vera"),
-            program=parse_to_ast(src), source=src)
+        return fake_resolved_module(
+            ("boxes",), "public data NatBox {\n  WrapN(Nat)\n}\n")
 
     def test_imported_concrete_nat_ctor_field_guarded(self) -> None:
         """An imported concrete-@Nat constructor field emits the runtime
@@ -917,17 +911,10 @@ public fn main(@Unit -> @NatBox)
         """A resolved `natfns` module with a function taking a concrete @Nat
         formal, for the cross-module imported-function guard test (CR #756 —
         `_register_modules` must harvest the module's `_fn_nat_params`)."""
-        from pathlib import Path
-
-        from vera.parser import parse_to_ast
-        from vera.resolver import ResolvedModule
-
-        src = ("public fn boxNat(@Nat -> @Nat)\n"
-               "  requires(true) ensures(true) effects(pure)\n"
-               "{ @Nat.0 }\n")
-        return ResolvedModule(
-            path=("natfns",), file_path=Path("/fake/natfns.vera"),
-            program=parse_to_ast(src), source=src)
+        return fake_resolved_module(("natfns",), (
+            "public fn boxNat(@Nat -> @Nat)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ @Nat.0 }\n"))
 
     def test_imported_fn_nat_param_guarded(self) -> None:
         """A cross-module call into an imported function's concrete @Nat formal

@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import os
 import tempfile
-from pathlib import Path
 
 import pytest
 
@@ -32,27 +31,7 @@ from vera.codegen.api import WasmTrapError
 from vera.transform import transform
 
 from tests.codegen_helpers import _compile, _compile_ok, _run
-
-
-def _resolved(path: tuple[str, ...], source: str) -> ResolvedModule:
-    """A ``ResolvedModule`` from source text, via a real temp file.
-
-    ``delete=False`` + explicit unlink is the Windows-safe pattern (an open
-    ``NamedTemporaryFile`` cannot be reopened there).
-    """
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".vera", delete=False, encoding="utf-8",
-    ) as f:
-        f.write(source)
-        f.flush()
-        fp = f.name
-    try:
-        return ResolvedModule(
-            path=path, file_path=Path(fp),
-            program=transform(parse_file(fp)), source=source,
-        )
-    finally:
-        os.unlink(fp)
+from tests.module_fixture_helpers import resolved_module as _resolved
 
 
 def _compile_mod(

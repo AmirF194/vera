@@ -49,6 +49,7 @@ from __future__ import annotations
 from typing import Any
 
 from vera.errors import ParseError, TransformError
+from vera.lsp.convert import uri_to_path
 from vera.obligations.core import ProofObligation
 from vera.obligations.session import VerificationSession
 
@@ -121,7 +122,13 @@ def speculative_edit(
     needs ("this edit doesn't even compile").
     """
     try:
-        result = session.verify_source(text, file=uri)
+        # The pipeline is driven with the PATH, as `analyze` is (#1246):
+        # a document URI is not a path, and handing one to the resolver
+        # roots it at a directory named `file:` — or, for a path-less
+        # document, at the process CWD.  Speculating on an edit has to
+        # see the same module namespace the document's own analysis did,
+        # or the delta compares two different programs.
+        result = session.verify_source(text, file=uri_to_path(uri))
     except (ParseError, TransformError):
         return {
             "ok": False,

@@ -23,10 +23,84 @@ document text.
 
 from __future__ import annotations
 
+import urllib.parse
+import urllib.request
+from urllib.error import URLError
+
 from lsprotocol import types as lsp
 
 from vera.ast import Span
 from vera.errors import SourceLocation
+
+
+def uri_to_path(uri: str) -> str:
+    """The filesystem path an LSP document URI names, or the URI itself.
+
+    A fourth conversion at the same boundary, and the same rule: nobody
+    hand-rolls it.  LSP identifies documents by URI (``file:///a/b.vera``);
+    the compiler pipeline identifies them by path, and uses it — the
+    module resolver reads imports from ``Path(file).parent``.  Handing it
+    the raw URI made that parent the literal directory ``file:``, so a
+    document with imports resolved none of them: the entry stopped at the
+    resolver and the editor showed neither obligations nor tier hints, and
+    ``verify_source``'s early return meant the resolver's own errors were
+    not surfaced either — silently unverified (#1246 adversarial round,
+    contradicting LSP_SERVER.md's "module imports resolve from disk").
+
+    **Total by construction.**  Every caller is on the didOpen/didChange
+    path, where a raised exception escapes the request handler, so this
+    returns a string for every input and never raises.  When a URI names
+    no path this process can open, the URI is returned unchanged — an
+    opaque document label the pipeline carries but never opens, which is
+    the pre-existing behaviour and exactly what an unsaved buffer needs.
+    Four kinds of input take that route:
+
+    * a non-``file:`` scheme — ``untitled:``, a virtual filesystem, or
+      the bare labels the tests use.  Matched case-insensitively, per
+      RFC 3986 §3.1 (``FILE:///x`` is the same scheme as ``file:///x``);
+    * an authority naming another host (``file://server/share/x``).  This
+      process can only open a LOCAL file, so a remote authority names no
+      path here.  Deciding it *here* also makes the answer the same on
+      every Python: 3.14's ``url2pathname`` validates the authority and
+      raises :exc:`~urllib.error.URLError` for anything but localhost,
+      while 3.13 returned a ``//server/...`` string that on POSIX is a
+      stray local path rather than a UNC mount — so the old fold was
+      wrong on every version, and on 3.14 it took the request with it;
+    * a degenerate URI that decodes to the empty string (``file://``,
+      ``file:``), so the label the pipeline carries stays recognisably a
+      URI rather than becoming ``""``.  This does NOT by itself stop the
+      resolver rooting at the process CWD — ``Path("file:")`` is exactly
+      as directory-less as ``Path("")``, both giving ``.`` — and an
+      earlier version of this note wrongly claimed it did.  That property
+      is enforced where the resolver is built
+      (:meth:`vera.obligations.session.VerificationSession.verify_source`),
+      which is the one place every caller passes through;
+    * anything else ``url2pathname`` rejects, caught as a backstop so a
+      future validation cannot reopen the same escape.
+
+    An empty authority and ``localhost`` both mean *this* host and take
+    the normal path.  ``url2pathname`` does the percent-decoding and, on
+    Windows, the drive-letter transform (``/C:/x`` → ``C:\\x``), so no
+    separate ``unquote`` here — a second one would corrupt a path
+    containing a literal ``%``.
+    """
+    try:
+        parsed = urllib.parse.urlsplit(uri)
+    except ValueError:
+        # A malformed authority — `file://[` is "Invalid IPv6 URL" — raises
+        # out of the SPLIT, before any guard below could run.  Same escape
+        # route the `URLError` took, and the same answer: a URI this
+        # malformed names no path, so it stays an opaque label.
+        return uri
+    if parsed.scheme.lower() != "file":
+        return uri
+    if parsed.netloc and parsed.netloc.lower() != "localhost":
+        return uri
+    try:
+        path = urllib.request.url2pathname(parsed.path)
+    except URLError:
+        return uri
+    return path or uri
 
 
 class LineIndex:

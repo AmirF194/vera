@@ -18,6 +18,8 @@ Three layers, matching the #222 plan's testing strategy:
 from __future__ import annotations
 
 import json
+import os
+import pathlib
 import subprocess
 import sys
 
@@ -33,6 +35,7 @@ from vera.lsp.convert import (
     location_to_range,
     position_to_cp,
     span_to_range,
+    uri_to_path,
 )
 from vera.lsp.documents import DocumentStore
 
@@ -40,6 +43,151 @@ from vera.lsp.documents import DocumentStore
 # code point but TWO UTF-16 code units, so LSP columns after it shift
 # by one relative to Python string indices.
 ASTRAL_LINE = "ab\U0001f389cd"
+
+
+class TestUriToPath:
+    """`uri_to_path` — the fourth conversion at the LSP boundary (#1246).
+
+    LSP identifies a document by URI; the compiler identifies it by
+    path, and USES the path (the module resolver reads imports from
+    `Path(file).parent`).  Handing the pipeline a raw `file://` URI made
+    that parent the literal directory `file:`.
+    """
+
+    def test_file_uri_round_trips_a_real_path(
+        self, tmp_path: pathlib.Path,
+    ) -> None:
+        target = tmp_path / "entry.vera"
+        target.write_text("", encoding="utf-8")
+        assert uri_to_path(target.as_uri()) == str(target)
+
+    def test_percent_escapes_are_decoded_once(
+        self, tmp_path: pathlib.Path,
+    ) -> None:
+        """A space escapes to `%20`; a literal `%` escapes to `%25`.
+
+        Decoding twice would turn `a%2520b` back into `a%20b` instead of
+        the literal `a%20b` the path really holds, so the round-trip
+        through a genuinely `%`-bearing name is the case that separates
+        one unquote from two.
+        """
+        for name in ("a b.vera", "a%20b.vera"):
+            target = tmp_path / name
+            target.write_text("", encoding="utf-8")
+            assert uri_to_path(target.as_uri()) == str(target), name
+
+    def test_localhost_authority_is_not_part_of_the_path(self) -> None:
+        """`file://localhost/x` names `/x`, not `//localhost/x`."""
+        assert uri_to_path("file://localhost/tmp/x.vera") == (
+            uri_to_path("file:///tmp/x.vera")
+        )
+
+    def test_a_foreign_authority_never_raises(self) -> None:
+        """`file://host/...` names a file on ANOTHER machine (G1).
+
+        Python 3.14's `url2pathname` validates the authority and raises
+        `URLError` for anything but localhost — before the fold that was
+        meant to handle it ever ran.  `analyze` calls this outside its
+        try/except and `analyze_and_publish` has none, so the exception
+        escaped the didOpen/didChange handler and took the request with
+        it.  3.13 returned a `//host/...` string instead, which on POSIX
+        is not a UNC mount but a stray local path — so the old behaviour
+        was wrong on every version, just differently.
+
+        This process can only open a LOCAL file, so a remote authority
+        names no path here and the URI stays an opaque label — the same
+        answer on every Python and platform.
+        """
+        for uri in (
+            "file://myserver/share/x.vera",
+            "file://127.0.0.1/tmp/x.vera",
+            "file://example.com/a/b.vera",
+        ):
+            assert uri_to_path(uri) == uri, uri
+
+    def test_scheme_matching_is_case_insensitive(self) -> None:
+        """RFC 3986 §3.1: schemes are case-insensitive.
+
+        Asserted RELATIONALLY — every spelling gives the answer the
+        lowercase one gives — rather than against a literal
+        `/tmp/x.vera`, which is what `url2pathname` returns on POSIX and
+        not what it returns on Windows (`\\tmp\\x.vera`).  The property
+        is that case does not change the answer, and that is expressible
+        without naming the answer at all.  The inequality is the other
+        half: without it, three URIs all failing to convert would agree
+        with each other and satisfy the equality.
+        """
+        lowercase = uri_to_path("file:///tmp/x.vera")
+        for spelling in (
+            "FILE:///tmp/x.vera",
+            "File:///tmp/x.vera",
+            "fIlE:///tmp/x.vera",
+        ):
+            assert uri_to_path(spelling) == lowercase, spelling
+            assert uri_to_path(spelling) != spelling, spelling
+
+    def test_a_file_uri_naming_no_path_stays_opaque(self) -> None:
+        """`file://` and `file:` decode to the empty string.
+
+        This pins the returned STRING only — that a degenerate URI is
+        carried through as the opaque label it is, rather than becoming
+        `""` and looking like a path.  It does NOT stop the resolver
+        rooting at the CWD, and an earlier version of this docstring
+        claimed it did: `Path("file:")` is exactly as directory-less as
+        `Path("")`, so both give `.`.  That property is enforced at the
+        resolver root instead (`VerificationSession.verify_source`) and
+        tested by `TestPathlessDocumentIsolation` below — which is the
+        test this one was passing for the wrong reason.
+        """
+        for uri in ("file://", "file:"):
+            assert uri_to_path(uri) == uri, uri
+
+    def test_the_root_uri_is_a_path_not_a_degenerate(self) -> None:
+        """`file:///` names the root directory, and that IS a path.
+
+        The empty-decode guard must not swallow it: a root resolves
+        imports against the filesystem root, which finds nothing and
+        says so, where the CWD fallback finds whatever is lying there.
+        Pinned so the guard stays keyed on emptiness rather than on
+        "looks unlike a document".
+
+        Asserted as the PROPERTY "converted, and the result is a root",
+        not as the literal `/`: `url2pathname` returns the platform's
+        spelling, `/` on POSIX and `\\` on Windows.  A root is the path
+        that has no filename component and is its own parent, which is
+        true of both spellings.
+        """
+        result = uri_to_path("file:///")
+        assert result != "file:///"          # it converted at all
+        root = pathlib.Path(result)
+        assert root.name == "", result       # no filename component
+        assert root.parent == root, result   # a root is its own parent
+
+    def test_a_malformed_uri_never_raises(self) -> None:
+        """`urlsplit` raises `ValueError` on a bad authority (PR #1282).
+
+        `file://[` is "Invalid IPv6 URL" — and the raise happened before
+        any of the guards below, on the same didOpen/didChange path that
+        `URLError` escaped from.  Totality is the property; the value is
+        the opaque label, because a URI this malformed names no path.
+        """
+        for uri in ("file://[", "file://[::1", "file://a[b]c/x",
+                    "file://]", "file://[]"):
+            assert uri_to_path(uri) == uri, uri
+
+    def test_non_file_schemes_pass_through_unchanged(self) -> None:
+        """`untitled:` and friends name no path — pre-existing behaviour.
+
+        The pipeline carries such a label without ever opening it, which
+        is what an unsaved buffer needs.
+        """
+        for uri in ("untitled:Untitled-1", "vscode-vfs://host/a.vera",
+                    "inmemory://model/1"):
+            assert uri_to_path(uri) == uri
+
+    def test_a_bare_path_is_already_a_path(self) -> None:
+        """Tests and the CLI-adjacent callers pass plain paths."""
+        assert uri_to_path("/tmp/x.vera") == "/tmp/x.vera"
 
 
 class TestLineIndex:
@@ -342,6 +490,165 @@ class TestAnalyzeDiagnostics:
         assert "Tier 1" in hints[0].message
         assert "dec" in hints[0].message
 
+    def test_a_file_uri_document_resolves_its_imports(
+        self, tmp_path: pathlib.Path,
+    ) -> None:
+        """The shipped entry point hands `analyze` a URI, not a path.
+
+        `server.py` passes `doc.uri` straight through, and the module
+        resolver reads imports from `Path(file).parent` — which for
+        `file:///a/b.vera` is the directory `file:`.  So a document with
+        imports resolved none of them, produced ZERO obligations and
+        zero hints, and said nothing about it: `verify_source` returns
+        its resolver errors as `check_diagnostics`, which `analyze`
+        does not collect.  Silently unverified, and contradicting
+        LSP_SERVER.md's "module imports resolve from disk" (#1246
+        adversarial round).
+        """
+        lib = tmp_path / "glib.vera"
+        lib.write_text(
+            "module glib;\n"
+            "\n"
+            "public forall<T> fn pick(@T, @T -> @T)\n"
+            "  requires(true)\n"
+            "  ensures(true)\n"
+            "  effects(pure)\n"
+            "{\n"
+            "  @T.1\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        entry = tmp_path / "entry.vera"
+        entry_src = (
+            "import glib;\n"
+            "\n"
+            "public fn main(@Nat, @Nat -> @Nat)\n"
+            "  requires(true)\n"
+            "  ensures(true)\n"
+            "  effects(pure)\n"
+            "{\n"
+            "  glib::pick(@Nat.1, @Nat.0)\n"
+            "}\n"
+        )
+        entry.write_text(entry_src, encoding="utf-8")
+
+        a = analyze(VerificationSession(), entry.as_uri(), entry_src)
+        assert a.obligations, "URI document produced no obligations"
+        assert a.path == str(entry), (a.path, str(entry))
+        # `uri` still answers the client-facing question unchanged.
+        assert a.uri == entry.as_uri()
+        # And the #1246 filter works on the REAL path: `glib`'s clone is
+        # in the stream, and only `main` gets a hint here.
+        assert str(lib) in {ob.file for ob in a.obligations}
+        hints = [d for d in to_lsp_diagnostics(a) if d.code == "tier"]
+        assert [h.message.split(":")[0] for h in hints] == ["main"], [
+            h.message for h in hints
+        ]
+
+    def test_analyze_survives_every_document_uri_shape(self) -> None:
+        """The escape route G1 travelled, closed at the source.
+
+        `analyze` calls `uri_to_path` BEFORE its try/except, and
+        `analyze_and_publish` has none — so a raise here left the
+        didOpen/didChange handler rather than becoming a diagnostic.
+        A conversion on that path must be total.
+        """
+        for uri in (
+            "file://myserver/share/x.vera",
+            "file://127.0.0.1/tmp/x.vera",
+            "file://localhost/tmp/x.vera",
+            "FILE:///tmp/x.vera",
+            "file://",
+            "file:",
+            "untitled:Untitled-1",
+            "vscode-vfs://host/a.vera",
+            "",
+        ):
+            a = analyze(VerificationSession(), uri, FEATURE_SRC)
+            assert a.uri == uri, uri
+            assert isinstance(a.path, str), uri
+
+    def test_definition_still_reports_the_uri_not_the_path(self) -> None:
+        """`textDocument/definition` Locations must carry a URI.
+
+        The path is what the compiler was driven with; the URI is what
+        the client is told.  Collapsing the two would have made
+        go-to-definition return a bare filesystem path.
+        """
+        a = analyze(VerificationSession(), "file:///t.vera", FEATURE_SRC)
+        loc = definition_at(a, lsp.Position(line=5, character=14))
+        assert loc is not None
+        assert loc.uri == "file:///t.vera", loc.uri
+
+    def test_imported_modules_obligations_get_no_hint_here(
+        self, tmp_path: pathlib.Path,
+    ) -> None:
+        """A hint belongs to the document its obligations live in (#1246).
+
+        Verifying an entry program verifies the imported modules it
+        pulls in, so the obligation stream carries `glib`'s functions
+        beside the entry's own.  `publishDiagnostics` is per-URI, and
+        `glib`'s line numbers index `glib.vera` — placed in this
+        document they land on whatever text happens to occupy that
+        line, or past its end.  Before `ProofObligation.file` (#1239)
+        nothing could tell them apart.
+        """
+        lib = tmp_path / "glib.vera"
+        lib.write_text(
+            "module glib;\n"
+            "\n"
+            "public forall<T> fn pick(@T, @T -> @T)\n"
+            "  requires(true)\n"
+            "  ensures(true)\n"
+            "  effects(pure)\n"
+            "{\n"
+            "  @T.1\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        entry = tmp_path / "entry.vera"
+        entry_src = (
+            "import glib;\n"
+            "\n"
+            "public fn main(@Nat, @Nat -> @Nat)\n"
+            "  requires(true)\n"
+            "  ensures(true)\n"
+            "  effects(pure)\n"
+            "{\n"
+            "  glib::pick(@Nat.1, @Nat.0)\n"
+            "}\n"
+        )
+        entry.write_text(entry_src, encoding="utf-8")
+
+        a = analyze(VerificationSession(), str(entry), entry_src)
+        # The premise: the stream really does carry both files.
+        files = {ob.file for ob in a.obligations}
+        assert str(lib) in files, files
+        assert str(entry) in files, files
+
+        hints = [d for d in to_lsp_diagnostics(a) if d.code == "tier"]
+        assert [h.message.split(":")[0] for h in hints] == ["main"], [
+            h.message for h in hints
+        ]
+        # And the one hint that IS published still points at a line of
+        # this document rather than at a line number borrowed from it.
+        assert hints[0].range.start.line < len(entry_src.splitlines())
+
+    def test_hint_survives_an_obligation_without_a_file(self) -> None:
+        """`file=None` means "not from a verifier run", not "foreign".
+
+        Every obligation the verifier reifies from a run carries the
+        file it was given, so `None` only reaches here from a
+        hand-constructed record; dropping those would silently delete
+        a hint rather than move it.
+        """
+        a = _analyze(FEATURE_SRC)
+        assert a.obligations
+        for ob in a.obligations:
+            ob.file = None
+        hints = [d for d in to_lsp_diagnostics(a) if d.code == "tier"]
+        assert len(hints) == 1, [h.message for h in hints]
+
     def test_violated_function_gets_no_cheerful_hint(self) -> None:
         a = _analyze(
             "public fn bad(@Int -> @Int)\n"
@@ -355,6 +662,275 @@ class TestAnalyzeDiagnostics:
         codes = [d.code for d in to_lsp_diagnostics(a)]
         assert "tier" not in codes
         assert any(d.severity == "error" for d in a.diagnostics)
+
+
+class TestPathlessDocumentIsolation:
+    """A document with no path on disk is analysed ALONE (#1246 review).
+
+    The resolver roots at `Path(file).parent`, and a document that names
+    no location gives `.` — the process CWD.  So a path-less document
+    searched for imports wherever the language server was started, and
+    whatever importable module was lying there became part of it.
+    Measured, not reasoned about: the same source, analysed from a CWD
+    that holds an importable `glib.vera` and from one that does not.
+    """
+
+    LIB = (
+        "module glib;\n"
+        "\n"
+        "public forall<T> fn pick(@T, @T -> @T)\n"
+        "  requires(true)\n"
+        "  ensures(true)\n"
+        "  effects(pure)\n"
+        "{\n"
+        "  @T.1\n"
+        "}\n"
+    )
+    SRC = (
+        "import glib;\n"
+        "\n"
+        "public fn main(@Nat, @Nat -> @Nat)\n"
+        "  requires(true)\n"
+        "  ensures(true)\n"
+        "  effects(pure)\n"
+        "{\n"
+        "  glib::pick(@Nat.1, @Nat.0)\n"
+        "}\n"
+    )
+    #: Every spelling of "this document has no path".
+    PATHLESS = ("untitled:Untitled-1", "file:", "file://", "",
+                "vscode-vfs://host/a.vera")
+
+    def _analyze_from(
+        self, cwd: pathlib.Path, uri: str,
+    ) -> object:
+        original = os.getcwd()
+        os.chdir(cwd)
+        try:
+            return analyze(VerificationSession(), uri, self.SRC)
+        finally:
+            os.chdir(original)
+
+    def test_a_pathless_document_ignores_a_module_in_the_cwd(
+        self, tmp_path: pathlib.Path,
+    ) -> None:
+        """The bug, at every path-less spelling.
+
+        Asserted as "no obligation belongs to a foreign file", which is
+        the property; an obligation COUNT would also move for unrelated
+        reasons, and did — a path-less document now verifies its own
+        function instead of being short-circuited by a resolver error.
+        """
+        holds = tmp_path / "holds"
+        holds.mkdir()
+        (holds / "glib.vera").write_text(self.LIB, encoding="utf-8")
+
+        for uri in self.PATHLESS:
+            a = self._analyze_from(holds, uri)
+            foreign = sorted({
+                ob.file for ob in a.obligations
+                if ob.file is not None and "glib" in ob.file
+            })
+            assert foreign == [], (uri, foreign)
+
+    def test_the_control_directory_holds_no_module_to_find(
+        self, tmp_path: pathlib.Path,
+    ) -> None:
+        """The control the positive is measured against.
+
+        Without it, "no foreign obligations" would also hold because the
+        fixture module was never importable in the first place.
+        """
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        holds = tmp_path / "holds"
+        holds.mkdir()
+        (holds / "glib.vera").write_text(self.LIB, encoding="utf-8")
+
+        for uri in self.PATHLESS:
+            a_empty = self._analyze_from(empty, uri)
+            a_holds = self._analyze_from(holds, uri)
+            assert (
+                [ob.file for ob in a_empty.obligations]
+                == [ob.file for ob in a_holds.obligations]
+            ), uri
+
+    def test_the_module_really_is_importable_from_that_directory(
+        self, tmp_path: pathlib.Path,
+    ) -> None:
+        """The premise: a REAL path in that directory does pull it in.
+
+        This is what makes the two tests above evidence rather than a
+        pair of tautologies — if the fixture were simply unimportable,
+        they would pass with the fix reverted.
+        """
+        holds = tmp_path / "holds"
+        holds.mkdir()
+        (holds / "glib.vera").write_text(self.LIB, encoding="utf-8")
+        entry = holds / "entry.vera"
+        entry.write_text(self.SRC, encoding="utf-8")
+
+        a = analyze(VerificationSession(), entry.as_uri(), self.SRC)
+        foreign = sorted({
+            ob.file for ob in a.obligations
+            if ob.file is not None and "glib" in ob.file
+        })
+        assert foreign, [ob.file for ob in a.obligations]
+
+    def test_the_unresolved_import_is_reported_not_swallowed(
+        self, tmp_path: pathlib.Path,
+    ) -> None:
+        """Isolation must not become silence.
+
+        Dropping the modules is only honest if the import that could not
+        resolve says so — otherwise a path-less document would look
+        fully analysed while a name in it went unresolved.
+        """
+        holds = tmp_path / "holds"
+        holds.mkdir()
+        (holds / "glib.vera").write_text(self.LIB, encoding="utf-8")
+
+        for uri in self.PATHLESS:
+            a = self._analyze_from(holds, uri)
+            codes = [d.error_code for d in a.diagnostics]
+            assert "E230" in codes, (uri, codes)
+
+
+class TestRelativePathDocument:
+    """A relative path is a REAL location, and keeps its imports (#1282).
+
+    The path-less isolation rule keyed on "the parent is `.`", which is
+    true of `untitled:Untitled-1` AND of `entry.vera` — a real file
+    whose directory happens to be the process CWD.  So a genuine
+    relative-path document silently lost every import.
+    """
+
+    LIB = (
+        "module glib;\n"
+        "\n"
+        "public forall<T> fn pick(@T, @T -> @T)\n"
+        "  requires(true)\n  ensures(true)\n  effects(pure)\n"
+        "{\n  @T.1\n}\n"
+    )
+    SRC = (
+        "import glib;\n"
+        "\n"
+        "public fn main(@Nat, @Nat -> @Nat)\n"
+        "  requires(true)\n  ensures(true)\n  effects(pure)\n"
+        "{\n  glib::pick(@Nat.1, @Nat.0)\n}\n"
+    )
+
+    def test_a_relative_path_resolves_its_siblings(
+        self, tmp_path: pathlib.Path,
+    ) -> None:
+        (tmp_path / "glib.vera").write_text(self.LIB, encoding="utf-8")
+        (tmp_path / "entry.vera").write_text(self.SRC, encoding="utf-8")
+        original = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            result = VerificationSession().verify_source(
+                self.SRC, file="entry.vera",
+            )
+        finally:
+            os.chdir(original)
+        foreign = sorted({
+            ob.file for ob in result.obligations
+            if ob.file is not None and "glib" in ob.file
+        })
+        assert foreign, [ob.file for ob in result.obligations]
+
+    def test_the_absolute_spelling_agrees_with_it(
+        self, tmp_path: pathlib.Path,
+    ) -> None:
+        """Same document, two spellings, same module namespace."""
+        (tmp_path / "glib.vera").write_text(self.LIB, encoding="utf-8")
+        entry = tmp_path / "entry.vera"
+        entry.write_text(self.SRC, encoding="utf-8")
+        original = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            rel = VerificationSession().verify_source(
+                self.SRC, file="entry.vera",
+            )
+        finally:
+            os.chdir(original)
+        abs_ = VerificationSession().verify_source(self.SRC, file=str(entry))
+        assert len(rel.obligations) == len(abs_.obligations), (
+            len(rel.obligations), len(abs_.obligations))
+
+
+class TestModuleAwareDiagnosticsReachTheEditor:
+    """The module-aware check's errors must be published (#1282).
+
+    `analyze` type-checks module-BLIND and then calls `verify_source`,
+    which type-checks module-AWARE.  Only the second sees resolver
+    errors and module-typed errors, and it returns them as
+    `check_diagnostics` — which `analyze` discarded.  So a real type
+    error in a cross-module call produced a document with a warning, no
+    obligations, and no sign that anything had failed.
+    """
+
+    HDR = "  requires(true)\n  ensures(true)\n  effects(pure)\n"
+    LIB = (
+        "module glib;\n\npublic fn takes_int(@Int -> @Int)\n"
+        "  requires(true)\n  ensures(true)\n  effects(pure)\n"
+        "{ @Int.0 }\n"
+    )
+
+    def _codes(self, tmp_path: pathlib.Path, lib: str | None,
+               src: str) -> list[str | None]:
+        if lib is not None:
+            (tmp_path / "glib.vera").write_text(lib, encoding="utf-8")
+        entry = tmp_path / "entry.vera"
+        entry.write_text(src, encoding="utf-8")
+        a = analyze(VerificationSession(), entry.as_uri(), src)
+        return [d.code for d in to_lsp_diagnostics(a)]
+
+    def test_a_module_typed_error_is_published(
+        self, tmp_path: pathlib.Path,
+    ) -> None:
+        codes = self._codes(
+            tmp_path, self.LIB,
+            f'import glib;\n\npublic fn main(@Unit -> @Int)\n{self.HDR}'
+            '{ glib::takes_int("nope") }\n',
+        )
+        assert "E202" in codes, codes
+
+    def test_a_missing_module_is_published(
+        self, tmp_path: pathlib.Path,
+    ) -> None:
+        codes = self._codes(
+            tmp_path, None,
+            f'import nosuch;\n\npublic fn main(@Unit -> @Int)\n{self.HDR}'
+            '{ nosuch::f(1) }\n',
+        )
+        assert "E012" in codes, codes
+
+    def test_a_clean_document_gains_no_duplicates(
+        self, tmp_path: pathlib.Path,
+    ) -> None:
+        """Appending must not double-report what was already published.
+
+        The module-aware check re-derives the same warnings the
+        module-blind one produced, so a blind append shows each twice.
+        """
+        codes = self._codes(
+            tmp_path, self.LIB,
+            f'import glib;\n\npublic fn main(@Unit -> @Int)\n{self.HDR}'
+            '{ glib::takes_int(1) }\n',
+        )
+        assert len(codes) == len(set(codes)), codes
+
+    def test_a_missing_module_reports_each_diagnostic_once(
+        self, tmp_path: pathlib.Path,
+    ) -> None:
+        """The overlap case: E230 is on BOTH sides, E012 on one."""
+        codes = self._codes(
+            tmp_path, None,
+            f'import nosuch;\n\npublic fn main(@Unit -> @Int)\n{self.HDR}'
+            '{ nosuch::f(1) }\n',
+        )
+        assert codes.count("E230") == 1, codes
 
 
 class TestHover:
@@ -629,6 +1205,8 @@ class TestHoleCompletion:
 
 from vera.lsp.extensions import proof_delta, speculative_edit  # noqa: E402
 
+SPEC_URI = "file:///s.vera"
+
 SPEC_BASE = (
     "public fn f(@Nat -> @Nat)\n"
     "  requires(@Nat.0 >= 1)\n"
@@ -642,15 +1220,29 @@ SPEC_BASE = (
 
 class TestSpeculativeEdit:
     def _baseline(self) -> tuple[VerificationSession, list[object]]:
+        """A baseline built the way the SERVER builds one.
+
+        `vera/speculativeEdit` diffs against `server.analyses[uri]`,
+        which `analyze` produced — so the baseline is keyed on whatever
+        `analyze` passed as `file=`.  Building it here with a different
+        call, and a different `file=`, made both sides of the delta
+        agree with each other and neither agree with production: with
+        `analyze` on the path and `speculative_edit` on the raw URI, an
+        identical-text edit reported `unchanged: 0` and every obligation
+        `removed`, and this suite was green throughout (#1246 review).
+        Going through `analyze` is what makes these tests a guard.
+        """
         session = VerificationSession()
-        result = session.verify_source(SPEC_BASE, file="file:///s.vera")
-        assert result.ok
-        return session, result.obligations
+        analysis = analyze(session, SPEC_URI, SPEC_BASE)
+        assert not [d for d in analysis.diagnostics
+                    if d.severity == "error"], analysis.diagnostics
+        assert analysis.obligations
+        return session, analysis.obligations
 
     def test_identical_text_reports_all_unchanged(self) -> None:
         session, baseline = self._baseline()
         out = speculative_edit(
-            session, baseline, "file:///s.vera", SPEC_BASE,
+            session, baseline, SPEC_URI, SPEC_BASE,
         )
         assert out["ok"] is True
         assert out["proof_delta"]["unchanged"] == len(baseline)
@@ -667,7 +1259,7 @@ class TestSpeculativeEdit:
             "requires(@Nat.0 >= 1)", "requires(true)",
         )
         out = speculative_edit(
-            session, baseline, "file:///s.vera", broken,
+            session, baseline, SPEC_URI, broken,
         )
         und = out["proof_delta"]["newly_undischarged"]
         assert any(
@@ -676,7 +1268,11 @@ class TestSpeculativeEdit:
         )
         # The edit must NOT have been committed anywhere — the session
         # still replays the ORIGINAL source fully from cache.
-        again = session.verify_source(SPEC_BASE, file="file:///s.vera")
+        # Driven with the PATH, as every production caller is — the
+        # discharge cache is keyed on the obligations' `file`, so a
+        # replay probe spelling the document differently from the
+        # baseline measures the spelling rather than the cache.
+        again = session.verify_source(SPEC_BASE, file=uri_to_path(SPEC_URI))
         assert again.ok
         assert session.last_run_stats.replayed_fns >= 1
 
@@ -686,18 +1282,31 @@ class TestSpeculativeEdit:
         subtraction obligation."""
         weak = SPEC_BASE.replace("requires(@Nat.0 >= 1)", "requires(true)")
         session = VerificationSession()
-        result = session.verify_source(weak, file="file:///w.vera")
-        baseline = result.obligations
+        # Through `analyze`, as the server does: a baseline built by a
+        # second `verify_source` call spelling the document differently
+        # from the speculative side shares no obligation identities, so
+        # everything reads as newly discharged and the assertion passes
+        # whatever the delta actually says (PR #1282 review).
+        baseline = analyze(session, SPEC_URI, weak).obligations
+        assert baseline, "no baseline obligations to diff against"
         out = speculative_edit(
-            session, baseline, "file:///w.vera", SPEC_BASE,
+            session, baseline, SPEC_URI, SPEC_BASE,
         )
         dis = out["proof_delta"]["newly_discharged"]
-        assert any(i["kind"] == "nat_sub" for i in dis)
+        assert any(i["kind"] == "nat_sub" for i in dis), dis
+        # `nat_sub` is the obligation that SURVIVES the edit — same
+        # expression, same site, only its provability changes — so it
+        # must be re-proved rather than replaced.  A baseline keyed
+        # apart from the speculative run reports it as removed, which
+        # is what distinguishes the two.  (`requires` legitimately does
+        # appear in `removed`: this edit rewrites that contract.)
+        removed = out["proof_delta"]["removed"]
+        assert not any(i["kind"] == "nat_sub" for i in removed), removed
 
     def test_parse_error_reports_not_ok(self) -> None:
         session, baseline = self._baseline()
         out = speculative_edit(
-            session, baseline, "file:///s.vera", "public fn broken(",
+            session, baseline, SPEC_URI, "public fn broken(",
         )
         assert out["ok"] is False
         assert out["proof_delta"] is None
@@ -707,7 +1316,7 @@ class TestSpeculativeEdit:
         session, baseline = self._baseline()
         bad = SPEC_BASE.replace("@Nat.0 - 1", '"not a nat"')
         out = speculative_edit(
-            session, baseline, "file:///s.vera", bad,
+            session, baseline, SPEC_URI, bad,
         )
         assert out["ok"] is False
         assert out["proof_delta"] is None
@@ -716,7 +1325,7 @@ class TestSpeculativeEdit:
     def test_deleted_function_reports_removed(self) -> None:
         session, baseline = self._baseline()
         out = speculative_edit(
-            session, baseline, "file:///s.vera",
+            session, baseline, SPEC_URI,
             "public fn g(@Int -> @Int)\n"
             "  requires(true) ensures(true) effects(pure)\n"
             "{ @Int.0 }\n",

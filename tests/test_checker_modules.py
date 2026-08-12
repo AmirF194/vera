@@ -19,17 +19,144 @@ from tests.checker_helpers import (
     _check_ok,
     _errors,
 )
+from tests.module_fixture_helpers import (
+    fake_resolved_module,
+    resolved_module,
+)
+from tests.module_fixture_helpers import (
+    fake_resolved_module as _resolved_module,
+)
 
 
-def _resolved_module(path: tuple[str, ...], source: str) -> ResolvedModule:
-    """Build a ResolvedModule from source text (shared test helper)."""
-    prog = parse_to_ast(source)
-    return ResolvedModule(
-        path=path,
-        file_path=Path(f"/fake/{'/'.join(path)}.vera"),
-        program=prog,
-        source=source,
+class TestModuleFixtureBuilders:
+    """The contract `tests/module_fixture_helpers.py` documents (#1228).
+
+    Both builders delete/never create the file their `file_path` names,
+    which is safe only because nothing downstream reopens it — the
+    checker and `compile()` work off the parsed program and the
+    in-memory source.  The docstrings said `resolved_module` produced "a
+    file the pipeline can open", which was never true after the unlink
+    (PR #1282 review); this pins what IS true, so the wording cannot
+    drift back.
+    """
+
+    SRC = (
+        "module m;\n"
+        "\n"
+        "public fn f(@Int -> @Int)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ @Int.0 }\n"
     )
+
+    def test_neither_builder_leaves_a_file_behind(self) -> None:
+        real = resolved_module(("m",), self.SRC)
+        fake = fake_resolved_module(("m",), self.SRC)
+        assert not real.file_path.exists(), real.file_path
+        assert not fake.file_path.exists(), fake.file_path
+
+    def test_a_failed_write_leaves_no_temp_file(self) -> None:
+        """The cleanup contract holds even when the write fails.
+
+        `delete=False` means the file outlives the context manager, so
+        anything raising between its creation and the `try` that removes
+        it stranded the file — the one case the contract's own docstring
+        promised could not happen (PR #1282 review).  A non-`str` source
+        makes `f.write` raise inside that window without mocking.
+        """
+        import glob
+        import tempfile
+
+        pattern = str(Path(tempfile.gettempdir()) / "*.vera")
+        before = set(glob.glob(pattern))
+        with pytest.raises(TypeError):
+            resolved_module(("m",), object())  # type: ignore[arg-type]
+        assert set(glob.glob(pattern)) - before == set()
+
+    def test_the_handle_is_closed_before_every_unlink(self) -> None:
+        """Windows cannot delete a file whose handle is still open.
+
+        The failure-path cleanup added for the leak sat INSIDE the
+        `with`, so on Windows it raised `PermissionError` (WinError 32)
+        instead of removing anything — green on POSIX, red on all three
+        Windows cells (PR #1282 CI).  The property is an ordering, and
+        an ordering is observable here: record whether the handle is
+        closed at the moment each unlink is issued, on both paths.  A
+        cleanup that runs too early shows `closed=False` and would raise
+        there.
+        """
+        import pathlib as _pathlib
+        import tempfile as _tempfile
+
+        from tests import module_fixture_helpers as helpers
+
+        real_ntf = _tempfile.NamedTemporaryFile
+        real_unlink = _pathlib.Path.unlink
+        handles: list[object] = []
+        closed_at_unlink: list[bool] = []
+
+        def traced_ntf(*a: object, **kw: object) -> object:
+            handle = real_ntf(*a, **kw)  # type: ignore[arg-type]
+            handles.append(handle)
+            return handle
+
+        def traced_unlink(
+            self: _pathlib.Path, *a: object, **kw: object,
+        ) -> None:
+            closed_at_unlink.append(
+                all(h.closed for h in handles),  # type: ignore[attr-defined]
+            )
+            real_unlink(self, *a, **kw)  # type: ignore[arg-type]
+
+        helpers.tempfile.NamedTemporaryFile = traced_ntf  # type: ignore[assignment]
+        _pathlib.Path.unlink = traced_unlink  # type: ignore[assignment,method-assign]
+        try:
+            handles.clear()
+            closed_at_unlink.clear()
+            helpers.resolved_module(("m",), "module m;\n")
+            success = list(closed_at_unlink)
+
+            handles.clear()
+            closed_at_unlink.clear()
+            with pytest.raises(TypeError):
+                helpers.resolved_module(("m",), object())  # type: ignore[arg-type]
+            failure = list(closed_at_unlink)
+        finally:
+            helpers.tempfile.NamedTemporaryFile = real_ntf  # type: ignore[assignment]
+            _pathlib.Path.unlink = real_unlink  # type: ignore[method-assign]
+
+        assert success and all(success), success
+        assert failure and all(failure), failure
+
+    def test_they_differ_by_parse_provenance_not_file_existence(
+        self,
+    ) -> None:
+        """`resolved_module`'s path is realistic; `fake`'s is synthetic."""
+        real = resolved_module(("m",), self.SRC)
+        fake = fake_resolved_module(("m",), self.SRC)
+        assert real.file_path.is_absolute()
+        assert real.file_path.suffix == ".vera"
+        assert "/fake/" not in real.file_path.as_posix(), real.file_path
+        assert fake.file_path.as_posix() == "/fake/m.vera", fake.file_path
+
+    def test_a_deleted_path_still_type_checks_against_the_module(
+        self,
+    ) -> None:
+        """The reason the deletion is safe, exercised rather than asserted.
+
+        If any consumer reopened `file_path`, this would fail — the file
+        is gone by the time the importer is checked.
+        """
+        mod = resolved_module(("m",), self.SRC)
+        assert not mod.file_path.exists()
+        prog = parse_to_ast(
+            "import m;\n"
+            "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ m::f(1) }\n"
+        )
+        diags = typecheck(prog, source="", resolved_modules=[mod])
+        errors = [d for d in diags if d.severity == "error"]
+        assert not errors, [d.description for d in errors]
 
 
 # =====================================================================
@@ -882,6 +1009,13 @@ class TestReservedTypePrefix:
         diags = typecheck(parse_to_ast(source), source=source)
         return [d.error_code for d in diags]
 
+    def _diag(self, source: str) -> Diagnostic:
+        """The single E154 *source* produces (asserting there is one)."""
+        diags = typecheck(parse_to_ast(source), source=source)
+        e154 = [d for d in diags if d.error_code == "E154"]
+        assert len(e154) == 1, [(d.error_code, d.description) for d in diags]
+        return e154[0]
+
     def test_alias_spelling_a_twin_is_E154(self) -> None:
         codes = self._codes("type VeraOptionMapFn = Int;\n")
         assert "E154" in codes, codes
@@ -1003,6 +1137,142 @@ class TestReservedTypePrefix:
             )
             codes = self._codes(src)
             assert "E154" not in codes, (binder, codes)
+
+    # -----------------------------------------------------------------
+    # Effect / ability / constructor NAMES (#1260)
+    # -----------------------------------------------------------------
+
+    def test_effect_name_in_the_reserved_namespace_is_E154(self) -> None:
+        """The reservation is one rule across every declaration namespace.
+
+        #1254 left it enforced in the type namespace alone, so
+        `effect VeraZed` checked clean — half a reservation, and the one
+        namespace a future prelude-internal effect would have to claim.
+        """
+        codes = self._codes("effect VeraZed {\n  op zap(Int -> Unit);\n}\n")
+        assert "E154" in codes, codes
+
+    def test_ability_name_in_the_reserved_namespace_is_E154(self) -> None:
+        codes = self._codes("ability VeraZed {\n  op size(Int -> Int);\n}\n")
+        assert "E154" in codes, codes
+
+    def test_constructor_name_in_the_reserved_namespace_is_E154(self) -> None:
+        """A constructor is a name a program declares, in its own namespace."""
+        codes = self._codes("public data Other { VeraZed(Int) }\n")
+        assert "E154" in codes, codes
+
+    def test_reserved_constructor_is_flagged_under_a_legal_parent(self) -> None:
+        """One error per offending constructor, parent name untouched."""
+        src = "public data Other { Fine(Int), VeraZed(Int), VeraOther }\n"
+        diags = typecheck(parse_to_ast(src), source=src)
+        e154 = [d for d in diags if d.error_code == "E154"]
+        assert len(e154) == 2, [d.description for d in diags]
+        assert all("Other'" not in d.description or "VeraOther" in
+                   d.description for d in e154), [d.description for d in e154]
+
+    def test_fix_text_offers_no_alias_escape_outside_the_type_namespace(
+        self,
+    ) -> None:
+        """Principle 1: the fix must be right PER NAMESPACE (#1260).
+
+        The type-position text offers "declare an alias outside the
+        reserved namespace"; an effect, ability, or constructor has no
+        alias escape, so its fix is a rename and nothing else.
+        """
+        for src, word in (
+            ("effect VeraZed {\n  op zap(Int -> Unit);\n}\n", "Effect"),
+            ("ability VeraZed {\n  op size(Int -> Int);\n}\n", "Ability"),
+            ("public data Other { VeraZed(Int) }\n", "Constructor"),
+        ):
+            diags = typecheck(parse_to_ast(src), source=src)
+            e154 = [d for d in diags if d.error_code == "E154"]
+            assert e154, (src, [d.error_code for d in diags])
+            assert e154[0].description.startswith(word), e154[0].description
+            assert "alias" not in (e154[0].fix or ""), e154[0].fix
+            assert "Zed" in (e154[0].fix or ""), e154[0].fix
+
+    def test_rationale_is_per_rail_because_the_consequence_is(self) -> None:
+        """A diagnostic must not state a consequence that cannot happen.
+
+        The type/alias rail's rationale names a real mechanism: the
+        prelude declares six reserved ALIASES, `inject_prelude` skips
+        one whose name the program already spells, and the user
+        declaration re-types the combinators' own signatures —
+        check-green, then a WebAssembly validation failure at run.  The
+        prelude declares no effect, ability or constructor in the
+        namespace at all, so nothing there can be re-typed: with the
+        gate bypassed, `data Other { VeraZed(Int) }` compiles AND runs.
+        Those three rails state the forward reason instead (the
+        namespace is reserved ahead of use).  `check_diagnostic_fields`
+        checks a rationale is present, never that it is true, so this is
+        the only rail against the wrong one.
+        """
+        occupied = self._diag("type VeraZed = Int;\n")
+        assert "re-types those internals" in occupied.rationale
+        assert "WebAssembly validation" in occupied.rationale
+
+        for src, kind in (
+            ("effect VeraZed {\n  op zap(Int -> Unit);\n}\n", "effect"),
+            ("ability VeraZed {\n  op size(Int -> Int);\n}\n", "ability"),
+            ("public data Other { VeraZed(Int) }\n", "constructor"),
+        ):
+            d = self._diag(src)
+            assert "re-types" not in d.rationale, (kind, d.rationale)
+            assert "WebAssembly validation" not in d.rationale, (
+                kind, d.rationale)
+            assert f"declares no {kind} there today" in d.rationale, (
+                kind, d.rationale)
+            assert "reserved ahead of use" in d.rationale, (kind, d.rationale)
+        # Both variants keep the shared statement of WHAT the namespace is.
+        assert "prelude's internal namespace" in occupied.rationale
+
+    def test_the_prelude_occupies_the_type_namespace_only(self) -> None:
+        """The premise the branch above rests on, measured not assumed.
+
+        If the prelude ever declares an effect, ability or constructor
+        in the reserved namespace, the "declares no X there today"
+        rationale becomes the false one and this fails first.
+        """
+        from vera import prelude as prelude_mod
+
+        found: dict[str, set[str]] = {}
+
+        def note(kind: str, name: str) -> None:
+            if name.startswith("Vera"):
+                found.setdefault(kind, set()).add(name)
+
+        for const in dir(prelude_mod):
+            value = getattr(prelude_mod, const)
+            if not isinstance(value, str) or "Vera" not in value:
+                continue
+            try:
+                prog = parse_to_ast(value)
+            except Exception:  # noqa: BLE001 — not every constant is a program
+                continue
+            for top in prog.declarations:
+                d = top.decl
+                note(type(d).__name__, getattr(d, "name", "") or "")
+                for tp in (getattr(d, "type_params", None) or ()):
+                    note("type_param", tp)
+                for fv in (getattr(d, "forall_vars", None) or ()):
+                    note("type_param", fv)
+                if isinstance(d, ast.DataDecl):
+                    for c in d.constructors:
+                        note("Constructor", c.name)
+
+        assert set(found) == {"TypeAliasDecl", "type_param"}, found
+        assert found["TypeAliasDecl"], found
+
+    def test_ordinary_names_stay_legal_in_all_three_namespaces(self) -> None:
+        """The anchoring holds wherever the rule is applied."""
+        for name in ("Veranda", "Vera_thing", "Vera"):
+            for src in (
+                f"effect {name} {{\n  op zap(Int -> Unit);\n}}\n",
+                f"ability {name} {{\n  op size(Int -> Int);\n}}\n",
+                f"public data Other {{ {name}(Int) }}\n",
+            ):
+                codes = self._codes(src)
+                assert "E154" not in codes, (src, codes)
 
     def test_module_declaration_surfaces_E154(self) -> None:
         mod_src = "module vmod;\ntype VeraResultMapFn = Int;\n"

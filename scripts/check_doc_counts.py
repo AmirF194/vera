@@ -223,8 +223,58 @@ def check_history_row_format(history_text: str) -> list[str]:
     return errors
 
 
+def check_conformance_skip_total(root: Path) -> list[str]:
+    """Gate TESTING.md's conformance-stage skip total against its table.
+
+    The "Skipped tests" section states a total and then enumerates every
+    skipped stage, one row each — two statements of the same number, so
+    they can disagree.  They did: three check-level conformance programs
+    added six rows and the total stayed at 85 while the table said 91
+    (PR #1282 review).  Nothing read either number, which is the same
+    blind spot the corpus counts had.
+
+    Checked against the ROW COUNT rather than by running pytest: the
+    rows are what a reader is counting, the comparison is free, and the
+    suite already proves the rows match reality (a wrong row is a
+    skipped test that does not exist).  A reworded total is an error,
+    not a skip.
+    """
+    errors: list[str] = []
+    text = (root / "TESTING.md").read_text(encoding="utf-8")
+    lines = text.splitlines()
+    try:
+        start = next(i for i, ln in enumerate(lines)
+                     if ln.startswith("### Skipped tests"))
+    except StopIteration:
+        return ["TESTING.md: no '### Skipped tests' section — it moved or"
+                " was renamed, so its total is no longer gated"]
+    end = next(
+        (i for i, ln in enumerate(lines[start + 1:], start + 1)
+         if ln.startswith("## ")),
+        len(lines),
+    )
+    section = lines[start:end]
+    rows = [ln for ln in section if ln.startswith("| `test_")]
+
+    m = re.search(
+        r"skips ([\d,]+) conformance-stage tests", "\n".join(section))
+    if not m:
+        errors.append(
+            "TESTING.md: the 'skips N conformance-stage tests' sentence was"
+            " not found — it moved or was reworded, so it is no longer gated"
+        )
+    else:
+        cited = int(m.group(1).replace(",", ""))
+        if cited != len(rows):
+            errors.append(
+                f"TESTING.md conformance-stage skips: doc says {cited},"
+                f" the table below it lists {len(rows)}"
+            )
+    return errors
+
+
 def check_corpus_count(root: Path) -> list[str]:
-    """Gate the cited corpus-program count wherever TESTING.md states it.
+    """Gate the cited corpus-program count in every document that states it.
 
     The corpus is every ``*.vera`` under ``examples/`` and
     ``tests/conformance/`` **recursively** — the set
@@ -238,26 +288,61 @@ def check_corpus_count(root: Path) -> list[str]:
     cite it — the two are worded differently ("All N corpus programs" vs
     "All N ``examples/`` + ..."), so the pattern here keys on the script name
     that anchors both rows, not on the prose around the number.
+
+    TESTING.md was the only document gated, and CLAUDE.md and AGENTS.md then
+    went stale for exactly that reason: both cite the count in the comment on
+    the command that runs the script, and a fix driven by this script's own
+    output could not see them (adversarial review of PR C.6).  All three are
+    read here, each keyed on the script name.  Every pattern is anchored on
+    surrounding TEXT rather than on a bare numeral: a document-wide numeric
+    substitution is not safe, `E207` being a live example of a token this
+    count's own digits sit inside.
+
+    A citation that is reworded away is an ERROR, not a skip — a silent skip
+    is the failure mode the gate exists to prevent.  That is checked PER ROW,
+    not per document: TESTING.md cites the count twice, and a
+    "at least one row still matches" test greened while one of the two was
+    reworded into invisibility (PR #1282 review).  Each document therefore
+    declares how many citations it is expected to carry, and a mismatch in
+    either direction is reported — a citation lost to rewording, or a new one
+    added without being counted here.
     """
     errors: list[str] = []
     live = sum(
         len(list((root / d).rglob("*.vera")))
         for d in ("examples", "tests/conformance")
     )
-    testing = (root / "TESTING.md").read_text(encoding="utf-8")
-    rows = re.findall(
-        r"`check_corpus_canonical\.py`[^|\n]*\|[^|\n]*?All (\d+)\b", testing
+    # (document, pattern, expected number of citations, what it anchors on)
+    sites = (
+        # Two table rows: | `check_corpus_canonical.py` | All N ... |
+        ("TESTING.md",
+         r"`check_corpus_canonical\.py`[^|\n]*\|[^|\n]*?All (\d+)\b",
+         2, "table row"),
+        # A command-block comment: python scripts/check_corpus_canonical.py
+        # # Verify all N corpus programs ... / # All N corpus programs ...
+        ("CLAUDE.md",
+         r"check_corpus_canonical\.py[^\n]*?\ball (\d+) corpus programs",
+         1, "command comment"),
+        ("AGENTS.md",
+         r"check_corpus_canonical\.py[^\n]*?\ball (\d+) corpus programs",
+         1, "command comment"),
     )
-    if not rows:
-        errors.append(
-            "TESTING.md: no `check_corpus_canonical.py` row states a corpus"
-            " count — the rows moved or were reworded, so they are no longer gated"
-        )
-    for cited in rows:
-        if int(cited) != live:
+    for doc, pattern, expected, anchor in sites:
+        text = (root / doc).read_text(encoding="utf-8")
+        rows = re.findall(pattern, text, re.IGNORECASE)
+        if len(rows) != expected:
             errors.append(
-                f"TESTING.md corpus count: doc says {cited}, live is {live}"
+                f"{doc}: expected {expected} `check_corpus_canonical.py`"
+                f" {anchor}(s) stating a corpus count, found {len(rows)} —"
+                f" one moved or was reworded (so it is no longer gated), or"
+                f" a new citation needs adding to check_corpus_count's"
+                f" expected count"
             )
+        for cited in rows:
+            if int(cited) != live:
+                errors.append(
+                    f"{doc} corpus count: doc says {cited}, live is {live}"
+                )
     return errors
 
 
@@ -1123,6 +1208,7 @@ def main() -> int:
     # ------------------------------------------------------------------
 
     errors.extend(check_corpus_count(root))
+    errors.extend(check_conformance_skip_total(root))
 
     # ------------------------------------------------------------------
     # Report

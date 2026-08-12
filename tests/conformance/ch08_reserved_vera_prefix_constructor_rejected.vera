@@ -1,0 +1,16 @@
+-- Conformance: a constructor name in the reserved prelude namespace is a checker error (Chapter 8, Section 8.4.1)
+-- Tests: E154 — the constructor NAME namespace is reserved too (#1260).  The
+-- parent data type here is an ordinary name; it is the constructor that spells
+-- `Vera` + an uppercase letter, and the gate flags the constructor rather than
+-- the declaration around it, so the message names what has to be renamed.
+public data Other {
+  VeraZed(Int)
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  0
+}

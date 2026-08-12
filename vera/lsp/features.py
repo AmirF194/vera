@@ -39,6 +39,7 @@ from vera.lsp.convert import (
     LineIndex,
     location_to_range,
     span_to_range,
+    uri_to_path,
 )
 from vera.obligations.cache import walk_nodes
 from vera.obligations.core import ProofObligation
@@ -59,6 +60,14 @@ class Analysis:
     uri: str
     text: str
     index: LineIndex
+    #: The filesystem path ``uri`` names, and the ``file=`` the pipeline was
+    #: actually driven with (:func:`vera.lsp.convert.uri_to_path`).  Kept
+    #: beside ``uri`` rather than replacing it because the two answer
+    #: different questions: ``uri`` is what the CLIENT is told (a
+    #: ``textDocument/definition`` Location must carry a URI), ``path`` is
+    #: what the compiler was told, so it is what an obligation's or a
+    #: diagnostic's ``file`` is comparable against.
+    path: str = ""
     diagnostics: list[Diagnostic] = field(default_factory=list)
     obligations: list[ProofObligation] = field(default_factory=list)
     artifacts: CheckArtifacts | None = None
@@ -84,24 +93,50 @@ def analyze(
     from vera.transform import transform
 
     index = LineIndex(text)
-    analysis = Analysis(uri=uri, text=text, index=index)
+    # The pipeline is driven with the PATH, never the URI (#1246): the
+    # module resolver reads imports from `Path(file).parent`, and a
+    # `file://` URI makes that the directory `file:`, so a document with
+    # imports resolved none of them and was silently left unverified.
+    path = uri_to_path(uri)
+    analysis = Analysis(uri=uri, text=text, index=index, path=path)
     try:
-        program = transform(parse(text, file=uri))
+        program = transform(parse(text, file=path))
     except (ParseError, TransformError) as exc:
         analysis.diagnostics = [exc.diagnostic]
         return analysis
 
     analysis.program = program
-    check_diags, artifacts = typecheck_with_artifacts(program, text, file=uri)
+    check_diags, artifacts = typecheck_with_artifacts(program, text, file=path)
     analysis.artifacts = artifacts
     analysis.alias_env = artifacts.alias_env
     analysis.diagnostics = list(check_diags)
 
     if not any(d.severity == "error" for d in check_diags):
-        result = session.verify_source(text, file=uri)
+        result = session.verify_source(text, file=path)
+        # The check above ran module-BLIND (no `resolved_modules`), and
+        # `verify_source` re-checks module-AWARE.  Only the second sees the
+        # resolver's errors and any error that needs an imported signature
+        # to detect, and it hands them back as `check_diagnostics` — which
+        # was discarded, so `glib::takes_int("nope")` published a warning,
+        # produced no obligations, and said nothing about the E202 that had
+        # stopped verification (PR #1282 review).  Appended here, minus
+        # anything the blind check already reported: the module-aware pass
+        # re-derives those, and a straight append shows each twice.
+        seen = {_diag_key(d) for d in analysis.diagnostics}
+        analysis.diagnostics += [
+            d for d in result.check_diagnostics if _diag_key(d) not in seen
+        ]
         analysis.diagnostics += result.verify_diagnostics
         analysis.obligations = result.obligations
     return analysis
+
+
+def _diag_key(d: Diagnostic) -> tuple[object, ...]:
+    """Identity of a diagnostic for de-duplication across two passes."""
+    return (
+        d.error_code, d.severity, d.description,
+        d.location.line, d.location.column,
+    )
 
 
 def _tier_hints(analysis: Analysis) -> list[lsp.Diagnostic]:
@@ -112,9 +147,25 @@ def _tier_hints(analysis: Analysis) -> list[lsp.Diagnostic]:
     obligation site.  ``violated`` obligations already have their own
     error diagnostics, so they exclude a function from getting a
     cheerful Tier-1 hint without re-stating the failure.
+
+    Only obligations belonging to THIS document contribute (#1246).
+    Verifying an entry program verifies the modules it imports, so the
+    stream carries their functions too, and their line numbers index
+    their own files — placed here they land on whatever this document
+    happens to have on that line, or past its end.  ``publishDiagnostics``
+    is per-URI, so an imported module's hint is not this document's to
+    publish under any line.  ``file is None`` means the record came from
+    outside a verifier run (see :class:`ProofObligation`), never from
+    another module, so it keeps its hint rather than losing one silently.
+
+    The comparison is against ``analysis.path``, not ``analysis.uri``:
+    ``path`` is the ``file=`` the pipeline was given, so it is the same
+    string the verifier stamped onto every obligation it reified.
     """
     by_fn: dict[str, list[ProofObligation]] = {}
     for ob in analysis.obligations:
+        if ob.file is not None and ob.file != analysis.path:
+            continue
         by_fn.setdefault(ob.fn_name, []).append(ob)
 
     hints: list[lsp.Diagnostic] = []

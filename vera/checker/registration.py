@@ -279,28 +279,87 @@ class RegistrationMixin:
         ``MyVeraThing``) stay ordinary: the reservation is anchored at the
         start and requires an uppercase or digit follower.
         """
-        if not _RESERVED_TYPE_PREFIX_RE.match(decl.name):
-            return
         kind = "alias" if isinstance(decl, ast.TypeAliasDecl) else "data type"
-        suggestion = decl.name.removeprefix("Vera")
+        self._check_reserved_decl_name(
+            decl, decl.name, kind, prelude_occupies=True,
+        )
+
+    def _check_reserved_decl_name(
+        self, node: ast.Node, name: str, kind: str, *,
+        prelude_occupies: bool,
+    ) -> None:
+        """Emit E154 for any DECLARED name in the prelude's namespace.
+
+        The reservation is one rule, not one rule per namespace (#1260):
+        a type, an alias, an effect, an ability and a constructor all
+        name something the program declares, and all five run through
+        this single :data:`_RESERVED_TYPE_PREFIX_RE` call so the rails
+        cannot drift.  What differs per rail is what the diagnostic can
+        truthfully SAY, and both variable parts are load-bearing:
+
+        ``kind`` is the noun, and it also settles the fix.  Renaming is
+        the only escape any of these namespaces has; the alias escape the
+        reference gate offers (``_resolve_named_type``, "write the type
+        out or declare your own alias") is a type-position answer and
+        would be wrong advice for an effect, an ability or a constructor,
+        none of which can be aliased.
+
+        ``prelude_occupies`` settles the RATIONALE, because the prelude
+        does not populate all four namespaces.  It declares exactly six
+        reserved type ALIASES and five reserved type PARAMETERS
+        (``VeraOptionMapFn``, ``VeraA``/``VeraB``/…) and no effect,
+        ability or constructor at all.  So the type/alias rail can state
+        the concrete consequence — ``inject_prelude`` skips a declaration
+        whose name the program already spells, the user's declaration
+        re-types the prelude's own signatures, and the program checks
+        green then fails WebAssembly validation at run.  The other three
+        rails cannot: there is nothing there to re-type, and a
+        reserved-name constructor compiled and RAN correctly before this
+        gate existed.  Their reason is the forward one #1260 was decided
+        on (DESIGN.md principle 6): the namespace is reserved ahead of
+        use so the prelude can grow internals into it without breaking
+        programs, and so one rule means one thing everywhere rather than
+        being discoverable only by tripping over it in one namespace and
+        not the next.  Claiming the type rail's consequence here would be
+        a false statement in a diagnostic, which no automated gate can
+        catch — ``check_diagnostic_fields`` checks that a rationale is
+        PRESENT, not that it is true.
+        """
+        if not _RESERVED_TYPE_PREFIX_RE.match(name):
+            return
+        suggestion = name.removeprefix("Vera")
         if not suggestion[:1].isupper():
             # A digit follower strips to an unparseable name (`Vera0Fn`
             # -> `0Fn`); UPPER_IDENT needs a leading uppercase letter.
-            suggestion = f"My{decl.name}"
+            suggestion = f"My{name}"
+        shared = (
+            "Names beginning with 'Vera' followed by an uppercase "
+            "letter or digit are the prelude's internal namespace — "
+            "its combinators resolve through generated declarations "
+            "such as 'VeraOptionMapFn' and the type parameters "
+            "'VeraA'/'VeraB'. "
+        )
+        if prelude_occupies:
+            because = (
+                "A user declaration under such a name re-types those "
+                "internals: the program still type-checks, then fails "
+                "WebAssembly validation when it runs. Vera reserves the "
+                "namespace outright so the mistake is refused where it "
+                "is written."
+            )
+        else:
+            because = (
+                f"The prelude declares no {kind} there today, so this "
+                f"one collides with nothing yet — the namespace is "
+                f"reserved ahead of use, in every declaration namespace, "
+                f"so the prelude can grow internals into it without "
+                f"breaking programs and so the rule means the same thing "
+                f"wherever a name is declared."
+            )
         self._error(
-            decl,
-            f"{kind.capitalize()} name '{decl.name}' is reserved for the prelude.",
-            rationale=(
-                "Names beginning with 'Vera' followed by an uppercase "
-                "letter or digit are the prelude's internal namespace — "
-                "its combinators resolve through generated declarations "
-                "such as 'VeraOptionMapFn' and the type parameters "
-                "'VeraA'/'VeraB'. A user declaration under such a name "
-                "re-types those internals: the program still type-checks, "
-                "then fails WebAssembly validation when it runs. Vera "
-                "reserves the namespace outright so the mistake is "
-                "refused where it is written."
-            ),
+            node,
+            f"{kind.capitalize()} name '{name}' is reserved for the prelude.",
+            rationale=shared + because,
             fix=(
                 f"Rename the {kind} — any name not starting with 'Vera' "
                 f"plus an uppercase letter or digit works (for example "
@@ -332,8 +391,10 @@ class RegistrationMixin:
         variables (and a ``where`` helper's own, one scope deeper — the
         recursion mirrors :meth:`_check_reserved_fn_name`'s), and the type
         parameters of ``data``, ``type``, ``effect`` and ``ability``
-        declarations.  This is the type namespace only; the effect, ability
-        and constructor NAME namespaces are deliberately untouched here.
+        declarations.  This gate covers BINDERS; the names those same
+        declarations introduce — type, alias, effect, ability and
+        constructor alike — go through :meth:`_check_reserved_decl_name`
+        (#1260), on the same regex.
         """
         if isinstance(decl, ast.FnDecl):
             binders = decl.forall_vars or ()
@@ -679,6 +740,9 @@ class RegistrationMixin:
 
         ctors: dict[str, ConstructorInfo] = {}
         for ctor in decl.constructors:
+            self._check_reserved_decl_name(
+                ctor, ctor.name, "constructor", prelude_occupies=False,
+            )
             field_types = None
             if ctor.fields is not None:
                 field_types = tuple(
@@ -725,6 +789,9 @@ class RegistrationMixin:
 
     def _register_effect(self, decl: ast.EffectDecl) -> None:
         """Register an effect and its operations."""
+        self._check_reserved_decl_name(
+            decl, decl.name, "effect", prelude_occupies=False,
+        )
         self._check_reserved_type_params(decl)
         saved_params = dict(self.env.type_params)
         if decl.type_params:
@@ -752,6 +819,9 @@ class RegistrationMixin:
 
     def _register_ability(self, decl: ast.AbilityDecl) -> None:
         """Register an ability and its operations."""
+        self._check_reserved_decl_name(
+            decl, decl.name, "ability", prelude_occupies=False,
+        )
         self._check_reserved_type_params(decl)
         saved_params = dict(self.env.type_params)
         if decl.type_params:
