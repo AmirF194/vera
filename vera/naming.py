@@ -681,8 +681,13 @@ def family_name(
 
     *fallback* is returned when there is no type expression and when the
     resolution has no nameable family — a top-level function type, or an
-    unresolvable type.  Both are shapes ``_register_state_cell`` /
-    ``_register_exn_tag`` already refuse (E607 / E612), so the fallback's
+    unresolvable type.  Both are refused DOWNSTREAM, though not at the same
+    gate: the unresolvable one at ``_register_state_cell`` /
+    ``_register_exn_tag`` (E607 / E612), which never reaches this renderer,
+    while a bare function type maps to ``i32`` and so passes that gate,
+    gets named here, and is refused when its enclosing function is dropped
+    (E616 at the closure read, then E602 / E620).  Either way nothing that
+    reaches a running program rests on the name, so the fallback's
     only remaining job is to keep two such spellings apart rather than
     merging them onto one ``fn(…)`` or ``?``; see
     :func:`~vera.slots.family_fallback_name`.

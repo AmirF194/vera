@@ -2415,7 +2415,23 @@ class CallsHandlersMixin:
         Deliberately conservative — an unrecognized shape answers ``False`` and
         keeps the pre-existing lowering — because the answer authorizes an
         ``unreachable``, and a wrong ``True`` would trap a program that runs.
+
+        A non-``Exn`` handler is one such shape, and it arrives here:
+        ``_expr_always_throws`` routes EVERY nested ``HandleExpr`` to this
+        method, so a ``handle[State<T>]`` was analysed as an Exn one and its
+        body evaluated with ``throw_installed=True`` — a claim that a bare
+        ``throw`` there IS this handler's operation, which a handler
+        installing ``get``/``put`` does not make true.  Nothing reached a
+        wrong ``True`` (a lowerable State clause body carries a tail
+        ``resume(...)``, for which ``_expr_always_throws`` is ``False``, so
+        the ``all(...)`` leg failed first), but that rested on the
+        clause-lowering shape rule rather than on this predicate.  Asking the
+        question the method's name asks puts the stated invariant back
+        (PR #1283 review).
         """
+        if (not isinstance(expr.effect, ast.EffectRef)
+                or expr.effect.name != "Exn"):
+            return False
         return bool(expr.clauses) and self._expr_always_throws(
             expr.body, throw_installed=True,
         ) and all(

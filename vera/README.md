@@ -116,7 +116,7 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | ` └ html_serde.py` | 261 | | WASM memory marshalling for HtmlNode ADT | |
 | `markdown.py` | 651 | Compile | Python Markdown parser/renderer (§9.7.3 subset) | `parse_markdown()`, `render_markdown()`, `has_heading()`, `has_code_block()`, `extract_code_blocks()` |
 | `obligations/` | 725 | Verify | Reified proof obligations + warm incremental session (#222 A/B) | `ProofObligation`, `VerificationSession` |
-| `  core.py` | 170 | | ProofObligation record: identity (content_key) + discharge outcome | |
+| `  core.py` | 198 | | ProofObligation record: identity (content_key) + discharge outcome | |
 | `  cache.py` | 219 | | Invalidation keys (structural/callee/context hashes), DischargeCache | |
 | `  session.py` | 311 | | Warm-Z3 daemon: per-function replay vs re-verify in declaration order | |
 | `lsp/` | 1,420 | Serve | Language Server Protocol over stdio (#222 C/D/E/F) | `create_server()`, `vera lsp` |
@@ -133,7 +133,7 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `  modules.py` | 1,241 | | Cross-module registration + call detection (C7e), per-module alias + source scopes (#1111/#1186) — `_module_alias_scope` swaps the alias maps *and* the `AliasEnv` every codegen rendering goes through as one pair (#1208) | |
 | `  registration.py` | 499 | | Pass 1 forward declarations, ADT layout | |
 | `  monomorphize.py` | 1,408 | | Generic instantiation, type inference, ability constraint checking (Pass 1.5) | |
-| `  functions.py` | 1,276 | | Function body compilation, GC prologue/epilogue (Pass 2) | |
+| `  functions.py` | 1,430 | | Function body compilation, GC prologue/epilogue (Pass 2) | |
 | `  tail_position.py` | 106 | | Tail-position analysis for the function body compiler | |
 | `  closures.py` | 1,037 | | Closure lifting, GC instrumentation | |
 | `  contracts.py` | 1,332 | | Runtime pre/postconditions, old state snapshots, decreases termination guard (entry check-and-set, per-function chain state, ADT rank helpers, self-tail site checks); the refinement boundary guard derives its binder from `naming.refinement_binder_parts` and layers the erased-base skip and the nested-base E618 on top.  Also the ONE derivation of what that guard layer lowers — `_tuple_component_guard_sites` decomposes a boundary tuple for the emitter, the return-epilogue gate and the host-import pre-scan alike, and `_signature_refinement_predicates` enumerates every predicate a signature will be guarded by (#1210) | |
@@ -588,7 +588,7 @@ The WASM import interface is the portability contract: the compiled `.wasm` bina
 
 ### Browser runtime
 
-`browser/runtime.mjs` is a self-contained JavaScript runtime (~3,272 lines) that provides JavaScript implementations of all Vera host bindings. It works with **any** compiled Vera `.wasm` module — no code generation needed.
+`browser/runtime.mjs` is a self-contained JavaScript runtime (~3,303 lines) that provides JavaScript implementations of all Vera host bindings. It works with **any** compiled Vera `.wasm` module — no code generation needed.
 
 **Dynamic import introspection:** Instead of generating per-program glue code, the runtime uses `WebAssembly.Module.imports(module)` at initialization to discover which host functions the module actually needs, then builds the import object dynamically. State\<T\> types are pattern-matched from `state_get_*`/`state_put_*` import names.
 
@@ -751,7 +751,7 @@ The `ERROR_CODES` dict in `errors.py` maps every code to a short description (15
 
 ## Test Suite
 
-Testing spans a **pytest suite** of 10,303 tests across 160 files — compiler-internals unit tests plus a **conformance suite** (213 programs in `tests/conformance/` validating every language feature against the spec) and **example programs** (42 end-to-end demos). The conformance suite is the definitive specification artifact — each program tests one feature and serves as a minimal working example.
+Testing spans a **pytest suite** of 10,313 tests across 160 files — compiler-internals unit tests plus a **conformance suite** (213 programs in `tests/conformance/` validating every language feature against the spec) and **example programs** (42 end-to-end demos). The conformance suite is the definitive specification artifact — each program tests one feature and serves as a minimal working example.
 
 See **[TESTING.md](../TESTING.md)** for the comprehensive testing reference -- test file table, conformance suite details, compiler code coverage, language feature coverage, helper conventions, validation scripts, CI pipeline, and guidelines for adding tests.
 

@@ -80,10 +80,14 @@ private fn caller(@Nat, @Nat -> @Nat)
         # loudly (E532) rather than vanishing (#1236) — the call is in fact
         # safe (the swapped arguments compensate for the De Bruijn order), so
         # this is the conservative direction, not a caught violation.
+        # The code is pinned, not just the kind and status: "demotes loudly
+        # (E532)" is the claim above, and a demotion that drifted to another
+        # code — or lost its code entirely, which is the #1236 shape — would
+        # otherwise leave this green (PR #1283 review).
         assert [
-            (o.kind, o.status) for o in result.obligations
+            (o.kind, o.status, o.error_code) for o in result.obligations
             if o.status in ("tier3", "timeout")
-        ] == [("call_pre", "tier3")], [
+        ] == [("call_pre", "tier3", "E532")], [
             (o.fn_name, o.kind, o.status, o.error_code)
             for o in result.obligations
         ]

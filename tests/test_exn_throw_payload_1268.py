@@ -104,9 +104,10 @@ class TestTheThrowPayloadIsObligated:
                        handler_body="@Int.0")
         # `boom(0 - 5)` is not a @Nat argument, so drive the call directly.
         src = src.replace("boom((0 - 5))", "boom(5)")
-        coerce = [o for o in _verify(src).obligations
+        result = _verify(src)
+        coerce = [o for o in result.obligations
                   if o.kind == "nat_to_int_coerce"]
-        assert coerce, [o.kind for o in _verify(src).obligations]
+        assert coerce, [o.kind for o in result.obligations]
 
 
 class TestTheConcreteGateReachesTheThrowPayload:

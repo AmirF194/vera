@@ -408,8 +408,10 @@ class ResolutionMixin:
         The #309 / #1160 provenance resolvers in :mod:`vera.checker.sql` need
         to look bindings up, and must do it with the CHECKER's renderer, not
         the syntactic one in :mod:`vera.slots`.  Binding keys resolve their
-        type arguments (``_type_expr_to_slot_name`` → ``canonical_type_name``
-        over resolved args), so a syntactic render of ``@Array<Option<Txt>>``
+        type arguments (``_type_expr_to_slot_name`` →
+        :func:`vera.naming.slot_name`: a syntactic head over resolved
+        arguments, since #1208 routed both sides through the one renderer),
+        so a syntactic render of ``@Array<Option<Txt>>``
         where ``type Txt = String`` yields ``Array<Option<Txt>>`` and matches
         the ``Array<Option<String>>`` key not at all.  A miss reads as "not
         statically known", so the check would silently do nothing — the exact

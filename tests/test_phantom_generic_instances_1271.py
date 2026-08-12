@@ -98,6 +98,14 @@ _CONCRETE_REQUIRED = {
     "nongeneric_parent_control": "pick$Bool",
     "mutual_recursion": "leaf$Bool",
 }
+# `_CASES` is imported from another file, so a label REMOVED there would
+# silently strand its entry here and take the "the filter removed the REAL
+# instantiation too" assertion for that shape with it — no test turning red.
+# (A label ADDED there is already loud: `_CONCRETE_REQUIRED[label]` raises.)
+assert {label for label, _ in _ALL_CASES} == set(_CONCRETE_REQUIRED), (
+    "the required-concrete-clone map drifted from the case set: "
+    f"{sorted({label for label, _ in _ALL_CASES} ^ set(_CONCRETE_REQUIRED))}"
+)
 
 
 def _compile_spied(source: str) -> tuple[CompileResult, set[str]]:

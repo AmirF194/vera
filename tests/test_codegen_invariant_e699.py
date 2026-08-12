@@ -214,3 +214,53 @@ def test_postcondition_invariant_error_surfaces_as_e699(monkeypatch) -> None:
     )
     assert e699[0].severity == "error"
     assert "Internal compiler error" in e699[0].description
+
+
+_OLD_NON_STATE = """\
+private fn bump(@Unit -> @Unit)
+  requires(true)
+  ensures(old(IO))
+  effects(<IO>)
+{
+  IO.print("x")
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<IO>)
+{
+  bump(());
+  7
+}
+"""
+
+
+def test_old_of_a_non_state_effect_surfaces_as_e699() -> None:
+    """The snapshot boundary completes the net (PR #1283 review).
+
+    Unlike its three siblings above this needs no monkeypatch: the source
+    is `check`-green.  `old(E)` is typed `UnknownType`, which satisfies a
+    `Bool` postcondition, so `ensures(old(IO))` reaches
+    `_collect_old_types`, and `state_type_arg` raises
+    `CodegenInvariantError` ("State type ref name is not 'State'") for an
+    effect reference that is not `State<T>`.
+
+    The `_snapshot_old_state` boundary in `_compile_fn` caught `CodegenSkip`
+    ALONE, while the precondition and `decreases` boundaries either side of
+    it catch `CodegenInvariantError` too — so this one raise escaped as a
+    raw Python traceback from `vera compile` on a program `vera check`
+    accepts.  The assertion is that SOMETHING structured comes back; the
+    `pytest.raises`-free call is the actual regression guard, since the
+    pre-fix failure was the compile call itself blowing up.
+    """
+    result = _compile_source(_OLD_NON_STATE)
+
+    e699 = [d for d in result.diagnostics if d.error_code == "E699"]
+    assert e699, (
+        "expected an [E699] from the old-state snapshot boundary; got "
+        f"{[(d.error_code, d.severity) for d in result.diagnostics]}"
+    )
+    assert e699[0].severity == "error"
+    assert "Internal compiler error" in e699[0].description
+    assert "bump" in e699[0].description, e699[0].description

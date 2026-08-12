@@ -186,6 +186,10 @@ _QUALIFIED_IN_CLAUSE = _PUT_IN_PUT_CLAUSE.replace(
     "put(@Nat) -> { put(1000); resume(()) }",
     "put(@Nat) -> { State.put(1000); resume(()) }",
 )
+assert _QUALIFIED_IN_CLAUSE != _PUT_IN_PUT_CLAUSE, (
+    "the qualified-spelling fixture no longer derives from the bare one — "
+    "the bare clause body's spelling changed"
+)
 
 # --- a nested handle expression INSIDE a clause body -----------------
 # The nested handle owns its own registries: its body's get(()) reads ITS

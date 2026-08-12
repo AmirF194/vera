@@ -36,7 +36,6 @@ it, from "nothing spurious is registered" to "what is lowered is declared".
 from __future__ import annotations
 
 import threading
-import time
 
 import pytest
 
@@ -458,10 +457,15 @@ def _compile_within(source: str, budget_s: float) -> object:
             err.append(exc)
 
     t = threading.Thread(target=_work, daemon=True)
-    start = time.monotonic()
     t.start()
+    # `join` returns either when the worker dies or after the budget, so
+    # `is_alive()` IS the hang verdict.  A second `elapsed < budget_s`
+    # assertion after it could never catch a hang this misses — it is
+    # reachable only once the worker has completed — and could only ever go
+    # red on the race where the worker finishes between `join` returning at
+    # the budget and this check, reporting a bare float instead of the
+    # message below (PR #1283 review).
     t.join(budget_s)
-    elapsed = time.monotonic() - start
     if t.is_alive():
         pytest.fail(
             f"compile did not terminate within {budget_s}s (#1234: the "
@@ -469,7 +473,6 @@ def _compile_within(source: str, budget_s: float) -> object:
         )
     if err:
         raise err[0]
-    assert elapsed < budget_s, elapsed
     return box[0]
 
 

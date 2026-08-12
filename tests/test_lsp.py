@@ -858,6 +858,66 @@ class TestRelativePathDocument:
         assert len(rel.obligations) == len(abs_.obligations), (
             len(rel.obligations), len(abs_.obligations))
 
+    #: (label, `file` spelling relative to the CWD, does it exist on disk,
+    #: must the resolver root at a directory).  The four-way discrimination
+    #: `(parent != "." or path.is_file()) and parent.is_dir()` makes, one
+    #: row per branch it can take.
+    ROOTING_TABLE = (
+        ("absolute_on_disk", "<abs>", True, True),
+        ("relative_on_disk", "entry.vera", True, True),
+        ("relative_absent", "entry.vera", False, False),
+        ("untitled_buffer", "untitled:Untitled-1", False, False),
+        ("phantom_vfs_root", "vscode-vfs:/host/a.vera", False, False),
+        ("degenerate_file_scheme", "", False, False),
+    )
+
+    @pytest.mark.parametrize(
+        ("label", "spelling", "on_disk", "roots"),
+        ROOTING_TABLE, ids=[r[0] for r in ROOTING_TABLE],
+    )
+    def test_the_resolver_roots_only_at_a_real_directory(
+        self, tmp_path: pathlib.Path, label: str, spelling: str,
+        on_disk: bool, roots: bool,
+    ) -> None:
+        """One table over the guard's four branches (PR #1283 review).
+
+        The `path.is_file()` disjunct exists because keying on the parent
+        alone took the siblings away from a genuine relative document — a
+        regression caught by review rather than by a test, on the didChange
+        path.  `relative_absent` is the row that distinguishes the two: same
+        `.` parent as a real relative document, no file behind it.
+
+        The degradation is asserted as a decision, not left implicit: where
+        the resolver does not root, `resolver_errors` stays empty, so E011 /
+        E012 / E013 are never produced and the module-not-found story comes
+        from E230 alone.
+        """
+        (tmp_path / "glib.vera").write_text(self.LIB, encoding="utf-8")
+        if on_disk:
+            (tmp_path / "entry.vera").write_text(self.SRC, encoding="utf-8")
+        file = (
+            str(tmp_path / "entry.vera") if spelling == "<abs>" else spelling
+        )
+        original = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            result = VerificationSession().verify_source(self.SRC, file=file)
+        finally:
+            os.chdir(original)
+
+        reached = any(
+            ob.file is not None and "glib" in ob.file
+            for ob in result.obligations
+        )
+        assert reached is roots, (label, [ob.file for ob in result.obligations])
+        codes = [d.error_code for d in result.check_diagnostics]
+        if roots:
+            assert "E230" not in codes, (label, codes)
+        else:
+            # E230 (the import check) and NOT a resolver diagnostic.
+            assert "E230" in codes, (label, codes)
+            assert not ({"E011", "E012", "E013"} & set(codes)), (label, codes)
+
 
 class TestModuleAwareDiagnosticsReachTheEditor:
     """The module-aware check's errors must be published (#1282).

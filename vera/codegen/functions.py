@@ -828,6 +828,30 @@ class FunctionCompilationMixin:
         # would degrade a skip to a diagnostic.
         try:
             snapshot_instrs = self._snapshot_old_state(ctx, decl)
+        except CodegenInvariantError as inv:  # PR #1283 review
+            # The arm this boundary was missing.  `state_type_arg` raises
+            # `CodegenInvariantError`, not `CodegenSkip`, for an `old(E)`
+            # whose `E` is not `State<T>` — and the checker types `old(E)`
+            # as `UnknownType`, which satisfies a `Bool` postcondition, so
+            # `ensures(old(IO))` is check-green and reached this raise.  A
+            # `CodegenSkip`-only net let it escape `_compile_fn` as a raw
+            # traceback: exactly the #939 gap, one boundary over.  Mirrors
+            # the precondition and `decreases` arms above — one loud [E699],
+            # attributed as a compiler bug.  MUST precede the `CodegenSkip`
+            # catch below only if it were a subclass; it is not, so order is
+            # free and this reads in raise-severity order.
+            self._harvest_interp_inference_failures(ctx)
+            self._error(
+                inv.node if inv.node is not None else decl,
+                f"Internal compiler error while compiling '{decl.name}': "
+                f"{inv.msg}",
+                rationale="This is a codegen invariant violation — the type "
+                "checker should have rejected the input before it reached "
+                "this point.  Please file a bug report with the offending "
+                "program.",
+                error_code="E699",
+            )
+            return None
         except CodegenSkip as skip:
             self._harvest_interp_inference_failures(ctx)
             self._warning(

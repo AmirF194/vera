@@ -1707,7 +1707,7 @@
     "features": [
       "reserved_name",
       "reserved_type_name",
-      "type_aliases",
+      "type_alias",
       "prelude",
       "check_error"
     ]
@@ -1723,7 +1723,7 @@
     "features": [
       "reserved_name",
       "reserved_type_name",
-      "type_aliases",
+      "type_alias",
       "prelude",
       "check_error"
     ]

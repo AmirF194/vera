@@ -1,5 +1,5 @@
 <svg width="920" height="782" viewBox="0 0 920 782" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title">
-  <title id="title">Vera compiler architecture: the compilation pipeline from source to WebAssembly, with the verify/compile fork, the warm-verification sidecar, and the three execution targets</title>
+  <title id="title">Vera compiler architecture: the compilation pipeline from source to WebAssembly, with the verify/compile fork, the warm-verification sidecar, the three execution targets, and naming.py as the one renderer every later stage asks for slot names and State/Exn families</title>
   <!--
     Hand-authored. Design system (from the house app style):
       panel #faf9f7 / border #e8e6e1 / radius 14 · cards #fff radius 10, 4px left accent

@@ -325,8 +325,10 @@ public fn run(-> @Result<Int, String>)
         """A type alias *inside a type argument* must not disable the check.
 
         The checker keys bindings by the alias-RESOLVED name
-        (`_type_expr_to_slot_name` -> `canonical_type_name` over resolved
-        args), so a lookup that renders the surface syntax finds nothing,
+        (`_type_expr_to_slot_name` -> `vera.naming.slot_name`: a syntactic
+        head over resolved arguments, since #1208 routed both sides through
+        the one renderer), so a lookup that renders the surface syntax finds
+        nothing,
         returns None, and defers — silently.  That is the #1160 bug class one
         level down, and it type-checks completely clean, so no other
         diagnostic hints at it.  Both resolvers therefore use the checker's

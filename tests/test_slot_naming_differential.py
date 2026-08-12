@@ -614,17 +614,6 @@ where {
   }
 }
 """),
-    # A former PRELUDE alias name in argument position (#1208 review, probe
-    # x01).  The checker never registers the prelude's type aliases —
-    # `inject_prelude` runs at codegen and at the verifier's mono discovery,
-    # not at check — so `ArrayMapFn<Int, Bool>` is an opaque ADT here and stays
-    # apart from the spelled-out function type beside it.  Swept so the
-    # CHECKER-side answer is pinned: it is the one every naming consumer keys
-    # off, and codegen's view of the same spelling used to differ — the #1221
-    # divergence, closed by moving the prelude's own aliases into the reserved
-    # `Vera` namespace (see `TestPreludeAliasesAreCodegenInternal` in
-    # tests/test_naming_env_provenance_1208.py), which leaves these six
-    # spellings as ordinary unknown names both sides render this way.
     # The effect-row corners of the argument-position rendering (#1208
     # review): a QUALIFIED effect reference (`Module.Effect`, the
     # `qualified_effect_ref` grammar rule) and an effect ROW VARIABLE, both
@@ -645,6 +634,17 @@ public forall<E> fn b26(
   1
 }
 """),
+    # A former PRELUDE alias name in argument position (#1208 review, probe
+    # x01).  The checker never registers the prelude's type aliases —
+    # `inject_prelude` runs at codegen and at the verifier's mono discovery,
+    # not at check — so `ArrayMapFn<Int, Bool>` is an opaque ADT here and stays
+    # apart from the spelled-out function type beside it.  Swept so the
+    # CHECKER-side answer is pinned: it is the one every naming consumer keys
+    # off, and codegen's view of the same spelling used to differ — the #1221
+    # divergence, closed by moving the prelude's own aliases into the reserved
+    # `Vera` namespace (see `TestPreludeAliasesAreCodegenInternal` in
+    # tests/test_naming_env_provenance_1208.py), which leaves these four
+    # spellings as ordinary unknown names both sides render this way.
     ("prelude_alias_in_arg", """\
 public fn b25(
   @Option<ArrayMapFn<Int, Bool>>,

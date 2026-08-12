@@ -795,7 +795,10 @@ def inject_prelude(program: ast.Program) -> str:
       or shadows the function names.
     - The closure-parameter type aliases the injected combinators
       resolve through (``VeraOptionMapFn``, ``VeraArrayMapFn``, …) —
-      injected with those bodies and never skipped.  Their names are
+      injected exactly when those bodies are, and never skipped for a
+      SHADOWING reason (the Option and Result blocks still ride their
+      combinators' own conditions; the Array block has no combinator
+      prerequisite and is appended unconditionally).  Their names are
       in the prelude's reserved ``Vera`` namespace (#869/#1184/#1221),
       which E154 keeps user programs out of, so nothing a user
       declares can re-type them and no user-written type expression
@@ -836,10 +839,12 @@ def inject_prelude(program: ast.Program) -> str:
     # prelude injection is a one-line change.
     array_fn_names: set[str] = set()
 
-    # The alias blocks are injected with the bodies that resolve through
-    # them, unconditionally: their names are in the reserved prelude
-    # namespace (#1221), which no user declaration may take, so there is
-    # no shadowing case to skip an injection for.
+    # The alias blocks ride the bodies that resolve through them — no
+    # injection is ever skipped for SHADOWING, because their names are in
+    # the reserved prelude namespace (#1221), which no user declaration may
+    # take, so there is no shadowing case to skip an injection for.  The
+    # combinator conditions below still apply: an absent alias is inert
+    # when the bodies that would resolve through it are absent too.
     if (inject_option_combinators
             and not option_fn_names.issubset(user_names)):
         source_parts.append(_OPTION_TYPE_ALIASES)

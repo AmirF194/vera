@@ -1399,8 +1399,14 @@ class Monomorphizer:
         self.ctx = ctx
         # #1207: the effect-op result-type registry IN SCOPE at the point the
         # discovery walk has reached — the discovery-side twin of codegen's
-        # `_effect_op_result_vera`, replaced (not merged) at each `handle`
-        # exactly as `_translate_handle_state` replaces it, and seeded from a
+        # `_effect_op_result_vera`, MERGED over the enclosing registry at each
+        # `handle` exactly as `_translate_handle_state` merges it — an inner
+        # mapping overwrites a same-name outer one, an absent inner mapping
+        # leaves the outer one answering.  See the `HandleExpr` arm in
+        # `_collect_calls` for why the merge is load-bearing: an `Exn` handler
+        # nested in a `State<Nat>` one must leave the enclosing result type in
+        # scope, or discovery names `pick$Int` against the rewrite's
+        # `pick$Nat` (#1207).  Seeded from a
         # function's declared effect row by `collect_calls_in_node`.  Walk
         # state, not context: it is pushed and popped by `_collect_calls` and
         # is empty outside a walk, so `Monomorphizer` stays re-entrant per

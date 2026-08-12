@@ -44,8 +44,11 @@ differentials in `tests/test_nat_narrowing_return_differential.py`
 `TestHandlerStateWidenDifferential1203`, and its `State<Byte>` family
 cases) already assert.  Its two parse-broken files went with it: the
 `let @Byte = 999` control was written in a `let … in …` form the grammar
-has no rule for, and its repaired spelling is a plain E170 at check (E301
-for the branch spelling) — a checker range gate, not a lowering question —
+has no rule for, and its repaired spelling is a plain E149 at check (E149
+for the branch spelling too, since #1252 made an out-of-range literal in a
+`@Byte` context report at the literal rather than at whatever downstream
+mismatch it caused — E170 under a `let`, E301 in a join) — a checker range
+gate, not a lowering question —
 while the empty-clause-list `handle[State<Nat>] { } in { … }` probe is
 superseded by its own valid-syntax sibling `p1_put_no_clause.vera`, which
 takes the same bare path through a get-only handler.

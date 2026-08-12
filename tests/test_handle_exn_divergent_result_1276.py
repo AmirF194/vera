@@ -30,11 +30,14 @@ import tempfile
 import pytest
 import wasmtime
 
+from vera import ast
 from vera.checker import typecheck_with_artifacts
 from vera.codegen import compile as codegen_compile
 from vera.codegen import execute
 from vera.codegen.api import CompileResult, WasmTrapError
 from vera.parser import parse_to_ast
+from vera.wasm import WasmContext
+from vera.wasm.helpers import StringPool
 
 
 # The issue's repro: an Int-payload inner handler whose clause rethrows at the
@@ -342,3 +345,47 @@ def test_unit_handler_wat_has_no_unreachable() -> None:
     assert "unreachable" not in wat, (
         f"a Unit-typed handler must not be terminated as if it diverged:\n{wat}"
     )
+
+
+def _handle(effect_name: str) -> ast.HandleExpr:
+    """A handler whose body AND clause body are both a bare `throw`."""
+    throw = ast.Block(statements=(), expr=ast.FnCall(
+        name="throw", args=(ast.IntLit(value=1),)))
+    return ast.HandleExpr(
+        effect=ast.EffectRef(name=effect_name, type_args=(
+            ast.NamedType(name="Int", type_args=None),)),
+        state=None,
+        clauses=(ast.HandlerClause(
+            op_name="put", params=(), body=throw),),
+        body=throw,
+    )
+
+
+def test_the_divergence_predicate_rejects_a_non_exn_handler() -> None:
+    """The predicate answers for `handle[Exn]`, so it must ASK (PR #1283 rev).
+
+    `_expr_always_throws` routes EVERY nested `HandleExpr` here, `State`
+    included, and the body is then analysed with `throw_installed=True` —
+    a claim that a bare `throw` at that point IS this handler's operation,
+    which is false for a handler that installs `get`/`put`.  The docstring
+    promises that an unrecognised shape answers `False`, because the answer
+    authorises an `unreachable` and a wrong `True` traps a program that
+    runs; a non-`Exn` handler is exactly such a shape.
+
+    No source reaches a wrong `True` today — a lowerable `State` clause body
+    carries a tail `resume(...)`, for which `_expr_always_throws` is `False`,
+    so the `all(...)` leg fails first.  The safety therefore rests on the
+    clause-lowering shape rule rather than on this predicate, which is what
+    the guard puts back.  The `Exn` twin is asserted beside it so the guard
+    cannot be satisfied by answering `False` to everything.
+    """
+    ctx = _context_for_predicate()
+    assert ctx._handle_exn_always_throws(_handle("Exn")) is True
+    assert ctx._handle_exn_always_throws(_handle("State")) is False
+
+
+def _context_for_predicate() -> WasmContext:
+    """A context carrying only what the divergence predicate reads."""
+    ctx = WasmContext(StringPool())
+    ctx._effect_ops = {"throw": ("$exn_Int", False)}
+    return ctx

@@ -2530,6 +2530,11 @@ class TestMangleInjectivity:
                 [sys.executable, "-c", prog],
                 capture_output=True, text=True, encoding="utf-8",
                 check=True, env=env,
+                # Bound each child so a mono hang fails here rather than
+                # burning the CI job timeout — this call sits in a loop, and
+                # its two closest siblings (test_monomorphize_differential,
+                # test_effect_op_determinism) already carry the same bound.
+                timeout=120,
             ).stdout.strip()
             outs.add(out)
         assert len(outs) == 1, f"seed-dependent mangle: {outs}"

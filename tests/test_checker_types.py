@@ -10,6 +10,9 @@ from tests.checker_helpers import (
     _errors,
     _warnings,
 )
+from vera import ast
+from vera.checker.core import TypeChecker
+from vera.checker.expressions import _U64_MAX
 
 
 # =====================================================================
@@ -2206,6 +2209,53 @@ public fn f(@Unit -> @Int)
         codes = [d.error_code for d in _errors(src) + _warnings(src)]
         assert "E149" not in codes, codes
         assert "E200" in codes, codes
+
+    def test_a_supersede_whose_message_repeats_keeps_the_verdict(
+        self,
+    ) -> None:
+        """One verdict per literal — never ZERO (PR #1283 review).
+
+        Superseding withdraws the provisional diagnostic but deliberately
+        KEEPS its `_seen_diag_keys` entry, so the withdrawn message cannot
+        reappear from a third synthesis.  If the contextual verdict renders
+        the SAME message, `_error` collapses it as a duplicate and appends
+        nothing — and the withdrawal has then removed the only verdict the
+        literal had.  The #812 gate opens silently, which is the one
+        outcome `_literal_range_error` exists to prevent.
+
+        Driven at the function's own boundary rather than through source:
+        every contextual verdict a program can currently reach re-renders
+        the message (`@Byte; the range is 0..255` supersedes `@Nat (u64)`),
+        so no `.vera` input reproduces it.  That makes this the invariant's
+        only honest test — and the invariant, not the reachability, is what
+        the next contextual verdict will rest on.
+        """
+        checker = TypeChecker(source="\n\n\n", file="m.vera")
+        node = ast.IntLit(
+            value=_U64_MAX + 1,
+            span=ast.Span(line=3, column=5, end_line=3, end_column=25),
+        )
+        message = (
+            f"Integer literal {_U64_MAX + 1} is out of range for "
+            f"@Nat (u64); the maximum is {_U64_MAX}."
+        )
+        # Pass 1 — unconstrained, so a GUESS at `@Nat`.
+        checker._literal_range_error(
+            node, message, rationale="r", fix="f", contextual=False)
+        assert len([e for e in checker.errors
+                    if e.error_code == "E149"]) == 1, checker.errors
+        # Pass 2 — contextual, and (the point) byte-identical.
+        checker._literal_range_error(
+            node, message, rationale="r", fix="f", contextual=True)
+        e149 = [e for e in checker.errors if e.error_code == "E149"]
+        assert len(e149) == 1, (
+            "a contextual verdict repeating the provisional message must "
+            f"leave the literal exactly one E149, got {len(e149)}"
+        )
+        # ... and the surviving verdict is recorded as CONTEXTUAL, so a
+        # later unconstrained synthesis is still dropped rather than
+        # re-opening the question.
+        assert checker._literal_range_verdict[id(node)][1] is True
 
     def test_byte_context_reports_the_byte_bound_not_the_u64_one(
         self,

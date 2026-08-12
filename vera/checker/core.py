@@ -527,6 +527,7 @@ class TypeChecker(
         #812 gate, and silencing it would reopen the soundness hole.
         """
         prior = self._literal_range_verdict.get(id(node))
+        withdrawn: Diagnostic | None = None
         if prior is not None:
             earlier, was_contextual = prior
             if was_contextual or not contextual:
@@ -536,6 +537,7 @@ class TypeChecker(
             # cannot reappear from a third synthesis of the same literal.
             if earlier in self.errors:
                 self.errors.remove(earlier)
+                withdrawn = earlier
         before = len(self.errors)
         self._error(
             node, description, rationale=rationale, fix=fix,
@@ -546,6 +548,17 @@ class TypeChecker(
             self._literal_range_verdict[id(node)] = (
                 self.errors[-1], contextual,
             )
+        elif withdrawn is not None:
+            # The contextual message was byte-identical to the withdrawn
+            # provisional one, so the `_seen_diag_keys` entry kept above
+            # suppressed it — and the withdrawal has just removed the only
+            # verdict this literal had (PR #1283 review).  Put it back: the
+            # rule is ONE verdict per literal, never zero, because zero
+            # re-opens the #812 gate silently.  The restored diagnostic is
+            # recorded as CONTEXTUAL, since that is the verdict now
+            # standing; a later unconstrained synthesis is still dropped.
+            self.errors.append(withdrawn)
+            self._literal_range_verdict[id(node)] = (withdrawn, contextual)
 
     def _source_line(self, node: ast.Node) -> str:
         """Extract source line for a node."""

@@ -405,6 +405,12 @@ public fn main(@Unit -> @Int)
                 path=(stem,), file_path=tmp_path / f"{stem}.vera",
                 program=parse_to_ast(files[f"{stem}.vera"]),
                 source=files[f"{stem}.vera"],
+                # The shape production resolution builds: `main` imports
+                # `mid`, so `deep` is transitive.  `ResolvedModule` defaults
+                # `direct` to True, and the classification predicate reads
+                # it, so leaving it defaulted made the symmetry claim below
+                # cover a directness no run produces (PR #1283 review).
+                direct=(stem == "mid"),
             )
             for stem in ("deep", "mid")
         ]

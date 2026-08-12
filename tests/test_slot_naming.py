@@ -646,7 +646,11 @@ public fn deep(@Box<A{hops - 1}> -> @Int)
   1
 }}
 """
-    program = parse_to_ast("type Box<T> = Option<T>;\n" + source)
+    # ONE text on both sides: the checker's `source` is what it slices for a
+    # diagnostic's `source_line`, so parsing a text one line longer than the
+    # one handed to the checker made every span off by one (PR #1283 review).
+    source = "type Box<T> = Option<T>;\n" + source
+    program = parse_to_ast(source)
     checker = TypeChecker(source=source, file="<deep2>")
     checker.check_program(program)
     fn = next(d.decl for d in program.declarations

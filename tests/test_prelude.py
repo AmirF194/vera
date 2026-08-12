@@ -327,6 +327,28 @@ class TestPreludeTypeAliases:
         )
 
 
+def test_the_reserved_regex_actually_discriminates() -> None:
+    """The two negative assertions either side of this are evidence only
+    if the regex discriminates (PR #1283 review).
+
+    Both state their property as "the set of names the regex does NOT match
+    is empty".  A regex broadened to match every identifier empties that set
+    without reserving anything, and both tests go green while E154's gate
+    reserves nothing at all — the vacuous-pass shape this file exists to
+    prevent one level up.  Pinned in the file that depends on it, since the
+    regex is imported here rather than restated.
+    """
+    assert _RESERVED_TYPE_PREFIX_RE.match("VeraOptionMapFn")
+    assert not _RESERVED_TYPE_PREFIX_RE.match("OptionMapFn")
+    assert not _RESERVED_TYPE_PREFIX_RE.match("Int")
+    # The anchoring and the uppercase/digit requirement, which are what
+    # keep ordinary words and user spellings out of the namespace.
+    assert not _RESERVED_TYPE_PREFIX_RE.match("Veranda")
+    assert not _RESERVED_TYPE_PREFIX_RE.match("Vera_thing")
+    assert not _RESERVED_TYPE_PREFIX_RE.match("Vera")
+    assert not _RESERVED_TYPE_PREFIX_RE.match("MyVeraThing")
+
+
 class TestPreludeInternalAliases:
     """#1184/#1221: the combinators resolve through reserved names."""
 

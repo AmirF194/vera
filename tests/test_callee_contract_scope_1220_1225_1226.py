@@ -1258,9 +1258,14 @@ class TestObligationsCarryTheirDeclaringFile:
         if modules is None:
             modules = [_resolved(("hlib",), _HELPER_LIB)]
         prog = parse_to_ast(_HELPER_MAIN)
-        typecheck(prog, _HELPER_MAIN, resolved_modules=modules)
+        # `file=` on BOTH legs, and from the constant `_verify_mod` uses, so
+        # the assertions below compare against a known value rather than
+        # against a literal that agrees with `_ENTRY_FILE` only by habit
+        # (PR #1283 review).
+        typecheck(
+            prog, _HELPER_MAIN, resolved_modules=modules, file=_ENTRY_FILE)
         return verify(
-            prog, _HELPER_MAIN, file="main.vera", resolved_modules=modules)
+            prog, _HELPER_MAIN, file=_ENTRY_FILE, resolved_modules=modules)
 
     def test_a_module_located_obligation_joins_its_diagnostic(self) -> None:
         result = self._verified()
@@ -1272,14 +1277,14 @@ class TestObligationsCarryTheirDeclaringFile:
             f"no obligation joins the E501 at {key}: "
             f"{[(o.kind, o.file, o.line, o.column) for o in result.obligations]}"
         )
-        assert key[0] != "main.vera", key
+        assert key[0] != _ENTRY_FILE, key
 
     def test_an_entry_located_obligation_keeps_the_entry_file(self) -> None:
         """The control: `main`'s own contracts are still the entry file's."""
         result = self._verified()
         entry = [o for o in result.obligations if o.fn_name == "main"]
         assert entry, [o.fn_name for o in result.obligations]
-        assert {o.file for o in entry} == {"main.vera"}, entry
+        assert {o.file for o in entry} == {_ENTRY_FILE}, entry
 
     def test_no_obligation_cites_a_line_its_file_lacks(self) -> None:
         """The symptom that made the break visible without a join.
@@ -1312,7 +1317,7 @@ class TestObligationsCarryTheirDeclaringFile:
         cold = self._verified(modules)
         session = VerificationSession()
         warm = session.verify_source(
-            _HELPER_MAIN, file="main.vera", resolved_modules=modules)
+            _HELPER_MAIN, file=_ENTRY_FILE, resolved_modules=modules)
         assert [(o.kind, o.file, o.line, o.column) for o in warm.obligations] \
             == [(o.kind, o.file, o.line, o.column) for o in cold.obligations]
 

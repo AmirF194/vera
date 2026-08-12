@@ -77,7 +77,7 @@ repos:
         pass_filenames: false
         files: '(examples/README\.md$|examples/.*\.vera$)'
 
-      # The six doc-block gates below read the inline vera:skip fence
+      # The seven doc-block gates below read the inline vera:skip fence
       # annotations via scripts/doc_annotations.py (#538), so an edit to
       # that shared module (or the gate script itself) re-runs the gate.
       - id: readme-examples

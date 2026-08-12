@@ -1437,11 +1437,6 @@ public fn caller(@Unit -> @Int)
         assert len(demoted) == 1, [
             (o.kind, o.error_code, o.line) for o in result.obligations
         ]
-        # From the BODY, which is the later line of the two.
-        body_line = max(
-            o.line for o in result.obligations if o.fn_name == "caller"
-        )
-        assert demoted[0].line == body_line, (demoted[0].line, body_line)
         # ... and the clause itself is disclosed as an undecidable
         # postcondition rather than silently proving.
         clause = [
@@ -1452,6 +1447,15 @@ public fn caller(@Unit -> @Int)
             (o.kind, o.status, o.error_code) for o in result.obligations
         ]
         assert clause[0].status == "tier3"
+        # From the BODY, which is strictly later than that clause.  Anchored
+        # on the clause rather than on `max(caller lines)` (PR #1283 review):
+        # the demoted obligation is itself in that max, so `demoted[0].line
+        # == max(...)` held BY CONSTRUCTION — and under the very mutant this
+        # test's docstring names, the one that moves the record to the
+        # clause, the max moved down with it and the equality stayed green
+        # while the demotion was attributed to exactly the wrong place.
+        assert demoted[0].line > clause[0].line, (
+            demoted[0].line, clause[0].line)
 
     def test_the_non_generic_twin_is_still_checked_statically(self) -> None:
         """Control: drop `forall<T>` and the obligation is discharged, not
