@@ -9,6 +9,27 @@ from __future__ import annotations
 import os
 
 from vera.monomorphize import mangle_type_name
+from vera.skip import CodegenInvariantError
+from vera.wasm.helpers import MAX_INLINE_I32_VALUE
+
+# The two fixed regions between the data section and the GC heap.  Named
+# because the #1255 heap-start invariant argues FROM them: they are
+# compile-time constants, so `$gc_heap_start` clears the inline i32 scalar
+# range whatever the data section holds — the guard below is what turns
+# that argument into something a layout change cannot silently invalidate.
+GC_STACK_SIZE = 16384  # 16 KiB shadow stack (4 096 roots)
+
+# #348: GC mark-phase worklist.  Pre-fix this was 16 KiB (4096 entries)
+# and silently dropped pushes once full, which left reachable objects
+# unmarked and they got swept as garbage — a real use-after-free hole for
+# programs whose live object graph held more than ~4 K pointers reachable
+# from a single root.  Post-fix: quadruple the capacity (64 KiB / 16 384
+# entries — covers reasonable program shapes) AND trap (`unreachable`) on
+# overflow rather than silently dropping, so any residual overflow is a
+# clean runtime failure rather than silent corruption.  Eliminating the
+# trap entirely via iterative deepening or dynamic worklist growth is
+# tracked separately for follow-up.
+GC_WORKLIST_SIZE = 65536  # 64 KiB worklist (16 384 entries)
 
 
 class AssemblyMixin:
@@ -350,8 +371,8 @@ class AssemblyMixin:
         # too mangles — matched by one consistent name).  Handler-body calls
         # (`wasm/calls_handlers.py`, `codegen/functions.py`) mangle the same
         # way, so import decl and call site never drift.
-        for type_name, wasm_t in self._state_types:
-            m = mangle_type_name(type_name)
+        for cell, wasm_t in self._state_types:
+            m = mangle_type_name(cell.family)
             parts.append(
                 f'  (import "vera" "state_get_{m}" '
                 f"(func $vera.state_get_{m} (result {wasm_t})))"
@@ -389,21 +410,8 @@ class AssemblyMixin:
         if self._needs_alloc:
             data_end = self.string_pool.heap_offset
             gc_stack_base = data_end
-            gc_stack_size = 16384  # 16K shadow stack
-            # #348: GC mark-phase worklist.  Pre-fix this was 16 KiB
-            # (4096 entries) and silently dropped pushes once full,
-            # which left reachable objects unmarked and they got
-            # swept as garbage — a real use-after-free hole for
-            # programs whose live object graph held more than ~4 K
-            # pointers reachable from a single root.  Post-fix:
-            # quadruple the capacity (64 KiB / 16 384 entries — covers
-            # reasonable program shapes) AND trap (`unreachable`)
-            # on overflow rather than silently dropping, so any
-            # residual overflow is a clean runtime failure rather
-            # than silent corruption.  Eliminating the trap entirely
-            # via iterative deepening or dynamic worklist growth is
-            # tracked separately for follow-up.
-            gc_worklist_size = 65536  # 64 KiB worklist (16 384 entries)
+            gc_stack_size = GC_STACK_SIZE
+            gc_worklist_size = GC_WORKLIST_SIZE
             # #573: wrap-table region for host-handle ADT wrappers.
             # Sized for 4 096 simultaneously-live wrapper objects at
             # 16 bytes per entry (obj_ptr / kind / handle / reserved).
@@ -427,6 +435,28 @@ class AssemblyMixin:
                 data_end + gc_stack_size + gc_worklist_size
                 + wraptable_overhead
             )
+            # #1255: the heap starts ABOVE every value an inline i32 scalar
+            # can hold, which is what makes a scalar that reaches the shadow
+            # stack harmless — the mark phase's first guard is `val >=
+            # $gc_heap_start + 4`, so a `@Byte` (0..255) or `@Bool` (0/1) is
+            # rejected before alignment or header is ever read.  The
+            # classification that decides which values are pushed resolves
+            # aliases now (`is_gc_pointer_base`), so nothing SHOULD arrive
+            # here needing that rejection; this keeps the property true by
+            # construction rather than by the string pool's presence, which
+            # is what it rested on when #1255 was filed.  The margin is
+            # structural — `gc_stack_size + gc_worklist_size` is 80 KiB of
+            # compile-time constant before `data_end` contributes anything —
+            # so the guard can only fire if those constants are reworked,
+            # which is exactly when the argument needs re-deriving.  A raise
+            # rather than an assert: `python -O` must not strip it (ruff S).
+            if gc_heap_start <= MAX_INLINE_I32_VALUE + 4:
+                raise CodegenInvariantError(
+                    f"GC heap starts at {gc_heap_start}, inside the inline "
+                    f"i32 scalar range (0..{MAX_INLINE_I32_VALUE}): the "
+                    "conservative mark phase could not distinguish a @Byte "
+                    "or @Bool value on the shadow stack from a heap pointer"
+                )
             parts.append(
                 f"  (global $heap_ptr (export \"heap_ptr\") "
                 f"(mut i32) (i32.const {gc_heap_start}))"

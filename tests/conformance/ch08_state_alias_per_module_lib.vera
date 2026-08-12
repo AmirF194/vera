@@ -1,0 +1,21 @@
+module ch08_state_alias_per_module_lib;
+
+-- Conformance: the module-side half of the per-module alias-table test
+-- (Chapter 8, Section 8.4.1).  Declares `Hid<T> = T` privately and handles
+-- `State<Hid<Nat>>`, which resolves — in THIS module's namespace — to the
+-- `Nat` cell family.  The importer declares a DIFFERENT `Hid<T>`.
+type Hid<T> = T;
+
+public fn tally(@Nat -> @Int)
+  requires(true)
+  ensures(@Int.result == nat_to_int(@Nat.0))
+  effects(pure)
+{
+  handle[State<Hid<Nat>>](@Hid<Nat> = 0) {
+    get(@Unit) -> { resume(@Hid<Nat>.0) },
+    put(@Hid<Nat>) -> { resume(()) }
+  } in {
+    put(@Nat.0);
+    nat_to_int(get(()))
+  }
+}

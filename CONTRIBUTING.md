@@ -89,11 +89,11 @@ dependencies. CI enforces that `uv.lock` stays current.
 
 ### Pre-commit Hooks
 
-Every push is checked by 32 configured hooks across two stages: 30 are configured at the commit stage (run after `pre-commit install`), and 2 (`check-changelog-updated` and `uv-lock-check`, described below) are configured at the push stage (run after `pre-commit install --hook-type pre-push`). Most commit-stage hooks have per-hook `files:` / `types:` filters — the `python` type-check only runs when Python files are staged; `check_readme_examples.py` only runs when `README.md` or Vera sources change, etc. A plain-text commit touching only one markdown file triggers a small subset; a compiler-level commit triggers most of them.
+Every push is checked by 33 configured hooks across two stages: 31 are configured at the commit stage (run after `pre-commit install`), and 2 (`check-changelog-updated` and `uv-lock-check`, described below) are configured at the push stage (run after `pre-commit install --hook-type pre-push`). Most commit-stage hooks have per-hook `files:` / `types:` filters — the `python` type-check only runs when Python files are staged; `check_readme_examples.py` only runs when `README.md` or Vera sources change, etc. A plain-text commit touching only one markdown file triggers a small subset; a compiler-level commit triggers most of them.
 
 ![The gate pipeline: file-filtered commit-stage hooks, the push-stage CHANGELOG and uv.lock gates, and CI re-running everything against the platform matrix before anything lands on protected main.](assets/diagrams/ci-gates.svg)
 
-The **commit-stage** hooks (30, each gated to relevant files) include:
+The **commit-stage** hooks (31, each gated to relevant files) include:
 
 - Trailing whitespace and file endings
 - YAML/TOML validity
@@ -171,6 +171,7 @@ python scripts/check_readme_examples.py  # verify README code blocks parse
 python scripts/check_examples_doc.py     # verify EXAMPLES.md code blocks parse
 python scripts/check_skill_examples.py   # verify SKILL.md code blocks parse
 python scripts/check_faq_examples.py    # verify FAQ code blocks parse
+python scripts/check_debruijn_examples.py  # verify DE_BRUIJN.md code blocks parse
 python scripts/check_html_examples.py   # verify HTML code blocks parse, check, verify
 python scripts/check_version_sync.py     # verify version consistency
 python scripts/check_doc_counts.py       # verify documentation counts match codebase

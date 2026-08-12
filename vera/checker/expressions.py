@@ -155,9 +155,38 @@ class ExpressionsMixin:
             # #865 call-argument site (the predicate is deferred to the
             # verifier, which is exactly how a `@Byte` argument to a refined
             # parameter is already handled).
-            if (expected is not None
-                    and base_type(expected) == BYTE
-                    and 0 <= expr.value <= 255):
+            if expected is not None and base_type(expected) == BYTE:
+                if 0 <= expr.value <= 255:
+                    return BYTE
+                # #1252: `@Byte` is a target machine type like `@Int` and
+                # `@Nat`, so an out-of-range literal in a `@Byte` context is
+                # the same E149 — reported HERE, where the mistake is, rather
+                # than left to fall through to `@Nat` and be described by
+                # whatever downstream mismatch that caused.  In a join it was
+                # E301 ("then-branch is Nat, else-branch is Byte"), true but
+                # about a consequence; at a call argument, E202; under a `let`,
+                # E170.  The literal keeps the type its context asked for, so
+                # the one real error is the only one reported.
+                self._literal_range_error(
+                    expr,
+                    f"Integer literal {expr.value} is out of range for "
+                    f"@Byte; the range is 0..255.",
+                    rationale=(
+                        "`@Byte` is an unsigned 8-bit integer, stored and "
+                        "compared at that width.  A literal outside 0..255 "
+                        "cannot be represented in it, so the value the "
+                        "verifier reasons about and the value the runtime "
+                        "holds would differ (#812/#1252)."
+                    ),
+                    fix=(
+                        "Use a literal in 0..255, or give the surrounding "
+                        "binding, argument or return a wider type such as "
+                        "`@Nat` or `@Int`."
+                    ),
+                    # This pass KNOWS the target is `@Byte`, so it supersedes
+                    # an unconstrained verdict on the same literal.
+                    contextual=True,
+                )
                 return BYTE
             # #812: range-check the literal against its target machine type
             # before typing it.  The target's base type (refinements stripped)
@@ -173,7 +202,7 @@ class ExpressionsMixin:
             bound = _I64_MAX if targets_int else _U64_MAX
             if expr.value > bound:
                 type_name = "@Int (i64)" if targets_int else "@Nat (u64)"
-                self._error(
+                self._literal_range_error(
                     expr,
                     f"Integer literal {expr.value} is out of range for "
                     f"{type_name}; the maximum is {bound}.",
@@ -190,8 +219,9 @@ class ExpressionsMixin:
                         "wider target type (`@Nat` reaches "
                         f"{_U64_MAX} where `@Int` stops at {_I64_MAX})."
                     ),
-                    spec_ref='Chapter 4, Section 4.2 "Literals"',
-                    error_code="E149",
+                    # `expected is None` is a GUESS at `@Nat`, not knowledge
+                    # of the target — a later contextual verdict wins.
+                    contextual=expected is not None,
                 )
             # Non-negative integer literals are Nat (which is a subtype of
             # Int).  This lets literals like 0, 1, 42 satisfy Nat parameters

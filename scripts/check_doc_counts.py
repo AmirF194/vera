@@ -5,11 +5,13 @@ Checks filesystem-derivable counts (conformance programs, examples, test
 files, pre-commit hooks, CI jobs) and pytest-collection counts (total tests,
 per-file test counts and line counts) against the numbers written in
 TESTING.md, CONTRIBUTING.md, CLAUDE.md, README.md, SKILL.md, AGENTS.md,
-FAQ.md, and ROADMAP.md.  Also checks the KNOWN_ISSUES.md "Refactoring
+FAQ.md, and ROADMAP.md.  Also checks TESTING.md's passed/stress/skipped
+breakdown against the collected total, the KNOWN_ISSUES.md "Refactoring
 needed" line counts (±10% tolerance), the HISTORY.md version-row format
 (one issue link max, no " — " separator per row), the vera/README.md
-module map (#1150), the project facts hardcoded on the landing page
-(#528), and the cited corpus-program count.
+module map (#1150) and its Test Suite paragraph's four counts, the project
+facts hardcoded on the landing page (#528), and the cited corpus-program
+count.
 
 Intentionally excludes CHANGELOG.md: its counts are historical records
 (e.g. "64 programs, was 63") that are frozen snapshots of the project state
@@ -20,9 +22,11 @@ Runs in a couple of seconds — fast enough for a pre-commit hook.
 """
 
 import json
+import os
 import re
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 
@@ -73,6 +77,122 @@ def check_refactoring_counts(known_issues_text: str, root: Path) -> list[str]:
     return errors
 
 
+_TESTS_BREAKDOWN = re.compile(
+    r"\*\*Tests\*\*\s*\|\s*[\d,]+\s+across.*?;\s*([\d,]+) passed"
+    r"\s*\+\s*([\d,]+) stress,\s*([\d,]+) skipped"
+)
+
+
+def check_tests_breakdown(testing_text: str, live_total: int) -> list[str]:
+    """Check that TESTING.md's tests breakdown sums to the gated total.
+
+    The overview row states the total *and* its parts, in the shape
+    "1,306 across 40 files (…; 1,234 passed + 5 stress, 67 skipped)" —
+    illustrative numbers, so this docstring does not itself become a
+    citation to keep in sync.  Pinning the total alone leaves the parts
+    free to drift, so a release that moves the parts without moving the
+    sum, or moves the sum and refreshes only the number the gate reads,
+    leaves an arithmetically impossible sentence behind.  Both halves are
+    checked: each part against nothing (they are not independently
+    derivable without running the suite three ways) and their sum against
+    the collected total, which is exactly the internal consistency a
+    reader would check by hand.
+
+    A pattern that matches nothing is an error in its own right — rewording
+    the parenthetical would otherwise silently switch the check off, which
+    is the failure mode the gate exists to prevent.
+    """
+    m = _TESTS_BREAKDOWN.search(testing_text)
+    if m is None:
+        return [
+            "TESTING.md: no tests breakdown matched"
+            " ('N passed + N stress, N skipped') — the row moved or was"
+            " reworded, so the breakdown is no longer gated"
+        ]
+    parts = [int(g.replace(",", "")) for g in m.groups()]
+    total = sum(parts)
+    if total != live_total:
+        passed, stress, skipped = parts
+        return [
+            f"TESTING.md tests breakdown: {passed:,} passed"
+            f" + {stress:,} stress + {skipped:,} skipped = {total:,},"
+            f" but the collected total is {live_total:,}"
+        ]
+    return []
+
+
+_VERA_README_TESTS = re.compile(
+    r"\*\*pytest suite\*\* of ([\d,]+) tests across ([\d,]+) files.*?"
+    r"\(([\d,]+) programs in `tests/conformance/`.*?"
+    r"\(([\d,]+) end-to-end demos\)",
+    re.DOTALL,
+)
+
+_TEST_SUITE_HEADING = re.compile(r"^## Test Suite[ \t]*$", re.M)
+
+
+def _test_suite_section(readme_text: str) -> str | None:
+    """The body of vera/README.md's "## Test Suite" section, or ``None``.
+
+    The counts are spread over one long sentence, so the pattern above
+    spans them with ``DOTALL``.  Searched against the whole file that lets
+    the paragraph's head pair with digits from any LATER section: the
+    paragraph can be reworded until it no longer states the counts and the
+    check still greens off a decoy elsewhere in the file — the silent skip
+    this gate exists to prevent.  Slicing to the section first is what
+    keeps a rewording (or a renamed heading, which yields ``None``) loud.
+    """
+    m = _TEST_SUITE_HEADING.search(readme_text)
+    if m is None:
+        return None
+    rest = readme_text[m.end():]
+    nxt = re.search(r"^## ", rest, re.M)
+    return rest if nxt is None else rest[: nxt.start()]
+
+
+def check_vera_readme_test_counts(
+    readme_text: str,
+    live_total_tests: int,
+    live_test_files: int,
+    live_conformance: int,
+    live_examples: int,
+) -> list[str]:
+    """Pin the four counts in vera/README.md's "Test Suite" paragraph.
+
+    Only the module map is otherwise gated in that file, which leaves this
+    sentence free to drift release after release — the same class as
+    FAQ.md's headline line, and the same remedy: read the numbers the way
+    the oracle reads every other citation of them.  The counts are read
+    from the "## Test Suite" section alone (see :func:`_test_suite_section`),
+    never from the file at large.  A missing heading or a missing pattern
+    is an error, not a skip.
+    """
+    section = _test_suite_section(readme_text)
+    m = None if section is None else _VERA_README_TESTS.search(section)
+    if m is None:
+        return [
+            "vera/README.md: the Test Suite paragraph's counts did not match"
+            " ('N tests across N files … (N programs in `tests/conformance/`"
+            " …) … (N end-to-end demos)') under a '## Test Suite' heading —"
+            " the heading or the sentence moved or was reworded, so it is"
+            " no longer gated"
+        ]
+    errors: list[str] = []
+    for label, cited_s, live in (
+        ("total tests", m.group(1), live_total_tests),
+        ("test file count", m.group(2), live_test_files),
+        ("conformance programs", m.group(3), live_conformance),
+        ("example programs", m.group(4), live_examples),
+    ):
+        cited = int(cited_s.replace(",", ""))
+        if cited != live:
+            errors.append(
+                f"vera/README.md Test Suite {label}: doc says {cited:,},"
+                f" live is {live:,}"
+            )
+    return errors
+
+
 _HISTORY_VERSION_ROW = re.compile(r"^\| v\d+\.\d+\.[\d.]")
 
 
@@ -105,8 +225,176 @@ def check_history_row_format(history_text: str) -> list[str]:
     return errors
 
 
+def project_version(root: Path) -> str:
+    """The `[project] version` in pyproject.toml.
+
+    `check_version_sync.py` is what pins this to the other four places
+    it appears, so reading the one file is enough here.
+    """
+    with (root / "pyproject.toml").open("rb") as handle:
+        return str(tomllib.load(handle)["project"]["version"])
+
+
+_RELEASE_TAG = re.compile(r"^v\d+\.\d+\.\d+(?:\.\d+)?$")
+
+# git reads the repository to operate on from the environment before it
+# reads `-C`, so these have to be cleared for `root` to mean `root`.
+# pre-commit sets them: this script runs as a hook, and inside that hook
+# `git -C <anywhere> tag` answers for the repository being committed to.
+GIT_REPO_ENV_VARS = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+)
+
+
+def git_env() -> dict[str, str]:
+    """The ambient environment with git's repository selectors removed."""
+    return {
+        k: v for k, v in os.environ.items() if k not in GIT_REPO_ENV_VARS
+    }
+
+
+def release_tags(root: Path) -> list[str] | None:
+    """Every release tag in this checkout, or ``None`` if git can't say.
+
+    ``None`` means "no evidence", NOT "zero releases" — a checkout whose
+    tags were never fetched must stand the check down rather than report
+    every documented count as wrong.  The `lint` job that runs this
+    script checks out with `fetch-depth: 0` (it needs full history for
+    `check_changelog_updated.py`'s `origin/main` diff), so the tags are
+    there in CI; this is the guard for anywhere they are not.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "tag", "--list"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=30,
+            check=False,
+            env=git_env(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    tags = [t for t in result.stdout.split() if _RELEASE_TAG.match(t)]
+    return tags or None
+
+
+def check_release_count(
+    readme_text: str,
+    history_text: str,
+    tags: list[str] | None,
+    version: str,
+) -> list[str]:
+    """The release count in README.md and HISTORY.md, against the tags.
+
+    The same hand-maintained number appears in two places — README's
+    status line and HISTORY's "By the numbers" total — so they can
+    disagree, and did (204/203, then 205/203).  Cross-checking them
+    against each other closed that, and nothing else: from v0.1.8 both
+    said 206 while the repository held 207 tags, agreeing with each
+    other the whole way down.  Two documents can be consistently wrong,
+    so the tags themselves are the oracle here.
+
+    The one permitted gap is the release being cut: `release.yml`
+    creates `vX.Y.Z` only after the merge, so on the PR that bumps
+    `version` to an untagged release the documented count is one ahead
+    of `git tag` — that is the convention (a release bumps both), not
+    drift.  Once the version IS tagged, the counts must match exactly.
+    """
+    errors: list[str] = []
+    m_readme = re.search(r"(\d+) releases,", readme_text)
+    m_history = re.search(r"(\d+) tagged releases", history_text)
+    if not m_readme:
+        errors.append(
+            "README.md: release count ('N releases,') not found"
+            " — the status line was reworded and is no longer gated"
+        )
+    if not m_history:
+        errors.append(
+            "HISTORY.md: release count ('N tagged releases') not found"
+            " — the totals line was reworded and is no longer gated"
+        )
+    if m_readme and m_history and m_readme.group(1) != m_history.group(1):
+        errors.append(
+            f"release count mismatch: README.md says {m_readme.group(1)},"
+            f" HISTORY.md says {m_history.group(1)} tagged releases"
+        )
+    if tags is None:
+        return errors
+
+    pending = 0 if f"v{version}" in set(tags) else 1
+    expected = len(tags) + pending
+    for label, match in (("README.md", m_readme), ("HISTORY.md", m_history)):
+        if match is None or int(match.group(1)) == expected:
+            continue
+        errors.append(
+            f"{label}: release count says {match.group(1)}, live is"
+            f" {expected} ({len(tags)} tags"
+            + (f" + v{version} pending" if pending else "")
+            + ")"
+        )
+    return errors
+
+
+def check_conformance_skip_total(root: Path) -> list[str]:
+    """Gate TESTING.md's conformance-stage skip total against its table.
+
+    The "Skipped tests" section states a total and then enumerates every
+    skipped stage, one row each — two statements of the same number, so
+    they can disagree.  They did: three check-level conformance programs
+    added six rows and the total stayed at 85 while the table said 91
+    (PR #1282 review).  Nothing read either number, which is the same
+    blind spot the corpus counts had.
+
+    Checked against the ROW COUNT rather than by running pytest: the
+    rows are what a reader is counting, the comparison is free, and the
+    suite already proves the rows match reality (a wrong row is a
+    skipped test that does not exist).  A reworded total is an error,
+    not a skip.
+    """
+    errors: list[str] = []
+    text = (root / "TESTING.md").read_text(encoding="utf-8")
+    lines = text.splitlines()
+    try:
+        start = next(i for i, ln in enumerate(lines)
+                     if ln.startswith("### Skipped tests"))
+    except StopIteration:
+        return ["TESTING.md: no '### Skipped tests' section — it moved or"
+                " was renamed, so its total is no longer gated"]
+    end = next(
+        (i for i, ln in enumerate(lines[start + 1:], start + 1)
+         if ln.startswith("## ")),
+        len(lines),
+    )
+    section = lines[start:end]
+    rows = [ln for ln in section if ln.startswith("| `test_")]
+
+    m = re.search(
+        r"skips ([\d,]+) conformance-stage tests", "\n".join(section))
+    if not m:
+        errors.append(
+            "TESTING.md: the 'skips N conformance-stage tests' sentence was"
+            " not found — it moved or was reworded, so it is no longer gated"
+        )
+    else:
+        cited = int(m.group(1).replace(",", ""))
+        if cited != len(rows):
+            errors.append(
+                f"TESTING.md conformance-stage skips: doc says {cited},"
+                f" the table below it lists {len(rows)}"
+            )
+    return errors
+
+
 def check_corpus_count(root: Path) -> list[str]:
-    """Gate the cited corpus-program count wherever TESTING.md states it.
+    """Gate the cited corpus-program count in every document that states it.
 
     The corpus is every ``*.vera`` under ``examples/`` and
     ``tests/conformance/`` **recursively** — the set
@@ -120,26 +408,61 @@ def check_corpus_count(root: Path) -> list[str]:
     cite it — the two are worded differently ("All N corpus programs" vs
     "All N ``examples/`` + ..."), so the pattern here keys on the script name
     that anchors both rows, not on the prose around the number.
+
+    TESTING.md was the only document gated, and CLAUDE.md and AGENTS.md then
+    went stale for exactly that reason: both cite the count in the comment on
+    the command that runs the script, and a fix driven by this script's own
+    output could not see them (adversarial review of PR C.6).  All three are
+    read here, each keyed on the script name.  Every pattern is anchored on
+    surrounding TEXT rather than on a bare numeral: a document-wide numeric
+    substitution is not safe, `E207` being a live example of a token this
+    count's own digits sit inside.
+
+    A citation that is reworded away is an ERROR, not a skip — a silent skip
+    is the failure mode the gate exists to prevent.  That is checked PER ROW,
+    not per document: TESTING.md cites the count twice, and a
+    "at least one row still matches" test greened while one of the two was
+    reworded into invisibility (PR #1282 review).  Each document therefore
+    declares how many citations it is expected to carry, and a mismatch in
+    either direction is reported — a citation lost to rewording, or a new one
+    added without being counted here.
     """
     errors: list[str] = []
     live = sum(
         len(list((root / d).rglob("*.vera")))
         for d in ("examples", "tests/conformance")
     )
-    testing = (root / "TESTING.md").read_text(encoding="utf-8")
-    rows = re.findall(
-        r"`check_corpus_canonical\.py`[^|\n]*\|[^|\n]*?All (\d+)\b", testing
+    # (document, pattern, expected number of citations, what it anchors on)
+    sites = (
+        # Two table rows: | `check_corpus_canonical.py` | All N ... |
+        ("TESTING.md",
+         r"`check_corpus_canonical\.py`[^|\n]*\|[^|\n]*?All (\d+)\b",
+         2, "table row"),
+        # A command-block comment: python scripts/check_corpus_canonical.py
+        # # Verify all N corpus programs ... / # All N corpus programs ...
+        ("CLAUDE.md",
+         r"check_corpus_canonical\.py[^\n]*?\ball (\d+) corpus programs",
+         1, "command comment"),
+        ("AGENTS.md",
+         r"check_corpus_canonical\.py[^\n]*?\ball (\d+) corpus programs",
+         1, "command comment"),
     )
-    if not rows:
-        errors.append(
-            "TESTING.md: no `check_corpus_canonical.py` row states a corpus"
-            " count — the rows moved or were reworded, so they are no longer gated"
-        )
-    for cited in rows:
-        if int(cited) != live:
+    for doc, pattern, expected, anchor in sites:
+        text = (root / doc).read_text(encoding="utf-8")
+        rows = re.findall(pattern, text, re.IGNORECASE)
+        if len(rows) != expected:
             errors.append(
-                f"TESTING.md corpus count: doc says {cited}, live is {live}"
+                f"{doc}: expected {expected} `check_corpus_canonical.py`"
+                f" {anchor}(s) stating a corpus count, found {len(rows)} —"
+                f" one moved or was reworded (so it is no longer gated), or"
+                f" a new citation needs adding to check_corpus_count's"
+                f" expected count"
             )
+        for cited in rows:
+            if int(cited) != live:
+                errors.append(
+                    f"{doc} corpus count: doc says {cited}, live is {live}"
+                )
     return errors
 
 
@@ -506,6 +829,7 @@ def main() -> int:
         live_examples,
         "example programs",
     )
+    errors.extend(check_tests_breakdown(testing_md, live_total_tests))
 
     # ------------------------------------------------------------------
     # 3. Check TESTING.md per-file test table
@@ -958,21 +1282,21 @@ def main() -> int:
 
     # README's status row and HISTORY's "By the numbers" total are the
     # same hand-maintained release count in two places; a release bumps
-    # both.  They disagreed for two releases (204/203, then 205/203)
-    # before this cross-check existed.
-    m_readme = re.search(r"(\d+) releases,", readme_md)
-    m_history = re.search(r"(\d+) tagged releases", history_md)
-    if not m_readme:
-        errors.append("README.md: release count ('N releases,') not found")
-    if not m_history:
-        errors.append(
-            "HISTORY.md: release count ('N tagged releases') not found"
+    # both.  They are checked against each other AND against `git tag`,
+    # because agreeing with each other is what they did all the way from
+    # v0.1.8 while both were two behind the repository.
+    tags = release_tags(root)
+    if tags is None:
+        print(
+            "NOTE: no release tags in this checkout — the release count"
+            " was cross-checked between README.md and HISTORY.md only.",
+            file=sys.stderr,
         )
-    if m_readme and m_history and m_readme.group(1) != m_history.group(1):
-        errors.append(
-            f"release count mismatch: README.md says {m_readme.group(1)},"
-            f" HISTORY.md says {m_history.group(1)} tagged releases"
+    errors.extend(
+        check_release_count(
+            readme_md, history_md, tags, project_version(root)
         )
+    )
 
     # ------------------------------------------------------------------
     # 17. Check the vera/README.md module map against the source tree
@@ -980,6 +1304,15 @@ def main() -> int:
 
     vera_readme_md = (root / "vera/README.md").read_text(encoding="utf-8")
     errors.extend(check_module_map(vera_readme_md, root))
+    errors.extend(
+        check_vera_readme_test_counts(
+            vera_readme_md,
+            live_total_tests,
+            live_test_files,
+            live_conformance,
+            live_examples,
+        )
+    )
 
     # ------------------------------------------------------------------
     # 18. Check the hardcoded project facts on the landing page
@@ -995,6 +1328,7 @@ def main() -> int:
     # ------------------------------------------------------------------
 
     errors.extend(check_corpus_count(root))
+    errors.extend(check_conformance_skip_total(root))
 
     # ------------------------------------------------------------------
     # Report

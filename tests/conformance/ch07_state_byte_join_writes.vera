@@ -1,0 +1,78 @@
+-- Conformance: Byte literal width at every State-cell write boundary (Ch 7)
+-- Tests: the four `State<Byte>` WRITE boundaries — the handler's state
+-- init, a `put` argument, a get clause's `resume` value, and a clause's
+-- `with` update — each accept an int literal the checker coerces to @Byte
+-- (spec §11 — Byte is i32), and each must lower it at i32 when it sits
+-- inside an `if` BRANCH rather than being the written value itself
+-- (#1212).  #865 coerced a top-level literal only, so every branch
+-- spelling here was a check-green program that failed WASM validation with
+-- "type mismatch: expected i32, found i64" — including
+-- `resume(if c then { … } else { … })`, which is verbatim the form the
+-- E602 clause-lowerability skip message recommends.
+public fn init_join(@Bool -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Byte>](@Byte = if @Bool.0 then { 200 } else { 3 }) {
+    get(@Unit) -> { resume(@Byte.0) },
+    put(@Byte) -> { resume(()) }
+  } in {
+    byte_to_int(get(()))
+  }
+}
+
+public fn put_join(@Bool -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Byte>](@Byte = 7) {
+    get(@Unit) -> { resume(@Byte.0) },
+    put(@Byte) -> { resume(()) }
+  } in {
+    put(if @Bool.0 then { 200 } else { 3 });
+    byte_to_int(get(()))
+  }
+}
+
+public fn resume_join(@Bool -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Byte>](@Byte = 7) {
+    get(@Unit) -> { resume(if @Bool.0 then { 200 } else { 3 }) },
+    put(@Byte) -> { resume(()) }
+  } in {
+    byte_to_int(get(()))
+  }
+}
+
+public fn with_join(@Bool -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Byte>](@Byte = 7) {
+    get(@Unit) -> { resume(@Byte.0) },
+    put(@Byte) -> { resume(()) } with @Byte = if @Bool.0 then { 200 } else { 3 }
+  } in {
+    put(1);
+    byte_to_int(get(()))
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  -- 200 from each boundary's then-branch, 3 from each else-branch:
+  -- 4 * 200 + 4 * 3 = 812.  Every boundary contributes both branches, so
+  -- a width defect on any one of the eight arms moves the total.
+  let @Int = init_join(true) + init_join(false);
+  let @Int = @Int.0 + put_join(true) + put_join(false);
+  let @Int = @Int.0 + resume_join(true) + resume_join(false);
+  @Int.0 + with_join(true) + with_join(false)
+}

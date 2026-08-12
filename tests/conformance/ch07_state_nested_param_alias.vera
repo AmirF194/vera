@@ -1,0 +1,36 @@
+-- Conformance: a twice-applied parameterised alias cell (Chapter 7, Section
+-- 7.5).  Tests: `State<Id<Id<Nat>>>` with `type Id<T> = T` — the resolution
+-- substitutes arguments BEFORE following the head, so the finite expansion
+-- `Id<Id<Nat>>` -> `Id<Nat>` -> `Nat` completes instead of stopping one hop
+-- short at a head it has already seen.  The clause slots are spelled with
+-- the same nested application, so the binding and the reference have to
+-- render identically or the reference dangles (#1208/#1209).
+type Id<T> = T;
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 7)
+  effects(pure)
+{
+  handle[State<Id<Id<Nat>>>](@Id<Id<Nat>> = 0) {
+    get(@Unit) -> { resume(@Id<Id<Nat>>.0) },
+    put(@Id<Id<Nat>>) -> { resume(()) }
+  } in {
+    put(7);
+    nat_to_int(get(()))
+  }
+}
+
+public fn go(@Nat -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Id<Id<Nat>>>](@Id<Id<Nat>> = 0) {
+    get(@Unit) -> { resume(@Id<Id<Nat>>.0) },
+    put(@Id<Id<Nat>>) -> { resume(()) }
+  } in {
+    put(@Nat.0);
+    nat_to_int(get(()))
+  }
+}

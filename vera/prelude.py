@@ -76,6 +76,24 @@ private fn html_attr(@HtmlNode, @String -> @Option<String>)
 
 # Type aliases needed by closure-taking combinators.
 #
+# #1221 — the DECLARED names below carry the same reserved ``Vera`` prefix
+# as the type parameters: they are codegen-internal, not a vocabulary user
+# programs write.  ``inject_prelude`` runs at codegen and at the verifier's
+# mono discovery, never at the checker, so every name it injects is a name
+# codegen resolves and the checker leaves opaque — two namespaces
+# disagreeing about one spelling.  Under the old user-facing names that
+# disagreement was writable: a program mixing ``ArrayMapFn<Int, Bool>`` with
+# the function type it aliases kept two parameter stacks at check and one at
+# codegen, and the emitted export read parameter 2 where the binding table
+# said parameter 1 (host-reachable, since the checker rejects every
+# Vera-source argument for the opaque head).  Reserving the names makes the
+# checker's ignorance correct by construction: E154 refuses a user
+# declaration OR reference in this namespace (spec §8.4.1), so no spelling a
+# program can contain resolves on one side only.  Function types have their
+# one canonical spelling — ``fn(Int -> Bool) effects(pure)`` — and a user
+# who wants a short name for it declares their own alias, visibly
+# (DESIGN.md principles 2, 3 and 6).
+#
 # #869 — the type-PARAMETER identifiers below (and on the ``forall``
 # combinators further down) use the reserved ``Vera``-prefixed names
 # ``VeraA``/``VeraB``/``VeraE``/``VeraT``/``VeraU`` rather than the bare
@@ -98,80 +116,36 @@ private fn html_attr(@HtmlNode, @String -> @Option<String>)
 # *arguments*), so the rename is orthogonal to the #775/#883 injective
 # name mangling.
 _OPTION_TYPE_ALIASES = """\
-type OptionMapFn<VeraA, VeraB> = fn(VeraA -> VeraB) effects(pure);
-type OptionBindFn<VeraA, VeraB> = fn(VeraA -> Option<VeraB>) effects(pure);
+type VeraOptionMapFn<VeraA, VeraB> = fn(VeraA -> VeraB) effects(pure);
+type VeraOptionBindFn<VeraA, VeraB> = fn(VeraA -> Option<VeraB>) effects(pure);
 """
 
 _RESULT_TYPE_ALIASES = """\
-type ResultMapFn<VeraA, VeraB> = fn(VeraA -> VeraB) effects(pure);
+type VeraResultMapFn<VeraA, VeraB> = fn(VeraA -> VeraB) effects(pure);
 """
 
 _ARRAY_TYPE_ALIASES = """\
-type ArrayMapFn<VeraA, VeraB> = fn(VeraA -> VeraB) effects(pure);
-type ArrayFilterFn<VeraT> = fn(VeraT -> Bool) effects(pure);
-type ArrayFoldFn<VeraT, VeraU> = fn(VeraU, VeraT -> VeraU) effects(pure);
+type VeraArrayMapFn<VeraA, VeraB> = fn(VeraA -> VeraB) effects(pure);
+type VeraArrayFilterFn<VeraT> = fn(VeraT -> Bool) effects(pure);
+type VeraArrayFoldFn<VeraT, VeraU> = fn(VeraU, VeraT -> VeraU) effects(pure);
 """
 
 
-# #1184 — the alias names above are USER-facing: they are injected into
-# the same namespace user code declares into, so a user (or an imported
-# module) may legally reuse one for an unrelated type, and doing so
-# shadows the prelude's definition exactly as it shadows a prelude ADT
-# or combinator.  The prelude's own combinators must therefore NOT
-# resolve their closure parameters through them — a shadowing alias
-# re-typed the PRELUDE's declaration, which is the mirror of the #1111
-# defect spec §8.4.1 forbids in the other direction (a main-file alias
-# must never re-type a module's declarations).  Worse, the two
-# namespaces disagreed about it: a main-file collision emitted an
-# ``Int``-typed closure parameter (WASM validation failure at ``vera
-# run``), while a module collision desynced Pass-1.5 discovery from the
-# module-scoped body and silently produced a program with NO exports
-# behind a green check / verify / compile.
+# The blocks above are the ONE table of prelude alias declarations: both
+# consumers of the injection — codegen (Pass 1.2) and the verifier's mono
+# discovery — read it through :func:`inject_prelude`, so neither restates
+# a name the other has to match.  They go in unconditionally with the
+# bodies that need them (#1184): nothing a user program declares can take
+# a name out of this namespace, so there is no shadowing case to skip an
+# injection for, and a combinator whose parameter alias went missing would
+# emit an ``Int``-typed closure parameter (WASM validation failure at
+# ``vera run``) or silently produce a program with no exports.
 #
-# So the combinators below spell their parameters with reserved
-# ``Vera``-prefixed twins of these aliases, whose declarations are
-# derived from the blocks above rather than restated.  This is #869's
-# remedy — reserved names no ordinary
-# user declaration spells, keeping prelude internals invisible to user
-# namespace decisions (spec §0.2 principle 4; DESIGN.md principle 2) —
-# applied to the alias names rather than the type-PARAMETER names.
-# Deriving rather than restating them keeps the two spellings from
-# drifting: rename a public alias and its twin follows, while the
-# combinators' references to the old twin would fail to resolve loudly
-# on every Option/Result-using program.
-_INTERNAL_ALIAS_PREFIX = "Vera"
-
-
-def _internal_alias_decls(alias_src: str) -> str:
-    """Derive the reserved-name twin declarations of *alias_src* (#1184).
-
-    Each ``type Foo<...> = ...;`` line is restated as
-    ``type VeraFoo<...> = ...;`` — same body, a name in the reserved
-    prelude namespace.  Only the DECLARED name is rewritten; names
-    mentioned in the body (``Option``, the ``Vera*`` type parameters)
-    are untouched, so the twin aliases the same type as its public
-    counterpart.
-    """
-    return "".join(
-        re.sub(
-            r"^type\s+([A-Za-z_][A-Za-z0-9_]*)",
-            lambda m: f"type {_INTERNAL_ALIAS_PREFIX}{m.group(1)}",
-            line,
-        ) + "\n"
-        for line in alias_src.splitlines()
-        if line.strip()
-    )
-
-
-# Injected alongside the combinator blocks that reference them — always,
-# and independently of whether the user-facing block above is injected
-# (a user shadowing ``OptionMapFn`` still gets a working ``option_map``).
-_OPTION_INTERNAL_ALIASES = _internal_alias_decls(_OPTION_TYPE_ALIASES)
-_RESULT_INTERNAL_ALIASES = _internal_alias_decls(_RESULT_TYPE_ALIASES)
-# The array aliases get no twin: ``_ARRAY_COMBINATORS`` is empty, so no
-# prelude declaration resolves through them (array_map / array_filter /
-# array_fold are emitted as iterative WASM by codegen, #480).  A future
-# array combinator with a prelude body needs one added here.
+# ``_ARRAY_COMBINATORS`` is empty, so no prelude declaration currently
+# resolves through the array block; it stays injected so a future array
+# combinator with a prelude body has its parameter aliases already in
+# place (array_map / array_filter / array_fold are emitted as iterative
+# WASM by codegen, #480).
 
 # Array higher-order operations.
 # array_map, array_filter, and array_fold are all emitted as iterative
@@ -819,15 +793,17 @@ def inject_prelude(program: ast.Program) -> str:
     - Result combinators (``result_unwrap_or``, ``result_map``) —
       injected unless the user defines a non-standard ``Result<T, E>``
       or shadows the function names.
-    - Array type aliases (``ArrayMapFn``, ``ArrayFilterFn``,
-      ``ArrayFoldFn``) — always injected unless the user shadows the
-      alias names, so user code can still spell closure types (e.g.
-      ``fn foo(@ArrayMapFn<Int, String>)``).
-    - Reserved ``Vera``-prefixed twins of the alias names the injected
-      combinators themselves resolve through (#1184) — injected with
-      those combinator bodies, and never skipped, so a user or module
-      alias may take a user-facing alias name without re-typing the
-      prelude's own declarations.
+    - The closure-parameter type aliases the injected combinators
+      resolve through (``VeraOptionMapFn``, ``VeraArrayMapFn``, …) —
+      injected exactly when those bodies are, and never skipped for a
+      SHADOWING reason (the Option and Result blocks still ride their
+      combinators' own conditions; the Array block has no combinator
+      prerequisite and is appended unconditionally).  Their names are
+      in the prelude's reserved ``Vera`` namespace (#869/#1184/#1221),
+      which E154 keeps user programs out of, so nothing a user
+      declares can re-type them and no user-written type expression
+      resolves through them.  User code that wants a short name for a
+      function type declares its own alias.
     - Array combinator bodies — none currently.  All three
       (``array_map``, ``array_filter``, ``array_fold``) are emitted
       as iterative WASM by codegen (#480).  ``_ARRAY_COMBINATORS`` is
@@ -855,52 +831,39 @@ def inject_prelude(program: ast.Program) -> str:
     source_parts: list[str] = [_PRELUDE_DATA]
 
     option_fn_names = {"option_unwrap_or", "option_map", "option_and_then"}
-    option_alias_names = {"OptionMapFn", "OptionBindFn"}
     result_fn_names = {"result_unwrap_or", "result_map"}
-    result_alias_names = {"ResultMapFn"}
     # array_map, array_filter, and array_fold are all built-ins
     # emitted as iterative WASM (#480); none of them have prelude
     # bodies any more.  The set stays explicit (rather than becoming
     # an empty constant) so adding future array helpers that DO need
     # prelude injection is a one-line change.
     array_fn_names: set[str] = set()
-    array_alias_names = {"ArrayMapFn", "ArrayFilterFn", "ArrayFoldFn"}
 
+    # The alias blocks ride the bodies that resolve through them — no
+    # injection is ever skipped for SHADOWING, because their names are in
+    # the reserved prelude namespace (#1221), which no user declaration may
+    # take, so there is no shadowing case to skip an injection for.  The
+    # combinator conditions below still apply: an absent alias is inert
+    # when the bodies that would resolve through it are absent too.
     if (inject_option_combinators
             and not option_fn_names.issubset(user_names)):
-        need_aliases = not (
-            {"option_map", "option_and_then"}.issubset(user_names)
-        )
-        if need_aliases and not option_alias_names.issubset(user_names):
-            source_parts.append(_OPTION_TYPE_ALIASES)
-        # #1184: the reserved twins the combinators actually resolve
-        # through go in unconditionally with the bodies that need them
-        # — a user or module alias named ``OptionMapFn`` shadows the
-        # user-facing block above (that is its right), and must not
-        # take ``option_map`` down with it.
-        source_parts.append(_OPTION_INTERNAL_ALIASES)
+        source_parts.append(_OPTION_TYPE_ALIASES)
         source_parts.append(_OPTION_COMBINATORS)
 
     if (inject_result_combinators
             and not result_fn_names.issubset(user_names)):
-        need_aliases = "result_map" not in user_names
-        if need_aliases and not result_alias_names.issubset(user_names):
-            source_parts.append(_RESULT_TYPE_ALIASES)
-        source_parts.append(_RESULT_INTERNAL_ALIASES)  # #1184, see above
+        source_parts.append(_RESULT_TYPE_ALIASES)
         source_parts.append(_RESULT_COMBINATORS)
 
     # Array operations — always inject the aliases (no ADT
     # prerequisites); inject the combinator bodies only when needed.
     # Decoupled after all three combinators migrated to iterative
     # WASM (#480): ``array_fn_names`` is empty so the combinator-
-    # injection branch is a no-op for current programs, but user
-    # code may still reference ``ArrayMapFn`` / ``ArrayFilterFn`` /
-    # ``ArrayFoldFn`` in type annotations and needs those aliases
-    # defined.  When a future array helper lands as a prelude
-    # function (not a built-in), just add it to ``array_fn_names``
-    # and populate ``_ARRAY_COMBINATORS``.
-    if not array_alias_names.issubset(user_names):
-        source_parts.append(_ARRAY_TYPE_ALIASES)
+    # injection branch is a no-op for current programs.  When a future
+    # array helper lands as a prelude function (not a built-in), just
+    # add it to ``array_fn_names`` and populate ``_ARRAY_COMBINATORS``
+    # — its parameter aliases are already injected here.
+    source_parts.append(_ARRAY_TYPE_ALIASES)
     if _ARRAY_COMBINATORS and not array_fn_names.issubset(user_names):
         source_parts.append(_ARRAY_COMBINATORS)
 

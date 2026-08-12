@@ -292,6 +292,151 @@ def pretty_effect(eff: EffectRowType) -> str:
     return "effects(?)"
 
 
+# =====================================================================
+# Structural (DISCRIMINATING) type keys
+# =====================================================================
+
+def structural_type_key(ty: Type) -> str:
+    """A rendering of *ty* that DISCRIMINATES, rather than one that reads well.
+
+    :func:`vera.types.pretty_type` is a presentation renderer, and two of its
+    choices are deliberate elisions: a `RefinedType` prints `{@Int | ...}`
+    with its predicate replaced by an ellipsis, and a `TypeVar` prints with
+    :data:`BUILTIN_TYPEVAR_MARKER` stripped (`T#b` → `T`).  Both are right for
+    an error message and wrong for an ORDERING key — distinct types render
+    identically, so they tie, and a stable `sorted` then falls back to the
+    input's own order.  Fed from a `frozenset` that is the `PYTHONHASHSEED`
+    dependence the ordering exists to remove.
+
+    Deterministic by construction: every branch is a fixed-shape recursion
+    over dataclass fields, and the only set this touches is a function type's
+    effect row, which :func:`structural_effect_key` sorts on a key built the
+    same structural way.
+
+    The predicate is rendered by :func:`vera.formatter.format_expr_canonical` — the
+    single-line canonical source form ``vera fmt`` emits.  Two properties
+    make it the right renderer, and they are the reason it is not
+    ``ast.Node.pretty`` (which this used first):
+
+    * It DISCRIMINATES, because it is a left inverse of parsing.
+      Parenthesisation is re-derived from precedence and associativity
+      rather than copied, precisely so the text re-parses to the same
+      expression — ``(a + b) + c`` renders ``a + b + c`` while
+      ``a + (b + c)`` keeps its parentheses.  ``parse(format(e)) == e``
+      therefore gives ``format(a) == format(b) => a == b``, and ``vera
+      fmt``'s idempotence postcondition plus
+      ``scripts/check_corpus_canonical.py`` exercise that round trip over
+      the whole corpus on every commit.
+    * It is LINEAR in the predicate's source length.  This key names a
+      State/Exn cell FAMILY (:func:`vera.naming.family_name`), which is
+      mangled into a WASM import name, and ``Node.pretty``'s
+      newline-indented tree grows QUADRATICALLY in nesting depth: 44
+      left-nested ``&&`` conjuncts rendered 56,604 characters there against
+      646 here, and mangled that crossed wasmparser's 100,000-byte
+      name-string cap.  Check, verify and compile all passed; ``vera run``
+      then failed to parse the module it had just emitted, while the
+      browser host ran the same bytes — a runtime divergence on a
+      check-green program (PR #1238 review).
+      ``vera/codegen/compilability.py``'s
+      :data:`~vera.codegen.compilability.MAX_CELL_FAMILY_SYMBOL` backstops
+      the residue loudly.
+
+    One derivation, still: the checker's effect-row ordering and the cell
+    family read the SAME key, so a predicate that discriminates two rows
+    discriminates two cells, by construction rather than by agreement.
+    """
+    if isinstance(ty, RefinedType):
+        # Imported here rather than at module scope: `vera.formatter` pulls
+        # in the parser and the transformer, and `vera.types` is imported by
+        # most of the compiler — a module-level edge would make every
+        # importer of a semantic type pay for the grammar.  Nothing in the
+        # formatter's own import closure reaches back here, so this is a
+        # cost decision, not a cycle break.
+        from vera.formatter import format_expr_canonical
+        return (f"{{{structural_type_key(ty.base)}"
+                f"|{format_expr_canonical(ty.predicate, structural=True)}}}")
+    if isinstance(ty, TypeVar):
+        # The raw name, marker included.
+        return f"'{ty.name}"
+    if isinstance(ty, AdtType):
+        if not ty.type_args:
+            return ty.name
+        args = ", ".join(structural_type_key(a) for a in ty.type_args)
+        return f"{ty.name}<{args}>"
+    if isinstance(ty, FunctionType):
+        params = ", ".join(structural_type_key(p) for p in ty.params)
+        return (f"fn({params} -> {structural_type_key(ty.return_type)}) "
+                f"{structural_effect_key(ty.effect)}")
+    return pretty_type(ty)
+
+
+def effect_sort_key(ei: EffectInstance) -> tuple[str, str]:
+    """A STRUCTURAL total order on effect instances (#1215 / #1231).
+
+    Used as the deterministic tiebreak for row members
+    :attr:`TypeEnv.current_effect_order` does not mention.  Keying on the
+    effect NAME alone is not a total order: spec §7.3.3 permits one effect
+    twice with different type arguments (`effects(<State<Int>, State<Bool>>)`
+    is two independent cells), so those two tie, and `sorted` — being stable —
+    then preserves the `frozenset`'s own iteration order, reintroducing the
+    exact `PYTHONHASHSEED` dependence the ordering exists to remove.
+    Rendering the arguments makes the key discriminate them.
+
+    The rendering is :func:`structural_type_key`, not `pretty_type` (round-5
+    review): the human-readable renderer elides a refinement's predicate and
+    a type variable's built-in marker, so `effects(<State<Pos>, State<Neg>>)`
+    over two refinement aliases of one base tied on the key exactly as the
+    name-only version tied `State<Int>` against `State<Bool>` — the same bug
+    one level down, in the fix for it.
+    """
+    return (
+        ei.name,
+        ", ".join(structural_type_key(a) for a in ei.type_args),
+    )
+
+
+def structural_effect_key(eff: EffectRowType) -> str:
+    """A rendering of an effect ROW that DISCRIMINATES (round-9 review).
+
+    The type-argument tiebreak reaches an effect row whenever a type argument
+    is a function type — `effects(<Cb<fn(@Int -> @Bool) effects(<State<Pos>>)>>)`
+    — and that leg was rendered by :func:`vera.types.pretty_effect`, which
+    renders each member through `pretty_type`.  So the two elisions
+    :func:`structural_type_key` exists to avoid came back at the NESTED
+    depth: two outer instances differing only inside a nested row (by a
+    refinement's predicate, or by a type variable's built-in marker) rendered
+    identically, tied, and a stable `sorted` handed back the `frozenset`'s own
+    order — the `PYTHONHASHSEED` dependence, three levels into its own fix.
+
+    Rendering members through :func:`effect_sort_key` closes it and makes the
+    two mutually recursive, which is what "structural all the way down" means
+    here: a nested row's own function-typed arguments recurse back through
+    this.  Deterministic despite reading a `frozenset`, because the members
+    are sorted on that structural key rather than on a presentation string —
+    a total order, so the sort's stability is never consulted.  The open row
+    variable is part of the row's identity, so it is rendered too.
+    """
+    if isinstance(eff, PureEffectRow):
+        return "effects(pure)"
+    if isinstance(eff, ConcreteEffectRow):
+        parts = [
+            f"{name}<{args}>" if args else name
+            for name, args in sorted(effect_sort_key(e) for e in eff.effects)
+        ]
+        if eff.row_var:
+            # `'`-prefixed, exactly as :func:`structural_type_key`'s
+            # `TypeVar` branch marks a variable (PR #1238 review).  An open
+            # ROW VARIABLE and a zero-argument effect MEMBER of the same
+            # spelling both rendered bare `E`, so an open
+            # `effects(<E>)` under `forall<E>` tied with a closed
+            # `effects(<E>)` over a declared `effect E`.  This key names a
+            # cell, so a tie is two cells sharing one host cell — the same
+            # class as the elisions the key exists to avoid, one level out.
+            parts.append(f"'{eff.row_var}")
+        return f"effects(<{', '.join(parts)}>)"
+    return "effects(?)"
+
+
 def base_type(ty: Type) -> Type:
     """Strip refinement wrappers to get the underlying base type."""
     while isinstance(ty, RefinedType):

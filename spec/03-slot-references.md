@@ -359,7 +359,7 @@ private fn apply_to_array(@Array<Int>, @IntTransform -> @Array<Int>)
 
 ## 3.8 Type Alias and Reference Resolution
 
-Type aliases are **not transparent** for reference resolution. This is a critical rule:
+At the **head** of a slot name, type aliases are **not transparent** for reference resolution. This is a critical rule (§3.8.1 gives the complementary rule for type *arguments*, which do resolve):
 
 <!-- vera:skip-parse category="FRAGMENT" reason="fn(@PosInt, @Int -> @Int) — no name" -->
 ```
@@ -376,7 +376,33 @@ fn(@PosInt, @Int -> @Int)
 
 Here `@PosInt.0` refers to the first parameter and `@Int.0` refers to the second parameter. They are in separate reference namespaces despite `PosInt` being a refinement of `Int`.
 
-Rationale: If aliases were transparent, adding a type alias to a library could silently change the meaning of `@Int.0` in user code by splitting the `Int` namespace. Opaque alias resolution prevents this class of errors.
+Rationale: If heads were transparent, adding a type alias to a library could silently change the meaning of `@Int.0` in user code by splitting the `Int` namespace. An opaque head prevents this class of errors.
+
+### 3.8.1 Head versus arguments
+
+Opacity applies to the **head** of a slot name only. A slot name's type **arguments** are fully resolved through aliases, so two spellings of the same argument name one namespace. A parameter written `@Option<Cnt>` under `type Cnt = Int` binds the name `Option<Int>`, and `@Option<Int>.0` is how it is referenced; a parameter written `@Cnt` binds `Cnt`, and only `@Cnt.0` reaches it.
+
+The two rules have different jobs. The head is the name the programmer chose for the binding, so leaving it opaque is what keeps a library's new alias from splitting a caller's namespace. An argument is a *component* of a structural type, so resolving it is what keeps `Option<Cnt>` and `Option<Int>` — one type — from becoming two namespaces.
+
+```vera
+type Cnt = Int;
+
+private fn unwrap(@Option<Cnt>, @Cnt -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  -- The first parameter binds `Option<Int>`: the argument `Cnt` resolves.
+  -- The second binds `Cnt`: the head stays opaque, so `@Int.0` would not
+  -- reach it.
+  match @Option<Int>.0 {
+    Some(@Int) -> @Int.0,
+    None -> @Cnt.0
+  }
+}
+```
+
+`vera check --explain-slots` prints the resolved name of every parameter, for `where`-block helpers as well as top-level functions.
 
 ## 3.9 Index Elision
 

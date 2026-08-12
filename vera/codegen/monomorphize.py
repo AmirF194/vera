@@ -16,6 +16,9 @@ plus the transitive worklist, with constraint-failing instances filtered out
 
 from __future__ import annotations
 
+import contextlib
+from collections.abc import Iterator
+
 from vera import ast
 from vera.monomorphize import (
     MonoContext,
@@ -23,6 +26,7 @@ from vera.monomorphize import (
     collect_nested_generic_decls,
     declared_return_clone_key,
 )
+from vera.naming import EMPTY_ALIAS_ENV, AliasEnv
 from vera.skip import DERIVED_HELPER_DEPTH_CAP
 from vera.slots import type_expr_slot_name
 
@@ -119,11 +123,29 @@ class MonomorphizationMixin:
             adt_tp_counts=getattr(self, "_adt_tp_counts", {}),
             type_aliases=getattr(self, "_type_aliases", {}),
             type_alias_params=getattr(self, "_type_alias_params", {}),
+            # #1208: the same namespace as the two maps above, as one value.
+            alias_env=getattr(self, "_alias_env", EMPTY_ALIAS_ENV),
             fn_ret_types=fn_ret_types,
             # #899 issue 1: the declared return TypeExprs (type args retained)
             # let discovery recover a user fn's parameterized return in
             # `Option<T>` argument position, mirroring the WASM call-rewrite.
             fn_ret_type_exprs=dict(self._fn_ret_type_exprs),
+            # #1207: the very table the `_effect_ops` shadow guard in
+            # `_compile_function` consults, so discovery decides "is this
+            # `get` an effect op or a user function?" the same way the
+            # rewrite does.  `_fn_sigs` — not `fn_ret_types` above, which
+            # drops any name whose return WAT type has no Vera collapse.
+            fn_names=frozenset(self._fn_sigs),
+            # #1274 (F1): every (module, name) the Pass-0 classification made
+            # qualified-only, so a rerouted `deep::gen(...)` is not mistaken for
+            # an instantiation of the importer's own `gen`.
+            qualified_module_generics=frozenset(
+                (path, name)
+                for path, by_name in getattr(
+                    self, "_shadowed_imported_generic_decls", {},
+                ).items()
+                for name in by_name
+            ),
         )
 
     def _monomorphize(
@@ -211,27 +233,39 @@ class MonomorphizationMixin:
         # every constrained-generic call site's constructor arguments, across
         # both the seed decls and the transitively emitted mono bodies below.
         self._eq_full_type_names: dict[str, str] = {}
-        seed_programs = [program, *(
-            mod.program for mod in getattr(self, "_resolved_modules", [])
-        )]
-        for seed_program in seed_programs:
-            # #999: seed from resolved-module bodies too (their #1015-hoisted +
-            # #1014-qualified copies).  An imported ``compute``'s body call to
-            # its own nested generic ``compute$where$gid`` (or a top-level
-            # imported generic) is only reachable through the module's decls, not
-            # the main program's — so without walking them the importer emits no
-            # clone and the module body's call dangles.  The verifier's
-            # `_collect_instantiations` walks the identical set, keeping the #732
-            # differential in lockstep.
-            for tld in seed_program.declarations:
-                decl = tld.decl
-                if isinstance(decl, ast.FnDecl) and not decl.forall_vars:
-                    mono.collect_calls_in_node(
-                        decl, generic_decls, ctor_to_adt, instances,
-                    )
-                    self._collect_eq_full_type_names(
-                        decl, mono, generic_decls, ctor_to_adt,
-                    )
+        # #999: seed from resolved-module bodies too.  An imported ``compute``'s
+        # body call to its own nested generic ``compute$where$gid`` (or a
+        # top-level imported generic) is only reachable through the module's
+        # decls, not the main program's — so without walking them the importer
+        # emits no clone and the module body's call dangles.  The verifier's
+        # `_collect_instantiations` walks the identical set, keeping the #732
+        # differential in lockstep.
+        #
+        # #1274 (F1): the module bodies walked here are the REROUTED copies
+        # (`_imported_fn_decls`), not the raw `mod.program`.  A bare call that
+        # Pass 0 turned into a `ModuleCall` is no longer a call to the bare name,
+        # and seeding from the pre-reroute AST recorded it anyway — codegen
+        # emitted a clone of the IMPORTER's same-named generic that nothing
+        # calls and the verifier (which walks its rerouted copies) never
+        # discovers: a differential desync, and an unverified clone if that
+        # generic's contract lied.  These decls carry their where-helpers both
+        # nested and as separate entries; `instances` is a set, so the overlap
+        # costs nothing.
+        seed_decls: list[ast.FnDecl] = [
+            tld.decl for tld in program.declarations
+            if isinstance(tld.decl, ast.FnDecl)
+        ]
+        seed_decls.extend(
+            fdecl for _mp, fdecl in getattr(self, "_imported_fn_decls", [])
+        )
+        for decl in seed_decls:
+            if not decl.forall_vars:
+                mono.collect_calls_in_node(
+                    decl, generic_decls, ctor_to_adt, instances,
+                )
+                self._collect_eq_full_type_names(
+                    decl, mono, generic_decls, ctor_to_adt,
+                )
 
         # Generate monomorphized FnDecls with transitive closure.
         # After generating the first round, scan the monomorphized bodies
@@ -240,7 +274,6 @@ class MonomorphizationMixin:
         # Constraint-failing instances are skipped here (and their subtrees
         # pruned), so the emitted set excludes anything that wouldn't compile.
         seen: set[tuple[str, tuple[str, ...]]] = set()
-        mono_decls: list[ast.FnDecl] = []
         # Sort each per-name instantiation set so the worklist seed — and hence
         # the order clones are appended to `mono_decls` and emitted to WAT — is
         # deterministic across runs.  Without this, `set` iteration order varies
@@ -252,43 +285,9 @@ class MonomorphizationMixin:
             for fn_name, type_arg_set in instances.items()
             for ct in sorted(type_arg_set)
         ]
-        while worklist:
-            fn_name, concrete_types = worklist.pop()
-            key = (fn_name, concrete_types)
-            if key in seen:
-                continue
-            seen.add(key)
-            if fn_name not in generic_decls:
-                continue
-            decl = generic_decls[fn_name]
-            if not self._check_constraints(decl, concrete_types):
-                continue  # constraint violation — error emitted
-            mono_fn = mono.monomorphize_fn(decl, concrete_types)
-            mono_decls.append(mono_fn)
-            self._record_clone_origin(fn_name, mono_fn.name)
-            # #1002: remember this clone's concrete-FREE chain base so the
-            # per-clone where-tree hoister can key a generic-under-generic
-            # helper's `_emitted_instances` entry identically to the verifier.
-            self._clone_base_chain[mono_fn.name] = fn_name
-            # #932: a transitively-reached nested-generic constrained call in
-            # this clone body carries the same truncated constrained-var name —
-            # record its full recovery so the next round's `_check_constraints`
-            # can decide derivability on the un-truncated name.
-            self._collect_eq_full_type_names(
-                mono_fn, mono, generic_decls, ctor_to_adt,
-            )
-            self._emitted_instances.add((fn_name, concrete_types))
-            # Scan the monomorphized body for further generic calls
-            transitive: dict[str, set[tuple[str, ...]]] = {
-                name: set() for name in generic_decls
-            }
-            mono.collect_calls_in_node(
-                mono_fn, generic_decls, ctor_to_adt, transitive,
-            )
-            for t_name, t_types in transitive.items():
-                for t_ct in sorted(t_types):  # deterministic order (see seed)
-                    if (t_name, t_ct) not in seen:
-                        worklist.append((t_name, t_ct))
+        mono_decls = self._drain_generic_worklist(
+            worklist, seen, generic_decls, ctor_to_adt, mono,
+        )
 
         # Store generic fn info for call rewriting in wasm.py
         self._generic_fn_info: dict[
@@ -337,7 +336,103 @@ class MonomorphizationMixin:
         # of every helper under a clone-aligned name and rewrite the intra-clone
         # calls to match, so the ordinary mono-decl emission path (register in
         # Pass 1.5, compile in Pass 2) emits them.
-        return self._hoist_clone_where_fns(mono_decls, mono, ctor_to_adt)
+        #
+        # #1223: hoisting and the top-level worklist are a FIXPOINT, not two
+        # phases.  A generic `where`-helper under a generic ancestor is only
+        # monomorphized during hoisting, and the concrete clone's body can
+        # call a TOP-LEVEL generic at a type nothing else instantiates — its
+        # still-generic spelling binds the enclosing type VARIABLE's name
+        # (`pick$U`), so the worklist above never sees `pick$Bool` and the
+        # rewrite's call dangles (E602, then the whole chain drops with
+        # E620).  Each round therefore re-seeds the worklist from the bodies
+        # hoisting just produced, and any clones that yields go back through
+        # hoisting for their own where-trees.
+        emitted: list[ast.FnDecl] = []
+        round_decls = mono_decls
+        while round_decls:
+            hoisted = self._hoist_clone_where_fns(
+                round_decls, mono, ctor_to_adt,
+            )
+            emitted.extend(hoisted)
+            reseed: list[tuple[str, tuple[str, ...]]] = []
+            found: dict[str, set[tuple[str, ...]]] = {
+                name: set() for name in generic_decls
+            }
+            for body in hoisted:
+                mono.collect_calls_in_node(
+                    body, generic_decls, ctor_to_adt, found,
+                )
+            for t_name, t_types in found.items():
+                for t_ct in sorted(t_types):  # deterministic (see the seed)
+                    if (t_name, t_ct) not in seen:
+                        reseed.append((t_name, t_ct))
+            round_decls = self._drain_generic_worklist(
+                reseed, seen, generic_decls, ctor_to_adt, mono,
+            ) if reseed else []
+        return emitted
+
+    def _drain_generic_worklist(
+        self,
+        worklist: list[tuple[str, tuple[str, ...]]],
+        seen: set[tuple[str, tuple[str, ...]]],
+        generic_decls: dict[str, ast.FnDecl],
+        ctor_to_adt: dict[str, str],
+        mono: Monomorphizer,
+    ) -> list[ast.FnDecl]:
+        """Monomorphize *worklist* to a fixpoint, returning the new clones.
+
+        The transitive closure over top-level generics: emit each clone, then
+        rescan its body for further generic calls.  ``seen`` is the caller's,
+        so a second drain (#1223's re-seed from hoisted helper bodies) neither
+        re-emits nor loses anything — a key already drained is skipped, and a
+        key reached for the first time from a hoisted body is emitted here.
+        Constraint-failing instances are skipped (and their subtrees pruned),
+        so the emitted set excludes anything that wouldn't compile.
+        """
+        produced: list[ast.FnDecl] = []
+        while worklist:
+            fn_name, concrete_types = worklist.pop()
+            key = (fn_name, concrete_types)
+            if key in seen:
+                continue
+            seen.add(key)
+            if fn_name not in generic_decls:
+                continue
+            decl = generic_decls[fn_name]
+            if not self._check_constraints(decl, concrete_types):
+                continue  # constraint violation — error emitted
+            # #1208: the clone's binders are named against the DEFINING
+            # module's aliases, which is the namespace the consumers rebuild
+            # its scope in — see `_clone_alias_env`.
+            with self._clone_alias_env(
+                    self._imported_generic_base_origins.get(fn_name)) as cenv:
+                mono_fn = mono.monomorphize_fn(decl, concrete_types, cenv)
+            produced.append(mono_fn)
+            self._record_clone_origin(fn_name, mono_fn.name)
+            # #1002: remember this clone's concrete-FREE chain base so the
+            # per-clone where-tree hoister can key a generic-under-generic
+            # helper's `_emitted_instances` entry identically to the verifier.
+            self._clone_base_chain[mono_fn.name] = fn_name
+            # #932: a transitively-reached nested-generic constrained call in
+            # this clone body carries the same truncated constrained-var name —
+            # record its full recovery so the next round's `_check_constraints`
+            # can decide derivability on the un-truncated name.
+            self._collect_eq_full_type_names(
+                mono_fn, mono, generic_decls, ctor_to_adt,
+            )
+            self._emitted_instances.add((fn_name, concrete_types))
+            # Scan the monomorphized body for further generic calls
+            transitive: dict[str, set[tuple[str, ...]]] = {
+                name: set() for name in generic_decls
+            }
+            mono.collect_calls_in_node(
+                mono_fn, generic_decls, ctor_to_adt, transitive,
+            )
+            for t_name, t_types in transitive.items():
+                for t_ct in sorted(t_types):  # deterministic order (see seed)
+                    if (t_name, t_ct) not in seen:
+                        worklist.append((t_name, t_ct))
+        return produced
 
     def _hoist_clone_where_fns(
         self,
@@ -397,74 +492,96 @@ class MonomorphizationMixin:
             if origin is not None:
                 for h in hoisted:
                     self._mono_clone_origins[h.name] = origin
-            for h in hoisted:
-                if h.forall_vars:
-                    # #1002: still-generic (generic-under-generic).  Instantiate
-                    # it per its calls in the just-hoisted parent + siblings;
-                    # the concrete clones re-enter `pending`.
-                    self._instantiate_hoisted_generic(
-                        h, decl.name, [rewritten, *hoisted], pending,
-                        mono, ctor_to_adt,
-                    )
-                else:
-                    result.append(h)
+            generic_helpers = [h for h in hoisted if h.forall_vars]
+            result.extend(h for h in hoisted if not h.forall_vars)
+            if generic_helpers:
+                # #1002: still-generic (generic-under-generic).  Instantiate
+                # per their calls in the just-hoisted parent + siblings; the
+                # concrete clones re-enter `pending`.
+                self._instantiate_hoisted_generics(
+                    generic_helpers, decl.name, [rewritten, *hoisted], pending,
+                    mono, ctor_to_adt,
+                )
         return result
 
-    def _instantiate_hoisted_generic(
+    def _instantiate_hoisted_generics(
         self,
-        gen: ast.FnDecl,
+        gens: list[ast.FnDecl],
         parent_clone_name: str,
         bodies: list[ast.FnDecl],
         pending: list[ast.FnDecl],
         mono: Monomorphizer,
         ctor_to_adt: dict[str, str],
     ) -> None:
-        """Instantiate a still-generic hoisted ``where``-helper (#1002).
+        """Instantiate one clone's still-generic hoisted ``where``-helpers (#1002).
 
-        *gen* is a ``forall`` helper hoisted under a generic ancestor's clone,
-        renamed to its concrete-including per-clone name
-        (``parent$where$outer$Int$where$ginner``).  Register it as a generic
-        base so Pass 2's call-site rewriter mangles the (already-redirected)
-        bare calls to it, discover its instantiations from *bodies* (the hoisted
-        parent clone + its sibling helpers), monomorphize each to a concrete
-        per-clone clone (``…$ginner$Int``), record the emission under the
-        concrete-FREE chain key so the #732 differential matches the verifier,
-        and re-queue each clone so its own where-tree is hoisted.
+        Each of *gens* is a ``forall`` helper hoisted under a generic ancestor's
+        clone, renamed to its concrete-including per-clone name
+        (``parent$where$outer$Int$where$ginner``).  Register them as generic
+        bases so Pass 2's call-site rewriter mangles the (already-redirected)
+        bare calls, discover instantiations from *bodies* (the hoisted parent
+        clone + its sibling helpers), monomorphize each to a concrete per-clone
+        clone (``…$ginner$Int``), record the emission under the concrete-FREE
+        chain key so the #732 differential matches the verifier, and re-queue
+        each clone so its own where-tree is hoisted.
+
+        The whole FAMILY at once, over a growing body set (#1223).  Taking one
+        helper at a time against the still-generic siblings missed every
+        instantiation a sibling's own CONCRETE clone introduces: inside the
+        generic ``outer<U>``, ``inner(@U.1, @U.0)`` binds ``inner``'s variable
+        to the type variable's NAME, so only ``inner$U`` was discovered while
+        ``outer$Bool``'s body called ``inner$Bool`` — a dangling target on a
+        check-clean program.  Feeding each clone back in as a body closes it,
+        and the discovery leaf is the one the verifier drives too
+        (``collect_generic_helper_instances``), so neither side can find a
+        different set.
         """
-        assert gen.forall_vars is not None  # noqa: S101
-        # Register for Pass 2 generic-call resolution under the emission name.
-        self._generic_fn_info[gen.name] = (gen.forall_vars, gen.params)
-        self._generic_constrained_vars[gen.name] = frozenset(
-            c.type_var for c in (gen.forall_constraints or ())
-        )
-        # The concrete-FREE chain key: the parent clone's chain base plus this
-        # helper's bare name (``gen.name`` is ``<parent_clone_name>$where$<h>``).
-        base_chain = self._clone_base_chain.get(
-            parent_clone_name, parent_clone_name,
-        )
-        helper_bare = gen.name[len(parent_clone_name) + len("$where$"):]
-        chain_key = f"{base_chain}$where${helper_bare}"
+        by_name: dict[str, ast.FnDecl] = {}
+        chain_keys: dict[str, str] = {}
+        for gen in gens:
+            assert gen.forall_vars is not None  # noqa: S101
+            by_name[gen.name] = gen
+            # Register for Pass 2 generic-call resolution under the emission name.
+            self._generic_fn_info[gen.name] = (gen.forall_vars, gen.params)
+            self._generic_constrained_vars[gen.name] = frozenset(
+                c.type_var for c in (gen.forall_constraints or ())
+            )
+            # The concrete-FREE chain key: the parent clone's chain base plus
+            # this helper's bare name (``gen.name`` is
+            # ``<parent_clone_name>$where$<h>``).
+            base_chain = self._clone_base_chain.get(
+                parent_clone_name, parent_clone_name,
+            )
+            helper_bare = gen.name[len(parent_clone_name) + len("$where$"):]
+            chain_keys[gen.name] = f"{base_chain}$where${helper_bare}"
         # Origin: a nested clone of an imported base is the module's own code.
         origin = self._mono_clone_origins.get(parent_clone_name)
-        # Discover instantiations of `gen` (by its emission name) across the
-        # parent clone body + every sibling helper body.
-        gen_decls = {gen.name: gen}
-        instances: dict[str, set[tuple[str, ...]]] = {gen.name: set()}
-        for body in bodies:
-            mono.collect_calls_in_node(
-                body, gen_decls, ctor_to_adt, instances,
+        emitted: set[tuple[str, tuple[str, ...]]] = set()
+        scan: list[ast.FnDecl] = list(bodies)
+        while scan:
+            found = mono.collect_generic_helper_instances(
+                by_name, scan, ctor_to_adt,
             )
-        for concrete in sorted(instances[gen.name]):
-            if not self._check_constraints(gen, concrete):
-                continue
-            clone = mono.monomorphize_fn(gen, concrete)
-            if origin is not None:
-                self._mono_clone_origins[clone.name] = origin
-            # Chain the deeper base so a generic sub-helper of `gen` keys
-            # concrete-free too.
-            self._clone_base_chain[clone.name] = chain_key
-            self._emitted_instances.add((chain_key, concrete))
-            pending.append(clone)
+            scan = []
+            for gen_name, concretes in found.items():
+                gen = by_name[gen_name]
+                for concrete in sorted(concretes):
+                    if (gen_name, concrete) in emitted:
+                        continue
+                    emitted.add((gen_name, concrete))
+                    if not self._check_constraints(gen, concrete):
+                        continue
+                    with self._clone_alias_env(origin) as cenv:  # #1208
+                        clone = mono.monomorphize_fn(gen, concrete, cenv)
+                    if origin is not None:
+                        self._mono_clone_origins[clone.name] = origin
+                    # Chain the deeper base so a generic sub-helper of `gen`
+                    # keys concrete-free too.
+                    self._clone_base_chain[clone.name] = chain_keys[gen_name]
+                    self._emitted_instances.add(
+                        (chain_keys[gen_name], concrete))
+                    pending.append(clone)
+                    scan.append(clone)
 
     def _hoist_where_fns_under(
         self,
@@ -534,6 +651,38 @@ class MonomorphizationMixin:
         rewritten = self._rewrite_call_names(stripped, combined)
         assert isinstance(rewritten, ast.FnDecl)  # noqa: S101
         return rewritten
+
+    @contextlib.contextmanager
+    def _clone_alias_env(
+        self, origin: tuple[str, ...] | None,
+    ) -> Iterator[AliasEnv]:
+        """Yield the naming env a clone of a generic from *origin* is named
+        against (#1208), with the flat alias maps swapped to match.
+
+        Aliases are module-scoped (spec §8.4.1), so the De Bruijn recount in
+        ``monomorphize_fn`` has to render binder names in the namespace of the
+        module that DECLARED the generic — which is also the namespace the
+        clone is later registered and emitted under (``_module_alias_scope``
+        at the Pass 1.5 registration and the Pass 2.5 / 2.6 emission doors).
+        Named against the importer's instead, an imported generic's
+        alias-typed parameter looks like a different class than it is, the
+        recount misses the merge, and the emitted clone resolves a reference
+        onto the wrong parameter — silently, with the right arity.
+
+        ``origin=None`` (a main-file generic, or a nested helper of one) makes
+        this the identity: the flat maps already hold that namespace.
+
+        The source scope is paired with the alias scope here as at the other
+        four doors (#1186/#1189, PR #1224 review): entering a module's
+        namespace leaves ``file``/``source`` on the IMPORTER, so a diagnostic
+        raised while the clone is built would carry the importer's path with
+        module-local line/column — coordinates naming unrelated source, and a
+        location-keyed dedup (E618) merging two modules' reports into one.
+        Nothing under this door reports today; the pairing is what keeps that
+        true of whatever moves into it.
+        """
+        with self._module_alias_scope(origin), self._module_source_scope(origin):
+            yield self._alias_env
 
     def _record_clone_origin(self, base_name: str, clone_name: str) -> None:
         """Record *clone_name*'s origin module when its base is an imported
@@ -620,15 +769,23 @@ class MonomorphizationMixin:
                 self._collect_shadowed_qualified_calls(
                     decl, path, decls_by_name, ctor_to_adt, instances,
                 )
-        # #1029: also seed from THIS module's imported NON-generic bodies (and
-        # their where-helpers), which after the loop-top reroute carry a
-        # ``path::inner(...)`` ModuleCall for each private-generic call.  Without
-        # this a NON-generic caller of a private generic (`use_it` → `inner`)
-        # never seeds `mod$<path>$inner$Int`, so Pass 2.5 emits `use_it`'s body
-        # with a `call $inner` that dangles (`unknown func`) at run.  These decls
-        # already live in `_imported_fn_decls` (rerouted); filter to this path.
-        for mp, fdecl in self._imported_fn_decls:
-            if mp == path and not fdecl.forall_vars:
+        # #1029: also seed from the imported NON-generic bodies (and their
+        # where-helpers), which after the loop-top reroute carry a
+        # ``path::inner(...)`` ModuleCall for each qualified-only generic call.
+        # Without this a NON-generic caller of a private generic (`use_it` →
+        # `inner`) never seeds `mod$<path>$inner$Int`, so Pass 2.5 emits
+        # `use_it`'s body with a `call $inner` that dangles (`unknown func`) at
+        # run.  These decls already live in `_imported_fn_decls` (rerouted).
+        #
+        # #1274 (F1): scan EVERY module's decls, not only this path's.  A module
+        # can call a DIFFERENT module's qualified-only generic — `mid`'s body
+        # calling `deep`'s `gen` — and that reroute lands a `deep::gen(...)`
+        # ModuleCall inside a decl registered under `mid`.  Filtering by the
+        # OWNING path skipped it, so no `mod$deep$gen$Bool` was emitted and
+        # `mid`'s body was dropped.  The walk itself already matches on the call
+        # node's own `path`, so widening the scan cannot pick up a foreign one.
+        for _mp, fdecl in self._imported_fn_decls:
+            if not fdecl.forall_vars:
                 self._collect_shadowed_qualified_calls(
                     fdecl, path, decls_by_name, ctor_to_adt, instances,
                 )
@@ -661,7 +818,8 @@ class MonomorphizationMixin:
             gdecl = decls_by_name[gen_name]
             if not self._check_constraints(gdecl, concrete_types):
                 continue
-            clone = mono.monomorphize_fn(gdecl, concrete_types)
+            with self._clone_alias_env(path) as cenv:  # #1208
+                clone = mono.monomorphize_fn(gdecl, concrete_types, cenv)
             qual_base = self._module_qualified_generic_bases[(path, gen_name)]
             mangled = self._mono_shadowed_name(qual_base, gen_name, clone.name)
 
@@ -675,9 +833,13 @@ class MonomorphizationMixin:
             trans_shadow: dict[str, set[tuple[str, ...]]] = {
                 name: set() for name in decls_by_name
             }
-            mono.collect_calls_in_node(
-                clone, decls_by_name, ctor_to_adt, trans_shadow,
-            )
+            # #1274 (F1): this scan is keyed on THIS module's own generics, so a
+            # `path::sibling(...)` here is the entry meant — see
+            # `Monomorphizer.shadowed_module_scope`.
+            with mono.shadowed_module_scope(path):
+                mono.collect_calls_in_node(
+                    clone, decls_by_name, ctor_to_adt, trans_shadow,
+                )
             for s_name, s_types in trans_shadow.items():
                 for s_ct in sorted(s_types):
                     if (s_name, s_ct) not in shadowed_seen:
@@ -753,7 +915,10 @@ class MonomorphizationMixin:
                     t_decl = generic_decls[t_name]
                     if not self._check_constraints(t_decl, t_ct):
                         continue
-                    t_fn = mono.monomorphize_fn(t_decl, t_ct)
+                    with self._clone_alias_env(  # #1208
+                            self._imported_generic_base_origins.get(
+                                t_name)) as cenv:
+                        t_fn = mono.monomorphize_fn(t_decl, t_ct, cenv)
                     mono_decls.append(t_fn)
                     self._record_clone_origin(t_name, t_fn.name)
                     # #1029 (R3): a normal clone reached transitively from a

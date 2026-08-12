@@ -12,7 +12,13 @@ from typing import TYPE_CHECKING
 
 from vera import ast
 from vera.errors import Diagnostic, SourceLocation
-from vera.monomorphize import canonicalize_type_aliases
+from vera.monomorphize import (
+    canonicalize_type_aliases,
+    importer_occupied_bare_names,
+    module_qualified_generic_names,
+    module_qualified_generic_targets,
+    public_generic_names,
+)
 
 if TYPE_CHECKING:
     from vera.codegen.core import CodeGenerator
@@ -32,7 +38,8 @@ class CrossModuleMixin:
         main file's aliases must never re-type a module's declarations.
         For the duration of the ``with`` block the flat
         ``_type_aliases`` / ``_type_alias_params`` maps (main file +
-        non-shadowed prelude) are swapped for ``{prelude, **module_own}``
+        non-shadowed prelude) — and the ``_alias_env`` those two describe
+        (#1208) — are swapped for ``{prelude, **module_own}``
         — the module's aliases overlaying the prelude's, mirroring how
         the main file's own aliases overlay the prelude in the flat maps.
         Every alias consumer downstream (signature derivation, contract
@@ -66,11 +73,37 @@ class CrossModuleMixin:
             if name not in mod_aliases
         }
         gen._type_alias_params.update(mod_params)
+        # The declaration-index space is swapped with them (PR #1224 review):
+        # it answers "was this name already declared when this alias body was
+        # registered?", which is a question about ONE namespace.  The module's
+        # own 0-based space overlays the prelude's negative block, mirroring
+        # the alias overlay above; a main-file declaration is not in it, and a
+        # module declaration is not in the main file's.
+        saved_order = gen._decl_order
+        gen._decl_order = {
+            **gen._prelude_decl_order,
+            **gen._module_decl_order.get(mod_path, {}),
+        }
+        # #1253: and so is ADT MEMBERSHIP — which names are data types HERE.
+        # `_adt_layouts` is one map across every absorbed namespace, so
+        # without this a sibling module's ADTs stayed members of this module's
+        # namespace while the checker, registering each module in isolation,
+        # never saw them: the two sides disagreeing about what a name MEANS.
+        saved_active = gen._active_module_path
+        gen._active_module_path = mod_path
+        # #1208: the naming environment is part of the swapped pair — it
+        # describes exactly these two maps, so it moves with them or it names
+        # the module's declarations against the main file's aliases.
+        saved_env = gen._alias_env
+        gen._sync_alias_env()
         try:
             yield
         finally:
             gen._type_aliases = saved_aliases
             gen._type_alias_params = saved_params
+            gen._decl_order = saved_order
+            gen._active_module_path = saved_active
+            gen._alias_env = saved_env
 
     @contextlib.contextmanager
     def _module_source_scope(
@@ -190,6 +223,11 @@ class CrossModuleMixin:
                 set(imp.names) if imp.names is not None else None
             )
 
+        # #1253: per-namespace ADT bookkeeping, filled in the harvest loop and
+        # folded into membership sets after it.
+        declared_adts: dict[tuple[str, ...], frozenset[str]] = {}
+        public_adts: dict[tuple[str, ...], frozenset[str]] = {}
+
         # #814 §8.5.3: names of LOCAL functions in the importing program,
         # INCLUDING (recursively) `where`-fn helpers.  A module fn whose bare
         # name appears here is shadowed for bare calls (§8.5.2); its module-
@@ -200,6 +238,30 @@ class CrossModuleMixin:
         # it shadows the namespace identically and must be collected too.
         local_fn_names = self._collect_local_fn_names(program)
         self._local_shadowed_fn_names = local_fn_names
+        # #1274 (F3): the GENERIC classification below reads the bare-name set
+        # through the shared derivation instead, so the verifier — which holds
+        # the pre-Pass-0 AST — computes the identical set from its own copy.
+        # `local_fn_names` above stays the post-hoist walk its other consumers
+        # (`_register_shadowed_import`, `importer_visible`) were written
+        # against; the two agree on every `$`-free name, which is asserted
+        # directly rather than assumed (tests/test_module_generic_namespace_1274).
+        importer_bare_names = importer_occupied_bare_names(program)
+
+        # #1274 (F1): classify EVERY module's generics before rerouting ANY
+        # module's bodies.  A module's bare call can name a generic it imported
+        # rather than one it declares (`mid` calls `deep`'s `gen`), and the
+        # reroute target is the OWNING module — so the per-module pass below
+        # needs every other module's answer already computed.
+        qualified_by_path: dict[tuple[str, ...], set[str]] = {}
+        public_generics_by_path: dict[tuple[str, ...], set[str]] = {}
+        for mod in self._resolved_modules:
+            qualified_by_path[mod.path] = module_qualified_generic_names(
+                mod.program, import_names.get(mod.path), importer_bare_names,
+                direct=mod.direct,
+            )
+            public_generics_by_path[mod.path] = public_generic_names(
+                mod.program,
+            )
 
         # Provenance tracking for collision detection
         fn_provenance: dict[str, tuple[str, ...]] = {}
@@ -238,24 +300,50 @@ class CrossModuleMixin:
                 elif isinstance(tld.decl, ast.DataDecl):
                     vis_map[tld.decl.name] = tld.visibility or "private"
 
-            # #1000: names of this module's PRIVATE top-level generics.  They
-            # are unimportable, so a public generic reaching one transitively
-            # must route to the module's own version (``mod$<path>$inner``) — a
-            # bare ``inner`` in the importer's flat namespace either dangles or
-            # (a same-named local) is captured.  Rerouted below to a synthetic
-            # ``ModuleCall`` so the existing shadowed-generic discovery finds it
-            # and the ModuleCall desugar resolves it to the qualified clone.
-            module_private_generics: set[str] = {
+            # #1253: what this module DECLARES as data types, and which of
+            # those it EXPORTS.  The two sets are the input to the membership
+            # rule below — a module's namespace holds its own ADTs whatever
+            # their visibility, and an importer's holds only the public ones
+            # its filter names, which is exactly the checker's view.
+            declared_adts[mod.path] = frozenset(
                 tld.decl.name
                 for tld in mod.program.declarations
-                if isinstance(tld.decl, ast.FnDecl)
-                and tld.decl.forall_vars
-                and (tld.visibility or "private") != "public"
-            }
+                if isinstance(tld.decl, ast.DataDecl)
+            )
+            public_adts[mod.path] = frozenset(
+                name for name in declared_adts[mod.path]
+                if vis_map.get(name) == "public"
+            )
 
             # Harvest function sigs — include all (public + private) so
             # private helpers called by imported public fns are available.
             name_filter = import_names.get(mod.path)
+
+            # #1000, widened by #1274: names of this module's QUALIFIED-ONLY
+            # top-level generics — the ones whose bare name in the importer's
+            # flat namespace does NOT denote this module's declaration (private,
+            # outside the import filter, or shadowed by a local).  A bare call to
+            # one of them from this module's own bodies either dangles or is
+            # captured by the importer's same-named generic, so each is rerouted
+            # below to a synthetic ``ModuleCall`` — the existing shadowed-generic
+            # discovery then finds it and the desugar resolves it to the
+            # ``mod$<path>$name`` clone.  The SAME predicate splits the generic
+            # registration below, and the verifier drives it too, so the two
+            # sides of the #732 differential can never disagree about which
+            # namespace a module generic's clone lives in.
+            # #1274 (F1): this module's own qualified-only generics AND the
+            # ones it can name through its imports, each mapped to its OWNING
+            # module — the `mod$<path>$name` identity is per-owner, so `mid`'s
+            # bare `gen` must reroute to `mod$deep$gen`.
+            module_qualified_targets = module_qualified_generic_targets(
+                mod.program, qualified_by_path, public_generics_by_path,
+                mod.path,
+            )
+            # The REGISTRATION split below is about this module's OWN
+            # declarations, so it reads this module's own classification —
+            # never the imports' union, which answers a different question
+            # (which bare CALLS from here must reroute, and to whom).
+            module_own_qualified = qualified_by_path[mod.path]
             for fn_name, sig in temp._fn_sigs.items():
                 # Collision detection: same name from different module
                 if fn_name in fn_provenance:
@@ -420,6 +508,14 @@ class CrossModuleMixin:
                     # both positions (E210 expression / E320 pattern), and
                     # importer VISIBILITY below stays public + in-filter.
                     self._adt_layouts.setdefault(adt_name, layouts)
+                    # #1227: and the namespace that declared it, so the
+                    # naming env can order it where its own module did
+                    # rather than at the built-in floor.  `setdefault`
+                    # matches the layout above — the first module to
+                    # register a name owns it, and a MAIN-file declaration
+                    # of the same name is never routed here (it stamps
+                    # `_decl_order`, which `_adt_decl_index` asks first).
+                    self._adt_layout_owners.setdefault(adt_name, mod.path)
                     # #912: propagate the imported ADT's type-parameter
                     # metadata alongside its layout.  Without these, an imported
                     # generic ADT (`Box<T>`) reached codegen with a layout but
@@ -473,6 +569,22 @@ class CrossModuleMixin:
             self._module_type_alias_params[mod.path] = dict(
                 temp._type_alias_params,
             )
+            # #1208: capture this module's declaration ORDER as its OWN
+            # namespace, exactly as the alias maps above are captured, in the
+            # module's own source order (`temp` registered them 0-based).
+            # `_module_alias_scope` installs it as {prelude, **module_own}
+            # while the module compiles.
+            #
+            # It used to be folded into ONE shared index space instead, which
+            # was a silent miscompile (PR #1224 review): `_stamp_decl_order`
+            # is idempotent by name, modules are absorbed at Pass 0.5 and the
+            # main file at Pass 1, so a name a module stamped kept that
+            # earlier index in the MAIN file's namespace and turned its
+            # forward reference into a backward one.  The reverse direction
+            # (a main-file alias ordering against a module's namespace) was
+            # never possible; this one was, and both directions are closed by
+            # keying the space to its owner.
+            self._module_decl_order[mod.path] = dict(temp._decl_order)
 
             # Collect ALL FnDecls from this module for compilation, and wire
             # up module-qualified-call resolution (#814 §8.5.3 + C2).
@@ -496,9 +608,9 @@ class CrossModuleMixin:
                 if not isinstance(tld.decl, ast.FnDecl):
                     continue
                 # #1029: reroute EVERY imported decl's bare calls to this
-                # module's private generics ONCE at the loop top, and use the
-                # rerouted copy in ALL branches below.  Pre-fix only the PUBLIC
-                # generic branch rerouted (#1000), so a NON-generic caller
+                # module's qualified-only generics ONCE at the loop top, and use
+                # the rerouted copy in ALL branches below.  Pre-#1029 only the
+                # PUBLIC generic branch rerouted (#1000), so a NON-generic caller
                 # (``use_it`` → private ``inner``), a private→private chain
                 # (private ``A`` → private ``B``), and a private generic's own
                 # body all kept the bare call — which dangled (``unknown func``)
@@ -507,53 +619,41 @@ class CrossModuleMixin:
                 # call), so it never captures a lexically-nearer helper.  Only
                 # the call nodes change; name/params/sig are untouched, so the
                 # ``temp._fn_sigs``-keyed registration lookups below stay valid.
-                routed = self._reroute_private_generic_calls(
-                    tld.decl, mod.path, module_private_generics,
+                routed = self._reroute_module_qualified_generic_calls(
+                    tld.decl, module_qualified_targets,
                 )
                 # #774: an imported PUBLIC generic is monomorphized by the
                 # importer (Pass 1.5) at its own call sites — it can't be
                 # emitted verbatim under a bare/mangled name in Pass 2.5, but
                 # its concrete clones can.  Harvest its FnDecl here so
                 # `_monomorphize` can discover instantiations of it and clone
-                # its body; a private module generic is not callable from the
-                # importer, so it never needs harvesting.  Split by local
-                # shadowing (§8.5.2): an unshadowed generic routes bare +
-                # qualified through `_generic_fn_info`; a shadowed one is
-                # qualified-only (the bare name stays on the local).
+                # its body.  Split by the ONE naming predicate (§8.5.2): a
+                # generic that owns the importer's bare name routes bare +
+                # qualified through `_generic_fn_info`; every other module
+                # generic is qualified-only and harvested under the
+                # module-qualified shadowed-generic identity
+                # (``mod$<path>$name``) — NEVER the bare
+                # ``_imported_generic_decls``, where a bare-name entry would
+                # hijack a same-named local fn (E608's import-only provenance
+                # can't catch that).  #1029: the rerouted copy is what is
+                # harvested, so a qualified-only → qualified-only chain (this
+                # generic calls ANOTHER of its module's) reaches the sibling's
+                # ``mod$<path>$sibling`` clone.
                 if tld.decl.forall_vars:
-                    is_public = (tld.visibility or "private") == "public"
-                    in_filter = (
-                        name_filter is None or tld.decl.name in name_filter
-                    )
-                    if is_public and in_filter:
-                        if tld.decl.name in local_fn_names:
-                            self._shadowed_imported_generic_decls.setdefault(
-                                mod.path, {},
-                            ).setdefault(tld.decl.name, routed)
-                        else:
-                            self._imported_generic_decls.setdefault(
-                                tld.decl.name, routed,
-                            )
-                            # #998: same first-seen-wins order as the decl
-                            # registry, so a clone of this generic compiles
-                            # against ITS module's span tables.
-                            self._imported_generic_origins.setdefault(
-                                tld.decl.name, mod.path,
-                            )
-                    elif not is_public:
-                        # #1000: a PRIVATE module generic is reachable only
-                        # transitively (through a public generic's body).
-                        # Harvest it under the module-qualified shadowed-generic
-                        # identity (``mod$<path>$name`` via the shared shadowed
-                        # machinery) — NEVER the bare ``_imported_generic_decls``,
-                        # where a bare-name entry would hijack a same-named local
-                        # fn (E608's import-only provenance can't catch that).
-                        # #1029: use the rerouted copy so a private→private chain
-                        # (this private generic calls ANOTHER private generic)
-                        # reaches the sibling's ``mod$<path>$sibling`` clone.
+                    if tld.decl.name in module_own_qualified:
                         self._shadowed_imported_generic_decls.setdefault(
                             mod.path, {},
                         ).setdefault(tld.decl.name, routed)
+                    else:
+                        self._imported_generic_decls.setdefault(
+                            tld.decl.name, routed,
+                        )
+                        # #998: same first-seen-wins order as the decl
+                        # registry, so a clone of this generic compiles
+                        # against ITS module's span tables.
+                        self._imported_generic_origins.setdefault(
+                            tld.decl.name, mod.path,
+                        )
                     continue
                 is_public = (tld.visibility or "private") == "public"
                 in_filter = name_filter is None or tld.decl.name in name_filter
@@ -611,6 +711,79 @@ class CrossModuleMixin:
         # bodies that legitimately call it (compiled in Pass 2.5, not scanned
         # by the guard rail) keep resolving to the emitted definition.
         self._transitive_only_names = transitive_contributed - importer_visible
+
+        # #1253: fold the per-namespace ADT membership sets.
+        self._builtin_adt_names = builtin_adt_names
+        self._adt_namespace_members = self._build_adt_membership(
+            program, import_names, declared_adts, public_adts,
+        )
+
+    def _build_adt_membership(
+        self,
+        program: ast.Program,
+        import_names: dict[tuple[str, ...], set[str] | None],
+        declared_adts: dict[tuple[str, ...], frozenset[str]],
+        public_adts: dict[tuple[str, ...], frozenset[str]],
+    ) -> dict[tuple[str, ...] | None, frozenset[str]]:
+        """Which ADT names are data types in each namespace (#1253).
+
+        A namespace holds its OWN declarations, whatever their visibility,
+        plus what it IMPORTS — public only, and only the names an explicit
+        import list mentions.  That is the checker's view of every module,
+        rebuilt here from the same declarations codegen already harvested, so
+        an unimported (or private) sibling's ADT is as opaque on this side as
+        it is on the checker's.
+
+        Keyed by module path, with ``None`` for the entry program.  Built-ins
+        are NOT included: they belong to every namespace and are added by the
+        reader (`_adt_members_in_scope`), so a namespace's entry stays a
+        statement about source declarations.
+
+        Imports are read per namespace, never inherited: §8.6.4 visibility is
+        the importer's property, so a module reached transitively from here is
+        a DIRECT import of whichever module names it, and holds exactly what
+        THAT module's import list allows.
+        """
+
+        def visible(
+            own: frozenset[str],
+            imports: dict[tuple[str, ...], set[str] | None],
+        ) -> frozenset[str]:
+            names = set(own)
+            for dep_path, name_filter in imports.items():
+                exported = public_adts.get(dep_path)
+                if exported is None:
+                    continue
+                names |= {
+                    n for n in exported
+                    if name_filter is None or n in name_filter
+                }
+            return frozenset(names)
+
+        main_own = frozenset(
+            tld.decl.name for tld in program.declarations
+            if isinstance(tld.decl, ast.DataDecl)
+        )
+        members: dict[tuple[str, ...] | None, frozenset[str]] = {
+            None: visible(main_own, import_names),
+        }
+        for mod in self._resolved_modules:
+            own_imports = {
+                tuple(imp.path): (
+                    set(imp.names) if imp.names is not None else None
+                )
+                for imp in mod.program.imports
+            }
+            members[mod.path] = visible(
+                declared_adts.get(mod.path, frozenset()), own_imports,
+            )
+        # Every ADT some namespace DECLARES.  `_adt_members_in_scope`
+        # subtracts this from the registered layouts to recover the global
+        # infrastructure — the built-ins plus the PRELUDE's own ADTs, which
+        # register after this pass runs and so cannot be snapshotted here.
+        self._namespace_declared_adts = frozenset(main_own).union(
+            *declared_adts.values()) if declared_adts else frozenset(main_own)
+        return members
 
     @staticmethod
     def _collect_local_fn_names(program: ast.Program) -> set[str]:
@@ -716,39 +889,45 @@ class CrossModuleMixin:
             self._module_qualified_targets[(mod_path, fn_name)] = mangled
 
     @staticmethod
-    def _reroute_private_generic_calls(
+    def _reroute_module_qualified_generic_calls(
         decl: ast.FnDecl,
-        module_path: tuple[str, ...],
-        private_generics: set[str],
+        qualified_targets: dict[str, tuple[str, ...]],
     ) -> ast.FnDecl:
-        """Rewrite bare calls to a module's PRIVATE generics into synthetic
-        ``ModuleCall``s (#1000).
+        """Rewrite bare calls to a module's QUALIFIED-ONLY generics into
+        synthetic ``ModuleCall``s (#1000, widened by #1274).
 
-        A public imported generic's body may transitively call one of its
-        module's private generics by bare name.  Once the importer clones that
-        body, the bare name is ambiguous — it dangles (the private generic is
-        unimportable) or a same-named local captures it.  Rewriting each such
-        ``FnCall`` to ``ModuleCall(module_path, name)`` routes it through the
+        An imported body may call a generic by bare name — one its own module
+        declares, or one it imported (#1274 F1: ``mid`` calling ``deep``'s).
+        Once the importer clones that body, the bare name is resolved in the
+        IMPORTER's flat namespace — where it dangles (the generic is
+        unimportable or outside the filter) or a same-named local captures it,
+        unless the generic owns that name outright
+        (:func:`vera.monomorphize.module_qualified_generic_names`).  Rewriting
+        each such ``FnCall`` to ``ModuleCall(owner, name)`` routes it through the
         existing shadowed-generic discovery + desugar
         (``_resolve_module_call_wasm_name`` → ``_module_qualified_generic_bases``
-        → the ``mod$<path>$name`` clone), so it reaches the module's own version.
-        Only the call NODE changes (``FnCall`` → ``ModuleCall`` with the same
-        args, recursively rerouted); every other node — including nested
-        ``AnonFn`` / ``where`` bodies — is structurally preserved with its span.
+        → the ``mod$<path>$name`` clone), so it reaches the DECLARING module's
+        version.  *qualified_targets* maps each such bare name to that owner,
+        which is why it is a map and not a set: ``mid``'s ``gen`` must reach
+        ``mod$deep$gen``, not ``mod$mid$gen``.  Only the call NODE changes
+        (``FnCall`` → ``ModuleCall`` with the same args, recursively rerouted);
+        every other node — including nested ``AnonFn`` / ``where`` bodies — is
+        structurally preserved with its span.
 
         Delegates to the shared shadow-aware walk
-        (:func:`vera.monomorphize.reroute_module_private_generic_calls`) so this
-        codegen reroute and the verifier's #732 mirror can never drift (#1029) —
-        the two differ only in the terminal node each builds (codegen a
+        (:func:`vera.monomorphize.reroute_module_qualified_generic_calls`) so
+        this codegen reroute and the verifier's #732 mirror can never drift
+        (#1029) — the two differ only in the terminal node each builds (codegen a
         ``ModuleCall`` resolved by the desugar; the verifier a name-renamed
         ``FnCall`` keyed to the same ``mod$…`` discovery base).
         """
-        from vera.monomorphize import reroute_module_private_generic_calls
+        from vera.monomorphize import reroute_module_qualified_generic_calls
 
-        return reroute_module_private_generic_calls(
-            decl, private_generics,
+        return reroute_module_qualified_generic_calls(
+            decl, qualified_targets,
             lambda call, args: ast.ModuleCall(
-                path=module_path, name=call.name, args=args, span=call.span,
+                path=qualified_targets[call.name], name=call.name,
+                args=args, span=call.span,
             ),
         )
 

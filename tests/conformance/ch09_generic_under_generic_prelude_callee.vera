@@ -1,0 +1,36 @@
+-- Conformance: the prelude twin of the generic-under-generic callee shape
+-- (Chapter 9, #1223 + #1271)
+-- Tests: the same nesting with a PRELUDE generic as the callee.
+-- `option_unwrap_or<Bool>` is reached only through `parent$Int`'s helper clone
+-- (#1223), and the helper's still-generic `option_unwrap_or(@Option<U>.0,
+-- @U.0)` must NOT be recorded as an instantiation at the type variable `U`
+-- (#1271) — `Option<U>` mentions a variable, so it names no clone.
+-- `Some(false)` unwraps to `false`, so the answer is 3.
+private forall<T> fn parent(@T -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  if helper(Some(false), true) then {
+    7
+  } else {
+    3
+  }
+}
+where {
+  forall<U> fn helper(@Option<U>, @U -> @U)
+    requires(true)
+    ensures(true)
+    effects(pure)
+  {
+    option_unwrap_or(@Option<U>.0, @U.0)
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 3)
+  effects(pure)
+{
+  parent(1)
+}

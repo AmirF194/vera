@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import ClassVar
 
-from vera import ast
+from vera import ast, naming
 from vera.monomorphize import (
     _BUILTIN_PARAMETERIZED_RETURNS,
     _BUILTIN_VERA_RETURN_TYPES,
@@ -13,14 +13,8 @@ from vera.monomorphize import (
     resolve_fn_type_alias,
     substitute_type_vars,
 )
-from vera.skip import CodegenSkip
-from vera.slots import (
-    AliasResolutionDepthError,
-    resolve_scalar_alias_te,
-    substitute_named,
-    type_expr_slot_name,
-)
-from vera.wasm.helpers import _element_wasm_type
+from vera.slots import family_fallback_name, type_expr_slot_name
+from vera.wasm.helpers import _element_wasm_type, state_type_arg
 
 # `substitute_type_vars` was relocated to `vera.monomorphize` (the codegen-free
 # shared monomorphizer, #732) so the verifier can reuse it without importing the
@@ -105,6 +99,11 @@ class InferenceMixin:
         Returns "i64" for Int/Nat, "f64" for Float64, "i32" for Bool,
         None for unknown/Unit.  Used to select the correct operators.
 
+        One exception to the Int/Nat rule: an ``IntLit`` carrying the #1212
+        Byte-width mark returns "i32", because that is what the lowering
+        emits for it — the two deciders read the same mark so a marked leaf
+        cannot be inferred at one width and lowered at the other.
+
         # WALKER_COVERAGE: (#597 — every Expr subclass below has a
         # disposition; check_walker_coverage.py enforces completeness.)
         #
@@ -123,8 +122,10 @@ class InferenceMixin:
         #   QualifiedCall     → from `_infer_qualified_call_wasm_type`
         #   ConstructorCall   → "i32" (heap ptr) if known
         #   NullaryConstructor → "i32" (heap ptr) if known
-        #   MatchExpr         → from first arm body
-        #   IfExpr            → from then-branch
+        #   MatchExpr         → from the first arm whose body infers a type
+        #                       (an all-throwing arm contributes none, #1276)
+        #   IfExpr            → from the then-branch, falling back to the else
+        #                       branch when the then-branch is typeless (#1276)
         #   Block             → from trailing expr
         #   HandleExpr        → from body
         #   IndexExpr         → from element type
@@ -151,7 +152,10 @@ class InferenceMixin:
         #   HoleExpr          → parser placeholder; check time rejects
         """
         if isinstance(expr, ast.IntLit):
-            return "i64"
+            # #1212: same Byte-width mark the lowering reads — a `match`
+            # result type is inferred from an arm BODY through here, so the
+            # two deciders must agree about a marked leaf.
+            return "i32" if id(expr) in self._byte_literal_ids else "i64"
         if isinstance(expr, ast.FloatLit):
             return "f64"
         if isinstance(expr, ast.BoolLit):
@@ -196,9 +200,19 @@ class InferenceMixin:
         if isinstance(expr, ast.NullaryConstructor):
             return "i32" if expr.name in self._ctor_layouts else None
         if isinstance(expr, ast.MatchExpr):
-            if expr.arms:
-                return self._infer_expr_wasm_type(expr.arms[0].body)
-            return None  # pragma: no cover
+            # #1276 (F4): the FIRST arm that yields a type, not arm 0.  An arm
+            # whose every path throws contributes no WAT type, and reading only
+            # arm 0 answered `None` for the whole match — so an enclosing
+            # `handle` block was emitted result-less while the completing arms
+            # left a value in it (`values remaining on stack at end of block`,
+            # from check-green source).  Arms that DO complete must agree on
+            # their type (the checker enforces that), so the first answer is the
+            # answer.
+            for arm in expr.arms:
+                arm_wt = self._infer_expr_wasm_type(arm.body)
+                if arm_wt is not None:
+                    return arm_wt
+            return None
         if isinstance(expr, ast.HandleExpr):
             # Handle expression result type is the body's result type
             if expr.body.expr:
@@ -216,7 +230,14 @@ class InferenceMixin:
         if isinstance(expr, ast.QualifiedCall):
             return self._infer_qualified_call_wasm_type(expr)
         if isinstance(expr, ast.IfExpr):
-            return self._infer_block_result_type(expr.then_branch)
+            # #1276 (F4): fall through to the ELSE branch when the THEN branch
+            # yields no type.  A `then` that always throws is typeless, and
+            # answering `None` for the whole `if` on that basis mistyped every
+            # consumer of the result — see the MatchExpr arm above, same shape.
+            then_wt = self._infer_block_result_type(expr.then_branch)
+            if then_wt is not None:
+                return then_wt
+            return self._infer_block_result_type(expr.else_branch)
         if isinstance(expr, ast.Block):
             return self._infer_block_result_type(expr)
         if isinstance(expr, (ast.ForallExpr, ast.ExistsExpr)):
@@ -256,13 +277,15 @@ class InferenceMixin:
         # i32 pointers (`expected i64, found i32`).  Resolve T's WAT type via
         # the shared canonical-slot-name → WASM map so the `==` picks i32.
         if isinstance(expr, (ast.OldExpr, ast.NewExpr)):
-            name = self._extract_state_type_name(expr.effect_ref)
-            # #1205: scalar-collapse before the WT map — `old(State<Count>)`
-            # over `type Count = Nat` is an i64 read, not the unknown-name
-            # i32 default.
-            if name and expr.effect_ref.type_args:
-                name = self._family_name(expr.effect_ref.type_args[0], name)
-            return self._type_name_to_wasm(name) if name else None
+            # The cell's REPRESENTATION name, not the source spelling, before
+            # the WT map — `old(State<Count>)` over `type Count = Nat` is an
+            # i64 read, not the unknown-name i32 default (#1205).  The base
+            # rather than the family (#1218): a refined cell's identity
+            # carries its predicate and would miss every entry in the map,
+            # silently defaulting a refined `Int` cell's `old`/`new` read to
+            # i32 — the base is the width both sides of the comparison have.
+            return self._type_name_to_wasm(
+                self._state_effect_family_base(expr.effect_ref))
         return None
 
     _IO_WASM_TYPES: ClassVar[dict[str, str | None]] = {
@@ -523,10 +546,17 @@ class InferenceMixin:
         return None
 
     def _infer_block_result_type(self, block: ast.Block) -> str | None:
-        """Infer the WAT result type of a block from its final expression."""
+        """Infer the WAT result type of a block from its final expression.
+
+        #1212: a literal marked for the i32 Byte width lowers as
+        ``i32.const``, so the join built over it must be annotated
+        ``(result i32)`` — the decider and the lowering read the same marks
+        (`_mark_byte_literal_leaves`), which is what keeps the `if` / `match`
+        result type and its arms in agreement.
+        """
         expr = block.expr
         if isinstance(expr, ast.IntLit):
-            return "i64"
+            return "i32" if id(expr) in self._byte_literal_ids else "i64"
         if isinstance(expr, ast.FloatLit):
             return "f64"
         if isinstance(expr, ast.BoolLit):
@@ -566,7 +596,15 @@ class InferenceMixin:
             if expr.op == ast.UnaryOp.NOT:
                 return "i32"
         if isinstance(expr, ast.IfExpr):
-            return self._infer_block_result_type(expr.then_branch)
+            # #1276 (F4): the twin of the `_infer_expr_wasm_type` arm — a
+            # `then` branch whose every path throws yields no type, and
+            # answering `None` for the whole `if` on that basis left an
+            # enclosing `handle` block result-less while the completing branch
+            # pushed a value into it.
+            then_wt = self._infer_block_result_type(expr.then_branch)
+            if then_wt is not None:
+                return then_wt
+            return self._infer_block_result_type(expr.else_branch)
         if isinstance(expr, ast.FnCall):
             return self._infer_fncall_wasm_type(expr)
         if isinstance(expr, ast.QualifiedCall):
@@ -582,9 +620,13 @@ class InferenceMixin:
         if isinstance(expr, ast.NullaryConstructor):
             return "i32" if expr.name in self._ctor_layouts else None
         if isinstance(expr, ast.MatchExpr):
-            if expr.arms:
-                return self._infer_expr_wasm_type(expr.arms[0].body)
-            return None  # pragma: no cover
+            # #1276 (F4): the first arm that yields a type — see the twin arm
+            # in `_infer_expr_wasm_type`.
+            for arm in expr.arms:
+                arm_wt = self._infer_expr_wasm_type(arm.body)
+                if arm_wt is not None:
+                    return arm_wt
+            return None
         if isinstance(expr, ast.IndexExpr):
             elem_type = self._infer_index_element_type(expr)
             return _element_wasm_type(elem_type) if elem_type else None
@@ -642,7 +684,7 @@ class InferenceMixin:
            re-loops.  (Used by generic FnType-alias resolution where
            the alias's type params bind concrete types from the
            call site.)
-        3. Follows `NamedType` alias chains via `self._type_aliases`
+        3. Follows `NamedType` alias chains via `self._alias_env.aliases`
            one step per outer iteration, so any `RefinementType`
            wrapping the alias body is unwrapped on the next
            iteration.
@@ -686,7 +728,7 @@ class InferenceMixin:
             if not isinstance(te, ast.NamedType):
                 return None
             # Unified cycle guard for both `alias_map` substitution
-            # and `_type_aliases` chain following.  Without this, an
+            # and `_alias_env.aliases` chain following.  Without this, an
             # alias_map self-reference (`{T: NamedType("T")}`) or a
             # cyclic chain through a mix of substitutions and follows
             # would loop forever.
@@ -706,11 +748,11 @@ class InferenceMixin:
             # type params with the concrete `te.type_args` *before*
             # continuing — otherwise the alias body's type variables
             # leak into the returned NamedType.
-            alias = self._type_aliases.get(te.name)
+            alias = self._alias_env.aliases.get(te.name)
             if alias is None:
                 break
             if isinstance(alias, (ast.NamedType, ast.RefinementType)):
-                alias_params = self._type_alias_params.get(te.name)
+                alias_params = self._alias_env.alias_params.get(te.name)
                 if (alias_params and te.type_args
                         and len(alias_params) == len(te.type_args)):
                     local_subst = dict(zip(alias_params, te.type_args))
@@ -799,7 +841,7 @@ class InferenceMixin:
         alias_map: dict[str, ast.TypeExpr] | None = None,
     ) -> bool:
         """True if walking `te` through `RefinementType` /
-        `alias_map` / `_type_aliases` lands on a `FnType`.
+        `alias_map` / `_alias_env.aliases` lands on a `FnType`.
 
         Used by `_canonical_wasm_type` to distinguish the
         FnType-return case (closure-pointer ABI, `"i32"`) from
@@ -823,7 +865,7 @@ class InferenceMixin:
             if alias_map is not None and te.name in alias_map:
                 te = alias_map[te.name]
                 continue
-            alias = self._type_aliases.get(te.name)
+            alias = self._alias_env.aliases.get(te.name)
             if alias is None:
                 return False
             if isinstance(alias, ast.FnType):
@@ -1613,7 +1655,11 @@ class InferenceMixin:
         # its target carries the alias's own free type params, which must
         # not leak; without args it is unresolvable (falls through to the
         # arity-checked substitution path below, which yields None).
-        if not type_arg_names and type_name not in self._type_alias_params:
+        # `alias_params` keys EVERY alias, mapping a non-parameterised one to
+        # `None` (the former flat map simply omitted it), so "is this alias
+        # generic?" is a None test here, not a membership test (#1208).
+        if (not type_arg_names
+                and self._alias_env.alias_params.get(type_name) is None):
             canonical, _ = self._canonicalize_alias_slot_name(type_name)
             if canonical != type_name:
                 parsed = Monomorphizer._parse_type_name(canonical)
@@ -1637,9 +1683,9 @@ class InferenceMixin:
         # the alias target and canonicalize; an arity mismatch (or a target
         # that resolves to no NamedType) is unresolvable — return None so
         # the caller keeps the loud skip.
-        alias_params = self._type_alias_params.get(type_name)
+        alias_params = self._alias_env.alias_params.get(type_name)
         if alias_params is not None:
-            target = self._type_aliases.get(type_name)
+            target = self._alias_env.aliases.get(type_name)
             if (target is not None
                     and type_arg_names
                     and len(type_arg_names) == len(alias_params)):
@@ -1831,8 +1877,8 @@ class InferenceMixin:
         # the enclosing function (`head`) gets dropped via [E602], and
         # the call site references a non-existent `$head` — the symptom
         # documented in #655 Shape B.
-        if type_name in self._type_aliases:
-            target = self._type_aliases[type_name]
+        if type_name in self._alias_env.aliases:
+            target = self._alias_env.aliases[type_name]
             while isinstance(target, ast.RefinementType):
                 target = target.base_type
             if isinstance(target, ast.NamedType):
@@ -1991,8 +2037,8 @@ class InferenceMixin:
                     name=closure_arg.type_name,
                     type_args=closure_arg.type_args,
                 ),
-                self._type_aliases,
-                self._type_alias_params,
+                self._alias_env.aliases,
+                self._alias_env.alias_params,
             )
             return fn_type.return_type if fn_type is not None else None
         if isinstance(closure_arg, ast.AnonFn):
@@ -2020,8 +2066,8 @@ class InferenceMixin:
                     name=closure_arg.type_name,
                     type_args=closure_arg.type_args,
                 ),
-                self._type_aliases,
-                self._type_alias_params,
+                self._alias_env.aliases,
+                self._alias_env.alias_params,
             )
             return tuple(fn_type.params) if fn_type is not None else None
         if isinstance(closure_arg, ast.AnonFn):
@@ -2063,7 +2109,7 @@ class InferenceMixin:
 
           - `SlotRef` into a `FnType` type alias (let-bound closure
             ref, possibly with generic type_args bound at the call
-            site like `OptionMapFn<Int, String>`).
+            site like a user `MapFn<Int, String>`).
           - `AnonFn` (inline closure literal).
 
         Future closure-arg shapes with a single `return_type` field
@@ -2161,13 +2207,12 @@ class InferenceMixin:
     def _type_expr_name(self, te: ast.TypeExpr) -> str | None:
         """Extract a simple type name from a TypeExpr.
 
-        Delegates to the shared recursive :func:`vera.slots.type_expr_slot_name`
-        so a closure's parameter-count keys (`param_type_counts`) use the same
-        fully-qualified nested-composite name that `_translate_slot_ref` /
-        `_walk_free_vars` resolve against (#914 finding 2 — a captured
-        `@Array<Array<Int>>` desynced when this stayed one-level).
+        Delegates to :func:`vera.naming.slot_name` (#1208) so a closure's
+        parameter-count keys (`param_type_counts`) use the same name that
+        `_translate_slot_ref` / `_walk_free_vars` resolve against — and that
+        the checker bound the slot under.
         """
-        return type_expr_slot_name(te)
+        return naming.slot_name_or_none(te, self._alias_env)
 
     def _type_name_to_wasm(self, type_name: str) -> str:
         """Map a Vera type name string to a WASM type string."""
@@ -2183,218 +2228,87 @@ class InferenceMixin:
         return "i32"
 
     def _type_expr_to_slot_name(self, te: ast.TypeExpr) -> str | None:
-        """Extract the slot name from a type expression.
+        """The slot-binding name of *te*, as the checker binds it (#1208).
 
-        Delegates to the shared recursive :func:`vera.slots.type_expr_slot_name`
-        so nested composite type args (`Option<Tuple<Int, Int>>`) are FULLY
-        qualified and distinguishable (#914 finding 2).
+        Delegates to :func:`vera.naming.slot_name` against this context's
+        alias environment: syntactic head, RESOLVED type arguments, so a
+        parameter written ``@Option<Cnt>`` keys the ``Option<Int>`` stack the
+        checker created and the reference side (``naming.slot_ref_key``)
+        looks up.  Nested composites stay fully qualified (#914 finding 2).
         """
-        return type_expr_slot_name(te)
+        return naming.slot_name_or_none(te, self._alias_env)
 
-    def _family_name(self, te: ast.TypeExpr, fallback: str) -> str:
+    def _family_name(self, te: ast.TypeExpr) -> str:
         """The ``State<T>``/``Exn<E>`` host-import/tag FAMILY name for a
-        type argument (#1205) — the scalar-gated collapse of
-        :func:`vera.slots.resolve_scalar_alias_te` over this module set's
-        alias tables (parameterised aliases substituted), falling back to
-        the opaque *fallback* slot name for composite-resolving
-        arguments.  Distinct from :py:meth:`_resolve_base_type_name`,
-        which resolves unconditionally (for TYPE questions); this
-        resolves only to scalars (for NAMING questions, where composite
-        names must stay opaque per the #914 full-name invariant)."""
-        try:
-            return (resolve_scalar_alias_te(
-                        te, self._type_aliases, self._type_alias_params)
-                    or fallback)
-        except AliasResolutionDepthError as exc:
-            # Loud, not opaque: falling back on overflow would key the
-            # family one way at this site and another at a
-            # fully-resolving site — the silent split of round-5 F4.
-            raise CodegenSkip(te, str(exc)) from exc
+        type argument (#1209) — :func:`vera.naming.family_name` over this
+        context's alias environment, so the family names the CELL the
+        checker typed.  Every spelling that resolves to one cell (a scalar
+        alias, #1205; a composite or parameterised alias, #1209) is one
+        import and one tag; only :func:`vera.slots.family_fallback_name`'s
+        residue stays syntactic.  The env is the DECLARING module's
+        (``set_alias_env``), so a name means what it meant where it was
+        written."""
+        return naming.family_name(
+            te, self._alias_env, family_fallback_name(te))
 
-    def _canonical_clause_slot_name(self, te: ast.TypeExpr) -> str | None:
-        """The CHECKER's slot-binding name for a clause pattern / state
-        annotation: top-level name syntactic (aliases opaque), type
-        ARGUMENTS fully resolved (the checker's
-        ``_type_expr_to_slot_name`` runs each argument through
-        ``_resolve_type`` before rendering with ``canonical_type_name``,
-        so ``put(@Option<Cnt>)`` binds under ``Option<Int>`` when
-        ``type Cnt = Int``, and a refined argument renders
-        predicate-elided as ``{@Int | ...}``).  The codegen-side clause
-        bindings must match or a mixed-spelling clause body resolves
-        against the wrong stack (PR #1202 adversarial round: two silent
-        wrong-value shapes, two dangling E699s on check-green
-        programs)."""
-        if isinstance(te, ast.RefinementType):
-            return self._canonical_clause_slot_name(te.base_type)
-        if isinstance(te, ast.FnType):
-            return "Fn"
-        if not isinstance(te, ast.NamedType):
-            return None
-        if not te.type_args:
-            return te.name
-        arg_names: list[str] = []
-        for a in te.type_args:
-            arg = self._checker_arg_name(a)
-            if arg is None:
-                return None
-            arg_names.append(arg)
-        return f"{te.name}<{', '.join(arg_names)}>"
+    def _family_base(self, te: ast.TypeExpr) -> str:
+        """The same cell's REPRESENTATION name (#1218).
 
-    def _checker_arg_name(
-        self, a: ast.TypeExpr, _depth: int = 0,
-    ) -> str | None:
-        """Render a slot-name type ARGUMENT for a clause binding key.
+        :func:`vera.naming.family_base_name` over this context's alias
+        environment: the family with its refinements stripped, which is what
+        decides i32/i64/f64/pair, pointer-ness for the GC shadow stack, and
+        which #1203 write guard applies.  A refined cell has its OWN family
+        (that is #1218) and its BASE's representation, so the two names are
+        derived side by side at every handle site and never substituted for
+        each other — this one is never a symbol and never compared against
+        another cell's."""
+        return naming.family_base_name(
+            te, self._alias_env, family_fallback_name(te))
 
-        Mirrors the checker's argument resolution (``_resolve_type`` +
-        ``canonical_type_name``) with ONE reachability deviation:
+    def _boundary_base(self, te: ast.TypeExpr) -> str:
+        """The REPRESENTATION base name of a declared WRITE boundary (#1256).
 
-        * Alias chains resolve fully — parameterised aliases
-          substituted, arguments before heads (a seen-set head-follow
-          truncated ``Id<Id<Int>>`` one level short, the round-3
-          review's silent wrong-binding shape).
-        * An argument whose resolution passes through a REFINEMENT keeps
-          its SOURCE syntactic rendering instead of the checker's
-          predicate-elided ``{@Base | ...}`` form: the codegen ref side
-          (``slot_ref_name``) can never spell that form (refinement
-          literals are unparseable in ref position and erase to the
-          base), so the checker-form key would make the binding
-          unreachable by every writable reference — the round-3 review
-          turned working refined-arg programs into dangling E699s.  The
-          source spelling is exactly the one ref spelling the checker
-          accepts for such a binding (any other canonicalizes onto the
-          refined form and is E130 at check), so bind and ref meet
-          there.
+        ONE derivation for every #1212 marking site that holds a type
+        expression — the named and closure RETURN, the ``apply_fn``
+        argument, the ``throw`` payload.  Composes the two hops each site
+        used to spell for itself: :meth:`_family_base` resolves the type
+        expression to its representation (an alias chased, a refinement
+        stripped), and :meth:`_resolve_base_type_name` chases the one
+        residue that can survive it — :func:`vera.slots.family_fallback_name`
+        returns a syntactic name when the resolution reaches a function or
+        unknown type.  ``_translate_handle_exn`` already wrote exactly this
+        composition; the return boundary wrote a different one (slot name
+        then resolve), which is two derivations of one fact and the shape
+        #1213 is about.
+
+        Never a cell IDENTITY: a refined boundary and its base share a
+        width and share this answer, which is the whole point.
         """
-        if _depth > 32:
-            return type_expr_slot_name(a)
-        if self._head_resolves_through_refinement(a):
-            # Refined-resolving argument (a literal refinement, a refined
-            # alias, or an alias-of-a-refined-alias): keep the OUTERMOST
-            # source spelling — the reachability deviation above.  The
-            # pre-check keeps this at the original node, so a chain like
-            # `P2 -> Pos -> {refined}` keys "P2" (the spelling the refs
-            # use), never the intermediate "Pos".
-            return type_expr_slot_name(a)
-        te: ast.TypeExpr = a
-        if not isinstance(te, ast.NamedType):
-            # FnType etc. — not a slot-nameable key form; keep opaque.
-            return type_expr_slot_name(a)
-        if te.type_args:
-            inner: list[str] = []
-            for x in te.type_args:
-                n = self._checker_arg_name(x, _depth + 1)
-                if n is None:
-                    return None
-                inner.append(n)
-            head_args = f"<{', '.join(inner)}>"
-        alias = self._type_aliases.get(te.name)
-        if alias is None:
-            return te.name + (head_args if te.type_args else "")
-        if not isinstance(alias, ast.NamedType):
-            # FnType-bodied (or other non-named) alias — keep opaque.
-            return type_expr_slot_name(a)
-        params = self._type_alias_params.get(te.name)
-        if params and te.type_args and len(params) == len(te.type_args):
-            alias = substitute_named(alias, dict(zip(params, te.type_args)))
-        elif te.type_args:
-            return te.name + head_args
-        return self._checker_arg_name(alias, _depth + 1)
+        return self._resolve_base_type_name(self._family_base(te))
 
-    def _checker_form_slot_name(self, te: ast.TypeExpr) -> str | None:
-        """The checker's OWN binding key for *te* (top name syntactic,
-        arguments fully canonical, a refined-resolving argument rendered
-        predicate-elided as ``{@Base | ...}``) — used ONLY for
-        equivalence-class comparison, never as a bind key: the
-        predicate-elided form is unreachable by any writable reference,
-        which is exactly why ``_canonical_clause_slot_name`` deviates to
-        the source spelling for bind keys.  Two type expressions with
-        equal checker forms are ONE slot stack to the checker; the
-        clause translator refuses to bind them under two different keys
-        (the class-collision skip) because that split is where a
-        mixed-spelling reference goes silently wrong."""
-        if isinstance(te, ast.RefinementType):
-            base = self._checker_form_slot_name(te.base_type)
-            return None if base is None else f"{{@{base} | ...}}"
-        if isinstance(te, ast.FnType):
-            return "Fn"
-        if not isinstance(te, ast.NamedType):
-            return None
-        if not te.type_args:
-            return te.name
-        inner: list[str] = []
-        for a in te.type_args:
-            n = self._checker_form_arg_name(a)
-            if n is None:
-                return None
-            inner.append(n)
-        return f"{te.name}<{', '.join(inner)}>"
+    def _state_effect_family(self, effect_ref: ast.EffectRefNode) -> str:
+        """The cell FAMILY named by a ``State<T>`` effect REFERENCE (#1209).
 
-    def _checker_form_arg_name(
-        self, a: ast.TypeExpr, _depth: int = 0,
-    ) -> str | None:
-        """Argument renderer for :py:meth:`_checker_form_slot_name` —
-        the checker's full canonicalization with NO reachability
-        deviation (refined chains render predicate-elided)."""
-        if _depth > 32:
-            return type_expr_slot_name(a)
-        if isinstance(a, ast.RefinementType):
-            base = self._checker_form_arg_name(a.base_type, _depth + 1)
-            return None if base is None else f"{{@{base} | ...}}"
-        if not isinstance(a, ast.NamedType):
-            return type_expr_slot_name(a)
-        if a.type_args:
-            inner: list[str] = []
-            for x in a.type_args:
-                n = self._checker_form_arg_name(x, _depth + 1)
-                if n is None:
-                    return None
-                inner.append(n)
-            head_args = f"<{', '.join(inner)}>"
-        alias = self._type_aliases.get(a.name)
-        if alias is None:
-            return a.name + (head_args if a.type_args else "")
-        if not isinstance(alias, (ast.NamedType, ast.RefinementType)):
-            return type_expr_slot_name(a)
-        # Substitute the alias's params BEFORE branching on refinement —
-        # a parameterised alias whose body is a refinement
-        # (`type Ref<T> = { @T | P }` at `Ref<Int>`) must render
-        # `{@Int | ...}` like the checker, not `{@T | ...}` (the round-6
-        # gate compared the unsubstituted form against the checker's and
-        # never fired — round-7 review, F1).  Mirrors
-        # `resolve_alias_type_expr`'s ordering.
-        params = self._type_alias_params.get(a.name)
-        if params and a.type_args and len(params) == len(a.type_args):
-            alias = substitute_named(alias, dict(zip(params, a.type_args)))
-        elif a.type_args and not isinstance(alias, ast.RefinementType):
-            return a.name + head_args
-        if isinstance(alias, ast.RefinementType):
-            base = self._checker_form_arg_name(alias.base_type, _depth + 1)
-            return None if base is None else f"{{@{base} | ...}}"
-        return self._checker_form_arg_name(alias, _depth + 1)
+        The one derivation behind ``old(State<T>)`` and ``new(State<T>)``:
+        the snapshot map (``_collect_old_types``) and the import registry
+        (``_state_types``) are keyed by the family, so a read that named the
+        reference any other way misses a registered entry and the
+        ``old(State<T>)`` lowering raises (#914 finding 1).  Naming it here,
+        once, is what keeps the three call sites from re-deriving it three
+        ways.  Shape validation belongs to
+        :func:`~vera.wasm.helpers.state_type_arg`, which raises for anything
+        that is not a one-argument ``State``.
+        """
+        return self._family_name(state_type_arg(effect_ref))
 
-    def _head_resolves_through_refinement(
-        self, te: ast.TypeExpr, _depth: int = 0,
-    ) -> bool:
-        """Whether *te*'s HEAD alias chain passes through (or is) a
-        refinement — the gate for ``_checker_arg_name``'s source-spelling
-        deviation.  Follows bare and parameterised head links only (type
-        arguments don't decide the head's refined-ness)."""
-        if _depth > 32:
-            return False
-        if isinstance(te, ast.RefinementType):
-            return True
-        if not isinstance(te, ast.NamedType):
-            return False
-        alias = self._type_aliases.get(te.name)
-        if alias is None or not isinstance(
-                alias, (ast.NamedType, ast.RefinementType)):
-            return False
-        if isinstance(alias, ast.RefinementType):
-            return True
-        params = self._type_alias_params.get(te.name)
-        if params and te.type_args and len(params) == len(te.type_args):
-            alias = substitute_named(alias, dict(zip(params, te.type_args)))
-        return self._head_resolves_through_refinement(alias, _depth + 1)
+    def _state_effect_family_base(
+        self, effect_ref: ast.EffectRefNode,
+    ) -> str:
+        """The REPRESENTATION name of the cell a ``State<T>`` effect
+        reference denotes (#1218) — :meth:`_state_effect_family`'s twin over
+        :meth:`_family_base`, for the width decisions rather than the
+        registry lookups."""
+        return self._family_base(state_type_arg(effect_ref))
 
     def _resolve_base_type_name(
         self,
@@ -2433,11 +2347,11 @@ class InferenceMixin:
             # Cycle — return the caller's original name unchanged
             # (treat as opaque, no resolution available).
             return _root_name
-        if name not in self._type_aliases:
+        if name not in self._alias_env.aliases:
             # Not an alias — this is the underlying base name.
             return name
         _seen = _seen | {name}
-        alias = self._type_aliases[name]
+        alias = self._alias_env.aliases[name]
         if isinstance(alias, ast.RefinementType):
             if isinstance(alias.base_type, ast.NamedType):
                 return self._resolve_base_type_name(
@@ -2527,8 +2441,8 @@ class InferenceMixin:
         # depth-1 behaviour is unchanged (a direct alias resolves in one hop).
         if resolve_fn_type_alias(
             ast.NamedType(name=type_name, type_args=type_args),
-            self._type_aliases,
-            self._type_alias_params,
+            self._alias_env.aliases,
+            self._alias_env.alias_params,
         ) is not None:
             return "i32"
         return None
@@ -2567,8 +2481,8 @@ class InferenceMixin:
         whose target has no nameable slot form, is returned unchanged for
         the caller's own fallthrough handling.
         """
-        while name in self._type_aliases and name not in _seen:
-            target = type_expr_slot_name(self._type_aliases[name])
+        while name in self._alias_env.aliases and name not in _seen:
+            target = type_expr_slot_name(self._alias_env.aliases[name])
             if target is None or target == name:
                 break
             _seen = _seen | {name}
@@ -2646,8 +2560,8 @@ class InferenceMixin:
         # substitutes at each hop.
         if resolve_fn_type_alias(
             ast.NamedType(name=base, type_args=None),
-            self._type_aliases,
-            self._type_alias_params,
+            self._alias_env.aliases,
+            self._alias_env.alias_params,
         ) is not None:
             return "i32"
         # Bare "Fn" for anonymous function types

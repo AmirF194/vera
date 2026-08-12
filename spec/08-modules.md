@@ -106,7 +106,7 @@ private fn helper(@Int -> @Int)
 
 - `public` declarations are visible to any module that imports them.
 - `private` declarations are visible only within the module that defines them.
-- Type aliases (`type Foo = ...`), effect declarations (`effect E { ... }`), module declarations, and import statements do not take visibility modifiers. These declarations are **module-local** — they are not importable by other modules. If another module needs the same type alias or effect, it must declare its own copy. An alias may reuse a name the prelude injects (`OptionMapFn`, `ArrayMapFn`, …), which shadows the prelude's definition within that module only and never re-types the prelude's own declarations — those resolve through reserved names no user declaration may spell: a type or alias whose name begins with `Vera` followed by an uppercase letter or digit is a compile error (**E154**), so the prelude's internal namespace cannot be re-typed.
+- Type aliases (`type Foo = ...`), effect declarations (`effect E { ... }`), module declarations, and import statements do not take visibility modifiers. These declarations are **module-local** — they are not importable by other modules. If another module needs the same type alias or effect, it must declare its own copy. The prelude's own combinators resolve their closure-parameter types through aliases a program cannot name: those aliases carry reserved names, and a name beginning with `Vera` followed by an uppercase letter or digit is a compile error (**E154**) — whether the program *declares* that name as a type, an alias, an effect, an ability or a constructor, *binds* it as a type parameter, or merely *mentions* it in a type. The reservation is one rule across every namespace, so the prelude's internal namespace can be neither re-typed, shadowed by a binder, nor referenced, and a program that wants a short name for a function type declares its own alias for it. Outside a type position there is no alias escape, so the fix in the effect, ability and constructor namespaces is simply a name that does not start with the reserved prefix. The prelude's data types (`Option`, `Result`, `Ordering`, `UrlParts`, …) are not in that namespace: they are ordinary public declarations a program names, and shadows, like any other.
 - Functions declared inside `where` blocks are always local to the parent function and do not take visibility modifiers.
 
 ### 8.4.2 Data Type Visibility
@@ -169,6 +169,51 @@ Here, `magnitude` and `larger` resolve to the imported functions from `vera.math
 Local definitions shadow imported declarations. If a module imports `magnitude` from `vera.math` but also defines its own `magnitude`, the local definition takes precedence for bare-call resolution. The import is not an error — it is simply unused for that name.
 
 The shadowing rule is implemented via `setdefault`: imported names are injected into the type environment only if no local definition with the same name already exists.
+
+### 8.5.2.1 Resolution Inside an Imported Module's Body
+
+A module's own bodies resolve in **that module's** namespace: its declarations
+plus what it imports (§8.5.1, §8.5.2). This is independent of which program is
+compiling it. A bare call inside `mid.vera` names what `mid` can see, never what
+the importing program happens to declare.
+
+The importing program's namespace is a different set, and the two need not agree
+on a name. A declaration is reachable by its **bare name in the importing
+program** only when all three hold:
+
+- it is `public`;
+- the importing program's import list admits it (a wildcard import admits every
+  public declaration; a selective import admits only the names it lists);
+- the importing program does not itself declare that name (§8.5.2 shadowing).
+
+A declaration failing any of these is **qualified-only**: it does not own the
+bare name in the importing program. It is still called by bare name from its own
+module's bodies, which resolve in their own namespace as above.
+
+Qualified-only is not the same as importer-callable. A module-qualified call
+(§8.5.3) reaches a declaration only when it is `public` **and** its module is
+imported directly **and** the import list admits the name; the other cases are
+rejected rather than routed — a private declaration is `E232`, a name outside the
+import list is `E231`, and a module the program does not import at all is not in
+scope to qualify. So the only declarations that fail the bare-name predicate and
+remain callable by an importer are the public, admitted ones of a directly
+imported module that the importer also shadows. Everything else that is
+qualified-only — private declarations, names outside the import list, and
+everything in a transitively reached module — is reachable only from its own
+module's bodies; it is compiled under a module-qualified internal name (§8.9.1)
+so that the flattened namespace keeps it distinct, which is a naming rule, not a
+call surface.
+
+Two same-named qualified-only declarations in different modules are distinct, and
+neither is the importer's.
+
+A module reached only **transitively** (§8.6.4) contributes nothing to the
+importing program's namespace, so all of its declarations are qualified-only
+there, whatever their visibility.
+
+These are properties of the importer, not of the declaration: the same module,
+imported two ways, can have a declaration own the bare name in one program and be
+qualified-only in another.
 
 ### 8.5.3 Module-Qualified Calls
 
@@ -341,11 +386,15 @@ The code generator uses a **flattening** strategy: imported function bodies are 
 
 ### 8.9.1 Compilation Process
 
-1. **Pass 0 — Module registration**: For each resolved module, register all function signatures and ADT layouts into the code generator's state. Imported names are injected via `setdefault` so local definitions shadow imports. Type aliases are **not** merged into the shared state: an alias is module-local (§8.4.1), so each module's aliases are captured in a per-module namespace, and that module's declarations compile and register against `{prelude aliases, module's own aliases}` — never against the importing program's. Harvested return-type expressions are canonicalized (alias references substituted) against the defining module's namespace before entering the shared registries.
+1. **Pass 0 — Module registration**: For each resolved module, register all function signatures and ADT layouts into the code generator's state. Imported names are injected via `setdefault` so local definitions shadow imports. Type aliases are **not** merged into the shared state: an alias is module-local (§8.4.1), so each module's aliases are captured in a per-module namespace, and that module's declarations compile and register against `{prelude aliases, module's own aliases}` — never against the importing program's. Harvested return-type expressions are canonicalized (alias references substituted) against the defining module's namespace before entering the shared registries. That same per-module namespace is what slot names, slot-reference keys and `State`/`Exn` cell families are rendered against — in the checker, the verifier and the code generator alike — so a declaration is named in the module that declared it, whichever phase is asking.
 
 2. **Pass 2.5 — Imported function compilation**: After compiling local functions (Pass 2), compile all imported function bodies — both public and private — as internal WASM functions. Private helpers must be compiled because imported public functions may call them.
 
 3. **Call desugaring**: `ModuleCall` AST nodes (e.g., `vera.math.magnitude(x)`) are desugared to flat `FnCall` nodes (e.g., `magnitude(x)`) since the imported function exists in the same WASM module.
+
+4. **Qualified-only naming**: flattening puts every module's declarations in one WASM namespace, where a bare name can belong to only one of them. A declaration that owns the importing program's bare name (§8.5.2.1) keeps it; every other module declaration — private, outside the importer's import filter, shadowed by a local, or reached only transitively — is emitted and called under a **module-qualified** name derived from its owning module's path, so two modules' same-named declarations stay distinct. This applies to generic declarations by way of their instantiations: a qualified-only generic's monomorphized clones are named under its owning module, never under the bare name, so an importer's same-named generic and a module's compile to different functions.
+
+5. **Bare calls in imported bodies**: because an imported body resolves in its own module's namespace (§8.5.2.1), a bare call there is compiled against what THAT module sees. Where the callee is qualified-only, the call is compiled to the callee's module-qualified name — including when the callee belongs to a module the body's own module imported, rather than to the body's own module. Without this the flattened bare name would be resolved in the importing program's namespace, and a same-named declaration there would silently be called instead.
 
 ### 8.9.2 Export Rules
 

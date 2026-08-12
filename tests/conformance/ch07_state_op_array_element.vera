@@ -18,7 +18,7 @@ private fn snapshot_pair(@Unit -> @Int)
 -- Identity get clause: state 3 -> [3, 1] -> 31.
 private fn elem_identity(@Unit -> @Int)
   requires(true)
-  ensures(true)
+  ensures(@Int.result == 31)
   effects(pure)
 {
   handle[State<Int>](@Int = 3) {
@@ -33,7 +33,7 @@ private fn elem_identity(@Unit -> @Int)
 -- Transforming get clause: the element sees the +100 transform -> 1031.
 private fn elem_transformed(@Unit -> @Int)
   requires(true)
-  ensures(true)
+  ensures(@Int.result == 1031)
   effects(pure)
 {
   handle[State<Int>](@Int = 3) {
@@ -48,7 +48,7 @@ private fn elem_transformed(@Unit -> @Int)
 -- Declared-effect helper under a handler: state 7 -> [7, 4] -> 74.
 private fn elem_declared_effect(@Unit -> @Int)
   requires(true)
-  ensures(true)
+  ensures(@Int.result == 74)
   effects(pure)
 {
   handle[State<Int>](@Int = 7) {

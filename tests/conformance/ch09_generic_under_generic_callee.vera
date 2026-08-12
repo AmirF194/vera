@@ -1,0 +1,49 @@
+-- Conformance: a generic where-helper under a GENERIC parent instantiates its
+-- own generic callees (Chapter 9, #1223 + #1271)
+-- Tests: `forall<U> fn helper` under `forall<T> fn parent` stays generic inside
+-- every clone of the parent, so the top-level generic it calls is reached only
+-- once the helper's own clone exists.  Discovery must find `pick<Bool>` from
+-- `parent$Int`'s helper clone (#1223) and must NOT record the helper's
+-- still-generic spelling `pick(@U.1, @U.0)` as an instantiation at the type
+-- VARIABLE `U` (#1271) — that phantom clone's parameter has no WASM type and
+-- was emitted only to be skipped with a loud [E604].
+-- `pick` returns its SECOND parameter (`@W.0` is the most recent binding) and
+-- the helper hands it (@U.1, @U.0), so `helper(true, false)` is `false` and the
+-- answer is 3.  Swapping either argument pair gives 7, so the oracle pins the
+-- wiring rather than merely the compile.
+private forall<W> fn pick(@W, @W -> @W)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  @W.0
+}
+
+private forall<T> fn parent(@T -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  if helper(true, false) then {
+    7
+  } else {
+    3
+  }
+}
+where {
+  forall<U> fn helper(@U, @U -> @U)
+    requires(true)
+    ensures(true)
+    effects(pure)
+  {
+    pick(@U.1, @U.0)
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 3)
+  effects(pure)
+{
+  parent(1)
+}

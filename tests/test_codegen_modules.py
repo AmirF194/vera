@@ -19,9 +19,10 @@ from vera.codegen import (
     execute,
 )
 from vera.parser import parse_file
-from vera.resolver import ResolvedModule
 from vera.transform import transform
 from vera.monomorphize import resolve_fn_type_alias
+
+from tests.module_fixture_helpers import resolved_module
 
 
 # =====================================================================
@@ -29,21 +30,45 @@ from vera.monomorphize import resolve_fn_type_alias
 # =====================================================================
 
 
-def _compile(source: str) -> CompileResult:
-    """Compile a Vera source string to WASM."""
-    # Write to a temp source and parse
+def _parse_from_temp_file(source: str) -> tuple[ast.Program, str]:
+    """Parse *source* through a real temp file: ``(program, path)``.
+
+    These tests need a real file because they exercise the module
+    pipeline through ``parse_file``, but nothing downstream re-reads the
+    path — codegen works off the returned program and the in-memory
+    source string, and keeps the path only as a diagnostic label.  So
+    the file is removed the moment it has been parsed.  ``delete=False``
+    plus a manual unlink is the Windows-portable pattern (an open
+    ``NamedTemporaryFile`` cannot be reopened there); see TESTING.md's
+    Test Fixture Conventions.  Six sites in this file each wrote the
+    temp file and never removed it, leaking one per call (#1228
+    adversarial round).
+    """
     import tempfile
 
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".vera", delete=False, encoding="utf-8"
-    ) as f:
-        f.write(source)
-        f.flush()
-        path = f.name
+    # Same shape as `tests/module_fixture_helpers.resolved_module`, and
+    # for the same two reasons: the `try` is entered before anything that
+    # can fail (a write error would otherwise strand the file, since
+    # `delete=False` outlives the block), and the single unlink sits
+    # AFTER the `with` has closed the handle — Windows cannot delete an
+    # open one (PR #1282 review).
+    tmp = tempfile.NamedTemporaryFile(  # noqa: SIM115 — closed by the `with`
+        mode="w", suffix=".vera", delete=False, encoding="utf-8",
+    )
+    path = tmp.name
+    try:
+        with tmp as f:
+            f.write(source)
+            f.flush()
+        return transform(parse_file(path)), path
+    finally:
+        Path(path).unlink(missing_ok=True)
 
-    tree = parse_file(path)
-    ast = transform(tree)
-    return compile(ast, source=source, file=path)
+
+def _compile(source: str) -> CompileResult:
+    """Compile a Vera source string to WASM."""
+    prog, path = _parse_from_temp_file(source)
+    return compile(prog, source=source, file=path)
 
 
 def _compile_ok(source: str) -> CompileResult:
@@ -175,48 +200,16 @@ private fn internal(@Int -> @Int)
 { @Int.0 }
 """
 
-    @staticmethod
-    def _resolved(
-        path: tuple[str, ...], source: str,
-    ) -> ResolvedModule:
-        """Build a ResolvedModule from source text."""
-        import tempfile
-        from pathlib import Path
-
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".vera", delete=False, encoding="utf-8"
-        ) as f:
-            f.write(source)
-            f.flush()
-            fpath = f.name
-
-        tree = parse_file(fpath)
-        prog = transform(tree)
-        return ResolvedModule(
-            path=path,
-            file_path=Path(fpath),
-            program=prog,
-            source=source,
-        )
+    _resolved = staticmethod(resolved_module)
 
     @classmethod
     def _compile_mod(
         cls, source: str, modules: list,
     ) -> CompileResult:
         """Compile with resolved modules."""
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".vera", delete=False, encoding="utf-8"
-        ) as f:
-            f.write(source)
-            f.flush()
-            path = f.name
-
-        tree = parse_file(path)
-        ast = transform(tree)
+        prog, path = _parse_from_temp_file(source)
         return compile(
-            ast, source=source, file=path, resolved_modules=modules,
+            prog, source=source, file=path, resolved_modules=modules,
         )
 
     @classmethod
@@ -1308,33 +1301,7 @@ class TestCrossModuleNameCollision661:
     module attribution, this test will flag the change.
     """
 
-    @staticmethod
-    def _resolved(
-        path: tuple[str, ...], source: str,
-    ) -> ResolvedModule:
-        import tempfile
-        from pathlib import Path
-        # Explicit utf-8 encoding (Windows-portability) + try/finally
-        # cleanup so the temp file is removed after parse + transform.
-        # Safe because `compile()` works off the in-memory `source`
-        # string + the AST `prog`, not by re-reading the file path
-        # (CR-2 on PR #664).
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".vera", delete=False,
-            encoding="utf-8",
-        ) as f:
-            f.write(source)
-            f.flush()
-            fpath = f.name
-        try:
-            tree = parse_file(fpath)
-            prog = transform(tree)
-            return ResolvedModule(
-                path=path, file_path=Path(fpath), program=prog,
-                source=source,
-            )
-        finally:
-            Path(fpath).unlink(missing_ok=True)
+    _resolved = staticmethod(resolved_module)
 
     def test_cross_module_forall_name_shadow_compiles_and_runs(
         self,
@@ -1477,12 +1444,7 @@ public fn main(@Unit -> @Int)
 class TestNameCollisionDetection:
     """Name collisions across imported modules produce diagnostics."""
 
-    @staticmethod
-    def _resolved(
-        path: tuple[str, ...], source: str,
-    ) -> ResolvedModule:
-        """Build a ResolvedModule from source text."""
-        return TestCrossModuleCodegen._resolved(path, source)
+    _resolved = staticmethod(resolved_module)
 
     @classmethod
     def _compile_mod(
@@ -3356,18 +3318,9 @@ public fn main(@Unit -> @Int)
   requires(true) ensures(true) effects(pure)
 { pick(true, 42) }
 """
-        import tempfile
-
         from vera.codegen.core import CodeGenerator
 
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".vera", delete=False, encoding="utf-8"
-        ) as f:
-            f.write(source)
-            f.flush()
-            path = f.name
-        tree = parse_file(path)
-        prog = transform(tree)
+        prog, path = _parse_from_temp_file(source)
         gen = CodeGenerator(
             source=source, file=path, resolved_modules=mods,
         )
@@ -3418,18 +3371,9 @@ public fn main(@Unit -> @Int)
   requires(true) ensures(true) effects(pure)
 { nums(()) * 6 }
 """
-        import tempfile
-
         from vera.codegen.core import CodeGenerator
 
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".vera", delete=False, encoding="utf-8"
-        ) as f:
-            f.write(source)
-            f.flush()
-            path = f.name
-        tree = parse_file(path)
-        prog = transform(tree)
+        prog, path = _parse_from_temp_file(source)
         gen = CodeGenerator(
             source=source, file=path, resolved_modules=mods,
         )
@@ -3515,12 +3459,12 @@ class TestPreludeFnTypeAliasCollision:
 
     The prelude spells its closure-taking combinators' parameters
     through type aliases (``option_map(@Option<VeraA>,
-    @OptionMapFn<VeraA, VeraB>)``) because a slot reference needs a type
-    *name*.  Those names used to live in the same namespace user code
-    writes into, so a user (or module) alias of the same name re-typed
-    the PRELUDE's declaration — the mirror image of the #1111 defect
-    that spec §8.4.1 forbids in the other direction (a main-file alias
-    must never re-type a module's declarations).
+    @VeraOptionMapFn<VeraA, VeraB>)``) because a slot reference needs a
+    type *name*.  Those names used to live in the same namespace user
+    code writes into, so a user (or module) alias of the same name
+    re-typed the PRELUDE's declaration — the mirror image of the #1111
+    defect that spec §8.4.1 forbids in the other direction (a main-file
+    alias must never re-type a module's declarations).
 
     Pre-fix the two namespaces disagreed about it, and neither was
     right:
@@ -3539,8 +3483,13 @@ class TestPreludeFnTypeAliasCollision:
     The fix gives the prelude's own combinators reserved ``Vera``-
     prefixed spellings of those aliases (the #869 remedy, applied to the
     alias names rather than the type-parameter names), so no user alias
-    can reach them from any scope.  The user-facing alias names stay
-    injected and stay the user's to shadow.
+    can reach them from any scope.  #1221 then retired the user-facing
+    spellings altogether: the prelude injects nothing outside the
+    reserved namespace, so the names these tests declare are ordinary
+    user aliases that collide with nothing.  They stay parametrized over
+    those names because that is the shape a program in the wild has —
+    each one must keep meaning exactly what the user wrote while the
+    combinators keep working beside it.
     """
 
     _resolved = staticmethod(TestCrossModuleCodegen._resolved)
@@ -3684,16 +3633,16 @@ public fn main(@Unit -> @Int)
 
     @pytest.mark.parametrize("alias", ["OptionMapFn", "OptionBindFn"])
     def test_shadowing_every_option_alias_at_once(self, alias: str) -> None:
-        """Both user-facing Option alias names taken in one program.
+        """Both Option-combinator alias names taken in one program.
 
         Distinct door from the single-alias tests: ``inject_prelude``
-        gates the user-facing alias block on the user having shadowed
-        *all* of a group's names, so shadowing one name still injects
-        the block (and its reserved twins with it) while shadowing both
-        skips it entirely.  The twins have to arrive with the
-        combinator bodies that need them, not with the block a user can
-        suppress.  ``ResultMapFn`` is a one-name group, so its own
-        parametrized cases already cross this threshold."""
+        used to gate a user-facing alias block on the user having taken
+        *all* of a group's names, so taking one name still injected the
+        block while taking both skipped it entirely — and the
+        declarations the combinators resolve through went with it.  The
+        aliases now arrive with the combinator bodies that need them,
+        unconditionally and under reserved names (#1221), which is what
+        this pair of declarations pins."""
         decl = "type OptionMapFn = Int;\ntype OptionBindFn = String;\n\n"
         assert self._run_as_main(alias, decl) == 42
         assert self._run_as_module(alias, decl) == 42
@@ -3795,17 +3744,18 @@ public fn main(@Unit -> @Int)
         ``len(params) == len(type_args)``, so the stale pair is a live
         wrong-substitution door for any consumer that reaches the name
         with two type args — which is exactly how the prelude's own
-        ``@OptionMapFn<VeraA, VeraB>`` parameter used to resolve to the
-        module's ``Int``.  Asserted on the maps rather than end-to-end:
-        after the reserved-name fix no prelude declaration spells a
-        shadowable alias, so the pairing is defence-in-depth against the
-        next consumer that does."""
-        import tempfile
-
+        ``@VeraOptionMapFn<VeraA, VeraB>`` parameter used to resolve to
+        the module's ``Int``.  Asserted on the maps rather than end to
+        end, and driven straight at ``CodeGenerator``: every prelude
+        alias now lives in the reserved namespace (#1221), so the module
+        below is a shape ``vera check`` refuses (E154) and only this
+        layer can still be handed.  The pairing is what keeps that
+        refusal from being the only thing standing between a module
+        alias and the prelude's parameter list."""
         from vera.codegen.core import CodeGenerator
 
         mods = [self._resolved(("mc",), """\
-type OptionMapFn = Int;
+type VeraOptionMapFn = Int;
 
 public fn ident(@Int -> @Int)
   requires(true)
@@ -3822,14 +3772,7 @@ public fn main(@Unit -> @Int)
   effects(pure)
 { ident(42) }
 """
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".vera", delete=False, encoding="utf-8"
-        ) as f:
-            f.write(source)
-            f.flush()
-            path = f.name
-        tree = parse_file(path)
-        prog = transform(tree)
+        prog, path = _parse_from_temp_file(source)
         gen = CodeGenerator(source=source, file=path, resolved_modules=mods)
         result = gen.compile_program(prog)
         errors = [d for d in result.diagnostics if d.severity == "error"]
@@ -3837,17 +3780,17 @@ public fn main(@Unit -> @Int)
 
         # The prelude's own entry is parameterized, so a stale param
         # list is distinguishable from a correctly paired override.
-        assert gen._prelude_type_alias_params.get("OptionMapFn") == (
+        assert gen._prelude_type_alias_params.get("VeraOptionMapFn") == (
             "VeraA", "VeraB",
         ), "prelude alias params missing — test no longer probes the hole"
 
         with gen._module_alias_scope(("mc",)):
             assert isinstance(
-                gen._type_aliases["OptionMapFn"], ast.NamedType,
-            ) and gen._type_aliases["OptionMapFn"].name == "Int", (
+                gen._type_aliases["VeraOptionMapFn"], ast.NamedType,
+            ) and gen._type_aliases["VeraOptionMapFn"].name == "Int", (
                 "module alias lost its own target inside its scope"
             )
-            assert "OptionMapFn" not in gen._type_alias_params, (
+            assert "VeraOptionMapFn" not in gen._type_alias_params, (
                 "module's non-parameterized alias is paired with the "
                 "prelude's stale param list"
             )
@@ -3858,13 +3801,10 @@ public fn main(@Unit -> @Int)
         The pairing invariant's other branch: `type OptionMapFn<A> =
         Option<A>;` in a module must resolve at arity 1 inside that
         module.  Dropping the `_type_alias_params.update(mod_params)`
-        overlay would leave the prelude's stale `("VeraA", "VeraB")`
-        paired with the module's target, and the arity-1 use below would
-        stop substituting — the differing arity makes the stale pairing
-        loud, end to end.
+        overlay leaves the module's target with no parameter list at
+        all, and the arity-1 use below stops substituting — the missing
+        pairing is loud, end to end.
         """
-        import tempfile
-
         from vera.codegen.core import CodeGenerator
 
         mods = [self._resolved(("palias",), """\
@@ -3885,14 +3825,7 @@ public fn main(@Unit -> @Int)
   effects(pure)
 { option_unwrap_or(palias::wrap(41), 0) + 1 }
 """
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".vera", delete=False, encoding="utf-8"
-        ) as f:
-            f.write(source)
-            f.flush()
-            path = f.name
-        tree = parse_file(path)
-        prog = transform(tree)
+        prog, path = _parse_from_temp_file(source)
         gen = CodeGenerator(source=source, file=path, resolved_modules=mods)
         result = gen.compile_program(prog)
         errors = [d for d in result.diagnostics if d.severity == "error"]

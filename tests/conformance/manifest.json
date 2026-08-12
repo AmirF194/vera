@@ -73,6 +73,20 @@
     ]
   },
   {
+    "id": "ch01_byte_literal_join_width",
+    "file": "ch01_byte_literal_join_width.vera",
+    "chapter": 1,
+    "title": "Byte literal width inside a value-position join (#1212)",
+    "level": "run",
+    "spec_ref": "Section 1.1",
+    "features": [
+      "byte_type",
+      "byte_coercion",
+      "if_expression",
+      "match_expression"
+    ]
+  },
+  {
     "id": "ch01_comments",
     "file": "ch01_comments.vera",
     "chapter": 1,
@@ -1184,6 +1198,38 @@
     ]
   },
   {
+    "id": "ch07_state_byte_join_writes",
+    "file": "ch07_state_byte_join_writes.vera",
+    "chapter": 7,
+    "title": "Byte literal width at every State-cell write boundary (#1212)",
+    "level": "run",
+    "spec_ref": "Section 7.3",
+    "features": [
+      "state_effect",
+      "handler",
+      "handler_clause",
+      "state_update",
+      "byte_coercion",
+      "if_expression"
+    ]
+  },
+  {
+    "id": "ch07_state_op_generic_instantiation",
+    "file": "ch07_state_op_generic_instantiation.vera",
+    "chapter": 7,
+    "title": "State operation fixes a generic's type argument (#1207)",
+    "level": "run",
+    "spec_ref": "Section 7.3",
+    "features": [
+      "state_effect",
+      "handler",
+      "handler_clause",
+      "generics",
+      "type_alias",
+      "array_literal"
+    ]
+  },
+  {
     "id": "ch07_exn_handler",
     "file": "ch07_exn_handler.vera",
     "chapter": 7,
@@ -1247,6 +1293,49 @@
       "handler_composition",
       "state_handler",
       "exn_handler"
+    ]
+  },
+  {
+    "id": "ch07_clause_body_op_enclosing",
+    "file": "ch07_clause_body_op_enclosing.vera",
+    "chapter": 7,
+    "title": "A handler clause body's bare op belongs to the enclosing context",
+    "level": "run",
+    "spec_ref": "Section 7.5.2",
+    "features": [
+      "nested_handlers",
+      "handler_clause",
+      "state_effect",
+      "state_update"
+    ]
+  },
+  {
+    "id": "ch07_handler_registration_positions",
+    "file": "ch07_handler_registration_positions.vera",
+    "chapter": 7,
+    "title": "A handler in a clause body, state-init, or 'with' update is as real as one in the body",
+    "level": "run",
+    "spec_ref": "Section 7.5",
+    "features": [
+      "nested_handlers",
+      "handler_clause",
+      "state_effect",
+      "exn_handler",
+      "state_update"
+    ]
+  },
+  {
+    "id": "ch07_effect_op_source_order",
+    "file": "ch07_effect_op_source_order.vera",
+    "chapter": 7,
+    "title": "Bare effect-op resolution: innermost handler, then the declared row in source order",
+    "level": "run",
+    "spec_ref": "Section 7.4",
+    "features": [
+      "effects",
+      "effect_op",
+      "effect_row",
+      "state_effect"
     ]
   },
   {
@@ -1616,8 +1705,86 @@
     "spec_ref": "Section 8.4.1",
     "expected_error": "E154",
     "features": [
+      "reserved_name",
       "reserved_type_name",
-      "type_aliases",
+      "type_alias",
+      "prelude",
+      "check_error"
+    ]
+  },
+  {
+    "id": "ch08_reserved_vera_prefix_reference_rejected",
+    "file": "ch08_reserved_vera_prefix_reference_rejected.vera",
+    "chapter": 8,
+    "title": "A type reference into the prelude's reserved Vera namespace is a checker error (#1221)",
+    "level": "check",
+    "spec_ref": "Section 8.4.1",
+    "expected_error": "E154",
+    "features": [
+      "reserved_name",
+      "reserved_type_name",
+      "type_alias",
+      "prelude",
+      "check_error"
+    ]
+  },
+  {
+    "id": "ch08_reserved_vera_prefix_binder_rejected",
+    "file": "ch08_reserved_vera_prefix_binder_rejected.vera",
+    "chapter": 8,
+    "title": "A type parameter bound in the prelude's reserved Vera namespace is a checker error (#1221 review)",
+    "level": "check",
+    "spec_ref": "Section 8.4.1",
+    "expected_error": "E154",
+    "features": [
+      "reserved_name",
+      "reserved_type_name",
+      "generics",
+      "prelude",
+      "check_error"
+    ]
+  },
+  {
+    "id": "ch08_reserved_vera_prefix_effect_rejected",
+    "file": "ch08_reserved_vera_prefix_effect_rejected.vera",
+    "chapter": 8,
+    "title": "An effect name in the prelude's reserved Vera namespace is a checker error (#1260)",
+    "level": "check",
+    "spec_ref": "Section 8.4.1",
+    "expected_error": "E154",
+    "features": [
+      "reserved_name",
+      "effect_declaration",
+      "prelude",
+      "check_error"
+    ]
+  },
+  {
+    "id": "ch08_reserved_vera_prefix_ability_rejected",
+    "file": "ch08_reserved_vera_prefix_ability_rejected.vera",
+    "chapter": 8,
+    "title": "An ability name in the prelude's reserved Vera namespace is a checker error (#1260)",
+    "level": "check",
+    "spec_ref": "Section 8.4.1",
+    "expected_error": "E154",
+    "features": [
+      "reserved_name",
+      "ability",
+      "prelude",
+      "check_error"
+    ]
+  },
+  {
+    "id": "ch08_reserved_vera_prefix_constructor_rejected",
+    "file": "ch08_reserved_vera_prefix_constructor_rejected.vera",
+    "chapter": 8,
+    "title": "A constructor name in the prelude's reserved Vera namespace is a checker error (#1260)",
+    "level": "check",
+    "spec_ref": "Section 8.4.1",
+    "expected_error": "E154",
+    "features": [
+      "reserved_name",
+      "constructor",
       "prelude",
       "check_error"
     ]
@@ -2234,6 +2401,52 @@
     ]
   },
   {
+    "id": "ch09_generic_under_generic_callee",
+    "file": "ch09_generic_under_generic_callee.vera",
+    "chapter": 9,
+    "title": "A generic where-helper under a generic parent instantiates its own generic callee (#1223, #1271)",
+    "level": "run",
+    "spec_ref": "Section 11.10.3",
+    "features": [
+      "generic_function",
+      "monomorphization",
+      "forall_where",
+      "generic_under_generic",
+      "where_block"
+    ]
+  },
+  {
+    "id": "ch09_generic_under_generic_prelude_callee",
+    "file": "ch09_generic_under_generic_prelude_callee.vera",
+    "chapter": 9,
+    "title": "A generic where-helper under a generic parent instantiates a PRELUDE generic callee (#1223, #1271)",
+    "level": "run",
+    "spec_ref": "Section 11.10.3",
+    "features": [
+      "generic_function",
+      "monomorphization",
+      "forall_where",
+      "generic_under_generic",
+      "prelude",
+      "option"
+    ]
+  },
+  {
+    "id": "ch09_generic_under_generic_depth_two",
+    "file": "ch09_generic_under_generic_depth_two.vera",
+    "chapter": 9,
+    "title": "Two levels of generic where-helper nesting under a generic parent (#1223, #1271)",
+    "level": "run",
+    "spec_ref": "Section 11.10.3",
+    "features": [
+      "generic_function",
+      "monomorphization",
+      "forall_where",
+      "generic_under_generic",
+      "nested_where"
+    ]
+  },
+  {
     "id": "ch09_generic_where_nongeneric_parent",
     "file": "ch09_generic_where_nongeneric_parent.vera",
     "chapter": 9,
@@ -2572,6 +2785,285 @@
       "equality",
       "adt",
       "check_error"
+    ]
+  },
+  {
+    "id": "ch02_alias_cycle_rejected",
+    "file": "ch02_alias_cycle_rejected.vera",
+    "chapter": 2,
+    "title": "A cyclic type alias is rejected at check",
+    "level": "check",
+    "spec_ref": "Section 2",
+    "expected_error": "E132",
+    "features": [
+      "type_alias",
+      "alias_cycle",
+      "check_error"
+    ]
+  },
+  {
+    "id": "ch02_refinement_base_param_alias",
+    "file": "ch02_refinement_base_param_alias.vera",
+    "chapter": 2,
+    "title": "A refinement over a parameterised alias application substitutes its argument",
+    "level": "run",
+    "spec_ref": "Section 2.6.3",
+    "features": [
+      "refinement_type",
+      "type_alias",
+      "parameterised_alias",
+      "nat"
+    ]
+  },
+  {
+    "id": "ch03_slot_alias_type_argument",
+    "file": "ch03_slot_alias_type_argument.vera",
+    "chapter": 3,
+    "title": "Alias opacity is head-only: type arguments resolve",
+    "level": "run",
+    "spec_ref": "Section 3.8.1",
+    "features": [
+      "slot_reference",
+      "type_alias",
+      "slot_naming"
+    ]
+  },
+  {
+    "id": "ch07_state_composite_alias",
+    "file": "ch07_state_composite_alias.vera",
+    "chapter": 7,
+    "title": "A composite type alias as the State<T> cell type",
+    "level": "run",
+    "spec_ref": "Section 7.5",
+    "features": [
+      "state_effect",
+      "type_alias",
+      "cell_family",
+      "composite_type"
+    ]
+  },
+  {
+    "id": "ch07_state_composite_alias_cross_spelling",
+    "file": "ch07_state_composite_alias_cross_spelling.vera",
+    "chapter": 7,
+    "title": "Two spellings of one composite State cell share it",
+    "level": "run",
+    "spec_ref": "Section 7.5",
+    "features": [
+      "state_effect",
+      "type_alias",
+      "cell_family",
+      "composite_type"
+    ]
+  },
+  {
+    "id": "ch07_state_fn_type_alias_cross_spelling",
+    "file": "ch07_state_fn_type_alias_cross_spelling.vera",
+    "chapter": 7,
+    "title": "A function-type-carrying composite cell is named by its resolution",
+    "level": "run",
+    "spec_ref": "Section 7.5",
+    "features": [
+      "state_effect",
+      "type_alias",
+      "cell_family",
+      "composite_type",
+      "function_type"
+    ]
+  },
+  {
+    "id": "ch07_state_refined_cell_family",
+    "file": "ch07_state_refined_cell_family.vera",
+    "chapter": 7,
+    "title": "Two refinements of one base are two State cells",
+    "level": "run",
+    "spec_ref": "Section 7.5",
+    "features": [
+      "state_effect",
+      "type_alias",
+      "cell_family",
+      "refinement_type",
+      "nested_handlers"
+    ]
+  },
+  {
+    "id": "ch07_state_scalar_alias_cross_spelling",
+    "file": "ch07_state_scalar_alias_cross_spelling.vera",
+    "chapter": 7,
+    "title": "A scalar alias and its base name one State cell",
+    "level": "run",
+    "spec_ref": "Section 7.5",
+    "features": [
+      "state_effect",
+      "type_alias",
+      "cell_family"
+    ]
+  },
+  {
+    "id": "ch07_state_alias_chain",
+    "file": "ch07_state_alias_chain.vera",
+    "chapter": 7,
+    "title": "Multi-hop and parameterised alias State cells",
+    "level": "run",
+    "spec_ref": "Section 7.5",
+    "features": [
+      "state_effect",
+      "type_alias",
+      "generic_alias",
+      "cell_family"
+    ]
+  },
+  {
+    "id": "ch07_state_nested_param_alias",
+    "file": "ch07_state_nested_param_alias.vera",
+    "chapter": 7,
+    "title": "A twice-applied parameterised alias State cell",
+    "level": "run",
+    "spec_ref": "Section 7.5",
+    "features": [
+      "state_effect",
+      "generic_alias",
+      "cell_family",
+      "slot_naming"
+    ]
+  },
+  {
+    "id": "ch07_state_scalar_alias_widths",
+    "file": "ch07_state_scalar_alias_widths.vera",
+    "chapter": 7,
+    "title": "Bool / Byte / Float64 alias State cells keep their width",
+    "level": "run",
+    "spec_ref": "Section 7.5",
+    "features": [
+      "state_effect",
+      "type_alias",
+      "cell_family",
+      "byte_type",
+      "float64"
+    ]
+  },
+  {
+    "id": "ch07_state_alias_op_result_positions",
+    "file": "ch07_state_alias_op_result_positions.vera",
+    "chapter": 7,
+    "title": "An effect op's result type under an alias State cell",
+    "level": "run",
+    "spec_ref": "Section 7.5",
+    "features": [
+      "state_effect",
+      "type_alias",
+      "cell_family",
+      "effect_op_result"
+    ]
+  },
+  {
+    "id": "ch07_state_clause_alias_slots",
+    "file": "ch07_state_clause_alias_slots.vera",
+    "chapter": 7,
+    "title": "Alias spellings inside handler clause slots name one stack",
+    "level": "run",
+    "spec_ref": "Section 7.5.2",
+    "features": [
+      "state_effect",
+      "handler_clause",
+      "type_alias",
+      "slot_naming"
+    ]
+  },
+  {
+    "id": "ch07_exn_scalar_alias",
+    "file": "ch07_exn_scalar_alias.vera",
+    "chapter": 7,
+    "title": "A scalar alias as the Exn<E> payload type",
+    "level": "run",
+    "spec_ref": "Section 7.6",
+    "features": [
+      "exn_effect",
+      "type_alias",
+      "cell_family"
+    ]
+  },
+  {
+    "id": "ch07_exn_string_alias",
+    "file": "ch07_exn_string_alias.vera",
+    "chapter": 7,
+    "title": "A String alias as the Exn<E> payload type",
+    "level": "run",
+    "spec_ref": "Section 7.6",
+    "features": [
+      "exn_effect",
+      "type_alias",
+      "cell_family",
+      "string"
+    ]
+  },
+  {
+    "id": "ch07_exn_param_alias",
+    "file": "ch07_exn_param_alias.vera",
+    "chapter": 7,
+    "title": "Parameterised alias payloads for Exn<E>",
+    "level": "run",
+    "spec_ref": "Section 7.6",
+    "features": [
+      "exn_effect",
+      "generic_alias",
+      "cell_family"
+    ]
+  },
+  {
+    "id": "ch08_state_alias_per_module_lib",
+    "file": "ch08_state_alias_per_module_lib.vera",
+    "chapter": 8,
+    "title": "Per-module alias table library (private Hid<T> = T)",
+    "level": "verify",
+    "spec_ref": "Section 8.4.1",
+    "features": [
+      "cross_module",
+      "type_alias",
+      "generic_alias",
+      "state_effect"
+    ]
+  },
+  {
+    "id": "ch08_state_alias_per_module",
+    "file": "ch08_state_alias_per_module.vera",
+    "chapter": 8,
+    "title": "An alias resolves in the namespace of the module that declared it",
+    "level": "run",
+    "spec_ref": "Section 8.4.1",
+    "features": [
+      "cross_module",
+      "type_alias",
+      "generic_alias",
+      "state_effect",
+      "cell_family"
+    ]
+  },
+  {
+    "id": "ch08_state_alias_module_table_lib",
+    "file": "ch08_state_alias_module_table_lib.vera",
+    "chapter": 8,
+    "title": "Same-name alias library (Count = Nat)",
+    "level": "verify",
+    "spec_ref": "Section 8.4.1",
+    "features": [
+      "cross_module",
+      "type_alias",
+      "state_effect"
+    ]
+  },
+  {
+    "id": "ch08_state_alias_module_table",
+    "file": "ch08_state_alias_module_table.vera",
+    "chapter": 8,
+    "title": "Same alias name, different body, per module",
+    "level": "run",
+    "spec_ref": "Section 8.4.1",
+    "features": [
+      "cross_module",
+      "type_alias",
+      "state_effect",
+      "cell_family"
     ]
   }
 ]

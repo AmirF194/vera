@@ -57,11 +57,35 @@ def _conformance_corpus() -> list[Path]:
     )
 
 
+def _checkable_conformance_corpus() -> list[Path]:
+    """Every conformance program that type-checks — whatever its level (#1242).
+
+    :func:`_conformance_corpus` above stops at the ``verify`` / ``run`` levels,
+    which is the right set for the warm/cold differential (those are the
+    programs CI verifies).  The ``--json`` summary/stream contract, though, is
+    what `vera verify --json` promises on ANY program a user points it at, and
+    the one corpus program whose stream the summary could not be reproduced
+    from — ``ch08_transitive_module_import_base`` — is a ``check``-level base
+    module, outside that set and therefore never asserted (#1242).  Only the
+    negative fixtures are excluded here: they carry an ``expected_error`` and
+    fail `check`, so verification never runs on them at all.
+    """
+    manifest = json.loads(
+        (CONFORMANCE_DIR / "manifest.json").read_text(encoding="utf-8"),
+    )
+    return sorted(
+        CONFORMANCE_DIR / entry["file"]
+        for entry in manifest
+        if not entry.get("expected_error")
+    )
+
+
 def _example_corpus() -> list[Path]:
     return sorted(EXAMPLES_DIR.glob("*.vera"))
 
 
 CORPUS = _example_corpus() + _conformance_corpus()
+CHECKABLE_CORPUS = _example_corpus() + _checkable_conformance_corpus()
 
 
 def _cold_verify(path: Path) -> tuple[VerifyResult, str]:
@@ -141,6 +165,55 @@ def _assert_summary_consistent(result_name: str, result: object) -> None:
     )
 
 
+#: The statuses ``summarize`` counts toward each summary field, and the ones it
+#: deliberately counts toward none.  Spelled here as a PARTITION of
+#: :data:`~vera.obligations.core.ObligationStatus` so the assertion below can
+#: check it is exhaustive against the Literal itself: a sixth status added to
+#: the vocabulary without a decision about which bucket it belongs in would
+#: otherwise vanish from the counts AND from the array's accounting in silence.
+_TIER1_STATUSES = ("verified",)
+_TIER3_STATUSES = ("tier3", "timeout")
+_UNCOUNTED_STATUSES = ("violated", "tier3_unguarded")
+
+
+def _assert_stream_partition(result_name: str, result: object) -> None:
+    """The obligation array is exhaustively accounted for by the summary (#1242).
+
+    The complement of :func:`_assert_summary_consistent`, which checks that the
+    counts can be *reproduced* from the stream.  This checks the other
+    direction — that nothing in the stream is unexplained — because the two
+    together are what the ``verify --json`` contract in CLAUDE.md promises, and
+    only their conjunction rules out the reading that produced #1242:
+    ``verification.total = 2`` beside a three-entry ``obligations`` array on
+    ``ch08_transitive_module_import_base`` looks like a disagreement until the
+    third entry's ``violated`` status is named as counted-nowhere-on-purpose (a
+    refutation discharged to no tier, surfaced as the E500 error instead).
+
+    Two legs:
+
+    1. every status is one of the documented five, partitioned into the tier-1
+       bucket, the tier-3 bucket and the uncounted bucket; and
+    2. ``len(obligations) == total + uncounted`` — so a consumer reads the
+       counts by FILTERING on ``status``, and the array's length is the sum of
+       the three buckets rather than of any one of them.
+    """
+    obligations = result.obligations  # type: ignore[attr-defined]
+    summary = result.summary  # type: ignore[attr-defined]
+    known = set(_TIER1_STATUSES + _TIER3_STATUSES + _UNCOUNTED_STATUSES)
+    unknown = sorted({o.status for o in obligations} - known)
+    assert not unknown, (
+        f"{result_name}: obligation status(es) {unknown} are outside the "
+        f"documented vocabulary {sorted(known)}, so they are counted by no "
+        f"summary field and accounted for by no bucket"
+    )
+    uncounted = sum(1 for o in obligations if o.status in _UNCOUNTED_STATUSES)
+    assert len(obligations) == summary.total + uncounted, (
+        f"{result_name}: {len(obligations)} obligations != total="
+        f"{summary.total} + {uncounted} uncounted "
+        f"(violated / tier3_unguarded)"
+    )
+
+
 class TestDifferentialOracle:
     """Warm session == cold verify, on the whole corpus."""
 
@@ -186,6 +259,49 @@ class TestDifferentialOracle:
         session = VerificationSession()
         warm = session.verify_source(source, file=str(path))
         _assert_summary_consistent(f"{path.name} (warm)", warm)
+
+
+class TestObligationStreamPartition:
+    """The summary accounts for every reified obligation, corpus-wide (#1242).
+
+    Over :data:`CHECKABLE_CORPUS` — every program `vera verify --json` runs on,
+    including the ``check``-level base modules the differential above skips,
+    which is where #1242 was hiding.  Both directions of the documented
+    contract are asserted on each program: the counts are reproducible from the
+    stream (:func:`_assert_summary_consistent`) and the stream is exhaustively
+    bucketed by the counts (:func:`_assert_stream_partition`).
+    """
+
+    @pytest.mark.parametrize(
+        "path", CHECKABLE_CORPUS, ids=lambda p: p.name.removesuffix(".vera"),
+    )
+    def test_stream_is_fully_accounted_for(self, path: Path) -> None:
+        cold, _source = _cold_verify(path)
+        _assert_summary_consistent(f"{path.name} (cold)", cold)
+        _assert_stream_partition(f"{path.name} (cold)", cold)
+
+    def test_the_1242_program_has_an_uncounted_entry(self) -> None:
+        """The partition leg is not vacuous: this program really does emit an
+        obligation no summary field counts.
+
+        Without this, a corpus that happened to contain no ``violated`` and no
+        ``tier3_unguarded`` obligation would satisfy
+        :func:`_assert_stream_partition` for the trivial reason that
+        ``uncounted == 0`` — the assertion would collapse into
+        ``len(obligations) == total``, the very reading #1242 reports as
+        broken, and would then break the day a corpus program acquires a
+        refutation.  Pinning the shape here keeps the corpus leg honest.
+        """
+        path = CONFORMANCE_DIR / "ch08_transitive_module_import_base.vera"
+        result, _source = _cold_verify(path)
+        statuses = [o.status for o in result.obligations]
+        assert "violated" in statuses, statuses
+        assert len(result.obligations) > result.summary.total, (
+            f"{path.name} is the #1242 shape: {len(result.obligations)} "
+            f"obligations against total={result.summary.total}"
+        )
+        _assert_summary_consistent(path.name, result)
+        _assert_stream_partition(path.name, result)
 
 
 # The three examples that hit the #882 call-site precondition demotion path,
@@ -256,6 +372,47 @@ class TestSummarizeUnit:
         assert s.tier1_verified == 2  # verified only
         assert s.tier3_runtime == 2  # tier3 + timeout
         assert s.total == 4  # violated / tier3_unguarded excluded
+
+    def test_the_status_vocabulary_is_closed_and_partitioned(self) -> None:
+        """Every member of ``ObligationStatus`` lands in exactly one bucket
+        (#1242).
+
+        The test above enumerates the five statuses by hand, so a SIXTH added
+        to the Literal leaves it green while ``summarize`` silently counts the
+        new status nowhere — the obligation would appear in ``verify --json``'s
+        array, be counted by no field, and be explained by no documented
+        exclusion.  Reading the vocabulary from the Literal instead makes that
+        addition fail here, at the one place that has to decide which bucket it
+        belongs in.
+        """
+        from typing import get_args
+
+        from vera.obligations.core import ObligationStatus
+
+        declared = set(get_args(ObligationStatus))
+        buckets = {
+            "tier1": set(_TIER1_STATUSES),
+            "tier3": set(_TIER3_STATUSES),
+            "uncounted": set(_UNCOUNTED_STATUSES),
+        }
+        covered: set[str] = set()
+        for name, members in buckets.items():
+            assert not (covered & members), (
+                f"{name} overlaps an earlier bucket on "
+                f"{sorted(covered & members)}"
+            )
+            covered |= members
+        assert covered == declared, (
+            f"ObligationStatus members {sorted(declared - covered)} are in no "
+            f"bucket and {sorted(covered - declared)} are in a bucket but not "
+            f"in the vocabulary"
+        )
+        # ... and `summarize` agrees with the bucketing, one status at a time.
+        for status in sorted(declared):
+            s = summarize([self._obl(status)])
+            assert s.tier1_verified == (1 if status in _TIER1_STATUSES else 0)
+            assert s.tier3_runtime == (1 if status in _TIER3_STATUSES else 0)
+            assert s.total == (0 if status in _UNCOUNTED_STATUSES else 1)
 
 
 class TestSummaryDerivedOnRead:
@@ -1085,13 +1242,65 @@ class TestObligationKinds:
         assert len(e501) == 1
         assert "At this call site: 1 > 2" in e501[0].description
 
+    def test_e501_substitutes_a_parameterised_slot_reference(self) -> None:
+        """A PARAMETERISED callee slot substitutes too (#1208).
+
+        The slot table is keyed by the rendered name (``Wrap<Int>``); the
+        lookup used to be by the reference's bare HEAD (``Wrap``), so every
+        parameterised reference missed and the whole substitution was
+        abandoned — E501 silently fell back to its generic wording on exactly
+        the signatures where the concrete rendering helps most.  Keying with
+        :func:`vera.naming.slot_ref_key` renders the reference the same way
+        the binding was rendered.
+
+        ``type Wrap<T> = T`` keeps the parameter SMT-translatable (it resolves
+        to ``Int``), which is what makes the call site reach E501 at all
+        rather than the E532 Tier-3 demotion an opaque container would take.
+        """
+        source = (
+            "type Wrap<T> = T;\n"
+            "\n"
+            "private fn need_pos(@Wrap<Int> -> @Int)\n"
+            "  requires(@Wrap<Int>.0 > 0)\n"
+            "  ensures(true)\n"
+            "  effects(pure)\n"
+            "{\n"
+            "  0\n"
+            "}\n"
+            "\n"
+            "public fn caller(-> @Int)\n"
+            "  requires(true)\n"
+            "  ensures(true)\n"
+            "  effects(pure)\n"
+            "{\n"
+            "  let @Int = need_pos(0);\n"
+            "  @Int.0\n"
+            "}\n"
+        )
+        result = self._verify_source(source)
+        e501 = [d for d in result.diagnostics if d.error_code == "E501"]
+        assert len(e501) == 1
+        d = e501[0]
+        assert "At this call site: 0 > 0" in d.description
+        assert d.fix is not None
+        assert "if 0 > 0 then { need_pos(0) } else { ... }" in d.fix
+
     def test_e501_unmappable_slot_keeps_generic_fix(self) -> None:
         """When a precondition slot cannot be mapped to an argument,
         the message keeps the generic wording instead of guessing."""
         from vera import ast as A
+        from vera.naming import EMPTY_ALIAS_ENV
         from vera.verifier import ContractVerifier
 
         v = ContractVerifier.__new__(ContractVerifier)
+        # #1208: `slot_table` is named against the verifier's alias env; this
+        # fixture bypasses `__init__`, so supply the empty one it declares no
+        # aliases against.  `_decl_alias_env` too: the call site reads
+        # `_current_alias_env`, which consults it (PR #1224 review) — without
+        # it the fixture raises `AttributeError` instead of exercising the
+        # unmappable-slot branch.
+        v._alias_env = EMPTY_ALIAS_ENV
+        v._decl_alias_env = None
         pre = A.Requires(
             expr=A.SlotRef(
                 type_name="String", type_args=None, index=5, span=None,
@@ -1099,7 +1308,7 @@ class TestObligationKinds:
             span=None,
         )
         call = A.FnCall(name="f", args=(), span=None)
-        out = v._pre_at_call_site((), call, pre)
+        out = v._pre_at_call_site((), None, call, pre)
         assert out is None
 
     def test_content_key_stable_across_runs(self) -> None:
@@ -1145,14 +1354,25 @@ class TestIncrementalInvalidation:
         "}\n"
     )
 
-    def _cold(self, source: str) -> VerifyResult:
-        program = transform(parse(source))
-        diags = typecheck(program, source)
-        assert not [d for d in diags if d.severity == "error"]
-        return verify(program, source)
+    def _cold(self, source: str, file: str | None = None) -> VerifyResult:
+        """The cold twin of the session runs below, driven with the SAME
+        *file* they are.
 
-    def _assert_matches_cold(self, source: str, warm: object) -> None:
-        cold = self._cold(source)
+        An obligation carries the file its line number belongs to (#1220), and
+        that is part of its identity, so a warm run given a file compared
+        against a cold run given none is comparing two different questions —
+        the fingerprint below would report a mismatch that is entirely the
+        harness's.
+        """
+        program = transform(parse(source, file=file))
+        diags = typecheck(program, source, file=file)
+        assert not [d for d in diags if d.severity == "error"]
+        return verify(program, source, file=file)
+
+    def _assert_matches_cold(
+        self, source: str, warm: object, file: str | None = None,
+    ) -> None:
+        cold = self._cold(source, file)
         assert _diag_fingerprint(
             warm.verify_diagnostics,  # type: ignore[attr-defined]
         ) == _diag_fingerprint(cold.diagnostics)
@@ -1191,11 +1411,11 @@ class TestIncrementalInvalidation:
         session = VerificationSession()
         session.verify_source(uninst, file="m.vera")
         warm = session.verify_source(inst, file="m.vera")
-        self._assert_matches_cold(inst, warm)
+        self._assert_matches_cold(inst, warm, file="m.vera")
         # Reverse: removing the last instantiation flips `bad` back to Tier-3
         # rather than replaying its cached Tier-1.
         warm_back = session.verify_source(uninst, file="m.vera")
-        self._assert_matches_cold(uninst, warm_back)
+        self._assert_matches_cold(uninst, warm_back, file="m.vera")
 
     def test_identical_source_replays_everything(self) -> None:
         session = VerificationSession()

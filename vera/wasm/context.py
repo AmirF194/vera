@@ -22,6 +22,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Callable
 
 from vera import ast
+from vera.naming import EMPTY_ALIAS_ENV, AliasEnv
 from vera.skip import DERIVED_HELPER_DEPTH_CAP, CodegenSkip
 
 if TYPE_CHECKING:
@@ -29,6 +30,8 @@ if TYPE_CHECKING:
 
 from vera.wasm.helpers import (  # noqa: F401 — re-exported for consumers
     _INLINE_I32_TYPES,
+    CellNames,
+    StateClauseEntry,
     StringPool,
     WasmSlotEnv,
     gc_shadow_push,
@@ -85,6 +88,7 @@ class WasmContext(
         effect_ops: dict[str, tuple[str, bool]] | None = None,
         effect_op_result_wt: dict[str, str | None] | None = None,
         effect_op_result_vera: dict[str, str | None] | None = None,
+        effect_op_cells: dict[str, CellNames] | None = None,
         ctor_layouts: dict[str, ConstructorLayout] | None = None,
         adt_type_names: set[str] | None = None,
         generic_fn_info: (
@@ -128,36 +132,60 @@ class WasmContext(
         self._effect_op_result_vera: dict[str, str | None] = (
             effect_op_result_vera or {}
         )
-        # #976 option C: op_name -> (HandlerClause, state type name,
-        # get import, put import) for the innermost enclosing
-        # ``handle[State<T>]``.  When a get/put call site has an entry here,
-        # the clause BODY is inlined at the site (intrinsic-hybrid
-        # semantics: intrinsic store/read, clause executes, ``resume(v)`` is
-        # the op's result, ``with`` overrides the store).  Empty for a
-        # declared-``effects(<State<T>>)`` function with no handler — those
-        # keep the bare host-cell call.  Saved/restored around each handler
-        # body exactly like ``_effect_ops`` (nested handlers).  Tuple
-        # fields, in order: the HandlerClause; the effect argument's
-        # source slot name; the scalar-collapsed FAMILY name (import
-        # naming + WASM types); the state annotation's slot name (None
-        # for a stateless handler); the handler-DECLARATION scope's
-        # WasmSlotEnv (clause bodies compile against it, not the op
-        # call-site env); the get import; the put import.
-        self._state_clause_ops: dict[
-            str,
-            tuple[
-                ast.HandlerClause, str, str, str | None,
-                "WasmSlotEnv", str, str,
-            ],
-        ] = {}
+        # #1218: op_name -> the CELL that op dispatches to, as the canonical
+        # pair :class:`CellNames` (identity + representation).  The fourth
+        # registry in the lock-step set, populated at the same two injection
+        # sites and saved/restored the same way.  It exists so a call site
+        # can ask "which cell is this?" from the canonical side: the answers
+        # used to be recovered by slicing the mangled family back out of the
+        # op's own `$vera.state_put_…` dispatch target, which is a SECOND
+        # derivation of the family — and re-mangling an already-mangled name
+        # is the exact non-idempotence trap #1233's round-5 review found.
+        # Only State get/put have entries; `throw` and user-effect ops reach
+        # no host cell and are absent.
+        self._effect_op_cells: dict[str, CellNames] = effect_op_cells or {}
+        # #976 option C: op_name -> :class:`StateClauseEntry` for the
+        # innermost enclosing ``handle[State<T>]``.  When a get/put call site
+        # has an entry here, the clause BODY is inlined at the site
+        # (intrinsic-hybrid semantics: intrinsic store/read, clause executes,
+        # ``resume(v)`` is the op's result, ``with`` overrides the store).
+        # Empty for a declared-``effects(<State<T>>)`` function with no
+        # handler — those keep the bare host-cell call.  Saved/restored
+        # around each handler body exactly like ``_effect_ops`` (nested
+        # handlers).  The entry carries the handler-DECLARATION scope the
+        # clause compiles in: see :class:`StateClauseEntry`.
+        self._state_clause_ops: dict[str, StateClauseEntry] = {}
         # True while translating an inlined State clause body/`with` expr —
         # gates the ``resume(v)`` lowering (v IS the op's result value).
         self._in_state_clause: bool = False
-        # The active clause's cell FAMILY name while translating it —
-        # lets the resume lowering apply the #865 Byte-literal width
+        # The active clause's cell REPRESENTATION name while translating
+        # it — lets the resume lowering apply the #865 Byte-literal width
         # coercion (`resume(0)` in a `State<Byte>` get clause is the
-        # op's i32 result).
-        self._state_clause_family: str | None = None
+        # op's i32 result).  The BASE rather than the family (#1218): a
+        # refined `Byte` cell has its own family and the same i32 width.
+        self._state_clause_family_base: str | None = None
+        # #1233: the host cell stack, as FAMILIES, at the current emission
+        # point — one entry per enclosing `handle[State<T>]` whose
+        # `state_push_T` has run, innermost last.  Maintained by
+        # `_translate_handle_state` around its handled body.
+        self._pushed_cell_families: list[str] = []
+        # The index into `_pushed_cell_families` from which the cells are
+        # SHADOWS of the scope the current op registries belong to.  Equal to
+        # `len(_pushed_cell_families)` inside a handled body (an op there
+        # reaches the innermost cell, which is its own handler's); rolled back
+        # to the handler's DECLARATION-time value while an inlined clause body
+        # is translated, because a bare op there resolves into that
+        # declaration scope (#1211) while the intrinsics still address the
+        # innermost cell of the family.  A family occurring in
+        # `_pushed_cell_families[_addressable_from:]` is therefore
+        # unreachable — refused loudly rather than compiled to hybrid
+        # semantics (see `_reject_unaddressable_clause_op`).
+        self._addressable_from: int = 0
+        # #1211: how many clause bodies are being inlined into one another
+        # right now.  Each outward re-entry re-expands another clause, so the
+        # emitted code is exponential in this depth — bounded by
+        # `STATE_CLAUSE_INLINE_DEPTH_CAP`.
+        self._clause_inline_depth: int = 0
         # Constructor layout mapping: ctor_name -> ConstructorLayout
         self._ctor_layouts: dict[str, ConstructorLayout] = ctor_layouts or {}
         # ADT type names for slot/param type resolution
@@ -347,16 +375,24 @@ class WasmContext(
         # #865: per-parameter concrete-@Byte flags, for the call-site
         # int-literal → i32.const coercion (spec §11 — @Byte is i32).
         self._fn_byte_params: dict[str, tuple[bool, ...]] = {}
+        # #1212: `IntLit` nodes this context lowers at the i32 Byte width.
+        # Populated by `_mark_byte_literal_leaves`, the ONE branch descent
+        # every #865 arm drives through `_mark_byte_write_value`; read by
+        # the `IntLit` lowering and by the two join result-type deciders, so
+        # a marked leaf and the `(result …)` annotation over it agree.
+        self._byte_literal_ids: set[int] = set()
         # Closure compilation state — accumulated during translation
         # Each entry: (anon_fn, captures, closure_id)
         # captures: list of (type_name, outer_de_bruijn, wasm_type)
         self._pending_closures: list[
             tuple[ast.AnonFn, list[tuple[str, int, str]], int]
         ] = []
-        # Type aliases: alias_name -> TypeExpr (for FnType resolution)
-        self._type_aliases: dict[str, ast.TypeExpr] = {}
-        # Type alias parameters: alias_name -> param names (for generic aliases)
-        self._type_alias_params: dict[str, tuple[str, ...]] = {}
+        # #1208: the naming environment — alias name -> body TypeExpr (for
+        # FnType resolution) and alias name -> declared parameter names (for
+        # generic aliases), as ONE value instead of two maps that could be
+        # swapped independently and fall out of step (the #1184 mispairing).
+        # Seeded empty; codegen calls `set_alias_env` before translation.
+        self._alias_env: AliasEnv = EMPTY_ALIAS_ENV
         # Closure signature registry: sig_key -> (type_name, param/result WAT)
         self._closure_sigs: dict[str, str] = {}
         # Flags for resource requirements detected during translation
@@ -547,17 +583,16 @@ class WasmContext(
         int-literal → i32.const coercion (#865)."""
         self._fn_byte_params = byte_params
 
-    def set_type_aliases(
-        self, aliases: dict[str, ast.TypeExpr],
-    ) -> None:
-        """Set type alias mappings for FnType resolution."""
-        self._type_aliases = aliases
+    def set_alias_env(self, env: AliasEnv) -> None:
+        """Set the naming environment for alias resolution (#1208).
 
-    def set_type_alias_params(
-        self, params: dict[str, tuple[str, ...]],
-    ) -> None:
-        """Set type alias parameter names for generic alias resolution."""
-        self._type_alias_params = params
+        Replaces the former ``set_type_aliases`` / ``set_type_alias_params``
+        pair.  The two maps have to be overlaid together — a module alias
+        shadowing a *parameterised* prelude alias with a *non*-parameterised
+        one must not inherit the prelude's parameter list (#1184) — so they
+        travel as one value that cannot be half-updated.
+        """
+        self._alias_env = env
 
     def set_closure_id_start(self, start: int) -> None:
         """Set the starting closure ID for this context."""
@@ -630,6 +665,77 @@ class WasmContext(
         return [f"(local {name} {wt})" for name, wt in self._locals]
 
     # -----------------------------------------------------------------
+    # #1212 — the @Byte write boundary's literal width
+    # -----------------------------------------------------------------
+
+    def _mark_byte_literal_leaves(self, value: ast.Expr) -> bool:
+        """Mark every value-position ``IntLit`` LEAF of *value* as i32.
+
+        THE branch descent for the ``@Byte`` write boundaries (#1212).
+        ``@Byte`` is i32 (spec §11) but an int literal defaults to
+        ``i64.const``, and #865 coerced a literal only when it was the whole
+        written value.  The checker's bidirectional coercion types a branch
+        literal as ``@Byte`` just as happily, so ``let @Byte = if c then { 1 }
+        else { 2 }`` — and its init / put / ``with`` / resume / argument /
+        constructor-field twins — were check-green programs that failed WASM
+        validation with ``type mismatch: expected i32, found i64``.
+
+        Descends exactly the JOIN positions whose arms carry the boundary's
+        own type: a ``Block``'s trailing expression, both branches of an
+        ``IfExpr``, and every arm body of a ``MatchExpr`` (single- and
+        multi-arm alike).  Everything else is a leaf that is not a literal
+        and already lowers at i32 in a Byte context, so it is left alone.
+
+        Returns True iff at least one literal was marked, which is what tells
+        the caller the join lowers at i32 — a join with no literal arm
+        (``if c then { @Byte.0 } else { @Byte.1 }``) already did, and is
+        deliberately not claimed here.
+
+        One descent shared by every #865 arm, rather than an ``isinstance``
+        test repeated per site: a site that tested for a bare ``IntLit`` was
+        precisely a site that emitted invalid WASM for the branch spelling.
+        """
+        if isinstance(value, ast.IntLit):
+            self._byte_literal_ids.add(id(value))
+            return True
+        if isinstance(value, ast.Block):
+            return self._mark_byte_literal_leaves(value.expr)
+        if isinstance(value, ast.IfExpr):
+            marked = self._mark_byte_literal_leaves(value.then_branch)
+            if value.else_branch is not None:
+                marked = self._mark_byte_literal_leaves(
+                    value.else_branch) or marked
+            return marked
+        if isinstance(value, ast.MatchExpr):
+            marked = False
+            for arm in value.arms:
+                marked = self._mark_byte_literal_leaves(arm.body) or marked
+            return marked
+        return False
+
+    def _mark_byte_write_value(
+        self, value: ast.Expr, target_base: str | None,
+    ) -> bool:
+        """Prepare *value* to be translated into a ``@Byte`` boundary.
+
+        THE entry every #865 arm calls — the `let` binding, the five
+        State-cell writes, the constructor field and the call argument —
+        BEFORE it translates *value*, so the marks are in place when the
+        ``IntLit`` lowering and the join result-type deciders read them.
+        Marking rather than returning instructions is what keeps the value
+        translated exactly ONCE: the arms that used to overwrite an
+        already-translated ``i64`` lowering with a coerced one discarded a
+        whole join's translation (and the locals and pending closures it
+        registered) to do it.
+
+        *target_base* is the boundary's resolved REPRESENTATION name; a
+        non-``Byte`` boundary marks nothing and returns False.
+        """
+        if target_base != "Byte":
+            return False
+        return self._mark_byte_literal_leaves(value)
+
+    # -----------------------------------------------------------------
     # Expression translation
     # -----------------------------------------------------------------
 
@@ -678,6 +784,11 @@ class WasmContext(
         #   HoleExpr          → parser placeholder; check time rejects
         """
         if isinstance(expr, ast.IntLit):
+            # #1212: a literal a @Byte write boundary marked (directly, or as
+            # a leaf of an `if` / `match` join flowing into one) lowers at the
+            # i32 Byte width — see `_mark_byte_literal_leaves`.
+            if id(expr) in self._byte_literal_ids:
+                return [f"i32.const {expr.value}"]
             return [f"i64.const {expr.value}"]
 
         if isinstance(expr, ast.BoolLit):
@@ -804,15 +915,30 @@ class WasmContext(
 
         for stmt in block.statements:
             if isinstance(stmt, ast.LetStmt):
-                val_instrs = self.translate_expr(stmt.value, current_env)
-                if val_instrs is None:
-                    return None
-                # Determine WAT type for this let binding
+                # Determine WAT type for this let binding.  Resolved BEFORE
+                # the value is translated because a `@Byte` target changes how
+                # the value's int literals lower (#865 / #1212) — see the
+                # `_mark_byte_write_value` call below.
                 type_name = self._type_expr_to_slot_name(stmt.type_expr)
                 if type_name is None:
                     raise CodegenSkip(
                         stmt, "let binding type has no slot name"
                     )
+                # #865: `@Byte` is i32 (spec §11), but an int literal defaults
+                # to `i64.const`.  The bidirectional checker accepts a 0..255
+                # literal bound to a `@Byte` (incl. a `{ @Byte | P }`
+                # refinement) let target — mark it so it lowers at i32 and
+                # matches the i32 Byte local.  Sibling of the call-argument
+                # coercion; a non-literal Byte value already yields i32.
+                # #1212: the marking descends `if` / `match` / `Block` joins to
+                # their literal LEAVES, so `let @Byte = if c then { 1 } else
+                # { 2 }` — check-green, and invalid WASM while only a top-level
+                # literal was coerced — lowers at i32 in every arm.
+                self._mark_byte_write_value(
+                    stmt.value, self._resolve_base_type_name(type_name))
+                val_instrs = self.translate_expr(stmt.value, current_env)
+                if val_instrs is None:
+                    return None
                 # Pair bindings (String, Array<T>) need two locals: (ptr, len)
                 if self._is_pair_type_name(type_name):
                     ptr_idx = self.alloc_local("i32")
@@ -859,17 +985,10 @@ class WasmContext(
                     # above i64.MAX reinterprets to a negative @Int.
                     instructions.extend(
                         self._emit_int_widen_guard(val_instrs))
-                elif (self._resolve_base_type_name(type_name) == "Byte"
-                        and isinstance(stmt.value, ast.IntLit)):
-                    # #865: `@Byte` is i32 (spec §11), but an int literal
-                    # defaults to `i64.const`.  The bidirectional checker
-                    # accepts a 0..255 literal bound to a `@Byte` (incl. a
-                    # `{ @Byte | P }` refinement) let target — lower it at i32
-                    # so the value matches the i32 Byte local.  Sibling of the
-                    # call-argument coercion; a non-literal Byte value already
-                    # yields i32 via `translate_expr`.
-                    instructions.append(f"i32.const {stmt.value.value}")
                 else:
+                    # A `@Byte` target's literals were already marked before
+                    # the translation above, so `val_instrs` is the i32
+                    # lowering — nothing to override here (#865 / #1212).
                     instructions.extend(val_instrs)
                 instructions.append(f"local.set {local_idx}")
                 # #705: shadow-push heap-pointer let bindings so

@@ -12,35 +12,43 @@ See spec/06-contracts.md for the full verification specification.
 
 from __future__ import annotations
 
+import contextlib
+
 import z3
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
 from dataclasses import fields as ast_fields
 from typing import TYPE_CHECKING
 
-from vera import ast
+from vera import ast, naming
 from vera.environment import ConstructorInfo, FunctionInfo, TypeEnv
 from vera.monomorphize import (
     MonoContext,
     Monomorphizer,
     collect_nested_generic_decls,
     declared_return_clone_key,
+    importer_occupied_bare_names,
+    module_qualified_generic_names,
+    module_qualified_generic_targets,
+    public_generic_names,
     qualify_nested_generic_decls,
-    reroute_module_private_generic_calls,
+    reroute_module_qualified_generic_calls,
 )
 
 if TYPE_CHECKING:
     from vera.resolver import ResolvedModule
 from vera.errors import Diagnostic, SourceLocation
+from vera.lexical import blank_comments
 from vera.obligations.core import (
     ObligationKind,
     ObligationStatus,
     ProofObligation,
     expr_text_for,
 )
-from vera.slots import slot_table, type_expr_slot_name
-from vera.smt import SlotEnv, SmtContext
+from vera.naming import EMPTY_ALIAS_ENV, AliasEnv, alias_env_from_environment
+from vera.slots import fn_slot_scope, slot_table
+from vera.smt import CalleeScope, SlotEnv, SmtContext
 from vera.types import (
     erases_to_unit,
     BOOL,
@@ -72,6 +80,34 @@ from vera.types import (
 _I64_MIN = -(2**63)
 _I64_MAX = 2**63 - 1
 _U64_MAX = 2**64 - 1
+
+#: The E506 reason shared by the two sub-pattern sites whose SCRUTINEE the SMT
+#: layer cannot project (#1251).  Nothing about the predicate or its base is at
+#: fault there — the field the predicate is about was never formed — so saying
+#: "outside Z3's decidable fragment" pointed the reader at the wrong thing.
+_OPAQUE_SCRUTINEE_REASON = (
+    "the matched value is opaque to the SMT layer, so its field could not be "
+    "projected and the predicate was never given a value to reason about"
+)
+
+
+def _walk_fn_decls(program: ast.Program) -> Iterator[ast.FnDecl]:
+    """Every function *declaration* in *program*, ``where``-helpers included.
+
+    The registries built from a module's registration are flat and last-wins,
+    so they cannot answer "which declarations did this file contain?" for a
+    module that spells one helper name twice.  This walks the AST instead, and
+    is used to attribute each declaration's contract clauses to the file they
+    were written in (#1220).
+    """
+    stack: list[ast.FnDecl] = [
+        tld.decl for tld in program.declarations
+        if isinstance(tld.decl, ast.FnDecl)
+    ]
+    while stack:
+        decl = stack.pop()
+        yield decl
+        stack.extend(decl.where_fns or ())
 
 
 # =====================================================================
@@ -110,6 +146,16 @@ def summarize(obligations: list[ProofObligation]) -> VerifySummary:
     ``total`` is exactly ``tier1_verified + tier3_runtime`` — the count of
     obligations that discharged to *some* tier — so the summary is internally
     arithmetic-consistent by construction.
+
+    The three buckets PARTITION the stream, which is the other half of the
+    contract ``verify --json`` documents (#1242): a consumer reproduces the
+    counts by filtering on ``status``, never by taking the array's length, and
+    the full accounting is ``len(obligations) == total + violated +
+    tier3_unguarded``.  Read as ``len == total`` instead, a program with one
+    refuted contract looks like a summary that disagrees with its own stream
+    (``ch08_transitive_module_import_base``: three obligations, ``total`` 2).
+    ``tests/test_obligations.py`` asserts both directions over every corpus
+    program the verifier runs on.
     """
     tier1 = sum(1 for o in obligations if o.status == "verified")
     tier3 = sum(1 for o in obligations if o.status in ("tier3", "timeout"))
@@ -188,6 +234,30 @@ def verify(
 class ContractVerifier:
     """Walks the AST, generates VCs, and submits them to Z3."""
 
+    #: #1208: the DEFINING module's naming env while an imported generic's
+    #: clone is under verification, ``None`` (this program's env) otherwise.
+    #: A CLASS default as well as an instance field, so the property below
+    #: answers for an instance built without ``__init__`` too.
+    _decl_alias_env: AliasEnv | None = None
+
+    #: #1220: the DEFINING module's source text over the same scope — the
+    #: buffer a clause of the declaration under verification is quoted from.
+    #: Class default for the same reason.
+    _decl_source: str | None = None
+
+    #: ... and its file name, which every location raised over that scope
+    #: carries, so a line number and the file it numbers cannot disagree.
+    _decl_file: str | None = None
+
+    #: #1241: ... and its FUNCTION REGISTRY, the namespace a bare call in the
+    #: declaration under verification resolves in.  The fourth half of "which
+    #: file is this?", travelling with the other three: a clone body reading
+    #: the importer's registry calls the importer's same-named function, so
+    #: the module's contract is proved against a body it never mentions —
+    #: verify-clean, and the run produces the other function's answer.  Class
+    #: default for the same reason as its three siblings.
+    _decl_fn_scope: CalleeScope | None = None
+
     def __init__(
         self,
         source: str = "",
@@ -213,6 +283,64 @@ class ContractVerifier:
         # program.  None (the default) preserves the historical
         # fresh-context-per-function cold path exactly.
         self._shared_smt = shared_smt
+        # #1208: the naming environment for THIS verifier's module — alias
+        # bodies, alias parameters, and declared-ADT names, as
+        # :mod:`vera.naming` renders against.  Built from `self.env` once
+        # registration has populated it (see `register_program`); empty until
+        # then, because there is nothing to name before the aliases register.
+        self._alias_env: AliasEnv = EMPTY_ALIAS_ENV
+        # #1208: the naming environment of each RESOLVED MODULE, built in
+        # `_register_modules` from that module's own registration.  Aliases are
+        # module-scoped (spec §8.4.1), so an imported callee's contract and an
+        # imported generic's body have to be rendered against the env of the
+        # module that DECLARED them — the importer's env names a different
+        # namespace, and two modules that spell the same alias differently then
+        # merge or split parameter stacks the checker kept apart.
+        self._module_alias_envs: dict[tuple[str, ...], AliasEnv] = {}
+        # #1220: each RESOLVED MODULE's source text, recorded beside its env in
+        # `_register_modules` and read through the same origin walk — the
+        # buffer a clause DECLARED in that module is quoted from.
+        self._module_sources: dict[tuple[str, ...], str] = {}
+        # ... and its FILE NAME, which travels with the buffer: a location that
+        # named the entry file while carrying a line number from another one
+        # sent a reader to the wrong file's wrong line (PR #1239 review).
+        self._module_files: dict[tuple[str, ...], str | None] = {}
+        # #1241: ... and its own function-resolution scope (naming env +
+        # registry), so a body DECLARED in that module resolves its bare
+        # calls where it wrote them.  The same `CalleeScope` pinned per
+        # `FunctionInfo` in `_fn_origins` below, keyed by module instead of
+        # by callee — the contract-READING pin (#1225) and this body-WALKING
+        # pin are one value, so the two cannot come to disagree about what a
+        # module's namespace is.
+        self._module_scopes: dict[tuple[str, ...], CalleeScope] = {}
+        # #1208/#1225: the scope a harvested `FunctionInfo`'s own contract is
+        # READ in — its declaring module's naming env AND function registry —
+        # keyed by object identity.  `FunctionInfo` is an unhashable mutable
+        # dataclass and carries no origin of its own, so identity is the join
+        # — sound because the value pins the info object itself, keeping it
+        # (and hence its id) alive for as long as the map is.  A callee absent
+        # from here is declared in whatever module is under verification.
+        self._fn_origins: dict[int, tuple[FunctionInfo, CalleeScope]] = {}
+        # #1220: the SOURCE TEXT each imported contract clause was WRITTEN in,
+        # keyed by clause identity on the same reasoning as `_fn_origins`
+        # above.  A clause's span numbers lines in the file that declared it,
+        # so a message quoting an imported callee's `requires` has to index
+        # that module's buffer — indexing this program's returns whatever text
+        # happens to sit on that line here (`requires(true)`, `effects(pure)`).
+        # A clause absent from here was declared in THIS program and quotes
+        # `self.source`.
+        self._contract_sources: dict[int, tuple[ast.Contract, str]] = {}
+        # #1208: the origin module of each IMPORTED generic, keyed by the same
+        # discovery key `_instances` / `generic_decls` use.  A key absent from
+        # here is a main-file generic.
+        self._generic_origins: dict[str, tuple[str, ...]] = {}
+        # See the class-level defaults: the DEFINING module's env (#1208) and
+        # source + file (#1220) while an imported generic's clone is verified,
+        # `None` otherwise.
+        self._decl_alias_env = None
+        self._decl_source = None
+        self._decl_file = None
+        self._decl_fn_scope = None
         self.source = source
         self.file = file
         self.timeout_ms = timeout_ms
@@ -292,6 +420,9 @@ class ContractVerifier:
         # gap above (their bodies live in another module, unreached by the
         # `program.declarations` verify loop).  Name → module FnDecl.
         self._imported_generic_verify_decls: dict[str, ast.FnDecl] = {}
+        self._qualified_targets_cache: (
+            dict[tuple[str, ...], dict[str, tuple[str, ...]]] | None
+        ) = None
         # PR #972 review (pre-existing): the instance's TypeVar → concrete-Type
         # mapping while a monomorphized clone is being verified, None otherwise.
         # The #747 side-tables are SPAN-keyed and clone nodes keep their source
@@ -440,7 +571,7 @@ class ContractVerifier:
         error_code: str = "",
     ) -> None:
         """Record a verification error."""
-        loc = SourceLocation(file=self.file)
+        loc = SourceLocation(file=self._current_file)
         if node.span:
             loc.line = node.span.line
             loc.column = node.span.column
@@ -466,7 +597,7 @@ class ContractVerifier:
         tier: int | None = None,
     ) -> None:
         """Record a verification warning (Tier 3 fallback)."""
-        loc = SourceLocation(file=self.file)
+        loc = SourceLocation(file=self._current_file)
         if node.span:
             loc.line = node.span.line
             loc.column = node.span.column
@@ -482,8 +613,16 @@ class ContractVerifier:
         ))
 
     def _get_source_line(self, line: int) -> str:
-        """Extract a line from the source text."""
-        lines = self.source.splitlines()
+        """Extract a line from the source of the module UNDER verification.
+
+        A diagnostic's span numbers lines in the file that declared what raised
+        it, so an imported generic's clone must be excerpted from ITS module's
+        buffer (#1220, PR #1239 review).  Indexing the entry program's instead
+        put the caret on an unrelated importer line, or — when the clone's span
+        ran past a shorter importer — produced an empty excerpt with no
+        indication anything was missing.
+        """
+        lines = self._current_source.splitlines()
         if 1 <= line <= len(lines):
             return lines[line - 1]
         return ""
@@ -518,6 +657,14 @@ class ContractVerifier:
         preconditions render the callee's contract expression but are
         located at the call site, so two calls violating the same
         precondition stay distinct obligations.
+
+        The FILE that line number belongs to travels with it, from the same
+        ``_current_file`` a diagnostic raised here would carry (#1220, PR
+        #1239 review): the two halves of ``verify --json`` are joined on
+        ``(file, line, column)``, so an obligation whose file was assumed
+        to be the entry program could not be joined to the diagnostic it
+        shares a site with — and, for an imported clone, named a line the
+        entry file does not have.
         """
         loc = span_node if span_node is not None else node
         line = loc.span.line if loc.span else 0
@@ -531,6 +678,7 @@ class ContractVerifier:
             column=column,
             error_code=error_code,
             counterexample=counterexample,
+            file=self._current_file,
         ))
 
     @staticmethod
@@ -616,6 +764,17 @@ class ContractVerifier:
         imports).  This makes the verifier resolve helper calls the same way
         codegen does after parent-qualified mangling — so a diamond of
         same-named helpers proves each parent against its OWN helper's contract.
+
+        #1241: past the lexical helpers, the two flat steps are the DECLARING
+        module's when one is in force — an imported generic's clone, verified
+        inside :meth:`_declaring_module_scope`.  A module's body calls the
+        names ITS file declares and imports (spec §8.5.1), so falling through
+        to this program's top-level table and registry resolved a bare call
+        onto the importer's same-named function: the module's own contract
+        proved against a body it never mentions, and the compiled clone
+        returning the importer's answer.  Its codegen twin is the intra-rename
+        map threaded at the clone-emission door (#1243) — one routing rule, so
+        neither side can call what the other did not verify.
         """
         # Nearest scope first: decl's own where_fns, then each ancestor's,
         # innermost (direct parent) before outermost.
@@ -626,6 +785,10 @@ class ContractVerifier:
                 for wfn in group.where_fns or ():
                     if wfn.name == name:
                         return self._fn_info_for_decl(wfn)
+            declaring = self._decl_fn_scope
+            if declaring is not None and declaring.fn_lookup is not None:
+                found: FunctionInfo | None = declaring.fn_lookup(name)
+                return found
             top = self._top_level_fn_infos.get(name)
             if top is not None:
                 return top
@@ -636,6 +799,9 @@ class ContractVerifier:
     def _register_data(self, decl: ast.DataDecl) -> None:
         """Register an ADT with constructor info for SMT translation."""
         from vera.environment import AdtInfo, ConstructorInfo
+        # #1208: same shared declaration-index stamp as the checker's
+        # registration pass, allocated before anything resolves.
+        decl_index = self.env.next_decl_index()
         # Set up type params for resolving constructor field types
         saved_params = dict(self.env.type_params)
         if decl.type_params:
@@ -657,6 +823,7 @@ class ContractVerifier:
             name=decl.name,
             type_params=decl.type_params,
             constructors=ctors,
+            decl_index=decl_index,
         )
         self.env.type_params = saved_params
 
@@ -689,13 +856,35 @@ class ContractVerifier:
         self.env.type_params = saved_params
 
     def _register_alias(self, decl: ast.TypeAliasDecl) -> None:
-        """Register a type alias."""
+        """Register a type alias.
+
+        A parameterised alias's own type parameters are bound as TYPE VARIABLES
+        for the resolution of its body, exactly as :meth:`_register_data` binds
+        an ADT's and as the checker's ``_register_alias`` does (#1237).  Without
+        it ``type Box<T> = T;`` fell through ``_resolve_type``'s unknown-name
+        fallback and registered ``AdtType('T')`` — the binder wearing an ADT's
+        name — which no substitution can eliminate, since
+        :func:`~vera.types.substitute` maps type variables.  Every application
+        of the alias then resolved to that phantom ADT, and a refinement over
+        it failed the modelled-primitive gate: the refined-return fact was
+        dropped and a valid program rejected with a spurious E501.
+        """
         from vera.environment import TypeAliasInfo
-        resolved = self._resolve_type(decl.type_expr)
+        decl_index = self.env.next_decl_index()
+        saved_params = dict(self.env.type_params)
+        if decl.type_params:
+            for tv in decl.type_params:
+                self.env.type_params[tv] = TypeVar(tv)
+        try:
+            resolved = self._resolve_type(decl.type_expr)
+        finally:
+            self.env.type_params = saved_params
         self.env.type_aliases[decl.name] = TypeAliasInfo(
             name=decl.name,
             type_params=decl.type_params,
             resolved_type=resolved,
+            body=decl.type_expr,
+            decl_index=decl_index,
         )
 
     def _register_ability(self, decl: ast.AbilityDecl) -> None:
@@ -746,16 +935,107 @@ class ContractVerifier:
         _builtins = TypeEnv()
         builtin_fn_names = set(_builtins.functions)
 
-        # 2. Register each module in isolation
+        # 2. Register each module in isolation.  Two passes, because a module's
+        # own registry is not complete until its OWN imports are in it and the
+        # module it imports may be registered after it.
+        temps: dict[tuple[str, ...], ContractVerifier] = {}
+        # What each module DECLARES, snapshotted before any import is injected
+        # below.  Everything downstream that asks "what is this module's own?"
+        # — what it exports, and what its scope is pinned to — reads this, not
+        # the registry: the registry deliberately grows names the module can
+        # CALL but does not OWN, and re-exporting or re-pinning those would
+        # both violate §8.6.4 and attribute another module's contract to this
+        # one's namespace.
+        own_fns: dict[tuple[str, ...], dict[str, FunctionInfo]] = {}
         for mod in self._resolved_modules:
             temp = ContractVerifier(source=mod.source)
             temp._register_all(mod.program)
-
+            temps[mod.path] = temp
             # All module-declared functions (exclude builtins)
-            all_fns = {
+            own_fns[mod.path] = {
                 k: v for k, v in temp.env.functions.items()
                 if k not in builtin_fn_names or v.span is not None
             }
+
+        # A module's contract calls bare names, and a bare name it can call is
+        # one its OWN file declares *or imports* — `_register_all` walks
+        # declarations only, so an imported name was missing from the registry
+        # pinned as that module's `CalleeScope` (PR #1239 review, regression of
+        # #1225).  The miss is silent and spelling-dependent: the requires
+        # direction demoted an honest Tier-1 to E532 while the same call spelled
+        # `deep::cap(0)` stayed Tier-1, and the ensures direction REJECTED a
+        # valid program.  Each module therefore takes its imports' public
+        # surface exactly as the entry program does in step 4 — same
+        # import-name filter, same `setdefault` so the module's own
+        # declarations win a name clash.  A path this program never resolved is
+        # skipped: the resolver reaches every transitive import, so a missing
+        # one means the module was not reachable, and a name that stays
+        # unresolvable misses LOUDLY (E532) rather than binding something else.
+        for mod in self._resolved_modules:
+            temp = temps[mod.path]
+            for imp in mod.program.imports:
+                dep_path = tuple(imp.path)
+                if dep_path not in temps:
+                    continue
+                dep_names = set(imp.names) if imp.names is not None else None
+                for fn_name, fn_info in own_fns[dep_path].items():
+                    if fn_info.visibility != "public":
+                        continue
+                    if dep_names is None or fn_name in dep_names:
+                        temp.env.functions.setdefault(fn_name, fn_info)
+
+        for mod in self._resolved_modules:
+            temp = temps[mod.path]
+            # #1208: capture this module's naming environment from the same
+            # isolated registration the contracts are harvested from — the env
+            # every rendering of one of ITS declarations has to happen under.
+            # Recorded for transitive modules too (before the `direct` gate
+            # below): an imported generic reached through another module's body
+            # is monomorphized by this importer and must be recounted in its own
+            # namespace.
+            mod_alias_env = alias_env_from_environment(temp.env)
+            self._module_alias_envs[mod.path] = mod_alias_env
+            self._module_sources[mod.path] = mod.source
+            self._module_files[mod.path] = str(mod.file_path)
+            # #1220: pin every clause this module DECLARES to the module's own
+            # source, so a message quoting one indexes the buffer its span
+            # numbers.  Walked off the AST rather than off `all_fns` below so
+            # a `where`-helper's clauses — flattened last-wins into the
+            # registry, and quotable through the scoped lookup — are pinned
+            # too.  Before the `direct` gate for the same reason the env above
+            # is: a transitive module's clause is quotable while an imported
+            # generic's clone is verified in its declaring module's scope.
+            for fn_decl in _walk_fn_decls(mod.program):
+                for clause in fn_decl.contracts:
+                    self._contract_sources[id(clause)] = (clause, mod.source)
+
+            # What this module DECLARES (snapshotted above, before its own
+            # imports were injected) — what it can export, and what its scope
+            # can be pinned to.
+            all_fns = own_fns[mod.path]
+            # #1208/#1225: the scope every contract this module declares is
+            # READ in — its own naming env and its own function registry.  The
+            # registry is the module's WHOLE registration, private helpers
+            # included, its own imports beside them and builtins behind, because
+            # that is the namespace a bare name in one of its contracts resolves
+            # in; harvesting only the public surface would leave a contract's
+            # call to a private helper falling through to the importer's
+            # registry, which is the bug (#1225).
+            mod_scope = CalleeScope(mod_alias_env, temp.env.lookup_function)
+            # #1241: and the scope every BODY this module declares resolves
+            # its bare calls in.  `_declaring_module_scope` already swapped
+            # the naming env and the source buffer for an imported generic's
+            # clone; without the registry beside them the clone's own body
+            # call fell through to the IMPORTER's `env.lookup_function` and
+            # picked up a same-named importer function — the module's
+            # contract proved against a body it never mentions.
+            self._module_scopes[mod.path] = mod_scope
+            # Pinned for every module-declared function, before the `direct`
+            # gate and irrespective of visibility: a contract read in this
+            # scope resolves to the module's OWN infos, and each of those is a
+            # callee whose contract must be read in the same scope in turn.
+            for fn_info in all_fns.values():
+                self._fn_origins[id(fn_info)] = (fn_info, mod_scope)
 
             # #890: a transitively-reached module (imported by an imported
             # module, not by this program) is in ``_resolved_modules`` so the
@@ -824,6 +1104,232 @@ class ContractVerifier:
             return None
         return mod_fns.get(name)
 
+    def _bind_smt_scope(self, smt: SmtContext, scope: CalleeScope) -> None:
+        """Hand *smt* the scope the declaration under verification is read in.
+
+        The one place the verifier tells the SMT layer where it is: the naming
+        env and the function registry go over together, as the :class:`~vera.
+        smt.CalleeScope` pair a callee swap also travels as, and the callee
+        hook goes with them.  A warm ``VerificationSession`` context outlives
+        the program that built it, so this is per function on that path as much
+        as on the cold one — and being one call, the two paths cannot come to
+        bind different halves.
+        """
+        smt._alias_env = scope.alias_env
+        smt._fn_lookup = scope.fn_lookup
+        smt._module_fn_lookup = self._lookup_module_function
+        smt._callee_scope_lookup = self._callee_scope
+
+    def _pinned_scope(self, callee_info: object) -> CalleeScope | None:
+        """The scope pinned to *callee_info* at module registration, or None.
+
+        THE read of ``_fn_origins`` — both consumers below go through it, so
+        the naming env one of them takes and the whole scope the other takes
+        can never come from different entries.  Identity is only meaningful for
+        the very object that was pinned; the ``is`` re-check rules out an id
+        reused after a collection.
+        """
+        found = self._fn_origins.get(id(callee_info))
+        if found is not None and found[0] is callee_info:
+            return found[1]
+        return None
+
+    def _callee_scope(
+        self, callee_info: object, current: CalleeScope,
+    ) -> CalleeScope:
+        """How *callee_info*'s own contract is READ (#1208, #1225).
+
+        The SMT layer's hook (``SmtContext._callee_scope_lookup``): the
+        declaring module's naming env and function registry for a callee this
+        importer harvested, *current* — the scope in force at the call — for
+        one it did not.
+
+        A callee's ``requires`` / ``ensures`` is written in ITS module, so both
+        lookups belong there.  Rendered in the importer's namespace, an
+        obligation either merges two parameter stacks the callee kept apart
+        (the precondition attaches to the wrong argument, or vanishes: a false
+        Tier-1) or splits one it merged (a spurious E501).  Resolved through
+        the importer's registry, a bare name the contract CALLS picks up the
+        importer's same-named function and the contract is interpreted against
+        a body the callee never mentions — verify-clean, and the run traps.
+
+        The unpinned fallback is the scope in force rather than the entry
+        program's (PR #1224 review), and that is why the SMT layer passes it
+        in: a callee reached from INSIDE another callee's contract — a module's
+        private helper, or a builtin — is declared in the module being read,
+        not in whatever function the verifier happens to be walking.
+        """
+        pinned = self._pinned_scope(callee_info)
+        return current if pinned is None else pinned
+
+    def _callee_alias_env(self, callee_info: object) -> AliasEnv:
+        """The naming env *callee_info*'s own contract renders against (#1208).
+
+        The RENDERING-side read of the same pin the translation scope rides:
+        the E501 message substitutes the callee's slots with the call's actual
+        arguments, and a table keyed in the wrong namespace silently misses, so
+        the message falls back to its generic wording.  Outside any translation
+        there is no scope in force to fall back to, so an unpinned callee takes
+        the module under verification — where, its clone being what is under
+        verification, an imported generic's own `where`-helper is declared.
+        """
+        pinned = self._pinned_scope(callee_info)
+        return self._current_alias_env if pinned is None else pinned.alias_env
+
+    @property
+    def _current_alias_env(self) -> AliasEnv:
+        """The naming env of the module that DECLARED what is being verified.
+
+        This program's env, except while an IMPORTED generic's clone is under
+        verification — then the defining module's, entered by
+        :meth:`_declaring_module_scope` (#1208).  Codegen names the very same
+        clone under the very same env (``_clone_alias_env``), so a slot the
+        verifier proves about is the slot the emitted code reads.
+        """
+        return (
+            self._alias_env if self._decl_alias_env is None
+            else self._decl_alias_env
+        )
+
+    @property
+    def _current_source(self) -> str:
+        """The source text of the module that DECLARED what is being verified.
+
+        This program's, except while an IMPORTED generic's clone is under
+        verification — then the defining module's, entered by the same
+        :meth:`_declaring_module_scope` that swaps the naming env (#1220).  A
+        clause quoted out of the wrong buffer names a line that file does not
+        have: the clone's helper contracts sit past the end of a shorter
+        importer, so the ``Precondition:`` line vanished from the message.
+        """
+        return self.source if self._decl_source is None else self._decl_source
+
+    @property
+    def _current_file(self) -> str | None:
+        """The file name of the module that DECLARED what is being verified.
+
+        Travels with :py:attr:`_current_source` so a diagnostic's line number
+        and the file it names always come from one buffer (#1220).
+        """
+        return self.file if self._decl_file is None else self._decl_file
+
+    @contextlib.contextmanager
+    def _declaring_module_scope(
+        self, origin: tuple[str, ...] | None,
+    ) -> Iterator[None]:
+        """Verify the enclosed declarations as module *origin* wrote them.
+
+        Every half of "which file is this?" rides this one scope: the naming
+        env its slots render against (#1208), the source buffer its clauses are
+        quoted from, the file name its diagnostics point at (#1220), and the
+        function registry its bare calls resolve in (#1241).  ``None`` is a
+        main-file declaration and keeps this program's.  Entered and left
+        together, so a clone named in one module can never quote another's
+        text, send a reader to another's line number, or call another's
+        same-named function.
+        """
+        saved = (self._decl_alias_env, self._decl_source, self._decl_file,
+                 self._decl_fn_scope)
+        self._decl_alias_env = self._alias_env_for_module(origin)
+        self._decl_source = self._source_for_module(origin)
+        self._decl_file = self._file_for_module(origin)
+        self._decl_fn_scope = (
+            None if origin is None else self._module_scopes.get(origin)
+        )
+        try:
+            yield
+        finally:
+            (self._decl_alias_env, self._decl_source,
+             self._decl_file, self._decl_fn_scope) = saved
+
+    def _alias_env_for_module(self, origin: tuple[str, ...] | None) -> AliasEnv:
+        """Module *origin*'s naming env; this program's for ``None`` or an
+        unregistered path (#1208)."""
+        if origin is None:
+            return self._alias_env
+        return self._module_alias_envs.get(origin, self._alias_env)
+
+    def _source_for_module(self, origin: tuple[str, ...] | None) -> str:
+        """Module *origin*'s source text; this program's for ``None`` or an
+        unregistered path (#1220)."""
+        if origin is None:
+            return self.source
+        return self._module_sources.get(origin, self.source)
+
+    def _file_for_module(self, origin: tuple[str, ...] | None) -> str | None:
+        """Module *origin*'s file name; this program's for ``None`` or an
+        unregistered path (#1220)."""
+        if origin is None:
+            return self.file
+        return self._module_files.get(origin, self.file)
+
+    @staticmethod
+    def _fn_naming_scope(
+        env: AliasEnv,
+        decl: ast.FnDecl,
+        enclosing: tuple[ast.FnDecl, ...] = (),
+    ) -> AliasEnv:
+        """*env* narrowed by every ``forall`` variable in scope over *decl*.
+
+        A type parameter SHADOWS a same-named module alias for the whole
+        signature and body (``_check_fn`` binds it first), and a ``where``
+        helper inherits its ancestors' as well as its own — the same
+        accumulation :func:`~vera.slots.fn_scopes` performs.  Rendering a
+        generic's parameters against the bare module env instead merges two
+        parameter stacks the checker kept apart, so the two conjuncts of one
+        ``requires`` land on one slot and the premises go unsatisfiable — which
+        proves anything (#1208 review, probe ``v01``).
+        """
+        return fn_slot_scope(env, (
+            *(v for e in enclosing for v in e.forall_vars or ()),
+            *(decl.forall_vars or ()),
+        ))
+
+    def _alias_env_for_generic(self, key: str | None) -> AliasEnv:
+        """The naming env a generic registered under *key* was DECLARED in.
+
+        ``None`` or an unrecorded key is a main-file generic and renders against
+        this program's env; an imported one renders against its own module's
+        (#1208), which is what codegen's ``_clone_alias_env`` gives the same
+        clone.  The De Bruijn recount in ``monomorphize_fn`` and the clone's
+        re-declaration in ``_verify_fn`` must agree on it, or the verifier
+        proves a body codegen never emits.
+        """
+        return self._alias_env_for_module(self._origin_module_for_generic(key))
+
+    def _origin_module_for_generic(
+        self, key: str | None,
+    ) -> tuple[str, ...] | None:
+        """The module a generic registered under *key* was DECLARED in, or
+        ``None`` for a main-file generic.
+
+        The single walk behind every per-generic origin question — the naming
+        env (:meth:`_alias_env_for_generic`) and the source buffer its clauses
+        quote from (:meth:`_source_for_module`) resolve the same key the same
+        way, so the two cannot answer for different modules.
+
+        *key* may be a lexical CHAIN (``parent$where$helper``), and the origin
+        registry holds whichever ancestor the harvest recorded: an imported
+        top-level generic under its bare or ``mod$…`` name, an imported
+        generic nested under a non-generic function under the qualified chain
+        that names it (``mod$ng$outer$where$mid``).  So the chain is probed
+        whole and then one ``$where$`` segment shorter at a time, and the
+        FIRST recorded ancestor wins — the most specific one, and a lexical
+        descendant is declared in the same module as its ancestor either way.
+        Taking only the outermost segment instead missed the nested-key case
+        entirely (``mod$ng$outer`` is never a recorded key), so a helper
+        beneath an imported nested generic recounted in the IMPORTER's
+        namespace (#1208 round 2, probe ``m4``).
+        """
+        probe = key
+        while probe is not None:
+            origin = self._generic_origins.get(probe)
+            if origin is not None:
+                return origin
+            ancestor, sep, _ = probe.rpartition("$where$")
+            probe = ancestor if sep else None
+        return None
+
     # -----------------------------------------------------------------
     # Type resolution (simplified — reuses TypeEnv patterns)
     # -----------------------------------------------------------------
@@ -837,6 +1343,29 @@ class ContractVerifier:
             # Check type aliases
             if te.name in self.env.type_aliases:
                 alias = self.env.type_aliases[te.name]
+                # An APPLICATION substitutes its arguments into the alias's
+                # body (#1237) — the same rule the checker applies in
+                # `vera/checker/resolution.py::_resolve_named_type` (#660), and
+                # the same substitute-before-you-ask-what-a-type-is discipline
+                # `vera.naming` applies on the naming side.  Ignoring
+                # `te.type_args` handed back the alias's registered body with
+                # its own parameters still in it, so `Box<Cnt>` under
+                # `type Box<T> = T;` resolved to `T` rather than to `Nat`.  The
+                # arguments resolve HERE (in the use site's scope) before they
+                # are substituted, so an argument that is itself an application
+                # is already fully resolved when it lands in the body.  Arity is
+                # the CHECKER's error (E133) and a mismatch cannot reach a
+                # verified program; `zip` truncating on one would substitute a
+                # prefix, which is the pre-#1237 behaviour for the un-mapped
+                # tail and no worse.
+                if te.type_args and alias.type_params:
+                    alias_args = tuple(
+                        self._resolve_type(a) for a in te.type_args
+                    )
+                    return substitute(
+                        alias.resolved_type,
+                        dict(zip(alias.type_params, alias_args)),
+                    )
                 return alias.resolved_type
             # Check ADTs
             if te.name in self.env.data_types:
@@ -906,6 +1435,11 @@ class ContractVerifier:
                 self._top_level_fn_infos[tld.decl.name] = self._fn_info_for_decl(
                     tld.decl, visibility=tld.visibility,
                 )
+        # #1208: registration has recorded every alias body (`TypeAliasInfo.body`)
+        # and every ADT, so the naming environment is now complete for this
+        # module.  Rebuilt here rather than lazily so it is a plain value: the
+        # warm session re-registers per program and picks up the new one.
+        self._alias_env = alias_env_from_environment(self.env)
         # #732: discover every concrete instantiation of each generic NOW, off
         # the registered env, so both verify_program (cold) and the warm
         # incremental session — which both go through register_program — verify
@@ -1048,6 +1582,27 @@ class ContractVerifier:
         # argument position identically to codegen and the WASM call-rewrite.
         fn_ret_type_exprs: dict[str, ast.TypeExpr] = {}
 
+        # #1207: every function name this program owns — codegen's `_fn_sigs`
+        # membership, rebuilt from the AST.  ONE decision rides on it: whether
+        # a declared effect row's `get`/`put` is an effect operation at all, or
+        # a user function of that name shadowing it (codegen's `_fn_sigs` guard
+        # in `_compile_function`).  Membership must mirror codegen's or the two
+        # discoveries desync in the shadowed direction, so it is populated from
+        # the same recursion — locals, `where` helpers, and imports — rather
+        # than from `fn_ret_types`, which drops any name with no simple return.
+        #
+        # LOCAL `where` helpers are collected by bare name and IMPORTED ones
+        # are not, which mirrors codegen exactly rather than diverging from it
+        # (PR review round 1): codegen keys a local helper's signature by its
+        # bare name, but #1015 hoists every IMPORTED module's helpers to
+        # parent-qualified names BEFORE registration, so `_fn_sigs` carries
+        # `outer$where$get`, never a bare `get`.  Measured on a module whose
+        # helper is named `get`: `_fn_sigs` = {`outer`, `outer$where$get`},
+        # bare `get` absent from both tables.  Adding the bare name here would
+        # CREATE the desync — suppressing the State op for a row codegen still
+        # injects it for.
+        fn_names: set[str] = set()
+
         def record_fn_ret_type(fn: ast.FnDecl) -> None:
             # Include `where` helpers, keyed by bare name exactly as codegen
             # does.  Codegen registers each where-helper's WAT signature in
@@ -1070,6 +1625,7 @@ class ContractVerifier:
             # this side would not miss anything (it would be a sound superset)
             # but would diverge the verifier from codegen for no soundness gain
             # while leaving the codegen side unfixed (PR #767 review).
+            fn_names.add(fn.name)
             ret_name = self._simple_type_name(fn.return_type)
             if ret_name is not None:
                 fn_ret_types[fn.name] = ret_name
@@ -1103,6 +1659,7 @@ class ContractVerifier:
             for tld in mod.program.declarations:
                 idecl = tld.decl
                 if isinstance(idecl, ast.FnDecl):
+                    fn_names.add(idecl.name)
                     iret = self._simple_type_name(idecl.return_type)
                     if iret is not None:
                         fn_ret_types.setdefault(idecl.name, iret)
@@ -1125,138 +1682,185 @@ class ContractVerifier:
             adt_tp_counts=adt_tp_counts,
             type_aliases=type_aliases,
             type_alias_params=type_alias_params,
+            # #1208: the verifier's own naming environment, built from the
+            # same `TypeEnv` the two maps above are harvested from.
+            alias_env=self._alias_env,
             fn_ret_types=fn_ret_types,
             fn_ret_type_exprs=fn_ret_type_exprs,
+            # #1207: see the `fn_names` comment above.
+            fn_names=frozenset(fn_names),
         )
 
     @staticmethod
     def _local_fn_names(program: ast.Program) -> set[str]:
-        """All locally-declared function names, incl. recursive where-fns.
+        """The bare source names this program's own declarations occupy.
 
-        Mirrors codegen's ``CrossModuleMixin._collect_local_fn_names`` — a
-        ``where``-fn flattens to a bare ``$name`` in the single WASM module
-        just like a top-level fn, so it shadows an imported name identically.
-        Used to split imported generics into unshadowed (route bare +
-        qualified) vs shadowed (qualified-only) exactly as codegen does, so the
-        #774 discovery stays in lockstep.
+        Delegates to the SHARED
+        :func:`vera.monomorphize.importer_occupied_bare_names`, which codegen
+        drives too — the importer-side input to the qualified-only predicate,
+        so the two sides cannot classify an imported generic differently.
+
+        This used to be a private walk counting EVERY ``where``-helper, which
+        was the pre-Pass-0 shape: codegen consults the name set only after the
+        generic-helper qualification (#1014) and the non-generic hoist (#991)
+        have moved those helpers out of the bare namespace, so a non-generic
+        helper named ``gen2`` made the verifier treat an imported ``gen2`` as
+        qualified-only while codegen let it own the bare name — codegen emitted
+        ``gen2$Bool``, the verifier verified ``mod$lib$gen2$Bool``, and each
+        side's clone went uncovered by the other (measured on the F3 shape).
         """
-        def walk(decl: ast.FnDecl) -> set[str]:
-            names = {decl.name}
-            for wfn in decl.where_fns or ():
-                names |= walk(wfn)
-            return names
-
-        out: set[str] = set()
-        for tld in program.declarations:
-            if isinstance(tld.decl, ast.FnDecl):
-                out |= walk(tld.decl)
-        return out
+        return importer_occupied_bare_names(program)
 
     def _imported_generic_decls(
         self, program: ast.Program,
     ) -> tuple[dict[str, ast.FnDecl], dict[str, ast.FnDecl]]:
-        """``(public unshadowed imported generics, private module generics)``.
+        """``(bare-name imported generics, qualified-only module generics)``.
 
         The verifier-side mirror of codegen's ``_register_modules`` generic
-        harvest (#774 + #1000):
+        harvest (#774 + #1000 + #1274), split by the SHARED naming predicate
+        :func:`vera.monomorphize.module_qualified_generic_names`:
 
-        * PUBLIC unshadowed generics, keyed by bare name — an unshadowed
-          imported generic is monomorphized by the importer, so the verifier
-          must discover the SAME instantiations codegen emits (a cross-module
-          clone verified by neither side would be a false Tier-1).  A public
-          generic whose body transitively calls a same-module PRIVATE generic
-          has that call rerouted to the private generic's ``mod$<path>$name``
-          key (byte-identical to codegen's ``_module_qualified_wasm_name``), so
-          discovery reaches it under a distinct-per-module identity.
+        * generics that OWN the importer's bare name (public, in-filter,
+          unshadowed), keyed by that name — such a generic is monomorphized by
+          the importer, so the verifier must discover the SAME instantiations
+          codegen emits (a cross-module clone verified by neither side would be
+          a false Tier-1).  A body that transitively calls one of its module's
+          QUALIFIED-ONLY generics has that call rerouted to the callee's
+          ``mod$<path>$name`` key (byte-identical to codegen's
+          ``_module_qualified_wasm_name``), so discovery reaches it under a
+          distinct-per-module identity.
 
-        * PRIVATE module generics, keyed by ``mod$<path>$name`` — reachable only
-          transitively (through a public generic's rerouted body).  Two modules'
-          same-named private generics keep DISTINCT decls under distinct keys, so
-          a LYING private contract in one is verified (and E500s) independently
-          of a truthful namesake in another (#1000c) — a single bare-name entry
-          would collapse them and leave the liar unverified (a false Tier-1).
+        * QUALIFIED-ONLY module generics, keyed by ``mod$<path>$name`` — private,
+          outside the import filter, or shadowed by a local.  Two modules'
+          same-named generics keep DISTINCT decls under distinct keys, so a LYING
+          contract in one is verified (and E500s) independently of a truthful
+          namesake in another (#1000c) — a single bare-name entry would collapse
+          them and leave the liar unverified (a false Tier-1).
 
-        Same public + import-filter gating and first-seen-wins ``setdefault`` as
-        codegen; a shadowed public generic (a local owns the bare name) is
-        excluded from the public set — its qualified-only routing is resolved via
-        the module's contract elsewhere.
+        First-seen-wins ``setdefault``, exactly as codegen.
         """
         local_fn_names = self._local_fn_names(program)
         public: dict[str, ast.FnDecl] = {}
         private: dict[str, ast.FnDecl] = {}
         for mod in self._resolved_modules:
             name_filter = self._import_names.get(mod.path)
-            # This module's PRIVATE top-level generics → their reroute targets.
-            priv_names = {
-                tld.decl.name
-                for tld in mod.program.declarations
-                if isinstance(tld.decl, ast.FnDecl)
-                and tld.decl.forall_vars
-                and (tld.visibility or "private") != "public"
-            }
+            # This module's OWN qualified-only generics decide the split below;
+            # the reroute set is wider — #1274 (F1) — because a body here can
+            # bare-call a DIFFERENT module's qualified-only generic.
+            qual_names = module_qualified_generic_names(
+                mod.program, name_filter, local_fn_names, direct=mod.direct,
+            )
+            reroute_targets = self._qualified_generic_targets(
+                program, mod.path,
+            )
             for tld in mod.program.declarations:
                 decl = tld.decl
                 if not isinstance(decl, ast.FnDecl) or not decl.forall_vars:
                     continue
-                is_public = (tld.visibility or "private") == "public"
-                in_filter = name_filter is None or decl.name in name_filter
-                if is_public and in_filter and (
-                    decl.name not in local_fn_names
-                ):
-                    # #1000/#1029: reroute this public generic's transitive calls
-                    # to same-module private generics onto their ``mod$<path>$n``
-                    # discovery key — the SAME shadow-aware walk codegen uses (a
-                    # where-helper of the same name owns the bare call, so it is
-                    # NOT captured), keyed by name-rename here (the verifier
-                    # discovers by `generic_decls` name) rather than the
+                if decl.name not in qual_names:
+                    # #1000/#1029: reroute this generic's transitive calls to
+                    # same-module qualified-only generics onto their
+                    # ``mod$<path>$n`` discovery key — the SAME shadow-aware walk
+                    # codegen uses (a where-helper of the same name owns the bare
+                    # call, so it is NOT captured), keyed by name-rename here (the
+                    # verifier discovers by `generic_decls` name) rather than the
                     # ModuleCall codegen emits.
                     public.setdefault(
                         decl.name,
-                        self._reroute_to_module_privates(
-                            decl, mod.path, priv_names,
+                        self._reroute_to_module_qualified(
+                            decl, reroute_targets,
                         ),
                     )
-                elif not is_public:
-                    # #1029: reroute the PRIVATE generic's own body too, so a
-                    # private→private chain (this generic calls ANOTHER private
-                    # generic) is discovered under the sibling's ``mod$<path>$n``
-                    # key — else its clone runs with a contract neither module
-                    # proved (a false Tier-1).  Its own name is included in the
-                    # rename map (harmless: a self-recursive call keys the same
-                    # base it already lives under).
+                    # #1208: first-seen-wins, in lockstep with the setdefault
+                    # above, so the origin recorded is the origin of the decl
+                    # actually kept.
+                    self._generic_origins.setdefault(decl.name, mod.path)
+                else:
+                    # #1029: reroute the qualified-only generic's own body too, so
+                    # a chain (this generic calls ANOTHER qualified-only generic)
+                    # is discovered under the sibling's ``mod$<path>$n`` key —
+                    # else its clone runs with a contract neither module proved (a
+                    # false Tier-1).  Its own name is included in the rename map
+                    # (harmless: a self-recursive call keys the same base it
+                    # already lives under).
                     private.setdefault(
                         self._module_qualified_base(mod.path, decl.name),
-                        self._reroute_to_module_privates(
-                            decl, mod.path, priv_names,
+                        self._reroute_to_module_qualified(
+                            decl, reroute_targets,
                         ),
+                    )
+                    self._generic_origins.setdefault(  # #1208
+                        self._module_qualified_base(mod.path, decl.name),
+                        mod.path,
                     )
         return public, private
 
-    def _reroute_to_module_privates(
+    def _qualified_generic_targets(
+        self, program: ast.Program, mod_path: tuple[str, ...],
+    ) -> dict[str, tuple[str, ...]]:
+        """Bare name → owning module, for every qualified-only generic a body in
+        *mod_path* can reach by bare call (#1274 F1).
+
+        The verifier-side mirror of codegen's per-module target map, built from
+        the SAME shared derivations over the same module set, so the two sides
+        reroute the identical calls to the identical owners.
+
+        Memoised for the whole ``register_program`` run.  Three loops ask for
+        this per module and each answer needs EVERY module classified, so
+        recomputing made registration quadratic in the module count — paid on
+        every edit in the LSP's warm session.  The inputs (the resolved set,
+        its import lists, the entry's declarations) are fixed for a run, and
+        the cache is cleared where the other per-run registries are.
+        """
+        cached = self._qualified_targets_cache
+        if cached is None:
+            local_fn_names = self._local_fn_names(program)
+            qualified_by_path = {
+                m.path: module_qualified_generic_names(
+                    m.program, self._import_names.get(m.path), local_fn_names,
+                    direct=m.direct,
+                )
+                for m in self._resolved_modules
+            }
+            public_by_path = {
+                m.path: public_generic_names(m.program)
+                for m in self._resolved_modules
+            }
+            cached = {
+                m.path: module_qualified_generic_targets(
+                    m.program, qualified_by_path, public_by_path, m.path,
+                )
+                for m in self._resolved_modules
+            }
+            self._qualified_targets_cache = cached
+        return cached.get(mod_path, {})
+
+    def _reroute_to_module_qualified(
         self,
         decl: ast.FnDecl,
-        path: tuple[str, ...],
-        priv_names: set[str],
+        qual_targets: dict[str, tuple[str, ...]],
     ) -> ast.FnDecl:
-        """Name-rename an imported body's bare calls to *path*'s private generics
-        onto their ``mod$<path>$name`` discovery keys (#1029).
+        """Name-rename an imported body's bare calls to *path*'s qualified-only
+        generics onto their ``mod$<path>$name`` discovery keys (#1029, #1274).
 
         The verifier-side mirror of codegen's ModuleCall reroute
-        (``_reroute_private_generic_calls``): both drive the SHARED shadow-aware
-        walk (:func:`vera.monomorphize.reroute_module_private_generic_calls`), so
-        a where-helper sharing a private generic's name is NOT captured on either
+        (``_reroute_module_qualified_generic_calls``): both drive the SHARED
+        shadow-aware walk
+        (:func:`vera.monomorphize.reroute_module_qualified_generic_calls`), so a
+        where-helper sharing a module generic's name is NOT captured on either
         side.  The verifier discovers instantiations by matching ``node.name``
-        against ``generic_decls`` (which keys private module generics under
-        ``mod$<path>$name``), so its terminal renames the ``FnCall`` to that key
-        rather than emitting a ``ModuleCall`` — keeping the #732 differential
+        against ``generic_decls`` (which keys qualified-only module generics
+        under ``mod$<path>$name``), so its terminal renames the ``FnCall`` to that
+        key rather than emitting a ``ModuleCall`` — keeping the #732 differential
         exact while both sides route the identical set of calls."""
-        if not priv_names:
+        if not qual_targets:
             return decl
         rename = {
-            n: self._module_qualified_base(path, n) for n in priv_names
+            n: self._module_qualified_base(owner, n)
+            for n, owner in qual_targets.items()
         }
-        return reroute_module_private_generic_calls(
-            decl, priv_names,
+        return reroute_module_qualified_generic_calls(
+            decl, qual_targets,
             lambda call, args: replace(
                 call, name=rename[call.name], args=args,
             ),
@@ -1285,6 +1889,12 @@ class ContractVerifier:
         # re-verify a clone that no longer exists.
         self._shadowed_module_generic_verify = {}
         self._imported_generic_verify_decls = {}
+        self._generic_origins = {}
+        # #1274 (F1): the per-module reroute targets are derived purely from the
+        # resolved set and this program's declarations, so they are stable for
+        # the run and rebuilt once — cleared here with the registries beside
+        # them, since a warm session re-registers with a changed program.
+        self._qualified_targets_cache = None
 
         disc = _replace(program)
         # #1014: qualify nested generic helper names on the discovery copy —
@@ -1367,26 +1977,24 @@ class ContractVerifier:
                 mod.program,
                 name_prefix="mod$" + "$".join(mod.path) + "$",
             )
-            mod_priv_names = {
-                tld.decl.name
-                for tld in mod.program.declarations
-                if isinstance(tld.decl, ast.FnDecl)
-                and tld.decl.forall_vars
-                and (tld.visibility or "private") != "public"
-            }
-            if mod_priv_names:
+            mod_qual_targets = self._qualified_generic_targets(
+                program, mod.path,
+            )
+            if mod_qual_targets:
                 qmod = replace(qmod, declarations=tuple(
                     replace(
                         tld,
-                        decl=self._reroute_to_module_privates(
-                            tld.decl, mod.path, mod_priv_names,
+                        decl=self._reroute_to_module_qualified(
+                            tld.decl, mod_qual_targets,
                         ),
                     )
                     if isinstance(tld.decl, ast.FnDecl) else tld
                     for tld in qmod.declarations
                 ))
             qualified_module_programs.append(qmod)
-        for qmod in qualified_module_programs:
+        for mod, qmod in zip(
+            self._resolved_modules, qualified_module_programs, strict=True,
+        ):
             for tld in qmod.declarations:
                 decl = tld.decl
                 if not isinstance(decl, ast.FnDecl) or decl.forall_vars:
@@ -1399,6 +2007,8 @@ class ContractVerifier:
                         self._imported_generic_verify_decls.setdefault(
                             gname, gdecl,
                         )
+                        self._generic_origins.setdefault(  # #1208
+                            gname, mod.path)
         if not generic_decls:
             return {}
 
@@ -1445,21 +2055,63 @@ class ContractVerifier:
         # superset of what codegen emits.
         nested_result: dict[str, set[tuple[str, ...]]] = {}
         nested_seen: set[tuple[str, tuple[str, ...]]] = set()
+        # #1223: top-level instantiations reached only from a nested helper's
+        # CONCRETE clone body.  Drained into the worklist below, so such a
+        # clone is verified exactly as codegen emits it.
+        pending_top: list[tuple[str, tuple[str, ...]]] = []
 
         def record_nested(clone: ast.FnDecl, base_chain: str) -> None:
-            found = mono.collect_clone_nested_generic_instances(
-                clone, ctor_to_adt,
-            )
-            for h_name, (h_decl, h_cts) in found.items():
-                chain_key = f"{base_chain}$where${h_name}"
-                for h_ct in h_cts:
-                    if (chain_key, h_ct) in nested_seen:
-                        continue
-                    nested_seen.add((chain_key, h_ct))
-                    nested_result.setdefault(chain_key, set()).add(h_ct)
-                    record_nested(
-                        mono.monomorphize_fn(h_decl, h_ct), chain_key,
-                    )
+            helpers = {
+                wfn.name: wfn
+                for wfn in (clone.where_fns or ())
+                if wfn.forall_vars
+            }
+            if not helpers:
+                return
+            # #1208: a nested helper is declared in the same module as the
+            # ancestor whose chain names it, so it recounts in that env.  The
+            # WHOLE chain is handed over — `_alias_env_for_generic` walks to
+            # the nearest recorded ancestor itself, and an imported generic
+            # nested under a non-generic function is recorded under the chain,
+            # not under its outermost segment (#1208 round 2, probe ``m4``).
+            env = self._alias_env_for_generic(base_chain)
+            # #1223: the FAMILY at once, over a GROWING body set, mirroring
+            # codegen's `_instantiate_hoisted_generics` and driving the same
+            # discovery leaf.  A helper's concrete clone can call a SIBLING
+            # helper at a type only that clone knows (inside the generic
+            # `outer<U>`, `inner(@U.1, @U.0)` binds `inner`'s variable to the
+            # type variable's NAME), so scanning the ancestor alone missed
+            # every such instantiation while codegen emitted it — a false
+            # Tier-1 the moment codegen's own rescan landed.
+            scan: list[ast.FnDecl] = [clone]
+            while scan:
+                found = mono.collect_generic_helper_instances(
+                    helpers, scan, ctor_to_adt,
+                )
+                scan = []
+                for h_name, h_cts in found.items():
+                    chain_key = f"{base_chain}$where${h_name}"
+                    for h_ct in h_cts:
+                        if (chain_key, h_ct) in nested_seen:
+                            continue
+                        nested_seen.add((chain_key, h_ct))
+                        nested_result.setdefault(chain_key, set()).add(h_ct)
+                        h_clone = mono.monomorphize_fn(
+                            helpers[h_name], h_ct, env,
+                        )
+                        scan.append(h_clone)
+                        record_nested(h_clone, chain_key)
+                        # #1223: the helper clone's own TOP-LEVEL generic
+                        # callees.  Only the concrete clone names them — the
+                        # generic spelling binds the enclosing type variable.
+                        top: dict[str, set[tuple[str, ...]]] = {
+                            name: set() for name in generic_decls
+                        }
+                        collect_calls_in_fn(h_clone, top)
+                        for t_name, t_cts in top.items():
+                            pending_top.extend(
+                                (t_name, t_ct) for t_ct in t_cts
+                            )
 
         # Transitive closure: monomorphize each, rescan its body.  Mirrors the
         # codegen worklist exactly, minus the constraint filter.
@@ -1477,6 +2129,7 @@ class ContractVerifier:
                 continue
             mono_fn = mono.monomorphize_fn(
                 generic_decls[fn_name], concrete_types,
+                self._alias_env_for_generic(fn_name),  # #1208
             )
             # #1002: seed nested generic-under-generic instances from this clone.
             record_nested(mono_fn, fn_name)
@@ -1488,6 +2141,11 @@ class ContractVerifier:
                 for t_ct in t_types:
                     if (t_name, t_ct) not in discovered:
                         worklist.append((t_name, t_ct))
+            # #1223: whatever the nested helpers' concrete clones reached.
+            while pending_top:
+                top_key = pending_top.pop()
+                if top_key not in discovered:
+                    worklist.append(top_key)
 
         result: dict[str, set[tuple[str, ...]]] = {
             name: set() for name in generic_decls
@@ -1538,12 +2196,13 @@ class ContractVerifier:
         ctor_to_adt = mono.ctx.ctor_to_adt
         # Build the (path → {name → decl}) map of shadowed imported generics,
         # mirroring codegen's ``_shadowed_imported_generic_decls`` — which holds
-        # BOTH a module's locally-shadowed PUBLIC generics AND ALL its PRIVATE
-        # top-level generics (#1029, R4).  Pre-fix only the public-shadowed
-        # generics were here, so a shadowed generic's body call to a PRIVATE
-        # sibling (`gen` → `sib`) had no `sib` base in the transitive scan: the
-        # `mod$g$sib` clone codegen emits ran with a contract the verifier never
-        # checked (a false Tier-1).  Each decl is rerouted the SAME shadow-aware
+        # every QUALIFIED-ONLY module generic, i.e. the ones that do not own the
+        # importer's bare name (#1029 R4, widened to the full predicate by
+        # #1274).  Pre-#1029 only the public-shadowed generics were here, so a
+        # shadowed generic's body call to a PRIVATE sibling (`gen` → `sib`) had
+        # no `sib` base in the transitive scan: the `mod$g$sib` clone codegen
+        # emits ran with a contract the verifier never checked (a false
+        # Tier-1).  Each decl is rerouted the SAME shadow-aware
         # way codegen reroutes it (bare private-generic call → a ``ModuleCall``
         # the by-name transitive scan then matches), keeping the two sides'
         # discovered set in lockstep.  A private sibling reached this way is
@@ -1552,21 +2211,25 @@ class ContractVerifier:
         # below — the guard there avoids the double-verify.
         shadowed: dict[tuple[str, ...], dict[str, ast.FnDecl]] = {}
         for mod in self._resolved_modules:
-            name_filter = self._import_names.get(mod.path)
-            priv_names = {
-                tld.decl.name
-                for tld in mod.program.declarations
-                if isinstance(tld.decl, ast.FnDecl)
-                and tld.decl.forall_vars
-                and (tld.visibility or "private") != "public"
-            }
+            qual_names = module_qualified_generic_names(
+                mod.program, self._import_names.get(mod.path), local_fn_names,
+                direct=mod.direct,
+            )
+            # #1274 (F1): the reroute reaches a DIFFERENT module's generics too,
+            # each under its own owner's path.
+            reroute_targets = self._qualified_generic_targets(
+                program, mod.path,
+            )
 
-            def _reroute(decl: ast.FnDecl, path: tuple[str, ...] = mod.path,
-                         privs: set[str] = priv_names) -> ast.FnDecl:
-                return reroute_module_private_generic_calls(
-                    decl, privs,
+            def _reroute(
+                decl: ast.FnDecl,
+                targets: dict[str, tuple[str, ...]] = reroute_targets,
+            ) -> ast.FnDecl:
+                return reroute_module_qualified_generic_calls(
+                    decl, targets,
                     lambda call, args: ast.ModuleCall(
-                        path=path, name=call.name, args=args, span=call.span,
+                        path=targets[call.name], name=call.name,
+                        args=args, span=call.span,
                     ),
                 )
 
@@ -1574,13 +2237,7 @@ class ContractVerifier:
                 decl = tld.decl
                 if not isinstance(decl, ast.FnDecl) or not decl.forall_vars:
                     continue
-                is_public = (tld.visibility or "private") == "public"
-                in_filter = name_filter is None or decl.name in name_filter
-                if is_public and in_filter and decl.name in local_fn_names:
-                    shadowed.setdefault(mod.path, {}).setdefault(
-                        decl.name, _reroute(decl),
-                    )
-                elif not is_public:
+                if decl.name in qual_names:
                     shadowed.setdefault(mod.path, {}).setdefault(
                         decl.name, _reroute(decl),
                     )
@@ -1626,8 +2283,9 @@ class ContractVerifier:
             gdecl = generic_decls.get(gname)
             if gdecl is None:
                 continue
+            genv = self._alias_env_for_generic(gname)  # #1208
             for gct in list(gcts):
-                walk_seed(mono.monomorphize_fn(gdecl, gct))
+                walk_seed(mono.monomorphize_fn(gdecl, gct, genv))
 
         # Transitive worklist over shadowed clones, mirroring codegen.
         shadowed_seen: set[tuple[tuple[str, ...], str, tuple[str, ...]]] = set()
@@ -1649,19 +2307,28 @@ class ContractVerifier:
             # the MODULE contract in `verify_program` via the stashed decl.
             base = self._module_qualified_base(spath, sname)
             result.setdefault(base, set()).add(sct)
-            # #1029 (R4): a PRIVATE sibling reached through the shadowed scan is
-            # already registered in `_imported_generic_verify_decls` under this
-            # same `mod$…` base (it is a private module generic), and
-            # `_verify_shadowed_module_generics` verifies it there at
-            # `_instances[base]` — which `result` above just populated.  Stashing
-            # it here too would verify its contract TWICE (two E500s for one lie).
-            # Only a locally-shadowed PUBLIC generic (absent from that registry)
-            # needs this stash — the importer verifies it nowhere else.
+            # #1029 (R4): a sibling reached through the shadowed scan is already
+            # registered in `_imported_generic_verify_decls` under this same
+            # `mod$…` base, and `_verify_shadowed_module_generics` verifies it
+            # there at `_instances[base]` — which `result` above just populated.
+            # Stashing it here too would verify its contract TWICE (two E500s
+            # for one lie), so this stash is the fallback for a base that
+            # registry does NOT hold.  #1274 widened that registry to every
+            # QUALIFIED-ONLY module generic — the same predicate this scan's
+            # `shadowed` map is built from — so the two are now expected to
+            # coincide; the guard stays as the one-verify invariant rather than
+            # a claim about which family lands where.
             if base not in self._imported_generic_verify_decls:
                 self._shadowed_module_generic_verify.setdefault(
                     base, (gdecl, set()),
                 )[1].add(sct)
-            clone = mono.monomorphize_fn(gdecl, sct)
+            # #1208: a shadowed MODULE generic recounts in ITS module's env —
+            # the shadow means the importer spells the name differently, which
+            # is exactly when the two namespaces can disagree.
+            self._generic_origins.setdefault(base, spath)
+            clone = mono.monomorphize_fn(
+                gdecl, sct, self._module_alias_envs.get(spath, self._alias_env),
+            )
 
             # Unshadowed transitive generics → chase full closure into `result`.
             self._chase_normal_from_clone(
@@ -1672,9 +2339,11 @@ class ContractVerifier:
             trans_shadow: dict[str, set[tuple[str, ...]]] = {
                 name: set() for name in sib_decls
             }
-            mono.collect_calls_in_node(
-                clone, sib_decls, ctor_to_adt, trans_shadow,
-            )
+            # #1274 (F1): mirrors codegen's scope around the identical scan.
+            with mono.shadowed_module_scope(spath):
+                mono.collect_calls_in_node(
+                    clone, sib_decls, ctor_to_adt, trans_shadow,
+                )
             for s_name, s_types in trans_shadow.items():
                 for s_ct in s_types:
                     nxt = (spath, s_name, s_ct)
@@ -1708,7 +2377,10 @@ class ContractVerifier:
                         continue
                     normal_seen.add((t_name, t_ct))
                     result.setdefault(t_name, set()).add(t_ct)
-                    stack.append(mono.monomorphize_fn(generic_decls[t_name], t_ct))
+                    stack.append(mono.monomorphize_fn(
+                        generic_decls[t_name], t_ct,
+                        self._alias_env_for_generic(t_name),  # #1208
+                    ))
 
     @property
     def summary(self) -> VerifySummary:
@@ -1781,6 +2453,7 @@ class ContractVerifier:
         instances: tuple[tuple[str, ...], ...],
         enclosing: tuple[ast.FnDecl, ...] = (),
         clone_name: str | None = None,
+        origin_key: str | None = None,
     ) -> None:
         """Verify each concrete instantiation of a generic, then aggregate.
 
@@ -1811,14 +2484,39 @@ class ContractVerifier:
         PR #1013 review).  The top-level call sites (shadowed / imported
         generic verification) pass nothing — those generics are genuinely
         top-level and an empty chain is correct there.
+
+        #1208: an IMPORTED generic is monomorphized AND verified in the
+        namespace of the module that declared it — the same env codegen's
+        ``_clone_alias_env`` hands the same clone.  Under the importer's env,
+        the De Bruijn recount and the clone's parameter re-declaration both
+        render an alias-typed parameter as a class it is not, so the verifier
+        proves a body codegen does not emit: verify clean, trap at run.
+
+        *origin_key* is that namespace lookup's key where it differs from the
+        clone's NAME.  A nested where-helper keeps its bare source name on the
+        clone (so recursion, ``decreases`` and diagnostics resolve as written)
+        while its origin is recorded against the lexical CHAIN its ancestor
+        was harvested under — the key ``_verify_fn`` already rebuilds to find
+        the instances.  Passing it separately is what keeps this side in step
+        with the discovery-time recount, which reaches the same env from the
+        same chain (#1208 round 2): the two rendering the helper in different
+        namespaces is the exact desync the origin registry exists to close,
+        and it was invisible only while BOTH were wrong.
         """
         assert self._mono is not None  # set by register_program  # noqa: S101
         per_instance: list[
             tuple[tuple[str, ...], list[ProofObligation], list[Diagnostic]]
         ] = []
         assert decl.forall_vars is not None  # generic by construction  # noqa: S101
+        # #1208: the declaring module's env for an imported generic (keyed by
+        # the canonical discovery key — `origin_key` where the caller has one
+        # that is not the clone's name, else `clone_name`), this program's
+        # otherwise.
+        origin_module = self._origin_module_for_generic(
+            origin_key or clone_name or decl.name)
+        origin_env = self._alias_env_for_module(origin_module)
         for concrete in instances:
-            clone = self._mono.monomorphize_fn(decl, concrete)
+            clone = self._mono.monomorphize_fn(decl, concrete, origin_env)
             clone = replace(clone, name=clone_name or decl.name)
             # Verify each instance into scratch error/obligation buffers so its
             # per-instance obligations don't pollute the aggregate stream; the
@@ -1842,8 +2540,12 @@ class ContractVerifier:
             try:
                 # forall_vars=None → normal path; the ancestor chain rides
                 # along so a nested generic's clone resolves helper calls
-                # lexically (PR #1013 review).
-                self._verify_fn(clone, enclosing=enclosing)
+                # lexically (PR #1013 review).  #1208: the clone's parameters
+                # re-declare under the SAME env the recount above renamed them
+                # in — a clone recounted in one namespace and re-declared in
+                # another resolves references onto the wrong parameters.
+                with self._declaring_module_scope(origin_module):
+                    self._verify_fn(clone, enclosing=enclosing)
             finally:
                 self._instance_subst = saved_subst
                 inst_obl, inst_err = self.obligations, self.errors
@@ -1998,13 +2700,22 @@ class ContractVerifier:
         synth_error_code = rep_ob.error_code or (
             "E500" if rep_ob.kind == "ensures" else ""
         )
+        # The obligation's OWN file, not this program's: aggregation runs
+        # AFTER `_declaring_module_scope` has been left, so `self.file` is the
+        # entry program again while `rep_ob.line` numbers the module that
+        # declared the clone.  Stamping the entry file here would pair a
+        # foreign line number with the wrong name — the join `verify --json`
+        # documents, broken in the one place that synthesises a diagnostic
+        # instead of re-emitting one (PR #1239 review, outside-diff).
         self.errors.append(Diagnostic(
             description=(
                 prefix
                 + f"{rep_ob.kind} obligation `{rep_ob.expr_text}` is violated."
             ),
             location=SourceLocation(
-                file=self.file, line=rep_ob.line, column=rep_ob.column,
+                file=rep_ob.file or self.file,
+                line=rep_ob.line,
+                column=rep_ob.column,
             ),
             rationale=(
                 "A contract obligation was neither discharged statically nor "
@@ -2071,7 +2782,13 @@ class ContractVerifier:
                 # ancestor's helper lexically, not through the flat last-wins
                 # registry (where a same-named decoy helper under any other
                 # function could capture it — a wrong-body verification).
-                self._verify_generic_instances(decl, instances, enclosing)
+                # #1208 round 2: `inst_key` is also the key the ORIGIN
+                # registry answers to, so it is handed over as well — the
+                # clone keeps its bare name, but its naming env comes from the
+                # module that declared the chain, matching the recount.
+                self._verify_generic_instances(
+                    decl, instances, enclosing, origin_key=inst_key,
+                )
                 return
             # Never instantiated in this program: the body's type variables
             # can't be represented in Z3, so non-trivial contracts fall to
@@ -2114,29 +2831,31 @@ class ContractVerifier:
             if (decl.body is not None
                     and self._is_refined_type(generic_ret)
                     and not contains_typevar(generic_ret)):
-                self._check_generic_refined_return(decl, generic_ret)
+                self._check_generic_refined_return(
+                    decl, generic_ret, enclosing)
             return
 
         # #991: resolve bare calls in this body through the lexically-scoped
         # where-helper lookup, so a same-named helper in a sibling subtree can't
         # be assumed at this call site (the diamond false-E500).
         fn_lookup = self._scoped_fn_lookup(decl, enclosing)
+        # #1208: THIS function's naming scope — its declaring module's env
+        # narrowed by the `forall` variables in scope over it.  Both the slot
+        # names declared below and the SMT context that resolves references to
+        # them are built from it, so the two sides cannot end up scoped
+        # differently.
+        fn_env = self._fn_naming_scope(self._current_alias_env, decl, enclosing)
         if self._shared_smt is not None:
             # Warm session (#222 Phase A): reuse one z3.Solver across
             # functions.  reset() clears all per-function state (vars,
             # assertions, sorts, path conditions, uninterpreted-fn
-            # caches) while the ADT registry persists; the lookups are
-            # rebound because they close over this verifier's env.
+            # caches) while the ADT registry persists; the scope is rebound
+            # because it closes over this verifier's env.
             smt = self._shared_smt
             smt.reset()
-            smt._fn_lookup = fn_lookup
-            smt._module_fn_lookup = self._lookup_module_function
         else:
-            smt = SmtContext(
-                timeout_ms=self.timeout_ms,
-                fn_lookup=fn_lookup,
-                module_fn_lookup=self._lookup_module_function,
-            )
+            smt = SmtContext(timeout_ms=self.timeout_ms)
+        self._bind_smt_scope(smt, CalleeScope(fn_env, fn_lookup))
         # CR PR-review: let the SMT match translation assume a constructor
         # pattern's refined / @Nat sub-pattern SOURCE facts while checking the
         # arm body's call PRECONDITIONS — the E501 path the narrowing-walk fact
@@ -2164,7 +2883,7 @@ class ContractVerifier:
         refined_param_assumptions: list[object] = []
         param_types = [self._resolve_type(p) for p in decl.params]
         for i, (param_te, param_ty) in enumerate(zip(decl.params, param_types)):
-            type_name = self._type_expr_to_slot_name(param_te)
+            type_name = self._type_expr_to_slot_name(param_te, fn_env)
             z3_name = f"@{type_name}.{self._count_slots(slot_env, type_name)}"
 
             if self._is_nat_type(param_ty):
@@ -2533,12 +3252,16 @@ class ContractVerifier:
                 if body_expr is not None else None
             )
             if goal is None:
-                # Untranslatable body / predicate / non-primitive base — Tier 3
-                # checked by the codegen return guard (guarded), never a silent
-                # pass (R7).
+                # No goal to check: the body did not translate, the base is
+                # one the verifier does not model, or the predicate is outside
+                # the fragment — Tier 3 checked by the codegen return guard
+                # (guarded), never a silent pass (R7).  Which of the three it
+                # was decides what the reader should go and change, so the
+                # disclosure says (#1251).
                 self._record_refined_bind_tier3(
                     decl, ret_node, "return type",
-                    guarded=self._refined_boundary_codegen_guardable(ret_type))
+                    guarded=self._refined_boundary_codegen_guardable(ret_type),
+                    reason=self._refined_bail_reason(ret_type, body_expr))
             else:
                 ret_result = smt.check_valid(goal, list(assumptions))
                 if ret_result.status == "verified":
@@ -2555,14 +3278,18 @@ class ContractVerifier:
                         ret_result.counterexample,
                     )
                 else:
-                    # Solver timeout — or, #1199, a countermodel over an
-                    # opaque effect-op stand-in, which refutes nothing the
-                    # effect actually produces: both demote to the guarded
-                    # Tier-3 leg rather than claiming a definite E505.
+                    # No verdict: the solver declined to decide, or — #1199 —
+                    # the only countermodel ran over an opaque effect-op
+                    # stand-in, which refutes nothing the effect actually
+                    # produces.  Both demote to the guarded Tier-3 leg rather
+                    # than claiming a definite E505; which one it was decides
+                    # what the disclosure says (#1251).
                     self._record_refined_bind_tier3(
                         decl, ret_node, "return type",
                         guarded=self._refined_boundary_codegen_guardable(
-                            ret_type))
+                            ret_type),
+                        reason=self._undecided_reason(
+                            ret_result.status))
 
         # 7c. #813: a bare @Nat body widening into an @Int return reinterprets
         #     its bit pattern above i64.MAX (u64.MAX -> -1), so a Tier-1 proof
@@ -2720,7 +3447,12 @@ class ContractVerifier:
                 z3_arg = smt.translate_expr(arg_expr, call_site_env)
                 if z3_arg is None:  # pragma: no cover
                     return False
-                type_name = self._type_expr_to_slot_name(param_te)
+                # #1208: `smt._alias_env` IS the scope `_verify_fn` built for
+                # this function (its module's env, forall-narrowed) — a
+                # decreases group is same-module and non-generic by
+                # construction, so the sibling's parameters render there too.
+                type_name = self._type_expr_to_slot_name(
+                    param_te, smt._alias_env)
                 callee_env = callee_env.push(type_name, z3_arg)
 
             # For cross-calls, use the callee's decreases expression
@@ -3734,7 +4466,8 @@ class ContractVerifier:
         constructor-field, and *all* call-arguments — concrete directly,
         generic on the monomorphised callee) are recorded ``tier3_runtime``
         (backed by the codegen ``i64.lt_s`` guard), while the genuinely
-        unguarded narrowings — the *user-effect* operation argument and
+        unguarded narrowings — the operation argument of a user-declared
+        effect or of the builtin ``Exn`` ``throw`` (#1268), and
         the generic-instantiated constructor field (constructors carry no
         per-field @Nat mono metadata) — are surfaced as E504, neither
         statically proven nor runtime-checked (#747; the ``guarded`` flag
@@ -3923,6 +4656,11 @@ class ContractVerifier:
                     decl, expr.body, "closure return",
                     guarded=self._refined_boundary_codegen_guardable(
                         resolved_ret),
+                    reason=(
+                        "a closure body is opaque to the verifier, so its "
+                        "returned value is never translated and the predicate "
+                        "has nothing to be tested against"
+                    ),
                 )
                 # #820 INTERSECTION: a refinement OVER @Int whose body is
                 # intrinsically @Nat gets codegen's widen guard ALONGSIDE the
@@ -3978,46 +4716,69 @@ class ContractVerifier:
             else:
                 callee = self._lookup_module_function(expr.path, expr.name)
             param_types = getattr(callee, "param_types", None)
-            if (param_types is None and isinstance(expr, ast.FnCall)
-                    and expr.name == "put"):
-                # #1203: the State `put` has no function-registry entry, so
-                # the formal loop below never fired and a narrowing
-                # argument (`put(@Int.0)` against the @Nat cell) carried no
-                # obligation at all — verify-clean while `vera run` stored
-                # a negative.  The checker's #747 side-table records the
-                # instantiated target, so the refined/nat/widen triple runs
-                # with formal=None (table-driven).  The guarded flag is
-                # COMPUTED, not hardcoded (PR #1202 adversarial round —
-                # a hardcoded True claimed a runtime check the bare
-                # intrinsic path did not have): the builtin State put is
-                # guarded on both dispatch paths (the clause-inlined store
-                # and the bare intrinsic call, which keys the guard off the
-                # dispatch target's cell type); a user-effect op named
-                # `put` is the #754 unguarded class (its handler does not
-                # compile today, E602) and discloses E504/E531.  The
-                # refined branch is ALWAYS unguarded — no handler boundary
-                # emits a refined-predicate guard (only sign-bit pairs) —
-                # so it discloses E506 honestly.  `resume` values are
-                # obligated from the HandleExpr arm instead, where the
-                # clause's effect identity is known.
+            if param_types is None and isinstance(expr, ast.FnCall):
+                # #1203/#1268: a BARE effect operation has no
+                # function-registry entry, so the formal loop below never
+                # fired and its argument carried no obligation at all —
+                # `put(@Int.0)` against a @Nat cell was verify-clean while
+                # `vera run` stored a negative, and `throw(0 - 5)` under
+                # `effects(<Exn<Nat>>)` was verify-clean while `vera run`
+                # returned -5 through the @Nat payload.  The gate is
+                # STRUCTURAL — does this name resolve to an operation —
+                # rather than a list of the built-in names that motivated
+                # each fix: a list is a claim about every name not on it, and
+                # the first version's claim was false, obligating a bare
+                # user-effect op spelled `put` while the same narrowing
+                # through one spelled `emit` stayed silent (PR review round
+                # 1).  Both spec §2.6.4 and KNOWN_ISSUES' #754 row say every
+                # narrowing binding site is obligated, effect-operation
+                # arguments included, so the name-keyed version contradicted
+                # the documented rule as well as itself.  Resolution is the
+                # innermost handled effect declaring the name, else the
+                # ordered registry; a bare call the checker accepted that
+                # resolves to no operation (a built-in function, say) simply
+                # obligates nothing.  The checker's #747 side-table records
+                # the instantiated target, so the refined/nat/widen triple
+                # runs with formal=None (table-driven).
+                #
+                # The guarded flag is COMPUTED, not hardcoded (PR #1202
+                # adversarial round — a hardcoded True claimed a runtime
+                # check the bare intrinsic path did not have): the builtin
+                # State ops are guarded on both dispatch paths (the
+                # clause-inlined store and the bare intrinsic call, which
+                # keys the guard off the dispatch target's cell type), which
+                # is why the test is the op's PARENT EFFECT and not its name
+                # — a user effect's `put` is no more guarded than its
+                # `emit`.  Everything else is the #754 unguarded class and
+                # discloses E504/E531: a user-effect op of any name (its
+                # handler does not compile today, E602), and `throw`, which
+                # lowers straight to `throw $exn_<family>` with the payload
+                # on the stack and no guard anywhere on that path (measured
+                # by run, #1268).  The refined branch is ALWAYS unguarded —
+                # no handler or throw boundary emits a refined-predicate
+                # guard (only sign-bit pairs) — so it discloses E506
+                # honestly.  A `resume` value is obligated from the
+                # HandleExpr arm instead, where the clause's effect identity
+                # is known; `resume` resolves to no operation here, so the
+                # two cannot both fire.
                 op = None
                 for eff_name in reversed(self._walk_handled_effects):
                     info = self.env.lookup_effect(eff_name)
-                    if info is not None and "put" in info.operations:
-                        op = info.operations["put"]
+                    if info is not None and expr.name in info.operations:
+                        op = info.operations[expr.name]
                         break
                 if op is None:
-                    op = self.env.lookup_effect_op("put")
-                put_guarded = (op is not None
-                               and op.parent_effect == "State")
-                put_site = ("State-op argument" if put_guarded
-                            else "effect-operation argument")
-                for arg in expr.args:
-                    self._obligate_binding_triple(
-                        decl, arg, None, smt, slot_env, assumptions,
-                        site=put_site,
-                        nat_guarded=put_guarded, widen_guarded=put_guarded,
-                    )
+                    op = self.env.lookup_effect_op(expr.name)
+                if op is not None:
+                    op_guarded = op.parent_effect == "State"
+                    op_site = ("State-op argument" if op_guarded
+                               else "effect-operation argument")
+                    for arg in expr.args:
+                        self._obligate_binding_triple(
+                            decl, arg, None, smt, slot_env, assumptions,
+                            site=op_site,
+                            nat_guarded=op_guarded, widen_guarded=op_guarded,
+                        )
             if param_types is not None:
                 # A generic function whose `TypeVar` formal is fixed to @Nat
                 # by context (e.g. `T = Nat`) is recovered from the checker's
@@ -5327,7 +6088,11 @@ class ContractVerifier:
         val = smt.translate_expr(value_node, slot_env)
         if val is None:
             self._record_nat_bind_tier3(
-                decl, value_node, site, "tier3", guarded=guarded)
+                decl, value_node, site, "tier3", guarded=guarded,
+                reason=(
+                    "the narrowed value is outside the SMT layer's decidable "
+                    "fragment, so there is no term to test `>= 0` against"
+                ))
             return
 
         obligation = val >= 0
@@ -5352,7 +6117,8 @@ class ContractVerifier:
             self._record_nat_bind_tier3(
                 decl, value_node, site,
                 "tier3" if result.status == "opaque" else "timeout",
-                guarded=guarded)
+                guarded=guarded,
+                reason=self._undecided_reason(result.status))
 
     def _check_nat_binding_obligation_term(
         self,
@@ -5431,7 +6197,12 @@ class ContractVerifier:
         val = smt.translate_expr(value_node, slot_env)
         if val is None:  # standard path under the #779 empty env
             self._record_int_widen_tier3(
-                decl, value_node, site, "tier3", guarded=guarded)
+                decl, value_node, site, "tier3", guarded=guarded,
+                reason=(
+                    "the widened value is outside the SMT layer's decidable "
+                    "fragment, so there is no term to test `<= i64.MAX` "
+                    "against"
+                ))
             return
 
         hi = z3.IntVal(_I64_MAX)
@@ -5451,7 +6222,9 @@ class ContractVerifier:
             self._report_nat_to_int(decl, value_node, site, safe.counterexample)
         else:
             self._record_int_widen_tier3(
-                decl, value_node, site, "tier3", guarded=guarded)
+                decl, value_node, site, "tier3", guarded=guarded,
+                reason=self._int_widen_undischarged_reason(
+                    safe.status, bad.status))
 
     def _record_int_widen_tier3(
         self,
@@ -5461,37 +6234,76 @@ class ContractVerifier:
         status: ObligationStatus,
         *,
         guarded: bool,
+        reason: str | None = None,
     ) -> None:
         """Record a Tier-3 ``nat_to_int_coerce`` outcome, the #813 dual of
         :py:meth:`_record_nat_bind_tier3`.  A codegen-guarded widening
         (``guarded=True`` — return, let, call-arg, concrete @Int constructor
-        field, and the #820 per-component sites: tuple component, array
-        element, heterogeneous if/match arm, closure argument/return/capture)
-        genuinely falls to a runtime coercion trap (``tier3_runtime``).  The
-        sole unguarded case (``guarded=False`` — the generic-instantiated @Int
-        field, which erases to i64 with no per-field mono metadata) is neither
-        statically proven nor runtime-checked, so surfaces an E531 warning and
-        is excluded from the discharged totals rather than silently counting
-        a runtime check it never gets."""
+        field, the built-in ``State`` boundaries, and the #820 per-component
+        sites: tuple component, array element, heterogeneous if/match arm,
+        closure argument/return/capture) genuinely falls to a runtime coercion
+        trap (``tier3_runtime``).  The unguarded cases (``guarded=False``) are
+        neither statically proven nor runtime-checked, so they surface an E531
+        warning and are excluded from the discharged totals rather than
+        silently counting a runtime check they never get.  There are three,
+        and the enumeration is derived from which callers can pass
+        ``guarded=False`` rather than from which one motivated the code — it
+        read "the sole unguarded case" while naming one of two, and #1268
+        added the third:
+
+        * an EFFECT-OPERATION argument — a user-declared effect's operation of
+          any name, or the built-in ``Exn`` ``throw`` payload (#1268), neither
+          of which has a guard emitted anywhere on its path;
+        * a TUPLE-DESTRUCTURE component, on both the projectable and the
+          unprojectable path — codegen does not guard the component coercion,
+          as it does not for tuple construction;
+        * a GENERIC-INSTANTIATED @Int constructor field, which erases to i64
+          with no per-field mono metadata to key a guard on.
+
+        *reason* is WHY the obligation was not discharged, spliced into the
+        E531 rationale (#1251).  Required on the UNGUARDED leg (and refused by
+        a raise if missing) for the reason
+        :py:meth:`_record_nat_bind_tier3` states: that leg emits a disclosure
+        which has to name a cause, and the causes here — an untranslatable
+        value, a value bounded on neither side, an unprojectable destructure
+        source — call for different responses."""
         if guarded:
             self._record_obligation(
                 decl.name, "nat_to_int_coerce", value_node, status)
         else:
+            # `not reason` rather than `is None`: an EMPTY reason renders a
+            # broken sentence ("could not be discharged: .") and is a caller
+            # that has not decided, which is the same defect the parameter
+            # exists to prevent — a default by another spelling.
+            if not reason:
+                raise ValueError(
+                    "an unguarded @Nat -> @Int widening emits an E531 that "
+                    f"must say why (site {site!r} in {decl.name!r}): pass "
+                    "`reason`"
+                )
             self._record_obligation(
                 decl.name, "nat_to_int_coerce", value_node, "tier3_unguarded",
                 error_code="E531",
             )
-            self._report_int_widen_unguarded(decl, value_node, site)
+            self._report_int_widen_unguarded(decl, value_node, site, reason)
 
     def _report_int_widen_unguarded(
         self,
         decl: ast.FnDecl,
         node: ast.Expr,
         site: str,
+        reason: str,
     ) -> None:
         """Emit an E531 warning for a @Nat -> @Int widening the SMT layer
         could not discharge and codegen does not guard (#813) — the dual of
-        :py:meth:`_report_nat_binding_unguarded`'s E504."""
+        :py:meth:`_report_nat_binding_unguarded`'s E504.
+
+        *reason* names WHY it was not discharged and is spliced in verbatim
+        (#1251).  This method does not decide the cause and must not describe
+        one: it emitted a fixed "outside Z3's decidable fragment
+        (untranslatable or the solver timed out)" for every caller, and the
+        site it is most often reached from is neither — an unbounded @Nat the
+        solver answered about promptly and correctly, twice."""
         self._warning(
             node,
             (
@@ -5503,16 +6315,17 @@ class ContractVerifier:
             ),
             rationale=(
                 "@Nat is u64 and @Int is i64, so a @Nat above i64.MAX "
-                "reinterprets to a negative @Int when widened.  The value is "
-                "outside Z3's decidable fragment (untranslatable or the solver "
-                "timed out), so the `<= i64.MAX` obligation could not be "
-                "discharged.  Codegen runtime-guards every concrete @Int "
+                "reinterprets to a negative @Int when widened.  The "
+                f"`<= i64.MAX` obligation could not be discharged: {reason}.  "
+                "Codegen runtime-guards every concrete @Int "
                 "coercion site (return, let, call-argument, constructor field, "
                 "tuple component, array element, heterogeneous arm, closure "
-                "argument/return/capture) but not this one — a "
-                "generic-instantiated @Int field with no per-field mono "
-                "metadata — so here the widening is neither statically proven "
-                "nor runtime-checked."
+                "argument/return/capture) but not this one — an "
+                "effect-operation argument (a user-declared effect's "
+                "operation, or an Exn `throw` payload), a tuple-destructure "
+                "component, or a generic-instantiated @Int field with no "
+                "per-field mono metadata — so here the widening is neither "
+                "statically proven nor runtime-checked."
             ),
             spec_ref='Chapter 11, Section 11.2.1 "Nat as i64"',
             error_code="E531",
@@ -5557,7 +6370,9 @@ class ContractVerifier:
             self._report_nat_to_int(decl, node, site, safe.counterexample)
         else:
             self._record_int_widen_tier3(
-                decl, node, site, "tier3", guarded=guarded)
+                decl, node, site, "tier3", guarded=guarded,
+                reason=self._int_widen_undischarged_reason(
+                    safe.status, bad.status))
 
     def _closure_arg_param_types(
         self, closure_arg: ast.Expr,
@@ -5629,12 +6444,30 @@ class ContractVerifier:
         ``smt._path_conditions``): on success ``tier1_verified``; on a Z3
         counterexample an E505 error.
 
-        An untranslatable value, an untranslatable / non-primitive-base
-        predicate, or a solver timeout is surfaced as an E506 warning, never a
-        silent ``tier1_verified`` (R7).  *guarded* says whether codegen
-        runtime-guards this site (a call argument, caught by the callee's entry
-        guard, is ``True``; an internal narrowing is ``False``) — see
-        :py:meth:`_record_refined_bind_tier3`.
+        When the predicate has no SMT sort to reason over, a CONCRETE value is
+        still decided rather than disclosed — :py:meth:`_concrete_refined_verdict`
+        (#1251(b)) — so ``handle[State<Small>](@Small = 200)`` over
+        ``{ @Byte | @Byte.0 < 10 }`` is an E505 naming 200 instead of a Tier-3
+        that lets the program run and return a value the refinement forbids.
+
+        Anything short of a verdict is surfaced as an E506 warning, never a
+        silent ``tier1_verified`` (R7), and the warning NAMES which of them it
+        was (#1251) — the four causes ask the reader to change different
+        things, so folding them into one sentence misinforms whichever reader
+        gets the other one:
+
+        * the VALUE did not translate, so there is no term to test against;
+        * the refinement's BASE is one the verifier does not model, so the
+          predicate was never handed a value — see
+          :py:meth:`_refined_untranslatable_reason`, which names the base;
+        * the PREDICATE is outside the decidable fragment; or
+        * the solver returned no verdict — ``unknown``, or the #1199
+          ``opaque`` countermodel, distinguished by
+          :py:meth:`_undecided_reason`.
+
+        *guarded* says whether codegen runtime-guards this site (a call
+        argument, caught by the callee's entry guard, is ``True``; an internal
+        narrowing is ``False``) — see :py:meth:`_record_refined_bind_tier3`.
         """
         # A `@Unit` refinement is codegen-UNguarded (erased binder), so its
         # Tier-3 fallback must not claim a runtime guard (CR db24433).
@@ -5645,13 +6478,39 @@ class ContractVerifier:
         val = smt.translate_expr(value_node, slot_env)
         if val is None:
             self._record_refined_bind_tier3(
-                decl, value_node, site, guarded=eff_guarded)
+                decl, value_node, site, guarded=eff_guarded,
+                reason=(
+                    "the value being narrowed is outside the SMT layer's "
+                    "decidable fragment, so there is no term to test the "
+                    "predicate against"
+                ),
+            )
             return
 
         goal = self._translate_refined_predicate(smt, refined_ty, val)
         if goal is None:
-            self._record_refined_bind_tier3(
-                decl, value_node, site, guarded=eff_guarded)
+            # #1251(b): the predicate has no SMT sort to reason over, but the
+            # VALUE may still be a literal — and a predicate instantiated on a
+            # literal is arithmetic, not inference.  `200 < 10` decides.
+            concrete = self._concrete_refined_verdict(smt, refined_ty, val)
+            if concrete is None:
+                self._record_refined_bind_tier3(
+                    decl, value_node, site, guarded=eff_guarded,
+                    reason=self._refined_untranslatable_reason(refined_ty),
+                )
+            elif concrete[0]:
+                # P holds of the value, so `premises => P` is valid whatever
+                # the premises are — including premises no state satisfies.
+                # Nothing the path can say changes that, which is why this
+                # side needs no reachability question (and why asking one
+                # could only add a timeout to a settled answer).
+                self._record_obligation(
+                    decl.name, "refine_bind", value_node, "verified")
+            else:
+                self._reject_or_excuse_concrete_violation(
+                    decl, value_node, refined_ty, smt, assumptions,
+                    site=site, guarded=eff_guarded, value=concrete[1],
+                )
             return
 
         result = smt.check_valid(goal, list(assumptions))
@@ -5667,9 +6526,224 @@ class ContractVerifier:
             )
             self._report_refined_binding(
                 decl, value_node, refined_ty, site, result.counterexample)
-        else:  # pragma: no cover — solver timeout
+        else:  # pragma: no cover — no solver verdict (unknown / #1199 opaque)
             self._record_refined_bind_tier3(
-                decl, value_node, site, guarded=eff_guarded)
+                decl, value_node, site, guarded=eff_guarded,
+                reason=self._undecided_reason(result.status),
+            )
+
+    def _reject_or_excuse_concrete_violation(
+        self,
+        decl: ast.FnDecl,
+        value_node: ast.Expr,
+        refined_ty: Type,
+        smt: SmtContext,
+        assumptions: list[object],
+        *,
+        site: str,
+        guarded: bool,
+        value: str,
+    ) -> None:
+        """Report a literal that fails its predicate — unless it cannot run.
+
+        A binding obligation is CONDITIONAL: *if* control reaches this site,
+        the value satisfies the predicate.  :py:meth:`SmtContext.check_valid`
+        discharges it as ``premises => goal`` with ``smt._path_conditions``
+        folded in, so premises no state satisfies discharge it vacuously —
+        which is why a base the verifier DOES model accepts a violating value
+        under ``if @Int.0 < 0`` beneath ``requires(@Int.0 > 0)``.
+
+        Folding the predicate on the literal answers the UNCONDITIONAL
+        question instead, and on a dead branch the two disagree.  Rejecting
+        there is a false rejection of exactly the kind the concrete gate was
+        scoped to avoid, arriving through the path conditions rather than
+        through the base — and it would make an unmodelled base STRICTER
+        about which paths exist than a modelled one, which no reading of
+        §2.6.4 supports.
+
+        So where the predicate is false, ask the solver the one question that
+        remains: is this site reachable at all — ``premises => False``, valid
+        exactly when the premises are unsatisfiable.  Its three answers are
+        the three a modelled base would give for the same site, which is the
+        point: ``verified`` means unreachable, so the obligation discharges
+        vacuously; ``violated`` means the solver exhibited a state satisfying
+        the premises, so the violation is real and loud; and no verdict means
+        the solver could not settle reachability, where a definite E505 would
+        claim a refutation nothing backs, so the site discloses instead.
+
+        The satisfied direction takes none of this: ``premises => True`` is
+        valid however the premises turn out, so its answer is already final
+        (see the caller).
+        """
+        reachable = smt.check_valid(z3.BoolVal(False), list(assumptions))
+        if reachable.status == "verified":
+            self._record_obligation(
+                decl.name, "refine_bind", value_node, "verified")
+            return
+        if reachable.status != "violated":
+            self._record_refined_bind_tier3(
+                decl, value_node, site, guarded=guarded,
+                reason=self._unsettled_reachability_reason(
+                    value, reachable.status),
+            )
+            return
+        self._record_obligation(
+            decl.name, "refine_bind", value_node, "violated",
+            error_code="E505",
+        )
+        self._report_refined_binding(
+            decl, value_node, refined_ty, site, None, concrete_value=value)
+
+    @staticmethod
+    def _unsettled_reachability_reason(value: str, status: str) -> str:
+        """Why a failing literal was disclosed rather than rejected (#1251).
+
+        The predicate is decided — it is false of *value* — and what is not
+        decided is whether the narrowing can be reached, so the disclosure
+        says exactly that rather than implying the predicate was the obstacle.
+        Derived, not fixed, because the solver-outcome half comes from
+        :py:meth:`_undecided_reason` like every other non-verdict text — named
+        for THAT QUESTION rather than for "the obligation", since the
+        obligation is not what went undecided here: the query that came back
+        without a verdict was the reachability one.
+        """
+        return (
+            f"the value {value} does not satisfy the predicate, but whether "
+            "this narrowing can be reached at all could not be settled: "
+            + ContractVerifier._undecided_reason(status, subject="that question")
+        )
+
+    @staticmethod
+    def _undecided_reason(status: str, subject: str = "the obligation") -> str:
+        """Why ``check_valid`` neither proved nor refuted the obligation (#1251).
+
+        :py:meth:`~vera.smt.SmtContext.check_valid` has FOUR outcomes, and the
+        two that reach a Tier-3 demotion are not the same event.  ``unknown``
+        is the solver declining to decide — a timeout, or a goal outside what
+        it can settle.  ``opaque`` is the #1199 verdict: the solver decided
+        promptly and SAT, but every countermodel ran over an effect-operation
+        stand-in (``_fresh_opaque_slot``), so it refutes nothing the effect
+        actually produces and must not be reported as a definite E505.
+
+        Shared by all three demotion families — the refinement predicate, the
+        ``>= 0`` narrowing (E504) and the ``<= i64.MAX`` widening (E531) — so
+        the wording names the OBLIGATION rather than any one family's goal.
+        The two coercion families carried the same conflated sentence the
+        refinement family did until this derivation reached them.
+
+        *subject* is what the solver returned no decision ABOUT, and it is a
+        parameter because one caller does not ask about the obligation at all:
+        :py:meth:`_unsettled_reachability_reason` asks whether the site can be
+        reached, and splicing "no decision on the obligation" there would name
+        the wrong undecided question in a text whose entire purpose is naming
+        the right one.  Every other caller takes the default.
+
+        Collapsing the two into "the solver timed out" is the misattribution
+        this issue is about, one level down: it names an event that did not
+        happen and sends the reader to raise a timeout that was never hit.
+        One derivation, called from every site that demotes on a non-verdict,
+        so a fifth outcome cannot be silently absorbed by whichever branch
+        happens to catch it.
+
+        Every reachable status is therefore handled BY NAME and anything else
+        raises, rather than falling through to the no-decision text: a catch-all
+        ``else`` would re-create the very defect this function exists to remove,
+        one status further out.  ``verified`` and ``violated`` never arrive —
+        callers branch on them first — and ``unsupported``, which
+        :py:class:`~vera.smt.SmtResult`'s annotation once listed, is produced by
+        nothing: ``check_valid`` is the only constructor and it returns exactly
+        the four below.  A future fifth status is a decision about what to tell
+        the reader, so it fails here rather than quietly wearing wrong text.
+        """
+        if status == "opaque":
+            return (
+                "the only countermodel ran over an opaque effect-operation "
+                "stand-in, which refutes nothing the effect actually produces"
+            )
+        if status == "unknown":
+            return f"the solver returned no decision on {subject}"
+        raise ValueError(
+            f"no demotion reason for solver status {status!r}: "
+            "every outcome that can reach a Tier-3 demotion must say what it "
+            "was, so add a branch here rather than letting it inherit "
+            "another outcome's text"
+        )
+
+    @staticmethod
+    def _int_widen_undischarged_reason(
+        safe_status: str, bad_status: str,
+    ) -> str:
+        """Why neither ``<= i64.MAX`` nor ``> i64.MAX`` was proved (#1251).
+
+        :py:meth:`_check_int_widening_obligation` asks the solver twice, and
+        reaching Tier 3 means neither question came back valid.  Almost always
+        that is the solver answering both promptly and correctly about a value
+        with no upper bound: a bare ``@Nat`` is [0, u64.MAX], so it is neither
+        provably inside i64's range nor provably outside it.  That is a fact
+        about the PROGRAM — bound the value — and the old text sent the reader
+        to look for a solver problem instead.
+
+        A genuine non-verdict on either question is a different event, and is
+        reported as itself via :py:meth:`_undecided_reason`.
+        """
+        for status in (safe_status, bad_status):
+            if status in ("unknown", "opaque"):
+                return ContractVerifier._undecided_reason(status)
+        return (
+            "the value is not provably within i64's range, and not provably "
+            "outside it either — an unconstrained @Nat leaves countermodels "
+            "on both sides"
+        )
+
+    @staticmethod
+    def _refined_bail_reason(
+        refined_ty: Type, value_term: object | None,
+    ) -> str:
+        """Why a refined-return check bailed before reaching the solver (#1251).
+
+        The two return-position sites fold "the body did not translate" and
+        "the predicate did not translate" into one ``goal is None``, and they
+        call for opposite actions — rewrite the body, or accept that the base
+        is unmodelled.  Split by which one it was.
+        """
+        if value_term is None:
+            return (
+                "the returned expression is outside the SMT layer's decidable "
+                "fragment, so there is no term to test the predicate against"
+            )
+        return ContractVerifier._refined_untranslatable_reason(refined_ty)
+
+    @staticmethod
+    def _refined_untranslatable_reason(refined_ty: Type) -> str:
+        """Why :py:meth:`_translate_refined_predicate` returned None (#1251).
+
+        Two causes reach that None and they call for different actions, so a
+        single sentence covering both misinforms whichever reader gets the
+        other one.  The predicate may genuinely be outside the fragment — an
+        undecidable construct, or an operand the SMT layer defers on — or the
+        BASE may be one the verifier does not model, in which case the
+        predicate was never given a value to reason about and may be perfectly
+        decidable.  ``{ @Byte | @Byte.0 < 10 }`` initialised to ``200`` is the
+        second: ``200 < 10`` decides, and decides FALSE, but ``Byte`` is not
+        among the five bases :py:meth:`_base_slot_name` models, so nothing was
+        ever asked (#1251).
+        """
+        parts = ContractVerifier._refined_parts(refined_ty)
+        if parts is None:  # pragma: no cover — caller checked the shape
+            return "the refinement's shape is not one the verifier models"
+        base, _predicate = parts
+        if ContractVerifier._base_slot_name(base) is None:
+            return (
+                f"the verifier does not model `{pretty_type(base)}` as a "
+                "refinement base — only Int, Nat, Bool, Float64 and String "
+                "carry an SMT sort here — so the predicate was never given a "
+                "value to reason about; the predicate itself may well be "
+                "decidable"
+            )
+        return (
+            "the predicate is outside Z3's decidable fragment (an undecidable "
+            "construct, or an operand the SMT layer defers on)"
+        )
 
     def _record_refined_bind_tier3(
         self,
@@ -5678,12 +6752,24 @@ class ContractVerifier:
         site: str,
         *,
         guarded: bool,
+        reason: str,
     ) -> None:
-        """Record a Tier-3 ``refine_bind`` outcome — the predicate could not be
-        discharged statically (a non-primitive base such as ``Array``, an
-        undecidable construct, or a solver timeout) — distinguishing
-        codegen-guarded boundary sites from unguarded internal ones (#746),
-        mirroring :py:meth:`_record_nat_bind_tier3`.
+        """Record a Tier-3 ``refine_bind`` outcome — the predicate was not
+        discharged statically — distinguishing codegen-guarded boundary sites
+        from unguarded internal ones (#746), mirroring
+        :py:meth:`_record_nat_bind_tier3`.
+
+        *reason* is WHY, as a clause the emitters splice into the E506
+        rationale (#1251).  It is required rather than defaulted because there
+        is no honest default: the causes are an untranslatable value, a base
+        the verifier does not model, a predicate outside the fragment, an
+        opaque scrutinee or destructure source, an opaque closure body, and
+        the two non-verdicts — and a caller that has not decided which one it
+        is has not finished thinking about the branch it is on.  Callers
+        derive it from :py:meth:`_refined_untranslatable_reason`,
+        :py:meth:`_refined_bail_reason` or
+        :py:meth:`_undecided_reason` wherever the answer depends on
+        state, and pass a literal only where the site itself is the cause.
 
         Codegen emits a runtime guard at the function boundary: a refined
         parameter at entry and a refined return at exit, so a *return* narrowing
@@ -5693,22 +6779,32 @@ class ContractVerifier:
         narrowing — ``let`` / constructor-field / effect-op-arg / match-bind /
         tuple-destructure / ADT-sub-pattern — has no codegen guard, so it is
         ``guarded=False`` — surfaced as an E506 warning and excluded from the
-        totals rather than overstating a runtime check it never gets (R7)."""
+        totals rather than overstating a runtime check it never gets (R7).
+
+        Required and non-EMPTY: an empty string is a caller that has not
+        decided wearing the shape of one that has, and it renders the same
+        broken sentence a missing reason would."""
+        if not reason:
+            raise ValueError(
+                "a refinement Tier-3 demotion emits an E506 that must say "
+                f"why (site {site!r} in {decl.name!r}): `reason` is empty"
+            )
         if guarded:
             self._record_obligation(
                 decl.name, "refine_bind", value_node, "tier3",
                 error_code="E506",
             )
-            self._report_refined_runtime(decl, value_node, site)
+            self._report_refined_runtime(decl, value_node, site, reason)
         else:
             self._record_obligation(
                 decl.name, "refine_bind", value_node, "tier3_unguarded",
                 error_code="E506",
             )
-            self._report_refined_unguarded(decl, value_node, site)
+            self._report_refined_unguarded(decl, value_node, site, reason)
 
     def _check_generic_refined_return(
         self, decl: ast.FnDecl, ret_type: Type,
+        enclosing: tuple[ast.FnDecl, ...] = (),
     ) -> None:
         """Discharge a *concrete* refined return on a generic function (#746).
 
@@ -5721,11 +6817,22 @@ class ContractVerifier:
         ``tier3``), exactly as on the non-generic path."""
         if decl.body is None:  # pragma: no cover — caller guards this
             return
-        smt = SmtContext(
-            timeout_ms=self.timeout_ms,
-            fn_lookup=self.env.lookup_function,
-            module_fn_lookup=self._lookup_module_function,
-        )
+        # #1208: the ONE path that renders a still-GENERIC signature, so the
+        # forall narrowing is load-bearing here — `type T = Int;` shadowed by
+        # `forall<T>` would otherwise merge `@T` and `@Int` parameters into one
+        # stack the checker kept apart.  The ancestor chain rides along for the
+        # same reason the main path (`_verify_fn` step 3) threads it: a
+        # `where`-helper inherits its ancestors' type parameters, which is the
+        # accumulation `slots.fn_scopes` performs.  Every ancestor that reaches
+        # this site today is already monomorphized (a still-generic parent
+        # returns before step 9, so only its clones recurse into `where_fns`),
+        # so the chain contributes nothing yet; passing it keeps the two
+        # `_fn_naming_scope` calls from disagreeing if that ever changes.
+        fn_env = self._fn_naming_scope(
+            self._current_alias_env, decl, enclosing)
+        smt = SmtContext(timeout_ms=self.timeout_ms)
+        self._bind_smt_scope(
+            smt, CalleeScope(fn_env, self.env.lookup_function))
         for adt_info in self.env.data_types.values():
             smt.register_adt(adt_info)
         # CR PR-review: the generic refined-return fast path translates the body
@@ -5742,7 +6849,7 @@ class ContractVerifier:
         assumptions: list[object] = []
         for param_te in decl.params:
             param_ty = self._resolve_type(param_te)
-            type_name = self._type_expr_to_slot_name(param_te)
+            type_name = self._type_expr_to_slot_name(param_te, fn_env)
             z3_name = f"@{type_name}.{self._count_slots(slot_env, type_name)}"
             if self._is_nat_type(param_ty):
                 var = smt.declare_nat(z3_name)
@@ -5796,7 +6903,8 @@ class ContractVerifier:
         if goal is None:
             self._record_refined_bind_tier3(
                 decl, decl.body, "return type",
-                guarded=self._refined_boundary_codegen_guardable(ret_type))
+                guarded=self._refined_boundary_codegen_guardable(ret_type),
+                reason=self._refined_bail_reason(ret_type, body_expr))
             return
         result = smt.check_valid(goal, list(assumptions))
         if result.status == "verified":
@@ -5811,10 +6919,11 @@ class ContractVerifier:
                 decl, decl.body, ret_type, "return type",
                 result.counterexample,
             )
-        else:  # pragma: no cover — solver timeout
+        else:  # pragma: no cover — no solver verdict (unknown / #1199 opaque)
             self._record_refined_bind_tier3(
                 decl, decl.body, "return type",
-                guarded=self._refined_boundary_codegen_guardable(ret_type))
+                guarded=self._refined_boundary_codegen_guardable(ret_type),
+                reason=self._undecided_reason(result.status))
 
     def _check_refined_binding_obligation_term(
         self,
@@ -5841,14 +6950,19 @@ class ContractVerifier:
         them a projection from a `@Nat` field into `{ @Nat | true }` would be a
         false E505 — Z3 inventing a negative payload the field type forbids (CR
         a48cd2c).  An obligation still undischarged under those premises is a
-        genuine E505; an untranslatable predicate / non-primitive base yields an
-        E506 Tier-3 warning.  These projection sites are internal narrowings
-        with no codegen guard, hence ``guarded=False``.  *node* gives the
-        diagnostic location.
+        genuine E505.  Anything short of a verdict is an E506 Tier-3 warning
+        that NAMES its cause (#1251): a base the verifier does not model or a
+        predicate outside the fragment, via
+        :py:meth:`_refined_untranslatable_reason`, and either non-verdict via
+        :py:meth:`_undecided_reason`.  These projection sites are
+        internal narrowings with no codegen guard, hence ``guarded=False``.
+        *node* gives the diagnostic location.
         """
         goal = self._translate_refined_predicate(smt, refined_ty, term)
         if goal is None:
-            self._record_refined_bind_tier3(decl, node, site, guarded=False)
+            self._record_refined_bind_tier3(
+                decl, node, site, guarded=False,
+                reason=self._refined_untranslatable_reason(refined_ty))
             return
         local_assumptions = list(assumptions)
         if source_ty is not None:
@@ -5865,8 +6979,10 @@ class ContractVerifier:
             )
             self._report_refined_binding(
                 decl, node, refined_ty, site, result.counterexample)
-        else:  # pragma: no cover — solver timeout
-            self._record_refined_bind_tier3(decl, node, site, guarded=False)
+        else:  # pragma: no cover — no solver verdict (unknown / #1199 opaque)
+            self._record_refined_bind_tier3(
+                decl, node, site, guarded=False,
+                reason=self._undecided_reason(result.status))
 
     def _term_source_fact(
         self, smt: SmtContext, source_ty: Type, term: z3.ExprRef,
@@ -6223,7 +7339,8 @@ class ContractVerifier:
                     # no codegen guard, so this is an unguarded E506 Tier-3
                     # (excluded from totals), not a silent pass (R7).
                     self._record_refined_bind_tier3(
-                        decl, scrutinee, "ADT sub-pattern bind", guarded=False)
+                        decl, scrutinee, "ADT sub-pattern bind", guarded=False,
+                        reason=_OPAQUE_SCRUTINEE_REASON)
                 continue
             if (self._is_nat_type(target)
                     and not self._is_nat_type(field_ty)):
@@ -6310,7 +7427,8 @@ class ContractVerifier:
             if (self._is_refined_type(target)
                     and self._refined_field_narrows(target, field_ty)):
                 self._record_refined_bind_tier3(
-                    decl, scrutinee, "ADT sub-pattern bind", guarded=False)
+                    decl, scrutinee, "ADT sub-pattern bind", guarded=False,
+                    reason=_OPAQUE_SCRUTINEE_REASON)
             elif (self._is_nat_type(target)
                     and not self._is_nat_type(field_ty)):
                 self._record_nat_bind_tier3(
@@ -6403,13 +7521,25 @@ class ContractVerifier:
                     guarded=True)
             for _ in refined_narrowing:
                 self._record_refined_bind_tier3(
-                    decl, stmt.value, "tuple destructure", guarded=False)
+                    decl, stmt.value, "tuple destructure", guarded=False,
+                    reason=(
+                        "the destructured value cannot be projected into its "
+                        "components (an effect-op result, or another term the "
+                        "SMT layer models opaquely), so the component the "
+                        "predicate is about was never formed"
+                    ))
             for _ in int_widening:
                 # #813: codegen does not guard a tuple-destructure component
                 # widening (like tuple construction), so disclose E531.
                 self._record_int_widen_tier3(
                     decl, stmt.value, "tuple destructure", "tier3",
-                    guarded=False)
+                    guarded=False,
+                    reason=(
+                        "the destructured value cannot be projected into its "
+                        "components (an effect-op result, or another term the "
+                        "SMT layer models opaquely), so the component being "
+                        "widened was never formed"
+                    ))
             return
         # `i` is a valid field index (filtered against `source_args`, whose
         # length matches the tuple sort's fields), so each accessor is safe
@@ -6445,6 +7575,7 @@ class ContractVerifier:
         status: ObligationStatus,
         *,
         guarded: bool,
+        reason: str | None = None,
     ) -> None:
         """Record a Tier-3 nat_bind outcome (untranslatable value or solver
         timeout), distinguishing codegen-guarded narrowings from unguarded
@@ -6455,8 +7586,9 @@ class ContractVerifier:
         *all* call-arguments — concrete directly, generic on the
         monomorphised callee (#747), so a Tier-3 narrowing there genuinely
         falls to a runtime check (``tier3_runtime``).  The unguarded cases —
-        the *user-effect* operation argument (the builtin State-op sites
-        are guarded since #1203) and the generic-instantiated
+        the operation argument of a user-declared effect or of the builtin
+        ``Exn`` ``throw`` (#1268; the builtin State-op sites are guarded
+        since #1203) and the generic-instantiated
         constructor field (constructors carry no per-field @Nat mono
         metadata) — may be neither statically proven nor runtime-checked, so
         surface an E504 warning and exclude them from the discharged totals
@@ -6465,24 +7597,50 @@ class ContractVerifier:
         get.  The caller knows which case applies (it has the formal /
         field type), so it passes *guarded* rather than inferring it from
         the broad *site* string.
+
+        *reason* is WHY the obligation was not discharged, spliced into the
+        E504 rationale (#1251).  It is required on the UNGUARDED leg and
+        refused-by-raise if missing, because that leg emits a disclosure that
+        has to state a cause and there is no honest default: the value may not
+        have translated, or the solver may have returned no verdict, and those
+        ask the reader to change different things.  The GUARDED leg emits no
+        disclosure at all, so it neither needs the text nor should carry dead
+        text for the sake of a uniform signature.
         """
         if guarded:
             self._record_obligation(decl.name, "nat_bind", value_node, status)
         else:
+            # `not reason` rather than `is None`: an EMPTY reason renders a
+            # broken sentence ("could not be discharged: .") and is a caller
+            # that has not decided, which is the same defect the parameter
+            # exists to prevent — a default by another spelling.
+            if not reason:
+                raise ValueError(
+                    "an unguarded nat_bind demotion emits an E504 that must "
+                    f"say why (site {site!r} in {decl.name!r}): pass `reason`"
+                )
             self._record_obligation(
                 decl.name, "nat_bind", value_node, "tier3_unguarded",
                 error_code="E504",
             )
-            self._report_nat_binding_unguarded(decl, value_node, site)
+            self._report_nat_binding_unguarded(decl, value_node, site, reason)
 
     def _report_nat_binding_unguarded(
         self,
         decl: ast.FnDecl,
         node: ast.Expr,
         site: str,
+        reason: str,
     ) -> None:
         """Emit an E504 warning for a non-let @Nat narrowing the SMT layer
-        could not discharge and codegen does not guard (#747)."""
+        could not discharge and codegen does not guard (#747).
+
+        *reason* names WHY it was not discharged and is spliced in verbatim
+        (#1251).  This method does not decide the cause and must not describe
+        one: it emitted a fixed "outside Z3's decidable fragment
+        (untranslatable or the solver timed out)" for every caller — two
+        different events, neither of which is what happens at the site this
+        warning is actually reachable from."""
         self._warning(
             node,
             (
@@ -6493,14 +7651,15 @@ class ContractVerifier:
                 "`if ... >= 0 then ... else ...`."
             ),
             rationale=(
-                "The narrowed value is outside Z3's decidable fragment "
-                "(untranslatable or the solver timed out), so the `>= 0` "
-                "obligation could not be discharged.  Codegen runtime-guards "
+                f"The `>= 0` obligation could not be discharged: {reason}.  "
+                "Codegen runtime-guards "
                 "the concrete @Nat binding sites (let, destructure, match, "
                 "sub-pattern, concrete field) and all call-arguments (generic "
                 "ones on the monomorphised callee) but not this one — an "
-                "effect-operation argument, or a generic-instantiated "
-                "constructor field with no per-field mono metadata — so here "
+                "effect-operation argument (a user-declared effect's "
+                "operation, or an Exn `throw` payload), or a "
+                "generic-instantiated constructor field with no per-field "
+                "mono metadata — so here "
                 "the narrowing is neither statically proven nor "
                 "runtime-checked."
             ),
@@ -6867,12 +8026,22 @@ class ContractVerifier:
         refined_ty: Type,
         site: str,
         counterexample: dict[str, str] | None,
+        *,
+        concrete_value: str | None = None,
     ) -> None:
         """Emit an E505 diagnostic for an undischarged refinement narrowing.
 
         Renders the refinement's actual predicate source (via
         :py:func:`ast.format_expr`) plus the counterexample, mirroring
-        :py:meth:`_report_nat_binding` (#746)."""
+        :py:meth:`_report_nat_binding` (#746).
+
+        *concrete_value* is set when the narrowing was decided on a LITERAL
+        (#1251(b)) rather than refuted by a solver search.  That is a different
+        claim and gets different words: the value MAY violate the predicate
+        only when the solver found some input where it does, whereas a literal
+        simply does — and the standing fix, "add a precondition implying the
+        predicate", cannot constrain a literal, so it would send the reader
+        somewhere that does not help."""
         ce_lines: list[str] = []
         if counterexample:
             ce_lines.append("Counterexample:")
@@ -6895,10 +8064,17 @@ class ContractVerifier:
         else:
             pred_src = "the predicate"
 
-        description = (
-            f"Value narrowing into a refined {site} in '{decl.name}' "
-            f"may violate the refinement predicate `{pred_src}`."
-        )
+        if concrete_value is not None:
+            description = (
+                f"Value narrowing into a refined {site} in '{decl.name}' "
+                f"violates the refinement predicate `{pred_src}`: the value "
+                f"is {concrete_value}."
+            )
+        else:
+            description = (
+                f"Value narrowing into a refined {site} in '{decl.name}' "
+                f"may violate the refinement predicate `{pred_src}`."
+            )
         if ce_text:
             description += f"\n  {ce_text}"
 
@@ -6910,10 +8086,18 @@ class ContractVerifier:
                 "that every inhabitant satisfies its predicate P, but the "
                 "type checker permits the underlying base value to narrow "
                 "into the refined slot and defers the proof to verification. "
-                "The SMT solver found inputs where the narrowed value does "
-                "not satisfy the predicate."
+                + (
+                    "The narrowed value is a literal, so the predicate was "
+                    "evaluated on it directly and is false."
+                    if concrete_value is not None else
+                    "The SMT solver found inputs where the narrowed value does "
+                    "not satisfy the predicate."
+                )
             ),
             fix=(
+                f"Narrow a value the predicate admits — {concrete_value} does "
+                "not satisfy it — or widen the refinement so it does."
+                if concrete_value is not None else
                 "Add a precondition implying the predicate, e.g. "
                 f"`requires({pred_src})`.  Alternatively, guard the binding "
                 "with an `if` whose condition is the predicate — the path "
@@ -6931,13 +8115,18 @@ class ContractVerifier:
         decl: ast.FnDecl,
         node: ast.Expr,
         site: str,
+        reason: str,
     ) -> None:
         """Emit an informational E506 warning for a refinement narrowing the
         SMT layer could not discharge but codegen runtime-guards (#746).
 
-        The predicate is outside Z3's decidable fragment — a non-primitive base
-        such as ``Array`` (Z3 cannot decide ``array_length``), an undecidable
-        construct, or a solver timeout — so it could not be proved statically.
+        *reason* is the caller's clause naming WHY it was not discharged, and
+        it is spliced into the rationale verbatim (#1251).  This method does
+        not decide the cause and must not describe one: it emitted a fixed
+        "outside Z3's decidable fragment" for every caller, which was false
+        for a decidable predicate over a base the verifier simply does not
+        model.
+
         Codegen emits a runtime predicate guard at the function boundary (a
         refined parameter at entry, a refined return at exit; call arguments
         via the callee's entry guard), so the narrowing falls to that check —
@@ -6952,12 +8141,10 @@ class ContractVerifier:
                 "predicate or guard the binding with an `if`."
             ),
             rationale=(
-                "The refinement predicate is outside Z3's decidable fragment "
-                "(a non-primitive base such as Array, an undecidable "
-                "construct, or a solver timeout), so it could not be "
-                "discharged statically.  Codegen emits a runtime predicate "
-                "guard at the function boundary, so the narrowing is checked "
-                "at run time (Tier 3) rather than silently accepted."
+                f"The refinement predicate was not discharged statically: "
+                f"{reason}.  Codegen emits a runtime predicate guard at the "
+                "function boundary, so the narrowing is checked at run time "
+                "(Tier 3) rather than silently accepted."
             ),
             spec_ref=(
                 'Chapter 2, Section 2.6 "Refinement Types" and Chapter 6, '
@@ -6972,17 +8159,22 @@ class ContractVerifier:
         decl: ast.FnDecl,
         node: ast.Expr,
         site: str,
+        reason: str,
     ) -> None:
         """Emit an E506 warning for a refinement narrowing the SMT layer could
         not discharge and codegen does NOT runtime-guard (#746).
 
+        *reason* is the caller's clause naming WHY it was not discharged, and
+        it is spliced into the rationale verbatim (#1251) — this method does
+        not decide the cause and must not describe one, for the reason its
+        guarded twin :py:meth:`_report_refined_runtime` records.
+
         Codegen guards a refined value only at the function boundary (parameter
         entry, return exit).  An *internal* narrowing — ``let`` / constructor
         field / effect-op argument / match bind / tuple-destructure / ADT
-        sub-pattern — has no such guard, so when its predicate is also outside
-        Z3's decidable fragment it is neither statically proven nor
-        runtime-checked: surfaced (R7) rather than silently passed, and excluded
-        from the discharged totals."""
+        sub-pattern — has no such guard, so an undischarged predicate here is
+        neither statically proven nor runtime-checked: surfaced (R7) rather
+        than silently passed, and excluded from the discharged totals."""
         self._warning(
             node,
             (
@@ -6993,13 +8185,11 @@ class ContractVerifier:
                 "return (which is runtime-guarded)."
             ),
             rationale=(
-                "The refinement predicate is outside Z3's decidable fragment "
-                "(a non-primitive base such as Array, an undecidable "
-                "construct, or a solver timeout), so it could not be "
-                "discharged statically.  Codegen runtime-guards refinements "
-                "only at the function boundary (parameter entry / return "
-                "exit), not at this internal narrowing site, so it is neither "
-                "statically proven nor runtime-checked."
+                f"The refinement predicate was not discharged statically: "
+                f"{reason}.  Codegen runtime-guards refinements only at the "
+                "function boundary (parameter entry / return exit), not at "
+                "this internal narrowing site, so it is neither statically "
+                "proven nor runtime-checked."
             ),
             spec_ref=(
                 'Chapter 2, Section 2.6 "Refinement Types" and Chapter 6, '
@@ -7430,7 +8620,13 @@ class ContractVerifier:
                 if name != "@result":
                     ce_lines.append(f"    {name} = {value}")
             if "@result" in counterexample:
-                result_name = f"@{self._type_expr_to_slot_name(fn.return_type)}.result"
+                # #1208: named in the function's OWN scope, so a `forall<T>`
+                # return type reads `@T.result` as written rather than picking
+                # up a same-named module alias's resolution.
+                result_name = "@{}.result".format(self._type_expr_to_slot_name(
+                    fn.return_type,
+                    self._fn_naming_scope(self._current_alias_env, fn),
+                ))
                 ce_lines.append(f"    {result_name} = {counterexample['@result']}")
 
         ce_text = "\n  ".join(ce_lines) if ce_lines else ""
@@ -7473,8 +8669,10 @@ class ContractVerifier:
     def _pre_at_call_site(
         self,
         callee_params: tuple[ast.TypeExpr, ...],
+        callee_forall: tuple[str, ...] | None,
         call_node: ast.FnCall | ast.ModuleCall,
         precondition: ast.Requires,
+        callee_env: AliasEnv | None = None,
     ) -> str | None:
         """The precondition rendered in CALL-SITE terms, or None.
 
@@ -7487,17 +8685,33 @@ class ContractVerifier:
         any slot cannot be mapped (unknown type in the table, index
         out of range, arity mismatch), in which case the caller keeps
         the generic wording.
+
+        Both sides of the lookup render through :mod:`vera.naming` (#1208),
+        in the CALLEE's scope: *callee_env* (the module that DECLARED the
+        callee — a bare call after ``import m(f)`` reaches an imported
+        contract, so this is not always this program's env) narrowed by
+        *callee_forall*, its own type parameters.  The table is keyed by
+        :func:`~vera.naming.slot_name` and the reference by
+        :func:`~vera.naming.slot_ref_key`, the same renderer the checker
+        binds and resolves with.  Keying by the reference's bare HEAD instead
+        — the pre-#1208 bug — meant a PARAMETERISED reference
+        (``@Wrap<Int>.0`` against a ``Wrap<Int>`` entry) never matched, so
+        the substitution was abandoned and the message fell back to its
+        generic wording on exactly the signatures the concrete rendering
+        helps most.  It failed closed, which is why it stayed invisible.
         """
         import dataclasses as _dc
 
-        table = slot_table(callee_params)
+        env = self._current_alias_env if callee_env is None else callee_env
+        table = slot_table(callee_params, env, callee_forall)
+        scope = fn_slot_scope(env, callee_forall)
 
         class _NoSubstitution(Exception):
             pass
 
         def rebuild(node: ast.Expr) -> ast.Expr:
             if isinstance(node, ast.SlotRef):
-                positions = table.get(node.type_name)
+                positions = table.get(naming.slot_ref_key(node, scope))
                 if not positions or node.index >= len(positions):
                     raise _NoSubstitution
                 pos = positions[node.index]
@@ -7567,8 +8781,14 @@ class ContractVerifier:
                     "tuple[ast.TypeExpr, ...]",
                     callee_info.param_type_exprs,
                 ),
+                callee_info.forall_vars,
                 call_node,
                 precondition,
+                # #1208: an IMPORTED callee's parameters are spelled in its own
+                # module's alias namespace, so the substitution table has to be
+                # keyed there or a rendered `@Alias.n` silently misses and the
+                # message falls back to its generic wording.
+                self._callee_alias_env(callee_info),
             )
 
         # Build counterexample description
@@ -7659,19 +8879,76 @@ class ContractVerifier:
                 f"The precondition will be checked at runtime.",
                 rationale="An argument or the callee's precondition contains "
                           "constructs that cannot be translated to SMT (e.g. "
-                          "an ADT field of a host-handle type such as Map).",
+                          "an ADT field of a host-handle type such as Map); "
+                          "or the callee is generic and its contract is "
+                          "written over type parameters, which have no Z3 "
+                          "sort until the call is monomorphized; or the "
+                          "callee's contract calls a name that resolves to no "
+                          "function in the module that declared it, which is "
+                          "every name outside that module's own imports.",
                 spec_ref='Chapter 6, Section 6.8 "Summary of Verification Tiers"',
                 error_code="E532",
                 tier=3,
             )
 
     def _contract_source_text(self, contract: ast.Contract) -> str:
-        """Extract the source text of a contract clause."""
+        """Extract the source text of a contract clause, from the file that
+        DECLARED it (#1220).
+
+        A clause's span numbers lines in its own file, so an IMPORTED callee's
+        `requires` quoted out of this program's buffer reads whatever sits on
+        that line here — the E501 for a violated `requires(@Option<Int>.0 ==
+        Some(3))` quoted `requires(true)`, and a reader has no way to tell the
+        garbage from a real clause.  The buffer comes from
+        :meth:`_declaring_source`, which is keyed by the clause itself.
+
+        The WHOLE clause, not its first physical line: a `requires` broken
+        across lines was quoted up to the first newline, so the message ended
+        mid-expression with unbalanced parentheses and named a condition the
+        program does not have (PR #1239 review).  Continuation lines are joined
+        on single spaces, since the message is one line.
+
+        Comments are blanked first, through the lexer's own scanner
+        (:func:`~vera.lexical.blank_comments`), because joining lines puts a
+        trailing `--` comment in front of the rest of the clause — the reader
+        then sees a condition that stops where the comment starts, and a
+        comment's text quoted as though it were code.  The scanner is what
+        keeps a `--` inside a STRING literal from being mistaken for one, and
+        blanking preserves offsets, so the line numbers this slices by are
+        unaffected.
+        """
         if contract.span:
-            lines = self.source.splitlines()
-            if 1 <= contract.span.line <= len(lines):
-                return lines[contract.span.line - 1].strip()
+            lines = blank_comments(
+                self._declaring_source(contract)).splitlines()
+            first, last = contract.span.line, contract.span.end_line
+            if 1 <= first <= len(lines):
+                last = min(max(last, first), len(lines))
+                return " ".join(
+                    part for part in (
+                        raw.strip() for raw in lines[first - 1:last]
+                    ) if part
+                )
         return ""
+
+    def _declaring_source(self, contract: ast.Contract) -> str:
+        """The source text *contract*'s span numbers lines in (#1220).
+
+        The defining module's for an imported clause, this program's for a
+        local one.  Identity is the join, and the pinned value holds the clause
+        object itself so a recycled ``id`` cannot answer for another clause —
+        the same reasoning ``_callee_alias_env`` documents.
+
+        An unpinned clause falls back to the module UNDER verification, not to
+        the entry program: only clauses parsed from a module's own AST are
+        pinned, so a monomorphized clone's clause — a fresh node carrying the
+        original's span — reaches here while its declaring module is in scope
+        (:meth:`_declaring_module_scope`), which is the buffer that span
+        numbers.
+        """
+        found = self._contract_sources.get(id(contract))
+        if found is not None and found[0] is contract:
+            return found[1]
+        return self._current_source
 
     # -----------------------------------------------------------------
     # Helpers
@@ -7861,13 +9138,16 @@ class ContractVerifier:
         return None
 
     @staticmethod
-    def _predicate_binder_name(predicate: ast.Expr) -> str | None:
-        """The slot type-name the refinement predicate's binder ACTUALLY uses —
-        a syntactic ALIAS binder (``@Age.0`` for ``type Age = Nat; { @Age |
-        @Age.0 >= 18 }``) differs from the resolved ``Nat`` (CR e6f17b7).
-        Delegates to the shared ``ast.predicate_binder_name`` so the verifier,
-        codegen, and SMT refined-return paths can't drift."""
-        return ast.predicate_binder_name(predicate)
+    def _predicate_binder_key(
+        predicate: ast.Expr, env: AliasEnv,
+    ) -> str | None:
+        """The key the refinement predicate's binder must be bound under — a
+        syntactic ALIAS binder (``@Age.0`` for ``type Age = Nat; { @Age |
+        @Age.0 >= 18 }``) differs from the resolved ``Nat`` (CR e6f17b7), and a
+        PARAMETERISED one (``@Box<Cnt>.0``) differs from its head as well
+        (#1226).  Delegates to the shared ``naming.predicate_binder_key`` so
+        the verifier, codegen, and SMT refined-return paths can't drift."""
+        return naming.predicate_binder_key(predicate, env)
 
     @staticmethod
     def _translate_refined_predicate(
@@ -7902,11 +9182,18 @@ class ContractVerifier:
         inner_env = SlotEnv().push(base_name, value_term)
         # The predicate may reference its binder by a syntactic alias
         # (`@Age.0` for `type Age = Nat`) that differs from the resolved
-        # primitive `base_name`; bind the value under that name too so the
+        # primitive `base_name`; bind the value under that key too so the
         # predicate resolves instead of falsely falling to Tier 3 (CR e6f17b7).
-        binder_name = ContractVerifier._predicate_binder_name(predicate)
-        if binder_name is not None and binder_name != base_name:
-            inner_env = inner_env.push(binder_name, value_term)
+        # The key is the whole reference RENDERED — against the env the
+        # predicate is about to be translated in, so the push side and the
+        # lookup side are one derivation over one environment.  Its head alone
+        # is not the key for a parameterised binder (`@Box<Cnt>.0` resolves
+        # `Box<Nat>`), and the miss took a provable refinement to Tier 3
+        # (#1226).
+        binder_key = ContractVerifier._predicate_binder_key(
+            predicate, smt._alias_env)
+        if binder_key is not None and binder_key != base_name:
+            inner_env = inner_env.push(binder_key, value_term)
         translated = smt.translate_expr(predicate, inner_env)
         if translated is None:
             return None
@@ -7915,16 +9202,144 @@ class ContractVerifier:
         return translated
 
     @staticmethod
+    def _concrete_refined_verdict(
+        smt: "SmtContext", refined_ty: Type, value_term: z3.ExprRef,
+    ) -> tuple[bool, str] | None:
+        """Decide the refinement predicate on a CONCRETE value (#1251(b)).
+
+        :py:meth:`_translate_refined_predicate` declines a base it does not
+        model, because a SYMBOLIC value of that base would translate without
+        its base semantics — ``Byte``'s ``0..255`` range is never asserted —
+        and the boundary narrowings codegen runtime-guards would come back as
+        false E505s (``ch02_byte_refinement`` is the measured case).  None of
+        that applies to a LITERAL: substituting the value leaves a closed
+        formula, and evaluating it is arithmetic rather than inference.
+        ``{ @Byte | @Byte.0 < 10 }`` initialised to ``200`` asks ``200 < 10``,
+        which decides, and decides FALSE — the program it was disclosed on ran
+        to completion and returned a value the refinement forbids.
+
+        So the gate is the VALUE, in the constant discipline
+        :py:meth:`_check_float_to_int_domain_obligation` already uses: simplify,
+        and proceed only for a Z3 literal.  Assumptions are deliberately not
+        consulted for the PREDICATE — nothing a precondition can assert changes
+        the value of a literal — and the answer is taken only from a fold that
+        lands on ``True`` or ``False``.  A predicate whose operands the SMT
+        layer models by something other than evaluation (a call, modelled by
+        the callee's contract) does not fold, and undecided stays undecided:
+        the caller keeps its runtime-guarded disclosure rather than guessing a
+        verdict.  What the premises DO decide is whether the site runs at all,
+        which is why a false fold is not a rejection on its own — see
+        :py:meth:`_reject_or_excuse_concrete_violation`.
+
+        The fold is Z3's, over unbounded integers, where the machine the
+        predicate will run on is not.  For a literal that gap is closed by
+        the checker, which admits an integer literal into a base only within
+        that base's range (a ``@Byte`` literal is 0..255, and 300 is a type
+        error before verification runs), so the folded comparison is the one
+        the emitted guard performs.  Where a predicate could still put an
+        unbounded intermediate between the literal and the comparison, that is
+        the standing prover-vs-machine gap (#1222's class) and it is already
+        how a MODELLED base behaves here — this gate inherits that exposure,
+        it does not widen it.
+
+        Returns ``(holds, rendered_value)``, or None when the value is not
+        concrete or the fold settles nothing.  Restricted to a PRIMITIVE base:
+        a composite literal does not reduce to a Z3 value, so this would return
+        None for it anyway, and gating explicitly keeps a future sort whose
+        literals DO reduce from inheriting the decision by accident.
+
+        Reached from the expression-valued binding sites only, not from
+        :py:meth:`_check_refined_binding_obligation_term`.  That is not an
+        exclusion by policy: a projection site holds an accessor term — a
+        field or tuple component — which is symbolic by construction, so the
+        concreteness gate would decline it on every call.  Wiring it there
+        would add a branch nothing can take.
+        """
+        parts = ContractVerifier._refined_parts(refined_ty)
+        if parts is None:  # pragma: no cover — caller checked the shape
+            return None
+        base, predicate = parts
+        if not isinstance(base, PrimitiveType):
+            return None
+        literal = z3.simplify(value_term)
+        if not ContractVerifier._is_z3_literal(literal):
+            return None
+        # Bound exactly as `_translate_refined_predicate` binds it, under the
+        # base type-name and (when it differs) the syntactic alias binder, so
+        # the two paths cannot disagree about which key the predicate reads.
+        inner_env = SlotEnv().push(base.name, literal)
+        binder_key = ContractVerifier._predicate_binder_key(
+            predicate, smt._alias_env)
+        if binder_key is not None and binder_key != base.name:
+            inner_env = inner_env.push(binder_key, literal)
+        translated = smt.translate_expr(predicate, inner_env)
+        if translated is None:
+            return None
+        # Membership is "the value is a valid @Base" AND the predicate, and
+        # `_translate_refined_predicate` conjoins the one base that carries an
+        # intrinsic (`@Nat`'s `>= 0`).  Carried here for the same reason: the
+        # goal must be the SAME goal on both paths.  A `@Nat` base is modelled
+        # and so never reaches this gate today, which is exactly why the
+        # omission was invisible — and re-deriving it costs one fold on a
+        # closed term.
+        if base == NAT:
+            translated = z3.And(literal >= 0, translated)
+        folded = z3.simplify(translated)
+        if z3.is_true(folded):
+            return (True, str(literal))
+        if z3.is_false(folded):
+            return (False, str(literal))
+        return None
+
+    @staticmethod
+    def _is_z3_literal(term: z3.ExprRef) -> bool:
+        """True iff *term* is a Z3 VALUE rather than a symbolic expression.
+
+        The concreteness half of :py:meth:`_concrete_refined_verdict`'s gate,
+        covering every sort a refinement base's literal reaches it in — Int,
+        Bool, String, and the FP sort ``@Float64`` declares as.  A symbolic
+        term — a slot variable, an accessor, an uninterpreted application — is
+        none of these, which is what keeps a runtime-guarded narrowing out of
+        the decided path.
+
+        There is deliberately no ``is_rational_value`` arm.  Reals reach the
+        verifier only where it converts one (``fpToReal`` in the
+        ``float_to_int`` domain check); no literal any base can carry
+        translates to one, which
+        :class:`~tests.test_verifier_refinements.TestTheConcretenessGateCoversEverySortALiteralArrivesIn`
+        pins per base, so an arm for them would be unreachable.
+        """
+        return bool(
+            z3.is_int_value(term)
+            or z3.is_true(term)
+            or z3.is_false(term)
+            or z3.is_string_value(term)
+            or z3.is_fp_value(term)
+        )
+
+    @staticmethod
     def _count_slots(env: SlotEnv, type_name: str) -> int:
         """Count how many slots exist for a type name."""
         stack = env._stacks.get(type_name, [])
         return len(stack)
 
-    def _type_expr_to_slot_name(self, te: ast.TypeExpr) -> str:
-        """Extract the canonical slot name from a type expression.
+    def _type_expr_to_slot_name(
+        self, te: ast.TypeExpr, env: AliasEnv | None = None,
+    ) -> str:
+        """The slot-binding name of *te*, as the checker binds it (#1208).
 
-        Delegates to the shared recursive :func:`vera.slots.type_expr_slot_name`
-        (fully-qualified over nested composites, #914 finding 2) with the
-        verifier's total-``str`` contract: an unnameable component is ``"?"``.
+        Delegates to :func:`vera.naming.slot_name` against *env*, defaulting to
+        the module env currently in scope (``_current_alias_env``: this
+        program's, built at the end of ``register_program`` from the same
+        registration pass the checker runs — or an imported generic's defining
+        module while its clone is verified).  Syntactic head, RESOLVED type
+        arguments, fully qualified over nested composites (#914 finding 2);
+        already total, and its ``"?"`` is the same unnameable rendering the
+        verifier's contract used.
+
+        A caller rendering a FUNCTION's own parameters passes that function's
+        scope (``_fn_naming_scope``) so its ``forall`` variables shadow
+        same-named aliases; a caller rendering an IMPORTED CALLEE's parameters
+        passes the callee's module env (``_callee_alias_env``).
         """
-        return type_expr_slot_name(te) or "?"
+        return naming.slot_name(te, self._current_alias_env if env is None else env)

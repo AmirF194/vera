@@ -1,0 +1,17 @@
+-- Conformance: an ability name in the reserved prelude namespace is a checker error (Chapter 8, Section 8.4.1)
+-- Tests: E154 — the ability NAME namespace is reserved on the same anchored
+-- pattern as the type namespace (#1260).  An ability is a name the program
+-- declares, so it goes through the one shared reserved-namespace gate; the fix
+-- is a rename, because an ability has no alias escape the way a type position
+-- does.
+ability VeraZed {
+  op size(Int -> Int);
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  0
+}

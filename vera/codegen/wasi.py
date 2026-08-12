@@ -554,7 +554,11 @@ def _gate_families(result: CompileResult) -> None:
         if ops:
             offending.append(f"{family} ({', '.join(sorted(ops))})")
     if result.state_types:
-        types = ", ".join(sorted(t for t, _ in result.state_types))
+        # The cell's BASE, never its identity (#1238 review F2): a
+        # refined family carries the whole predicate as a
+        # discriminator, and this string is read by a person.
+        types = ", ".join(
+            sorted({c.base for c, _ in result.state_types}))
         offending.append(f"state ({types})")
     if offending:
         raise ValueError(
@@ -2737,7 +2741,11 @@ def _gate_families_server(result: CompileResult) -> None:
         if ops:
             offending.append(f"{family} ({', '.join(sorted(ops))})")
     if result.state_types:
-        types = ", ".join(sorted(t for t, _ in result.state_types))
+        # The cell's BASE, never its identity (#1238 review F2): a
+        # refined family carries the whole predicate as a
+        # discriminator, and this string is read by a person.
+        types = ", ".join(
+            sorted({c.base for c, _ in result.state_types}))
         offending.append(f"state ({types})")
     if offending:
         raise ValueError(

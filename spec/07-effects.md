@@ -50,7 +50,7 @@ Rules:
 
 ## 7.3 Effect Rows
 
-A function's effect declaration specifies an **effect row** — an unordered set of effects:
+A function's effect declaration specifies an **effect row** — the sequence of effects it is written with. Row *containment* compares rows by set equality (§7.3.2), so two rows listing the same effects in different orders permit exactly the same callees; the written order is nonetheless meaningful, and resolves which effect a bare operation name belongs to (§7.4, §7.3.3).
 
 ```
 effects(pure)                        -- no effects (empty row)
@@ -68,7 +68,9 @@ effects(<Exn<String>, IO>)           -- may throw String errors and perform IO
 
 ### 7.3.2 Effect Row Ordering
 
-Effect rows are unordered sets. `<IO, State<Int>>` and `<State<Int>, IO>` are the same effect row. The canonical form (for the one-canonical-form rule) is alphabetical order by effect name.
+Set equality governs effect *containment*: `<IO, State<Int>>` and `<State<Int>, IO>` permit exactly the same callees, so for the purposes of §7.8 they are the same effect row.
+
+Containment is all that set equality governs. The order a row is **written** in is meaningful and is preserved: it resolves a bare operation name that more than one effect in the row declares (§7.4), and it selects among two instantiations of one effect (§7.3.3). The formatter therefore does not reorder a row — there is no alphabetical canonical form for effect rows, and imposing one would change what a program means.
 
 ### 7.3.3 Duplicate Effects
 
@@ -110,13 +112,15 @@ public fn hello(-> @Unit)
 
 Effect operations are resolved by the effect declared in the function's effect row. If `get` appears in a function with `effects(<State<Int>>)`, it refers to the `get` operation of `State<Int>`.
 
+**Resolution order.** More than one effect in scope may declare the same operation name — the built-in `State` and `Http` both declare `get`. A bare operation name binds to the **first** effect that declares it in this order: the innermost enclosing `handle[E]` (§7.5), then each enclosing handler outwards, then the function's declared effect row **in the order the row is written**, and finally the **registered** effects in registration order — the built-ins first, then any user `effect` declaration in source order. So `effects(<State<Int>, Http>)` binds a bare `get` to `State`, `effects(<Http, State<Int>>)` binds it to `Http`, and a `handle[State<Int>]` around the call binds it to `State` whatever the row says. Every step of that list is an ordered sequence, so the binding is a property of the program text alone — never of the order an implementation happens to enumerate the row's members.
+
 **Bare operation calls and routing (`E217`).** A bare (unqualified) operation name is only well-formed when the compiler can route it to a concrete implementation. The built-in `State` and `Exn` operations (`get`, `put`, `throw`) are always routable — they are backed by intrinsic host cells — so they may be called bare, as in `increment` above. Every other operation — those of `IO`, `DB`, `Http`, `Inference`, `Random`, and any user-declared effect — is routable bare only inside a `handle[E]` block for its effect `E` (§7.5); outside such a block it has no bare route and MUST be called qualified as `E.op(...)`, the way `hello` calls `IO.print`. Calling one of these operations bare with no enclosing handler is a compile-time error (`E217`), reported by the checker so the backend never receives an operation it cannot lower.
 
 **Effect ordering.** Effect operations execute in program order.  The one sanctioned relaxation is `async(e)` (§9.5.4): when `e`'s effect row is commutative — its operations' completions cannot be observably reordered against any other effect in the program — an implementation MAY overlap `e`'s execution with subsequent computation, resolving at the corresponding `await`.  Effects outside that whitelist retain strict program order; the checker warns (`W002`) where this forces eager evaluation, so verified sequential semantics remain literally true for every Tier-1 claim.
 
 ### 7.4.1 Ambiguous Operations
 
-If two effects in scope define an operation with the same name, the call is ambiguous and MUST be qualified:
+If two effects in scope define an operation with the same name, the call is ambiguous to a reader and SHOULD be qualified. The compiler does not reject the bare form *for ambiguity*: it binds by the resolution order in §7.4, and qualifying says which effect is meant without depending on that order. The binding it picks must still be well-formed on its own terms — a bare call that resolves to an operation with no bare route is `E217` (§7.4), and one whose signature does not fit the call site is an ordinary type error — so "not rejected for ambiguity" is not "always accepted".
 
 <!-- vera:skip-parse category="FRAGMENT" reason="effect Logger + anonymous fn body" -->
 ```
@@ -171,6 +175,38 @@ The builtin parameterized effects take exactly one type argument at the handle: 
 
 For the builtin `State` effect the state declaration **is** the `State<T>` cell: its declared type must structurally equal the effect's `T` after alias resolution — for refined types, predicate included — or the handle is a checker error (E336). A type alias that resolves to `T` is accepted (including a refined alias on both sides, or two textually identical refinement declarations); a declaration that widens (`@Int` on `State<Nat>`), narrows (`@Nat` on `State<Int>`), or carries a refinement predicate the effect argument does not (or a different one) is rejected — verification obligations and runtime guards key off `T`, so a divergent declaration would be documentation the toolchain contradicts. Any refinement on the cell belongs in the `State<T>` argument itself **via a named refinement alias** (`type Small = { @Nat | ... }; handle[State<Small>](@Small = ...)`) — an inline refinement literal in the `State<T>` argument position is not compilable. A user-declared effect's handler state is the handler's own accumulator and may take any type.
 
+**Cell identity is the RESOLVED `T`, not the spelling.** `State<T>` is one effect instance per resolved `T`, so every spelling that resolves to the same type names the same cell — whether that type is scalar or composite, and whether the alias is plain or parameterized. A `handle[State<MaybeInt>]` under `type MaybeInt = Option<Int>` therefore handles a callee declaring `effects(<State<Option<Int>>>)`, and the two share one cell:
+
+```vera
+type MaybeInt = Option<Int>;
+
+private fn stash(@Unit -> @Unit)
+  requires(true)
+  ensures(true)
+  effects(<State<Option<Int>>>)
+{
+  put(Some(7))
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<MaybeInt>](@MaybeInt = None) {
+    get(@Unit) -> { resume(@MaybeInt.0) },
+    put(@MaybeInt) -> { resume(()) }
+  } in {
+    stash(());
+    option_unwrap_or(get(()), 0 - 1)
+  }
+}
+```
+
+`main` returns `7` — `stash` writes to the cell the handler established. The same rule governs `Exn<E>` payloads: `Exn<Msg>` under `type Msg = String` catches a `throw` from a function declaring `effects(<Exn<String>>)`. Two cells are distinct exactly when their resolved types are (`State<Option<Int>>` and `State<Option<Bool>>` are two cells; a handler for one does not handle the other). A refinement is part of that resolved type, predicate included, exactly as it is for the state declaration a handler writes: under `type Pos = { @Int | @Int.0 > 0 }` and `type Neg = { @Int | @Int.0 < 0 }`, `State<Pos>`, `State<Neg>` and `State<Int>` are **three** cells, and a function declaring `effects(<State<Pos>>)` writes the `Pos` one wherever it is called from.
+
+Resolved-type identity governs the cell wherever the resolved type is **nameable** — every type with a resolution, which since the mangler was made total over canonical renderings includes the composite carrying a function type (`State<Handler>` under `type Handler = Option<fn(Int -> Int) effects(pure)>` is the `Option<fn(Int -> Int) effects(pure)>` cell, the same one `State<Option<fn(Int -> Int) effects(pure)>>` names). What is left outside the rule is the type expression with **no resolution to name**: one resolving to a bare function type, and one that does not resolve at all (a removed alias, an alias applied at the wrong arity). Family naming is total, so both are named by their alias-opaque **spelling** and two such spellings name two cells rather than sharing one; both are then refused, downstream and at different gates — the unresolvable one at the compilability gate before any cell is declared, the bare function type only when the function reading it is dropped, its cell having been declared in the meantime. That fallback runs in the conservative direction only: it can leave split a cell the resolution would have merged, never merge two the checker keeps apart.
+
 ### 7.5.2 Handler Semantics
 
 When an effect operation is performed in the handled body:
@@ -188,7 +224,9 @@ For **`State<T>`** these steps have *intrinsic-hybrid* semantics: the operations
 - **The state slot is captured before the intrinsic effect.** In a `put` clause, `@T.0` is the state as it was *before* the store (`@T.1` is the argument being stored).
 - **`with @T = expr` overrides the intrinsic store**, evaluated in the clause scope after the body. Because `@T.0` is the pre-store capture, `with @T = @T.0` means *keep the old state* — it undoes the `put`. A clause with no `with` leaves the intrinsic effect in place, so the canonical clauses (`get(@Unit) -> { resume(@T.0) }`, `put(@T) -> { resume(()) }`) are exact identity transforms.
 - **`resume` is single-shot and tail-position** in a `State` clause: the clause body's tail expression is exactly one `resume(...)` (reached through a block's trailing expression or a single-arm `match`). To branch on the resumed value, branch *inside* the argument (`resume(if c then a else b)`) — a `resume` per branch arm is not compilable (`resume` types as `Unit`, so the branch is a void block that cannot carry the op's result). A missing, repeated, non-tail, or per-arm `resume` skips the function with a diagnostic. Multi-shot resumption is a FUTURE feature (§7.5.3's `Choice` sketch).
-- **Clauses are lexical to the handled body's own operation sites.** An operation performed inside a *called function* (one declaring `effects(<State<T>>)`) or inside a clause body itself performs the **intrinsic** operation against the same dynamically-scoped state cell — clause transforms and overrides do not follow the effect through call boundaries. Extracting a handled body's ops into a helper therefore changes what a transforming clause observes; keep transformed operations syntactically inside the `in { ... }` body.
+- **Clause transforms do not cross a call boundary, and a clause never re-enters itself.** An operation performed inside a *called function* (one declaring `effects(<State<T>>)`) performs the **intrinsic** operation against the same dynamically-scoped state cell: the transforms and overrides of the handler that discharges the effect do not apply to it. Extracting a handled body's ops into a helper therefore changes what a transforming clause observes; keep transformed operations syntactically inside the `in { ... }` body. The same holds for a clause seen from inside itself — an operation written in a clause body never re-enters the clause it is written in. Which handler that operation *does* reach is the next rule.
+- **A clause body belongs to the handler's DECLARATION scope, not to the body it refines.** This is one rule with two consequences. A slot reference in a clause body (or in its `with` expression) resolves against the scope where the `handle` expression is written, never against bindings the handled body made before performing the operation (§7.5.1). And a bare `get`/`put` written in a clause body is likewise an operation of the **enclosing** context — the next handler out, or the enclosing function's declared row — never of the handler whose clause it is. It is an operation *site of that enclosing context*, so if the enclosing handler declares a clause for the operation, that clause runs — exactly as it would for the same operation written directly in the enclosing handled body. With two nested handlers over **different** cell types, a bare `put` in the inner handler's clause body therefore writes the **outer** cell, through the outer handler's `put` clause where it has one; to refine the inner cell from its own clause, use `with @T = expr`, which is the clause's own state override. (That a clause cannot re-enter itself is the same rule seen from the other side, and it is what makes clause inlining terminate: each such operation resolves strictly further out.)
+- **A clause-body operation cannot reach a same-family outer cell yet.** When such an operation resolves to a handler for the *same* `State<T>` — `handle[State<Int>]` nested inside `handle[State<Int>]`, or a `handle[State<T>]` written in a function that itself declares `effects(<State<T>>)` — the reference implementation cannot reach the outer cell from inside the inner handler: its state intrinsics address only the innermost cell of each family, so the operation would be routed outward while its cell stayed inward. That operation is refused at compile time (`E602`) rather than lowered to hybrid semantics; outward cell addressing is tracked as [#1233](https://github.com/aallan/vera/issues/1233). Same-family nesting is otherwise supported: it is only a clause body that performs the operation that is refused, so two handlers over the same cell type whose clause bodies perform none of their own operations compile and run normally, and so does an operation written in the inner handler's *handled body*. Nest handlers over distinct cell types, or refine the inner cell with `with @T = expr`.
 
 The handler may also choose NOT to call `resume`, which aborts the handled body. This is how exceptions are implemented (`Exn` clauses run at the catch boundary and never resume).
 

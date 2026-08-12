@@ -1,0 +1,57 @@
+-- Conformance: non-Int scalar alias cells keep their WASM width (Chapter 7,
+-- Section 7.5).  Tests: `Bool`, `Byte` and `Float64` behind aliases as the
+-- State<T> cell — the family NAME and the cell's WASM type resolve together,
+-- so an i32 Byte cell is not fed by an i64 host binding named after the
+-- alias (#1205).
+type Flag = Bool;
+
+type Level = Byte;
+
+type Ratio = Float64;
+
+private fn use_flag(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result)
+  effects(pure)
+{
+  handle[State<Flag>](@Flag = false) {
+    put(@Flag) -> { resume(()) }
+  } in {
+    put(true);
+    get(())
+  }
+}
+
+private fn use_ratio(@Unit -> @Float64)
+  requires(true)
+  ensures(@Float64.result == 2.5)
+  effects(pure)
+{
+  handle[State<Ratio>](@Ratio = 0.0) {
+    get(@Unit) -> { resume(@Ratio.0) }
+  } in {
+    put(2.5);
+    get(())
+  }
+}
+
+private fn use_level(@Unit -> @Byte)
+  requires(true)
+  ensures(byte_to_int(@Byte.result) == 42)
+  effects(pure)
+{
+  handle[State<Level>](@Level = 0) {
+    put(@Level) -> { resume(()) }
+  } in {
+    put(42);
+    get(())
+  }
+}
+
+public fn main(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result)
+  effects(pure)
+{
+  use_flag(()) && use_ratio(()) == 2.5 && byte_to_int(use_level(())) == 42
+}

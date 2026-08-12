@@ -619,6 +619,98 @@ class TestCmdVerify:
             f"and diagnostics {diag_keys}"
         )
 
+    def test_json_obligation_file_follows_the_declaring_module(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """An obligation raised while an IMPORTED body verifies carries THAT
+        module's file, not the entry program's.
+
+        The join above assumed every obligation belonged to the entry file and
+        stamped the CLI path on all of them.  Once the verifier began
+        reporting an imported clone against its own module (#1220), that
+        assumption broke the join outright — the E501 diagnostic said
+        `hlib.vera:10` while its own obligation said `main.vera:10` — and made
+        the obligation stream cite lines past the entry file's end (PR #1239
+        review).
+        """
+        module = tmp_path / "hlib.vera"
+        module.write_text(
+            "module hlib;\n"
+            "\n"
+            "type Cnt = Bool;\n"
+            "\n"
+            "public forall<T> fn f(@Array<Bool>, @Array<Int>, @T -> @Nat)\n"
+            "  requires(array_length(@Array<Bool>.0) == 3)\n"
+            "  ensures(@Nat.result >= 0)\n"
+            "  effects(pure)\n"
+            "{\n"
+            "  help(@Array<Bool>.0, @Array<Int>.0)\n"
+            "}\n"
+            "where {\n"
+            "  fn help(@Array<Cnt>, @Array<Int> -> @Nat)\n"
+            "    requires(array_length(@Array<Cnt>.0) == 2)\n"
+            "    ensures(@Nat.result >= 0)\n"
+            "    effects(pure)\n"
+            "  {\n"
+            "    array_length(@Array<Int>.0)\n"
+            "  }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        main = tmp_path / "main.vera"
+        main.write_text(
+            "import hlib(f);\n"
+            "\n"
+            "public fn main(@Unit -> @Nat)\n"
+            "  requires(true)\n"
+            "  ensures(true)\n"
+            "  effects(pure)\n"
+            "{\n"
+            "  f([true, false, true], array_range(0, 2), 9)\n"
+            "}\n",
+            encoding="utf-8",
+        )
+
+        rc = cmd_verify(str(main), as_json=True)
+        data = json.loads(capsys.readouterr().out)
+        # The fixture violates a precondition, so the verdict is part of what
+        # this pins: an E501 reported with a success exit code would otherwise
+        # keep it green.
+        assert rc == 1, rc
+        assert data["ok"] is False, data["ok"]
+        obls, reported = data["obligations"], data["diagnostics"]
+        assert obls and reported, (obls, reported)
+
+        # Every obligation names a file that exists and a line that file has.
+        lengths = {
+            str(f): len(f.read_text(encoding="utf-8").splitlines())
+            for f in (main, module)
+        }
+        for o in obls:
+            where = o["location"]["file"]
+            assert where in lengths, where
+            assert o["location"]["line"] <= lengths[where], (
+                f"obligation at {where}:{o['location']['line']} names a line "
+                f"that file does not have ({lengths[where]} lines)"
+            )
+
+        # Both files are represented — the fixture would not measure the fix
+        # if every obligation happened to belong to one of them.
+        assert len({o["location"]["file"] for o in obls}) == 2, obls
+
+        # And the E501 joins its obligation on the full key.
+        e501 = [d for d in reported if d["error_code"] == "E501"]
+        assert len(e501) == 1, reported
+        key = (
+            e501[0]["location"]["file"], e501[0]["location"]["line"],
+            e501[0]["location"]["column"],
+        )
+        assert key in {
+            (o["location"]["file"], o["location"]["line"],
+             o["location"]["column"])
+            for o in obls
+        }, (key, obls)
+
     def test_json_summary_consistent_on_demotion_example(
         self, capsys: pytest.CaptureFixture[str],
     ) -> None:
@@ -643,6 +735,54 @@ class TestCmdVerify:
         tier3 = sum(1 for o in obls if o["status"] in ("tier3", "timeout"))
         assert v["tier1_verified"] == tier1
         assert v["tier3_runtime"] == tier3
+
+    def test_json_obligations_array_is_the_whole_stream(
+        self, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The array is emitted UNFILTERED, and the summary is a partition of
+        it rather than a count of it (#1242).
+
+        ``ch08_transitive_module_import_base`` emits three obligations against
+        ``total = 2``, which reads as the summary disagreeing with the stream
+        until the third is named: a REFUTED obligation discharges to no tier,
+        so it is counted by no summary field and surfaced as the E500 error
+        instead.  Both halves are pinned here — the entry is present in the
+        array (a `cmd_verify` that filtered it out would satisfy the naive
+        ``len == total`` reading and lose the join to its diagnostic), and the
+        counts account for it exactly once.
+        """
+        path = str(
+            Path(__file__).parent / "conformance"
+            / "ch08_transitive_module_import_base.vera"
+        )
+        rc = cmd_verify(path, as_json=True)
+        assert rc == 1, rc
+        data = json.loads(capsys.readouterr().out)
+        obls, v = data["obligations"], data["verification"]
+        uncounted = [
+            o for o in obls
+            if o["status"] in ("violated", "tier3_unguarded")
+        ]
+        assert len(uncounted) == 1, obls
+        assert uncounted[0]["status"] == "violated", uncounted
+        assert uncounted[0]["kind"] == "ensures", uncounted
+        # The counts partition the array: nothing double-counted, nothing
+        # unexplained.
+        assert v["total"] == v["tier1_verified"] + v["tier3_runtime"]
+        assert len(obls) == v["total"] + len(uncounted), (obls, v)
+        assert len(obls) > v["total"], (
+            "the fixture must actually exercise an uncounted entry"
+        )
+        # And the uncounted entry joins the error it was surfaced as.
+        e500 = [d for d in data["diagnostics"] if d["error_code"] == "E500"]
+        assert len(e500) == 1, data["diagnostics"]
+        assert (
+            e500[0]["location"]["line"],
+            e500[0]["location"]["column"],
+        ) == (
+            uncounted[0]["location"]["line"],
+            uncounted[0]["location"]["column"],
+        ), (e500, uncounted)
 
     def test_json_type_error(
         self,
@@ -4060,6 +4200,191 @@ class TestExplainSlots:
         assert "last @Int" in captured.out
         assert "2 from last @Int" in captured.out
         assert "first @Int" in captured.out
+
+    def test_inprocess_alias_argument_is_resolved(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A parameter written `@Option<Cnt>` is tabled as `Option<Int>`.
+
+        The table is a NAMING answer, so it reports what the CHECKER bound
+        (#1208): THE renderer keeps the head syntactic and RESOLVES the type
+        arguments, so an alias in argument position collapses.  A table that
+        still said `Option<Cnt>` would be naming a stack no other subsystem
+        agrees with — the body's `@Option<Int>.0` resolves against
+        `Option<Int>`, and that is what the user has to be told.
+        """
+        src = (
+            "type Cnt = Int;\n"
+            "\n"
+            "public fn f(@Option<Cnt> -> @Int)\n"
+            "  requires(true)\n"
+            "  ensures(true)\n"
+            "  effects(pure)\n"
+            "{\n"
+            "  match @Option<Int>.0 {\n"
+            "    Some(@Int) -> @Int.0,\n"
+            "    None -> 0 - 1\n"
+            "  }\n"
+            "}\n"
+        )
+        f = tmp_path / "alias_arg.vera"
+        f.write_text(src, encoding="utf-8")
+        rc = cmd_check(str(f), explain_slots=True)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "@Option<Int>.0  parameter 1 (only @Option<Int>)" in out
+        # The signature line echoes the SOURCE spelling (what was written);
+        # the slot lines must not offer it as a key, because it is not one.
+        assert "@Option<Cnt>.0" not in out
+
+    def test_inprocess_forall_var_shadows_a_module_alias(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A `forall<T>` parameter is named in the FUNCTION's scope (#1208).
+
+        `T` here is both a module alias (`= Int`) and the function's own type
+        parameter, and the type parameter SHADOWS the alias — that is the
+        checker's branch order, so the checker binds two distinct stacks,
+        `Option<Int>` (parameter 1) and `Option<T>` (parameter 2).  Named
+        against the bare module environment the shadow is invisible: `T`
+        resolves to `Int`, the two parameters merge into one `Option<Int>`
+        stack, and the table tells the user `@Option<Int>.0` is parameter 2
+        when the checker resolves it to parameter 1.  Wrong, not merely
+        vague — which is why the function's own type parameters have to
+        enter the environment the table is rendered against.
+        """
+        src = (
+            "type T = Int;\n"
+            "\n"
+            "public forall<T> fn g(@Option<Int>, @Option<T> -> @Int)\n"
+            "  requires(true)\n"
+            "  ensures(true)\n"
+            "  effects(pure)\n"
+            "{\n"
+            "  match @Option<Int>.0 {\n"
+            "    Some(@Int) -> @Int.0,\n"
+            "    None -> 0 - 1\n"
+            "  }\n"
+            "}\n"
+        )
+        f = tmp_path / "shadow.vera"
+        f.write_text(src, encoding="utf-8")
+        rc = cmd_check(str(f), explain_slots=True)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "@Option<Int>.0  parameter 1 (only @Option<Int>)" in out
+        assert "@Option<T>.0  parameter 2 (only @Option<T>)" in out
+
+    _WHERE_HELPER = (
+        "public fn outer(@Int -> @Int)\n"
+        "  requires(true)\n"
+        "  ensures(true)\n"
+        "  effects(pure)\n"
+        "{\n"
+        "  helper(@Int.0, 2)\n"
+        "}\n"
+        "where {\n"
+        "  fn helper(@Int, @Int -> @Int)\n"
+        "    requires(true)\n"
+        "    ensures(true)\n"
+        "    effects(pure)\n"
+        "  {\n"
+        "    @Int.1 - @Int.0\n"
+        "  }\n"
+        "}\n"
+    )
+
+    def test_inprocess_where_helper_gets_its_own_table(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A `where`-block helper is tabled too (#1217).
+
+        A helper resets the slot namespace, so its De Bruijn ordering is a
+        separate question from its parent's — and the parent's table answers
+        nothing about it.  Printing only top-level functions left the shape
+        where De Bruijn confusion is MOST likely (two same-typed helper
+        parameters, read in the parent's mental model) with no table at all.
+        """
+        f = tmp_path / "where_helper.vera"
+        f.write_text(self._WHERE_HELPER, encoding="utf-8")
+        rc = cmd_check(str(f), explain_slots=True)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "fn outer(@Int -> @Int)" in out
+        assert "where fn helper(@Int, @Int -> @Int)" in out
+        # The helper's OWN stack: two @Int parameters, De Bruijn ordered.
+        assert "@Int.0  parameter 2 (last @Int)" in out
+        assert "@Int.1  parameter 1 (first @Int)" in out
+
+    def test_where_helper_table_is_in_the_json_too(
+        self, tmp_path: Path,
+    ) -> None:
+        """The JSON surface gains the helper, qualified by its parent."""
+        import io
+        from contextlib import redirect_stdout
+
+        f = tmp_path / "where_helper.vera"
+        f.write_text(self._WHERE_HELPER, encoding="utf-8")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = cmd_check(str(f), as_json=True, explain_slots=True)
+        assert rc == 0
+        envs = json.loads(buf.getvalue())["slot_environments"]
+        by_name = {e["function"]: e for e in envs}
+        assert set(by_name) == {"outer", "outer.helper"}
+        assert {"slot": "@Int.0", "type": "Int", "parameter": 2} in (
+            by_name["outer.helper"]["slots"])
+
+    def test_where_helper_inherits_the_parents_forall_vars(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The helper's table is narrowed by the ENCLOSING `forall` (#1217).
+
+        `T` is both a module alias (`= Int`) and the parent's type parameter,
+        and a helper sees its parent's type variables — the checker saves and
+        restores ONE type-parameter map rather than replacing it.  Rendered
+        against the bare module environment, `T` in the helper resolves to
+        `Int`, the helper's two parameters merge into one `Option<Int>` stack,
+        and neither `@Option<T>` row exists at all.
+
+        The helper declares its two parameters in the OPPOSITE order from its
+        parent (PR #1224 review), so its table is DISTINGUISHABLE from the
+        parent's: a printer that echoed the enclosing function's table under
+        the helper's heading would satisfy assertions written against the same
+        order, and fails these.
+        """
+        src = (
+            "type T = Int;\n"
+            "\n"
+            "public forall<T> fn outer(@Option<Int>, @Option<T> -> @Int)\n"
+            "  requires(true)\n"
+            "  ensures(true)\n"
+            "  effects(pure)\n"
+            "{\n"
+            "  helper(@Option<T>.0, @Option<Int>.0)\n"
+            "}\n"
+            "where {\n"
+            "  fn helper(@Option<T>, @Option<Int> -> @Int)\n"
+            "    requires(true)\n"
+            "    ensures(true)\n"
+            "    effects(pure)\n"
+            "  {\n"
+            "    0\n"
+            "  }\n"
+            "}\n"
+        )
+        f = tmp_path / "where_shadow.vera"
+        f.write_text(src, encoding="utf-8")
+        rc = cmd_check(str(f), explain_slots=True)
+        assert rc == 0
+        out = capsys.readouterr().out
+        parent_block, helper_block = out.split("where fn helper")
+        # The parent's own order, as the control the helper must differ from.
+        assert "@Option<Int>.0  parameter 1 (only @Option<Int>)" in parent_block
+        assert "@Option<T>.0  parameter 2 (only @Option<T>)" in parent_block
+        # The helper's, reversed.
+        assert "@Option<T>.0  parameter 1 (only @Option<T>)" in helper_block
+        assert "@Option<Int>.0  parameter 2 (only @Option<Int>)" in helper_block
 
 
 class TestCmdServe:

@@ -32,18 +32,20 @@ from dataclasses import dataclass, field
 
 from lsprotocol import types as lsp
 
-from vera import ast
+from vera import ast, naming
 from vera.checker.core import CheckArtifacts
 from vera.errors import Diagnostic, ParseError, TransformError
 from vera.lsp.convert import (
     LineIndex,
     location_to_range,
     span_to_range,
+    uri_to_path,
 )
 from vera.obligations.cache import walk_nodes
 from vera.obligations.core import ProofObligation
 from vera.obligations.session import VerificationSession
-from vera.slots import slot_table
+from vera.naming import EMPTY_ALIAS_ENV, AliasEnv
+from vera.slots import fn_scopes, fn_slot_scope, slot_table
 
 _SEVERITY = {
     "error": lsp.DiagnosticSeverity.Error,
@@ -58,10 +60,23 @@ class Analysis:
     uri: str
     text: str
     index: LineIndex
+    #: The filesystem path ``uri`` names, and the ``file=`` the pipeline was
+    #: actually driven with (:func:`vera.lsp.convert.uri_to_path`).  Kept
+    #: beside ``uri`` rather than replacing it because the two answer
+    #: different questions: ``uri`` is what the CLIENT is told (a
+    #: ``textDocument/definition`` Location must carry a URI), ``path`` is
+    #: what the compiler was told, so it is what an obligation's or a
+    #: diagnostic's ``file`` is comparable against.
+    path: str = ""
     diagnostics: list[Diagnostic] = field(default_factory=list)
     obligations: list[ProofObligation] = field(default_factory=list)
     artifacts: CheckArtifacts | None = None
     program: ast.Program | None = None
+    # #1208: the document's naming environment, lifted out of `artifacts` so
+    # the slot-table and hover renderers can name against the checker's own
+    # alias table.  Empty when the pipeline stopped at parse/transform — there
+    # is no check, so there are no aliases to name against.
+    alias_env: AliasEnv = EMPTY_ALIAS_ENV
 
 
 def analyze(
@@ -78,23 +93,50 @@ def analyze(
     from vera.transform import transform
 
     index = LineIndex(text)
-    analysis = Analysis(uri=uri, text=text, index=index)
+    # The pipeline is driven with the PATH, never the URI (#1246): the
+    # module resolver reads imports from `Path(file).parent`, and a
+    # `file://` URI makes that the directory `file:`, so a document with
+    # imports resolved none of them and was silently left unverified.
+    path = uri_to_path(uri)
+    analysis = Analysis(uri=uri, text=text, index=index, path=path)
     try:
-        program = transform(parse(text, file=uri))
+        program = transform(parse(text, file=path))
     except (ParseError, TransformError) as exc:
         analysis.diagnostics = [exc.diagnostic]
         return analysis
 
     analysis.program = program
-    check_diags, artifacts = typecheck_with_artifacts(program, text, file=uri)
+    check_diags, artifacts = typecheck_with_artifacts(program, text, file=path)
     analysis.artifacts = artifacts
+    analysis.alias_env = artifacts.alias_env
     analysis.diagnostics = list(check_diags)
 
     if not any(d.severity == "error" for d in check_diags):
-        result = session.verify_source(text, file=uri)
+        result = session.verify_source(text, file=path)
+        # The check above ran module-BLIND (no `resolved_modules`), and
+        # `verify_source` re-checks module-AWARE.  Only the second sees the
+        # resolver's errors and any error that needs an imported signature
+        # to detect, and it hands them back as `check_diagnostics` — which
+        # was discarded, so `glib::takes_int("nope")` published a warning,
+        # produced no obligations, and said nothing about the E202 that had
+        # stopped verification (PR #1282 review).  Appended here, minus
+        # anything the blind check already reported: the module-aware pass
+        # re-derives those, and a straight append shows each twice.
+        seen = {_diag_key(d) for d in analysis.diagnostics}
+        analysis.diagnostics += [
+            d for d in result.check_diagnostics if _diag_key(d) not in seen
+        ]
         analysis.diagnostics += result.verify_diagnostics
         analysis.obligations = result.obligations
     return analysis
+
+
+def _diag_key(d: Diagnostic) -> tuple[object, ...]:
+    """Identity of a diagnostic for de-duplication across two passes."""
+    return (
+        d.error_code, d.severity, d.description,
+        d.location.line, d.location.column,
+    )
 
 
 def _tier_hints(analysis: Analysis) -> list[lsp.Diagnostic]:
@@ -105,9 +147,25 @@ def _tier_hints(analysis: Analysis) -> list[lsp.Diagnostic]:
     obligation site.  ``violated`` obligations already have their own
     error diagnostics, so they exclude a function from getting a
     cheerful Tier-1 hint without re-stating the failure.
+
+    Only obligations belonging to THIS document contribute (#1246).
+    Verifying an entry program verifies the modules it imports, so the
+    stream carries their functions too, and their line numbers index
+    their own files — placed here they land on whatever this document
+    happens to have on that line, or past its end.  ``publishDiagnostics``
+    is per-URI, so an imported module's hint is not this document's to
+    publish under any line.  ``file is None`` means the record came from
+    outside a verifier run (see :class:`ProofObligation`), never from
+    another module, so it keeps its hint rather than losing one silently.
+
+    The comparison is against ``analysis.path``, not ``analysis.uri``:
+    ``path`` is the ``file=`` the pipeline was given, so it is the same
+    string the verifier stamped onto every obligation it reified.
     """
     by_fn: dict[str, list[ProofObligation]] = {}
     for ob in analysis.obligations:
+        if ob.file is not None and ob.file != analysis.path:
+            continue
         by_fn.setdefault(ob.fn_name, []).append(ob)
 
     hints: list[lsp.Diagnostic] = []
@@ -226,19 +284,27 @@ def definition_at(
     # parameters, not the enclosing top-level function's.
     enclosing: ast.FnDecl | None = None
     enclosing_size: tuple[int, int] | None = None
+    # `fn_scopes` (vera/slots.py) pairs each function with the type
+    # parameters in scope OVER it — a `where` helper inside a generic sees
+    # the outer function's variables too (`_check_fn` saves and restores one
+    # shared map rather than replacing it) — so taking the INNERMOST function
+    # containing the cursor takes its accumulated scope with it.  Shared with
+    # `vera check --explain-slots` (#1217): the two surfaces answer the same
+    # question about the same helper, so they accumulate in one place.
+    in_scope_vars: tuple[str, ...] = ()
     for tld in analysis.program.declarations:
-        for node in walk_nodes(tld.decl):
-            if (
-                isinstance(node, ast.FnDecl)
-                and node.span is not None
-                and _span_contains(node.span, line1, col1)
-            ):
-                size = (
-                    node.span.end_line - node.span.line,
-                    node.span.end_column - node.span.column,
-                )
-                if enclosing_size is None or size < enclosing_size:
-                    enclosing, enclosing_size = node, size
+        if not isinstance(tld.decl, ast.FnDecl):
+            continue
+        for fn, fn_vars, _path in fn_scopes(tld.decl):
+            if fn.span is None or not _span_contains(fn.span, line1, col1):
+                continue
+            size = (
+                fn.span.end_line - fn.span.line,
+                fn.span.end_column - fn.span.column,
+            )
+            if enclosing_size is None or size < enclosing_size:
+                enclosing, enclosing_size = fn, size
+                in_scope_vars = fn_vars
     if enclosing is None:
         return None
 
@@ -254,8 +320,16 @@ def definition_at(
     if slot is None:
         return None
 
-    table = slot_table(enclosing.params)
-    positions = table.get(slot.type_name, [])
+    # #1208: BOTH sides render through :mod:`vera.naming`, in ONE scope —
+    # this module's env (the document being analysed owns `enclosing`)
+    # narrowed by `fn_slot_scope`, the same narrowing `slot_table` applies to
+    # the binding side, so the two cannot be scoped differently.  The
+    # reference used to be keyed by its bare HEAD, so `@Option<Int>.0` looked
+    # up `Option` in a table keyed `Option<Int>` and go-to-definition
+    # silently returned nothing for every parameterised slot.
+    scope = fn_slot_scope(analysis.alias_env, in_scope_vars)
+    table = slot_table(enclosing.params, analysis.alias_env, in_scope_vars)
+    positions = table.get(naming.slot_ref_key(slot, scope), [])
     if slot.index >= len(positions):
         return None  # binds to a let/match binding, not a parameter
     param = enclosing.params[positions[slot.index] - 1]

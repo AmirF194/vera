@@ -114,6 +114,10 @@ In a function body:
 - **Let bindings**: each `let @T = ...;` pushes a new binding onto the stack. After the `let`, the new binding is `@T.0` and every previous `T`-typed binding shifts up by one.
 - **Match arms**: pattern variables introduce bindings for the duration of that arm only.
 - **Closures**: the inner function's parameters are innermost; outer parameters are accessible at higher indices.
+- **`where` helpers**: a closed, parameter-rooted scope — the one binding form that does *not* nest. Unlike a closure, a helper cannot reach the parent's bindings at any index; a reference to one is `E130`, and the fix is to pass the value as an argument.
+- **`forall` variables**: a type parameter shadows a module type alias of the same name, over the whole signature, the body, and any `where` helper beneath it. Under `type T = Int`, the parameters of `forall<T> fn f(@Option<T>, @Option<Int>)` are two stacks, not one.
+
+The *name* a binding takes is a separate question from the index it takes, and type aliases make the two come apart. §6 is that rule.
 
 ---
 
@@ -242,13 +246,17 @@ In the else branch, after the `let`:
 
 ### 5.6 Closures and captured bindings
 
+Two spelling rules govern a function type in a signature: a return type expression always carries the `@` prefix, so an inline function type reads `@fn(Int -> Int) effects(pure)`; and a type-level `fn(...)` takes plain inner type names, never `@`-prefixed ones. Neither an alias nor a `Unit` parameter is required — `fn(-> Int) effects(pure)` is a legal nullary function type — but the alias is the form the conformance suite uses, and a `Unit` parameter is the conventional spelling for a thunk, so the examples below follow both:
+
 ```vera
-private fn make_adder(@Int -> fn(-> @Int) effects(pure))
+type UnitToInt = fn(Unit -> Int) effects(pure);
+
+private fn make_adder(@Int -> @UnitToInt)
   requires(true)
   ensures(true)
   effects(pure)
 {
-  fn(-> @Int) effects(pure) {
+  fn(@Unit -> @Int) effects(pure) {
     @Int.0 + 1
   }
 }
@@ -259,7 +267,9 @@ This closure captures the outer parameter. Inside the inner function there are n
 If the inner function had its own `Int` parameter:
 
 ```vera
-private fn make_adder(@Int -> fn(@Int -> @Int) effects(pure))
+type IntToInt = fn(Int -> Int) effects(pure);
+
+private fn make_adder(@Int -> @IntToInt)
   requires(true)
   ensures(true)
   effects(pure)
@@ -312,7 +322,172 @@ The `requires` clause encodes the precondition that minimum ≤ maximum: `@Int.1
 
 ---
 
-## 6. The commutative operations trap
+## 6. Type aliases and slot names
+
+A slot reference names a *type*, so `type` declarations are how a Vera program controls its own slot namespaces. Three rules decide what a parameter binds, and they are deliberately different from one another.
+
+### 6.1 The three-clause rule
+
+**The head stays as written.** `type Cnt = Int;` does not make `@Cnt` and `@Int` interchangeable. A parameter declared `@Cnt` is reached only by `@Cnt.0`; `@Int.0` does not see it. This is what stops a library adding an alias and silently splitting a caller's `Int` stack.
+
+**Type arguments resolve.** Inside `<...>`, aliases are transparent: under that same `type Cnt = Int`, a parameter written `@Option<Cnt>` binds `Option<Int>` — because `Option<Cnt>` and `Option<Int>` are one type, and one type should not be two namespaces.
+
+```vera
+type Cnt = Int;
+
+private fn wrap(@Option<Cnt>, @Cnt, @Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  @Cnt.0 + @Int.0
+}
+```
+
+```text
+  fn wrap(@Option<@Cnt>, @Cnt, @Int -> @Int)
+    @Cnt.0  parameter 2 (only @Cnt)
+    @Int.0  parameter 3 (only @Int)
+    @Option<Int>.0  parameter 1 (only @Option<Int>)
+```
+
+Three parameters, three separate stacks. Parameters 2 and 3 stay apart because the head is opaque; parameter 1 is reached by `@Option<Int>.0` rather than `@Option<Cnt>.0` because the argument resolved.
+
+**`State` and `Exn` cells resolve through the head too.** A cell's identity is its *resolved* type rather than its spelling — §6.5, which also carries the one exception.
+
+### 6.2 Naming your parameters with aliases
+
+Vera has no variable names, but it does have type names — and an alias is how you give a parameter one. Prefer this to counting indices whenever two parameters of the same underlying type mean different things:
+
+```vera
+type Meters = Int;
+type Feet = Int;
+
+private fn excess(@Meters, @Feet -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  @Meters.0 - @Feet.0 / 3
+}
+```
+
+Each type has exactly one binding, so every reference is `.0` and there is no ordering to get wrong. The same function written `fn excess(@Int, @Int -> @Int)` needs `@Int.1 - @Int.0 / 3`, and swapping those two indices is precisely the silent bug §7 is about.
+
+Aliases turn a positional question into a named one without reintroducing names the model can misspell. A misspelled `@Metres.0` does not quietly resolve to something else — there are no `Metres` bindings, so it fails to type-check:
+
+```text
+[E130] Error at main.vera, line 9, column 3:
+
+      @Metres.0 - @Feet.0 / 3
+      ^
+
+  Cannot resolve @Metres.0: no Metres bindings in scope.
+
+  Slot reference @Metres.0 requires at least 1 binding(s) of type Metres.
+
+  Fix:
+
+    Ensure enough Metres bindings are in scope, or use a lower index.
+
+  See: Chapter 3, Section 3.4 "Reference Resolution"
+```
+
+### 6.3 When two spellings share a stack
+
+Because arguments resolve, two differently-spelled parameters can land on one stack — and then De Bruijn ordering applies across both:
+
+```vera
+type Cnt = Int;
+
+private fn pick(@Option<Cnt>, @Option<Int> -> @Option<Int>)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  @Option<Int>.1
+}
+```
+
+```text
+  fn pick(@Option<@Cnt>, @Option<@Int> -> @Option<@Int>)
+    @Option<Int>.0  parameter 2 (last @Option<Int>)
+    @Option<Int>.1  parameter 1 (first @Option<Int>)
+```
+
+The body returns parameter 1. Note what the two parts of the report are doing: the signature line re-prints the type names you *wrote* (`@Cnt`, unresolved), and the table rows report what was *bound*. When they differ, the rows are the authority — they are the keys the checker's binding table actually uses.
+
+### 6.4 `forall` variables shadow aliases
+
+A `forall<T>` variable shadows a module alias of the same name over the whole signature, the body, and any `where` helper beneath it:
+
+```vera
+type T = Int;
+
+private forall<T> fn split(@Option<Int>, @Option<T> -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  match @Option<Int>.0 {
+    Some(@Int) -> @Int.0,
+    None -> 0
+  }
+}
+```
+
+```text
+  fn split(@Option<@Int>, @Option<@T> -> @Int)
+    @Option<Int>.0  parameter 1 (only @Option<Int>)
+    @Option<T>.0  parameter 2 (only @Option<T>)
+```
+
+Two stacks, not one: the `T` inside `split` is the type parameter, not the module's `type T = Int`. That is what makes `@Option<Int>.0` parameter 1. Were the alias visible here, both parameters would render `Option<Int>`, they would merge into one two-entry stack, and `@Option<Int>.0` — most recent — would land on parameter 2 instead: a different parameter, silently, with no error to read.
+
+Passing `@Option<Int>.0` to a helper that declares `@Option<T>` is an `E202`. That is the shadowing being enforced, not a mistake in the table.
+
+### 6.5 Cell identity is not slot identity
+
+A `State<T>` or `Exn<E>` cell is identified by the *resolved* `T`, not by its spelling. `State<MaybeInt>` under `type MaybeInt = Option<Int>` is the same cell as `State<Option<Int>>`, so a helper declaring one and a handler spelling the other share their state:
+
+```vera
+type MaybeInt = Option<Int>;
+
+private fn bump(@Unit -> @Unit)
+  requires(true)
+  ensures(true)
+  effects(<State<Option<Int>>>)
+{
+  put(Some(7))
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 7)
+  effects(pure)
+{
+  handle[State<MaybeInt>](@MaybeInt = None) {
+    get(@Unit) -> { resume(@MaybeInt.0) },
+    put(@MaybeInt) -> { resume(()) }
+  } in {
+    bump(());
+    match get(()) {
+      Some(@Int) -> @Int.0,
+      None -> 0 - 1
+    }
+  }
+}
+```
+
+`vera run` prints `7` — the value `bump` put through its own spelling, read back through the handler's. Two cells would leave the handler reading its own untouched `None` and printing `-1`.
+
+Note the contrast with the head rule inside that same handler. The clause binder is still `@MaybeInt`, because that is a *slot name* and slot names keep their head. The *cell* it reads is shared, because cell identity is not a naming question at all.
+
+**The one exception, and it runs in the safe direction.** The resolved type names the cell wherever the type expression **has a resolution to name**. What it cannot name is a resolution that is a bare function type, or one that failed altogether (a removed alias, an alias applied at the wrong arity). The reference compiler falls back to the alias-opaque spelling there, and only there, so two spellings of one such type name two cells rather than sharing one — naming is total and runs first. Both shapes are refused downstream, at different gates: the unresolvable one at the compilability gate before any cell is declared, the bare function type only when the function reading it is dropped. The fallback can leave split a cell the resolution would have merged; it never merges two the checker keeps apart. [`spec/07-effects.md`](spec/07-effects.md) §7.5.1 states the rule.
+
+---
+
+## 7. The commutative operations trap
 
 This deserves a dedicated section because it is the primary source of silent correctness bugs.
 
@@ -347,31 +522,31 @@ This comment is erased by `vera fmt --write` (the canonical formatter strips com
 
 ---
 
-## 7. Comparison with related approaches
+## 8. Comparison with related approaches
 
-### 7.1 Classic De Bruijn indices
+### 8.1 Classic De Bruijn indices
 
 Classic De Bruijn indices count *all* binders, not just same-type binders. In the lambda term `λInt λString λInt . ⋯`, the outermost (first) `Int` has De Bruijn index 2 (two binders intervene: the `String` and the innermost `Int`), while the innermost (second) `Int` has index 0. Vera's type-stratified variant would assign the outermost `Int` index `@Int.1` (one `Int` binder intervenes), and the innermost `Int` index `@Int.0`.
 
 The type-stratified approach is strictly more convenient for a typed language: the model only needs to track the binding stack for the type it cares about. It is less well-studied theoretically, but the substitution and shifting properties carry over straightforwardly with type annotations.
 
-### 7.2 Locally nameless
+### 8.2 Locally nameless
 
 The *locally nameless* representation (Aydemir, Charguéraud, Pierce, Pollack, and Weirich, 2008) uses De Bruijn indices for *bound* variables but ordinary names for *free* variables. This simplifies certain metatheoretic proofs (particularly those involving open and close operations on terms). Vera uses a fully nameless representation — there are no free variables in a well-formed Vera program, because all identifiers are either slot references or function names from the global scope.
 
 - B. Aydemir, A. Charguéraud, B.C. Pierce, R. Pollack, and S. Weirich. ["Engineering Formal Metatheory."](https://www.chargueraud.org/research/2007/binders/binders_popl_08.pdf) In *Proceedings of POPL 2008*, pp. 3–15. ACM Press, 2008. The canonical reference for locally nameless representations and their use in mechanised proofs.
 
-### 7.3 The bruijn language
+### 8.3 The bruijn language
 
 The [bruijn language](https://github.com/marvinborner/bruijn) uses De Bruijn indices as its surface syntax for a pure untyped lambda calculus. This is the closest predecessor to Vera's design choice of exposing indices directly to the programmer. Vera extends the idea to a typed, effectful setting with type-stratified indices and `@T.n` syntax.
 
-### 7.4 Proof assistants
+### 8.4 Proof assistants
 
 Coq (the Coq Development Team, INRIA) and Isabelle (Nipkow, Paulson, and Wenzel) use De Bruijn indices in their kernel representations. Neither exposes them to the user directly — they maintain bidirectional translation between named and indexed representations. This is the right choice for tools targeting human mathematicians. Vera's choice to expose indices directly reflects the different target audience.
 
 ---
 
-## 8. Quick reference
+## 9. Quick reference
 
 ### The mnemonic
 
@@ -402,13 +577,21 @@ After `let @T = expr;`, the new binding becomes `@T.0`. Every previous `@T.n` be
 
 Inside an anonymous function, inner parameters are numbered first. Captured outer bindings continue their outer numbering but are now accessible at higher indices (past the inner parameters of the same type).
 
+### `where` helpers
+
+A helper's scope is closed and parameter-rooted: only its own parameters and its own `let`/match bindings. The parent's bindings are not reachable at any index — that is `E130`, not a capture. Pass what the helper needs as an argument. (Type parameters *are* inherited: a helper inside `forall<T>` sees `T`.)
+
+### Aliases
+
+`type Cnt = Int` gives `@Cnt` its own stack: `@Int.0` does not reach a `@Cnt` parameter, and vice versa. But an alias used as a type *argument* resolves, so a parameter written `@Option<Cnt>` binds `Option<Int>` and is referenced `@Option<Int>.0`. `State<T>`/`Exn<E>` cell identity is the *resolved* type, so spelling does not split a cell wherever that type expression has a resolution to name (§6.5). Full rule in §6.
+
 ### The result reference
 
 `@T.result` is only valid inside `ensures` clauses. It refers to the function's return value. It uses the function's *entry* environment — not the body's final let-extended environment.
 
 ---
 
-## 9. Debugging with `--explain-slots`
+## 10. Debugging with `--explain-slots`
 
 When you are uncertain which parameter a slot index refers to, run:
 
@@ -426,30 +609,47 @@ Slot environments (index 0 = last occurrence in signature):
     @Int.1  parameter 1 (first @Int)
 
   fn repeat(@String, @Int -> @String)
-    @Int.0    parameter 2 (only @Int)
+    @Int.0  parameter 2 (only @Int)
     @String.0  parameter 1 (only @String)
+
+  fn scale(@Int, @Nat -> @Int)
+    @Int.0  parameter 1 (only @Int)
+    @Nat.0  parameter 2 (only @Nat)
+    where fn step(@Int, @Nat -> @Int)
+      @Int.0  parameter 1 (only @Int)
+      @Nat.0  parameter 2 (only @Nat)
 ```
+
+A `where` helper gets its own indented block under its parent. The helper's
+indices start over because its scope is *closed*: unlike a closure, it cannot
+read the parent's bindings, and a reference to one is `E130`, not a capture.
+The block is the direct way to confirm which parameter a helper's `@T.n` names.
 
 **Use this before writing non-commutative operations.** For `fn subtract(@Int, @Int -> @Int)`,
 the body `@Int.1 - @Int.0` computes parameter1 − parameter2 (first minus second). The body
 `@Int.0 - @Int.1` computes the opposite. The table removes all ambiguity.
 
 The `--json` flag works too: `vera check --explain-slots --json` includes a `slot_environments`
-array in the output, useful for programmatic consumption.
+array in the output, useful for programmatic consumption. Each entry names its function; a
+`where` helper's entry is qualified, `"function": "scale.step"`, so a helper sharing a name
+with a top-level function or with another parent's helper is still unambiguous.
 
-**Recommended workflow for any function with duplicate parameter types:**
+**Recommended workflow for any function with duplicate parameter types — or any alias-typed
+parameter:**
 1. Write the signature.
 2. Run `vera check --explain-slots`.
-3. Read the table.
+3. Read the table. Where the signature line and a table row disagree about a name, the row is
+   what the binding is keyed by (§6.3).
 4. Write contracts and body using the confirmed indices.
 
 ---
 
-## 10. Further reading
+## 11. Further reading
 
 The spec chapter on slot references is the authoritative technical reference for how Vera resolves `@T.n`:
 
-- [`spec/03-slot-references.md`](spec/03-slot-references.md) — formal definition, binding sites, scope rules, error cases, ten worked examples including generics, closures, and ADT matching.
+- [`spec/03-slot-references.md`](spec/03-slot-references.md) — formal definition, binding sites, scope rules, error cases, ten worked examples including generics, closures, and ADT matching. §3.8 states the head-opacity rule §6 above works through, and §3.8.1 the complementary rule for type arguments.
+- [`spec/07-effects.md`](spec/07-effects.md) — §7.5.1 on `State<T>`/`Exn<E>` cell identity: the resolved type names the cell, predicate included, and only a type expression with no resolution to name — a bare function type, or one that does not resolve — falls back to the spelling.
 
 For the broader context of why Vera is designed around structural references rather than names:
 

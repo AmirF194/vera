@@ -6,10 +6,14 @@ postcondition checks with informative failure messages.
 
 from __future__ import annotations
 
-from vera import ast
+from collections.abc import Iterator
+from dataclasses import dataclass
+
+from vera import ast, naming
 from vera.monomorphize import mangle_type_name
 from vera.skip import CodegenSkip
 from vera.wasm import WasmContext, WasmSlotEnv
+from vera.wasm.helpers import state_type_arg
 from vera.wasm.inference import substitute_type_vars
 
 # Recursion bound for tuple-component boundary guards (#746).  A *finite* tuple
@@ -18,6 +22,31 @@ from vera.wasm.inference import substitute_type_vars
 # recursive type aliases (which the checker currently accepts) and is failed
 # CLOSED, never silently skipped — see `_emit_component_refinement_guards`.
 _MAX_COMPONENT_GUARD_DEPTH = 16
+
+
+@dataclass(frozen=True)
+class _ComponentGuardSite:
+    """One component of a boundary tuple the guard layer acts on (#1210).
+
+    Yielded by :meth:`ContractsMixin._tuple_component_guard_sites`, which is
+    the ONE decomposition three consumers read: the guard EMITTER, the
+    has-guardable predicate that decides whether the return epilogue runs at
+    all, and the host-import PRE-SCAN.  Carrying the layout (*field_offset*,
+    *load_wt*) alongside the classification (*guard*, *nested*) is what lets
+    the emitter consume the same enumeration rather than re-deriving it: a
+    component this record does not describe is one no guard is emitted for,
+    and one the pre-scan therefore need not register.
+    """
+
+    field_offset: int
+    load_wt: str
+    #: `(predicate, base slot-name)` — the pair `_refinement_guard_parts`
+    #: returns, or the synthesized `@Nat.0 >= 0` for a bare-`@Nat` component.
+    #: None when the component is guarded only through its inner components.
+    guard: tuple[ast.Expr, str] | None
+    #: The component's own type expression when it wraps a further tuple, so
+    #: the caller can recurse; None otherwise.
+    nested: ast.TypeExpr | None
 
 
 class ContractsMixin:
@@ -29,145 +58,84 @@ class ContractsMixin:
         """(predicate, base slot-name) if *te* is a refinement, else None
         (#746) — the codegen counterpart of the verifier's ``_refined_parts``.
 
-        Resolves an alias chain (``type PosInt = { @Int | ... }``; also
-        ``type P2 = PosInt``) to the underlying ``RefinementType`` and returns
-        its predicate plus the base type's *name* (the binder slot, e.g.
-        ``Int`` for ``{ @Int | ... }`` or the canonical ``Array<Int>`` for
-        ``{ @Array<Int> | array_length(@Array<Int>.0) > 0 }`` — matching
-        ``_translate_slot_ref``'s key, since a bare ``Array`` would never
-        resolve).  Unlike the
-        verify side — where Z3 cannot decide ``array_length`` so a collection
-        base is Tier 3 — the runtime guard compiles the predicate to WASM
-        directly, so it covers any base whose predicate
-        :py:meth:`WasmContext.translate_expr` can lower (:py:meth:`_emit_refinement_check`
-        returns None and emits no guard when it cannot)."""
-        node: ast.TypeExpr = te
-        seen: set[str] = set()
-        while (isinstance(node, ast.NamedType)
-               and node.name in self._type_aliases
-               and node.name not in seen):
-            seen.add(node.name)
-            node = self._type_aliases[node.name]
-        if isinstance(node, ast.RefinementType):
-            base = node.base_type
-            if isinstance(base, ast.NamedType):
-                # Build the canonical slot name the predicate's binder uses —
-                # ``Array<Int>`` for a parameterised base, ``Int`` otherwise —
-                # matching `_translate_slot_ref`'s key (a bare ``Array`` would
-                # never resolve).
-                name = base.name
-                if base.type_args:
-                    arg_names: list[str] = []
-                    for ta in base.type_args:
-                        if isinstance(ta, ast.NamedType):
-                            arg_names.append(ta.name)
-                        else:
-                            return None
-                    name = f"{base.name}<{', '.join(arg_names)}>"
-                predicate = node.predicate
-                # Conjoin the `@Nat` base's implicit `>= 0` when the base
-                # resolves to `@Nat` — directly OR through an alias chain
-                # (`type Age = Nat`).  The *decision* follows the base's
-                # aliases, but the synthetic slot ref uses `name` (the binder
-                # key the predicate uses and the guard pushes the value under,
-                # e.g. `@Age.0`), NOT a literal `@Nat.0` which wouldn't resolve.
-                # Mirrors the verifier's `_translate_refined_predicate` so the
-                # runtime guard (and its trap message, both derived here) reject
-                # a negative value satisfying P — `-1` for `{ @Age | @Age.0 < 10
-                # }` — at an FFI/public boundary (CR f1f2a26, db24433).
-                base_node: ast.TypeExpr = base
-                bseen: set[str] = set()
-                while (isinstance(base_node, ast.NamedType)
-                       and base_node.name in self._type_aliases
-                       and base_node.name not in bseen):
-                    bseen.add(base_node.name)
-                    base_node = self._type_aliases[base_node.name]
-                if isinstance(base_node, ast.RefinementType):
-                    # Refinement-over-refinement (e.g. `type Tiny = { @Pos |
-                    # @Pos.0 < 10 }` where `Pos = { @Int | @Int.0 > 0 }`): the
-                    # outer guard would compile only the outer predicate and
-                    # silently DROP the inner `> 0` membership — a soundness
-                    # hole that wrongly accepts `f(-1)`.  The verifier already
-                    # records such a narrowing as a Tier-3 E506 (its
-                    # `_base_slot_name` returns None for a non-primitive base),
-                    # so reject it loudly here at codegen (the "reject before
-                    # codegen" choice) with a clean E600 — a non-zero-exit
-                    # diagnostic, not a partial guard.  Returns None after
-                    # recording the error so the helper stays total; the
-                    # recorded error fails the compile.  This IS reachable.
-                    inner = ast.format_type_expr(base_node.base_type)
-                    self._error(
-                        te,
-                        f"Refinement base '{base.name}' resolves to another "
-                        f"refinement ({{ {inner} | ... }}); a refinement base "
-                        "must not itself resolve to a refinement.",
-                        rationale="Composing nested refinement membership "
-                        "predicates is unsupported — the runtime guard would "
-                        "silently drop the inner base predicate, so codegen "
-                        "rejects this rather than emit a partial guard.",
-                        error_code="E618",
-                    )
-                    return None
-                if self._type_expr_to_wasm_type(base_node) is None:
-                    # A zero-size / erased base — `@Unit`, or a `Future`
-                    # transparently wrapping one (`Future<Unit>`; #841/#943):
-                    # there is no WASM local to load into a boundary predicate
-                    # check, so emit NO guard (the verifier records such a
-                    # refinement `tier3_unguarded` rather than claiming a runtime
-                    # check; CR db24433).  Keyed on codegen's OWN erasure
-                    # (`_type_expr_to_wasm_type` returns None iff a type has no
-                    # WASM representation), so the guard-skip set is exactly the
-                    # set with no runtime local — #943 review found the literal
-                    # `base_node.name == "Unit"` keying missed `Future<Unit>`,
-                    # which erases identically and raised a raw `ValueError` at
-                    # the `wt is None` invariant in `_compile_fn` below.
-                    return None
-                if (isinstance(base_node, ast.NamedType)
-                        and base_node.name == "Nat"):
-                    predicate = ast.BinaryExpr(
-                        op=ast.BinOp.AND,
-                        left=ast.BinaryExpr(
-                            op=ast.BinOp.GE,
-                            left=ast.SlotRef(
-                                type_name=name, type_args=None, index=0),
-                            right=ast.IntLit(value=0),
-                        ),
-                        right=predicate,
-                    )
-                if (isinstance(base_node, ast.NamedType)
-                        and base_node.name == "Byte"):
-                    # Conjoin the `@Byte` base's implicit `0 <= @Byte.0 <= 255`
-                    # range the way `@Nat` conjoins `>= 0` above (#766, the
-                    # deferred PR #763 range-conjoin point).  A `@Byte` crosses
-                    # a public / FFI boundary as an unbounded i32, so a value
-                    # SATISFYING P but outside 0..255 (e.g. `300` for `@Byte.0
-                    # > 5`) would otherwise launder past the guard.  The
-                    # synthetic refs use the binder key `name` (`@SmallByte.0`
-                    # through an alias, `@Byte.0` directly) — the key the
-                    # predicate uses and the guard pushes the value under, NOT a
-                    # literal `@Byte.0` which wouldn't resolve for an alias.
-                    # The literal bounds are Byte-typed slot comparisons, so
-                    # `_translate_byte_binop` (#766) lowers them at i32 too.
-                    slot = ast.SlotRef(type_name=name, type_args=None, index=0)
-                    predicate = ast.BinaryExpr(
-                        op=ast.BinOp.AND,
-                        left=ast.BinaryExpr(
-                            op=ast.BinOp.AND,
-                            left=ast.BinaryExpr(
-                                op=ast.BinOp.GE,
-                                left=slot,
-                                right=ast.IntLit(value=0),
-                            ),
-                            right=ast.BinaryExpr(
-                                op=ast.BinOp.LE,
-                                left=slot,
-                                right=ast.IntLit(value=255),
-                            ),
-                        ),
-                        right=predicate,
-                    )
-                return (predicate, name)
-        return None
+        The DERIVATION is :func:`vera.naming.refinement_binder_parts` (#1208):
+        chase the alias chain (``type PosInt = { @Int | ... }``; also
+        ``type P2 = PosInt``) to the underlying ``RefinementType``, name its
+        base with the ONE renderer, and conjoin the ``@Nat`` / ``@Byte`` base's
+        implicit range so a value satisfying the written predicate but outside
+        the base's range cannot launder past the guard.  It used to be a second
+        hand-maintained copy of that walk, and the two had already drifted
+        apart at the erased-base and nested-refinement corners; layering
+        codegen's two WASM-specific decisions ON TOP of one shared derivation
+        is what keeps the guard's binder equal to the key the predicate's
+        ``@Base.n`` resolves to (and to the key the checker bound it under).
+
+        The two decisions that stay here, because they are about a type's WASM
+        REPRESENTATION and :mod:`vera.naming` must not import the backend:
+
+        * a nested refinement base is rejected LOUDLY (E618) — naming reports
+          the shape, codegen decides what to do about it;
+        * an erased base emits NO guard at all.
+        """
+        parts = naming.refinement_binder_parts(te, self._alias_env)
+        if parts is None:
+            return None
+        if parts.base_is_refinement:
+            # Refinement-over-refinement (e.g. `type Tiny = { @Pos |
+            # @Pos.0 < 10 }` where `Pos = { @Int | @Int.0 > 0 }`): the
+            # outer guard would compile only the outer predicate and
+            # silently DROP the inner `> 0` membership — a soundness
+            # hole that wrongly accepts `f(-1)`.  The verifier already
+            # records such a narrowing as a Tier-3 E506 (its
+            # `_base_slot_name` returns None for a non-primitive base),
+            # so reject it loudly here at codegen (the "reject before
+            # codegen" choice) with a clean E618 — a non-zero-exit
+            # diagnostic, not a partial guard.  Returns None after
+            # recording the error so the helper stays total; the
+            # recorded error fails the compile.  This IS reachable.
+            # `base` IS the inner `RefinementType` on this branch; the
+            # isinstance keeps the unwrap total rather than asserting it.
+            inner = ast.format_type_expr(
+                parts.base.base_type
+                if isinstance(parts.base, ast.RefinementType)
+                else parts.base
+            )
+            # Once per SITE, not once per visit (PR #1224 review).  This
+            # helper is consulted from several places per declaration — and,
+            # since round 7, from the import pre-scan's derivation as well —
+            # and a generic carrying a concrete nested-refinement parameter is
+            # compiled once per instantiation from the SAME spans, so
+            # `forall<T> fn g(@T, @Tiny -> @Int)` used at two types reported
+            # the one declaration twice.  `_error_once` keys on the resolved
+            # diagnostic location, which carries the owning file — two modules
+            # whose declarations happen to share a line/column stay distinct.
+            self._error_once(
+                te,
+                f"Refinement base '{parts.binder_name}' resolves to another "
+                f"refinement ({{ {inner} | ... }}); a refinement base "
+                "must not itself resolve to a refinement.",
+                rationale="Composing nested refinement membership "
+                "predicates is unsupported — the runtime guard would "
+                "silently drop the inner base predicate, so codegen "
+                "rejects this rather than emit a partial guard.",
+                error_code="E618",
+            )
+            return None
+        if self._type_expr_to_wasm_type(parts.base) is None:
+            # A zero-size / erased base — `@Unit`, or a `Future`
+            # transparently wrapping one (`Future<Unit>`; #841/#943):
+            # there is no WASM local to load into a boundary predicate
+            # check, so emit NO guard (the verifier records such a
+            # refinement `tier3_unguarded` rather than claiming a runtime
+            # check; CR db24433).  Keyed on codegen's OWN erasure
+            # (`_type_expr_to_wasm_type` returns None iff a type has no
+            # WASM representation), so the guard-skip set is exactly the
+            # set with no runtime local — #943 review found the literal
+            # `base_node.name == "Unit"` keying missed `Future<Unit>`,
+            # which erases identically and raised a raw `ValueError` at
+            # the `wt is None` invariant in `_compile_fn` below.
+            return None
+        return (parts.predicate, parts.binder_name)
 
     def _emit_refinement_check(
         self,
@@ -278,56 +246,41 @@ class ContractsMixin:
             return node
         return None
 
-    def _emit_component_refinement_guards(
-        self,
-        ctx: WasmContext,
-        decl: ast.FnDecl,
-        te: ast.TypeExpr,
-        value_local: int,
-        env: WasmSlotEnv,
-        role: str,
-        _depth: int = 0,
-    ) -> list[str]:
-        """Per-component refinement / ``@Nat`` runtime guards for a boundary
-        **tuple** value (#746, PR-review-found FFI gap).
+    def _tuple_component_guard_sites(
+        self, te: ast.TypeExpr, _depth: int = 0,
+    ) -> Iterator[_ComponentGuardSite]:
+        """Decompose ONE level of a boundary tuple into its guarded components.
 
-        The top-level param / return guard (``_refinement_guard_parts``) fires
-        only when the boundary *type itself* is a refinement; a
-        ``Tuple<PosInt, Int>`` parameter carries no top-level refinement, so its
-        refined *components* would cross a ``public`` / FFI boundary unchecked
-        even though the verifier *assumes* each component satisfies its
-        refinement (the ``_term_source_fact`` projection fact backing the R1
-        param-assume).  An external caller passing ``Tuple(-5, 3)`` into a
-        ``Tuple<PosInt, Int>`` boundary would otherwise launder a violating
-        component into a Tier-1-clean callee.
+        THE tuple decomposition (#1210 round 7).  Every consumer that needs to
+        know what the boundary-guard layer does to a tuple reads it from here:
+        the emitter (`_emit_component_refinement_guards`), the return-epilogue
+        gate (`_has_guardable_tuple_components`), and the host-import pre-scan
+        (`_signature_refinement_predicates`).  They used to carry three
+        hand-kept copies of the same classification, and the pre-scan's copy
+        did not exist at all — a `handle[State<Nat>]` written in the
+        refinement of a tuple COMPONENT was lowered as a guard here and
+        registered by nobody, so a check-green program died at whole-module
+        WAT with `unknown func $vera.state_push_Nat`.  A component that is not
+        described by a yielded `_ComponentGuardSite` is one no guard is
+        emitted for; that equivalence is the invariant, and it now holds by
+        construction rather than by three functions agreeing.
 
-        This descends the tuple layout, loads each refined / ``@Nat`` component
-        from the heap value, and guards it with the same
-        ``$vera.contract_fail`` predicate check the top-level guard uses, so the
-        violating component traps at the boundary.  Recurses into nested tuples.
+        Laziness matters: the emitter allocates a local per yielded site, so
+        the sites must be produced one at a time, interleaved with the
+        caller's `ctx.alloc_local` calls, to keep the local numbering (and the
+        E618 report order) exactly as it was.
 
-        Only ``Tuple`` is handled: its component types are recoverable directly
-        from the declared ``type_args``.  A user ADT's refined field types need
-        the generic substitution the guard layer does not carry (a refined ADT
-        *field* is obligated statically at its construction site and tracked for
-        a runtime guard separately) — so this never fabricates a guard it
-        cannot ground in a declared component type.
-
-        ``value_local`` is the tuple's heap pointer; it is transitively rooted
-        (a parameter is shadow-pushed in the prologue, a return value is live on
-        the operand stack) and the emitted predicate checks do not allocate, so
-        the loaded components need no separate GC rooting.  Mirrors the offset
-        algorithm in ``_translate_constructor_call`` exactly — the layout this
-        decomposes is the one construction built."""
+        The depth limit is enforced HERE, once, for all three consumers.  It
+        fails CLOSED: a tuple nested deeper than the limit is almost always an
+        infinite type via mutually-recursive aliases (`type A = Tuple<B, Int>;
+        type B = Tuple<A, Int>`, which the checker currently accepts), so
+        whichever consumer reaches the bound first records the loud E617 and
+        the compile fails — never a silent `return []` that drops the guards
+        for every component past the limit (CR PR-review).  `_error_once`
+        keeps the three consumers from tripling the one diagnostic.
+        """
         if _depth > _MAX_COMPONENT_GUARD_DEPTH:
-            # Fail CLOSED, not silent: a tuple nested deeper than the limit is
-            # almost always an infinite type via mutually-recursive aliases
-            # (`type A = Tuple<B, Int>; type B = Tuple<A, Int>`, which the
-            # checker currently accepts) — that recursion would never terminate,
-            # and a bare `return []` would silently drop the guards for every
-            # component past the limit.  Emit a loud diagnostic so the compile
-            # fails rather than shipping partial boundary guards (CR PR-review).
-            self._error(
+            self._error_once(
                 te,
                 "Tuple nesting in this boundary type exceeds the runtime-guard "
                 f"depth limit ({_MAX_COMPONENT_GUARD_DEPTH}); the type is most "
@@ -340,15 +293,14 @@ class ContractsMixin:
                 "the boundary unchecked.",
                 error_code="E617",
             )
-            return []
+            return
         node = self._resolve_tuple_type(te)
         if node is None:
-            return []
+            return
 
         _sizes = {"i32": 4, "i64": 8, "f64": 8, "i32_pair": 8}
         _aligns = {"i32": 4, "i64": 8, "f64": 8, "i32_pair": 4}
         offset = 4  # after the tag (i32, 4 bytes) — as construction lays it out
-        instrs: list[str] = []
         for comp_te in (node.type_args or ()):  # _resolve_tuple_type: non-empty
             wt = self._type_expr_to_wasm_type(comp_te)
             if wt is None or wt == "unsupported":
@@ -371,30 +323,16 @@ class ContractsMixin:
             # `_resolve_tuple_type` unwraps both, so its inner components are
             # guarded recursively (CR PR-review).  When the component IS a
             # refinement, `parts` is non-None (its top-level predicate is
-            # guarded below) yet we still recurse to reach the inner tuple.
+            # guarded by the caller) yet it is still yielded as nested so the
+            # caller reaches the inner tuple.
             is_nested = (not is_nat
                          and self._resolve_tuple_type(comp_te) is not None)
             if parts is None and not is_nat and not is_nested:
                 continue
 
-            # Load the component from the heap into a fresh local.  A pair
-            # component (String / Array) loads its ptr half — the length is read
-            # from memory by the predicate, exactly as the i32_pair return guard
-            # does (a Vera string / array is self-describing from its pointer).
-            load_wt = "i32" if wt == "i32_pair" else wt
-            comp_local = ctx.alloc_local(load_wt)
-            instrs.append(f"local.get {value_local}")
-            instrs.append(f"{'i32' if wt == 'i32_pair' else wt}.load "
-                          f"offset={field_offset}")
-            instrs.append(f"local.set {comp_local}")
-
-            # Guard the component's OWN predicate (a refined component) or the
-            # bare-@Nat `>= 0`, THEN — if it also wraps a tuple — recurse into
-            # its inner components.  A refinement OVER a tuple does both: its
-            # top-level predicate here, its inner components via the recursion.
-            pred_parts: tuple[ast.Expr, str] | None = parts
-            if pred_parts is None and is_nat:
-                pred_parts = (
+            guard: tuple[ast.Expr, str] | None = parts
+            if guard is None and is_nat:
+                guard = (
                     ast.BinaryExpr(
                         op=ast.BinOp.GE,
                         left=ast.SlotRef(
@@ -402,10 +340,83 @@ class ContractsMixin:
                         right=ast.IntLit(value=0)),
                     "Nat",
                 )
-            if pred_parts is not None:
-                predicate, base_name = pred_parts
+            yield _ComponentGuardSite(
+                field_offset=field_offset,
+                # A pair component (String / Array) loads its ptr half — the
+                # length is read from memory by the predicate, exactly as the
+                # i32_pair return guard does (a Vera string / array is
+                # self-describing from its pointer).
+                load_wt="i32" if wt == "i32_pair" else wt,
+                guard=guard,
+                nested=comp_te if is_nested else None,
+            )
+
+    def _emit_component_refinement_guards(
+        self,
+        ctx: WasmContext,
+        sig_text: str,
+        te: ast.TypeExpr,
+        value_local: int,
+        env: WasmSlotEnv,
+        role: str,
+        _depth: int = 0,
+    ) -> list[str]:
+        """Per-component refinement / ``@Nat`` runtime guards for a boundary
+        **tuple** value (#746, PR-review-found FFI gap).
+
+        *sig_text* is the rendered signature the violation message names —
+        ``ast.format_fn_signature(decl)`` for a named function, the
+        ``fn(… -> …)`` rendering for a closure (#1235).  A pre-rendered
+        string rather than the declaration itself, because an ``AnonFn``
+        has no ``FnDecl`` to format and the two callers already build the
+        same text for their top-level guards.
+
+        The top-level param / return guard (``_refinement_guard_parts``) fires
+        only when the boundary *type itself* is a refinement; a
+        ``Tuple<PosInt, Int>`` parameter carries no top-level refinement, so its
+        refined *components* would cross a ``public`` / FFI boundary unchecked
+        even though the verifier *assumes* each component satisfies its
+        refinement (the ``_term_source_fact`` projection fact backing the R1
+        param-assume).  An external caller passing ``Tuple(-5, 3)`` into a
+        ``Tuple<PosInt, Int>`` boundary would otherwise launder a violating
+        component into a Tier-1-clean callee.
+
+        This descends the tuple layout — via ``_tuple_component_guard_sites``,
+        the ONE decomposition the has-guardable predicate and the host-import
+        pre-scan read too — loads each refined / ``@Nat`` component from the
+        heap value, and guards it with the same ``$vera.contract_fail``
+        predicate check the top-level guard uses, so the violating component
+        traps at the boundary.  Recurses into nested tuples.
+
+        Only ``Tuple`` is handled: its component types are recoverable directly
+        from the declared ``type_args``.  A user ADT's refined field types need
+        the generic substitution the guard layer does not carry (a refined ADT
+        *field* is obligated statically at its construction site and tracked for
+        a runtime guard separately) — so this never fabricates a guard it
+        cannot ground in a declared component type.
+
+        ``value_local`` is the tuple's heap pointer; it is transitively rooted
+        (a parameter is shadow-pushed in the prologue, a return value is live on
+        the operand stack) and the emitted predicate checks do not allocate, so
+        the loaded components need no separate GC rooting.  Mirrors the offset
+        algorithm in ``_translate_constructor_call`` exactly — the layout this
+        decomposes is the one construction built."""
+        instrs: list[str] = []
+        for site in self._tuple_component_guard_sites(te, _depth):
+            # Load the component from the heap into a fresh local.
+            comp_local = ctx.alloc_local(site.load_wt)
+            instrs.append(f"local.get {value_local}")
+            instrs.append(f"{site.load_wt}.load offset={site.field_offset}")
+            instrs.append(f"local.set {comp_local}")
+
+            # Guard the component's OWN predicate (a refined component) or the
+            # bare-@Nat `>= 0`, THEN — if it also wraps a tuple — recurse into
+            # its inner components.  A refinement OVER a tuple does both: its
+            # top-level predicate here, its inner components via the recursion.
+            if site.guard is not None:
+                predicate, base_name = site.guard
                 msg = (
-                    f"Refinement violation in {ast.format_fn_signature(decl)}\n"
+                    f"Refinement violation in {sig_text}\n"
                     f"  {role} (tuple component): "
                     f"{ast.format_expr(predicate)} failed"
                 )
@@ -413,9 +424,10 @@ class ContractsMixin:
                     ctx, predicate, base_name, comp_local, msg, env)
                 if guard is not None:
                     instrs.extend(guard)
-            if is_nested:
+            if site.nested is not None:
                 instrs.extend(self._emit_component_refinement_guards(
-                    ctx, decl, comp_te, comp_local, env, role, _depth + 1))
+                    ctx, sig_text, site.nested, comp_local, env, role,
+                    _depth + 1))
         return instrs
 
     def _has_guardable_tuple_components(
@@ -427,33 +439,93 @@ class ContractsMixin:
 
         Used to keep ``_compile_postconditions`` from early-returning ``[]`` for
         a tuple *return* that carries no top-level refinement but does have
-        guardable components — mirrors the per-component classification in the
-        emit helper (kept a pure predicate so the early-return decision needs no
-        ``ctx``)."""
-        if _depth > _MAX_COMPONENT_GUARD_DEPTH:
-            # Conservatively report "guardable" so a deep *return* is NOT
-            # short-circuited away by `_compile_postconditions` — it flows into
-            # `_emit_component_refinement_guards`, whose matching depth check
-            # fails closed with a loud diagnostic.  Routing the failure through
-            # the one emit-side error keeps the fail-closed behaviour single-
-            # sourced (CR PR-review).
-            return True
-        node = self._resolve_tuple_type(te)
-        if node is None:
-            return False
-        for comp_te in (node.type_args or ()):  # _resolve_tuple_type: non-empty
-            if self._refinement_guard_parts(comp_te) is not None:
+        guardable components.  Reads the SAME decomposition the emitter does
+        (``_tuple_component_guard_sites``) rather than mirroring its
+        classification, so the early-return decision cannot disagree with what
+        the epilogue would emit; it stays a pure predicate, needing no ``ctx``,
+        because the sites carry the classification without emitting anything.
+
+        A type nested past the depth limit yields no sites and reports the
+        decomposition's own fail-closed E617, so this returns False for one —
+        and the compile fails on that error rather than on a missing guard.
+        """
+        for site in self._tuple_component_guard_sites(te, _depth):
+            if site.guard is not None:
                 return True
-            resolved = self._resolve_type_alias(comp_te)
-            if isinstance(resolved, ast.NamedType) and resolved.name == "Nat":
-                return True
-            # A nested tuple OR refinement-over-tuple component (unwrapped by
-            # `_resolve_tuple_type`) may carry guardable inner components.
-            if (self._resolve_tuple_type(comp_te) is not None
+            if (site.nested is not None
                     and self._has_guardable_tuple_components(
-                        comp_te, _depth + 1)):
+                        site.nested, _depth + 1)):
                 return True
         return False
+
+    def _signature_refinement_predicates(
+        self, sig: ast.FnDecl | ast.AnonFn,
+    ) -> Iterator[ast.Expr]:
+        """Every refinement predicate LOWERED as a boundary guard for *sig*.
+
+        THE derivation the host-import pre-scans consume (#1210 rounds 5 and
+        7), stated once against the emitters it must equal and living beside
+        them.  A parameter or return type that resolves to a `{ @Base | P }`
+        refinement has `P` emitted as a runtime guard in the prologue /
+        epilogue, so a `handle[State<T>]` or a host-imported builtin written
+        in `P` is LOWERED here — `type Big = { @Int | nat_to_int(
+        handle[State<Nat>] … ) > 0 && @Int.0 > 5 }` used as a parameter type
+        died at whole-module WAT with `unknown func $vera.state_push_Nat`,
+        from a check-green program.  The predicate is reached through the
+        ALIAS table rather than structurally from the signature's `TypeExpr`,
+        which is why no amount of walking the AST from the body finds it.
+
+        Round 5 enumerated only a named `FnDecl`'s own params and return.  The
+        guard emitters are reached from three further routes, all of which
+        lowered predicates this never registered:
+
+        * a TUPLE PARAMETER's components (`functions.py` ->
+          `_emit_component_refinement_guards`) — `fn f(@Tuple<Big, Int> …)`;
+        * a TUPLE RETURN's components (`_compile_postconditions`) —
+          `fn f(… -> @Tuple<Big, Int>)`;
+        * an `AnonFn`'s refined params and return (`closures.py`) —
+          `fn(@Big -> @Int)` and `fn(@Int -> @Big)` behind an `apply_fn`.
+
+        All four routes are enumerated here now, through the same helpers the
+        emitters call: `_refinement_guard_parts` for a top-level refinement
+        (so the two bails below are ITS bails, not a copy of them — a
+        nested-refinement base is an E618 with no guard, an erased base emits
+        no guard) and `_tuple_component_guard_sites` for the decomposition (so
+        the depth cap, the `@Unit`-component skip and the nested recursion are
+        the emitter's own).  Registration must equal what is emitted, not
+        exceed it: an import declared for a guard that is never emitted is a
+        host obligation nothing calls.
+
+        COMPONENT decomposition applies to a closure signature as well as a
+        named one (#1235).  It was a `FnDecl`-only leg for exactly as long as
+        the closure path emitted top-level formal / return guards only —
+        enumerating a closure's tuple components then would have registered
+        families no lowering asked for.  `_compile_lifted_closure` now
+        consumes the same `_tuple_component_guard_sites` decomposition the
+        named path consumes, so emitter and registration flip together and
+        this walks every signature the same way.
+        """
+        for te in (*sig.params, sig.return_type):
+            parts = self._refinement_guard_parts(te)
+            if parts is not None:
+                yield parts[0]
+            yield from self._component_guard_predicates(te)
+
+    def _component_guard_predicates(
+        self, te: ast.TypeExpr, _depth: int = 0,
+    ) -> Iterator[ast.Expr]:
+        """The predicates `_emit_component_refinement_guards` would lower for
+        *te*, in its own order — the enumeration half of that emitter, walking
+        the same `_tuple_component_guard_sites` decomposition to the same depth
+        cap.  A bare-`@Nat` component's synthesized `>= 0` is included: it
+        registers nothing, but it IS lowered, and enumerating exactly the
+        emitted set is what makes the two provably co-extensive."""
+        for site in self._tuple_component_guard_sites(te, _depth):
+            if site.guard is not None:
+                yield site.guard[0]
+            if site.nested is not None:
+                yield from self._component_guard_predicates(
+                    site.nested, _depth + 1)
 
     def _format_contract_message(
         self,
@@ -644,8 +716,8 @@ class ContractsMixin:
             # OVER a tuple has its predicate potentially read the components, so
             # establish those first (mirrors the param-guard order, CR).
             instrs.extend(self._emit_component_refinement_guards(
-                ctx, decl, decl.return_type, result_local, env,
-                "return value"))
+                ctx, ast.format_fn_signature(decl), decl.return_type,
+                result_local, env, "return value"))
 
             if refined_ret is not None:
                 predicate, base_name = refined_ret
@@ -774,16 +846,14 @@ class ContractsMixin:
     ) -> None:
         """Recursively collect State<T> type names from OldExpr nodes."""
         if isinstance(expr, ast.OldExpr):
-            type_name = WasmContext._extract_state_type_name(
-                expr.effect_ref,
-            )
-            if type_name is not None:
-                # #1205: key the snapshot set by the scalar-collapsed
-                # family — matches `_state_types` registration and the
-                # `_translate_old_expr` read, so `old(State<Count>)`
-                # snapshots (and finds) the `Nat` family.
-                types.add(self._family_name_te(
-                    expr.effect_ref.type_args[0], type_name))
+            # Key the snapshot set by the resolved cell FAMILY — matches
+            # `_state_types` registration and the `_translate_old_expr`
+            # read, so `old(State<Count>)` snapshots (and finds) the `Nat`
+            # family (#1205) and `old(State<MaybeInt>)` the `Option<Int>`
+            # one (#1209).  The fallback for a resolution that names no
+            # family is derived inside `_family_name_te`, so the two sides
+            # cannot pass different ones.
+            types.add(self._family_name_te(state_type_arg(expr.effect_ref)))
             return
         # Walk child expressions
         for child in self._expr_children(expr):
@@ -809,8 +879,8 @@ class ContractsMixin:
 
     def _state_type_to_wasm(self, type_name: str) -> str | None:
         """Map a State type name (e.g. 'Int') to its WASM type."""
-        for registered_name, wasm_t in self._state_types:
-            if registered_name == type_name:
+        for cell, wasm_t in self._state_types:
+            if cell.family == type_name:
                 return wasm_t
         return None
 

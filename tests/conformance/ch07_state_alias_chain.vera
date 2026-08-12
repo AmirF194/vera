@@ -1,0 +1,63 @@
+-- Conformance: multi-hop and parameterised alias cells (Chapter 7, Section
+-- 7.5).  Tests: a two-hop scalar chain (`type A = B; type B = Nat`), a
+-- parameterised application (`type Id<T> = T` at `State<Id<Nat>>`), and an
+-- alias OF that application (`type IdN = Id<Nat>`) each name the SAME `Nat`
+-- cell family — the resolution substitutes an alias's parameters and follows
+-- the chain to its end, so every spelling reaches the host bindings the base
+-- type already provides instead of minting a family whose WASM type
+-- disagrees with its name (#1205/#1209).
+type B = Nat;
+
+type A = B;
+
+type Id<T> = T;
+
+type IdN = Id<Nat>;
+
+private fn chained(@Nat -> @Int)
+  requires(true)
+  ensures(@Int.result == nat_to_int(@Nat.0))
+  effects(pure)
+{
+  handle[State<A>](@A = 0) {
+    get(@Unit) -> { resume(@A.0) },
+    put(@A) -> { resume(()) }
+  } in {
+    put(@Nat.0);
+    nat_to_int(get(()))
+  }
+}
+
+private fn applied(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 9)
+  effects(pure)
+{
+  handle[State<Id<Nat>>](@Id<Nat> = 4) {
+    put(@Id<Nat>) -> { resume(()) }
+  } in {
+    put(9);
+    nat_to_int(get(()))
+  }
+}
+
+private fn alias_of_applied(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 9)
+  effects(pure)
+{
+  handle[State<IdN>](@IdN = 4) {
+    put(@IdN) -> { resume(()) }
+  } in {
+    put(9);
+    nat_to_int(get(()))
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 0)
+  effects(pure)
+{
+  chained(9) - 9 + (applied(()) - 9) + (alias_of_applied(()) - 9)
+}

@@ -697,7 +697,7 @@ ERROR_CODES: dict[str, str] = {
     "E151": "Function redefines a built-in",
     "E152": "Effect redeclares a built-in effect",
     "E153": "Function name is reserved by the grammar",
-    "E154": "Type name is reserved for the prelude",
+    "E154": "Name is reserved for the prelude",
     "E160": "Array index must be Int or Nat",
     "E161": "Cannot index non-array type",
     "E170": "Let binding type mismatch",

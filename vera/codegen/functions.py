@@ -10,10 +10,16 @@ from typing import TYPE_CHECKING, cast
 
 from vera import ast
 from vera.skip import AdtEqNotDerivableError, CodegenInvariantError, CodegenSkip
+from vera.codegen.compilability import contract_exprs
 from vera.codegen.tail_position import compute_tail_call_sites
 from vera.monomorphize import mangle_type_name
+from vera.slots import effect_op_result_names, type_expr_slot_name
 from vera.wasm import WasmContext, WasmSlotEnv
-from vera.wasm.helpers import _is_host_handle_type, gc_shadow_push
+from vera.wasm.helpers import (
+    CellNames,
+    gc_shadow_push,
+    is_gc_pointer_base,
+)
 
 if TYPE_CHECKING:
     from vera.types import SpanTypeTable
@@ -106,6 +112,125 @@ class FunctionCompilationMixin:
         else:
             self._emit_contract_predicate_skip(ctx, exc, decl)
 
+    def _mark_byte_return_leaves(
+        self, ctx: WasmContext, return_type: ast.TypeExpr, body: ast.Block,
+    ) -> None:
+        """Mark *body*'s literal leaves when the return resolves to `@Byte`.
+
+        The return-boundary arm of #1212's ONE marking, shared by the named
+        path (`_compile_fn`) and the closure path
+        (`_compile_lifted_closure`) so the two cannot decide a return width
+        differently — which is exactly what the ninth and tenth shapes were.
+        The declared return resolves through `WasmContext._boundary_base`,
+        the ONE representation-base derivation every #1212 boundary now
+        shares (#1256), so a refined `@Byte` alias is a Byte boundary here
+        as it is at the `apply_fn` argument and the `throw` payload.
+        """
+        ctx._mark_byte_write_value(body, ctx._boundary_base(return_type))
+
+    def _lift_closures_or_drop(
+        self, ctx: WasmContext, decl: ast.FnDecl,
+    ) -> bool:
+        """Lift *ctx*'s pending closures; True means drop the function.
+
+        The ONE degradation net around ``_lift_pending_closures``, driven
+        TWICE per function (#1245): once after the body, once after
+        ``_compile_postconditions`` — which lowers the refined-RETURN guard,
+        a tuple return's component guards and every ``ensures(...)``
+        predicate, any of which may construct a closure that registers on
+        ``ctx`` only at that point.  Both passes need the identical
+        treatment of a failed lift, so the handling lives here rather than
+        being written out twice.
+
+        If any closure body failed to compile, the enclosing fn is dropped
+        rather than emitting a module with a ``call_indirect`` to a missing
+        function-table entry — closes #636.  The closure body's own
+        diagnostics (E615 from interpolation failures, generic E602 from
+        translation failures) were already emitted by
+        ``_compile_lifted_closure``'s harvest; a specific E602 is added here
+        noting that the parent is being dropped *because* of the closure
+        failure, so the user can correlate the cause with the effect.
+        """
+        try:
+            closure_failed = self._lift_pending_closures(ctx)
+        except (AdtEqNotDerivableError, CodegenSkip) as exc:
+            # #773 / PR #870 review: a direct `==` on a non-Eq-derivable ADT
+            # inside a CLOSURE body — same clean E613 as the function-body
+            # catch (a user error, not a compiler bug).  MUST precede the
+            # parent CodegenInvariantError catch below (subclass).
+            # #922: also degrade a `CodegenSkip` (an unsupported `hash`/`show`
+            # inside a closure) to a clean E602 rather than an uncaught
+            # traceback, via the shared contract-predicate dispatcher.
+            # #1185 (PR #1192 review): record the failed lift here too — an
+            # escape from `_lift_pending_closures` leaves `_closure_table`
+            # empty exactly as the rolled-back `closure_failed` path below
+            # does, so the orphan-carrier blame chain must be able to select
+            # THIS function as the [E602] root; without the record, the
+            # carrier's [E620] falls back to the no-closure-in-program
+            # wording, which is false for this shape.  No check-green
+            # program reaches this branch today (a closure-body skip is
+            # caught inside `_compile_lifted_closure`, and non-Eq `==` is
+            # E243-gated in body and refinement position since #928) — it
+            # is the defensive sibling of the append below, pinned by the
+            # stubbed-lift regression in
+            # tests/test_codegen_orphan_call_indirect_1185.py.
+            self._closure_lift_skips.append(decl.name)
+            self._emit_contract_predicate_degradation(ctx, exc, decl)
+            return True
+        except CodegenInvariantError as inv:  # #657: a closure-body invariant
+            # violation (a codegen bug) propagates out of
+            # `_compile_lifted_closure` to here and surfaces as ONE [E699] for
+            # the whole function — NOT the [E602] "closure skipped" warning
+            # below, which is reserved for a user-facing unsupported-construct
+            # skip.  Swallowing it in the closure helper (its previous
+            # behaviour) mixed the compiler-bug and user-skip signals: the
+            # helper emitted [E699] AND returned None, so this path then also
+            # emitted [E602].  Covered by tests/test_codegen_invariant_e699.py.
+            # #1185 (PR #1192 review, outside-diff): record the failed lift
+            # on THIS route too — the [E699] is an error, but the module is
+            # still assembled (compilation degrades, it does not abort), so
+            # the orphan-carrier blame chain runs and must be able to name
+            # this function as the root instead of falling back to the
+            # false no-closure-in-program wording.  Pinned by the
+            # `invariant_error` leg of the stubbed-lift regression in
+            # tests/test_codegen_orphan_call_indirect_1185.py.
+            self._closure_lift_skips.append(decl.name)
+            self._harvest_interp_inference_failures(ctx)
+            self._error(
+                inv.node if inv.node is not None else decl,
+                f"Internal compiler error while compiling '{decl.name}': "
+                f"{inv.msg}",
+                rationale="This is a codegen invariant violation — the type "
+                "checker should have rejected the input before it reached this "
+                "point.  Please file a bug report with the offending program.",
+                error_code="E699",
+            )
+            return True
+        if closure_failed:
+            # #1185: record the rolled-back lift.  A lift that rolls back
+            # is what leaves `_closure_table` empty, and an empty table
+            # orphans every `call_indirect` elsewhere in the module — the
+            # drop-propagation pass blames this function for those
+            # carriers, so the user gets one root cause, not two.
+            self._closure_lift_skips.append(decl.name)
+            self._warning(
+                decl,
+                f"Function '{decl.name}' contains a closure whose "
+                f"body failed to compile — skipped to avoid emitting "
+                f"an invalid module.",
+                rationale="A closure body inside this function failed "
+                "to translate (see preceding diagnostics for the "
+                "specific cause). The closure was dropped from the "
+                "function table; the enclosing function references it "
+                "via call_indirect, which would fail at WASM "
+                "validation. Dropping the enclosing function lets the "
+                "build complete with diagnostics only, no invalid "
+                "module emission.",
+                error_code="E602",
+            )
+            return True
+        return False
+
     def _compile_fn(
         self, decl: ast.FnDecl, *, export: bool = True,
         module_renames: dict[str, str] | None = None,
@@ -184,23 +309,54 @@ class FunctionCompilationMixin:
         effect_ops: dict[str, tuple[str, bool]] = {}
         effect_op_result_wt: dict[str, str | None] = {}
         effect_op_result_vera: dict[str, str | None] = {}
+        effect_op_cells: dict[str, CellNames] = {}
+        # #1207: the op → Vera result-type table, from the ONE derivation
+        # mono discovery also reads.  Source-order-first-wins and the
+        # unnameable-argument skip live in the shared builder, so the two
+        # consultors cannot drift; the `_fn_sigs` shadow guard below is
+        # this site's own (an op the row declares but a user function
+        # already owns is not injected here, and discovery mirrors that).
+        row_op_results = (
+            effect_op_result_names(decl.effect.effects)
+            if isinstance(decl.effect, ast.EffectSet) else {}
+        )
         if isinstance(decl.effect, ast.EffectSet):
+            # SOURCE ORDER, first wins — the checker's rule for a bare op
+            # (spec §7.4) and for its type arguments, so the two agree on
+            # which cell a bare `get`/`put` names.  A row may legitimately
+            # carry two instantiations of one effect (§7.3.3:
+            # `effects(<State<Int>, State<Bool>>)` is two independent
+            # cells); this loop used to let the LAST one overwrite the
+            # first, emitting `state_get_Bool` (i32) where the checker had
+            # typed the call `Int` (i64) — invalid WASM from a check-green
+            # program.  Every assignment below is therefore guarded on the
+            # op name not already being mapped.
             for eff in decl.effect.effects:
                 if (isinstance(eff, ast.EffectRef) and eff.name == "State"
                         and eff.type_args and len(eff.type_args) == 1):
-                    type_name = self._type_expr_to_slot_name(eff.type_args[0])
+                    # The alias-OPAQUE source spelling, kept for exactly one
+                    # role: the #1006 Vera-name mirror below.
+                    type_name = type_expr_slot_name(eff.type_args[0])
                     if type_name:
-                        # #1205: the import NAME keys on the scalar-collapsed
-                        # family (matching `_check_state_type` registration);
-                        # the Vera-name mirror below stays the SOURCE name
-                        # (note it also feeds the #1006/#914-A2 clone-naming
-                        # contract for a `get(())` array element driving a
-                        # generic instantiation — see the tracked mono
-                        # discovery desync).
-                        mangled = mangle_type_name(
-                            self._family_name_te(eff.type_args[0], type_name))
+                        # The import NAME keys on the resolved cell FAMILY
+                        # (matching `_check_state_type` registration, #1205
+                        # / #1209); the Vera-name mirror below stays the
+                        # SOURCE name (note it also feeds the #1006/#914-A2
+                        # clone-naming contract for a `get(())` array
+                        # element driving a generic instantiation — see the
+                        # tracked mono discovery desync).
+                        # IDENTITY names the import; REPRESENTATION is
+                        # recorded beside it so a `put` call site can
+                        # pick its #1203 write guard without slicing
+                        # the family back out of the mangled name
+                        # (#1218).
+                        cell = CellNames(
+                            family=self._family_name_te(eff.type_args[0]),
+                            base=self._family_base_te(eff.type_args[0]),
+                        )
+                        mangled = mangle_type_name(cell.family)
                         # Only map if no user-defined function shadows the op
-                        if "get" not in self._fn_sigs:
+                        if "get" not in self._fn_sigs and "get" not in effect_ops:
                             effect_ops["get"] = (
                                 f"$vera.state_get_{mangled}", False
                             )
@@ -214,22 +370,40 @@ class FunctionCompilationMixin:
                             # #1006: the VERA-name mirror — `_infer_vera_type`
                             # needs it to type a `get(())` array-literal
                             # element (the WAT type above is layout-ambiguous).
-                            effect_op_result_vera["get"] = type_name
-                        if "put" not in self._fn_sigs:
+                            # #1207: read from the shared table rather than
+                            # re-derived here, so mono discovery's copy of
+                            # this answer is the SAME answer.
+                            effect_op_result_vera["get"] = row_op_results.get(
+                                "get")
+                            effect_op_cells["get"] = cell
+                        if "put" not in self._fn_sigs and "put" not in effect_ops:
                             effect_ops["put"] = (
                                 f"$vera.state_put_{mangled}", True
                             )
+                            effect_op_cells["put"] = cell
                 elif (isinstance(eff, ast.EffectRef) and eff.name == "Exn"
                         and eff.type_args and len(eff.type_args) == 1):
-                    type_name = self._type_expr_to_slot_name(eff.type_args[0])
-                    if type_name and "throw" not in self._fn_sigs:
-                        # #1205: tag family name collapses like the State
-                        # import family (matching `_check_exn_type`).
+                    type_name = type_expr_slot_name(eff.type_args[0])
+                    if (type_name and "throw" not in self._fn_sigs
+                            and "throw" not in effect_ops):
+                        # The tag name resolves like the State import
+                        # family (matching `_check_exn_type`, #1205/#1209).
+                        # IDENTITY names the tag; REPRESENTATION rides
+                        # beside it in `effect_op_cells` exactly as the
+                        # State pair above (#1218), because the throw call
+                        # site is a WRITE boundary and needs the payload's
+                        # width: `throw(5)` into `Exn<{ @Byte | … }>` put an
+                        # `i64.const` under an i32 tag and the module failed
+                        # WASM validation (#1269).
+                        exn_cell = CellNames(
+                            family=self._family_name_te(eff.type_args[0]),
+                            base=self._family_base_te(eff.type_args[0]),
+                        )
                         effect_ops["throw"] = (
-                            f"$exn_"
-                            f"{mangle_type_name(self._family_name_te(eff.type_args[0], type_name))}",
+                            f"$exn_{mangle_type_name(exn_cell.family)}",
                             False,
                         )
+                        effect_op_cells["throw"] = exn_cell
 
         # Flatten ADT layouts into ctor_name -> layout for WasmContext
         ctor_layouts = {}
@@ -245,6 +419,7 @@ class FunctionCompilationMixin:
             effect_ops=effect_ops,
             effect_op_result_wt=effect_op_result_wt,
             effect_op_result_vera=effect_op_result_vera,
+            effect_op_cells=effect_op_cells,
             ctor_layouts=ctor_layouts,
             adt_type_names=adt_type_names,
             generic_fn_info=getattr(self, "_generic_fn_info", None),
@@ -310,9 +485,10 @@ class FunctionCompilationMixin:
         # #865: per-parameter concrete-@Byte flags for the call-site
         # int-literal → i32.const coercion.
         ctx.set_fn_byte_params(self._fn_byte_params)
-        # Provide type aliases so closures can resolve FnType return types
-        ctx.set_type_aliases(self._type_aliases)
-        ctx.set_type_alias_params(self._type_alias_params)
+        # Provide the naming environment so closures can resolve FnType
+        # return types.  One value, so the alias bodies and their parameter
+        # lists cannot be handed over half-updated (#1184 / #1208).
+        ctx.set_alias_env(self._alias_env)
         ctx.set_closure_id_start(self._next_closure_id)
         ctx.set_closure_sigs(self._closure_sigs)
         # #814 §8.5.3: module-qualified call target table, so a ``m::f`` call
@@ -403,17 +579,14 @@ class FunctionCompilationMixin:
             # PR-review).
             if self._resolve_tuple_type(param_te) is not None:
                 component_param_checks.append((local_idx, param_te))
-            # Track i32 pointer params (ADT/closure, not Bool/Byte,
-            # not opaque host handles — Map/Set/Decimal are i32
-            # indices into Python-side stores, not Vera-heap
-            # pointers; pushing them onto the GC shadow stack wastes
-            # space and a handle value that lands in the heap-pointer
-            # range with valid alignment would spuriously mark an
-            # unrelated heap object as live (#347).
-            if (
-                wt == "i32"
-                and type_name not in ("Bool", "Byte", None)
-                and not _is_host_handle_type(type_name)
+            # Track i32 pointer params.  `is_gc_pointer_base` over the
+            # formal's REPRESENTATION base (#1255) — the closure path's
+            # twin, and the slot name pushed above is deliberately NOT the
+            # input: that one is the syntactic head (it has to be, it keys
+            # the binding table), which classified a refined or aliased
+            # `@Byte` formal as a heap pointer.
+            if wt == "i32" and is_gc_pointer_base(
+                self._family_base_te(param_te)
             ):
                 gc_pointer_params.append(local_idx)
 
@@ -435,8 +608,16 @@ class FunctionCompilationMixin:
         else:
             result_part = ""
 
-        # Scan body for handle[State<T>] expressions to register imports
-        self._scan_body_for_state_handlers(decl.body)
+        # Scan the function for handle[State<T>] / handle[Exn<E>] expressions
+        # to register imports and tags.  #1210: a handler naming a cell or
+        # payload type the backend cannot compile drops the function here with
+        # its own [E607] / [E612], the same verdict the declared-effect gate
+        # reaches — the walk used to skip such a type in silence and leave the
+        # lowering to emit calls to imports that were never declared.  The
+        # walk covers the contract predicates too (round 2): they are lowered
+        # code, so a handler in one is emitted like any other.
+        if not self._scan_body_for_state_handlers(decl.body, decl):
+            return None
 
         # Scan body for IO qualified calls to register per-op imports
         self._scan_io_ops(decl.body)
@@ -447,11 +628,19 @@ class FunctionCompilationMixin:
         # `requires(...)` / `ensures(...)` would emit an orphaned
         # `call $vera.<name>` with no import declaration and fail WAT
         # compilation.  Contracts are pure, so the QualifiedCall (IO / Http /
-        # Inference / Random) branches of the scan never fire here.
-        for _contract in decl.contracts:
-            _pred = getattr(_contract, "expr", None)
-            if _pred is not None:
-                self._scan_io_ops(_pred)
+        # Inference / Random) branches of the scan never fire here — except
+        # through a handler clause body, which is ordinary code.
+        # `contract_exprs` is the shared enumeration (#1210 round 2): the
+        # `getattr(c, "expr")` shortcut this replaced skipped `decreases`,
+        # whose measure lives in `exprs`.
+        for _pred in contract_exprs(decl.contracts):
+            self._scan_io_ops(_pred)
+        # #1210 round 5: and the SIGNATURE's refinement predicates, which are
+        # lowered as boundary guards in this function's prologue/epilogue.
+        # They are reached through the alias table, not structurally from the
+        # body, so nothing the recursion does can find them.
+        for _pred in self._signature_refinement_predicates(decl):
+            self._scan_io_ops(_pred)
 
         # #517 — configure tail-call optimization for this function.
         # The analyzer marks `id(FnCall)` for every call in syntactic
@@ -471,18 +660,25 @@ class FunctionCompilationMixin:
         # descent), instead of wrapping the WHOLE body — which reverted EVERY
         # `return_call` and broke TCO for a non-narrowing @Nat->@Nat recursive
         # tail call (`drain`, which stack-exhausted at depth).  Alias-aware
-        # (`type Count = Nat`) via `_resolve_base_type_name` and refined-excluded
-        # (`{ @Nat | P }` / an alias to one stays on the 7b refinement-boundary
-        # path) via `_refinement_guard_parts`, exactly as the whole-body
+        # (`type Count = Nat`) via `_boundary_base` — the ONE representation-base
+        # derivation the `throw` payload and the `apply_fn` signature also ask
+        # (#1256).  It resolves the type EXPRESSION, where the
+        # `_resolve_base_type_name(_type_expr_to_slot_name(...))` spelling it
+        # replaces chased the alias by NAME and dropped its type arguments:
+        # `type Ident<T> = T; type Count = Ident<Nat>;` answered the bare head
+        # `Ident`, this gate stayed shut, and `f(0 - 5)` returned -5 through the
+        # `@Nat` slot — the #983 silent negative, one spelling over.  Still
+        # refined-excluded (`{ @Nat | P }` / an alias to one stays on the 7b
+        # refinement-boundary path) via `_refinement_guard_parts`, a SEPARATE
+        # conjunct untouched by the base swap even though `_boundary_base`
+        # strips the refinement wrapper.  Exactly as the whole-body
         # narrow-return gate below.  A narrowing leaf that is itself a tail call
         # (an @Int-returning call) is removed from `tail_sites` so it lowers to
         # a plain `call` — the appended guard runs AFTER it, which `return_call`
         # would skip.
         nat_leaf_ids: set[int] = set()
         if (decl.body is not None
-                and ctx._resolve_base_type_name(
-                    self._type_expr_to_slot_name(decl.return_type) or "")
-                == "Nat"
+                and ctx._boundary_base(decl.return_type) == "Nat"
                 and self._refinement_guard_parts(decl.return_type) is None):
             nat_leaf_ids = ctx._collect_narrowing_return_leaves(decl.body)
         ctx._nat_return_leaf_ids = nat_leaf_ids
@@ -546,7 +742,8 @@ class FunctionCompilationMixin:
             for value_local, param_te in component_param_checks:
                 refine_guard_instrs.extend(
                     self._emit_component_refinement_guards(
-                        ctx, decl, param_te, value_local, env, "parameter"))
+                        ctx, ast.format_fn_signature(decl), param_te,
+                        value_local, env, "parameter"))
 
             for value_local, param_te in refined_param_checks:
                 parts = self._refinement_guard_parts(param_te)
@@ -622,15 +819,39 @@ class FunctionCompilationMixin:
             return None
         pre_instrs = pre_instrs + dec_entry_instrs
 
-        # Snapshot old state for postcondition old() references.  The
-        # snapshot's family resolution can raise (an `old(State<T>)`
-        # whose alias chain overflows the resolver bound — round-7
-        # review, F2: this was the ONE `_family_name_te` door outside
-        # every CodegenSkip net, and the raise escaped as a crash on a
-        # check-green program).  Degrade to the same clean E602 skip
-        # the body path uses.
+        # Snapshot old state for postcondition old() references.  This call
+        # sits OUTSIDE the body's CodegenSkip net (round-7 review, F2: a
+        # raise from the snapshot's family resolution escaped as a crash on
+        # a check-green program), so it carries its own — kept as
+        # defence-in-depth now that `_family_name_te` is total (#1209), for
+        # the same reason the boundary had a net at all: nothing else here
+        # would degrade a skip to a diagnostic.
         try:
             snapshot_instrs = self._snapshot_old_state(ctx, decl)
+        except CodegenInvariantError as inv:  # PR #1283 review
+            # The arm this boundary was missing.  `state_type_arg` raises
+            # `CodegenInvariantError`, not `CodegenSkip`, for an `old(E)`
+            # whose `E` is not `State<T>` — and the checker types `old(E)`
+            # as `UnknownType`, which satisfies a `Bool` postcondition, so
+            # `ensures(old(IO))` is check-green and reached this raise.  A
+            # `CodegenSkip`-only net let it escape `_compile_fn` as a raw
+            # traceback: exactly the #939 gap, one boundary over.  Mirrors
+            # the precondition and `decreases` arms above — one loud [E699],
+            # attributed as a compiler bug.  MUST precede the `CodegenSkip`
+            # catch below only if it were a subclass; it is not, so order is
+            # free and this reads in raise-severity order.
+            self._harvest_interp_inference_failures(ctx)
+            self._error(
+                inv.node if inv.node is not None else decl,
+                f"Internal compiler error while compiling '{decl.name}': "
+                f"{inv.msg}",
+                rationale="This is a codegen invariant violation — the type "
+                "checker should have rejected the input before it reached "
+                "this point.  Please file a bug report with the offending "
+                "program.",
+                error_code="E699",
+            )
+            return None
         except CodegenSkip as skip:
             self._harvest_interp_inference_failures(ctx)
             self._warning(
@@ -664,6 +885,19 @@ class FunctionCompilationMixin:
         #    The audit-and-convert pass (Phase 3, tracked in #657) is
         #    migrating these sites to ``raise CodegenSkip``; until
         #    that's complete this branch stays as the catch-all.
+        # #1212: the RETURN is a `@Byte` write boundary like any other, so
+        # mark the body's literal leaves before translating it.  The
+        # whole-body `i32.wrap_i64` below cannot cover a HETEROGENEOUS join
+        # — `_infer_block_result_type` reads the then-branch / first arm
+        # only, so a join whose read arm is an i32 `@Byte` slot and whose
+        # sibling is a bare literal was annotated from one arm while the
+        # other lowered at its own width, and ARM ORDER decided which way
+        # the module failed to validate.  Marking makes every arm i32, after
+        # which whichever arm the decider reads gives the same answer; a
+        # decider taught to read every arm would not have helped, since the
+        # literal arm would still emit `i64.const`.  Alias-aware, so a
+        # refined `@Byte` alias return marks too.
+        self._mark_byte_return_leaves(ctx, decl.return_type, decl.body)
         try:
             body_instrs = ctx.translate_block(decl.body, env)
         except CodegenSkip as skip:
@@ -775,16 +1009,22 @@ class FunctionCompilationMixin:
         # so trap rather than silently return it — the runtime backstop for the
         # verifier's nat_to_int_coerce obligation (7c).  @Int is i64, so this
         # runs before (and is unaffected by) the i32 coercion below.
-        # Alias-aware (`type MyInt = Int`) via `_resolve_base_type_name` so an
-        # alias-typed @Int return is guarded too — matching the verifier's 7c
-        # gate (`_is_int_type` over the *resolved* return type), whereas the raw
-        # `_type_expr_to_slot_name` returns the opaque alias name and missed it
-        # (#983 review, the widen sibling of the alias-blind narrow gate).  A
-        # refinement over @Int stays here (the verifier's 7c fires on refined
-        # @Int too: the `<= i64.MAX` bound is not subsumed by the predicate).
+        # Alias-aware via `_boundary_base` so an alias-typed @Int return is
+        # guarded too — matching the verifier's 7c gate (`_is_int_type` over the
+        # *resolved* return type).  The raw `_type_expr_to_slot_name` returned
+        # the opaque alias name and missed `type MyInt = Int` entirely (#983
+        # review, the widen sibling of the alias-blind narrow gate); the
+        # name-only chase that replaced it still dropped an APPLICATION's type
+        # arguments, so `type MyInt = Ident<Int>` answered the head `Ident` and
+        # the widen guard went missing again (#1256, measured against the plain
+        # spelling's).  `_boundary_base` resolves the type expression, so both
+        # spellings answer `Int` — the same derivation the narrow gate above,
+        # the `throw` payload and the `apply_fn` signature ask.  A refinement
+        # over @Int stays here (the verifier's 7c fires on refined @Int too: the
+        # `<= i64.MAX` bound is not subsumed by the predicate), which the
+        # wrapper-stripping resolution preserves rather than changes.
         widen_guarded = (
-            ctx._resolve_base_type_name(
-                self._type_expr_to_slot_name(decl.return_type) or "") == "Int"
+            ctx._boundary_base(decl.return_type) == "Int"
             and ctx._result_is_nat(decl.body)
         )
         if widen_guarded:
@@ -813,92 +1053,11 @@ class FunctionCompilationMixin:
                 body_instrs.append("i32.wrap_i64")
 
         # Collect closures created during body compilation and lift them.
-        # If any closure body failed to compile, drop the enclosing fn
-        # rather than emit a module with a `call_indirect` to a missing
-        # function-table entry — closes #636.  The closure body's own
-        # diagnostics (E615 from interpolation failures, generic E602
-        # from translation failures) were already emitted by
-        # `_compile_lifted_closure`'s harvest; here we add a specific
-        # E602 noting that the parent is being dropped *because* of
-        # the closure failure, so the user can correlate the cause
-        # diagnostic with the effect.
-        try:
-            closure_failed = self._lift_pending_closures(ctx)
-        except (AdtEqNotDerivableError, CodegenSkip) as exc:
-            # #773 / PR #870 review: a direct `==` on a non-Eq-derivable ADT
-            # inside a CLOSURE body — same clean E613 as the function-body
-            # catch above (a user error, not a compiler bug).  MUST precede
-            # the parent CodegenInvariantError catch below (subclass).
-            # #922: also degrade a `CodegenSkip` (an unsupported `hash`/`show`
-            # inside a closure) to a clean E602 rather than an uncaught
-            # traceback, via the shared contract-predicate dispatcher.
-            # #1185 (PR #1192 review): record the failed lift here too — an
-            # escape from `_lift_pending_closures` leaves `_closure_table`
-            # empty exactly as the rolled-back `closure_failed` path below
-            # does, so the orphan-carrier blame chain must be able to select
-            # THIS function as the [E602] root; without the record, the
-            # carrier's [E620] falls back to the no-closure-in-program
-            # wording, which is false for this shape.  No check-green
-            # program reaches this branch today (a closure-body skip is
-            # caught inside `_compile_lifted_closure`, and non-Eq `==` is
-            # E243-gated in body and refinement position since #928) — it
-            # is the defensive sibling of the append below, pinned by the
-            # stubbed-lift regression in
-            # tests/test_codegen_orphan_call_indirect_1185.py.
-            self._closure_lift_skips.append(decl.name)
-            self._emit_contract_predicate_degradation(ctx, exc, decl)
-            return None
-        except CodegenInvariantError as inv:  # #657: a closure-body invariant
-            # violation (a codegen bug) propagates out of
-            # `_compile_lifted_closure` to here and surfaces as ONE [E699] for
-            # the whole function — NOT the [E602] "closure skipped" warning
-            # below, which is reserved for a user-facing unsupported-construct
-            # skip.  Swallowing it in the closure helper (its previous
-            # behaviour) mixed the compiler-bug and user-skip signals: the
-            # helper emitted [E699] AND returned None, so this path then also
-            # emitted [E602].  Covered by tests/test_codegen_invariant_e699.py.
-            # #1185 (PR #1192 review, outside-diff): record the failed lift
-            # on THIS route too — the [E699] is an error, but the module is
-            # still assembled (compilation degrades, it does not abort), so
-            # the orphan-carrier blame chain runs and must be able to name
-            # this function as the root instead of falling back to the
-            # false no-closure-in-program wording.  Pinned by the
-            # `invariant_error` leg of the stubbed-lift regression in
-            # tests/test_codegen_orphan_call_indirect_1185.py.
-            self._closure_lift_skips.append(decl.name)
-            self._harvest_interp_inference_failures(ctx)
-            self._error(
-                inv.node if inv.node is not None else decl,
-                f"Internal compiler error while compiling '{decl.name}': "
-                f"{inv.msg}",
-                rationale="This is a codegen invariant violation — the type "
-                "checker should have rejected the input before it reached this "
-                "point.  Please file a bug report with the offending program.",
-                error_code="E699",
-            )
-            return None
-        if closure_failed:
-            # #1185: record the rolled-back lift.  A lift that rolls back
-            # is what leaves `_closure_table` empty, and an empty table
-            # orphans every `call_indirect` elsewhere in the module — the
-            # drop-propagation pass blames this function for those
-            # carriers, so the user gets one root cause, not two.
-            self._closure_lift_skips.append(decl.name)
-            self._warning(
-                decl,
-                f"Function '{decl.name}' contains a closure whose "
-                f"body failed to compile — skipped to avoid emitting "
-                f"an invalid module.",
-                rationale="A closure body inside this function failed "
-                "to translate (see preceding diagnostics for the "
-                "specific cause). The closure was dropped from the "
-                "function table; the enclosing function references it "
-                "via call_indirect, which would fail at WASM "
-                "validation. Dropping the enclosing function lets the "
-                "build complete with diagnostics only, no invalid "
-                "module emission.",
-                error_code="E602",
-            )
+        # #1245: this is the FIRST of two lift passes — the second runs
+        # after `_compile_postconditions` below, which is where a closure
+        # written in a refined RETURN's predicate, a tuple return's
+        # component guards, or an `ensures(...)` clause is registered.
+        if self._lift_closures_or_drop(ctx, decl):
             return None
 
         # Compile postcondition checks (wrap around body result).
@@ -947,6 +1106,35 @@ class FunctionCompilationMixin:
                 "point.  Please file a bug report with the offending program.",
                 error_code="E699",
             )
+            return None
+
+        # #1245: the SECOND lift pass.  `_compile_postconditions` lowers the
+        # refined-RETURN guard, a tuple return's per-component guards, and
+        # every `ensures(...)` predicate — all of which may construct a
+        # closure, which registers on `ctx` only now.  With one pass, that
+        # closure was created and never lifted: the module's function table
+        # stayed empty, the `call_indirect` its construction emits was
+        # orphaned, and the #1185 propagation dropped the function and every
+        # caller — a check-green, verify-clean program compiling to ZERO
+        # exports.  `_lift_pending_closures` consumes the pending list and
+        # re-syncs the id counter, so this pass sees exactly the closures the
+        # postcondition phase added.
+        #
+        # The two passes are deliberately NOT one transaction (PR #1250
+        # review).  When this one reports a failed lift the function is
+        # dropped while the FIRST pass's lifted closures stay committed, so
+        # the module carries them as dead code.  Measured on a stubbed
+        # second-pass failure: `$anon_0`/`$anon_1` and their `elem` entries
+        # remain, contiguous and still aligned with their `closure_id`s, the
+        # parent and its callers drop with the usual [E602]/[E620] chain, and
+        # the module VALIDATES — so the cost is output size in a path no
+        # check-green program reaches (every catch in
+        # `_lift_closures_or_drop` is defensive; a closure-body failure is
+        # caught inside `_compile_lifted_closure`), not a correctness one.
+        # Deferring pass 1's commit would mean holding its four output
+        # buffers uncommitted across the whole postcondition phase to buy
+        # that back.
+        if self._lift_closures_or_drop(ctx, decl):
             return None
 
         # Propagate resource / host-import flags from ``ctx`` to the module
@@ -1152,15 +1340,13 @@ class FunctionCompilationMixin:
             for pidx in gc_pointer_params:
                 gc_prologue.extend(gc_shadow_push(pidx))
 
-            # Determine if return type is a heap pointer
-            ret_type_name = self._type_expr_to_slot_name(decl.return_type)
+            # Determine if return type is a heap pointer (#1255: from the
+            # REPRESENTATION base, the closure return's twin).
             ret_is_pointer = False
-            if (
-                ret_wt == "i32"
-                and ret_type_name not in ("Bool", "Byte", None)
-                and not _is_host_handle_type(ret_type_name)
-            ):
-                ret_is_pointer = True
+            if ret_wt == "i32":
+                ret_is_pointer = is_gc_pointer_base(
+                    self._family_base_te(decl.return_type),
+                )
             elif ret_wt == "i32_pair":
                 ret_is_pointer = True
 

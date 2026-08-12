@@ -1,0 +1,63 @@
+-- Conformance: alias spellings inside handler clause slots (Chapter 7,
+-- Section 7.5.2).  Tests: a clause pattern and a `with`-expression reference
+-- that spell one type through DIFFERENT aliases name one slot stack, so the
+-- reference resolves to the binding the checker gave it — the state slot,
+-- captured pre-store and bound last, at index 0 (#1208).  Three depths of
+-- divergence between pattern and reference: an alias in the pattern read
+-- canonically, an alias in the reference read against a canonical pattern,
+-- and a twice-applied alias in the pattern read at one application.  Each
+-- keeps the OLD state, so a reference misbound to the put argument shows up
+-- as the argument's value instead.
+type Cnt = Int;
+
+type Id<T> = T;
+
+public fn alias_in_pattern(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 100)
+  effects(pure)
+{
+  handle[State<Option<Int>>](@Option<Int> = Some(100)) {
+    get(@Unit) -> { resume(@Option<Int>.0) },
+    put(@Option<Cnt>) -> { resume(()) } with @Option<Int> = @Option<Cnt>.0
+  } in {
+    put(Some(7));
+    option_unwrap_or(get(()), 0 - 1)
+  }
+}
+
+public fn alias_in_reference(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 5)
+  effects(pure)
+{
+  handle[State<Option<Int>>](@Option<Int> = Some(5)) {
+    get(@Unit) -> { resume(@Option<Int>.0) },
+    put(@Option<Cnt>) -> { resume(()) } with @Option<Int> = @Option<Int>.0
+  } in {
+    put(Some(9));
+    option_unwrap_or(get(()), 0 - 1)
+  }
+}
+
+public fn nested_alias_reference(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 5)
+  effects(pure)
+{
+  handle[State<Option<Int>>](@Option<Int> = Some(5)) {
+    get(@Unit) -> { resume(@Option<Int>.0) },
+    put(@Option<Id<Id<Int>>>) -> { resume(()) } with @Option<Int> = @Option<Id<Int>>.0
+  } in {
+    put(Some(9));
+    option_unwrap_or(get(()), 0 - 1)
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 0)
+  effects(pure)
+{
+  alias_in_pattern(()) - 100 + (alias_in_reference(()) - 5) + (nested_alias_reference(()) - 5)
+}

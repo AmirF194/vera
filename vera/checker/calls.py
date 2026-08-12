@@ -930,20 +930,24 @@ class CallsMixin:
         """Get the type argument mapping for an effect — innermost enclosing
         HANDLER first (#1203 determinism: an op inside nested same-name
         handlers resolves against the governing handler's instantiation,
-        §7.5.2), then the current effect row.  The row fallback iterates a
-        frozenset, whose order is hash-dependent — acceptable only because
-        a declared row cannot meaningfully carry two instantiations of one
-        effect; the nested-handler case, which CAN, is covered by the
-        stack."""
+        §7.5.2), then the current effect row IN SOURCE ORDER.
+
+        The row leg used to iterate the row's ``frozenset`` on the premise
+        that a declared row cannot meaningfully carry two instantiations of
+        one effect.  Spec §7.3.3 says otherwise — ``effects(<State<Int>,
+        State<Bool>>)`` is two independent cells — and such a row made a bare
+        ``get``'s type a function of PYTHONHASHSEED: the same source checked
+        clean on some interpreter starts and failed E121 (`body has type Bool,
+        expected Int`) on others.  It now walks `ordered_effect_row()`, the
+        same ordered candidate list bare op-NAME resolution uses (#1215), so
+        the first instantiation written in the row governs."""
         eff_info = self.env.lookup_effect(effect_name)
         if eff_info is None or not eff_info.type_params:
             return {}
         for inst in reversed(self._handled_effect_insts):
             if inst.name == effect_name and inst.type_args:
                 return dict(zip(eff_info.type_params, inst.type_args))
-        if not isinstance(self.env.current_effect_row, ConcreteEffectRow):
-            return {}
-        for ei in self.env.current_effect_row.effects:
+        for ei in self.env.ordered_effect_row():
             if ei.name == effect_name and ei.type_args:
                 return dict(zip(eff_info.type_params, ei.type_args))
         return {}

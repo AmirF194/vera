@@ -39,6 +39,8 @@ from vera.parser import parse_file
 from vera.transform import transform
 from vera.verifier import ContractVerifier
 
+from tests.module_fixture_helpers import resolved_module as _resolved_module
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Real, known-good programs that already compile + verify.  Exercise multi
@@ -52,6 +54,55 @@ _REPO_CORPUS = [
 
 # Targeted cases for the soundness-critical scenarios.
 _INLINE_CORPUS = {
+    # #1223: a generic `where`-helper under a GENERIC parent, whose own body
+    # calls a TOP-LEVEL generic (`gug_pick`) and a SIBLING generic helper.
+    # Neither instantiation exists until the helper itself is monomorphized —
+    # in its still-generic spelling the argument's type is the enclosing type
+    # VARIABLE — so both sides had to grow the same rescan.  This entry is
+    # what makes the two halves land together: the codegen half alone makes
+    # `gug_pick<Bool>` an emitted instantiation the verifier does not
+    # discover, which is a false Tier-1 and turns this check red.
+    "generic_under_generic_callees_1223": """
+private forall<W> fn gug_pick(@W, @W -> @W)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  @W.0
+}
+
+private forall<T> fn gug_parent(@T -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  if gug_outer(true, false) then { 7 } else { 3 }
+}
+where {
+  forall<U> fn gug_outer(@U, @U -> @U)
+    requires(true)
+    ensures(true)
+    effects(pure)
+  {
+    gug_inner(@U.1, @U.0)
+  }
+  forall<V> fn gug_inner(@V, @V -> @V)
+    requires(true)
+    ensures(true)
+    effects(pure)
+  {
+    gug_pick(@V.1, @V.0)
+  }
+}
+
+public fn use_gug(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  gug_parent(1)
+}
+""",
     # Two type vars collapse to the same concrete type (A=B=Int) — exercises
     # the De Bruijn reindex inside _monomorphize_fn during discovery.
     "collapsed_typevars": """
@@ -356,24 +407,6 @@ def _verifier_discovered(
     return {(name, ct) for name, cts in result.items() for ct in cts}
 
 
-def _resolved_module(path: tuple[str, ...], src: str) -> object:
-    """Build a ``ResolvedModule`` from source text (shared by the cross-module
-    differential tests, which each need one or more imported modules)."""
-    from vera.resolver import ResolvedModule
-
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".vera", delete=False, encoding="utf-8",
-    ) as f:
-        f.write(src)
-        f.flush()
-        fp = f.name
-    try:
-        return ResolvedModule(
-            path=path, file_path=Path(fp),
-            program=transform(parse_file(fp)), source=src,
-        )
-    finally:
-        os.unlink(fp)
 
 
 def _cross_module_sets(
@@ -793,8 +826,6 @@ def test_imported_generic_symmetric_between_codegen_and_verifier(
     monomorphized (both empty).  Now both monomorphize; the equality assertion is
     the lockstep the #732 differential demands.
     """
-    from vera.resolver import ResolvedModule
-
     a_src = (
         "public forall<T> fn ext_id(@T -> @T)\n"
         "  requires(true) ensures(@T.result == @T.0) effects(pure)\n"
@@ -808,22 +839,7 @@ def test_imported_generic_symmetric_between_codegen_and_verifier(
         f"{{ {call} }}\n"
     )
 
-    def _resolved(path: tuple[str, ...], src: str) -> "ResolvedModule":
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".vera", delete=False, encoding="utf-8",
-        ) as f:
-            f.write(src)
-            f.flush()
-            fp = f.name
-        try:
-            return ResolvedModule(
-                path=path, file_path=Path(fp),
-                program=transform(parse_file(fp)), source=src,
-            )
-        finally:
-            os.unlink(fp)
-
-    mod_a = _resolved(("a",), a_src)
+    mod_a = _resolved_module(("a",), a_src)
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".vera", delete=False, encoding="utf-8",
     ) as f:
@@ -1318,6 +1334,110 @@ def test_private_to_private_generic_chain_symmetric_1029() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("gen_vis", "imports"),
+    [
+        ("public", "door"),        # public, outside the importer's filter
+        ("public", "gen2, door"),  # public, inside it, but locally shadowed
+        ("public", None),          # wildcard import, locally shadowed
+        ("private", "door"),       # the #1000 family (regression half)
+    ],
+    ids=["out_of_filter", "in_filter_shadowed", "wildcard", "private"],
+)
+def test_module_generic_qualified_only_symmetric_1274(
+    gen_vis: str, imports: str | None,
+) -> None:
+    """#1274: EVERY qualified-only module generic — the ones that do not own the
+    importer's bare name — is emitted and discovered under the SAME
+    ``mod$<path>$name`` base by both sides.
+
+    Pre-fix only the PRIVATE family was routed that way, so codegen collapsed a
+    public module generic's clone onto the importer's bare ``gen2$Bool`` while
+    the verifier resolved the module's contract: the module ran the importer's
+    body with a proved ``ensures`` (a false Tier-1), or dangled at
+    ``unknown func`` where the importer declared no such name.  The per-module
+    differential is what pins the two sides to one namespace: an asymmetry here
+    is precisely a clone one side emits and the other never verifies.
+    """
+    mod = _resolved_module(("lib",), (
+        "private fn v(@Unit -> @Int)\n"
+        "  requires(true) ensures(@Int.result == 111) effects(pure)\n"
+        "{ 111 }\n\n"
+        f"{gen_vis} forall<T> fn gen2(@T -> @Int)\n"
+        "  requires(true) ensures(@Int.result == 111) effects(pure)\n"
+        "{ v(()) }\n\n"
+        "public fn door(@Bool -> @Int)\n"
+        "  requires(true) ensures(@Int.result == 111) effects(pure)\n"
+        "{ gen2(@Bool.0) }\n"
+    ))
+    imp = "import lib;" if imports is None else f"import lib({imports});"
+    main_src = (
+        f"{imp}\n\n"
+        "private forall<T> fn gen2(@T -> @Int)\n"
+        "  requires(true) ensures(@Int.result == 999) effects(pure)\n"
+        "{ 999 }\n\n"
+        "public fn useLocal(@Unit -> @Int)\n"
+        "  requires(true) ensures(@Int.result == 999) effects(pure)\n"
+        "{ gen2(true) }\n\n"
+        "public fn main(@Unit -> @Int)\n"
+        "  requires(true) ensures(@Int.result == 111) effects(pure)\n"
+        "{ door(true) }\n"
+    )
+    codegen_set, verifier_set = _cross_module_sets(main_src, [mod])
+
+    assert ("mod$lib$gen2", ("Bool",)) in codegen_set, (
+        f"codegen must emit the module generic's clone under its owning "
+        f"module's base, got {sorted(codegen_set)}"
+    )
+    assert ("gen2", ("Bool",)) in codegen_set, (
+        f"the IMPORTER's own gen2<Bool> must still be emitted under the bare "
+        f"name it owns, got {sorted(codegen_set)}"
+    )
+    assert verifier_set == codegen_set, (
+        f"verifier ({sorted(verifier_set)}) must discover exactly codegen's "
+        f"emitted set ({sorted(codegen_set)}) — the qualified-only module "
+        f"generic namespace (#1274); a divergence is a false Tier-1"
+    )
+
+
+def test_module_generic_owning_bare_name_stays_unqualified_1274() -> None:
+    """The complement: a module generic that DOES own the importer's bare name
+    (public, in-filter, unshadowed) keeps that bare name on both sides.
+
+    Without this the widened predicate would be a blanket rename, and #774's
+    bare-call routing (`ext_id(42)` reaching the imported generic) would break
+    silently — the fix must move exactly the qualified-only families.
+    """
+    mod = _resolved_module(("lib",), (
+        "public forall<T> fn gen2(@T -> @Int)\n"
+        "  requires(true) ensures(@Int.result == 111) effects(pure)\n"
+        "{ 111 }\n\n"
+        "public fn door(@Bool -> @Int)\n"
+        "  requires(true) ensures(@Int.result == 111) effects(pure)\n"
+        "{ gen2(@Bool.0) }\n"
+    ))
+    main_src = (
+        "import lib(gen2, door);\n\n"
+        "public fn main(@Unit -> @Int)\n"
+        "  requires(true) ensures(@Int.result == 222) effects(pure)\n"
+        "{ door(true) + gen2(3) }\n"
+    )
+    codegen_set, verifier_set = _cross_module_sets(main_src, [mod])
+
+    assert ("gen2", ("Bool",)) in codegen_set, (
+        f"an unshadowed in-filter public module generic must keep the bare "
+        f"clone name, got {sorted(codegen_set)}"
+    )
+    assert not any(n.startswith("mod$lib$gen2") for n, _ in codegen_set), (
+        f"it must NOT be renamed — it owns the importer's bare name, "
+        f"got {sorted(codegen_set)}"
+    )
+    assert verifier_set == codegen_set, (
+        f"verifier ({sorted(verifier_set)}) must discover exactly codegen's "
+        f"emitted set ({sorted(codegen_set)})"
+    )
+
+
 def test_generic_typearg_from_where_helper_return_is_discovered() -> None:
     """A generic whose type arg is fixed ONLY by a where-helper's return must be
     discovered by the verifier at the same concrete type codegen emits.
@@ -1389,8 +1509,6 @@ def test_generic_typearg_from_imported_constructor_is_discovered() -> None:
     ``"Bool"`` phantom default, and it discovers ``id2<Bool>`` — MISSING
     codegen's ``id2<Box>`` clone, a false Tier-1 (PR #767 review).
     """
-    from vera.resolver import ResolvedModule
-
     a_src = "public data Box<T> {\n  MkBox(T)\n}\n"
     b_src = (
         "import a;\n\n"
@@ -1402,22 +1520,7 @@ def test_generic_typearg_from_imported_constructor_is_discovered() -> None:
         "{ id2(MkBox(7)) }\n"
     )
 
-    def _resolved(path: tuple[str, ...], src: str) -> "ResolvedModule":
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".vera", delete=False, encoding="utf-8",
-        ) as f:
-            f.write(src)
-            f.flush()
-            fp = f.name
-        try:
-            return ResolvedModule(
-                path=path, file_path=Path(fp),
-                program=transform(parse_file(fp)), source=src,
-            )
-        finally:
-            os.unlink(fp)
-
-    mod_a = _resolved(("a",), a_src)
+    mod_a = _resolved_module(("a",), a_src)
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".vera", delete=False, encoding="utf-8",
     ) as f:
@@ -1465,8 +1568,6 @@ def test_generic_typearg_from_imported_function_return_is_discovered() -> None:
     ``id_g<Int>``: an ASYMMETRIC miss = false Tier-1 (verified the wrong clone).
     Differentially confirmed (PR #767 review, CodeRabbit).
     """
-    from vera.resolver import ResolvedModule
-
     a_src = (
         "public fn make_int(@Unit -> @Int)\n"
         "  requires(true) ensures(true) effects(pure)\n"
@@ -1482,22 +1583,7 @@ def test_generic_typearg_from_imported_function_return_is_discovered() -> None:
         "{ id_g(make_int(@Unit.0)) }\n"
     )
 
-    def _resolved(path: tuple[str, ...], src: str) -> "ResolvedModule":
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".vera", delete=False, encoding="utf-8",
-        ) as f:
-            f.write(src)
-            f.flush()
-            fp = f.name
-        try:
-            return ResolvedModule(
-                path=path, file_path=Path(fp),
-                program=transform(parse_file(fp)), source=src,
-            )
-        finally:
-            os.unlink(fp)
-
-    mod_a = _resolved(("a",), a_src)
+    mod_a = _resolved_module(("a",), a_src)
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".vera", delete=False, encoding="utf-8",
     ) as f:
@@ -1549,8 +1635,6 @@ def test_imported_private_shadow_fn_return_stays_symmetric() -> None:
     avoid.  This pins the symmetry so that "fix" cannot land silently, while
     asserting only agreement (not the incidental concrete type) so a later #769
     precision fix that moves BOTH sides together still passes (PR #767 review)."""
-    from vera.resolver import ResolvedModule
-
     a_src = (
         "private fn mk(@Unit -> @Bool)\n"
         "  requires(true) ensures(true) effects(pure)\n"
@@ -1575,22 +1659,7 @@ def test_imported_private_shadow_fn_return_stays_symmetric() -> None:
         "{ id_g(mk(@Unit.0)) }\n"
     )
 
-    def _resolved(path: tuple[str, ...], src: str) -> "ResolvedModule":
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".vera", delete=False, encoding="utf-8",
-        ) as f:
-            f.write(src)
-            f.flush()
-            fp = f.name
-        try:
-            return ResolvedModule(
-                path=path, file_path=Path(fp),
-                program=transform(parse_file(fp)), source=src,
-            )
-        finally:
-            os.unlink(fp)
-
-    mods = [_resolved(("a",), a_src), _resolved(("b",), b_src)]
+    mods = [_resolved_module(("a",), a_src), _resolved_module(("b",), b_src)]
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".vera", delete=False, encoding="utf-8",
     ) as f:

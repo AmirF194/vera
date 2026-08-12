@@ -19,6 +19,7 @@ from tests.codegen_helpers import (
     _compile_ok,
     _run,
 )
+from tests.module_fixture_helpers import fake_resolved_module
 
 
 # =====================================================================
@@ -866,15 +867,8 @@ public fn main(@Unit -> @Int)
     def _boxes_module() -> object:
         """A resolved `boxes` module declaring `data NatBox { WrapN(Nat) }`
         for the cross-module imported-constructor guard tests (#747 site 4)."""
-        from pathlib import Path
-
-        from vera.parser import parse_to_ast
-        from vera.resolver import ResolvedModule
-
-        src = "public data NatBox {\n  WrapN(Nat)\n}\n"
-        return ResolvedModule(
-            path=("boxes",), file_path=Path("/fake/boxes.vera"),
-            program=parse_to_ast(src), source=src)
+        return fake_resolved_module(
+            ("boxes",), "public data NatBox {\n  WrapN(Nat)\n}\n")
 
     def test_imported_concrete_nat_ctor_field_guarded(self) -> None:
         """An imported concrete-@Nat constructor field emits the runtime
@@ -917,17 +911,10 @@ public fn main(@Unit -> @NatBox)
         """A resolved `natfns` module with a function taking a concrete @Nat
         formal, for the cross-module imported-function guard test (CR #756 —
         `_register_modules` must harvest the module's `_fn_nat_params`)."""
-        from pathlib import Path
-
-        from vera.parser import parse_to_ast
-        from vera.resolver import ResolvedModule
-
-        src = ("public fn boxNat(@Nat -> @Nat)\n"
-               "  requires(true) ensures(true) effects(pure)\n"
-               "{ @Nat.0 }\n")
-        return ResolvedModule(
-            path=("natfns",), file_path=Path("/fake/natfns.vera"),
-            program=parse_to_ast(src), source=src)
+        return fake_resolved_module(("natfns",), (
+            "public fn boxNat(@Nat -> @Nat)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ @Nat.0 }\n"))
 
     def test_imported_fn_nat_param_guarded(self) -> None:
         """A cross-module call into an imported function's concrete @Nat formal
@@ -1280,6 +1267,129 @@ public fn f(@Int -> @Pos)
             f"the nat-bind narrow guard must NOT co-fire with the refinement "
             f"boundary guard (double guard):\n{body}"
         )
+
+
+class TestParameterisedAliasReturnGuard1256:
+    """#1256 — the same two gates resolve a PARAMETERISED alias APPLICATION.
+
+    `_resolve_base_type_name` chases an alias by NAME and drops the type
+    arguments, so `type Ident<T> = T; type Count = Ident<Nat>;` resolved to
+    the bare head `Ident` — in neither gate's set — and a `@Count` return got
+    no guard at all while the plain `type Count = Nat` spelling got both.
+    Same silent-negative soundness gap #983 closed for the unparameterised
+    alias, reached one spelling over: measured `run(-5)` returning -5 through
+    the `@Nat` slot.
+
+    Both gates now ask `WasmContext._boundary_base`, which substitutes the
+    application because it resolves the type EXPRESSION rather than chasing
+    its head — the derivation the throw payload and the `apply_fn` signature
+    already share.  Each case carries its unparameterised twin as the oracle:
+    the claim is that the two spellings compile to the same guard, and a
+    bare "guard present" assertion would not notice if the twin lost its.
+    """
+
+    _PARAM_ALIAS = "type Ident<T> = T;\n"
+
+    _NARROW = _PARAM_ALIAS + """
+type Count = Ident<Nat>;
+public fn f(@Int -> @Count)
+  requires(true) ensures(true) effects(pure)
+{ @Int.0 }
+"""
+
+    _NARROW_TWIN = """
+type Count = Nat;
+public fn f(@Int -> @Count)
+  requires(true) ensures(true) effects(pure)
+{ @Int.0 }
+"""
+
+    _WIDEN = _PARAM_ALIAS + """
+type MyInt = Ident<Int>;
+public fn g(@Nat -> @MyInt)
+  requires(true) ensures(true) effects(pure)
+{ @Nat.0 }
+"""
+
+    _WIDEN_TWIN = """
+type MyInt = Int;
+public fn g(@Nat -> @MyInt)
+  requires(true) ensures(true) effects(pure)
+{ @Nat.0 }
+"""
+
+    @pytest.mark.parametrize(
+        ("source", "fn"),
+        [
+            pytest.param(_NARROW, "f", id="narrow"),
+            pytest.param(_NARROW_TWIN, "f", id="narrow_unparameterised_twin"),
+            pytest.param(_WIDEN, "g", id="widen"),
+            pytest.param(_WIDEN_TWIN, "g", id="widen_unparameterised_twin"),
+        ],
+    )
+    def test_the_guard_is_emitted_through_the_application(
+        self, source: str, fn: str,
+    ) -> None:
+        """Pre-fix the two parameterised cases emitted no guard at all."""
+        body = _fn_body(_compile_ok(source).wat, fn)
+        assert "i64.lt_s" in body and "unreachable" in body, body
+
+    def test_a_negative_through_the_application_traps(self) -> None:
+        """The soundness statement: -5 no longer reaches the `@Nat` slot.
+
+        Pre-fix this returned **-5** — the value, not a trap — which is the
+        same silent negative #983 closed for `type Count = Nat`.
+        """
+        result = _compile_ok(self._NARROW)
+        with pytest.raises(WasmTrapError):
+            execute(result, fn_name="f", args=[-5])
+
+    def test_a_satisfying_value_through_the_application_passes(self) -> None:
+        """The gained guard fires on violations only — 7 still returns 7."""
+        assert _run(self._NARROW, fn="f", args=[7]) == 7
+
+    # The parameter is `@Int`, NOT `@Nat`: the body must actually NARROW for
+    # the exclusion to have anything to exclude.  A `@Nat` body into a
+    # `@Nat`-based return is no narrowing leaf at all, so
+    # `_collect_narrowing_return_leaves` returns nothing and the absence of
+    # `i64.lt_s` below holds whether or not the conjunct is there —
+    # measured, and the reason this fixture is spelled the harder way.
+    _REFINED_OVER_APPLICATION = _PARAM_ALIAS + """
+type Grown = { @Ident<Nat> | @Ident<Nat>.0 >= 18 };
+public fn f(@Int -> @Grown)
+  requires(@Int.0 >= 18) ensures(true) effects(pure)
+{ @Int.0 }
+"""
+
+    def test_a_refinement_over_an_application_is_not_double_guarded(
+        self,
+    ) -> None:
+        """The exclusion the swap must NOT disturb.
+
+        `_boundary_base` strips refinement wrappers, so a refined return now
+        answers `Nat` where the old spelling answered the alias head — which
+        would double-guard were the narrow gate keyed on the base ALONE.  It
+        is not: the `_refinement_guard_parts` conjunct beside it is what
+        keeps a refined return on its single 7b boundary guard, and this is
+        the shape that proves the swap left that conjunct doing its job.
+        The return type is
+        `tests/conformance/ch02_refinement_base_param_alias.vera`'s — the one
+        corpus program whose base spelling the swap moves (`T` to `Nat`),
+        inert there for exactly this reason.
+
+        Mutation-measured over the whole suite, dropping the conjunct:
+        `i64.lt_s` appears and this goes red, together with #983's
+        unparameterised twin `test_alias_to_refinement_return_single_guard_
+        not_double` — those two and nothing else, which is what says the
+        exclusion is tested at both spellings and by nothing incidental.
+        That measurement is also why the parameter is `@Int`: with the
+        conformance program's own `@Nat` parameter the body narrows nothing,
+        the leaf collector returns empty, and the assertion held with the
+        conjunct gone.  A control that cannot go red is not a control.
+        """
+        body = _fn_body(_compile_ok(self._REFINED_OVER_APPLICATION).wat, "f")
+        assert "vera.contract_fail" in body, body
+        assert "i64.lt_s" not in body, body
 
 
 class TestNatReturnPerLeafTCO983:

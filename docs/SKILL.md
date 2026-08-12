@@ -89,13 +89,13 @@ vera lsp                          # Serve LSP over stdio: live diagnostics, hove
                                   #   hole completion + agent proof-delta methods (LSP_SERVER.md)
 vera builtins [--json]            # List the built-in function registry (no file needed)
 vera effects [--json]             # List the effect and ability registry (no file needed)
-vera errors [--json]              # List the diagnostic-code registry: E001–E702 + W001 (no file needed)
+vera errors [--json]              # List the diagnostic-code registry: E001–E702 + W001/W002 (no file needed)
 pytest tests/ -v                  # Run the test suite
 ```
 
 Errors are natural language instructions explaining what went wrong and how to fix it. Feed them back into your context to correct the code.
 
-`vera test` generates Z3 inputs for `Int`, `Nat`, `Bool`, `Byte`, `String`, and `Float64` parameters. Functions with ADT or function-type parameters are skipped with a message naming the specific type. Float64 uses Z3's mathematical reals (NaN, ±∞, and subnormals are not generated). Strings are capped at 50 characters.
+`vera test` generates Z3 inputs for `Int`, `Nat`, `Bool`, `Byte`, `String`, and `Float64` parameters. The decision is made on each parameter's **resolved** type, not its spelling: a type alias or refinement that resolves to one of those six is generated for like any other, so a parameter spelled `@Count` under `type Count = Nat;` is not skipped for its parameter type, and an alias-spelled `requires` still constrains the inputs. (Trials are what a *Tier 3* contract gets; a signature the verifier proves reports `VERIFIED (Tier 1)` instead, and one with only trivial contracts is skipped as `trivial contracts only`.) A parameter resolving to an ADT or a function type is skipped with a message naming that resolved type — `type MaybeCount = Option<Nat>` skips with `cannot generate Option<Nat> inputs`. A generic function is skipped as `generic function` before its parameter types are considered at all, so a `forall<T>` signature never reports a per-parameter reason even when every parameter is generable. A generable signature is also skipped when a `requires` conjunct — or a refined parameter's predicate — is outside the SMT layer's decidable fragment, since Z3 could not constrain the generated inputs by it; the skip names the conjunct (`cannot generate inputs satisfying `` `string_length(@String.0) > 0` ``), because running trials the precondition never shaped would report the function's own entry-guard trap as a broken contract. `string_length` over a non-literal is the usual trigger — Vera counts UTF-8 bytes and Z3's string theory has no byte-length operator — so compare a `string_length` against a literal where you want the function trialled. Float64 uses Z3's mathematical reals (NaN, ±∞, and subnormals are not generated). Strings are capped at 50 characters.
 
 ### Browser compilation
 
@@ -146,9 +146,10 @@ On error, each diagnostic includes `severity`, `description`, `location` (`file`
 
 ### Error codes
 
-Every diagnostic has a stable error code grouped by compiler phase:
+Every diagnostic has a stable code grouped by compiler phase — the `W` series is warnings, the `E` series errors:
 
 - **W001** — Typed hole (`?`) — expected type and available bindings reported (warning, not error)
+- **W002** — `async()` argument evaluates eagerly: its effects fall outside the commutative set (`Http`), so the future is computed sequentially at the `async()` site rather than concurrently (warning, not error)
 - **E001–E007** — Parse errors (missing contracts, unexpected tokens)
 - **E020, E021, E023** — Malformed comments: unterminated `{-` (E020) or `/*` (E021), or a `/*` nested inside another (E023 — only `{- -}` nests). Each names the delimiter at fault and how to close it.
 - **E010** — Transform errors (internal)
@@ -396,6 +397,15 @@ Slot environments (index 0 = last occurrence in signature):
     @Int.1  parameter 1 (first @Int)
 ```
 
+`where`-block helpers get their own table, indented under their parent:
+
+```text
+  fn is_even(@Nat -> @Bool)
+    @Nat.0  parameter 1 (only @Nat)
+    where fn is_odd(@Nat -> @Bool)
+      @Nat.0  parameter 1 (only @Nat)
+```
+
 **Read this table before writing any contract or recursive call.** The ordering only matters
 when a function has multiple parameters of the same type — but that is exactly when bugs occur.
 
@@ -479,6 +489,12 @@ match @Tuple<Int, String>.0 {
 type PosInt = { @Int | @Int.0 > 0 };
 type Name = String;
 ```
+
+An alias is **opaque as the head** of a slot name and **transparent inside type arguments**
+(spec §3.8.1). A parameter written `@PosInt` is referenced `@PosInt.0`, never `@Int.0` — the
+two are separate namespaces. A parameter written `@Option<Name>` binds `Option<String>`, so it
+is referenced `@Option<String>.0`. When in doubt, run `vera check --explain-slots`: it prints
+the resolved name of every parameter.
 
 ## Data Types (ADTs)
 
@@ -2372,7 +2388,7 @@ public fn main(@Unit -> @Unit)
 
 ## Conformance Suite
 
-The `tests/conformance/` directory contains 179 small programs — most self-contained, with the Chapter 8 module-system programs and a few cross-module Chapter 7 and 9 programs importing companion `_lib.vera` / `_mid.vera` modules — that validate every language feature against the spec — often one program per feature, though some features (slot references, match, contracts) span several. These are the best minimal working examples of Vera syntax and semantics.
+The `tests/conformance/` directory contains 213 small programs — most self-contained, with the Chapter 8 module-system programs and a few cross-module Chapter 7 and 9 programs importing companion `_lib.vera` / `_mid.vera` modules — that validate every language feature against the spec — often one program per feature, though some features (slot references, match, contracts) span several. These are the best minimal working examples of Vera syntax and semantics.
 
 Each program is organized by spec chapter (`ch01_int_literals.vera`, `ch04_match_basic.vera`, `ch07_state_handler.vera`, etc.) and the `manifest.json` file maps features to programs. When you need to see how a specific construct works, check the conformance program before reading the spec.
 
@@ -2401,6 +2417,7 @@ These are known limitations in the current reference implementation. Most are tr
 | `Inference` effect has no user-defined handlers | In the current implementation, `Inference` is always host-backed (dispatches to a real API). User-defined handlers for mocking, local models, or replay are not yet supported. | [#372](https://github.com/aallan/vera/issues/372) |
 | `DB` effect has no user-defined handlers | `DB` is always host-backed; `handle[DB]` for mocking or replay is not yet supported (shared with the other host effects). Test against `sqlite::memory:` for a hermetic real database. | [#372](https://github.com/aallan/vera/issues/372) |
 | `DB` effect is SQLite-only with positional string rows | Phase 1 supports SQLite only, a single connection per run, and stringly-typed positional rows (`Array<Array<Option<String>>>`). Named columns, typed cells, other backends, and transactions are future work. | [#1143](https://github.com/aallan/vera/issues/1143) |
+| Nested handlers over the SAME cell type, with an operation in a clause body | A bare `get`/`put` in a clause body is the ENCLOSING context's operation (spec §7.5.2), but the host state intrinsics address only the innermost cell of a family — so when the enclosing handler (or the function's declared row) is the *same* `State<T>`, the outer cell cannot be reached. That shape is a loud `E602` codegen skip rather than a silently wrong write. Nest handlers over *different* cell types, or refine the inner cell with `with @T = expr`, which is the clause's own state override. Handler nesting is also capped at 8 levels of outward clause re-entry (the expansion is exponential in the nesting depth); past it the function is a loud `E602`. | [#1233](https://github.com/aallan/vera/issues/1233) |
 | Browser target: `IO.sleep` freezes the tab | `IO.sleep` busy-waits the browser's main thread, so animations and paced simulations don't run meaningfully under `--target browser`. Until the JSPI-based suspend/resume fix lands, write browser-target programs as a pure simulation core with a JS driver, or stick to terminal output. | [#609](https://github.com/aallan/vera/issues/609) |
 | Browser target: ANSI escapes render as literal text | ANSI escape sequences (cursor control, screen clear) appear as literal control characters in the DOM rather than being interpreted. Terminal-style rendering needs the planned ANSI-subset interpreter in `runtime.mjs`; no language change is required. | [#610](https://github.com/aallan/vera/issues/610) |
 

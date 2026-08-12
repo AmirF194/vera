@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from vera import ast
+from vera.skip import CodegenInvariantError
 from vera.types import (
     BOOL,
     FLOAT64,
@@ -65,6 +67,112 @@ class WasmSlotEnv:
         new_stacks = {k: list(v) for k, v in self._stacks.items()}
         new_stacks.setdefault(type_name, []).append(local_idx)
         return WasmSlotEnv(new_stacks)
+
+
+# =====================================================================
+# The two names one State cell answers to (#1218)
+# =====================================================================
+
+@dataclass(frozen=True)
+class CellNames:
+    """A State cell's IDENTITY and its REPRESENTATION, carried together.
+
+    *family* is :func:`vera.naming.family_name` — what the checker's cell
+    type renders to, what the host symbol is mangled from, and the ONLY
+    thing two cells are ever compared on.  *base* is
+    :func:`vera.naming.family_base_name` — the same type with its
+    refinements stripped, which decides the WASM value type, pointer-ness,
+    and which #1203 write guard applies.
+
+    They differ exactly when the cell type is refined (#1218): `State<Pos>`,
+    `State<Neg>` and `State<Int>` are three cells that are all i64.  Before
+    #1218 one string did both jobs, so making it discriminate the predicate
+    would have silently switched off every decision keyed on `"Nat"` /
+    `"Int"` / `"Byte"` / `"Bool"` / `"String"` — the guards would stop being
+    emitted while the verifier went on recording them as `tier3_runtime`.
+
+    Recorded per OP NAME in ``WasmContext._effect_op_cells``, in lock-step
+    with ``_effect_ops``, so a `get`/`put` call site can ask what cell it
+    dispatches to WITHOUT parsing the mangled import name back out of its
+    own dispatch target.  That parse was a second, independent derivation of
+    the family — the seam #1233's round-5 review found re-mangling an
+    already-mangled name at — and it is gone: one canonical family is
+    threaded to both consumers.
+    """
+
+    family: str
+    base: str
+
+
+# =====================================================================
+# State handler clause registry entry (#976 / #1211)
+# =====================================================================
+
+@dataclass(frozen=True)
+class StateClauseEntry:
+    """One ``handle[State<T>]`` clause, plus the scope it compiles in.
+
+    Registered per op name by ``_translate_handle_state`` and consumed by
+    ``_translate_state_clause_op``, which inlines the clause body at each
+    get/put call site in the handled body (#976 intrinsic-hybrid semantics).
+
+    Everything after ``put_import`` is the handler-DECLARATION scope — the
+    context that existed at the ``handle`` expression, before this handler
+    installed its own bindings and op registries.  The checker checks clause
+    bodies THERE (§7.5.2): a clause is not part of the body it refines, so
+    both an outer slot reference and a bare ``get``/``put`` in a clause body
+    resolve against the enclosing context, not against this handler.  Keeping
+    the whole declaration-time scope in one record is what stops the two
+    halves drifting — ``decl_env`` alone was threaded first (#1202) and the
+    op registries were left at the innermost handler's, so a bare op in a
+    nested handler's clause body wrote the WRONG CELL (#1211).
+
+    Fields (each has a consumer — the tuple this replaced also carried the
+    effect argument's alias-opaque source spelling, which nothing unpacking
+    it ever read):
+        clause: the ``HandlerClause`` to inline.
+        family: the resolved cell family — the cell's IDENTITY, so import
+            naming and every comparison against another cell (#1218).
+        family_base: the same family with its refinements stripped — the
+            cell's REPRESENTATION, so WASM value type, pointer-ness, and
+            which #1203 write guard applies.  Both are carried because a
+            refined cell needs both and they differ: `State<Pos>` is its own
+            cell (identity) and is an i64 taking the plain `Int` guards
+            (representation).
+        state_slot_name: the state annotation's slot name; ``None`` for a
+            stateless handler, which binds no state slot in the checker.
+        decl_env: the declaration scope's slot environment.
+        get_import / put_import: this handler's own host-cell imports — the
+            intrinsic read/store the clause refines, not a declaration-time
+            value.
+        decl_effect_ops / decl_effect_op_result_wt / decl_effect_op_result_vera
+        / decl_effect_op_cells:
+            the four op registries as they stood at the declaration.
+        decl_state_clause_ops: the clause registry as it stood at the
+            declaration — the ENCLOSING handlers' clauses, never this
+            handler's own, so re-entering an op from inside a clause body
+            walks strictly outwards and terminates.
+        decl_addressable_from: how many host cells were pushed at the
+            declaration — the index into ``_pushed_cell_families`` from which
+            this clause body's cells are SHADOWS.  A bare op in the clause
+            body resolves into the declaration scope, but the host intrinsics
+            address only the innermost cell of a family, so an op whose family
+            appears at or after this index cannot reach its cell (#1233).
+    """
+
+    clause: ast.HandlerClause
+    family: str
+    family_base: str
+    state_slot_name: str | None
+    decl_env: WasmSlotEnv
+    get_import: str
+    put_import: str
+    decl_effect_ops: dict[str, tuple[str, bool]]
+    decl_effect_op_result_wt: dict[str, str | None]
+    decl_effect_op_result_vera: dict[str, str | None]
+    decl_effect_op_cells: dict[str, CellNames]
+    decl_state_clause_ops: dict[str, "StateClauseEntry"]
+    decl_addressable_from: int
 
 
 # =====================================================================
@@ -353,6 +461,56 @@ def _is_host_handle_type(type_name: str | None) -> bool:
     return head in _HOST_HANDLE_TYPES
 
 
+# The inline i32 scalars, as a REPRESENTATION question — `Unit` is absent
+# because it has no WASM value at all, so no boundary ever asks whether one
+# is a pointer (`_INLINE_I32_TYPES` above answers the different question of
+# which BINDINGS need no push, and a Unit binding is one of them).
+_NON_POINTER_I32_BASES = frozenset({"Bool", "Byte"})
+
+# The largest value an inline i32 scalar can hold: `@Byte` is 0..255 and
+# `@Bool` is 0/1 (spec §11).  Read by the heap-layout guard in
+# `vera/codegen/assembly.py`, which keeps the GC heap above this range so a
+# scalar that reached the shadow stack could never be mistaken for a
+# pointer by the conservative mark phase.
+MAX_INLINE_I32_VALUE = 255
+
+
+def is_gc_pointer_base(base_name: str) -> bool:
+    """Whether an ``i32``-lowered value is a Vera-heap pointer to be rooted.
+
+    THE pointer-ness rule (#1255), stated once.  An ``i32`` is either an
+    inline scalar (``@Bool`` / ``@Byte``), an opaque host handle, or a
+    pointer into the GC heap; only the last must go on the shadow stack,
+    and pushing one of the others costs a slot and a spurious mark
+    candidate.  Callers pair it with their own ``wt == "i32"`` test — the
+    pair convention (String / Array) is a pointer by construction and is
+    decided by width, not by name.
+
+    *base_name* MUST be the REPRESENTATION base — the name after alias
+    chasing and refinement stripping, which is
+    :func:`vera.naming.family_base_name` from a type expression and
+    ``WasmContext._resolve_base_type_name`` from a slot name.  The
+    syntactic head is what #1255 was: ``type SmallByte = { @Byte | … }``
+    answers ``SmallByte``, which is in neither set, so every closure
+    parameter, return and capture of a refined or aliased scalar was rooted
+    as though it were a heap pointer.  Inert, because the mark phase's
+    first guard rejects anything below the heap (see the layout invariant
+    in ``vera/codegen/assembly.py``) — but a classification rule cannot
+    rely on a downstream range check to be right.
+
+    The parameter is a plain ``str``, not ``str | None``: both admissible
+    producers are total — ``family_base_name`` falls back to
+    :func:`vera.slots.family_fallback_name` rather than returning ``None``,
+    and ``_resolve_base_type_name`` returns its input unchanged when it
+    resolves no further.  An optional parameter here would have been a
+    branch no caller can reach, and one that quietly invited a caller to
+    hand over ``_type_expr_to_slot_name``'s optional result — the very
+    syntactic-head spelling this replaces.
+    """
+    return (base_name not in _NON_POINTER_I32_BASES
+            and not _is_host_handle_type(base_name))
+
+
 def _element_mem_size(elem_type: str) -> int | None:
     """Get memory size in bytes for an array element type.
 
@@ -461,3 +619,25 @@ def _element_wasm_type(elem_type: str) -> str | None:
         return "i32_pair"
     # ADT / other compound types: i32 heap pointer
     return "i32"
+
+
+def state_type_arg(effect_ref: ast.EffectRefNode) -> ast.TypeExpr:
+    """The single type argument of a ``State<T>`` effect reference.
+
+    Shape validation only, shared by the two sides that name that argument
+    (#1208): the ``WasmContext`` translating ``old(State<T>)`` and the
+    ``CodeGenerator`` collecting which snapshots to allocate.  The NAMING is
+    deliberately not done here — each side renders through its own alias
+    environment, and the whole point of the one renderer is that a name is a
+    function of the environment it is asked in.
+    """
+    if not isinstance(effect_ref, ast.EffectRef):
+        raise CodegenInvariantError(  # pragma: no cover
+            "State type ref is not an EffectRef", effect_ref)
+    if effect_ref.name != "State":
+        raise CodegenInvariantError(  # pragma: no cover
+            "State type ref name is not 'State'", effect_ref)
+    if not effect_ref.type_args or len(effect_ref.type_args) != 1:
+        raise CodegenInvariantError(  # pragma: no cover
+            "State<T> must have exactly one type argument", effect_ref)
+    return effect_ref.type_args[0]

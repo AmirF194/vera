@@ -121,8 +121,14 @@ def cmd_check(
     """Parse, transform, and type-check a .vera file."""
     from vera.ast import FnDecl, format_type_expr
     from vera.checker import typecheck
+    from vera.checker.core import typecheck_with_artifacts
     from vera.resolver import ModuleResolver
-    from vera.slots import format_slot_table, slot_table, slot_table_dict
+    from vera.slots import (
+        fn_scopes,
+        format_slot_table,
+        slot_table,
+        slot_table_dict,
+    )
 
     try:
         p, source, tree = _load_and_parse(path)
@@ -134,9 +140,21 @@ def cmd_check(
         resolved = resolver.resolve_imports(program, p)
         resolve_diags = resolver.errors
 
-        diagnostics = resolve_diags + typecheck(
-            program, source, file=str(p), resolved_modules=resolved,
-        )
+        if explain_slots:
+            # #1208: the slot table is a NAMING question, so it is answered
+            # against the checker's own alias table
+            # (``CheckArtifacts.alias_env``) rather than a syntactic rebuild.
+            # Only this flag pays for the artifact-collecting check; a plain
+            # ``vera check`` keeps the cheaper entry point, and the
+            # diagnostics are the same list either way.
+            check_diags, artifacts = typecheck_with_artifacts(
+                program, source, file=str(p), resolved_modules=resolved,
+            )
+        else:
+            check_diags = typecheck(
+                program, source, file=str(p), resolved_modules=resolved,
+            )
+        diagnostics = resolve_diags + check_diags
 
         errors = [d for d in diagnostics if d.severity == "error"]
         warnings = [d for d in diagnostics if d.severity == "warning"]
@@ -148,19 +166,39 @@ def cmd_check(
             for top in program.declarations:
                 if not isinstance(top.decl, FnDecl):
                     continue
-                decl = top.decl
-                table = slot_table(decl.params)
-                params_str = (
-                    ", ".join(format_type_expr(te) for te in decl.params)
-                    + " -> "
-                    + format_type_expr(decl.return_type)
-                )
-                if as_json:
-                    slot_json.append(slot_table_dict(decl.name, table))
-                else:
-                    slot_sections.append(
-                        format_slot_table(decl.name, params_str, table)
+                # Every function, `where`-block helpers included (#1217): a
+                # helper resets the slot namespace, so its De Bruijn ordering
+                # is its own question and the parent's table answers none of
+                # it.  `fn_scopes` pairs each with the type parameters in
+                # scope OVER it — the parent's `forall` variables reach the
+                # helper, and they shadow same-named module aliases there too.
+                blocks: list[str] = []
+                for decl, in_scope, name_path in fn_scopes(top.decl):
+                    # The ENTRY module's env (these are its own top-level
+                    # declarations), plus the type parameters in scope —
+                    # which shadow same-named module aliases, exactly as they
+                    # do for the checker that bound these slots.
+                    table = slot_table(
+                        decl.params, artifacts.alias_env, in_scope,
                     )
+                    params_str = (
+                        ", ".join(format_type_expr(te) for te in decl.params)
+                        + " -> "
+                        + format_type_expr(decl.return_type)
+                    )
+                    if as_json:
+                        slot_json.append(
+                            slot_table_dict(".".join(name_path), table))
+                    else:
+                        blocks.append(format_slot_table(
+                            decl.name, params_str, table,
+                            len(name_path) - 1,
+                        ))
+                # One section per TOP-LEVEL function: its helpers belong to
+                # it, so they print inside its block rather than as peers
+                # separated by a blank line.
+                if blocks:
+                    slot_sections.append("\n".join(blocks))
 
         if as_json:
             result: dict[str, object] = {
@@ -296,12 +334,27 @@ def cmd_verify(path: str, as_json: bool = False, quiet: bool = False) -> int:
                         "location": {
                             "line": o.line,
                             "column": o.column,
-                            # str(p), not the raw CLI `path`: diagnostics
-                            # carry the normalized path (verify(...,
-                            # file=str(p))), and a consumer must be able to
-                            # join an obligation to its diagnostic on
-                            # (file, line, column) (PR #974 review).
-                            **({"file": str(p)} if path else {}),
+                            # The obligation's OWN file, so a consumer can
+                            # join it to its diagnostic on (file, line,
+                            # column) (PR #974 review).  That join assumed
+                            # every obligation belonged to the entry program
+                            # and stamped `str(p)` on all of them, which was
+                            # true only while the verifier reported
+                            # everything against the entry buffer; once an
+                            # imported generic's clone reports against its
+                            # own module (#1220), a stamped entry path both
+                            # broke the join and named a line the entry file
+                            # does not have.  The verifier normalizes the
+                            # path it is handed (`verify(..., file=str(p))`),
+                            # so a main-file obligation still carries exactly
+                            # the `str(p)` diagnostics carry; the fallback
+                            # covers only an obligation reified with no file
+                            # at all, which a run given `path` does not
+                            # produce.
+                            **(
+                                {"file": o.file or str(p)}
+                                if path else {}
+                            ),
                         },
                         **({"error_code": o.error_code} if o.error_code else {}),
                     }
@@ -1404,6 +1457,7 @@ def cmd_test(
             expr_semantic_types=artifacts.expr_semantic_types,
             expr_target_types=artifacts.expr_target_types,
             module_artifacts=artifacts.module_artifacts,
+            alias_env=artifacts.alias_env,
         )
 
         has_errors = any(d.severity == "error" for d in result.diagnostics)

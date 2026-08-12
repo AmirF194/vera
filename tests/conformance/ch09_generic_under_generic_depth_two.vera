@@ -1,0 +1,54 @@
+-- Conformance: two levels of generic nesting under a generic parent
+-- (Chapter 9, #1223 + #1271)
+-- Tests: `inner<V>` is generic under `outer<U>` under `parent<T>`, and IT is the
+-- one calling the top-level `pick`.  The real instantiation has to survive both
+-- hoisting rounds (#1223's fixpoint), while the still-generic spellings at each
+-- level — `inner(@U.1, @U.0)` and `pick(@V.1, @V.0)` — must record no
+-- instantiation at all (#1271): every one of them binds a type VARIABLE, and a
+-- clone keyed by a variable has no WASM parameter type.
+-- Each hop passes (second, first), so two swaps compose back to the first
+-- argument: `outer(true, false)` is `false` and the answer is 3.
+private forall<W> fn pick(@W, @W -> @W)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  @W.0
+}
+
+private forall<T> fn parent(@T -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  if outer(true, false) then {
+    7
+  } else {
+    3
+  }
+}
+where {
+  forall<U> fn outer(@U, @U -> @U)
+    requires(true)
+    ensures(true)
+    effects(pure)
+  {
+    inner(@U.1, @U.0)
+  }
+
+  forall<V> fn inner(@V, @V -> @V)
+    requires(true)
+    ensures(true)
+    effects(pure)
+  {
+    pick(@V.1, @V.0)
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 3)
+  effects(pure)
+{
+  parent(1)
+}

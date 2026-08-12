@@ -26,8 +26,9 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from vera.resolver import ResolvedModule
 
-from vera import ast
+from vera import ast, naming
 from vera.errors import Diagnostic, SourceLocation
+from vera.naming import AliasEnv
 from vera.environment import (
     AdtInfo,
     FunctionInfo,
@@ -45,7 +46,6 @@ from vera.types import (
     Type,
     TypeVar,
     UnknownType,
-    canonical_type_name,
     is_subtype,
     pretty_type,
     pretty_inferred_type,
@@ -128,6 +128,13 @@ class CheckArtifacts:
     # the #820 @Nat -> @Int widening guard fires at the array-element /
     # tuple-construction sites through the import door, not just same-file.
     module_artifacts: ModuleArtifacts
+    # #1208: the ENTRY module's naming environment — the alias bodies, alias
+    # parameters, and declared-ADT names :mod:`vera.naming` renders slot names,
+    # slot-reference keys, and State/Exn cell families against.  Captured from
+    # the checker's own ``TypeEnv`` once the program has been checked, so a
+    # consumer downstream of the check renders against exactly the table the
+    # checker keyed its bindings by rather than rebuilding an approximation.
+    alias_env: AliasEnv
 
 
 def typecheck_with_artifacts(
@@ -154,6 +161,13 @@ def typecheck_with_artifacts(
     extra ``check_program`` per resolved module for nothing, so they leave it
     ``False`` (``module_artifacts`` is then an empty dict, which ``_compile_fn``
     already tolerates — the #986 imported-body suppression fallback).
+    ``alias_env`` (#1208), by contrast, is the entry module's own and always
+    present — it costs one walk of an already-built table.  There is no
+    per-module counterpart in the artifacts: the two consumers that need one
+    build it themselves from a namespace they already hold — codegen from its
+    own flat alias maps (``_sync_alias_env``), the verifier from its own
+    per-module registration (``ContractVerifier._module_alias_envs``) — and a
+    third, unread copy here would only be one more table to drift.
     """
     checker = TypeChecker(
         source=source, file=file, resolved_modules=resolved_modules,
@@ -167,20 +181,14 @@ def typecheck_with_artifacts(
     module_arts: ModuleArtifacts = {}
     diagnostics = list(checker.errors)
     if collect_module_artifacts:
-        module_arts, body_errors = _collect_module_artifacts(resolved_modules)
-        # Merge imported-body errors (Cortex #1147 Finding 2), deduped against
-        # the top-level program's own diagnostics — a module's E151, say, can be
-        # reported by both the top-level registration and its sub-check.
-        top_keys = {
-            (d.location.file, d.location.line, d.location.column,
-             d.error_code, d.description)
-            for d in diagnostics
-        }
-        for e in body_errors:
-            key = (e.location.file, e.location.line, e.location.column,
-                   e.error_code, e.description)
-            if key not in top_keys:
-                diagnostics.append(e)
+        # #1244: the imported-body DIAGNOSTICS are already in `diagnostics` —
+        # `_register_modules` checks every module's bodies under its own import
+        # filter on EVERY path, not just this one, so this pass collects
+        # artifacts only.  The memo goes over so the sub-checks here do not
+        # re-run a body check the top-level pass has already done.
+        module_arts = _collect_module_artifacts(
+            resolved_modules, checker._module_body_check_memo,
+        )
 
     return diagnostics, CheckArtifacts(
         expr_types=checker.expr_types,
@@ -188,14 +196,15 @@ def typecheck_with_artifacts(
         expr_semantic_types=checker.expr_semantic_types,
         expr_target_types=checker.expr_target_types,
         module_artifacts=module_arts,
+        alias_env=naming.alias_env_from_environment(checker.env),
     )
 
 
 def _collect_module_artifacts(
     resolved_modules: list[ResolvedModule] | None,
-) -> tuple[ModuleArtifacts, list[Diagnostic]]:
-    """Collect each resolved module's OWN span-keyed side-tables (#987) and its
-    OWN check ERRORS (Cortex #1147 Finding 2).
+    body_check_memo: set[tuple[str, ...]] | None = None,
+) -> ModuleArtifacts:
+    """Collect each resolved module's OWN span-keyed side-tables (#987).
 
     The top-level program's ``expr_target_types`` / ``expr_semantic_types`` are
     keyed by bare span ``(line, col, end_line, end_col)`` with no file identity,
@@ -226,19 +235,39 @@ def _collect_module_artifacts(
     sub-check.  That artifact-level difference is pinned by
     ``tests/test_xmod_artifact_collection.py::TestTransitiveArtifactContent``.
 
-    Cost note (PR #997 review): this is quadratic on the codegen paths that
-    opt in — N resolved modules each get a full ``check_program`` that
-    re-registers the other N-1, so the pass is O(N^2) sub-checks (measured
-    ~85ms at 20 modules vs ~4ms for the main-file-only check).  It runs only
-    for ``vera compile``/``run``/``serve``/``test`` (``vera verify`` and the
-    warm session skip it entirely).  Memoising each module's per-check
-    registration (its declarations are re-derived identically every pass) is a
-    future optimisation candidate that would collapse it toward O(N).
+    Diagnostics are NOT collected here (#1244).  The imported-body errors this
+    pass used to surface (Cortex #1147 Finding 2 — a library whose SQL is
+    non-literal must fail the importer's compile too, E207) now reach every
+    caller from ``ModulesMixin._register_modules``, which checks each module's
+    bodies under that module's own import filter on every path rather than only
+    on the codegen ones.  Two passes deriving the same diagnostics is the #1213
+    disease; this one keeps the artifact it alone produces.
+
+    Cost note (PR #997 review, corrected for #1244): THIS pass is quadratic
+    and still codegen-only — N resolved modules each get a full
+    ``check_program`` that re-registers the other N-1, so it is O(N^2)
+    sub-checks (measured ~85ms at 20 modules vs ~4ms for the main-file-only
+    check), and it runs only when a caller asks for artifacts, i.e. for
+    ``vera compile``/``run``/``serve``/``test``.
+
+    What is no longer true is that a module's body is checked only on those
+    paths.  ``ModulesMixin._register_modules`` checks each module's bodies
+    under its own import filter (#1244), and that runs from
+    ``check_program`` — so ``vera check``, ``vera verify`` and the warm
+    ``VerificationSession`` all pay one full sub-check per resolved module,
+    and the session pays it again on every re-check (it calls
+    ``typecheck_with_artifacts`` per verify).  ``body_check_memo`` is that
+    pass's memo, threaded into each sub-checker here so a body check the
+    top-level pass has already run is not repeated per sub-check — without
+    it, this O(N^2) pass would multiply the #1244 pass by N.
+
+    Memoising each module's per-check REGISTRATION (its declarations are
+    re-derived identically every pass) is the optimisation candidate that
+    would collapse both toward O(N); it is tracked as
+    [#1275](https://github.com/aallan/vera/issues/1275).
     """
     mods = resolved_modules or []
     result: ModuleArtifacts = {}
-    body_errors: list[Diagnostic] = []
-    seen: set[tuple[str | None, int, int, str, str]] = set()
     for mod in mods:
         mod_direct = {imp.path for imp in mod.program.imports}
         sub_resolved = [
@@ -253,27 +282,14 @@ def _collect_module_artifacts(
             file=str(mod.file_path),
             resolved_modules=sub_resolved,
         )
+        sub._module_body_check_memo = body_check_memo
         sub.expr_types = {}
         sub.expr_semantic_types = sub_semantic
         sub.expr_target_types = sub_target
         sub.hole_sites = []
         sub.check_program(mod.program)
         result[mod.path] = (sub_semantic, sub_target)
-        # Cortex #1147 Finding 2: surface each imported body's OWN check ERRORS.
-        # The body is compiled into the flat WASM module, so a body that fails
-        # its standalone check — e.g. a library whose SQL is non-literal (E207)
-        # — must fail the compile too; dropping ``sub.errors`` let an injection
-        # slip through the import door.  ERRORS only (warnings stay with the
-        # body's own ``vera check``); deduped by location + code + text.
-        for e in sub.errors:
-            if e.severity != "error":
-                continue
-            key = (e.location.file, e.location.line, e.location.column,
-                   e.error_code, e.description)
-            if key not in seen:
-                seen.add(key)
-                body_errors.append(e)
-    return result, body_errors
+    return result
 
 
 # =====================================================================
@@ -418,6 +434,11 @@ class TypeChecker(
         self._import_names: dict[
             tuple[str, ...], set[str] | None
         ] = {}
+        # #1244: paths whose BODIES this run has already checked under their
+        # own import filter, shared down the nested checkers so a module
+        # reached from several importers is checked once and an import cycle
+        # terminates.  ``None`` until the first module is reached.
+        self._module_body_check_memo: set[tuple[str, ...]] | None = None
         # C7c: unfiltered module declarations (for "is private" errors).
         self._module_all_functions: dict[
             tuple[str, ...], dict[str, object]
@@ -427,6 +448,18 @@ class TypeChecker(
         ] = {}
         # De-dup removed-alias errors (emitted once per alias name).
         self._reported_alias_errors: set[str] = set()
+        # De-dup reserved-namespace type REFERENCES (E154, #1221) — one
+        # error per name, at its first mention.
+        self._reported_reserved_type_refs: set[str] = set()
+        # One range verdict per integer LITERAL (E149, #1252 / PR #1282
+        # review).  Keyed by `id(node)` — per OCCURRENCE, not per value or
+        # per message, so two distinct out-of-range literals still get two
+        # errors.  Ids are stable for the run: the program holds every node
+        # alive from parse until the check finishes.  The bool records
+        # whether the verdict was contextual (it knew the target type); see
+        # `ExpressionsMixin`'s IntLit branch for why an unconstrained
+        # verdict is provisional.
+        self._literal_range_verdict: dict[int, tuple[Diagnostic, bool]] = {}
         # Monotonic counter for fresh TypeVar names (prevents
         # self-referential mappings when different ADTs share a type
         # parameter name — see #243).
@@ -469,6 +502,63 @@ class TypeChecker(
             severity=severity,
             error_code=error_code,
         ))
+
+    def _literal_range_error(
+        self, node: ast.Node, description: str, *,
+        rationale: str, fix: str, contextual: bool,
+    ) -> None:
+        """Emit E149 for *node*, keeping ONE verdict per literal.
+
+        An integer literal can be synthesised more than once — a
+        refinement predicate's operands are typed with no expected type
+        first and against the refined base afterwards — and the two
+        passes answer with different bounds, so a single mistake drew
+        two E149s naming ``@Nat (u64)`` and ``@Byte`` (PR #1282 review).
+        ``_error``'s duplicate collapse cannot see it: the messages
+        differ, which is precisely the problem.
+
+        The unconstrained pass is provisional.  It reports the u64 bound
+        because nothing has told it the target type, not because u64 is
+        the target — so a later CONTEXTUAL verdict supersedes it rather
+        than joining it, and the earlier diagnostic is withdrawn.  The
+        reverse never happens: a guess does not overrule knowledge, and
+        an unconstrained verdict arriving second is dropped.  When the
+        unconstrained verdict is the only one, it stands — that is the
+        #812 gate, and silencing it would reopen the soundness hole.
+        """
+        prior = self._literal_range_verdict.get(id(node))
+        withdrawn: Diagnostic | None = None
+        if prior is not None:
+            earlier, was_contextual = prior
+            if was_contextual or not contextual:
+                return
+            # Contextual supersedes provisional: withdraw the guess.  Its
+            # `_seen_diag_keys` entry stays, so the withdrawn message
+            # cannot reappear from a third synthesis of the same literal.
+            if earlier in self.errors:
+                self.errors.remove(earlier)
+                withdrawn = earlier
+        before = len(self.errors)
+        self._error(
+            node, description, rationale=rationale, fix=fix,
+            spec_ref='Chapter 4, Section 4.2 "Literals"',
+            error_code="E149",
+        )
+        if len(self.errors) > before:
+            self._literal_range_verdict[id(node)] = (
+                self.errors[-1], contextual,
+            )
+        elif withdrawn is not None:
+            # The contextual message was byte-identical to the withdrawn
+            # provisional one, so the `_seen_diag_keys` entry kept above
+            # suppressed it — and the withdrawal has just removed the only
+            # verdict this literal had (PR #1283 review).  Put it back: the
+            # rule is ONE verdict per literal, never zero, because zero
+            # re-opens the #812 gate silently.  The restored diagnostic is
+            # recorded as CONTEXTUAL, since that is the verdict now
+            # standing; a later unconstrained synthesis is still dropped.
+            self.errors.append(withdrawn)
+            self._literal_range_verdict[id(node)] = (withdrawn, contextual)
 
     def _source_line(self, node: ast.Node) -> str:
         """Extract source line for a node."""
@@ -603,6 +693,7 @@ class TypeChecker(
         saved_params = dict(self.env.type_params)
         saved_return = self.env.current_return_type
         saved_effect = self.env.current_effect_row
+        saved_effect_order = self.env.current_effect_order
         # #991 checker leg: this function's frame joins the lexical scope
         # stack for the duration of its body, contracts, AND its where-helper
         # recursion (step 8) — a helper's body must see this function's
@@ -654,7 +745,10 @@ class TypeChecker(
         # 2. Resolve parameter and return types
         param_types = tuple(self._resolve_type(p) for p in decl.params)
         return_type = self._resolve_type(decl.return_type)
-        effect_row = self._resolve_effect_row(decl.effect)
+        # #1215: the row AND its source order, from one resolution — a bare op
+        # name declared by two effects in this row binds the first in SOURCE
+        # order, which the frozenset alone cannot say.
+        effect_row, effect_order = self._resolve_effect_row_ordered(decl.effect)
 
         # 2b. Check refinement predicates written directly in the signature —
         # a refinement can reach a param / return via a type argument, e.g.
@@ -667,6 +761,7 @@ class TypeChecker(
         # 3. Set context
         self.env.current_return_type = return_type
         self.env.current_effect_row = effect_row
+        self.env.current_effect_order = effect_order
         self._effect_ops_used = set()
 
         # 4. Push scope and bind parameters
@@ -753,6 +848,7 @@ class TypeChecker(
         self.env.type_params = saved_params
         self.env.current_return_type = saved_return
         self.env.current_effect_row = saved_effect
+        self.env.current_effect_order = saved_effect_order
 
     def _fn_info_for_decl(
         self, decl: ast.FnDecl, visibility: str | None = None,
@@ -805,19 +901,18 @@ class TypeChecker(
 
     def _type_expr_to_slot_name(self, te: ast.TypeExpr) -> str:
         """Extract the canonical slot name from a type expression used as a
-        parameter binding.  This is the syntactic name — aliases are opaque."""
-        if isinstance(te, ast.NamedType):
-            if te.type_args:
-                resolved_args = tuple(
-                    self._resolve_type(a) for a in te.type_args)
-                return canonical_type_name(te.name, resolved_args)
-            return te.name
-        if isinstance(te, ast.RefinementType):
-            return self._type_expr_to_slot_name(te.base_type)
-        if isinstance(te, ast.FnType):
-            # Function-typed parameters: use a synthetic name
-            return "Fn"
-        return "?"
+        parameter binding.  The head is the syntactic name — aliases are
+        opaque — while type arguments resolve.
+
+        Delegates to :func:`vera.naming.slot_name` (#1208), which is the ONE
+        renderer of that rule; the six subsystems that used to answer this
+        question independently disagreed about aliases, and a name minted one
+        way and looked up another misses silently.  The argument diagnostics
+        the old in-place composition emitted as a side effect are preserved
+        by ``_check_slot_name_args`` — see its docstring.
+        """
+        self._check_slot_name_args(te)
+        return naming.slot_name(te, self._naming_env())
 
     # -----------------------------------------------------------------
     # Contracts

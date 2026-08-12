@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 from vera import ast
+from vera.checker.registration import _RESERVED_TYPE_PREFIX_RE
 from vera.parser import parse
 from vera.transform import transform
 from vera.prelude import inject_prelude
@@ -266,7 +267,7 @@ class TestPreludeTypeAliases:
     """Tests for type alias injection."""
 
     def test_option_aliases_injected(self) -> None:
-        """OptionMapFn and OptionBindFn injected with Option combinators."""
+        """The Option combinators' aliases arrive with the combinators."""
         prog = _make_program(
             "public fn main(@Unit -> @Int)\n"
             "  requires(true) ensures(true) effects(pure)\n"
@@ -274,11 +275,11 @@ class TestPreludeTypeAliases:
         )
         inject_prelude(prog)
         names = _alias_names(prog)
-        assert "OptionMapFn" in names
-        assert "OptionBindFn" in names
+        assert "VeraOptionMapFn" in names
+        assert "VeraOptionBindFn" in names
 
     def test_result_alias_injected(self) -> None:
-        """ResultMapFn injected with Result combinators."""
+        """VeraResultMapFn injected with Result combinators."""
         prog = _make_program(
             "public fn main(@Unit -> @Int)\n"
             "  requires(true) ensures(true) effects(pure)\n"
@@ -286,7 +287,7 @@ class TestPreludeTypeAliases:
         )
         inject_prelude(prog)
         names = _alias_names(prog)
-        assert "ResultMapFn" in names
+        assert "VeraResultMapFn" in names
 
     def test_array_aliases_injected(self) -> None:
         """Array type aliases always injected."""
@@ -297,28 +298,75 @@ class TestPreludeTypeAliases:
         )
         inject_prelude(prog)
         names = _alias_names(prog)
-        assert "ArrayMapFn" in names
-        assert "ArrayFilterFn" in names
-        assert "ArrayFoldFn" in names
+        assert "VeraArrayMapFn" in names
+        assert "VeraArrayFilterFn" in names
+        assert "VeraArrayFoldFn" in names
+
+    def test_no_alias_is_injected_under_a_user_facing_name(self) -> None:
+        """#1221: the injected alias namespace is reserved, entirely.
+
+        ``inject_prelude`` runs at codegen and at the verifier's mono
+        discovery, never at the checker, so every name it injects is a
+        name codegen resolves and the checker leaves opaque.  Keeping
+        the whole set inside the namespace E154 reserves is what makes
+        that asymmetry unobservable: no spelling a user program can
+        contain resolves on one side only.
+        """
+        prog = _make_program(
+            "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ 0 }\n"
+        )
+        inject_prelude(prog)
+        unreserved = sorted(
+            name for name in _alias_names(prog)
+            if not _RESERVED_TYPE_PREFIX_RE.match(name)
+        )
+        assert not unreserved, (
+            f"prelude aliases outside the reserved namespace: {unreserved}"
+        )
+
+
+def test_the_reserved_regex_actually_discriminates() -> None:
+    """The two negative assertions either side of this are evidence only
+    if the regex discriminates (PR #1283 review).
+
+    Both state their property as "the set of names the regex does NOT match
+    is empty".  A regex broadened to match every identifier empties that set
+    without reserving anything, and both tests go green while E154's gate
+    reserves nothing at all — the vacuous-pass shape this file exists to
+    prevent one level up.  Pinned in the file that depends on it, since the
+    regex is imported here rather than restated.
+    """
+    assert _RESERVED_TYPE_PREFIX_RE.match("VeraOptionMapFn")
+    assert not _RESERVED_TYPE_PREFIX_RE.match("OptionMapFn")
+    assert not _RESERVED_TYPE_PREFIX_RE.match("Int")
+    # The anchoring and the uppercase/digit requirement, which are what
+    # keep ordinary words and user spellings out of the namespace.
+    assert not _RESERVED_TYPE_PREFIX_RE.match("Veranda")
+    assert not _RESERVED_TYPE_PREFIX_RE.match("Vera_thing")
+    assert not _RESERVED_TYPE_PREFIX_RE.match("Vera")
+    assert not _RESERVED_TYPE_PREFIX_RE.match("MyVeraThing")
 
 
 class TestPreludeInternalAliases:
-    """#1184: the combinators resolve through reserved-name twins."""
+    """#1184/#1221: the combinators resolve through reserved names."""
 
-    def test_no_combinator_spells_a_user_facing_alias(self) -> None:
-        """The structural statement of the #1184 fix, as a drift guard.
+    def test_every_declared_alias_name_is_reserved(self) -> None:
+        """The structural statement of the fix, as a drift guard.
 
-        A prelude combinator that reaches for a user-facing alias name
-        is re-typable by any user or module declaration of that name —
-        silently, and differently in the main-file and module
-        namespaces.  Every prelude body must spell its closure
-        parameters with the reserved ``Vera``-prefixed twin instead, so
-        adding a combinator that reaches for the public name fails
-        here rather than in someone's program.
+        A prelude alias outside the reserved namespace is re-typable by
+        any user or module declaration of that name — silently, and
+        differently in the main-file and module namespaces (#1184) —
+        and, being resolved by codegen while the checker leaves it
+        opaque, partitions a function's parameters differently on the
+        two sides (#1221).  Checked against the CHECKER's own reserved
+        regex, not a second spelling of the rule, so adding an alias
+        the gate would not cover fails here.
         """
         from vera import prelude
 
-        public_names = {
+        declared = {
             name
             for block in (
                 prelude._OPTION_TYPE_ALIASES,
@@ -329,46 +377,57 @@ class TestPreludeInternalAliases:
                 r"^type\s+([A-Za-z_][A-Za-z0-9_]*)", block, re.MULTILINE,
             )
         }
-        assert public_names, "no prelude alias blocks found — guard is inert"
+        assert declared, "no prelude alias blocks found — guard is inert"
+        unreserved = sorted(
+            name for name in declared
+            if not _RESERVED_TYPE_PREFIX_RE.match(name)
+        )
+        assert not unreserved, (
+            f"prelude alias declarations a user program may spell: "
+            f"{unreserved}"
+        )
+
+    def test_no_combinator_spells_an_unreserved_alias(self) -> None:
+        """The bodies' half: every closure parameter names a reserved alias.
+
+        A combinator that reaches for the unprefixed spelling of one of
+        its aliases resolves through a name the prelude no longer
+        declares — silently, to whatever a user program happens to have
+        declared under it.
+        """
+        from vera import prelude
+
+        unprefixed = {
+            name.removeprefix("Vera")
+            for block in (
+                prelude._OPTION_TYPE_ALIASES,
+                prelude._RESULT_TYPE_ALIASES,
+                prelude._ARRAY_TYPE_ALIASES,
+            )
+            for name in re.findall(
+                r"^type\s+([A-Za-z_][A-Za-z0-9_]*)", block, re.MULTILINE,
+            )
+        }
+        assert unprefixed, "no prelude alias blocks found — guard is inert"
         for block_name in (
             "_OPTION_COMBINATORS", "_RESULT_COMBINATORS",
             "_ARRAY_COMBINATORS", "_JSON_COMBINATORS", "_HTML_COMBINATORS",
         ):
             block = getattr(prelude, block_name)
-            for name in public_names:
-                assert not re.search(rf"\b{name}\b", block), (
-                    f"{block_name} resolves through the user-facing alias "
-                    f"{name!r}; use the reserved "
-                    f"{prelude._INTERNAL_ALIAS_PREFIX}{name} twin (#1184)"
+            for name in unprefixed:
+                assert not re.search(rf"(?<!Vera)\b{name}\b", block), (
+                    f"{block_name} resolves through {name!r}, which the "
+                    f"prelude does not declare; use the reserved "
+                    f"Vera{name} (#1184/#1221)"
                 )
 
-    def test_internal_twin_is_derived_from_the_public_declaration(
+    def test_reserved_aliases_injected_even_when_user_takes_the_name(
         self,
     ) -> None:
-        """The twin restates the public alias's body under a new name.
-
-        Only the declared name is rewritten — a body mentioning
-        ``Option`` or a ``Vera*`` type parameter must survive verbatim,
-        or the twin would alias a different type from the name the user
-        can still spell.
-        """
-        from vera.prelude import _internal_alias_decls
-
-        assert _internal_alias_decls(
-            "type OptionBindFn<VeraA, VeraB> = fn(VeraA -> Option<VeraB>)"
-            " effects(pure);\n"
-        ) == (
-            "type VeraOptionBindFn<VeraA, VeraB> = fn(VeraA -> Option<VeraB>)"
-            " effects(pure);\n"
-        )
-
-    def test_internal_twins_injected_even_when_user_shadows_the_alias(
-        self,
-    ) -> None:
-        """A user alias may take the public name; it must not take the twin.
+        """A user alias may take the unprefixed name; nothing follows.
 
         This is the injection-side half of the fix: the user's
-        ``OptionMapFn`` shadows the public declaration (its right), and
+        ``OptionMapFn`` is an ordinary alias of theirs, and
         ``option_map`` keeps a resolvable parameter type regardless.
         """
         prog = _make_program(

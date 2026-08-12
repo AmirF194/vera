@@ -1,0 +1,56 @@
+-- Conformance: an effect operation fixes a generic's type argument (Ch 7)
+-- Tests: `get(())` in a value position that DRIVES a generic instantiation —
+-- as the first element of an array literal and as a direct argument — names
+-- the same clone for every consumer of that answer (#1207).  The result type
+-- of a State operation is the cell's, and the cell's SOURCE spelling at that:
+-- `handle[State<Count>]` with `type Count = Nat` instantiates `pick$Count`.
+-- Monomorphization discovery had no operation registry, so it fell through to
+-- the literal-driven `Int` default while the WASM call-rewrite read the cell —
+-- the emitted clone dangled at the call, and this whole program compiled to
+-- nothing (E602 skip, then an E620 caller drop).
+type Count = Nat;
+
+public forall<T> fn pick(@Array<T>, @T -> @T)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  @T.0
+}
+
+-- Returns its FIRST parameter (De Bruijn: `@U.1` is the older binding), so a
+-- `second(get(()), 0)` call carries the cell's VALUE out of the operation and
+-- the expected totals below depend on which cell was read.
+public forall<U> fn second(@U, @U -> @U)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  @U.1
+}
+
+-- The operation comes from the DECLARED effect row, with no `handle` in
+-- sight: codegen's second injection site for the same registry.
+private fn from_row(@Unit -> @Nat)
+  requires(true)
+  ensures(true)
+  effects(<State<Nat>>)
+{
+  pick([get(()), 4], second(get(()), 0))
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Count>](@Count = 2) {
+    put(@Count) -> { resume(()) }
+  } in {
+    put(6);
+    -- 9 + 6 + 3: the array-element form (`@T.0` is pick's SECOND parameter,
+    -- the literal 9), the direct-argument form reading the outer cell back
+    -- (6), and the declared-effect-row form under its own State<Nat> cell (3).
+    nat_to_int(pick([get(()), 4], 9)) + nat_to_int(second(get(()), 0)) + nat_to_int(handle[State<Nat>](@Nat = 3) { put(@Nat) -> { resume(()) } } in { from_row(()) })
+  }
+}

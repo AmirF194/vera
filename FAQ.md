@@ -33,6 +33,34 @@ Vera's answer is that the contracts *are* the link between implementation and re
 The bet is that contracts are a better surface for capturing intent than variable names scattered through an implementation. A function signature with `requires(@Int.1 != 0)` and `ensures(@Int.result == @Int.0 / @Int.1)` communicates what the function does more precisely than any variable name could.
 
 
+## How do type aliases interact with `@T.n` references?
+
+A slot reference names a type, so `type` declarations are how a program shapes its own slot namespaces. Three rules apply, and they differ deliberately.
+
+At the **head** of a slot name an alias is opaque. `type Cnt = Int;` does not make `@Cnt` and `@Int` interchangeable — a parameter declared `@Cnt` is reached only by `@Cnt.0`. That opacity is what stops a library adding an alias and silently splitting a caller's `Int` stack.
+
+Inside a type **argument** an alias resolves. Under the same declaration, a parameter written `@Option<Cnt>` binds `Option<Int>` and is referenced `@Option<Int>.0` — because `Option<Cnt>` and `Option<Int>` are one type, and one type must not become two namespaces.
+
+A `State<T>` or `Exn<E>` **cell** resolves through the head as well: identity is the *resolved* type, so a helper declaring `State<Option<Int>>` and a handler spelling `State<MaybeInt>` share their state. That holds wherever the resolved type has a mangle-safe family name — see [`DE_BRUIJN.md`](DE_BRUIJN.md) §6.5 for the one case where the compiler falls back to the spelling instead.
+
+The practical consequence is that an alias is how you give a parameter a name without reintroducing names. Two parameters of one underlying type become two stacks, so every reference is `.0` and there is no ordering to get wrong:
+
+```vera
+type Meters = Int;
+type Feet = Int;
+
+private fn excess(@Meters, @Feet -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  @Meters.0 - @Feet.0 / 3
+}
+```
+
+`vera check --explain-slots` prints what each parameter actually bound, and spec [§3.8 and §3.8.1](spec/03-slot-references.md) are the formal statement.
+
+
 ## What actually gets verified?
 
 There are three layers, and they cover different things.
@@ -161,7 +189,7 @@ Mandatory parity tests enforce that the browser runtime produces identical resul
 
 The process works in three steps:
 
-1. **Input generation**: The compiler reads each function's `requires()` clause and uses Z3 to generate concrete values that satisfy the precondition. For example, if a function requires `@Int.1 != 0`, Z3 produces pairs of integers where the second is non-zero. It generates up to 100 trials per function by default (configurable with `--trials`).
+1. **Input generation**: The compiler reads each function's `requires()` clause and uses Z3 to generate concrete values that satisfy the precondition. For example, if a function requires `@Int.1 != 0`, Z3 produces pairs of integers where the second is non-zero. It generates up to 100 trials per function by default (configurable with `--trials`). Whether a parameter can be generated for is decided on its *resolved* type, not its spelling, so an alias of a generatable type (`type Cnt = Int;`) is trialled rather than skipped, and an alias-spelled precondition still constrains the inputs. "Satisfy the precondition" is exact rather than best-effort, for the functions that reach trials at all: among the Tier-3 targets, if any conjunct — or any refined parameter's predicate — falls outside the SMT layer's decidable fragment, Z3 could not constrain the inputs by it, so the function is *skipped* with the blocking conjunct named instead of being exercised on inputs its own guard would reject. A function the verifier proved at Tier 1 is reported `VERIFIED` and never trialled, so the question does not arise for it.
 
 2. **Execution**: Each generated input is compiled to WASM and executed via wasmtime. The function runs with real values, not symbolic ones.
 
@@ -206,7 +234,7 @@ None of this is Vera-specific, but it validates the design choices. The thesis i
 
 This is a real concern. LLMs are trained on trillions of tokens of Python, TypeScript, and JavaScript. A MojoBench study (NAACL 2025) found that even fine-tuned models achieved only 30–35% improvement over base models on Mojo code generation, illustrating the cold-start problem for new languages.
 
-Vera's approach has three parts. First, the agent-facing documentation (SKILL.md) is designed to be dropped into a model's context window, so the model works from the language specification rather than training data recall. Second, Vera's syntax is deliberately simple and regular — fewer constructs, each with exactly one canonical form — which reduces the surface area a model needs to learn. Third, the conformance test suite (179 programs covering every language feature) gives models concrete examples to learn from and conform to. Simon Willison's December 2025 JustHTML write-up illustrates the same point in practice: an LLM-assisted implementation, guided by the html5lib conformance suite, conformed to the HTML parsing spec by running against its tests — a comprehensive test suite is a strong scaffold for a model implementing to a specification.
+Vera's approach has three parts. First, the agent-facing documentation (SKILL.md) is designed to be dropped into a model's context window, so the model works from the language specification rather than training data recall. Second, Vera's syntax is deliberately simple and regular — fewer constructs, each with exactly one canonical form — which reduces the surface area a model needs to learn. Third, the conformance test suite (213 programs covering every language feature) gives models concrete examples to learn from and conform to. Simon Willison's December 2025 JustHTML write-up illustrates the same point in practice: an LLM-assisted implementation, guided by the html5lib conformance suite, conformed to the HTML parsing spec by running against its tests — a comprehensive test suite is a strong scaffold for a model implementing to a specification.
 
 
 ## How does Vera compare to Dafny / Lean / Koka / F*?
@@ -249,7 +277,7 @@ The reference compiler is under active development. The current release includes
 
 - A seven-stage pipeline: parse, transform, resolve, typecheck, verify, compile, execute
 - A 14-chapter formal specification
-- 9,037 tests, including a 179-program conformance suite
+- 10,313 tests, including a 213-program conformance suite
 - 42 working example programs
 - 164 built-in functions covering strings, arrays, math, parsing, and data types
 - Four built-in abilities (Eq, Ord, Hash, Show) with constrained generics and ADT auto-derivation

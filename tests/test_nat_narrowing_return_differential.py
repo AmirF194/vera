@@ -1587,25 +1587,45 @@ public fn go(@Int -> @Bool) requires(true) ensures(true) effects(pure)
     def test_bare_put_zero_survives(self) -> None:
         assert _run(self._PUT_NO_CLAUSE, "go", 0) == 0
 
+    # The handler is `State<Bool>` while the DECLARED row is `State<Nat>`, so
+    # the get clause's bare `put(@Int.0)` resolves outward to the declared
+    # `State<Nat>` row (#1211) and takes the bare intrinsic dispatch path —
+    # which is what this pair pins, on the @Nat cell whose narrowing guard is
+    # the subject.  It used to handle `State<Nat>` here, i.e. the SAME family
+    # as the row it routes to; that shape is unaddressable by construction
+    # (the intrinsics reach only the innermost cell of a family, so the store
+    # would land in the handler's own cell rather than the caller's) and is
+    # now a loud codegen skip — see #1233.  Two families keep the routing
+    # honest AND the boundary under test unchanged.
     _PUT_IN_CLAUSE_BODY = """\
 public fn go(@Int -> @Bool) requires(true) ensures(true) effects(<State<Nat>>)
 {
-  handle[State<Nat>](@Nat = 0) {
-    get(@Unit) -> { put(@Int.0); resume(@Nat.0) },
-    put(@Nat) -> { resume(()) }
+  handle[State<Bool>](@Bool = false) {
+    get(@Unit) -> { put(@Int.0); resume(@Bool.0) },
+    put(@Bool) -> { resume(()) }
   } in {
-    get(());
-    get(()) < 0
+    get(())
   }
 }
 """
 
     def test_clause_body_put_negative_traps(self) -> None:
         """A put INSIDE another clause's body takes the bare path too
-        (`_state_clause_ops` is cleared in clauses) — same guard."""
+        (the clause body compiles against the handler's DECLARATION scope,
+        whose `put` here is the declared row's) — same guard."""
         assert _run(self._PUT_IN_CLAUSE_BODY, "go", -5) is None
     def test_clause_body_put_non_negative_passes(self) -> None:
         assert _run(self._PUT_IN_CLAUSE_BODY, "go", 9) == 0
+
+    def test_clause_body_put_zero_survives(self) -> None:
+        """Zero is the guard's boundary, and every sibling pair pins it.
+
+        `@Nat`'s range starts AT zero, so a guard written `<= 0` instead of
+        `< 0` traps here while both the negative and the positive case above
+        stay green — the one input that separates the correct comparison from
+        the off-by-one (round-5 review; this pair was the only boundary
+        differential in the class missing it)."""
+        assert _run(self._PUT_IN_CLAUSE_BODY, "go", 0) == 0
 
 
 class TestHandlerStateWidenDifferential1203:
@@ -2589,43 +2609,65 @@ public fn drive(@Int -> @Int) requires(true) ensures(true) effects(pure)
         silently hit the canonically-spelled sibling (111)."""
         assert _run(self._OUTER_MIXED_PARAMS, "drive", 0) == 222
 
-    def test_refined_class_collision_is_loud_skip(self) -> None:
-        """Two aliases of ONE refined class as pattern and annotation
-        (`put(@Option<P2>)` under `(@Option<Pos> = ...)`) would bind one
-        checker stack under two keys — a mixed reference resolves
-        silently wrong — so the clause translator refuses it loudly
-        with spell-both-with-one-alias guidance."""
-        src = """\
+    _REFINED_CLASS_MIXED = """\
 type Pos = { @Int | @Int.0 > 0 };
 type P2 = Pos;
 
 public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
 {
-  handle[State<Option<Pos>>](@Option<Pos> = Some(5)) {
+  handle[State<Option<Pos>>](@Option<Pos> = %s) {
     get(@Unit) -> { resume(@Option<Pos>.0) },
-    put(@Option<P2>) -> { resume(()) } with @Option<Pos> = @Option<P2>.0
+    put(@Option<P2>) -> { resume(()) } with @Option<Pos> = @Option<P2>.%d
   } in {
     put(Some(9));
     option_unwrap_or(get(()), 0 - 1)
   }
 }
 """
-        with _resolved_pipeline(src) as (program, arts, resolved, path):
-            result = codegen_compile(
-                program, source=src, file=path, resolved_modules=resolved,
-                expr_semantic_types=arts.expr_semantic_types,
-            )
-            msgs = [d.description for d in result.diagnostics]
-            assert any("spell both with ONE alias" in m for m in msgs), msgs
 
-    def test_alias_depth_overflow_is_loud(self) -> None:
-        """A 33-deep (legal, acyclic) alias chain as a State cell: the
-        resolver's depth bound surfaces as a loud per-function E607 skip
-        — an opaque fallback would silently split the family against a
-        fully-resolving sibling site (round-5 F4)."""
-        chain = "type A0 = Nat;\n" + "".join(
-            f"type A{i} = A{i - 1};\n" for i in range(1, 34))
-        src = chain + """
+    _REFINED_CLASS_SINGLE = """\
+type Pos = { @Int | @Int.0 > 0 };
+
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Option<Pos>>](@Option<Pos> = Some(5)) {
+    get(@Unit) -> { resume(@Option<Pos>.0) },
+    put(@Option<Pos>) -> { resume(()) } with @Option<Pos> = @Option<Pos>.0
+  } in {
+    put(Some(9));
+    option_unwrap_or(get(()), 0 - 1)
+  }
+}
+"""
+
+    def test_refined_class_two_spellings_are_one_stack(self) -> None:
+        """Two aliases of ONE refined class as pattern and annotation
+        (`put(@Option<P2>)` under `(@Option<Pos> = ...)`) are one slot stack
+        to the checker, and now to codegen (#1208) — both spellings render
+        `Option<{@Int | ...}>`.
+
+        Pre-#1208 they bound under two DIFFERENT codegen keys, so a mixed
+        reference resolved against the wrong member silently; the clause
+        translator refused the shape with spell-both-with-one-alias
+        guidance.  With one renderer on both the bind and the reference
+        side the workaround IS the semantics: the mixed spelling and the
+        single-alias spelling the guidance asked for now agree, which is
+        the property the skip could only approximate by refusing."""
+        mixed = _run(self._REFINED_CLASS_MIXED % ("Some(5)", 0), "go", 0)
+        assert mixed == _run(self._REFINED_CLASS_SINGLE, "go", 0)
+        assert mixed == 5
+
+    def test_refined_class_one_stack_orders_state_over_argument(self) -> None:
+        """The merged stack is the CHECKER's, in the checker's order: the
+        clause pushes the op parameter and then the handler state, so index
+        0 is the state (`Some(5)`) and index 1 the put argument
+        (`Some(9)`) — reached through the OTHER alias, which is what makes
+        this one stack rather than two that happen to agree."""
+        assert _run(self._REFINED_CLASS_MIXED % ("Some(5)", 0), "go", 0) == 5
+        assert _run(self._REFINED_CLASS_MIXED % ("Some(5)", 1), "go", 0) == 9
+
+    _DEEP_CHAIN = "type A0 = Nat;\n" + "".join(
+        f"type A{i} = A{i - 1};\n" for i in range(1, 34)) + """
 public fn go(@Nat -> @Int)
   requires(true)
   ensures(true)
@@ -2635,13 +2677,49 @@ public fn go(@Nat -> @Int)
   nat_to_int(get(()))
 }
 """
-        with _resolved_pipeline(src) as (program, arts, resolved, path):
+
+    def test_deep_alias_chain_joins_the_base_family(self) -> None:
+        """A 33-deep (legal, acyclic) alias chain as a State cell resolves.
+
+        The depth bound this chain used to trip belonged to the
+        TypeExpr-level walk the family named itself through before #1209.
+        ``vera.naming``'s resolution is bounded by DECLARATION ORDER
+        instead — each alias body resolves against a strictly shorter
+        prefix of the table, so the recursion is well-founded with no
+        arbitrary limit, exactly as the checker's own registration is.  A
+        chain the checker resolves therefore joins the ``Nat`` family the
+        checker typed, instead of being refused with a loud per-function
+        skip.
+
+        That refusal was never the goal: it was the least-bad answer while
+        the family could fall back OPAQUELY, where an overflow at one site
+        and a resolution at a sibling site split one cell in two silently
+        (round-5 F4).  Resolving it removes the hazard at the root, so the
+        assertion is the family name AND the round-trip value, not the
+        absence of a diagnostic.
+        """
+        with _resolved_pipeline(self._DEEP_CHAIN) as (
+                program, arts, resolved, path):
             result = codegen_compile(
-                program, source=src, file=path, resolved_modules=resolved,
+                program, source=self._DEEP_CHAIN, file=path,
+                resolved_modules=resolved,
                 expr_semantic_types=arts.expr_semantic_types,
             )
-            msgs = [d.description for d in result.diagnostics]
-            assert any("nested deeper than 32" in m for m in msgs), msgs
+            hard = [(d.error_code, d.description) for d in result.diagnostics
+                    if d.severity == "error"]
+            assert not hard, hard
+            assert '(import "vera" "state_get_Nat"' in result.wat, (
+                "the chain must join the base family, not mint its own: "
+                f"{result.wat[:400]}"
+            )
+            # JOINED, not merely present alongside: a renderer that minted the
+            # chain's own family would satisfy the positive above while still
+            # splitting the cell in two (PR #1224 review).
+            assert "state_get_A33" not in result.wat, (
+                "the chain minted its own family beside the base one: "
+                f"{result.wat[:400]}"
+            )
+        assert _run(self._DEEP_CHAIN, "go", 7) == 7
 
     _QUAL_USER_SHADOW = """\
 private fn put(@Int -> @Unit) requires(true) ensures(true) effects(pure)
@@ -2699,8 +2777,16 @@ class TestClauseClassCollisionBothDirections:
             )
             return [d.description for d in result.diagnostics]
 
-    def test_parameterised_refined_alias_collision_is_loud(self) -> None:
-        msgs = self._compile_msgs("""\
+    def test_parameterised_refined_alias_is_one_stack_with_the_literal(
+        self,
+    ) -> None:
+        """A parameterised refined alias applied (`Ref<Int>`) and the
+        refinement literal it substitutes to are ONE class — the round-7 F1
+        ordering (substitute the alias parameters BEFORE the refinement
+        branch) is what makes both render `Option<{@Int | ...}>`.  Pre-#1208
+        this was the loud collision skip; now the mixed spelling agrees with
+        the single-alias spelling the skip's guidance asked for."""
+        mixed = _run("""\
 type Ref<T> = { @T | true };
 
 public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
@@ -2713,15 +2799,38 @@ public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
     option_unwrap_or(get(()), 0 - 1)
   }
 }
-""")
-        assert any("spell both with ONE alias" in m for m in msgs), msgs
+""", "go", 0)
+        single = _run("""\
+type Ref<T> = { @T | true };
 
-    def test_reverse_skew_merged_key_is_loud(self) -> None:
-        """The dual direction: refined-literal annotation + plain
-        pattern bind under ONE codegen key while the checker splits
-        them — previously a silent wrong value (the with-expr's ref
-        resolved to the state where the checker meant the argument)."""
-        msgs = self._compile_msgs("""\
+public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
+{
+  handle[State<Option<Ref<Int>>>](@Option<Ref<Int>> = Some(5)) {
+    get(@Unit) -> { resume(@Option<Ref<Int>>.0) },
+    put(@Option<Ref<Int>>) -> { resume(()) } with @Option<Ref<Int>> = @Option<Ref<Int>>.0
+  } in {
+    put(Some(9));
+    option_unwrap_or(get(()), 0 - 1)
+  }
+}
+""", "go", 0)
+        assert mixed == single
+        assert mixed == 5
+
+    def test_reverse_skew_binds_two_classes_as_the_checker_does(self) -> None:
+        """The DUAL direction: a refined-literal annotation and a plain
+        `Option<Int>` pattern are two DISTINCT classes to the checker, and
+        now to codegen — the annotation renders `Option<{@Int | ...}>`, the
+        pattern `Option<Int>`.
+
+        Pre-#1208 codegen erased the refinement literal to its base and bound
+        both under one key, so the `with` expression's `@Option<Int>.0`
+        landed on the merged stack's other member (the handler state,
+        `Some(5)`) where the checker means the put ARGUMENT — a silent wrong
+        value, which is why the shape was refused.  The argument is
+        `Some(9)`, distinct from the state, so the returned value names
+        which binding was reached: 9 is the checker's."""
+        assert _run("""\
 public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
 {
   handle[State<Option<{ @Int | @Int.0 > 0 }>>](@Option<{ @Int | @Int.0 > 0 }> = Some(5)) {
@@ -2732,14 +2841,24 @@ public fn go(@Int -> @Int) requires(true) ensures(true) effects(pure)
     option_unwrap_or(get(()), 0 - 1)
   }
 }
-""")
-        assert any("DIFFERENT slot classes" in m for m in msgs), msgs
+""", "go", 0) == 9
 
-    def test_old_state_depth_overflow_is_clean_skip(self) -> None:
-        """`old(State<A33>)` in an ensures — the ONE family-resolution
-        door outside every CodegenSkip net: the depth error escaped as
-        a raw crash on a check-green program (round-7 F2).  Now the
-        same clean E602 skip the body path uses."""
+    def test_old_state_cross_spelling_reads_the_same_snapshot(self) -> None:
+        """`old(State<A33>)` against an `effects(<State<Nat>>)` function.
+
+        The `old` reference and the effect name ONE cell — `A33` is a
+        33-hop alias chain ending at `Nat` — so the snapshot the
+        postcondition reads must be the snapshot the `Nat` family
+        registered.  Both sides resolve through `naming.family_name`, so
+        they agree by construction (#1209); before, this was the ONE
+        family-resolution door outside every CodegenSkip net and the
+        chain's depth error escaped as a raw crash on a check-green
+        program, later degraded to an E602 skip (round-7 F2).
+
+        Asserted as a CLEAN compile with the `Nat` snapshot read emitted:
+        a spelling that resolved to its own key would either skip the
+        function or emit a `state_get_A33` the module never imports.
+        """
         chain = "type A0 = Nat;\n" + "".join(
             f"type A{i} = A{i - 1};\n" for i in range(1, 34))
         src = chain + """
@@ -2752,6 +2871,13 @@ public fn bump(@Nat -> @Int)
   nat_to_int(get(()))
 }
 """
-        msgs = self._compile_msgs(src)
-        assert any("old(State<T>) snapshot" in m
-                   and "nested deeper than 32" in m for m in msgs), msgs
+        with _resolved_pipeline(src) as (program, arts, resolved, path):
+            result = codegen_compile(
+                program, source=src, file=path, resolved_modules=resolved,
+                expr_semantic_types=arts.expr_semantic_types,
+            )
+        hard = [(d.error_code, d.description) for d in result.diagnostics
+                if d.severity == "error"]
+        assert not hard, hard
+        assert "call $vera.state_get_Nat" in result.wat, result.wat[:400]
+        assert "state_get_A33" not in result.wat, result.wat[:400]

@@ -1,0 +1,113 @@
+-- Chapter 7, Section 7.5.2 — a clause body's bare op belongs to the ENCLOSING context.
+-- Tests: nested handlers over distinct cell families, bare get/put in a clause body,
+-- a bare op inside a 'with' state-update expression, three-deep handler nesting.
+--
+-- A handler clause is not part of the body it refines: a bare get/put written in a
+-- clause body is an operation of the context enclosing the handle expression, never
+-- of the handler whose clause it is.  Nesting handlers over DIFFERENT cell types
+-- makes the two cells distinguishable, so the clause-body operation lands observably
+-- in the outer cell.
+-- Bare put(1000) inside the nested Nat handler's put clause writes the OUTER Int
+-- cell, so the Nat cell keeps 3 and the Int cell becomes 1000: 3 * 100000 + 1000.
+private fn cross_family(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 301000)
+  effects(pure)
+{
+  handle[State<Int>](@Int = 111) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) }
+  } in {
+    let @Nat = handle[State<Nat>](@Nat = 7) {
+      get(@Unit) -> { resume(@Nat.0) },
+      put(@Nat) -> { put(1000); resume(()) }
+    } in {
+      put(3);
+      get(())
+    };
+    nat_to_int(@Nat.0) * 100000 + get(())
+  }
+}
+
+-- The 'with' state-update expression is clause scope too: its bare get(()) reads
+-- the enclosing Nat cell (4), so the Int cell is overridden with 40, not with ten
+-- times the 7 just stored: 40 * 100 + 4.
+private fn with_expr(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 4004)
+  effects(pure)
+{
+  handle[State<Nat>](@Nat = 4) {
+    get(@Unit) -> { resume(@Nat.0) },
+    put(@Nat) -> { resume(()) }
+  } in {
+    let @Int = handle[State<Int>](@Int = 1) {
+      get(@Unit) -> { resume(@Int.0) },
+      put(@Int) -> { resume(()) } with @Int = nat_to_int(get(())) * 10
+    } in {
+      put(7);
+      get(())
+    };
+    @Int.0 * 100 + nat_to_int(get(()))
+  }
+}
+
+-- Three deep: the innermost clause's bare put reaches the IMMEDIATELY enclosing
+-- handler (the Nat cell), not the outermost (the Bool cell).  The Nat cell is
+-- read into the result BEFORE the inner handler overwrites it, so its initial
+-- 20 is load-bearing too: 20 * 100000 + 33 * 1000 + 7.  (Routing the clause's
+-- put to the inner Int cell would leave the Nat cell at 20 throughout: the
+-- 33 * 1000 term would read 20 as well.)  The Bool cell stays false, which the
+-- final `if` reads.
+private fn depth_three(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 2033007)
+  effects(pure)
+{
+  handle[State<Bool>](@Bool = false) {
+    get(@Unit) -> { resume(@Bool.0) },
+    put(@Bool) -> { resume(()) }
+  } in {
+    let @Int = handle[State<Nat>](@Nat = 20) {
+      get(@Unit) -> { resume(@Nat.0) },
+      put(@Nat) -> { resume(()) }
+    } in {
+      let @Nat = get(());
+      let @Int = handle[State<Int>](@Int = 7) {
+        get(@Unit) -> { put(33); resume(@Int.0) },
+        put(@Int) -> { resume(()) }
+      } in {
+        get(())
+      };
+      nat_to_int(@Nat.0) * 100000 + nat_to_int(get(())) * 1000 + @Int.0
+    };
+    if get(()) then {
+      0 - 1
+    } else {
+      @Int.0
+    }
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 0)
+  effects(pure)
+{
+  let @Int = cross_family(());
+  if @Int.0 != 301000 then {
+    1
+  } else {
+    let @Int = with_expr(());
+    if @Int.0 != 4004 then {
+      2
+    } else {
+      let @Int = depth_three(());
+      if @Int.0 != 2033007 then {
+        3
+      } else {
+        0
+      }
+    }
+  }
+}

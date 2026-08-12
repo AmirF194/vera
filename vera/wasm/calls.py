@@ -432,6 +432,14 @@ class CallsMixin:
         if call.name == "apply_fn" and len(call.args) >= 2:
             return self._translate_apply_fn(call, env)
 
+        # #1233: inside an inlined clause body, an outward-routed op of the
+        # SAME cell family cannot address the enclosing cell — the intrinsics
+        # only reach the innermost cell of a family.  Refuse it here, before
+        # either dispatch below picks a route, so both the clause-inline and
+        # the bare-import path are covered by one gate (and so is the
+        # qualified `State.get`/`State.put` spelling, which delegates here).
+        self._reject_unaddressable_clause_op(call)
+
         # #976 option C: a get/put under a handle with registered clauses
         # inlines the clause body at the call site (intrinsic-hybrid
         # semantics) instead of the bare host-cell call below.
@@ -442,11 +450,14 @@ class CallsMixin:
         # enforced before inlining).  resume(()) is a UnitLit: no value,
         # matching put's void result.
         if call.name == "resume" and self._in_state_clause:
-            if self._state_clause_family is not None:
-                byte_val = self._state_byte_literal(
-                    call.args[0], self._state_clause_family)
-                if byte_val is not None:
-                    return byte_val
+            if self._state_clause_family_base is not None:
+                # #865/#1212: the resumed value is the op's result at the
+                # call site, so a Byte cell's `resume(1)` — and
+                # `resume(if c then { 1 } else { 2 })`, the very form the
+                # E602 clause skip message recommends — must lower at i32.
+                # Marked before translating; the ONE branch descent.
+                self._mark_state_byte_write(
+                    call.args[0], self._state_clause_family_base)
             return self.translate_expr(call.args[0], env)
 
         # Check if this is an effect operation (e.g. get/put/throw)
@@ -457,29 +468,87 @@ class CallsMixin:
             # general unguarded here — `_effect_ops` carries only the
             # dispatch target, not the op's formal types (#754 tracks the
             # general registry).  The builtin State `put` is the exception
-            # (#1203, PR #1202 adversarial round): its cell type IS the
-            # dispatch target's suffix, so the same nat/widen guard pair
-            # the clause-inlined path emits wraps the argument on the bare
-            # path too — a handler with no `put` clause, a `put` inside
-            # another clause's body, and a delegated bare `put` (handler in
-            # the caller) all previously stored a negative silently.
+            # (#1203, PR #1202 adversarial round): the cell it writes is
+            # recorded beside the dispatch target, so the same nat/widen
+            # guard pair the clause-inlined path emits wraps the argument on
+            # the bare path too — a handler with no `put` clause, a `put`
+            # inside another clause's body, and a delegated bare `put`
+            # (handler in the caller) all previously stored a negative
+            # silently.
+            #
+            # The cell's REPRESENTATION name, read from `_effect_op_cells`
+            # (#1218).  This used to SLICE the family back out of the
+            # dispatch target (`target_name[len("$vera.state_put_"):]`) and
+            # hand the MANGLED result to `_resolve_base_type_name`, which
+            # expects a canonical one — a second derivation of the family
+            # that worked only because `Nat`/`Int`/`Byte` mangle to
+            # themselves.  A refined `Nat` cell does not (its family carries
+            # the predicate), so the slice would have matched nothing and
+            # switched this guard off silently, while the verifier went on
+            # recording the obligation as `tier3_runtime`.
+            # ONE normalisation for all three sibling decisions (PR #1238
+            # review).  The Nat/Int guards resolved `cell.base` and the Byte
+            # width coercion did not, so a base that still needs alias
+            # resolution — which `family_fallback_name`'s residue can produce
+            # — would fire the guards and skip the coercion, putting an
+            # `i64.const` into an i32 cell.
+            cell = self._effect_op_cells.get(call.name)
+            is_state_put = (
+                call.name == "put" and len(call.args) == 1
+                and cell is not None
+            )
+            # `throw`'s payload is the OTHER cell-carrying write boundary
+            # (#1269).  The `Exn<E>` tag is declared at the payload's
+            # representation width — i32 for a `@Byte` payload, refined or
+            # not — while an int literal defaults to `i64.const`, so
+            # `throw(5)` into `Exn<{ @Byte | … }>` emitted a module WASM
+            # validation rejects at load.  Same marking, same derivation,
+            # different op; the #1268 narrowing GUARD on this payload is a
+            # separate obligation and is deliberately NOT added here.
+            is_exn_throw = (
+                call.name == "throw" and len(call.args) == 1
+                and cell is not None
+            )
+            # `_boundary_base`'s composition with its FIRST hop already
+            # performed, at registration: the registry carries a name, not
+            # the type expression, so this site cannot call the named helper
+            # and applies the residue chase itself.  Two of the three
+            # producers (both `handle` sites) store an already-chased base,
+            # so this is a no-op for them; the declaration-row producer
+            # (`codegen/functions.py`) has no `_resolve_base_type_name` to
+            # reach, which is the only reason the hop still lives here.
+            #
+            # UNTESTED as of #1273: deleting the chase leaves the suite green,
+            # because `family_base_name` already answers `Byte` for every
+            # refinement and alias reachable today, so no producer stores a
+            # base that still needs chasing.  It is defence for the residue
+            # `family_fallback_name` can return (a function or unknown type),
+            # which no boundary that asks this question can currently carry.
+            # A fixture exercising it needs a producer that stores an
+            # UNCHASED base — construct one and this becomes testable.
+            base = (
+                self._resolve_base_type_name(cell.base)
+                if (is_state_put or is_exn_throw) and cell is not None
+                else None
+            )
+            if is_state_put or is_exn_throw:
+                # #865/#1212: mark the Byte width BEFORE the argument is
+                # translated, so a literal — or the literal leaves of an
+                # `if` / `match` argument — lowers at the cell's i32 width.
+                # The general entry rather than `_mark_state_byte_write`,
+                # which names the State cell this branch no longer only
+                # serves.
+                self._mark_byte_write_value(call.args[0], base or "")
             for arg in call.args:
                 arg_instrs = self.translate_expr(arg, env)
                 if arg_instrs is None:
                     return None
                 instructions.extend(arg_instrs)
-            if (call.name == "put" and len(call.args) == 1
-                    and target_name.startswith("$vera.state_put_")):
-                cell_tn = target_name[len("$vera.state_put_"):]
-                if (self._resolve_base_type_name(cell_tn) == "Nat"
-                        and self._narrows_into_nat(call.args[0])):
+            if is_state_put:
+                if base == "Nat" and self._narrows_into_nat(call.args[0]):
                     instructions = self._emit_nat_bind_guard(instructions)
-                elif (self._resolve_base_type_name(cell_tn) == "Int"
-                        and self._result_is_nat(call.args[0])):
+                elif base == "Int" and self._result_is_nat(call.args[0]):
                     instructions = self._emit_int_widen_guard(instructions)
-                byte_arg = self._state_byte_literal(call.args[0], cell_tn)
-                if byte_arg is not None:
-                    instructions = byte_arg
             # throw uses WASM throw instruction, not call
             if call.name == "throw":
                 instructions.append(f"throw {target_name}")
@@ -539,16 +608,18 @@ class CallsMixin:
         # position.  Disjoint from `nat_params` / `int_params`.
         byte_params = self._fn_byte_params.get(call_target, ())
         for i, arg in enumerate(call.args):
-            if (i < len(byte_params) and byte_params[i]
-                    and isinstance(arg, ast.IntLit)):
+            if i < len(byte_params) and byte_params[i]:
                 # The bidirectional checker (`_synth_expr(expected=Byte)`)
                 # accepts a 0..255 int literal as a Byte argument (spec §11);
                 # lower it as i32 rather than the default i64 to match the
                 # callee's i32 Byte parameter.  Non-literal Byte arguments (a
                 # Byte slot ref, a Byte-returning call) already yield i32 via
                 # `translate_expr`, so only the literal needs the override.
-                instructions.append(f"i32.const {arg.value}")
-                continue
+                # #1212: the same coercion for a literal inside an `if` /
+                # `match` argument, through the ONE branch descent — the
+                # bare-`IntLit` test this replaced left
+                # `byte_id(if c then { 1 } else { 2 })` invalid WASM.
+                self._mark_byte_write_value(arg, "Byte")
             arg_instrs = self.translate_expr(arg, env)
             if arg_instrs is None:
                 return None
@@ -608,6 +679,19 @@ class CallsMixin:
             # dispatch to the USER fn (round-5 review) — the unresolved
             # case falls through to the legacy path's loud
             # unknown-func failure instead.
+            return self._translate_call(
+                ast.FnCall(name=call.name, args=call.args, span=call.span),
+                env,
+            )
+        if (call.qualifier == "Exn" and call.name == "throw"
+                and "throw" in self._effect_ops):
+            # `Exn.throw(x)` delegates for exactly the reason `State.put(x)`
+            # does: the payload's #1212 Byte marking lives on the bare
+            # dispatcher (#1269), and a qualified spelling that skipped it
+            # emitted an `i64.const` under an i32 tag while the bare one
+            # compiled.  Guarded on the op resolving, same as the State
+            # twin — an unresolved `throw` falls through to the legacy path
+            # below rather than synthesizing a bare call that would miss.
             return self._translate_call(
                 ast.FnCall(name=call.name, args=call.args, span=call.span),
                 env,
@@ -847,8 +931,8 @@ class CallsMixin:
         if isinstance(arg, ast.SlotRef):
             fn_type = resolve_fn_type_alias(
                 ast.NamedType(name=arg.type_name, type_args=arg.type_args),
-                self._type_aliases,
-                self._type_alias_params,
+                self._alias_env.aliases,
+                self._alias_env.alias_params,
             )
             if fn_type is not None:
                 return (tuple(fn_type.params), fn_type.return_type)
@@ -878,7 +962,7 @@ class CallsMixin:
             return None
         arg_params, arg_return = arg_shape
 
-        alias_params = self._type_alias_params.get(param_te.name)
+        alias_params = self._alias_env.alias_params.get(param_te.name)
         if (
             not alias_params
             or not param_te.type_args
@@ -894,8 +978,8 @@ class CallsMixin:
                     for p in alias_params
                 ),
             ),
-            self._type_aliases,
-            self._type_alias_params,
+            self._alias_env.aliases,
+            self._alias_env.alias_params,
         )
         if alias_te is None:
             return None

@@ -247,6 +247,32 @@ public fn opt_field(@Nat -> @Int)
             d.error_code for d in result.diagnostics
         ]
 
+    def test_the_unguarded_disclosure_names_its_actual_cause(self) -> None:
+        """The E531 rationale must not claim a cause it did not have (#1251).
+
+        It read "The value is outside Z3's decidable fragment (untranslatable
+        or the solver timed out)" for every demotion — the exact conflation
+        #1251 removed from E506, in a family that had no reason plumbing at
+        all.  Neither half is what happened here: `@Nat.0` translates fine and
+        the solver answered promptly, twice.  It is simply unconstrained, so
+        `<= i64.MAX` and `> i64.MAX` both have countermodels, which is a fact
+        about the PROGRAM (add a bound) rather than about the solver.
+        """
+        result = _verify("""
+public fn opt_field(@Nat -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ let @Option<Int> = Some(@Nat.0); match @Option<Int>.0 { Some(@Int) -> @Int.0, None -> 0 } }
+""")
+        warns = [d for d in result.diagnostics if d.error_code == "E531"]
+        assert len(warns) == 1, [
+            (d.error_code, d.description[:70]) for d in result.diagnostics
+        ]
+        rationale = warns[0].rationale
+        assert "countermodels on both sides" in rationale, rationale
+        assert "timed out" not in rationale, rationale
+        assert "outside Z3's decidable fragment" not in rationale, rationale
+        assert "untranslatable" not in rationale, rationale
+
     def test_array_element_widening_tier3_guarded(self) -> None:
         # #820: `[@Nat.0]` into an `@Array<Int>` widens each @Nat element.
         # Codegen recovers the target element type (`Array<Int>`) from the

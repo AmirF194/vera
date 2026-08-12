@@ -1,0 +1,19 @@
+module ch08_state_alias_module_table_lib;
+
+-- Conformance: the module-side half of the same-name-different-body alias
+-- test (Chapter 8, Section 8.4.1).  `Count` is `Nat` HERE; the importer
+-- declares its own `Count = Int`.
+type Count = Nat;
+
+public fn bump(@Nat -> @Int)
+  requires(true)
+  ensures(@Int.result == nat_to_int(@Nat.0))
+  effects(pure)
+{
+  handle[State<Count>](@Count = 0) {
+    put(@Count) -> { resume(()) }
+  } in {
+    put(@Nat.0);
+    nat_to_int(get(()))
+  }
+}

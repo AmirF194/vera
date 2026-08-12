@@ -133,6 +133,17 @@ class ProofObligation:
     column: int = 0
     error_code: str = ""
     counterexample: dict[str, str] | None = None
+    #: The file ``line``/``column`` number lines in — the module that DECLARED
+    #: what this obligation is about, which is not the entry program once an
+    #: imported generic's clone is verified (#1220, PR #1239 review).  Without
+    #: it a consumer joining an obligation to its diagnostic on
+    #: ``(file, line, column)`` — the join ``verify --json`` documents — had
+    #: to assume every obligation belonged to the entry file, and read a line
+    #: number past its end.  ``None`` only for an obligation built outside a
+    #: verifier run (a hand-constructed record in a unit test); every
+    #: obligation ``_record_obligation`` reifies carries one whenever the
+    #: verifier was given a file at all.
+    file: str | None = None
 
     def content_key(self) -> str:
         """Stable identity digest for this obligation.
@@ -142,11 +153,28 @@ class ProofObligation:
         obligation regardless of discharge result.  Spans are included
         because textually identical obligations can occur at multiple
         sites (e.g. the same ``@Nat.0 - @Nat.1`` subtraction in two
-        branches) and must remain distinct cache entries.
+        branches) and must remain distinct cache entries — and the FILE with
+        them, since a span is only unique within one, so two identical
+        obligations in an importer and an imported module would otherwise
+        share a cache entry.  Adding it can only SPLIT entries, never merge
+        them, which is the safe direction for a cache.
+
+        The cache is not the only consumer, and the second one does not
+        tolerate a split the way a cache does:
+        :func:`vera.lsp.extensions.proof_delta` diffs two obligation streams
+        BY this key, so a stream keyed under a different ``file`` reports
+        every obligation as removed and every one recreated rather than as
+        unchanged.  The precondition is therefore stronger there — both
+        streams must derive ``file`` identically — and it is met by both
+        sides going through :func:`vera.lsp.convert.uri_to_path`:
+        ``features.analyze`` for the baseline, ``extensions.speculative_edit``
+        for the speculative stream (#1246).  A future caller that hands the
+        session a raw URI, or an un-normalised path, breaks the delta without
+        breaking anything the cache would notice (PR #1283 review).
         """
         ident = (
             f"{self.fn_name}\x1f{self.kind}\x1f{self.expr_text}"
-            f"\x1f{self.line}\x1f{self.column}"
+            f"\x1f{self.line}\x1f{self.column}\x1f{self.file or ''}"
         )
         return hashlib.sha256(ident.encode("utf-8")).hexdigest()
 

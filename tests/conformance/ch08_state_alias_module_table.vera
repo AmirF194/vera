@@ -1,0 +1,30 @@
+import ch08_state_alias_module_table_lib(bump);
+
+-- Conformance: same alias NAME, different body, per module (Chapter 8,
+-- Section 8.4.1).  Tests: `Count` is `Int` here and `Nat` in the imported
+-- module, and each `State<Count>` cell must resolve against its declaring
+-- module's table — the imported handler's Nat cell and this module's Int
+-- cell are two families, so a single shared alias table would merge them and
+-- carry i64 values through the wrong host bindings (#1208/#1209).
+type Count = Int;
+
+private fn local_sum(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 0 - 3)
+  effects(pure)
+{
+  handle[State<Count>](@Count = 0 - 5) {
+    get(@Unit) -> { resume(@Count.0) }
+  } in {
+    put(0 - 3);
+    get(())
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 1)
+  effects(pure)
+{
+  bump(4) + local_sum(())
+}

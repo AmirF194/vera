@@ -51,22 +51,23 @@ vera lsp                          # Serve LSP over stdio (needs the [lsp] extra;
 vera version                      # Print the installed version (also --version, -V)
 vera builtins [--json]            # List the built-in function registry (no file needed)
 vera effects [--json]             # List the effect and ability registry (no file needed)
-vera errors [--json]              # List the diagnostic error-code registry E001–E702 (no file needed)
+vera errors [--json]              # List the diagnostic code registry E001–E702 + W001/W002 (no file needed)
 
 pytest tests/ -v                  # Run the test suite (see TESTING.md)
 VERA_JS_COVERAGE=1 pytest tests/test_browser.py -v  # Browser tests with JS coverage
 VERA_EAGER_GC=1 vera run file.vera  # Force GC on every alloc (see ENVIRONMENT.md, debug knob for #593-class GC-rooting bugs)
 mypy vera/                        # Type-check the compiler itself
 
-python scripts/check_conformance.py    # Verify all 179 conformance programs (positives pass their level; negatives fail with their expected_error E-code)
+python scripts/check_conformance.py    # Verify all 213 conformance programs (positives pass their level; negatives fail with their expected_error E-code)
 python scripts/check_examples.py      # Verify all 42 examples parse + check + verify
-python scripts/check_corpus_canonical.py # Verify all 227 corpus programs are in canonical form (vera fmt)
+python scripts/check_corpus_canonical.py # Verify all 261 corpus programs are in canonical form (vera fmt)
 python scripts/check_examples_readme.py # Verify vera run commands in examples/README.md
 python scripts/check_spec_examples.py # Verify spec code blocks parse
 python scripts/check_readme_examples.py # Verify README code blocks parse
 python scripts/check_examples_doc.py  # Verify EXAMPLES.md code blocks parse
 python scripts/check_skill_examples.py # Verify SKILL.md code blocks parse
 python scripts/check_faq_examples.py  # Verify FAQ code blocks parse
+python scripts/check_debruijn_examples.py # Verify DE_BRUIJN.md code blocks parse
 python scripts/check_pypi_readme_examples.py # Verify PYPI_README code blocks parse + check + verify
 python scripts/check_html_examples.py # Verify HTML code blocks parse + check + verify
 python scripts/check_doc_builtin_shadowing.py # Verify no doc example redefines a built-in (E151; #819)
@@ -90,7 +91,7 @@ See [`TOOLCHAIN.md`](TOOLCHAIN.md) for the CLI cookbook — driving the toolchai
 - `vera/` — Reference compiler: grammar, parser, AST, transformer, type checker, verifier, codegen, CLI
 - `examples/` — 42 example Vera programs (all must pass `vera check` and `vera verify`)
 - `tests/` — Test suite (unit tests + conformance suite)
-- `tests/conformance/` — 179 conformance programs validating every language feature against the spec
+- `tests/conformance/` — 213 conformance programs validating every language feature against the spec
 - `scripts/` — CI and validation scripts
 
 ## Writing Vera code
@@ -127,7 +128,7 @@ Before changing code — **adding or removing** — write the test that proves y
 ## What not to break
 
 - Pre-commit hooks run mypy + pytest + conformance suite + example validation on every commit
-- All 179 conformance programs in `tests/conformance/` must hold at their declared level — positive entries pass, and the negative fixtures (`ch02_generic_over_unit_rejected`, `ch02_map_unit_value_rejected`, `ch04_let_unit_rejected`, `ch05_apply_fn_arity`, `ch05_decreases_float_rejected`, `ch05_reserved_fn_name_rejected`, `ch05_reserved_keyword_fn_rejected`, `ch05_where_helper_outer_slot_rejected`, `ch07_handler_state_body_scope_rejected`, `ch07_old_outside_ensures_rejected`, `ch07_state_unit_op_param_read_rejected`, `ch08_circular_import`, `ch08_reserved_vera_prefix_rejected`, `ch08_visibility_private`, `ch09_builtin_effect_redefinition_rejected`, `ch09_builtin_redefinition`, `ch09_ord_adt_rejected`, `ch09_eq_non_derivable_rejected`, `ch09_sql_injection_rejected`, `ch09_sql_placeholder_mismatch_rejected`, `ch09_sql_placeholder_let_mismatch_rejected`, `ch09_sql_numbered_placeholder_rejected`, `ch07_bare_effect_op_rejected`, `ch06_quantifier_array_domain_rejected`, `ch07_handler_state_type_mismatch_rejected`) must *fail* `check` with their `expected_error` E-code
+- All 213 conformance programs in `tests/conformance/` must hold at their declared level — positive entries pass, and the negative fixtures (`ch02_generic_over_unit_rejected`, `ch02_map_unit_value_rejected`, `ch04_let_unit_rejected`, `ch05_apply_fn_arity`, `ch05_decreases_float_rejected`, `ch05_reserved_fn_name_rejected`, `ch05_reserved_keyword_fn_rejected`, `ch05_where_helper_outer_slot_rejected`, `ch07_handler_state_body_scope_rejected`, `ch07_old_outside_ensures_rejected`, `ch07_state_unit_op_param_read_rejected`, `ch08_circular_import`, `ch08_reserved_vera_prefix_rejected`, `ch08_reserved_vera_prefix_reference_rejected`, `ch08_reserved_vera_prefix_binder_rejected`, `ch08_reserved_vera_prefix_effect_rejected`, `ch08_reserved_vera_prefix_ability_rejected`, `ch08_reserved_vera_prefix_constructor_rejected`, `ch08_visibility_private`, `ch09_builtin_effect_redefinition_rejected`, `ch09_builtin_redefinition`, `ch09_ord_adt_rejected`, `ch09_eq_non_derivable_rejected`, `ch09_sql_injection_rejected`, `ch09_sql_placeholder_mismatch_rejected`, `ch09_sql_placeholder_let_mismatch_rejected`, `ch09_sql_numbered_placeholder_rejected`, `ch07_bare_effect_op_rejected`, `ch06_quantifier_array_domain_rejected`, `ch07_handler_state_type_mismatch_rejected`, `ch02_alias_cycle_rejected`) must *fail* `check` with their `expected_error` E-code
 - All 42 examples in `examples/` must pass `vera check` and `vera verify`
 - Version must stay in sync across `pyproject.toml`, `vera/__init__.py`, `docs/index.html`, `README.md`, and `uv.lock` (gated by `scripts/check_version_sync.py`); CHANGELOG.md must also carry a matching `## [X.Y.Z]` section
 - All tests must pass: `pytest tests/ -v`
@@ -154,11 +155,22 @@ Before changing code — **adding or removing** — write the test that proves y
 {"ok": true, "file": "...", "diagnostics": [], "warnings": []}
 ```
 
-Each diagnostic includes: `severity`, `description`, `location` (`file`, `line`, `column`), `source_line`, `rationale`, `fix`, `spec_ref`, and `error_code`. The `verify --json` output also includes a `verification` summary with `tier1_verified`, `tier3_runtime`, and `total` counts (the summary is derived from the reified obligation stream, so `total == tier1_verified + tier3_runtime`), plus an `obligations` array — one entry per reified obligation with `kind`, `status`, `description`, `location`, and `error_code` (when present) — from which a consumer can reproduce the counts.
+Each diagnostic includes: `severity`, `description`, `location` (`file`, `line`, `column`), `source_line`, `rationale`, `fix`, `spec_ref`, and `error_code`. The `verify --json` output also includes a `verification` summary with `tier1_verified`, `tier3_runtime`, and `total` counts, plus an `obligations` array — one entry per reified obligation with `kind`, `status`, `description`, `location`, and `error_code` (when present).
+
+The summary is *derived* from that array, by `status`. A consumer reproduces the counts by filtering on `status`, never by taking the array's length:
+
+| `status` | counted as | also surfaced as |
+|----------|-----------|------------------|
+| `verified` | `tier1_verified` | — |
+| `tier3`, `timeout` | `tier3_runtime` | an informational warning, for the kinds that carry one |
+| `violated` | *nothing* | an error diagnostic (E500, E501, E502, E505, …) |
+| `tier3_unguarded` | *nothing* | a warning diagnostic (E504, E506, E531) |
+
+So `total == tier1_verified + tier3_runtime`, and the array — which is the complete stream — is a *superset* of what the counts cover: `violated` and `tier3_unguarded` discharged to no tier, so they are counted nowhere and appear only as diagnostics. The full accounting is `len(obligations) == total + violated + tier3_unguarded`. A program with one refuted contract therefore reports (say) `total: 2` beside a three-entry array; that is the partition, not a disagreement.
 
 ### Error codes
 
-Every diagnostic has a stable error code (`E001`–`E702`). Codes are grouped by compiler phase:
+Every diagnostic has a stable code — errors `E001`–`E702`, warnings `W001`/`W002`. Codes are grouped by compiler phase:
 
 | Range | Phase |
 |-------|-------|
@@ -211,8 +223,10 @@ This repo uses [CodeRabbit](https://coderabbit.ai) for AI code review on pull re
 
 ## Cross-platform pitfalls (test fixtures)
 
-The CI matrix tests on `{ubuntu-latest, macos-15, macos-26, windows-latest} × {3.11, 3.12, 3.13}` plus an advisory `ubuntu-24.04-arm` × 3.12 cell (13 combinations; macOS pinned explicitly to insulate from silent `macos-latest` migration — see README §Supported platforms).  When writing test fixtures, three Windows-portability rules apply — see the **Test Fixture Conventions** section in `TESTING.md` for full examples:
+The CI matrix tests on `{ubuntu-latest, macos-15, macos-26, windows-latest} × {3.11, 3.12, 3.13}` plus an advisory `ubuntu-24.04-arm` × 3.12 cell (13 combinations; macOS pinned explicitly to insulate from silent `macos-latest` migration — see README §Supported platforms).  When writing test fixtures, five Windows-portability rules apply — see the **Test Fixture Conventions** section in `TESTING.md` for full examples:
 
 - `tempfile.NamedTemporaryFile` handed off to a subprocess MUST use `delete=False` + manual `Path.unlink()` (Windows can't reopen a held file).
 - Paths embedded into Vera string literals MUST be POSIX-form (`Path(tmp_path).as_posix()`); Windows backslashes trip Vera's `\U` escape grammar.
+- Repo-relative paths COMPARED as strings MUST be POSIX-form (`path.relative_to(ROOT).as_posix()`); a native-separator string makes every `startswith("tests/…")` match nothing, silently.
+- A path a stdlib converter RETURNED must be asserted by its PROPERTY, not its POSIX shape: `url2pathname` returns `\tmp\x` on Windows where it returns `/tmp/x` elsewhere, so compare against another call's result or against a path the test built, never a `/`-shaped literal.
 - Text I/O MUST pass `encoding="utf-8"` explicitly, enforced by `scripts/check_explicit_encoding.py` (pre-commit + CI lint, #645): every text-mode `open()` / `read_text()` / `write_text()` **and** every `subprocess.run/Popen/check_output(..., text=True)` capture. A deliberate non-UTF-8 site opts out with `# encoding-exempt: <reason>`. The `vera` CLI also reconfigures its stdout/stderr to UTF-8 at startup, so a Vera program printing `→` / `—` is UTF-8 on any locale. Together these replaced the `PYTHONUTF8=1` CI backstop (#641), which has been removed — no reliance on the runner's or a local Windows shell's locale.

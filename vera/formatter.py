@@ -563,10 +563,24 @@ class Formatter:
         self,
         attached: _Attached,
         blank_lines: frozenset[int] = frozenset(),
+        structural: bool = False,
     ) -> None:
         self._lines: list[str] = []
         self._indent: int = 0
         self._attached = attached
+        # STRUCTURAL mode (#1238 round 2): render for DISCRIMINATION rather
+        # than for canonical form.  Two sites below choose the canonical
+        # spelling between two AST shapes the CHECKER holds apart — an arm
+        # body's redundant block wrapper, and a handler clause's braces —
+        # and picking one erases the distinction.  That is right for
+        # `vera fmt`, whose whole job is to pick, and wrong for
+        # `vera.types.structural_type_key`, where the rendering NAMES a
+        # State cell: two predicates rendering alike is two cells sharing
+        # one host cell behind a check that typed them apart (#1218's
+        # failure mode, through the renderer that fixed it).  Set only by
+        # :func:`format_expr_canonical`; `format_source` never turns it on, so
+        # canonical output is untouched.
+        self._structural = structural
         # Source lines holding only whitespace, from
         # :func:`blank_source_lines`.  Defaulted so a caller that has an
         # AST but no text still formats -- it simply gets no gaps, which
@@ -1533,11 +1547,25 @@ class Formatter:
         # The wrapper below supplies the clause's braces, so a Block
         # body renders braceless through `_fmt_block_inline`; routing
         # it through `_fmt_expr` would add a second, nested pair.
+        #
+        # The SECOND site that is not structure-preserving in canonical
+        # mode (#1238 round 2), and one the review's own battery missed —
+        # found by reading every normalisation site rather than by probing.
+        # A bare clause body parses (`put(@Int) -> resume(())`), so
+        # `clause.body` is a `Block` for the braced spelling and a plain
+        # expression for the bare one; supplying braces unconditionally
+        # renders both as `-> { resume(()) }`.  In structural mode the
+        # braces follow the AST instead: present exactly when the body is
+        # a block, which is what re-parses to the shape it came from.
         body = (
             self._fmt_block_inline(clause.body)
             if isinstance(clause.body, Block)
             else self._fmt_expr(clause.body)
         )
+        if self._structural and not isinstance(clause.body, Block):
+            rendered_body = body
+        else:
+            rendered_body = f"{{ {body} }}"
 
         with_str = ""
         if clause.state_update:
@@ -1545,7 +1573,7 @@ class Formatter:
             val = self._fmt_expr(clause.state_update[1])
             with_str = f" with {te} = {val}"
 
-        return f"{clause.op_name}({params}) -> {{ {body} }}{with_str}"
+        return f"{clause.op_name}({params}) -> {rendered_body}{with_str}"
 
     def _fmt_handler_state(self, expr: HandleExpr) -> str:
         """The `(@T = init)` initialiser, or nothing at all."""
@@ -1752,9 +1780,19 @@ class Formatter:
         return f"match {scrut} {{ {arms} }}"
 
     def _fmt_arm_body(self, body: Expr) -> str:
-        """Format a match arm body, wrapping multi-statement blocks in braces."""
+        """Format a match arm body, wrapping multi-statement blocks in braces.
+
+        NOT structure-preserving in canonical mode, which is the point of
+        the structural flag (#1238 round 2).  `Red -> { e }` parses to
+        `Block(expr=e)` and `Red -> e` to `e`; the unwrap below renders both
+        as `e`, so the two — which the checker holds apart, `RefinedType`
+        equality being dataclass equality over the predicate — name one
+        cell family.  In structural mode the wrapper is kept, which
+        re-parses to the block it came from, so the left-inverse argument
+        that makes this renderer a discriminator survives.
+        """
         if isinstance(body, Block):
-            if body.statements:
+            if body.statements or self._structural:
                 return f"{{ {self._fmt_block_inline(body)} }}"
             # A statement-less wrapper is redundant in arm position;
             # the bare body is canonical, matching the multi-line arm
@@ -1930,6 +1968,53 @@ def _check_postconditions(
             f"is not a fixed point — a second pass would rewrite it, "
             f"so it is not canonical form.  {tail}"
         )
+
+
+def format_expr_canonical(expr: Expr, *, structural: bool = False) -> str:
+    """One expression, in canonical single-line source form.
+
+    *structural* renders for DISCRIMINATION instead: identical output
+    except at the two sites where canonical form CHOOSES between AST
+    shapes the checker holds apart — a match arm's redundant block wrapper
+    and a handler clause's braces (see :meth:`Formatter._fmt_arm_body` and
+    :meth:`Formatter._fmt_handler_clause`).  Both spellings stay
+    re-parseable, so the left-inverse argument below holds in either mode;
+    only in structural mode does it also hold *between* those two shapes.
+    :func:`vera.types.structural_type_key` passes ``structural=True``,
+    because there the rendering NAMES a State cell and two predicates
+    rendering alike is two cells sharing one.  ``vera fmt`` does not, so
+    canonical output is untouched.
+
+    The expression half of :func:`format_source`, reached without a source
+    buffer: the same :meth:`Formatter._fmt_expr` that formats a contract
+    clause or a `let` value, over an empty comment attachment (an expression
+    rendered in isolation has no comments to place, and none of them are
+    part of the expression anyway).
+
+    **A left inverse of parsing, which is what makes it usable as a
+    discriminator** (#1218 / PR #1238 review).  Parenthesisation is not
+    copied from the source — the parser discards it — but RE-DERIVED from
+    precedence and associativity by :func:`_needs_parens`, precisely so the
+    output re-parses to the expression it came from.  So ``parse(format(e))
+    == e``, and therefore ``format(a) == format(b)`` implies ``a == b``:
+    ``(a + b) + c`` renders ``a + b + c`` while ``a + (b + c)`` keeps its
+    parentheses, and the two never collide.  ``vera fmt``'s idempotence
+    postcondition and ``scripts/check_corpus_canonical.py`` exercise that
+    round trip over the whole corpus on every commit, so the property is a
+    maintained gate rather than an argument.
+
+    :func:`vera.types.structural_type_key` uses this to render a refinement
+    predicate, which is what keeps a refined cell's family name LINEAR in
+    the predicate's source length.  ``ast.Node.pretty`` — the obvious
+    alternative, and what the key used first — is a newline-indented tree
+    whose size grows quadratically in nesting depth: 44 left-nested ``&&``
+    conjuncts render 56,604 characters there against 646 here, and mangled
+    that crossed the WASM name-section limit.
+    """
+    return Formatter(
+        _Attached(before={}, inline=[], header=[], footer=[]),
+        structural=structural,
+    )._fmt_expr(expr)
 
 
 def format_source(source: str, file: str | None = None) -> str:

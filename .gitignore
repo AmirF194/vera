@@ -62,3 +62,13 @@ node_modules/
 # interrupted run can strand one in the repo root.  Backstop only — the checkers
 # now write to the system tempdir, not here.
 /tmp*.vera
+
+# Run artifacts from the example corpus.  `examples/file_io.vera` writes the
+# RELATIVE path `hello.txt`, and the host resolves it against the process CWD
+# — so the documented invocation `vera run examples/file_io.vera` from the
+# repository root drops it in the ROOT, and running it from inside `examples/`
+# drops it there.  Both are ignored; a `git add -A` has twice picked the root
+# one up.  It is output, not source.  (`scripts/check_examples.py` only checks
+# and verifies, so it produces neither; `pytest tests/` leaves the tree clean.)
+/hello.txt
+/examples/hello.txt

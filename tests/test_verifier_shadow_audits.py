@@ -69,10 +69,28 @@ private fn caller(@Nat, @Nat -> @Nat)
 { dec(@Nat.1, @Nat.0, true) }
 """)
         assert [d for d in result.diagnostics if d.severity == "error"] == []
-        assert result.summary.tier3_runtime == 0
         # the body's nat_sub obligation is discharged statically for dec<Bool>
         assert any(o.kind == "nat_sub" and o.status == "verified"
                    for o in result.obligations)
+        # ... and NOTHING in the body falls to a runtime check.  The one
+        # Tier-3 obligation left is the CALL SITE's precondition, which is a
+        # different question and is #732's remaining half: `dec` is generic, so
+        # its contract has no Z3 sort until the call is monomorphized, and the
+        # summary the caller would need cannot be built here.  It demotes
+        # loudly (E532) rather than vanishing (#1236) — the call is in fact
+        # safe (the swapped arguments compensate for the De Bruijn order), so
+        # this is the conservative direction, not a caught violation.
+        # The code is pinned, not just the kind and status: "demotes loudly
+        # (E532)" is the claim above, and a demotion that drifted to another
+        # code — or lost its code entirely, which is the #1236 shape — would
+        # otherwise leave this green (PR #1283 review).
+        assert [
+            (o.kind, o.status, o.error_code) for o in result.obligations
+            if o.status in ("tier3", "timeout")
+        ] == [("call_pre", "tier3", "E532")], [
+            (o.fn_name, o.kind, o.status, o.error_code)
+            for o in result.obligations
+        ]
 
     def test_never_instantiated_generic_stays_tier3(self) -> None:
         """A generic with no call site cannot be monomorphized, so its

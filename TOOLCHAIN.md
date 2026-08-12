@@ -76,6 +76,15 @@ vera check --explain-slots file.vera   # a table: which @T.n maps to which param
 This is the first thing to run when a contract "should hold" but doesn't, or a
 recursive call behaves backwards.
 
+Two things the table tells you that the source does not. It covers `where`-block
+helpers, each in its own indented block under its parent (`slot_environments`
+qualifies them `parent.helper` under `--json`) — a helper's scope is closed, so
+its indices start over. And the rows print **resolved** names: a slot name's head
+stays as written, but its type arguments resolve through aliases, so a parameter
+declared `@Option<Cnt>` under `type Cnt = Int` is listed — and referenced — as
+`@Option<Int>`. The signature line echoes your spelling; when the two disagree,
+the rows are the one place the bound name appears.
+
 **Normalise the source.** There is exactly one canonical form; `fmt` enforces it
 (pre-commit and CI reject drift).
 
@@ -135,6 +144,26 @@ outputs are checked against `ensures`. It is the empirical counterpart to
 `verify` — where `verify` proves, `test` tries to falsify. Run it on the Tier-3
 functions `verify --json` flagged: those are the ones a proof didn't cover, so
 they're where a generated counterexample is most valuable.
+
+A parameter's type is **resolved before** the encodability test, so an alias of a
+generatable type is trialled rather than skipped: `type Cnt = Int;` costs you
+nothing here, and an alias-spelled `requires` still constrains the inputs. A
+`SKIPPED` line names the type it could not generate for after resolution
+(`cannot generate Option<Nat> inputs`), which is what to look for when a function
+you expected to be tested wasn't.
+
+The generator only runs when it can honour *every* input constraint, so
+"satisfy each function's `requires`" is a promise rather than a best effort.
+Where a `requires` conjunct — or a refined parameter's predicate — is outside
+the SMT layer's decidable fragment (`string_length` over a non-literal is the
+common one: Vera counts UTF-8 bytes and Z3's string theory has no byte-length
+operator), the constraint would reach the solver as nothing at all, the inputs
+could violate it, and the function's own entry guard would trap. That trap is a
+limit of the generator, not a falsified contract, so the function is `SKIPPED`
+with the blocking conjunct named rather than counted as a failure:
+``cannot generate inputs satisfying `string_length(@String.0) > 0` (see #1229)``.
+The same reason is repeated in an `E701` warning, so a `--json` consumer reading
+only `diagnostics` still learns why nothing ran.
 
 ---
 
@@ -302,6 +331,7 @@ scripts; the LSP is for interactive editing and edit-verify-apply loops.
 |---|---|---|
 | "Contract should hold but doesn't" | `vera check --explain-slots` | which parameter `@T.n` actually resolves to |
 | Recursive call behaves backwards | `vera check --explain-slots` | non-commutative slot order (`@T.0` is *most recent*) |
+| A `@T.n` you wrote doesn't resolve | `vera check --explain-slots` | an alias in the head or in a type argument — the bound name may not be the one you spelled |
 | "Verified, but it trapped at runtime" | `vera verify --json` | a non-zero `tier3_runtime` — it was a runtime guard, not a proof |
 | "Z3 can't prove my postcondition" | `vera test --fn f` | a generated counterexample input |
 | Wrong *output* (not wrong *proof*) | `vera compile --wat` | the actual emitted instructions |

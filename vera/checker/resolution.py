@@ -7,7 +7,8 @@ _unify_for_inference methods extracted from TypeChecker.
 
 from __future__ import annotations
 
-from vera import ast
+from vera import ast, naming
+from vera.checker.registration import _RESERVED_TYPE_PREFIX_RE
 from vera.types import (
     PRIMITIVES,
     REMOVED_ALIASES,
@@ -21,7 +22,6 @@ from vera.types import (
     Type,
     TypeVar,
     UnknownType,
-    canonical_type_name,
     erases_to_unit,
     merge_inferred_types,
     pretty_type,
@@ -246,6 +246,52 @@ class ResolutionMixin:
                 )
             return UnknownType()
 
+        # Reserved prelude namespace? — the reference half of E154 (#1221).
+        # Reaching here means nothing the checker knows carries this name, so
+        # it would become an opaque head.  Codegen knows better: the prelude
+        # injects its closure-parameter aliases under exactly these names, at
+        # codegen and at the verifier's mono discovery but never at check, so
+        # a `VeraOptionMapFn<Int, Bool>` parameter is one stack here and a
+        # resolved function type there — codegen merges parameters this
+        # binding table keeps apart and the export reads the wrong one.  The
+        # declaration gate alone cannot close that: it stops a user DEFINING
+        # a reserved name, not MENTIONING one the prelude defines.  Anchored
+        # on the same regex the declaration gate uses, so the two halves of
+        # the reservation cannot drift apart.
+        if _RESERVED_TYPE_PREFIX_RE.match(name):
+            if name not in self._reported_reserved_type_refs:
+                self._reported_reserved_type_refs.add(name)
+                self._error(
+                    te,
+                    f"Type '{name}' is reserved for the prelude.",
+                    rationale=(
+                        "Names beginning with 'Vera' followed by an "
+                        "uppercase letter or digit are the prelude's "
+                        "internal namespace — the declarations its "
+                        "combinators resolve through, injected at code "
+                        "generation and never visible to the type checker. "
+                        "A user program that mentions one names a type this "
+                        "checker cannot see and code generation can: the two "
+                        "then partition a function's parameters differently, "
+                        "and the compiled export reads a parameter the "
+                        "binding table assigns to a different slot."
+                    ),
+                    fix=(
+                        "Write out the type this name stands for — a "
+                        "function type is spelled `fn(A -> B) "
+                        "effects(pure)` — or declare your own alias for it "
+                        "under a name outside the reserved namespace: any "
+                        "name that does not start with 'Vera' followed by "
+                        "an uppercase letter or digit. Stripping the prefix "
+                        "is not a fix by itself; the reserved name is not a "
+                        "declaration this program can reach under any "
+                        "spelling."
+                    ),
+                    spec_ref='Chapter 8, Section 8.4.1 "Visibility Rules"',
+                    error_code="E154",
+                )
+            return UnknownType()
+
         # Unknown — might be a type from an unresolved import
         return AdtType(name, tuple(
             self._resolve_type(a) for a in te.type_args
@@ -253,8 +299,23 @@ class ResolutionMixin:
 
     def _resolve_effect_row(self, er: ast.EffectRow) -> EffectRowType:
         """Convert an AST EffectRow into a semantic EffectRowType."""
+        return self._resolve_effect_row_ordered(er)[0]
+
+    def _resolve_effect_row_ordered(
+        self, er: ast.EffectRow,
+    ) -> tuple[EffectRowType, tuple[EffectInstance, ...]]:
+        """Resolve an AST EffectRow to its row type AND its SOURCE order.
+
+        One derivation, two views (#1215).  The row type carries a
+        ``frozenset`` — the shape subeffect containment wants — which loses
+        the declaration order a bare op name needs to resolve deterministically
+        when two effects in the row declare it.  The second element is that
+        order: the ``ast.EffectSet``'s own sequence, minus the row variable,
+        with each instance resolved exactly once here so the two views can
+        never describe different effects.
+        """
         if isinstance(er, ast.PureEffect):
-            return PureEffectRow()
+            return PureEffectRow(), ()
         if isinstance(er, ast.EffectSet):
             instances = []
             row_var = None
@@ -274,8 +335,9 @@ class ResolutionMixin:
                     ) if ref.type_args else ()
                     instances.append(
                         EffectInstance(f"{ref.module}.{ref.name}", args))
-            return ConcreteEffectRow(frozenset(instances), row_var)
-        return PureEffectRow()
+            return (ConcreteEffectRow(frozenset(instances), row_var),
+                    tuple(instances))
+        return PureEffectRow(), ()
 
     def _resolve_effect_ref(self, ref: ast.EffectRefNode) -> EffectInstance | None:
         """Resolve a single effect reference."""
@@ -295,13 +357,50 @@ class ResolutionMixin:
     # Canonical type name for slot references
     # -----------------------------------------------------------------
 
+    def _naming_env(self) -> naming.AliasEnv:
+        """The naming environment for the checker's CURRENT state.
+
+        Rebuilt per call rather than cached: ``env.type_aliases`` grows
+        through registration and ``env.type_params`` changes on entering and
+        leaving every ``forall`` scope, so a cached env would render a
+        ``forall<T>`` parameter against the wrong shadowing set.  The build is
+        a copy of the module's alias table (user aliases only — no built-in
+        seeds the table), which is small enough that the full suite shows no
+        measurable cost.
+        """
+        return naming.alias_env_from_environment(self.env)
+
+    def _check_slot_name_args(self, te: ast.TypeExpr) -> None:
+        """Resolve a slot name's type ARGUMENTS for their diagnostics.
+
+        The naming composition that used to live in the checker got E133 /
+        E134 / E135 / removed-alias reporting for free, because it rendered
+        each argument by RESOLVING it — and at a slot REFERENCE
+        (``@Option<Box>.0`` for a parameterised ``Box``) that incidental
+        report is the only one there is.  :mod:`vera.naming` is total and
+        silent by design, so delegating the rendering to it would drop those
+        diagnostics; this walk keeps them, following exactly the traversal
+        the old composition took (refinement bases unwrapped, a function type
+        naming nothing).  It is a reporting pass only — the name itself comes
+        from the module.
+        """
+        while isinstance(te, ast.RefinementType):
+            te = te.base_type
+        if isinstance(te, ast.NamedType) and te.type_args:
+            for arg in te.type_args:
+                self._resolve_type(arg)
+
     def _slot_type_name(self, type_name: str,
                         type_args: tuple[ast.TypeExpr, ...] | None) -> str:
-        """Form the canonical type name for slot reference matching."""
-        if not type_args:
-            return type_name
-        resolved = tuple(self._resolve_type(a) for a in type_args)
-        return canonical_type_name(type_name, resolved)
+        """Form the canonical type name for slot reference matching.
+
+        Delegates to :func:`vera.naming.slot_name` (#1208): the head is
+        syntactic and the arguments resolve, which is what the binding side
+        does too, so a reference and its binding cannot be keyed differently.
+        """
+        te = ast.NamedType(name=type_name, type_args=type_args)
+        self._check_slot_name_args(te)
+        return naming.slot_name(te, self._naming_env())
 
     def _slot_ref_key(self, ref: ast.SlotRef) -> str:
         """Binding-table key for a ``SlotRef``, keyed as ``bind()`` keys it.
@@ -309,8 +408,10 @@ class ResolutionMixin:
         The #309 / #1160 provenance resolvers in :mod:`vera.checker.sql` need
         to look bindings up, and must do it with the CHECKER's renderer, not
         the syntactic one in :mod:`vera.slots`.  Binding keys resolve their
-        type arguments (``_type_expr_to_slot_name`` → ``canonical_type_name``
-        over resolved args), so a syntactic render of ``@Array<Option<Txt>>``
+        type arguments (``_type_expr_to_slot_name`` →
+        :func:`vera.naming.slot_name`: a syntactic head over resolved
+        arguments, since #1208 routed both sides through the one renderer),
+        so a syntactic render of ``@Array<Option<Txt>>``
         where ``type Txt = String`` yields ``Array<Option<Txt>>`` and matches
         the ``Array<Option<String>>`` key not at all.  A miss reads as "not
         statically known", so the check would silently do nothing — the exact

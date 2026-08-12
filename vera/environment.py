@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from vera import ast
 from vera.types import (
     BOOL,
     BUILTIN_TYPEVAR_MARKER,
@@ -27,6 +28,7 @@ from vera.types import (
     PureEffectRow,
     Type,
     TypeVar,
+    effect_sort_key,
     substitute,
 )
 
@@ -63,6 +65,11 @@ class AdtInfo:
     type_params: tuple[str, ...] | None
     constructors: dict[str, ConstructorInfo]
     visibility: str | None = None  # "public" | "private" | None (C7c)
+    # #1208: this ADT's position in the module's SHARED declaration-index
+    # space — see :py:meth:`TypeEnv.next_decl_index`.  ``-1`` means "precedes
+    # every user declaration", which is what the built-in ADTs are and what
+    # any unstamped construction site conservatively gets.
+    decl_index: int = -1
 
 
 @dataclass
@@ -80,6 +87,22 @@ class TypeAliasInfo:
     name: str
     type_params: tuple[str, ...] | None
     resolved_type: Type
+    # #1208: the SYNTACTIC alias body, exactly as written.  ``resolved_type``
+    # is the semantic collapse computed at registration time and cannot be
+    # walked back to the spelling, but the one naming renderer
+    # (:mod:`vera.naming`) needs the source-level body to build its
+    # ``AliasEnv`` from a live :class:`Environment` — the same map codegen
+    # already keeps in its own ``_type_aliases`` side-table.  Defaulted so the
+    # other construction sites stay valid; ``None`` means "body unavailable",
+    # and the naming env simply omits that alias.
+    body: ast.TypeExpr | None = None
+    # #1208: this alias's position in the module's SHARED declaration-index
+    # space — see :py:meth:`TypeEnv.next_decl_index`.  ``_register_alias``
+    # resolves each body against the table as it stood, so the index is what
+    # bounds which aliases AND which ADTs that body can see.  ``-1`` (the
+    # unstamped default) reads as "precedes everything", matching the
+    # always-visible behaviour the flat registries had.
+    decl_index: int = -1
 
 
 @dataclass
@@ -115,8 +138,13 @@ class AbilityInfo:
 class Binding:
     """A single binding in the type environment.
 
-    type_name is the *syntactic* name used for slot reference matching.
-    Type aliases are OPAQUE: @PosInt.0 counts PosInt bindings, not Int.
+    ``type_name`` is the name slot references match against, rendered by
+    :func:`vera.naming.slot_name` — and alias opacity applies to the HEAD
+    of that name only.  ``@PosInt.0`` counts ``PosInt`` bindings and never
+    ``Int`` ones; but a parameter written ``@Option<Cnt>`` under
+    ``type Cnt = Int`` binds ``Option<Int>``, because a type ARGUMENT is a
+    component of a structural type and one type must not become two
+    namespaces.  Spec §3.8 and §3.8.1.
     """
     type_name: str       # canonical name for slot matching
     resolved_type: Type  # fully resolved semantic type
@@ -223,6 +251,37 @@ class TypeEnv:
     refinement_bases: list[Type] = field(default_factory=list)
     current_return_type: Type | None = None
     current_effect_row: EffectRowType | None = None
+    # #1215: the RESOLUTION ORDER for a bare (unqualified) effect-op name —
+    # innermost handled effect first, then each enclosing handler, then the
+    # function's DECLARED row in SOURCE order.  `current_effect_row` carries
+    # the same effects as a `frozenset`, which is the right shape for
+    # subeffect containment but a hash-seed lottery to iterate; two effects
+    # in one row may declare the SAME op name (the built-in `State` and
+    # `Http` both declare `get`), and which signature bound flipped with
+    # PYTHONHASHSEED.  Set in lock-step with `current_effect_row` at both
+    # sites that assign it (checker/core.py `_check_fn`, checker/control.py's
+    # handler-body scope); `lookup_effect_op` orders the row by this tuple.
+    current_effect_order: tuple[EffectInstance, ...] = ()
+
+    # #1208: the ONE per-module declaration counter that stamps
+    # ``AdtInfo.decl_index`` and ``TypeAliasInfo.decl_index``.  Shared
+    # deliberately: an alias body sees only what was registered before it, and
+    # "before" has to order the two registries against EACH OTHER, not just
+    # each within itself.
+    _decl_counter: int = 0
+
+    def next_decl_index(self) -> int:
+        """Allocate the next declaration index in this module's index space.
+
+        Called once per ``data`` / ``type`` registration, in source order, by
+        both the checker's and the verifier's registration passes.  The
+        resulting total order is what :mod:`vera.naming` bounds alias-body
+        resolution by, so it must be allocated at the moment of registration
+        and never reordered.
+        """
+        idx = self._decl_counter
+        self._decl_counter += 1
+        return idx
 
     def __post_init__(self) -> None:
         """Register built-in types, effects, and functions."""
@@ -2155,12 +2214,59 @@ class TypeEnv:
         """Look up an effect by name."""
         return self.effects.get(name)
 
+    def ordered_effect_row(self) -> tuple[EffectInstance, ...]:
+        """The current effect row as an ORDERED sequence (#1215).
+
+        ``current_effect_row.effects`` is a ``frozenset`` — the right shape
+        for subeffect containment, the wrong one to *iterate*, because two
+        effects in one row may declare the same op name and set iteration
+        order is a function of ``PYTHONHASHSEED``.  ``current_effect_order``
+        records the semantic order (innermost handled effect first, then each
+        enclosing handler, then the declared row in source order); this
+        returns the row sequenced by it.
+
+        The result is TOTAL over the row: a member the order tuple does not
+        mention (a row assigned without its companion order, e.g. by a
+        consumer outside the checker) is not dropped, it follows the ordered
+        prefix under a STRUCTURAL tiebreak — still independent of hash seed.
+        The tiebreak keys on the effect name AND its rendered type arguments,
+        because §7.3.3 lets one effect appear twice with different arguments:
+        `State<Int>` and `State<Bool>` tie on name alone, and a stable sort
+        then leaves them in the frozenset's own iteration order, which is the
+        `PYTHONHASHSEED` dependence this method exists to remove.
+        """
+        row = self.current_effect_row
+        if not isinstance(row, ConcreteEffectRow):
+            return ()
+        ordered: list[EffectInstance] = []
+        seen: set[EffectInstance] = set()
+        for ei in self.current_effect_order:
+            if ei in row.effects and ei not in seen:
+                seen.add(ei)
+                ordered.append(ei)
+        ordered.extend(sorted(row.effects - seen, key=effect_sort_key))
+        return tuple(ordered)
+
     def lookup_effect_op(self, op_name: str,
                          qualifier: str | None = None) -> OpInfo | None:
         """Look up an effect operation, optionally qualified.
 
-        If qualifier is given, look only in that effect.
-        Otherwise, search all effects in the current effect row.
+        If qualifier is given, look only in that effect — a deterministic,
+        single-candidate lookup.
+
+        A BARE op name can be declared by more than one effect in scope (the
+        built-in ``State`` and ``Http`` both declare ``get``), so resolution
+        walks ordered candidate lists rather than any set (#1215):
+
+        1. ``ordered_effect_row()`` — innermost handled effect first, then
+           each enclosing handler, then the function's DECLARED row in SOURCE
+           order (spec §7.4).
+        2. every registered effect, in REGISTRATION order.  ``self.effects``
+           is a ``dict``, so this is insertion order: the built-ins in the
+           order ``_register_builtins`` declares them, then any user
+           ``effect`` in source order.  It is the fallback for a clause body
+           checked outside its own handler's row, and is deterministic for
+           the same reason step 1 is — no set is iterated on either path.
         """
         if qualifier:
             eff = self.effects.get(qualifier)
@@ -2168,14 +2274,11 @@ class TypeEnv:
                 return eff.operations[op_name]
             return None
 
-        # Search effects in the current effect row
-        if isinstance(self.current_effect_row, ConcreteEffectRow):
-            for ei in self.current_effect_row.effects:
-                eff = self.effects.get(ei.name)
-                if eff and op_name in eff.operations:
-                    return eff.operations[op_name]
+        for ei in self.ordered_effect_row():
+            eff = self.effects.get(ei.name)
+            if eff and op_name in eff.operations:
+                return eff.operations[op_name]
 
-        # Also search all registered effects (for handler clauses)
         for eff in self.effects.values():
             if op_name in eff.operations:
                 return eff.operations[op_name]

@@ -57,6 +57,7 @@ __all__ = [
     "CommentSpan",
     "annotation_labels",
     "blank_block_comments",
+    "blank_comments",
     "find_comment_problems",
     "scan_comments",
 ]
@@ -185,6 +186,37 @@ def blank_block_comments(source: str) -> tuple[str, int | None]:
                 chars[i] = " "
 
     return "".join(chars), unterminated
+
+
+def blank_comments(source: str) -> str:
+    """``source`` with EVERY comment replaced by spaces.
+
+    :func:`blank_block_comments`'s wider sibling — same length- and
+    line-preserving blanking, over line and annotation comments too.  For a
+    consumer that reads source text back out by span and must not pick a
+    comment up with it: the verifier quotes a multi-line contract clause into
+    a one-line message, and a ``--`` comment on the first physical line would
+    otherwise swallow the rest of the clause (PR #1239 review).
+
+    It shares :func:`scan_comments` with the parser rather than looking for
+    delimiters itself, so a ``--`` inside a string literal survives — which
+    is exactly the case a hand-rolled split would get wrong.
+
+    The early return is an optimisation, so its opener set has to be the
+    scanner's WHOLE set: all three of ``--``, ``{-`` and the annotation
+    comment's ``/*`` (spec §1.3).  Missing one made the fast path a silent
+    behaviour change rather than a shortcut — a clause whose only comment was
+    an annotation came back unblanked and was quoted with the comment in it
+    (PR #1239 review).
+    """
+    if not any(opener in source for opener in ("--", "{-", "/*")):
+        return source
+    chars = list(source)
+    for span in scan_comments(source):
+        for i in range(span.start, min(span.end, len(chars))):
+            if chars[i] != "\n":
+                chars[i] = " "
+    return "".join(chars)
 
 
 @dataclass(frozen=True)

@@ -1,0 +1,48 @@
+-- Conformance: a COMPOSITE type alias as the State<T> cell type (Chapter 7,
+-- Section 7.5).  Tests: `State<MaybeInt>` with `type MaybeInt = Option<Int>`
+-- names the `Option<Int>` cell family — the family is the cell the CHECKER
+-- typed, which resolves an effect instance's type arguments in full, so one
+-- host cell and one set of `state_*_Option_LInt_R` imports serve both
+-- spellings (#1209).  Covers the get/put roundtrip and a `match get(())`
+-- scrutinee, whose i64 result has to arrive through that same family.
+type MaybeInt = Option<Int>;
+
+public fn roundtrip(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 3)
+  effects(pure)
+{
+  handle[State<MaybeInt>](@MaybeInt = Some(3)) {
+    get(@Unit) -> { resume(@MaybeInt.0) },
+    put(@MaybeInt) -> { resume(()) }
+  } in {
+    match get(()) {
+      Some(@Int) -> @Int.0,
+      None -> 0 - 1
+    }
+  }
+}
+
+public fn put_then_read(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 42)
+  effects(pure)
+{
+  handle[State<MaybeInt>](@MaybeInt = None) {
+    put(@MaybeInt) -> { resume(()) }
+  } in {
+    put(Some(41));
+    match get(()) {
+      Some(@Int) -> @Int.0 + 1,
+      None -> 0
+    }
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 0)
+  effects(pure)
+{
+  roundtrip(()) - 3 + (put_then_read(()) - 42)
+}

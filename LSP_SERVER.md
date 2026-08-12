@@ -88,7 +88,14 @@ included) and publishes:
 - **Go-to-definition on slot references** — `@T.n` under the cursor
   jumps to the parameter it names under De Bruijn resolution
   (most-recent-first), which is exactly the lookup humans find
-  hardest to do in their head.
+  hardest to do in their head. Both sides of the lookup — the
+  parameter's name and the reference's — are rendered by the same
+  function the checker keys its binding table with, so a
+  parameterised reference (`@Option<Int>.0`) resolves, an
+  alias-spelled parameter (`@Option<Cnt>` under `type Cnt = Int`) is
+  reachable from its canonical spelling, and a reference inside a
+  `where` helper resolves against that helper's own scope, including
+  any `forall` variables it inherits from its parent.
 - **Typed-hole completion** — with the cursor at a `?` hole,
   completion lists the in-scope bindings that fit, innermost first,
   each with its type.
@@ -224,7 +231,7 @@ every step.
 
 | Limitation | Issue |
 |-----------|-------|
-| Single-file model: module imports resolve from disk, not from open editor buffers, so unsaved edits to an imported module are invisible until saved. | [#724](https://github.com/aallan/vera/issues/724) |
+| Single-file model: module imports resolve from disk, relative to the analysed document's own path, not from open editor buffers — so unsaved edits to an imported module are invisible until saved. A document that names no local path resolves no imports and is analysed alone: an `untitled:` buffer or other non-`file:` URI, and a `file://host/…` URI naming another machine (carried opaquely — it used to raise out of the didOpen handler on Python 3.14). | [#724](https://github.com/aallan/vera/issues/724) |
 | Slot go-to-definition covers parameters only — references binding through `let`/`match` have no definition site to jump to yet. | [#181](https://github.com/aallan/vera/issues/181) |
 | `vera/addEffect` is handler-unaware: a caller that handles the effect in a `handle[E]` block is still rewritten. Propagation also stops at the file boundary, by design. | [#725](https://github.com/aallan/vera/issues/725) |
 

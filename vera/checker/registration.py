@@ -166,6 +166,9 @@ class RegistrationMixin:
             # control flow, so the two rules stay independent.
             if isinstance(tld.decl, ast.FnDecl):
                 self._check_reserved_fn_name(tld.decl)
+                # #1221 review: and its `forall` binders, which bind into
+                # the same type namespace the two other E154 rails guard.
+                self._check_reserved_type_params(tld.decl)
             # #815: redefining a built-in is a one-canonical-form violation
             # (and a silent verifier↔runtime unsoundness for the
             # verifier-modelled built-ins).  Covers top-level and module
@@ -276,28 +279,87 @@ class RegistrationMixin:
         ``MyVeraThing``) stay ordinary: the reservation is anchored at the
         start and requires an uppercase or digit follower.
         """
-        if not _RESERVED_TYPE_PREFIX_RE.match(decl.name):
-            return
         kind = "alias" if isinstance(decl, ast.TypeAliasDecl) else "data type"
-        suggestion = decl.name.removeprefix("Vera")
+        self._check_reserved_decl_name(
+            decl, decl.name, kind, prelude_occupies=True,
+        )
+
+    def _check_reserved_decl_name(
+        self, node: ast.Node, name: str, kind: str, *,
+        prelude_occupies: bool,
+    ) -> None:
+        """Emit E154 for any DECLARED name in the prelude's namespace.
+
+        The reservation is one rule, not one rule per namespace (#1260):
+        a type, an alias, an effect, an ability and a constructor all
+        name something the program declares, and all five run through
+        this single :data:`_RESERVED_TYPE_PREFIX_RE` call so the rails
+        cannot drift.  What differs per rail is what the diagnostic can
+        truthfully SAY, and both variable parts are load-bearing:
+
+        ``kind`` is the noun, and it also settles the fix.  Renaming is
+        the only escape any of these namespaces has; the alias escape the
+        reference gate offers (``_resolve_named_type``, "write the type
+        out or declare your own alias") is a type-position answer and
+        would be wrong advice for an effect, an ability or a constructor,
+        none of which can be aliased.
+
+        ``prelude_occupies`` settles the RATIONALE, because the prelude
+        does not populate all four namespaces.  It declares exactly six
+        reserved type ALIASES and five reserved type PARAMETERS
+        (``VeraOptionMapFn``, ``VeraA``/``VeraB``/…) and no effect,
+        ability or constructor at all.  So the type/alias rail can state
+        the concrete consequence — ``inject_prelude`` skips a declaration
+        whose name the program already spells, the user's declaration
+        re-types the prelude's own signatures, and the program checks
+        green then fails WebAssembly validation at run.  The other three
+        rails cannot: there is nothing there to re-type, and a
+        reserved-name constructor compiled and RAN correctly before this
+        gate existed.  Their reason is the forward one #1260 was decided
+        on (DESIGN.md principle 6): the namespace is reserved ahead of
+        use so the prelude can grow internals into it without breaking
+        programs, and so one rule means one thing everywhere rather than
+        being discoverable only by tripping over it in one namespace and
+        not the next.  Claiming the type rail's consequence here would be
+        a false statement in a diagnostic, which no automated gate can
+        catch — ``check_diagnostic_fields`` checks that a rationale is
+        PRESENT, not that it is true.
+        """
+        if not _RESERVED_TYPE_PREFIX_RE.match(name):
+            return
+        suggestion = name.removeprefix("Vera")
         if not suggestion[:1].isupper():
             # A digit follower strips to an unparseable name (`Vera0Fn`
             # -> `0Fn`); UPPER_IDENT needs a leading uppercase letter.
-            suggestion = f"My{decl.name}"
+            suggestion = f"My{name}"
+        shared = (
+            "Names beginning with 'Vera' followed by an uppercase "
+            "letter or digit are the prelude's internal namespace — "
+            "its combinators resolve through generated declarations "
+            "such as 'VeraOptionMapFn' and the type parameters "
+            "'VeraA'/'VeraB'. "
+        )
+        if prelude_occupies:
+            because = (
+                "A user declaration under such a name re-types those "
+                "internals: the program still type-checks, then fails "
+                "WebAssembly validation when it runs. Vera reserves the "
+                "namespace outright so the mistake is refused where it "
+                "is written."
+            )
+        else:
+            because = (
+                f"The prelude declares no {kind} there today, so this "
+                f"one collides with nothing yet — the namespace is "
+                f"reserved ahead of use, in every declaration namespace, "
+                f"so the prelude can grow internals into it without "
+                f"breaking programs and so the rule means the same thing "
+                f"wherever a name is declared."
+            )
         self._error(
-            decl,
-            f"{kind.capitalize()} name '{decl.name}' is reserved for the prelude.",
-            rationale=(
-                "Names beginning with 'Vera' followed by an uppercase "
-                "letter or digit are the prelude's internal namespace — "
-                "its combinators resolve through generated declarations "
-                "such as 'VeraOptionMapFn' and the type parameters "
-                "'VeraA'/'VeraB'. A user declaration under such a name "
-                "re-types those internals: the program still type-checks, "
-                "then fails WebAssembly validation when it runs. Vera "
-                "reserves the namespace outright so the mistake is "
-                "refused where it is written."
-            ),
+            node,
+            f"{kind.capitalize()} name '{name}' is reserved for the prelude.",
+            rationale=shared + because,
             fix=(
                 f"Rename the {kind} — any name not starting with 'Vera' "
                 f"plus an uppercase letter or digit works (for example "
@@ -306,6 +368,67 @@ class RegistrationMixin:
             spec_ref='Chapter 8, Section 8.4.1 "Visibility Rules"',
             error_code="E154",
         )
+
+    def _check_reserved_type_params(
+        self,
+        decl: (ast.FnDecl | ast.DataDecl | ast.TypeAliasDecl
+               | ast.EffectDecl | ast.AbilityDecl),
+    ) -> None:
+        """Emit E154 for a type-PARAMETER binder in the prelude's namespace.
+
+        The declaration gate above covers the names a program *declares* as
+        types, and the reference gate in ``_resolve_named_type`` covers the
+        names it *mentions* — but a ``forall`` variable is neither: it BINDS
+        a type name for the body of one declaration.  ``_resolve_named_type``
+        consults ``env.type_params`` first, precisely so a binder shadows an
+        outer alias, so ``forall<VeraOptionMapFn>`` made every mention of the
+        reserved name resolve to the type variable and the reservation held
+        at neither end (#1221 review).  Gated where the name is BOUND, which
+        is the one place both other gates can then rely on.
+
+        Every surface that binds a type name is covered, because they all
+        feed the same ``env.type_params`` scope: a function's ``forall``
+        variables (and a ``where`` helper's own, one scope deeper — the
+        recursion mirrors :meth:`_check_reserved_fn_name`'s), and the type
+        parameters of ``data``, ``type``, ``effect`` and ``ability``
+        declarations.  This gate covers BINDERS; the names those same
+        declarations introduce — type, alias, effect, ability and
+        constructor alike — go through :meth:`_check_reserved_decl_name`
+        (#1260), on the same regex.
+        """
+        if isinstance(decl, ast.FnDecl):
+            binders = decl.forall_vars or ()
+        else:
+            binders = decl.type_params or ()
+        for name in binders:
+            if not _RESERVED_TYPE_PREFIX_RE.match(name):
+                continue
+            self._error(
+                decl,
+                f"Type parameter '{name}' is reserved for the prelude.",
+                rationale=(
+                    "Names beginning with 'Vera' followed by an uppercase "
+                    "letter or digit are the prelude's internal namespace — "
+                    "the declarations and type parameters its combinators "
+                    "resolve through, injected at code generation and never "
+                    "visible to the type checker. A binder in that namespace "
+                    "makes every mention of the name inside this declaration "
+                    "resolve to the type variable, so neither the "
+                    "declaration nor the reference rail can see it, and code "
+                    "generation resolves the same spelling to the prelude's "
+                    "own declaration."
+                ),
+                fix=(
+                    "Rename the type parameter to anything outside the "
+                    "reserved namespace — any name that does not start with "
+                    "'Vera' followed by an uppercase letter or digit."
+                ),
+                spec_ref='Chapter 8, Section 8.4.1 "Visibility Rules"',
+                error_code="E154",
+            )
+        if isinstance(decl, ast.FnDecl):
+            for wfn in decl.where_fns or ():
+                self._check_reserved_type_params(wfn)
 
     def _check_reserved_fn_name(self, decl: ast.FnDecl) -> None:
         """Emit E153 if ``decl`` — or a nested where-helper — is named after a
@@ -605,6 +728,10 @@ class RegistrationMixin:
     ) -> None:
         """Register an ADT and its constructors."""
         self._check_reserved_type_name(decl)
+        self._check_reserved_type_params(decl)
+        # #1208: allocate the declaration index BEFORE resolving anything, so
+        # data and alias registrations interleave in source order.
+        decl_index = self.env.next_decl_index()
         # Set up type params for resolving constructor field types
         saved_params = dict(self.env.type_params)
         if decl.type_params:
@@ -613,6 +740,9 @@ class RegistrationMixin:
 
         ctors: dict[str, ConstructorInfo] = {}
         for ctor in decl.constructors:
+            self._check_reserved_decl_name(
+                ctor, ctor.name, "constructor", prelude_occupies=False,
+            )
             field_types = None
             if ctor.fields is not None:
                 field_types = tuple(
@@ -631,6 +761,7 @@ class RegistrationMixin:
             type_params=decl.type_params,
             constructors=ctors,
             visibility=visibility,
+            decl_index=decl_index,
         )
 
         self.env.type_params = saved_params
@@ -638,6 +769,8 @@ class RegistrationMixin:
     def _register_alias(self, decl: ast.TypeAliasDecl) -> None:
         """Register a type alias."""
         self._check_reserved_type_name(decl)
+        self._check_reserved_type_params(decl)
+        decl_index = self.env.next_decl_index()
         saved_params = dict(self.env.type_params)
         if decl.type_params:
             for tv in decl.type_params:
@@ -648,12 +781,18 @@ class RegistrationMixin:
             name=decl.name,
             type_params=decl.type_params,
             resolved_type=resolved,
+            body=decl.type_expr,
+            decl_index=decl_index,
         )
 
         self.env.type_params = saved_params
 
     def _register_effect(self, decl: ast.EffectDecl) -> None:
         """Register an effect and its operations."""
+        self._check_reserved_decl_name(
+            decl, decl.name, "effect", prelude_occupies=False,
+        )
+        self._check_reserved_type_params(decl)
         saved_params = dict(self.env.type_params)
         if decl.type_params:
             for tv in decl.type_params:
@@ -680,6 +819,10 @@ class RegistrationMixin:
 
     def _register_ability(self, decl: ast.AbilityDecl) -> None:
         """Register an ability and its operations."""
+        self._check_reserved_decl_name(
+            decl, decl.name, "ability", prelude_occupies=False,
+        )
+        self._check_reserved_type_params(decl)
         saved_params = dict(self.env.type_params)
         if decl.type_params:
             for tv in decl.type_params:

@@ -1,0 +1,52 @@
+-- Conformance: parameterised alias payloads for Exn<E> (Chapter 7, Section
+-- 7.6).  Tests: `Exn<Id<Int>>` and the twice-applied `Exn<Id<Id<Int>>>` with
+-- `type Id<T> = T` both resolve to the `Int` tag family — the payload
+-- resolution substitutes the alias's parameters and completes the finite
+-- expansion, so a thrower and a handler spelled at different application
+-- depths share one tag (#1209).
+type Id<T> = T;
+
+private fn single(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 0 - 7)
+  effects(pure)
+{
+  handle[Exn<Id<Int>>] {
+    throw(@Id<Int>) -> { 0 - @Id<Int>.0 }
+  } in {
+    throw(7);
+    1
+  }
+}
+
+private fn thrower(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<Exn<Id<Id<Int>>>>)
+{
+  if @Int.0 == 0 then {
+    throw(0 - 1)
+  } else {
+    @Int.0
+  }
+}
+
+private fn nested(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 0 - 1)
+  effects(pure)
+{
+  handle[Exn<Id<Id<Int>>>] {
+    throw(@Id<Int>) -> { @Id<Int>.0 }
+  } in {
+    thrower(0)
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 0)
+  effects(pure)
+{
+  single(()) + 7 + (nested(()) + 1)
+}

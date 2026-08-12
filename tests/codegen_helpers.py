@@ -39,6 +39,28 @@ _CALL_INDIRECT_RE = re.compile(r"(?m)^\s*call_indirect\b")
 _TABLE_DECL_RE = re.compile(r"(?m)^\s*\(table\b")
 
 
+def exceptions_engine() -> wasmtime.Engine:
+    """A wasmtime engine configured the way ``execute()`` configures its own.
+
+    ``vera/codegen/api.py`` enables ``wasm_exceptions`` explicitly, and the
+    SUPPORTED wasmtime range includes versions where the proposal is not on by
+    default (PR #1192 review).  A test that loads or validates emitted WAT has
+    to configure it the same way, or on those versions it rejects every valid
+    ``Exn`` module and is measuring the runner's wasmtime build rather than
+    the compiler.
+
+    That is a claim about the range, not about today's runner: on wasmtime
+    47.0.1 exceptions default ON, so a bare ``wasmtime.Engine()`` currently
+    loads the whole corpus.  What the proposal being off costs is measured
+    directly instead — 10 of the 30 handler-bearing modules
+    ``test_state_exn_registration`` validates fail to load with
+    ``wasm_exceptions=False``, which is what a supported older runner sees.
+    """
+    config = wasmtime.Config()
+    config.wasm_exceptions = True
+    return wasmtime.Engine(config)
+
+
 def _assert_no_orphan_call_indirect(wat: str) -> None:
     """#1185: every emitted ``call_indirect`` has a table to dispatch on.
 
@@ -353,14 +375,10 @@ def _assert_no_raw_wat_error(result: CompileResult) -> None:
     assert not errors, f"expected a warning-only drop, got errors: {errors}"
     assert result.wasm_bytes, "module must still assemble (minus the subgraph)"
     try:
-        # Mirror execute()'s engine configuration (vera/codegen/api.py):
-        # it enables wasm_exceptions, and the supported wasmtime range
-        # includes versions where exceptions are not on by default — a
-        # default engine would spuriously fail valid Exn modules here
-        # (PR #1192 review).
-        config = wasmtime.Config()
-        config.wasm_exceptions = True
-        engine = wasmtime.Engine(config)
+        # Mirror execute()'s engine configuration (vera/codegen/api.py) —
+        # see `exceptions_engine`, shared with every other test that hands
+        # emitted WAT to wasmtime.
+        engine = exceptions_engine()
         module = wasmtime.Module(engine, result.wat)
         linker = wasmtime.Linker(engine)
         store = wasmtime.Store(engine)

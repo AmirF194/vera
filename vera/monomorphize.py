@@ -9,8 +9,9 @@ instantiation set codegen emits, or a missed instantiation becomes a false
 Tier-1 — ``vera verify`` reports clean while a runtime obligation is left
 unproven.
 
-This module is deliberately codegen-free.  Its only imports are :mod:`vera.ast`
-and the pure :func:`substitute_type_vars` ``TypeExpr`` walk (relocated here from
+This module is deliberately codegen-free.  It imports :mod:`vera.ast`, the ONE
+naming renderer (:mod:`vera.naming` / :mod:`vera.slots`, #1208), and the pure
+:func:`substitute_type_vars` ``TypeExpr`` walk (relocated here from
 ``vera/wasm/inference.py`` so importing the monomorphizer doesn't pull in the
 ``vera.wasm`` backend).  WASM/layout-specific concerns — ability-constraint
 checking (E613) and layout-derived ``Eq`` auto-derivation — stay in
@@ -28,12 +29,27 @@ instantiation sets in agreement.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import contextlib
+import re
+from collections.abc import (
+    Callable,
+    Collection,
+    Iterable,
+    Iterator,
+    Mapping,
+)
 from dataclasses import dataclass, field, fields, replace
 from typing import Any, cast
 
-from vera import ast
-from vera.slots import slot_ref_name, type_expr_slot_name
+from vera import ast, naming
+from vera.naming import EMPTY_ALIAS_ENV, AliasEnv
+from vera.slots import effect_op_result_names, fn_slot_scope
+from vera.types import PRIMITIVES, REMOVED_ALIASES
+
+# Identifier tokens inside a rendered type name (`Map<String, Int>` →
+# `Map`, `String`, `Int`).  #1271 matches type-variable names against these
+# rather than by substring, so `Unit` never reads as a mention of `U`.
+_TYPE_NAME_TOKENS = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
 
 
 def substitute_type_vars(
@@ -108,8 +124,8 @@ def substitute_type_vars(
 
 def resolve_type_alias(
     te: ast.TypeExpr,
-    type_aliases: dict[str, ast.TypeExpr],
-    type_alias_params: dict[str, tuple[str, ...]],
+    type_aliases: Mapping[str, ast.TypeExpr],
+    type_alias_params: Mapping[str, tuple[str, ...] | None],
 ) -> ast.TypeExpr | None:
     """Resolve a ``TypeExpr`` through the alias chain to its terminal shape.
 
@@ -177,8 +193,8 @@ def resolve_type_alias(
 
 def resolve_fn_type_alias(
     te: ast.TypeExpr,
-    type_aliases: dict[str, ast.TypeExpr],
-    type_alias_params: dict[str, tuple[str, ...]],
+    type_aliases: Mapping[str, ast.TypeExpr],
+    type_alias_params: Mapping[str, tuple[str, ...] | None],
 ) -> ast.FnType | None:
     """Resolve a ``TypeExpr`` to the ``FnType`` it aliases, transitively.
 
@@ -387,42 +403,121 @@ def declared_return_clone_key(te: ast.TypeExpr | None) -> str | None:
     return None
 
 
+# Source character -> its two-character `_X` escape code.  These, plus the
+# `", "` pair below, are the PRE-#1219 alphabet and their meanings are
+# FROZEN: every family name, Z3 sort, `$eq_` helper and mono clone the
+# compiler already emits is named through them, so changing one renames
+# symbols across the corpus.  Anything else outside `[A-Za-z0-9_]` takes the
+# `_U<hex>_` escape below.
+_MANGLE_CODES = {
+    "_": "__",
+    "<": "_L",
+    ">": "_R",
+    " ": "_S",
+}
+
+# The canonical argument SEPARATOR, escaped as one unit (`Map<String, Int>`
+# → `Map_LString_CInt_R`).  Matched before the per-character table, so a
+# comma that is NOT part of the separator — only a string literal inside a
+# refinement predicate can spell one — falls through to `_U2c_` instead of
+# being collapsed onto this code, which is what keeps `'a,b'` and `'a, b'`
+# distinct families (#1219).
+_MANGLE_SEP = ", "
+_MANGLE_SEP_CODE = "_C"
+
+# The reserved letter for the variable-length escape (`_U` + lowercase hex +
+# `_`).  It may never be given to a character in `_MANGLE_CODES`; nor may
+# `J`, which `Monomorphizer._mangle_fn_name` uses as the JOIN separator
+# between mangled components and which therefore must stay outside the
+# mangler's range.
+_MANGLE_HEX = "U"
+
+
 def mangle_type_name(type_name: str) -> str:
     """Escape a canonical Vera type name for embedding in a WAT identifier.
 
-    The ONE escape convention for type names in WAT symbols (#775): both the
+    The ONE escape convention for type names in WAT symbols (#775): the
     structural-Eq helper namer (``$eq_<type>``, ``vera/wasm/operators.py``,
-    #773) and the mono-clone namer (:meth:`Monomorphizer._mangle_fn_name`)
-    delegate here, so the two naming families cannot drift apart.
+    #773), the mono-clone namer (:meth:`Monomorphizer._mangle_fn_name`), the
+    Z3 sort namer (``vera/smt.py``) and the State/Exn cell-family symbols
+    (``vera/codegen/assembly.py``) all delegate here, so the naming families
+    cannot drift apart.
 
-    Encoding: ``_`` doubles to ``__``; the type-grammar metacharacters get
-    distinct ``_X`` codes — ``<`` → ``_L``, ``>`` → ``_R``, ``, ``/``,`` →
-    ``_C``, `` `` → ``_S``.
+    Encoding, a left-to-right scan:
 
-    Injectivity (over canonical type names, as produced by
-    :meth:`Monomorphizer._format_type_name`): the output is a concatenation
-    of code units, each either a single non-``_`` character (mapping to
-    itself) or a two-character code starting with ``_`` (``__``, ``_L``,
-    ``_R``, ``_C``, ``_S``).  A left-to-right scan decodes uniquely: at a
-    ``_`` consume two characters, otherwise one — a prefix code, so no two
-    inputs share an output.  (``A, B`` / ``A,B`` both encode to ``A_CB``,
-    but canonical names always spell the separator ``", "``, so only one
-    preimage exists in the domain.)  This kills the ``g<Map<String, Int>>``
-    vs ``g<Map_String_Int>`` collision class from #775: the former encodes
-    its brackets (``Map_LString_CInt_R``) while the flat ADT name doubles
-    its underscores (``Map__String__Int``).
+    ==============  ========  ====================================
+    source          code      where it comes from
+    ==============  ========  ====================================
+    ``_``           ``__``    any identifier
+    ``<``           ``_L``    ``Head<arg>``
+    ``>``           ``_R``    ``Head<arg>``
+    ``", "``        ``_C``    the canonical argument separator
+    ``" "``         ``_S``    a space that is not that separator
+    other non-      ``_U``    everything a canonical rendering can
+    ``[A-Za-z0-9_]``  ``<hex>_``  carry outside the two grammars above
+    ==============  ========  ====================================
+
+    The first five are the pre-#1219 alphabet, unchanged, so no symbol the
+    compiler already emits moves.  The sixth is what makes the mangler TOTAL
+    (#1219): a cell family is no longer restricted to the ``Head<arg, arg>``
+    grammar, so a family name can now carry a function type's parentheses
+    and arrow, an effect row, a refinement's braces and ``|`` bar, the
+    canonical source form a refinement predicate renders as (#1218), and
+    any character a string literal inside such a predicate spells —
+    non-ASCII included.  Output is ``[A-Za-z0-9_]`` only, which is
+    inside the WAT ``idchar`` set, inside the SMT-LIB simple-symbol set, and
+    unchanged by the browser runtime's ``/^state_get_(.+)$/`` split.
+
+    Injectivity (now over EVERY canonical rendering, not just
+    :meth:`Monomorphizer._format_type_name`'s): the output is a
+    concatenation of code units, each either a single ``[A-Za-z0-9]``
+    character mapping to itself, or a unit starting with ``_`` — the
+    two-character codes above, or ``_U`` followed by hex digits and a
+    closing ``_``.  Decoding scans left to right: at a ``_``, the next
+    character selects the unit (and ``U`` makes it variable-length,
+    terminated by the ``_`` that no hex digit can be), otherwise consume
+    one.  :func:`unmangle_type_name` is that scan, and
+    ``unmangle_type_name(mangle_type_name(t)) == t`` for every ``t`` — a
+    left inverse, which is exactly injectivity.  This kills the
+    ``g<Map<String, Int>>`` vs ``g<Map_String_Int>`` collision class from
+    #775 (the former encodes its brackets, the latter doubles its
+    underscores) and, since #1219, the ``'a,b'`` vs ``'a, b'`` class a
+    refinement predicate's string literal introduced: a comma NOT followed
+    by a space is no longer collapsed onto the ``", "`` separator's code.
+
+    NOT idempotent, and cannot be: ``mangle_type_name("Option_LInt_R")`` is
+    ``"Option__LInt__R"``, because ``Option_LInt_R`` is itself a legal flat
+    ADT name and must not collide with ``Option<Int>``'s symbol.  The range
+    and the domain overlap, so there is likewise no sound "already mangled?"
+    guard to add.  The invariant is STRUCTURAL instead: canonical names are
+    carried everywhere and mangled exactly once, at symbol construction, and
+    any comparison of two families is made on the canonical side.
+    ``tests/test_codegen_monomorphize.py::TestMangleInjectivity`` pins the
+    decision, the alphabet, and the preserved pre-#1219 symbols.
     """
-    return (
-        type_name.replace("_", "__")
-        .replace("<", "_L").replace(">", "_R")
-        .replace(", ", "_C").replace(",", "_C").replace(" ", "_S")
-    )
+    out: list[str] = []
+    i = 0
+    n = len(type_name)
+    while i < n:
+        if type_name.startswith(_MANGLE_SEP, i):
+            out.append(_MANGLE_SEP_CODE)
+            i += len(_MANGLE_SEP)
+            continue
+        ch = type_name[i]
+        code = _MANGLE_CODES.get(ch)
+        if code is not None:
+            out.append(code)
+        elif ch.isascii() and ch.isalnum():
+            out.append(ch)
+        else:
+            out.append(f"_{_MANGLE_HEX}{ord(ch):x}_")
+        i += 1
+    return "".join(out)
 
 
-# Two-char escape code -> the canonical character(s) it decodes to.
-# `_C` decodes to the canonical separator spelling `", "` (mangle collapses
-# both `", "` and `","` to `_C`, but canonical type names always spell the
-# separator `", "`, so that is the sole preimage in the domain).
+# Two-char escape code -> the canonical character(s) it decodes to.  `_U` is
+# absent deliberately: it is the variable-length escape and is decoded by its
+# own branch in :func:`unmangle_type_name`.
 _UNMANGLE_CODES = {"_": "_", "L": "<", "R": ">", "C": ", ", "S": " "}
 
 
@@ -493,26 +588,203 @@ def rewrite_fn_call_names(node: object, rename: dict[str, str]) -> object:
     return node
 
 
-def reroute_module_private_generic_calls(
+def importer_occupied_bare_names(program: ast.Program) -> set[str]:
+    """The bare SOURCE names *program*'s own declarations occupy (#1274/F3).
+
+    The importer-side input to :func:`module_qualified_generic_names`, computed
+    once so codegen and the verifier cannot answer it differently.  Two Pass-0
+    transforms move helper names out of the bare namespace before anything
+    resolves against it:
+
+    * ``qualify_nested_generic_decls`` renames every nested GENERIC helper to
+      ``parent$where$name`` (#1014);
+    * codegen's ``_hoist_nongeneric_where_helpers`` lifts every non-generic
+      helper that has no generic ancestor to a ``$``-qualified top-level decl
+      (#991).
+
+    What survives with a bare name is therefore every top-level function, plus
+    the helpers neither transform touches — a NON-generic helper under a
+    generic ancestor (the hoist skips generic subtrees, and the qualification
+    only renames generic nodes).
+
+    The rule is deliberately stated over the SOURCE shape so it is idempotent
+    across BOTH transforms and their composition: run it on any of those
+    programs and the extra top-level entries are all ``$``-mangled, which can
+    never equal a module's source identifier, so the answer this predicate
+    consumes is unchanged.  That is what lets the verifier — which holds the
+    pre-transform AST — and codegen — which holds the post-transform one —
+    reach the same set, and all three legs are asserted directly over a program
+    carrying every helper shape this rule distinguishes.
+
+    Pre-fix they did not: the verifier's walk counted a non-generic
+    ``where``-helper named ``gen2`` as occupying the bare name while codegen,
+    reading the hoisted program, did not, so an imported ``gen2`` was
+    qualified-only on one side and bare-name-owning on the other — codegen
+    emitted ``gen2$Bool`` while the verifier verified ``mod$lib$gen2$Bool``,
+    and neither covered the other's clone.
+    """
+    out: set[str] = set()
+
+    def walk_helpers(decl: ast.FnDecl, generic_ancestor: bool) -> None:
+        for wfn in decl.where_fns or ():
+            if generic_ancestor and not wfn.forall_vars:
+                out.add(wfn.name)
+            walk_helpers(wfn, generic_ancestor or bool(wfn.forall_vars))
+
+    for tld in program.declarations:
+        decl = tld.decl
+        if isinstance(decl, ast.FnDecl):
+            out.add(decl.name)
+            walk_helpers(decl, bool(decl.forall_vars))
+    return out
+
+
+def module_qualified_generic_names(
+    module_program: ast.Program,
+    name_filter: set[str] | None,
+    local_fn_names: set[str],
+    *,
+    direct: bool = True,
+) -> set[str]:
+    """The module's top-level generics reached ONLY under ``mod$<path>$name``.
+
+    One predicate, shared by codegen and the verifier, for the naming rule
+    non-generic module functions already follow (``_register_shadowed_import``):
+    a module function keeps the importer's BARE name only when that name in the
+    importer's flat namespace denotes this very declaration — public, inside the
+    importer's import filter, and unshadowed by a local declaration.  Anything
+    else is qualified-only: its clones are emitted (and discovered) under
+    ``mod$<path>$name``, and every bare call to it from its own module's bodies
+    is rerouted onto that identity.
+
+    Pre-#1274 the rule for generics was ``private`` alone (#1000 / #1029), which
+    covered only the case where the bare name could not POSSIBLY denote the
+    module's generic.  The other two qualified-only cases were silently wrong:
+
+    * **public but locally shadowed** — the module's own bare call resolved to
+      the IMPORTER's same-named generic, so both modules' ``gen2`` mangled to one
+      ``gen2$Bool``, one overwrote the other, and the module ran the importer's
+      body with the module's proved contract (a false Tier-1, and invalid WASM
+      where the two clones' WAT types differ);
+    * **public but outside the import filter** — registered in no clone
+      namespace at all, so the module's own bare call assembled to an
+      ``unknown func``.
+
+    ``local_fn_names`` is the importer's occupied bare-name set (the same one
+    ``_register_shadowed_import`` consults); ``name_filter`` is ``None`` for a
+    wildcard import.  ``direct`` is ``ResolvedModule.direct``: a module reached
+    only transitively contributes nothing to the entry's namespace, so all of
+    its generics are qualified-only whatever their visibility.
+    """
+    out: set[str] = set()
+    for tld in module_program.declarations:
+        decl = tld.decl
+        if not isinstance(decl, ast.FnDecl) or not decl.forall_vars:
+            continue
+        owns_bare_name = (
+            # A TRANSITIVE module's declarations are not in the entry program's
+            # namespace at all (spec §8.6.4 — visibility is the importer's
+            # property), so none of them can own its bare name.  Without this
+            # the `import_names` lookup answers `None` for such a module — the
+            # spelling that means "wildcard import" — and every one of its
+            # public generics was classified a bare-name owner.
+            direct
+            and (tld.visibility or "private") == "public"
+            and (name_filter is None or decl.name in name_filter)
+            and decl.name not in local_fn_names
+        )
+        if not owns_bare_name:
+            out.add(decl.name)
+    return out
+
+
+def module_qualified_generic_targets(
+    module_program: ast.Program,
+    qualified_by_path: Mapping[tuple[str, ...], set[str]],
+    public_generics_by_path: Mapping[tuple[str, ...], set[str]],
+    own_path: tuple[str, ...],
+) -> dict[str, tuple[str, ...]]:
+    """Bare name → the module that OWNS it, for every qualified-only generic
+    reachable by a bare call from *module_program*'s bodies (#1274 F1).
+
+    A module's bare call resolves in ITS namespace, which holds its own
+    declarations and what it imports.  Codegen has one flat WASM namespace,
+    though, so a name this module resolves to a generic is only safe to leave
+    bare when that generic owns the flat bare name — which
+    :func:`module_qualified_generic_names` decides, from the ENTRY program's
+    point of view, once per module.
+
+    The per-module reroute set was that module's OWN qualified-only generics
+    alone, which silently missed the hop: ``mid`` declares no generics and calls
+    ``deep``'s by bare name, so nothing was rerouted and the entry program's
+    same-named generic captured the call — ``vera verify`` clean, ``mid``'s
+    proved postcondition violated at run.  This adds the imports' sets under the
+    SAME predicate, keyed by which module each name belongs to, because the
+    ``mod$<path>$name`` identity is per-owner and ``mid``'s call must reach
+    ``mod$deep$gen``, not ``mod$mid$gen``.
+
+    Visibility is read from *this* module's side: only a PUBLIC name inside this
+    module's own import filter is reachable here at all, so a private or
+    out-of-filter generic of a dependency contributes nothing (it is not in this
+    namespace to be called).  The module's OWN generics are applied last, so a
+    local declaration shadows an import exactly as §8.5.2 requires.
+    """
+    # Whatever this module declares owns its own bare calls (§8.5.2), so an
+    # import never contributes a name the module itself defines — otherwise a
+    # module that declares `gen` AND imports another module's `gen` would have
+    # its own calls rerouted to the dependency's clone.
+    own_names = importer_occupied_bare_names(module_program)
+    targets: dict[str, tuple[str, ...]] = {}
+    for imp in module_program.imports:
+        dep_path = tuple(imp.path)
+        exported = public_generics_by_path.get(dep_path)
+        if not exported:
+            continue
+        allowed = None if imp.names is None else set(imp.names)
+        for name in qualified_by_path.get(dep_path, set()):
+            if (
+                name in exported
+                and name not in own_names
+                and (allowed is None or name in allowed)
+            ):
+                targets[name] = dep_path
+    for name in qualified_by_path.get(own_path, set()):
+        targets[name] = own_path
+    return targets
+
+
+def public_generic_names(module_program: ast.Program) -> set[str]:
+    """The module's PUBLIC top-level generic names — what a dependent can name
+    at all, before that dependent's own import filter narrows it."""
+    return {
+        tld.decl.name
+        for tld in module_program.declarations
+        if isinstance(tld.decl, ast.FnDecl) and tld.decl.forall_vars
+        and (tld.visibility or "private") == "public"
+    }
+
+
+def reroute_module_qualified_generic_calls(
     decl: ast.FnDecl,
-    private_generics: set[str],
+    qualified_generics: Collection[str],
     make_call: Callable[[ast.FnCall, tuple[ast.Expr, ...]], ast.Node],
 ) -> ast.FnDecl:
-    """Shadow-aware rewrite of bare calls to a module's PRIVATE top-level
-    generics (#1000).
+    """Shadow-aware rewrite of bare calls to a module's QUALIFIED-ONLY top-level
+    generics (#1000, widened by #1274).
 
-    An imported body (a public generic, a non-generic fn, or another private
-    generic) may transitively call one of its module's private generics by bare
-    name.  Once the importer clones or discovers that body the bare name is
-    ambiguous — the private generic is unimportable, or a same-named local
-    captures it — so each such ``FnCall`` is replaced by ``make_call(node,
+    An imported body (a generic, a non-generic fn, or another generic) may call
+    one of its module's own generics by bare name.  Once the importer clones or
+    discovers that body, the bare name is resolved in the IMPORTER's flat
+    namespace — where it denotes the module's generic only when that generic
+    owns it (see :func:`module_qualified_generic_names`).  For every generic
+    that does NOT, each such ``FnCall`` is replaced by ``make_call(node,
     rerouted_args)``: codegen builds an ``ast.ModuleCall`` (resolved by the
     desugar to the module's ``mod$<path>$name`` clone), while the verifier
     builds a name-renamed ``FnCall`` keyed to that same ``mod$…`` discovery
     base.  The SHARED shadow-aware walk is what keeps the two sides' routing (and
     thus the #732 differential) in lockstep.
 
-    Shadow-aware (PR #1029 review): a ``where``-helper sharing a private
+    Shadow-aware (PR #1029 review): a ``where``-helper sharing a module
     generic's name lexically owns the bare call for its whole scope (spec §5), so
     rerouting it would run/verify the module generic instead of the
     lexically-nearer helper (a wrong body / wrong contract).  Each ``FnDecl``
@@ -521,7 +793,7 @@ def reroute_module_private_generic_calls(
     node — including nested ``AnonFn`` / ``where`` bodies — is structurally
     preserved with its span.
     """
-    if not private_generics:
+    if not qualified_generics:
         return decl
 
     def walk(node: object, shadowed: frozenset[str]) -> object:
@@ -539,7 +811,7 @@ def reroute_module_private_generic_calls(
                 return replace(node, **changes)
             return node
         if (isinstance(node, ast.FnCall)
-                and node.name in private_generics
+                and node.name in qualified_generics
                 and node.name not in shadowed):
             new_args = tuple(
                 cast("ast.Expr", walk(a, shadowed)) for a in node.args
@@ -703,20 +975,23 @@ def unmangle_type_name(mangled: str) -> str:
     """Inverse of :func:`mangle_type_name` over canonical type names.
 
     :func:`mangle_type_name` is a prefix code — the output is a concatenation
-    of code units, each either a single non-``_`` character (mapping to
-    itself) or a two-character ``_X`` code (``__``/``_L``/``_R``/``_C``/``_S``)
-    — so a left-to-right scan decodes uniquely: at a ``_`` consume two
-    characters and emit the decoded character(s), otherwise consume one and
-    emit it.  Round-trips every canonical type name
-    (``unmangle_type_name(mangle_type_name(t)) == t``), which is what lets the
-    verifier's Array-element reverse lookup (``_get_element_sort_for_array``
-    in ``vera/smt.py``) recover the ``_z3_sorts`` key (``List<Int>``) from a
+    of code units, each either a single ``[A-Za-z0-9]`` character (mapping to
+    itself) or a unit starting with ``_``: one of the two-character codes
+    (``__``/``_L``/``_R``/``_C``/``_S``), or the variable-length ``_U<hex>_``
+    (#1219).  A left-to-right scan therefore decodes uniquely: at a ``_`` the
+    next character selects the unit, and for ``_U`` the run of hex digits
+    ends at the ``_`` that no hex digit can be.  Round-trips every canonical
+    type name (``unmangle_type_name(mangle_type_name(t)) == t``) — the LEFT
+    INVERSE that makes the mangler injective, and what lets the verifier's
+    Array-element reverse lookup (``_get_element_sort_for_array`` in
+    ``vera/smt.py``) recover the ``_z3_sorts`` key (``List<Int>``) from a
     mangled Array-element sort name (``List_LInt_R``) after #884 routed ADT
     sort names through the mangler.
 
     Raises ``ValueError`` on a string that is not valid mangler output (a
-    trailing lone ``_`` or an unknown ``_X`` code) — such input is outside the
-    mangler's range and has no preimage.
+    trailing lone ``_``, an unknown ``_X`` code, or an unterminated / empty /
+    non-hex ``_U…`` run) — such input is outside the mangler's range and has
+    no preimage.
     """
     out: list[str] = []
     i = 0
@@ -730,6 +1005,18 @@ def unmangle_type_name(mangled: str) -> str:
         if i + 1 >= n:
             raise ValueError(f"trailing lone '_' in mangled name: {mangled!r}")
         code = mangled[i + 1]
+        if code == _MANGLE_HEX:
+            end = mangled.find("_", i + 2)
+            digits = mangled[i + 2:end] if end >= 0 else ""
+            if end < 0 or not digits or any(
+                    d not in "0123456789abcdef" for d in digits):
+                raise ValueError(
+                    f"malformed '_{_MANGLE_HEX}<hex>_' escape in mangled "
+                    f"name: {mangled!r}"
+                )
+            out.append(chr(int(digits, 16)))
+            i = end + 1
+            continue
         decoded = _UNMANGLE_CODES.get(code)
         if decoded is None:
             raise ValueError(
@@ -1049,6 +1336,8 @@ class MonoContext:
       discovered set is a sound superset under that normalization, which the
       #732 differential test maintains (its ``collapse`` table is the one place
       that mapping lives) and pins.
+    * ``alias_env`` — the same alias namespace as the two maps above, carried
+      as the one value :mod:`vera.naming` renders against (#1208).
     * ``fn_ret_type_exprs`` — function name (bare-keyed, same as ``fn_ret_types``)
       → declared return **TypeExpr** (type args RETAINED, unlike ``fn_ret_types``).
       Lets discovery recover a user fn's *parameterized* return (`maybe → Option<Decimal>`)
@@ -1057,6 +1346,16 @@ class MonoContext:
       Optional (defaults empty): a consumer that doesn't populate it simply
       loses the user-fn parameterized-return recovery, degrading to the prior
       (bare-name) behaviour rather than erroring.
+    * ``fn_names`` — every function name this consumer's own table owns, used
+      for ONE decision: whether a declared effect row's ``get``/``put`` is an
+      effect operation here at all (#1207).  Codegen keeps an op out of
+      ``_effect_ops`` when ``_fn_sigs`` already owns the name, so a program
+      declaring its own ``get`` resolves that call through the ordinary
+      function path; discovery has to make the same call or the two consultors
+      desync again in the shadowed direction.  Optional (defaults empty): a
+      consumer that doesn't populate it treats no name as shadowed, which is
+      exactly the handler-expression rule (an op inside a ``handle`` body owns
+      its name unconditionally, matching ``_translate_handle_state``).
     """
 
     generic_decls: dict[str, ast.FnDecl]
@@ -1067,6 +1366,23 @@ class MonoContext:
     type_alias_params: dict[str, tuple[str, ...]]
     fn_ret_types: dict[str, str]
     fn_ret_type_exprs: dict[str, ast.TypeExpr] = field(default_factory=dict)
+    # #1208: the naming environment for this consumer's alias namespace — the
+    # `type_aliases` / `type_alias_params` pair above as ONE value, plus the
+    # declared-ADT names.  Defaulted empty so a consumer that has not been
+    # threaded yet behaves exactly as before.
+    alias_env: AliasEnv = EMPTY_ALIAS_ENV
+    # #1207: the consumer's own function-name table (see the docstring).
+    fn_names: frozenset[str] = frozenset()
+    # #1274 (F1): ``(module path, name)`` pairs whose generic is QUALIFIED-ONLY
+    # — reached under ``mod$<path>$name``, never under the bare name.  A
+    # ``ModuleCall`` to one of these must NOT be discovered as an instantiation
+    # of whatever ``generic_decls`` holds for its bare name, because that entry
+    # belongs to somebody else (the importer's same-named generic).  Defaulted
+    # empty: a consumer that routes these by RENAMING the call instead (the
+    # verifier) never presents such a node here, so it needs no entry.
+    qualified_module_generics: frozenset[tuple[tuple[str, ...], str]] = (
+        frozenset()
+    )
 
 
 class Monomorphizer:
@@ -1081,6 +1397,56 @@ class Monomorphizer:
 
     def __init__(self, ctx: MonoContext) -> None:
         self.ctx = ctx
+        # #1207: the effect-op result-type registry IN SCOPE at the point the
+        # discovery walk has reached — the discovery-side twin of codegen's
+        # `_effect_op_result_vera`, MERGED over the enclosing registry at each
+        # `handle` exactly as `_translate_handle_state` merges it — an inner
+        # mapping overwrites a same-name outer one, an absent inner mapping
+        # leaves the outer one answering.  See the `HandleExpr` arm in
+        # `_collect_calls` for why the merge is load-bearing: an `Exn` handler
+        # nested in a `State<Nat>` one must leave the enclosing result type in
+        # scope, or discovery names `pick$Int` against the rewrite's
+        # `pick$Nat` (#1207).  Seeded from a
+        # function's declared effect row by `collect_calls_in_node`.  Walk
+        # state, not context: it is pushed and popped by `_collect_calls` and
+        # is empty outside a walk, so `Monomorphizer` stays re-entrant per
+        # pass in the way its docstring promises.
+        self._op_result_types: dict[str, str] = {}
+        # #1271: the type VARIABLES in scope at the point the discovery walk has
+        # reached — every enclosing ``forall`` binder, pushed and popped by
+        # `collect_calls_in_node` exactly as `_op_result_types` is.  Walk state,
+        # not context: empty outside a walk.
+        self._scope_type_vars: frozenset[str] = frozenset()
+        # #1271 memos over the fixed `ctx`, filled on first use.  Both are
+        # derived purely from `ctx`, which no discovery walk mutates.
+        self._ctx_type_vars_cached: frozenset[str] | None = None
+        self._declared_types_cached: frozenset[str] | None = None
+        # #1274 (F1): the module whose OWN shadowed generics the current scan is
+        # keyed on, or ``None`` outside such a scan.  Walk state, like the two
+        # above it — see `shadowed_module_scope`.
+        self._shadowed_scan_path: tuple[str, ...] | None = None
+
+    @contextlib.contextmanager
+    def shadowed_module_scope(
+        self, path: tuple[str, ...],
+    ) -> Iterator[None]:
+        """Scan a clone body against *path*'s OWN qualified-only generics.
+
+        Inside this scope a ``ModuleCall`` targeting *path* is discovered
+        normally: the table it is matched against holds that module's generics
+        by bare name, so the entry found is the intended one.  Outside it the
+        same node is skipped, because the flat table's entry for that bare name
+        belongs to whoever owns it in the importer's namespace.
+
+        Both sides drive it around the identical scan, so their discovered sets
+        stay equal (#732).
+        """
+        saved = self._shadowed_scan_path
+        self._shadowed_scan_path = path
+        try:
+            yield
+        finally:
+            self._shadowed_scan_path = saved
 
     def collect_calls_in_expr(
         self,
@@ -1125,6 +1491,139 @@ class Monomorphizer:
         (a ``CodegenSkip`` at run time) and diverge from the verifier, which does
         walk contracts and helpers (PR #767 review).
         """
+        # #1207: the function's DECLARED effect row is the outermost
+        # effect-op scope for everything below — codegen's per-function
+        # `effect_op_result_vera` (codegen/functions.py), rebuilt from the
+        # same shared derivation, with this site's `_fn_sigs` shadow guard
+        # spelled as `ctx.fn_names`.  Saved and restored so a `where` helper
+        # (walked recursively below) cannot leak its own row outwards.
+        saved_ops = self._op_result_types
+        self._op_result_types = self._row_op_result_types(fn)
+        # #1271: this function's own ``forall`` binders join the enclosing
+        # scope's for the whole subtree (body, contracts, `where` helpers).
+        # A helper under a generic ancestor is walked through this same door,
+        # so the set accumulates down the nesting exactly as the binders do.
+        saved_vars = self._scope_type_vars
+        self._scope_type_vars = saved_vars | frozenset(fn.forall_vars or ())
+        try:
+            self._collect_calls_in_node_scoped(
+                fn, generic_decls, ctor_to_adt, instances,
+            )
+        finally:
+            self._op_result_types = saved_ops
+            self._scope_type_vars = saved_vars
+
+    def _binds_a_type_var(
+        self,
+        type_args: tuple[str, ...],
+        decl: ast.FnDecl,
+        generic_decls: dict[str, ast.FnDecl],
+    ) -> bool:
+        """Is *type_args* a phantom instantiation — one that binds a type
+        VARIABLE rather than a type (#1271)?
+
+        Discovery infers a callee's type arguments from its argument
+        expressions.  Inside a still-generic scope those expressions can be
+        typed by a variable rather than a type: ``pick(@U.1, @U.0)`` in
+        ``forall<U> fn helper`` binds ``pick``'s variable to the NAME ``U``, and
+        a callee's own declared return type can leak the same way
+        (``b(leaf(…), …)`` binds ``b``'s variable to ``leaf``'s ``W``).  Neither
+        is an instantiation: the resulting clone's parameter has no WASM type, so
+        codegen emitted it only to skip it with a loud ``[E604]``, and the
+        verifier discovered a matching phantom.  The REAL instantiation appears
+        once the enclosing scope is bound — ``helper$Bool``'s body yields
+        ``pick$Bool`` — which is why filtering here loses nothing.
+
+        A name counts as a type variable when some ``forall`` in play binds it —
+        the scope's own binders, the callee's, and those of every generic
+        discovery is keyed on — and nothing in this namespace makes it a TYPE.
+        That subtraction is what keeps a program whose data type happens to
+        share a binder's spelling (``data T``) instantiating normally: a name
+        that names a type is a type here, whatever some other signature calls
+        its variable.
+
+        Components are matched by identifier token, never by substring, so
+        ``Option<U>`` is phantom while ``Unit`` is not.
+        """
+        type_vars = self._scope_type_vars | frozenset(decl.forall_vars or ())
+        type_vars |= self._ctx_generic_type_vars()
+        type_vars |= frozenset(
+            v for gdecl in generic_decls.values()
+            for v in (gdecl.forall_vars or ())
+        )
+        type_vars -= self._declared_type_names()
+        if not type_vars:
+            return False
+        return any(
+            token in type_vars
+            for arg in type_args
+            for token in _TYPE_NAME_TOKENS.findall(arg)
+        )
+
+    def _ctx_generic_type_vars(self) -> frozenset[str]:
+        """Every ``forall`` binder across the context's generics, memoised.
+
+        The context is fixed for a pass while ``_binds_a_type_var`` runs once
+        per discovered call site, so recomputing this per site is pure cost.
+        """
+        cached = self._ctx_type_vars_cached
+        if cached is None:
+            cached = frozenset(
+                v for gdecl in self.ctx.generic_decls.values()
+                for v in (gdecl.forall_vars or ())
+            )
+            self._ctx_type_vars_cached = cached
+        return cached
+
+    def _declared_type_names(self) -> frozenset[str]:
+        """Every name that denotes a TYPE here — the built-in primitives and
+        the removed aliases the checker still recognizes, plus this namespace's
+        ADTs and type aliases (memoised).
+
+        The subtrahend of the #1271 type-variable test: a ``forall`` binder's
+        spelling is only evidence of a variable where nothing else claims the
+        name.  The primitives are in the set because a binder may legally BE
+        spelled ``Int`` — the language does not reserve type names against
+        binders — and reading that spelling as a variable poisons every genuine
+        instantiation at ``Int`` anywhere in the program, dropping functions
+        from a program that compiled before this filter existed.  Erring the
+        other way costs only the pre-existing ``[E604]`` on the pathological
+        template itself.
+
+        Whether the checker should REJECT a primitive-spelled binder outright
+        is a language question (it would make this subtraction unreachable for
+        the primitives); it is deliberately not decided here.
+        """
+        cached = self._declared_types_cached
+        if cached is None:
+            cached = (
+                frozenset(PRIMITIVES)
+                | frozenset(REMOVED_ALIASES)
+                | frozenset(self.ctx.adt_tp_counts)
+                | frozenset(self.ctx.ctor_to_adt.values())
+                | frozenset(self.ctx.type_aliases)
+            )
+            self._declared_types_cached = cached
+        return cached
+
+    def _row_op_result_types(self, fn: ast.FnDecl) -> dict[str, str]:
+        """The effect-op result registry a function's declared row installs."""
+        if not isinstance(fn.effect, ast.EffectSet):
+            return {}
+        return {
+            op: name
+            for op, name in effect_op_result_names(fn.effect.effects).items()
+            if op not in self.ctx.fn_names
+        }
+
+    def _collect_calls_in_node_scoped(
+        self,
+        fn: ast.FnDecl,
+        generic_decls: dict[str, ast.FnDecl],
+        ctor_to_adt: dict[str, str],
+        instances: dict[str, set[tuple[str, ...]]],
+    ) -> None:
+        """:meth:`collect_calls_in_node`'s walk, with the op scope already set."""
         self.collect_calls_in_expr(
             fn.body, generic_decls, ctor_to_adt, instances,
         )
@@ -1181,15 +1680,44 @@ class Monomorphizer:
         }
         if not generic_helpers:
             return {}
-        found: dict[str, set[tuple[str, ...]]] = {
-            name: set() for name in generic_helpers
-        }
-        self.collect_calls_in_node(clone, generic_helpers, ctor_to_adt, found)
+        found = self.collect_generic_helper_instances(
+            generic_helpers, (clone,), ctor_to_adt,
+        )
         return {
             name: (generic_helpers[name], cts)
             for name, cts in found.items()
             if cts
         }
+
+    def collect_generic_helper_instances(
+        self,
+        helpers: dict[str, ast.FnDecl],
+        bodies: Iterable[ast.FnDecl],
+        ctor_to_adt: dict[str, str],
+    ) -> dict[str, set[tuple[str, ...]]]:
+        """Instantiations of *helpers* called from any of *bodies* (#1223).
+
+        The leaf under :meth:`collect_clone_nested_generic_instances`, exposed
+        separately because a helper family is not fully discovered from the
+        ancestor clone alone.  A helper's own CONCRETE clone can call a SIBLING
+        helper at a type only that clone knows: inside the still-generic
+        ``outer<U>``, ``inner(@U.1, @U.0)`` binds ``inner``'s variable to the
+        NAME ``U``, and the real ``inner<Bool>`` appears only once ``outer`` is
+        monomorphized at ``Bool``.  Both sides therefore drive this over a
+        GROWING body set — each clone produced is fed back in — rather than
+        over the ancestor once, and they must drive the same leaf or the
+        verifier stops covering what codegen emits.
+
+        Returns ``{helper name: {concrete type vectors}}``, one entry per
+        helper (possibly empty), so a caller can diff against what it has
+        already emitted.
+        """
+        found: dict[str, set[tuple[str, ...]]] = {
+            name: set() for name in helpers
+        }
+        for body in bodies:
+            self.collect_calls_in_node(body, helpers, ctor_to_adt, found)
+        return found
 
     def _collect_calls(
         self,
@@ -1207,12 +1735,32 @@ class Monomorphizer:
         # ModuleCall only matches once its target is a known generic.
         if isinstance(node, (ast.FnCall, ast.ModuleCall)) and (
             node.name in generic_decls
+        ) and not (
+            # #1274 (F1): a qualified call whose target is QUALIFIED-ONLY is not
+            # a call to the bare name at all — its clone is emitted under
+            # ``mod$<path>$name`` by the shadowed path.  Discovering it against
+            # the FLAT table would instantiate whichever generic happens to own
+            # the bare name (the importer's), emitting a clone nothing calls and
+            # the other side never verifies.  Only the QUALIFIED spelling is
+            # skipped; a bare call to an unshadowed imported generic still
+            # routes here, which is what #774 needs.
+            #
+            # Not skipped inside that module's OWN shadowed scan
+            # (``shadowed_module_scope``): there the table IS the module's
+            # generics keyed by bare name, so ``m::bb`` from ``m``'s own clone
+            # body is exactly the entry meant — the #1000/#1029 private chain.
+            isinstance(node, ast.ModuleCall)
+            and tuple(node.path) != self._shadowed_scan_path
+            and (tuple(node.path), node.name)
+            in self.ctx.qualified_module_generics
         ):
             decl = generic_decls[node.name]
             type_args = self._infer_type_args_from_args(
                 decl, node.args, ctor_to_adt, generic_decls,
             )
-            if type_args is not None:
+            if type_args is not None and not self._binds_a_type_var(
+                type_args, decl, generic_decls,
+            ):
                 instances[node.name].add(type_args)
         # #913: a generic invoked via the ``|>`` pipe — ``x |> g(…)`` — desugars
         # to ``g(x, …)`` at BOTH the checker (`_check_pipe`) and codegen
@@ -1237,8 +1785,63 @@ class Monomorphizer:
             type_args = self._infer_type_args_from_args(
                 decl, piped_args, ctor_to_adt, generic_decls,
             )
-            if type_args is not None:
+            if type_args is not None and not self._binds_a_type_var(
+                type_args, decl, generic_decls,
+            ):
                 instances[node.right.name].add(type_args)
+        # #1207: a `handle[State<T>]` installs its op registry over its BODY
+        # only.  The state-init expression and the clause bodies belong to the
+        # ENCLOSING context — the checker checks clauses before the handled
+        # effect joins the row, and codegen threads the declaration-time
+        # snapshot into every clause (#1211) — so a `get(())` there names the
+        # OUTER cell.  Walking those children under this handler's scope would
+        # make discovery pick the inner cell's clone where the rewrite calls
+        # the outer's: the desync again, one level in.
+        if isinstance(node, ast.HandleExpr):
+            saved_ops = self._op_result_types
+            # This arm hand-enumerates the children because they are walked in
+            # DIFFERENT scopes, so it cannot use the generic `fields()`
+            # recursion below.  That makes it the one place a new `HandleExpr`
+            # field would become silently invisible to discovery — a missed
+            # generic call is a dangling clone (E602) with no diagnostic
+            # pointing here — so the enumeration is checked against the
+            # dataclass rather than trusted.
+            enumerated = {"effect", "state", "clauses", "body"}
+            declared = {f.name for f in fields(node)} - {"span"}
+            if declared != enumerated:  # pragma: no cover — guard
+                msg = (
+                    f"HandleExpr fields changed: {sorted(declared)}; this arm "
+                    f"walks {sorted(enumerated)}.  Add the new field to the "
+                    f"enclosing-scope group or to the handler-scope body walk "
+                    f"— an unwalked child hides every generic call inside it."
+                )
+                raise AssertionError(msg)
+            for child in (node.effect, node.state, node.clauses):
+                self._collect_calls(
+                    child, generic_decls, ctor_to_adt, instances,
+                )
+            # MERGED over the enclosing registry, not swapped for it — and
+            # deliberately, because codegen merges too (`_translate_handle_state`
+            # writes `{**saved_result_vera, **effect_op_result_names(...)}`, and
+            # `_translate_handle_exn` leaves the registry untouched).  A handler
+            # that contributes no result type must therefore leave the enclosing
+            # one answering: `pick([get(()), 4], 9)` inside an `Exn` handler
+            # nested in a `State<Nat>` one names `pick$Nat` on both sides.
+            # Replacing here instead names `pick$Int` against the rewrite's
+            # `pick$Nat` — measured: E602, `main` dropped, #1207 exactly.  The
+            # inner entry still wins for a key it DOES supply, the merge being
+            # ordered.  Pinned by `exn_nested_in_state` in
+            # tests/test_mono_effect_op_naming_1207.py.
+            self._op_result_types = {
+                **saved_ops, **effect_op_result_names([node.effect]),
+            }
+            try:
+                self._collect_calls(
+                    node.body, generic_decls, ctor_to_adt, instances,
+                )
+            finally:
+                self._op_result_types = saved_ops
+            return
         if isinstance(node, ast.Node):
             for f in fields(node):
                 if f.name == "span":
@@ -1542,6 +2145,17 @@ class Monomorphizer:
             return "String"
         if isinstance(expr, ast.ArrayLit):
             return "Array"
+        # #1207: an effect operation in a value position is not in any fn
+        # table, so it has to be answered from the op registry in scope —
+        # the same table (`vera.slots.effect_op_result_names`) the WASM
+        # call-rewrite consults at `_infer_vera_type`'s matching arm.  Before
+        # this, a `get(())` fixing a generic's type variable fell through to
+        # `fn_ret_types` / the builtin table, missed both, and left the
+        # instantiation to the phantom default while the rewrite named the
+        # cell's type: the clone discovery emitted dangled at the call the
+        # rewrite emitted (loud E602, caller dropped with E620).
+        if isinstance(expr, ast.FnCall) and expr.name in self._op_result_types:
+            return self._op_result_types[expr.name]
         if isinstance(expr, ast.FnCall) and generic_decls:
             return self._infer_fncall_vera_type(
                 expr, ctor_to_adt, generic_decls)
@@ -1899,8 +2513,9 @@ class Monomorphizer:
         from a closure-shaped argument uniformly across both forms.
 
         Fixes #604: pre-fix, only the AnonFn form was resolved.  When a
-        prelude generic like ``option_map<A, B>(@Option<A>, @OptionMapFn<A, B>)``
-        was called with a ``SlotRef`` typed as an FnType alias instead
+        prelude generic like ``option_map<VeraA, VeraB>(@Option<VeraA>,
+        @VeraOptionMapFn<VeraA, VeraB>)`` was called with a ``SlotRef``
+        typed as an FnType alias instead
         of an inline ``AnonFn``, ``B`` failed to bind and defaulted to
         ``Bool`` (the phantom-var fallback in :meth:`_infer_type_args_from_call`),
         producing the wrong mono suffix (``option_map$Int_JBool``) and
@@ -1934,7 +2549,7 @@ class Monomorphizer:
     ) -> tuple[str, ...] | None:
         """Infer concrete types for a type alias's params from a callable arg.
 
-        When ``param_te`` is e.g. ``NamedType("OptionMapFn", [A, B])``
+        When ``param_te`` is e.g. ``NamedType("MapFn", [A, B])``
         which aliases ``fn(A -> B)``, and the argument is callable (an
         ``AnonFn`` literal or a ``SlotRef`` typed as an FnType alias)
         with concrete param/return types, infer one concrete type name
@@ -2045,17 +2660,31 @@ class Monomorphizer:
 
         INJECTIVE over (name, type-arg vector), #775.  Each component is
         escaped by :func:`mangle_type_name` (itself injective — see its
-        docstring) and the vector is joined with ``_J``.  ``_J`` can never
-        be *produced* by the escape: every ``_`` in escaped output starts
-        one of the codes ``__``/``_L``/``_R``/``_C``/``_S``, so during the
-        left-to-right decode a ``_J`` at a code boundary is unambiguously a
-        separator (a literal ``_J`` in a type name escapes to ``__J``,
-        whose leading ``__`` is consumed as one code first).  Splitting on
-        boundary-``_J`` therefore recovers the exact component vector, and
-        each component un-escapes uniquely — no two distinct instantiation
-        vectors share a symbol.  ``name`` never contains ``$`` (Vera
-        identifiers can't lex it), so the prefix splits off unambiguously
-        at the first ``$``.
+        docstring) and the vector is joined with ``_J``.
+
+        The separator is safe because of a property of the escape, not
+        because of a list of its codes: **no mangler unit begins with**
+        ``J``.  A unit is either a single ``[A-Za-z0-9]`` character or a
+        ``_``-led escape, and ``J`` is not one of the escape letters — so
+        during the left-to-right decode, a ``_J`` at a unit boundary can
+        only be the separator.  A literal ``_J`` inside a type name is not
+        that: its ``_`` escapes to ``__``, whose two characters are
+        consumed as one unit first, leaving the ``J`` as an ordinary
+        character mid-unit-stream.  Splitting on boundary-``_J`` therefore
+        recovers the exact component vector, and each component un-escapes
+        uniquely — no two distinct instantiation vectors share a symbol.
+
+        Stating it as the property rather than as an enumeration is what
+        keeps it true as the escape grows: the #1219 widening added the
+        variable-length ``_U<hex>_`` unit, whose TERMINATOR is a ``_`` that
+        can sit immediately before a literal ``J``, and an argument phrased
+        as "the codes are ``__``/``_L``/``_R``/``_C``/``_S``" would have
+        silently stopped covering the alphabet it describes.  It is still
+        sound: that ``_`` closes its unit, so the ``J`` after it begins a
+        new one as an ordinary character, never a ``_J`` boundary.
+
+        ``name`` never contains ``$`` (Vera identifiers can't lex it), so
+        the prefix splits off unambiguously at the first ``$``.
 
         Collision classes this kills (both produced duplicate WAT ``func``
         identifiers pre-fix): parameterized built-in vs flat user ADT
@@ -2078,6 +2707,7 @@ class Monomorphizer:
         self,
         decl: ast.FnDecl,
         concrete_types: tuple[str, ...],
+        alias_env: AliasEnv | None = None,
     ) -> ast.FnDecl:
         """Create a monomorphized copy of a generic function.
 
@@ -2091,15 +2721,31 @@ class Monomorphizer:
         When distinct type variables map to the same concrete type
         (e.g. A→Int, B→Int), De Bruijn indices in slot references
         must be adjusted because formerly separate namespaces merge.
+
+        *alias_env* is the naming environment the reindex renders binder
+        names against (#1208).  It must be the env of the module that
+        DECLARED *decl*, not the driver's own: aliases are module-scoped
+        (spec §8.4.1), so a clone of an IMPORTED generic whose parameters
+        name a module-local alias merges differently in its own namespace
+        than in the importer's — and the consumers rebuild the clone's scope
+        under the defining module's scope, so a recount done against the
+        importer's would be a recount against a scope nobody has.  Defaults
+        to ``ctx.alias_env``, which is right whenever the caller has only
+        one namespace in play.  ``_compute_scoped_reindex`` narrows it by the
+        ``forall`` variables in scope on each side of the recount — all of
+        them before substitution, the SURVIVING ones after — so a type
+        parameter shadowing a same-named alias renders as the checker
+        rendered it, and as the consumers re-render it on the clone.
         """
         assert decl.forall_vars is not None  # noqa: S101
+        env = self.ctx.alias_env if alias_env is None else alias_env
         mapping = dict(zip(decl.forall_vars, concrete_types))
         mangled = self._mangle_fn_name(decl.name, concrete_types)
 
         # Scope-aware De Bruijn reindexing (#769 gap 3): resolve every
         # SlotRef against the full binding scope at its reference site and
         # recompute its index in the collapsed (post-substitution) namespace.
-        reindex = self._compute_scoped_reindex(decl, mapping)
+        reindex = self._compute_scoped_reindex(decl, mapping, env)
 
         # Substitute type variables in the entire FnDecl
         substituted = self._substitute_in_ast(decl, mapping, reindex)
@@ -2112,16 +2758,24 @@ class Monomorphizer:
         )
 
     def _substituted_slot_name(
-        self, te: ast.TypeExpr, mapping: dict[str, str],
+        self, te: ast.TypeExpr, mapping: dict[str, str], env: AliasEnv,
     ) -> str | None:
-        """Full-depth canonical slot name of ``te`` AFTER type-variable
-        substitution — the name this binder carries in the clone."""
-        return type_expr_slot_name(self._substitute_type_expr(te, mapping))
+        """Canonical slot name of ``te`` AFTER type-variable substitution —
+        the name this binder carries in the clone.
+
+        #1208: rendered by :func:`vera.naming.slot_name` against the origin
+        module's alias environment, the same renderer the consumers rebuild
+        the clone's scope with.  A name minted here that they would not mint
+        is a De Bruijn recount against a scope neither of them has.
+        """
+        return naming.slot_name_or_none(
+            self._substitute_type_expr(te, mapping), env)
 
     def _compute_scoped_reindex(
         self,
         decl: ast.FnDecl,
         mapping: dict[str, str],
+        env: AliasEnv,
     ) -> dict[int, int]:
         """Scope-aware De Bruijn reindex for monomorphization (#769 gap 3).
 
@@ -2166,25 +2820,78 @@ class Monomorphizer:
         the walker never descends into ``TypeExpr`` fields, so their indices
         are untouched (an outer collapse cannot shift a one-binder scope).
 
-        Names are FULL-DEPTH canonical slot names (``vera/slots.py``, the
-        shared namer both consumers resolve against).  A reference that does
-        not resolve against the walked scope keeps its index — the consumers
-        surface dangling refs (hard E699 in codegen) exactly as they would
-        have pre-substitution.
+        Names come from :mod:`vera.naming` — the ONE renderer both consumers
+        resolve the clone's scope against (#1208) — with the BIND side
+        (``push``) and the REFERENCE side (``resolve``) rendered by the same
+        function over the same environment.  They have to move together: a
+        recount that pushes under one rendering and looks up under another
+        silently mis-resolves, which is the whole failure mode this walker
+        exists to prevent.  A reference that does not resolve against the
+        walked scope keeps its index — the consumers surface dangling refs
+        (hard E699 in codegen) exactly as they would have pre-substitution.
+
+        TWO environments, because the recount spans a scope change.  The
+        PRE-substitution side (the old name a ``push`` records and the key a
+        ``resolve`` looks up) is rendered against *scope* — the module env
+        NARROWED by the ``forall`` variables in scope over the function being
+        walked (:func:`~vera.slots.fn_slot_scope`), which is what the CHECKER
+        rendered the generic's own signature and body against: a type
+        parameter shadows a same-named module alias for the whole signature
+        (``type T = Int;`` + ``forall<T>``), so rendering the pre-substitution
+        side against the bare module env collapses ``@Option<T>`` and
+        ``@Option<Int>`` into one stack the checker kept apart, and every
+        reference into that stack silently resolves onto the wrong parameter
+        (#1208 review, probes ``m01``/``m03``/``v01``).
+
+        The POST-substitution side is narrowed by the ``forall`` variables the
+        CLONE declares — which is what the consumers rebuild from, so matching
+        them is by construction rather than by argument.  For the function
+        being cloned that is none of them (``monomorphize_fn`` clears its
+        ``forall_vars``), which is why the bare env is right for the top-level
+        walk.  It is NOT right one level down: substitution clears only the
+        cloned function's own variables, so a ``where`` helper declared
+        ``forall<U>`` still carries ``forall_vars=('U',)`` in the clone, and
+        both consumers narrow by it when they re-render the helper.  Minting
+        the helper's post-substitution names against the bare env instead
+        resolves ``U`` through a same-named module alias (``type U = Int;`` →
+        ``Option<Int>``) — a recount whose new names are names nobody looks
+        up.  Narrowing by the variables that merely SURVIVE the substitution
+        (``v not in mapping``) is not the same rule and was the same bug one
+        case further out: it dropped a helper variable that shares a name with
+        the parent's, and under an identity mapping (``forall<T>``
+        instantiated at a module alias spelled ``T``) that variable is still
+        written in the clone, so the post side minted ``Option<Int>`` where
+        the consumers rebuild ``Option<T>`` (PR #1224 round-3).  Every
+        currently-reachable instance of that shape is blocked upstream by
+        `#1223 <https://github.com/aallan/vera/issues/1223>`_ — codegen drops
+        a generic ``where``-helper under a generic parent before it can be
+        run — so the rule is pinned as a differential against the consumers'
+        own rebuild rather than end to end.  A ``where`` helper extends BOTH
+        narrowings with its own parameters on top of its ancestors' — the same
+        accumulation :func:`~vera.slots.fn_scopes` performs, because
+        ``_check_fn`` adds to one shared type-parameter map rather than
+        replacing it.  One environment per side, used by every rendering on
+        that side: ``push`` mints both names, and ``resolve`` reads the
+        pre-side key it minted and the post-side name it recorded, so the two
+        cannot be scoped differently.
         """
         out: dict[int, int] = {}
         stack: list[tuple[str | None, str | None]] = []
 
+        scope = fn_slot_scope(env, decl.forall_vars)
+        # The clone this walk is minting names for declares NO type parameters
+        # — `monomorphize_fn` clears them — so the consumers rebuild its scope
+        # from the bare env, and so does the post side.
+        post_scope = env
+
         def push(te: ast.TypeExpr) -> None:
             stack.append((
-                type_expr_slot_name(te),
-                self._substituted_slot_name(te, mapping),
+                naming.slot_name_or_none(te, scope),
+                self._substituted_slot_name(te, mapping, post_scope),
             ))
 
         def resolve(ref: ast.SlotRef) -> None:
-            name = slot_ref_name(ref)
-            if name is None:
-                return
+            name = naming.slot_ref_key(ref, scope)
             seen = 0
             for pos in range(len(stack) - 1, -1, -1):
                 if stack[pos][0] != name:
@@ -2287,6 +2994,7 @@ class Monomorphizer:
                     walk(item)
 
         def walk_fn_scope(fn_decl: ast.FnDecl) -> None:
+            nonlocal scope, post_scope
             del stack[:]
             for param_te in fn_decl.params:
                 push(param_te)
@@ -2298,7 +3006,23 @@ class Monomorphizer:
             # collect_calls_in_node walk (PR #972 review; a depth-1 walk left
             # nested helpers' collapsed indices stale).
             for nested in fn_decl.where_fns or ():
-                walk_fn_scope(nested)
+                saved = (scope, post_scope)
+                scope = fn_slot_scope(scope, nested.forall_vars)
+                # AS DECLARED on both sides.  Substitution clears only the
+                # cloned function's own variables, so the helper carries its
+                # `forall_vars` unchanged into the clone and the consumers
+                # narrow by exactly them.  Narrowing the post side by the
+                # SURVIVING ones instead dropped any helper variable that
+                # shared a name with the parent's — under an identity mapping
+                # (`forall<T>` instantiated at a module alias spelled `T`) the
+                # variable is still written in the clone, so the post side
+                # minted `Option<Int>` through the alias where the consumers
+                # rebuild `Option<T>` (PR #1224 round-3).
+                post_scope = fn_slot_scope(post_scope, nested.forall_vars)
+                try:
+                    walk_fn_scope(nested)
+                finally:
+                    scope, post_scope = saved
 
         walk_fn_scope(decl)
         return out

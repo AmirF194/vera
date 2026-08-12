@@ -10,6 +10,9 @@ from tests.checker_helpers import (
     _errors,
     _warnings,
 )
+from vera import ast
+from vera.checker.core import TypeChecker
+from vera.checker.expressions import _U64_MAX
 
 
 # =====================================================================
@@ -95,12 +98,17 @@ private fn foo(@Unit -> @Byte)
 """)
 
     def test_byte_lit_overflow_rejected(self) -> None:
-        """256 is out of Byte range — should be rejected."""
+        """256 is out of Byte range — rejected, naming the range (#1252).
+
+        Until #1252 this was reported as a return-type mismatch ("body
+        has type Nat"), which described the fall-through rather than
+        the literal that caused it.
+        """
         _check_err("""
 private fn foo(@Unit -> @Byte)
   requires(true) ensures(true) effects(pure)
 { 256 }
-""", "body has type")
+""", "out of range for @Byte")
 
     def test_byte_lit_negative_rejected(self) -> None:
         """Negative integer is not a valid Byte."""
@@ -130,10 +138,11 @@ private fn foo(@Unit -> @Byte)
 """)
 
     def test_byte_lit_coercion_refined_let_out_of_range_rejected(self) -> None:
-        """The refined-Byte coercion is bounded by the Byte range: `300` bound
-        to `{ @Byte | @Byte.0 < 10 }` stays @Nat (not a Byte) and the let
-        binding is rejected with E170 — proving the coercion is not a blanket
-        literal→Byte acceptance."""
+        """The refined-Byte coercion is bounded by the Byte range: `300`
+        bound to `{ @Byte | @Byte.0 < 10 }` is rejected, proving the
+        coercion is not a blanket literal→Byte acceptance.  Since #1252
+        the rejection is E149 at the literal (naming 0..255) rather than
+        E170 at the binding, which only saw the resulting @Nat."""
         _check_err("""
 private fn foo(@Unit -> @Byte)
   requires(true) ensures(true) effects(pure)
@@ -141,7 +150,7 @@ private fn foo(@Unit -> @Byte)
   let @{ @Byte | @Byte.0 < 10 } = 300;
   @Byte.0
 }
-""", "Let binding expects")
+""", "out of range for @Byte")
 
 
 # =====================================================================
@@ -2005,6 +2014,262 @@ public fn f(@Unit -> @Int)
 { -18446744073709551616 }
 """)
 
+    # -----------------------------------------------------------------
+    # `@Byte` is a target type too (#1252)
+    # -----------------------------------------------------------------
+
+    def test_byte_literal_past_255_is_E149(self) -> None:
+        """The `@Byte` bound is 255, and it is the same range check.
+
+        The coercion accepted 0..255 in a `@Byte` context and let
+        anything else fall through to `@Nat`, so the literal's own
+        mistake was only ever reported by whatever downstream mismatch
+        the `@Nat` then caused.
+        """
+        errs = _errors("""
+public fn f(@Unit -> @Byte)
+  requires(true) ensures(true) effects(pure)
+{ 999 }
+""")
+        e149 = [e for e in errs if e.error_code == "E149"]
+        assert e149, [(e.error_code, e.description) for e in errs]
+        assert "999" in e149[0].description, e149[0].description
+        assert "255" in e149[0].description, e149[0].description
+
+    def test_byte_literal_at_255_still_ok(self) -> None:
+        _check_ok("""
+public fn f(@Unit -> @Byte)
+  requires(true) ensures(true) effects(pure)
+{ 255 }
+""")
+
+    def test_out_of_range_byte_in_a_join_names_the_range(self) -> None:
+        """#1252: the branch disagreement was a consequence, not the cause.
+
+        `let @Byte = if c then { 999 } else { 3 }` reported E301
+        "then-branch is Nat, else-branch is Byte" — a true statement
+        about a program whose actual mistake is that 999 is not a
+        `@Byte`.  The expectation IS pushed into both branches (which
+        is why `3` typed as `@Byte` at all); only the out-of-range
+        literal declined it.
+        """
+        src = """
+public fn f(@Bool -> @Byte)
+  requires(true) ensures(true) effects(pure)
+{
+  let @Byte = if @Bool.0 then { 999 } else { 3 };
+  @Byte.0
+}
+"""
+        codes = [e.error_code for e in _errors(src)]
+        assert "E149" in codes, codes
+        assert "E301" not in codes, codes
+        assert "E170" not in codes, codes
+
+    def test_out_of_range_byte_argument_names_the_range(self) -> None:
+        """The same at a call argument, where E202 told the same story."""
+        codes = [e.error_code for e in _errors("""
+public fn g(@Byte -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ 0 }
+public fn f(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ g(999) }
+""")]
+        assert "E149" in codes, codes
+        assert "E202" not in codes, codes
+
+    def test_refined_byte_base_gets_the_byte_range_too(self) -> None:
+        """#865's refinement wrapper is transparent in both directions."""
+        codes = [e.error_code for e in _errors("""
+public fn f(@Unit -> @{ @Byte | @Byte.0 < 10 })
+  requires(true) ensures(true) effects(pure)
+{ 999 }
+""")]
+        assert "E149" in codes, codes
+
+    def test_one_literal_gets_one_range_error_in_a_byte_predicate(
+        self,
+    ) -> None:
+        """One literal, one verdict (PR #1282 review).
+
+        A refinement predicate's operands are synthesised twice: once
+        with no expected type, where a literal past the u64 bound draws
+        the `@Nat` range error, and again against the refined base,
+        where the same literal draws the `@Byte` one.  Both fired, so a
+        single mistake produced two E149s naming two different bounds.
+        The unconstrained pass is a GUESS — it reports `@Nat` only
+        because nothing told it otherwise — so the contextual verdict
+        supersedes it rather than joining it.
+        """
+        errs = _errors("""
+public fn f(@Unit -> @{ @Byte | @Byte.0 < 18446744073709551616 })
+  requires(true) ensures(true) effects(pure)
+{ 5 }
+""")
+        e149 = [e for e in errs if e.error_code == "E149"]
+        assert len(e149) == 1, [e.description for e in e149]
+        assert "0..255" in e149[0].description, e149[0].description
+        assert "u64" not in e149[0].description, e149[0].description
+
+    def test_an_unconstrained_vast_literal_still_reports_u64(self) -> None:
+        """Superseding must not silence the #812 gate itself.
+
+        With no `@Byte` anywhere the unconstrained verdict is the only
+        one there is, and it must survive — a dedup that dropped it
+        would reopen the soundness hole #812 closed.
+        """
+        errs = _errors("""
+public fn f(@Unit -> @{ @Nat | @Nat.0 < 18446744073709551616 })
+  requires(true) ensures(true) effects(pure)
+{ 5 }
+""")
+        e149 = [e for e in errs if e.error_code == "E149"]
+        assert len(e149) == 1, [e.description for e in e149]
+        assert "u64" in e149[0].description, e149[0].description
+
+    def test_two_distinct_literals_keep_two_errors(self) -> None:
+        """Superseding is per-literal, not per-program.
+
+        A dedup keyed on the message or the error code rather than on
+        the occurrence would collapse these two into one.
+        """
+        errs = _errors("""
+public fn g(@Byte, @Byte -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ 0 }
+public fn f(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ g(999, 888) }
+""")
+        e149 = [e for e in errs if e.error_code == "E149"]
+        assert len(e149) == 2, [e.description for e in e149]
+        assert {"999", "888"} == {
+            n for n in ("999", "888")
+            if any(n in e.description for e in e149)
+        }
+
+    def test_the_same_bad_value_twice_keeps_two_errors(self) -> None:
+        """The sharper form: identical VALUE, identical message.
+
+        Two occurrences of `999` produce two messages that differ only
+        in position, so a supersede keyed on anything but the
+        occurrence — the value, the text, the error code — collapses
+        them and the program looks like it has one mistake.
+        """
+        errs = _errors("""
+public fn g(@Byte, @Byte -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ 0 }
+public fn f(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ g(999, 999) }
+""")
+        e149 = [e for e in errs if e.error_code == "E149"]
+        assert len(e149) == 2, [e.description for e in e149]
+        assert len({e.location.column for e in e149}) == 2, [
+            e.location.column for e in e149
+        ]
+
+    def test_a_bad_literal_and_a_bad_arity_are_two_true_errors(self) -> None:
+        """The literal check runs ahead of the arity gate (PR #1282 review).
+
+        `g(999)` against a two-parameter `g` used to report the arity
+        mismatch alone, because the argument never reached a `@Byte`
+        context.  Both statements are true and neither implies the
+        other, so both are reported — a count increase in a position
+        that is not a join, unlike the multi-literal branch case.
+        """
+        codes = [e.error_code for e in _errors("""
+public fn g(@Byte, @Byte -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ 0 }
+public fn f(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ g(999) }
+""")]
+        assert "E149" in codes, codes
+        assert "E201" in codes, codes
+
+    def test_an_unknown_callee_still_reports_only_itself(self) -> None:
+        """No callee, no expected type, so no `@Byte` verdict to add.
+
+        The complement of the arity case: the range check reaches the
+        literal only where something told it the target type, so an
+        unresolved call is unchanged rather than gaining a second
+        diagnostic.  (E200 is a *warning* here, so the assertion has to
+        look at both streams — an `_errors`-only check would read the
+        empty error list as agreement.)
+        """
+        src = """
+public fn f(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ nosuch(999) }
+"""
+        codes = [d.error_code for d in _errors(src) + _warnings(src)]
+        assert "E149" not in codes, codes
+        assert "E200" in codes, codes
+
+    def test_a_supersede_whose_message_repeats_keeps_the_verdict(
+        self,
+    ) -> None:
+        """One verdict per literal — never ZERO (PR #1283 review).
+
+        Superseding withdraws the provisional diagnostic but deliberately
+        KEEPS its `_seen_diag_keys` entry, so the withdrawn message cannot
+        reappear from a third synthesis.  If the contextual verdict renders
+        the SAME message, `_error` collapses it as a duplicate and appends
+        nothing — and the withdrawal has then removed the only verdict the
+        literal had.  The #812 gate opens silently, which is the one
+        outcome `_literal_range_error` exists to prevent.
+
+        Driven at the function's own boundary rather than through source:
+        every contextual verdict a program can currently reach re-renders
+        the message (`@Byte; the range is 0..255` supersedes `@Nat (u64)`),
+        so no `.vera` input reproduces it.  That makes this the invariant's
+        only honest test — and the invariant, not the reachability, is what
+        the next contextual verdict will rest on.
+        """
+        checker = TypeChecker(source="\n\n\n", file="m.vera")
+        node = ast.IntLit(
+            value=_U64_MAX + 1,
+            span=ast.Span(line=3, column=5, end_line=3, end_column=25),
+        )
+        message = (
+            f"Integer literal {_U64_MAX + 1} is out of range for "
+            f"@Nat (u64); the maximum is {_U64_MAX}."
+        )
+        # Pass 1 — unconstrained, so a GUESS at `@Nat`.
+        checker._literal_range_error(
+            node, message, rationale="r", fix="f", contextual=False)
+        assert len([e for e in checker.errors
+                    if e.error_code == "E149"]) == 1, checker.errors
+        # Pass 2 — contextual, and (the point) byte-identical.
+        checker._literal_range_error(
+            node, message, rationale="r", fix="f", contextual=True)
+        e149 = [e for e in checker.errors if e.error_code == "E149"]
+        assert len(e149) == 1, (
+            "a contextual verdict repeating the provisional message must "
+            f"leave the literal exactly one E149, got {len(e149)}"
+        )
+        # ... and the surviving verdict is recorded as CONTEXTUAL, so a
+        # later unconstrained synthesis is still dropped rather than
+        # re-opening the question.
+        assert checker._literal_range_verdict[id(node)][1] is True
+
+    def test_byte_context_reports_the_byte_bound_not_the_u64_one(
+        self,
+    ) -> None:
+        """A vast literal in a `@Byte` context gets ONE error, about Byte."""
+        errs = _errors("""
+public fn f(@Unit -> @Byte)
+  requires(true) ensures(true) effects(pure)
+{ 18446744073709551616 }
+""")
+        e149 = [e for e in errs if e.error_code == "E149"]
+        assert len(e149) == 1, [(e.error_code, e.description) for e in errs]
+        assert "255" in e149[0].description, e149[0].description
+
 
 # =====================================================================
 # #898 — cross-argument type-argument merge for a generic bound by
@@ -2848,7 +3113,10 @@ public fn main(@Unit -> @Bool)
     def test_handler_init_intlit_coercion(self) -> None:
         """The init-expected change also enables IntLit coercion for
         non-ctor inits: `@Byte = 5` checks (bidirectional IntLit -> Byte,
-        as at every other expected-type site); out-of-range stays E331."""
+        as at every other expected-type site); out-of-range is still
+        rejected — since #1252 by E149 at the literal, which names the
+        0..255 range instead of describing the @Byte/@Nat mismatch the
+        fall-through produced."""
         _check_ok("""
 public fn main(@Unit -> @Int)
   requires(true) ensures(true) effects(pure)
@@ -2872,7 +3140,7 @@ public fn main(@Unit -> @Int)
     0
   }
 }
-""", "Handler state initial value")
+""", "out of range for @Byte")
 
     def test_compat_fn_effect_row_not_wildcarded(self) -> None:
         """Unit-level guardrail on `_compatible_modulo_typevars`: a fresh
