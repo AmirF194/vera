@@ -170,6 +170,51 @@ Local definitions shadow imported declarations. If a module imports `magnitude` 
 
 The shadowing rule is implemented via `setdefault`: imported names are injected into the type environment only if no local definition with the same name already exists.
 
+### 8.5.2.1 Resolution Inside an Imported Module's Body
+
+A module's own bodies resolve in **that module's** namespace: its declarations
+plus what it imports (§8.5.1, §8.5.2). This is independent of which program is
+compiling it. A bare call inside `mid.vera` names what `mid` can see, never what
+the importing program happens to declare.
+
+The importing program's namespace is a different set, and the two need not agree
+on a name. A declaration is reachable by its **bare name in the importing
+program** only when all three hold:
+
+- it is `public`;
+- the importing program's import list admits it (a wildcard import admits every
+  public declaration; a selective import admits only the names it lists);
+- the importing program does not itself declare that name (§8.5.2 shadowing).
+
+A declaration failing any of these is **qualified-only**: it does not own the
+bare name in the importing program. It is still called by bare name from its own
+module's bodies, which resolve in their own namespace as above.
+
+Qualified-only is not the same as importer-callable. A module-qualified call
+(§8.5.3) reaches a declaration only when it is `public` **and** its module is
+imported directly **and** the import list admits the name; the other cases are
+rejected rather than routed — a private declaration is `E232`, a name outside the
+import list is `E231`, and a module the program does not import at all is not in
+scope to qualify. So the only declarations that fail the bare-name predicate and
+remain callable by an importer are the public, admitted ones of a directly
+imported module that the importer also shadows. Everything else that is
+qualified-only — private declarations, names outside the import list, and
+everything in a transitively reached module — is reachable only from its own
+module's bodies; it is compiled under a module-qualified internal name (§8.9.1)
+so that the flattened namespace keeps it distinct, which is a naming rule, not a
+call surface.
+
+Two same-named qualified-only declarations in different modules are distinct, and
+neither is the importer's.
+
+A module reached only **transitively** (§8.6.4) contributes nothing to the
+importing program's namespace, so all of its declarations are qualified-only
+there, whatever their visibility.
+
+These are properties of the importer, not of the declaration: the same module,
+imported two ways, can have a declaration own the bare name in one program and be
+qualified-only in another.
+
 ### 8.5.3 Module-Qualified Calls
 
 Vera supports module-qualified function calls using `::` to separate the module path from the function name:
@@ -346,6 +391,10 @@ The code generator uses a **flattening** strategy: imported function bodies are 
 2. **Pass 2.5 — Imported function compilation**: After compiling local functions (Pass 2), compile all imported function bodies — both public and private — as internal WASM functions. Private helpers must be compiled because imported public functions may call them.
 
 3. **Call desugaring**: `ModuleCall` AST nodes (e.g., `vera.math.magnitude(x)`) are desugared to flat `FnCall` nodes (e.g., `magnitude(x)`) since the imported function exists in the same WASM module.
+
+4. **Qualified-only naming**: flattening puts every module's declarations in one WASM namespace, where a bare name can belong to only one of them. A declaration that owns the importing program's bare name (§8.5.2.1) keeps it; every other module declaration — private, outside the importer's import filter, shadowed by a local, or reached only transitively — is emitted and called under a **module-qualified** name derived from its owning module's path, so two modules' same-named declarations stay distinct. This applies to generic declarations by way of their instantiations: a qualified-only generic's monomorphized clones are named under its owning module, never under the bare name, so an importer's same-named generic and a module's compile to different functions.
+
+5. **Bare calls in imported bodies**: because an imported body resolves in its own module's namespace (§8.5.2.1), a bare call there is compiled against what THAT module sees. Where the callee is qualified-only, the call is compiled to the callee's module-qualified name — including when the callee belongs to a module the body's own module imported, rather than to the body's own module. Without this the flattened bare name would be resolved in the importing program's namespace, and a same-named declaration there would silently be called instead.
 
 ### 8.9.2 Export Rules
 

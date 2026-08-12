@@ -122,8 +122,10 @@ class InferenceMixin:
         #   QualifiedCall     → from `_infer_qualified_call_wasm_type`
         #   ConstructorCall   → "i32" (heap ptr) if known
         #   NullaryConstructor → "i32" (heap ptr) if known
-        #   MatchExpr         → from first arm body
-        #   IfExpr            → from then-branch
+        #   MatchExpr         → from the first arm whose body infers a type
+        #                       (an all-throwing arm contributes none, #1276)
+        #   IfExpr            → from the then-branch, falling back to the else
+        #                       branch when the then-branch is typeless (#1276)
         #   Block             → from trailing expr
         #   HandleExpr        → from body
         #   IndexExpr         → from element type
@@ -198,9 +200,19 @@ class InferenceMixin:
         if isinstance(expr, ast.NullaryConstructor):
             return "i32" if expr.name in self._ctor_layouts else None
         if isinstance(expr, ast.MatchExpr):
-            if expr.arms:
-                return self._infer_expr_wasm_type(expr.arms[0].body)
-            return None  # pragma: no cover
+            # #1276 (F4): the FIRST arm that yields a type, not arm 0.  An arm
+            # whose every path throws contributes no WAT type, and reading only
+            # arm 0 answered `None` for the whole match — so an enclosing
+            # `handle` block was emitted result-less while the completing arms
+            # left a value in it (`values remaining on stack at end of block`,
+            # from check-green source).  Arms that DO complete must agree on
+            # their type (the checker enforces that), so the first answer is the
+            # answer.
+            for arm in expr.arms:
+                arm_wt = self._infer_expr_wasm_type(arm.body)
+                if arm_wt is not None:
+                    return arm_wt
+            return None
         if isinstance(expr, ast.HandleExpr):
             # Handle expression result type is the body's result type
             if expr.body.expr:
@@ -218,7 +230,14 @@ class InferenceMixin:
         if isinstance(expr, ast.QualifiedCall):
             return self._infer_qualified_call_wasm_type(expr)
         if isinstance(expr, ast.IfExpr):
-            return self._infer_block_result_type(expr.then_branch)
+            # #1276 (F4): fall through to the ELSE branch when the THEN branch
+            # yields no type.  A `then` that always throws is typeless, and
+            # answering `None` for the whole `if` on that basis mistyped every
+            # consumer of the result — see the MatchExpr arm above, same shape.
+            then_wt = self._infer_block_result_type(expr.then_branch)
+            if then_wt is not None:
+                return then_wt
+            return self._infer_block_result_type(expr.else_branch)
         if isinstance(expr, ast.Block):
             return self._infer_block_result_type(expr)
         if isinstance(expr, (ast.ForallExpr, ast.ExistsExpr)):
@@ -577,7 +596,15 @@ class InferenceMixin:
             if expr.op == ast.UnaryOp.NOT:
                 return "i32"
         if isinstance(expr, ast.IfExpr):
-            return self._infer_block_result_type(expr.then_branch)
+            # #1276 (F4): the twin of the `_infer_expr_wasm_type` arm — a
+            # `then` branch whose every path throws yields no type, and
+            # answering `None` for the whole `if` on that basis left an
+            # enclosing `handle` block result-less while the completing branch
+            # pushed a value into it.
+            then_wt = self._infer_block_result_type(expr.then_branch)
+            if then_wt is not None:
+                return then_wt
+            return self._infer_block_result_type(expr.else_branch)
         if isinstance(expr, ast.FnCall):
             return self._infer_fncall_wasm_type(expr)
         if isinstance(expr, ast.QualifiedCall):
@@ -593,9 +620,13 @@ class InferenceMixin:
         if isinstance(expr, ast.NullaryConstructor):
             return "i32" if expr.name in self._ctor_layouts else None
         if isinstance(expr, ast.MatchExpr):
-            if expr.arms:
-                return self._infer_expr_wasm_type(expr.arms[0].body)
-            return None  # pragma: no cover
+            # #1276 (F4): the first arm that yields a type — see the twin arm
+            # in `_infer_expr_wasm_type`.
+            for arm in expr.arms:
+                arm_wt = self._infer_expr_wasm_type(arm.body)
+                if arm_wt is not None:
+                    return arm_wt
+            return None
         if isinstance(expr, ast.IndexExpr):
             elem_type = self._infer_index_element_type(expr)
             return _element_wasm_type(elem_type) if elem_type else None

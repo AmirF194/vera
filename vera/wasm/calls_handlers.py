@@ -2276,6 +2276,21 @@ class CallsHandlersMixin:
         if result_wt is None:
             result_wt = self._infer_expr_wasm_type(expr.body)
 
+        # #1276: `result_wt is None` means one of TWO things, and the two want
+        # opposite lowerings.  **Unit** — the handler completes carrying no
+        # value, and a result-less `block` is exactly right.  **Divergence** —
+        # every path out of the clause AND out of the handled body is a
+        # `throw`, so the block never completes at all; a result-less block
+        # then lands in a context expecting a value and the module is rejected
+        # at load (`expected i64 but nothing on stack`) from check-green,
+        # verify-green source.  Distinguishing them is the whole fix: the
+        # divergent shape keeps its result-less block (it truly leaves nothing)
+        # and gains an `unreachable` terminator, which makes the stack
+        # polymorphic for whatever the context wanted.  The instruction is
+        # emitted where control provably never arrives, so it cannot trap a
+        # program that runs.
+        diverges = result_wt is None and self._handle_exn_always_throws(expr)
+
         # Save/inject throw as an effect op for the body
         # Saved by reference, replaced with a fresh copy, restored in a
         # `finally` — the same discipline as the State twin: the body
@@ -2356,7 +2371,9 @@ class CallsHandlersMixin:
         elif result_wt:
             result_spec = f" (result {result_wt})"
         else:
-            result_spec = ""  # pragma: no cover
+            # Unit, or (#1276) a handler no path completes — both leave the
+            # block result-less; only the second gets the `unreachable` tail.
+            result_spec = ""
         if is_pair:
             thrown_spec = " (result i32 i32)"
         else:
@@ -2382,5 +2399,80 @@ class CallsHandlersMixin:
             instructions.append(f"  local.set {thrown_local}")
         instructions.extend(f"  {i}" for i in handler_instrs)
         instructions.append("end")
+        if diverges:  # #1276 — see the `diverges` derivation above
+            instructions.append("unreachable")
 
         return instructions
+
+    def _handle_exn_always_throws(self, expr: ast.HandleExpr) -> bool:
+        """Does EVERY path out of this ``handle[Exn]`` end in a ``throw`` (#1276)?
+
+        True exactly when the handled body diverges (so the handler is entered
+        or the throw escapes) and every clause body diverges too (so being
+        entered does not help).  Both halves are required: a completing clause
+        is the ordinary shape, and its inferred type is the block's result.
+
+        Deliberately conservative — an unrecognized shape answers ``False`` and
+        keeps the pre-existing lowering — because the answer authorizes an
+        ``unreachable``, and a wrong ``True`` would trap a program that runs.
+        """
+        return bool(expr.clauses) and self._expr_always_throws(
+            expr.body, throw_installed=True,
+        ) and all(
+            # A clause body is translated with the ENCLOSING scope's ops
+            # restored (this handler's `throw` is injected over the handled
+            # body only), so a `throw` there denotes an outer handler's op or
+            # the declaration's own effect row — which is what makes the
+            # rethrow shape divergent rather than a call to some `throw`.
+            self._expr_always_throws(
+                clause.body, throw_installed="throw" in self._effect_ops,
+            )
+            for clause in expr.clauses
+        )
+
+    def _expr_always_throws(
+        self, expr: ast.Expr, *, throw_installed: bool,
+    ) -> bool:
+        """Does every path through *expr* leave via a ``throw`` (#1276)?
+
+        The narrow structural cases that can carry a divergent tail: a block
+        (its trailing expression), both arms of an ``if``, every arm of a
+        ``match``, a nested ``handle[Exn]`` that itself always throws, and the
+        ``throw`` call at the leaf.  Everything else answers ``False``.
+
+        ``throw_installed`` says whether a bare ``throw`` at this point IS the
+        effect operation.  Inside a ``handle[Exn<E>]``'s handled body it always
+        is — the injection at the translation site is unconditional — while
+        elsewhere the enclosing ``_effect_ops`` decides, so a program that
+        declares its own ``fn throw`` is read the same way the lowering reads
+        it.
+        """
+        if isinstance(expr, ast.Block):
+            return self._expr_always_throws(
+                expr.expr, throw_installed=throw_installed,
+            )
+        if isinstance(expr, ast.IfExpr):
+            return self._expr_always_throws(
+                expr.then_branch, throw_installed=throw_installed,
+            ) and self._expr_always_throws(
+                expr.else_branch, throw_installed=throw_installed,
+            )
+        if isinstance(expr, ast.MatchExpr):
+            return bool(expr.arms) and all(
+                self._expr_always_throws(
+                    arm.body, throw_installed=throw_installed,
+                )
+                for arm in expr.arms
+            )
+        if isinstance(expr, ast.HandleExpr):
+            return self._handle_exn_always_throws(expr)
+        if isinstance(expr, ast.FnCall):
+            return expr.name == "throw" and throw_installed
+        if isinstance(expr, ast.QualifiedCall):
+            # The `Exn.throw(v)` spelling delegates to the bare dispatcher
+            # (#1269), so it diverges under the same condition.
+            return (
+                expr.qualifier == "Exn" and expr.name == "throw"
+                and throw_installed
+            )
+        return False

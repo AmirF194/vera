@@ -1367,6 +1367,110 @@ def test_private_to_private_generic_chain_symmetric_1029() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("gen_vis", "imports"),
+    [
+        ("public", "door"),        # public, outside the importer's filter
+        ("public", "gen2, door"),  # public, inside it, but locally shadowed
+        ("public", None),          # wildcard import, locally shadowed
+        ("private", "door"),       # the #1000 family (regression half)
+    ],
+    ids=["out_of_filter", "in_filter_shadowed", "wildcard", "private"],
+)
+def test_module_generic_qualified_only_symmetric_1274(
+    gen_vis: str, imports: str | None,
+) -> None:
+    """#1274: EVERY qualified-only module generic — the ones that do not own the
+    importer's bare name — is emitted and discovered under the SAME
+    ``mod$<path>$name`` base by both sides.
+
+    Pre-fix only the PRIVATE family was routed that way, so codegen collapsed a
+    public module generic's clone onto the importer's bare ``gen2$Bool`` while
+    the verifier resolved the module's contract: the module ran the importer's
+    body with a proved ``ensures`` (a false Tier-1), or dangled at
+    ``unknown func`` where the importer declared no such name.  The per-module
+    differential is what pins the two sides to one namespace: an asymmetry here
+    is precisely a clone one side emits and the other never verifies.
+    """
+    mod = _resolved_module(("lib",), (
+        "private fn v(@Unit -> @Int)\n"
+        "  requires(true) ensures(@Int.result == 111) effects(pure)\n"
+        "{ 111 }\n\n"
+        f"{gen_vis} forall<T> fn gen2(@T -> @Int)\n"
+        "  requires(true) ensures(@Int.result == 111) effects(pure)\n"
+        "{ v(()) }\n\n"
+        "public fn door(@Bool -> @Int)\n"
+        "  requires(true) ensures(@Int.result == 111) effects(pure)\n"
+        "{ gen2(@Bool.0) }\n"
+    ))
+    imp = "import lib;" if imports is None else f"import lib({imports});"
+    main_src = (
+        f"{imp}\n\n"
+        "private forall<T> fn gen2(@T -> @Int)\n"
+        "  requires(true) ensures(@Int.result == 999) effects(pure)\n"
+        "{ 999 }\n\n"
+        "public fn useLocal(@Unit -> @Int)\n"
+        "  requires(true) ensures(@Int.result == 999) effects(pure)\n"
+        "{ gen2(true) }\n\n"
+        "public fn main(@Unit -> @Int)\n"
+        "  requires(true) ensures(@Int.result == 111) effects(pure)\n"
+        "{ door(true) }\n"
+    )
+    codegen_set, verifier_set = _cross_module_sets(main_src, [mod])
+
+    assert ("mod$lib$gen2", ("Bool",)) in codegen_set, (
+        f"codegen must emit the module generic's clone under its owning "
+        f"module's base, got {sorted(codegen_set)}"
+    )
+    assert ("gen2", ("Bool",)) in codegen_set, (
+        f"the IMPORTER's own gen2<Bool> must still be emitted under the bare "
+        f"name it owns, got {sorted(codegen_set)}"
+    )
+    assert verifier_set == codegen_set, (
+        f"verifier ({sorted(verifier_set)}) must discover exactly codegen's "
+        f"emitted set ({sorted(codegen_set)}) — the qualified-only module "
+        f"generic namespace (#1274); a divergence is a false Tier-1"
+    )
+
+
+def test_module_generic_owning_bare_name_stays_unqualified_1274() -> None:
+    """The complement: a module generic that DOES own the importer's bare name
+    (public, in-filter, unshadowed) keeps that bare name on both sides.
+
+    Without this the widened predicate would be a blanket rename, and #774's
+    bare-call routing (`ext_id(42)` reaching the imported generic) would break
+    silently — the fix must move exactly the qualified-only families.
+    """
+    mod = _resolved_module(("lib",), (
+        "public forall<T> fn gen2(@T -> @Int)\n"
+        "  requires(true) ensures(@Int.result == 111) effects(pure)\n"
+        "{ 111 }\n\n"
+        "public fn door(@Bool -> @Int)\n"
+        "  requires(true) ensures(@Int.result == 111) effects(pure)\n"
+        "{ gen2(@Bool.0) }\n"
+    ))
+    main_src = (
+        "import lib(gen2, door);\n\n"
+        "public fn main(@Unit -> @Int)\n"
+        "  requires(true) ensures(@Int.result == 222) effects(pure)\n"
+        "{ door(true) + gen2(3) }\n"
+    )
+    codegen_set, verifier_set = _cross_module_sets(main_src, [mod])
+
+    assert ("gen2", ("Bool",)) in codegen_set, (
+        f"an unshadowed in-filter public module generic must keep the bare "
+        f"clone name, got {sorted(codegen_set)}"
+    )
+    assert not any(n.startswith("mod$lib$gen2") for n, _ in codegen_set), (
+        f"it must NOT be renamed — it owns the importer's bare name, "
+        f"got {sorted(codegen_set)}"
+    )
+    assert verifier_set == codegen_set, (
+        f"verifier ({sorted(verifier_set)}) must discover exactly codegen's "
+        f"emitted set ({sorted(codegen_set)})"
+    )
+
+
 def test_generic_typearg_from_where_helper_return_is_discovered() -> None:
     """A generic whose type arg is fixed ONLY by a where-helper's return must be
     discovered by the verifier at the same concrete type codegen emits.

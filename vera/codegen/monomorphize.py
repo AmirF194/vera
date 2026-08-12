@@ -136,6 +136,16 @@ class MonomorphizationMixin:
             # rewrite does.  `_fn_sigs` — not `fn_ret_types` above, which
             # drops any name whose return WAT type has no Vera collapse.
             fn_names=frozenset(self._fn_sigs),
+            # #1274 (F1): every (module, name) the Pass-0 classification made
+            # qualified-only, so a rerouted `deep::gen(...)` is not mistaken for
+            # an instantiation of the importer's own `gen`.
+            qualified_module_generics=frozenset(
+                (path, name)
+                for path, by_name in getattr(
+                    self, "_shadowed_imported_generic_decls", {},
+                ).items()
+                for name in by_name
+            ),
         )
 
     def _monomorphize(
@@ -223,27 +233,39 @@ class MonomorphizationMixin:
         # every constrained-generic call site's constructor arguments, across
         # both the seed decls and the transitively emitted mono bodies below.
         self._eq_full_type_names: dict[str, str] = {}
-        seed_programs = [program, *(
-            mod.program for mod in getattr(self, "_resolved_modules", [])
-        )]
-        for seed_program in seed_programs:
-            # #999: seed from resolved-module bodies too (their #1015-hoisted +
-            # #1014-qualified copies).  An imported ``compute``'s body call to
-            # its own nested generic ``compute$where$gid`` (or a top-level
-            # imported generic) is only reachable through the module's decls, not
-            # the main program's — so without walking them the importer emits no
-            # clone and the module body's call dangles.  The verifier's
-            # `_collect_instantiations` walks the identical set, keeping the #732
-            # differential in lockstep.
-            for tld in seed_program.declarations:
-                decl = tld.decl
-                if isinstance(decl, ast.FnDecl) and not decl.forall_vars:
-                    mono.collect_calls_in_node(
-                        decl, generic_decls, ctor_to_adt, instances,
-                    )
-                    self._collect_eq_full_type_names(
-                        decl, mono, generic_decls, ctor_to_adt,
-                    )
+        # #999: seed from resolved-module bodies too.  An imported ``compute``'s
+        # body call to its own nested generic ``compute$where$gid`` (or a
+        # top-level imported generic) is only reachable through the module's
+        # decls, not the main program's — so without walking them the importer
+        # emits no clone and the module body's call dangles.  The verifier's
+        # `_collect_instantiations` walks the identical set, keeping the #732
+        # differential in lockstep.
+        #
+        # #1274 (F1): the module bodies walked here are the REROUTED copies
+        # (`_imported_fn_decls`), not the raw `mod.program`.  A bare call that
+        # Pass 0 turned into a `ModuleCall` is no longer a call to the bare name,
+        # and seeding from the pre-reroute AST recorded it anyway — codegen
+        # emitted a clone of the IMPORTER's same-named generic that nothing
+        # calls and the verifier (which walks its rerouted copies) never
+        # discovers: a differential desync, and an unverified clone if that
+        # generic's contract lied.  These decls carry their where-helpers both
+        # nested and as separate entries; `instances` is a set, so the overlap
+        # costs nothing.
+        seed_decls: list[ast.FnDecl] = [
+            tld.decl for tld in program.declarations
+            if isinstance(tld.decl, ast.FnDecl)
+        ]
+        seed_decls.extend(
+            fdecl for _mp, fdecl in getattr(self, "_imported_fn_decls", [])
+        )
+        for decl in seed_decls:
+            if not decl.forall_vars:
+                mono.collect_calls_in_node(
+                    decl, generic_decls, ctor_to_adt, instances,
+                )
+                self._collect_eq_full_type_names(
+                    decl, mono, generic_decls, ctor_to_adt,
+                )
 
         # Generate monomorphized FnDecls with transitive closure.
         # After generating the first round, scan the monomorphized bodies
@@ -747,15 +769,23 @@ class MonomorphizationMixin:
                 self._collect_shadowed_qualified_calls(
                     decl, path, decls_by_name, ctor_to_adt, instances,
                 )
-        # #1029: also seed from THIS module's imported NON-generic bodies (and
-        # their where-helpers), which after the loop-top reroute carry a
-        # ``path::inner(...)`` ModuleCall for each private-generic call.  Without
-        # this a NON-generic caller of a private generic (`use_it` → `inner`)
-        # never seeds `mod$<path>$inner$Int`, so Pass 2.5 emits `use_it`'s body
-        # with a `call $inner` that dangles (`unknown func`) at run.  These decls
-        # already live in `_imported_fn_decls` (rerouted); filter to this path.
-        for mp, fdecl in self._imported_fn_decls:
-            if mp == path and not fdecl.forall_vars:
+        # #1029: also seed from the imported NON-generic bodies (and their
+        # where-helpers), which after the loop-top reroute carry a
+        # ``path::inner(...)`` ModuleCall for each qualified-only generic call.
+        # Without this a NON-generic caller of a private generic (`use_it` →
+        # `inner`) never seeds `mod$<path>$inner$Int`, so Pass 2.5 emits
+        # `use_it`'s body with a `call $inner` that dangles (`unknown func`) at
+        # run.  These decls already live in `_imported_fn_decls` (rerouted).
+        #
+        # #1274 (F1): scan EVERY module's decls, not only this path's.  A module
+        # can call a DIFFERENT module's qualified-only generic — `mid`'s body
+        # calling `deep`'s `gen` — and that reroute lands a `deep::gen(...)`
+        # ModuleCall inside a decl registered under `mid`.  Filtering by the
+        # OWNING path skipped it, so no `mod$deep$gen$Bool` was emitted and
+        # `mid`'s body was dropped.  The walk itself already matches on the call
+        # node's own `path`, so widening the scan cannot pick up a foreign one.
+        for _mp, fdecl in self._imported_fn_decls:
+            if not fdecl.forall_vars:
                 self._collect_shadowed_qualified_calls(
                     fdecl, path, decls_by_name, ctor_to_adt, instances,
                 )
@@ -803,9 +833,13 @@ class MonomorphizationMixin:
             trans_shadow: dict[str, set[tuple[str, ...]]] = {
                 name: set() for name in decls_by_name
             }
-            mono.collect_calls_in_node(
-                clone, decls_by_name, ctor_to_adt, trans_shadow,
-            )
+            # #1274 (F1): this scan is keyed on THIS module's own generics, so a
+            # `path::sibling(...)` here is the entry meant — see
+            # `Monomorphizer.shadowed_module_scope`.
+            with mono.shadowed_module_scope(path):
+                mono.collect_calls_in_node(
+                    clone, decls_by_name, ctor_to_adt, trans_shadow,
+                )
             for s_name, s_types in trans_shadow.items():
                 for s_ct in sorted(s_types):
                     if (s_name, s_ct) not in shadowed_seen:
