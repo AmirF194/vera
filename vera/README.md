@@ -126,20 +126,20 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `  extensions.py` | 146 | | vera/speculativeEdit proof-delta | |
 | `  server.py` | 287 | | pygls wiring, single-session serialisation | |
 | `  workflows.py` | 442 | | Skill-layer workflows: enforced edit sequences (#222 F) | |
-| `codegen/` | 18,093 | Compile | Codegen orchestrator (mixin package) | `compile()`, `execute()` |
-| `  api.py` | 1,400 | | Public API, dataclasses, `compile()`/`execute()` orchestration, core IO host bindings (#421) | |
+| `codegen/` | 18,981 | Compile | Codegen orchestrator (mixin package) | `compile()`, `execute()` |
+| `  api.py` | 1,402 | | Public API, dataclasses, `compile()`/`execute()` orchestration, core IO host bindings (#421) | |
 | `  memory.py` | 105 | | Compile-time ADT layout helpers (`ConstructorLayout`, alignment) (#421) | |
-| `  core.py` | 2,805 | | CodeGenerator class, orchestration, ability op rewriting (Pass 1.6), skip propagation to callers (#1100) | |
-| `  modules.py` | 1,241 | | Cross-module registration + call detection (C7e), per-module alias + source scopes (#1111/#1186) — `_module_alias_scope` swaps the alias maps *and* the `AliasEnv` every codegen rendering goes through as one pair (#1208) | |
+| `  core.py` | 2,952 | | CodeGenerator class, orchestration, ability op rewriting (Pass 1.6), skip propagation to callers (#1100) | |
+| `  modules.py` | 1,242 | | Cross-module registration + call detection (C7e), per-module alias + source scopes (#1111/#1186) — `_module_alias_scope` swaps the alias maps *and* the `AliasEnv` every codegen rendering goes through as one pair (#1208) | |
 | `  registration.py` | 499 | | Pass 1 forward declarations, ADT layout | |
-| `  monomorphize.py` | 1,408 | | Generic instantiation, type inference, ability constraint checking (Pass 1.5) | |
+| `  monomorphize.py` | 1,534 | | Generic instantiation, type inference, ability constraint checking (Pass 1.5) | |
 | `  functions.py` | 1,430 | | Function body compilation, GC prologue/epilogue (Pass 2) | |
 | `  tail_position.py` | 106 | | Tail-position analysis for the function body compiler | |
-| `  closures.py` | 1,037 | | Closure lifting, GC instrumentation | |
-| `  contracts.py` | 1,332 | | Runtime pre/postconditions, old state snapshots, decreases termination guard (entry check-and-set, per-function chain state, ADT rank helpers, self-tail site checks); the refinement boundary guard derives its binder from `naming.refinement_binder_parts` and layers the erased-base skip and the nested-base E618 on top.  Also the ONE derivation of what that guard layer lowers — `_tuple_component_guard_sites` decomposes a boundary tuple for the emitter, the return-epilogue gate and the host-import pre-scan alike, and `_signature_refinement_predicates` enumerates every predicate a signature will be guarded by (#1210) | |
-| `  assembly.py` | 1,472 | | WAT module assembly, `$alloc`, `$gc_collect` | |
-| `  compilability.py` | 1,002 | | Compilability checks; the two host-import pre-scans (State/Exn families and IO/Markdown/Regex builtins), walking each function's body, its contract predicates and every signature the guard layer will check — including closures', cycle-guarded | |
-| `  wasi.py` | 4,820 | | WASI Preview 2 component/adapter emitter — `--target wasi-p2` / `--world server` (#237, #853) | |
+| `  closures.py` | 1,040 | | Closure lifting, GC instrumentation | |
+| `  contracts.py` | 1,337 | | Runtime pre/postconditions, old state snapshots, decreases termination guard (entry check-and-set, per-function chain state, ADT rank helpers, self-tail site checks); the refinement boundary guard derives its binder from `naming.refinement_binder_parts` and layers the erased-base skip and the nested-base E618 on top.  Also the ONE derivation of what that guard layer lowers — `_tuple_component_guard_sites` decomposes a boundary tuple for the emitter, the return-epilogue gate and the host-import pre-scan alike, and `_signature_refinement_predicates` enumerates every predicate a signature will be guarded by (#1210) | |
+| `  assembly.py` | 1,502 | | WAT module assembly, `$alloc`, `$gc_collect` | |
+| `  compilability.py` | 1,004 | | Compilability checks; the two host-import pre-scans (State/Exn families and IO/Markdown/Regex builtins), walking each function's body, its contract predicates and every signature the guard layer will check — including closures', cycle-guarded | |
+| `  wasi.py` | 4,828 | | WASI Preview 2 component/adapter emitter — `--target wasi-p2` / `--world server` (#237, #853) | |
 | `runtime/` | 4,785 | Execute | wasmtime host layer (#421): traps + per-effect host-binding families | `register_*()`, `WasmTrapError` |
 | `  traps.py` | 493 | | `WasmTrapError`, `_classify_trap`, source-backtrace resolution | |
 | `  heap.py` | 1,376 | | WASM memory marshalling primitives, ADT/Option/Array/bucket codecs, `_ShadowGuard`, shared collection helpers | |

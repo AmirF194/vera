@@ -653,6 +653,7 @@ public fn deep(@Box<A{hops - 1}> -> @Int)
     program = parse_to_ast(source)
     checker = TypeChecker(source=source, file="<deep2>")
     checker.check_program(program)
+    assert not [d for d in checker.errors if d.severity == "error"]
     fn = next(d.decl for d in program.declarations
               if isinstance(d.decl, ast.FnDecl))
     env = alias_env_from_environment(checker.env)
