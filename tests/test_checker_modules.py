@@ -19,17 +19,9 @@ from tests.checker_helpers import (
     _check_ok,
     _errors,
 )
-
-
-def _resolved_module(path: tuple[str, ...], source: str) -> ResolvedModule:
-    """Build a ResolvedModule from source text (shared test helper)."""
-    prog = parse_to_ast(source)
-    return ResolvedModule(
-        path=path,
-        file_path=Path(f"/fake/{'/'.join(path)}.vera"),
-        program=prog,
-        source=source,
-    )
+from tests.module_fixture_helpers import (
+    fake_resolved_module as _resolved_module,
+)
 
 
 # =====================================================================

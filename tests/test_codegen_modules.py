@@ -19,9 +19,10 @@ from vera.codegen import (
     execute,
 )
 from vera.parser import parse_file
-from vera.resolver import ResolvedModule
 from vera.transform import transform
 from vera.monomorphize import resolve_fn_type_alias
+
+from tests.module_fixture_helpers import resolved_module
 
 
 # =====================================================================
@@ -175,29 +176,7 @@ private fn internal(@Int -> @Int)
 { @Int.0 }
 """
 
-    @staticmethod
-    def _resolved(
-        path: tuple[str, ...], source: str,
-    ) -> ResolvedModule:
-        """Build a ResolvedModule from source text."""
-        import tempfile
-        from pathlib import Path
-
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".vera", delete=False, encoding="utf-8"
-        ) as f:
-            f.write(source)
-            f.flush()
-            fpath = f.name
-
-        tree = parse_file(fpath)
-        prog = transform(tree)
-        return ResolvedModule(
-            path=path,
-            file_path=Path(fpath),
-            program=prog,
-            source=source,
-        )
+    _resolved = staticmethod(resolved_module)
 
     @classmethod
     def _compile_mod(
@@ -1308,33 +1287,7 @@ class TestCrossModuleNameCollision661:
     module attribution, this test will flag the change.
     """
 
-    @staticmethod
-    def _resolved(
-        path: tuple[str, ...], source: str,
-    ) -> ResolvedModule:
-        import tempfile
-        from pathlib import Path
-        # Explicit utf-8 encoding (Windows-portability) + try/finally
-        # cleanup so the temp file is removed after parse + transform.
-        # Safe because `compile()` works off the in-memory `source`
-        # string + the AST `prog`, not by re-reading the file path
-        # (CR-2 on PR #664).
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".vera", delete=False,
-            encoding="utf-8",
-        ) as f:
-            f.write(source)
-            f.flush()
-            fpath = f.name
-        try:
-            tree = parse_file(fpath)
-            prog = transform(tree)
-            return ResolvedModule(
-                path=path, file_path=Path(fpath), program=prog,
-                source=source,
-            )
-        finally:
-            Path(fpath).unlink(missing_ok=True)
+    _resolved = staticmethod(resolved_module)
 
     def test_cross_module_forall_name_shadow_compiles_and_runs(
         self,
@@ -1477,12 +1430,7 @@ public fn main(@Unit -> @Int)
 class TestNameCollisionDetection:
     """Name collisions across imported modules produce diagnostics."""
 
-    @staticmethod
-    def _resolved(
-        path: tuple[str, ...], source: str,
-    ) -> ResolvedModule:
-        """Build a ResolvedModule from source text."""
-        return TestCrossModuleCodegen._resolved(path, source)
+    _resolved = staticmethod(resolved_module)
 
     @classmethod
     def _compile_mod(
