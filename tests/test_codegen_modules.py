@@ -46,13 +46,20 @@ def _parse_from_temp_file(source: str) -> tuple[ast.Program, str]:
     """
     import tempfile
 
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".vera", delete=False, encoding="utf-8"
-    ) as f:
-        f.write(source)
-        f.flush()
-        path = f.name
+    # Same shape as `tests/module_fixture_helpers.resolved_module`, and
+    # for the same two reasons: the `try` is entered before anything that
+    # can fail (a write error would otherwise strand the file, since
+    # `delete=False` outlives the block), and the single unlink sits
+    # AFTER the `with` has closed the handle — Windows cannot delete an
+    # open one (PR #1282 review).
+    tmp = tempfile.NamedTemporaryFile(  # noqa: SIM115 — closed by the `with`
+        mode="w", suffix=".vera", delete=False, encoding="utf-8",
+    )
+    path = tmp.name
     try:
+        with tmp as f:
+            f.write(source)
+            f.flush()
         return transform(parse_file(path)), path
     finally:
         Path(path).unlink(missing_ok=True)

@@ -41,7 +41,6 @@ temp file per fixture it built.
 """
 from __future__ import annotations
 
-import os
 import tempfile
 from pathlib import Path
 
@@ -60,21 +59,24 @@ def resolved_module(path: tuple[str, ...], source: str) -> ResolvedModule:
     consumer needs, since none of them reopens it (see the module
     docstring).
     """
-    # The name is captured and the try entered BEFORE anything that can
-    # fail: `delete=False` means the file outlives the context manager, so
-    # a write or flush error inside it would strand the very file this
-    # helper promises to remove (PR #1282 review).
-    with tempfile.NamedTemporaryFile(
+    # Creation, then ONE cleanup site covering every path.  Two rules
+    # meet here and the obvious arrangement satisfies only one of them:
+    # the file must be removed even if the WRITE fails (`delete=False`
+    # means it outlives the context manager), and on Windows it cannot
+    # be removed while the handle is open at all — an unlink in an
+    # `except` inside the `with` is WinError 32 there, which is
+    # TESTING.md's first fixture rule (PR #1282 review, and its own CI).
+    # So the name is captured and the `try` entered before anything that
+    # can fail, the `with` closes the handle on its way out however it
+    # leaves, and the `finally` unlinks after it — never during.
+    tmp = tempfile.NamedTemporaryFile(  # noqa: SIM115 — closed by the `with`
         mode="w", suffix=".vera", delete=False, encoding="utf-8",
-    ) as f:
-        fp = f.name
-        try:
+    )
+    fp = tmp.name
+    try:
+        with tmp as f:
             f.write(source)
             f.flush()
-        except BaseException:
-            os.unlink(fp)
-            raise
-    try:
         return ResolvedModule(
             path=path,
             file_path=Path(fp),
@@ -82,7 +84,7 @@ def resolved_module(path: tuple[str, ...], source: str) -> ResolvedModule:
             source=source,
         )
     finally:
-        os.unlink(fp)
+        Path(fp).unlink(missing_ok=True)
 
 
 def fake_resolved_module(

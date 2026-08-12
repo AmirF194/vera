@@ -72,6 +72,61 @@ class TestModuleFixtureBuilders:
             resolved_module(("m",), object())  # type: ignore[arg-type]
         assert set(glob.glob(pattern)) - before == set()
 
+    def test_the_handle_is_closed_before_every_unlink(self) -> None:
+        """Windows cannot delete a file whose handle is still open.
+
+        The failure-path cleanup added for the leak sat INSIDE the
+        `with`, so on Windows it raised `PermissionError` (WinError 32)
+        instead of removing anything — green on POSIX, red on all three
+        Windows cells (PR #1282 CI).  The property is an ordering, and
+        an ordering is observable here: record whether the handle is
+        closed at the moment each unlink is issued, on both paths.  A
+        cleanup that runs too early shows `closed=False` and would raise
+        there.
+        """
+        import pathlib as _pathlib
+        import tempfile as _tempfile
+
+        from tests import module_fixture_helpers as helpers
+
+        real_ntf = _tempfile.NamedTemporaryFile
+        real_unlink = _pathlib.Path.unlink
+        handles: list[object] = []
+        closed_at_unlink: list[bool] = []
+
+        def traced_ntf(*a: object, **kw: object) -> object:
+            handle = real_ntf(*a, **kw)  # type: ignore[arg-type]
+            handles.append(handle)
+            return handle
+
+        def traced_unlink(
+            self: _pathlib.Path, *a: object, **kw: object,
+        ) -> None:
+            closed_at_unlink.append(
+                all(h.closed for h in handles),  # type: ignore[attr-defined]
+            )
+            real_unlink(self, *a, **kw)  # type: ignore[arg-type]
+
+        helpers.tempfile.NamedTemporaryFile = traced_ntf  # type: ignore[assignment]
+        _pathlib.Path.unlink = traced_unlink  # type: ignore[assignment,method-assign]
+        try:
+            handles.clear()
+            closed_at_unlink.clear()
+            helpers.resolved_module(("m",), "module m;\n")
+            success = list(closed_at_unlink)
+
+            handles.clear()
+            closed_at_unlink.clear()
+            with pytest.raises(TypeError):
+                helpers.resolved_module(("m",), object())  # type: ignore[arg-type]
+            failure = list(closed_at_unlink)
+        finally:
+            helpers.tempfile.NamedTemporaryFile = real_ntf  # type: ignore[assignment]
+            _pathlib.Path.unlink = real_unlink  # type: ignore[method-assign]
+
+        assert success and all(success), success
+        assert failure and all(failure), failure
+
     def test_they_differ_by_parse_provenance_not_file_existence(
         self,
     ) -> None:
