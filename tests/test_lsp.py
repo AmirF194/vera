@@ -163,6 +163,18 @@ class TestUriToPath:
         assert root.name == "", result       # no filename component
         assert root.parent == root, result   # a root is its own parent
 
+    def test_a_malformed_uri_never_raises(self) -> None:
+        """`urlsplit` raises `ValueError` on a bad authority (PR #1282).
+
+        `file://[` is "Invalid IPv6 URL" — and the raise happened before
+        any of the guards below, on the same didOpen/didChange path that
+        `URLError` escaped from.  Totality is the property; the value is
+        the opaque label, because a URI this malformed names no path.
+        """
+        for uri in ("file://[", "file://[::1", "file://a[b]c/x",
+                    "file://]", "file://[]"):
+            assert uri_to_path(uri) == uri, uri
+
     def test_non_file_schemes_pass_through_unchanged(self) -> None:
         """`untitled:` and friends name no path — pre-existing behaviour.
 
@@ -784,6 +796,143 @@ class TestPathlessDocumentIsolation:
             assert "E230" in codes, (uri, codes)
 
 
+class TestRelativePathDocument:
+    """A relative path is a REAL location, and keeps its imports (#1282).
+
+    The path-less isolation rule keyed on "the parent is `.`", which is
+    true of `untitled:Untitled-1` AND of `entry.vera` — a real file
+    whose directory happens to be the process CWD.  So a genuine
+    relative-path document silently lost every import.
+    """
+
+    LIB = (
+        "module glib;\n"
+        "\n"
+        "public forall<T> fn pick(@T, @T -> @T)\n"
+        "  requires(true)\n  ensures(true)\n  effects(pure)\n"
+        "{\n  @T.1\n}\n"
+    )
+    SRC = (
+        "import glib;\n"
+        "\n"
+        "public fn main(@Nat, @Nat -> @Nat)\n"
+        "  requires(true)\n  ensures(true)\n  effects(pure)\n"
+        "{\n  glib::pick(@Nat.1, @Nat.0)\n}\n"
+    )
+
+    def test_a_relative_path_resolves_its_siblings(
+        self, tmp_path: pathlib.Path,
+    ) -> None:
+        (tmp_path / "glib.vera").write_text(self.LIB, encoding="utf-8")
+        (tmp_path / "entry.vera").write_text(self.SRC, encoding="utf-8")
+        original = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            result = VerificationSession().verify_source(
+                self.SRC, file="entry.vera",
+            )
+        finally:
+            os.chdir(original)
+        foreign = sorted({
+            ob.file for ob in result.obligations
+            if ob.file is not None and "glib" in ob.file
+        })
+        assert foreign, [ob.file for ob in result.obligations]
+
+    def test_the_absolute_spelling_agrees_with_it(
+        self, tmp_path: pathlib.Path,
+    ) -> None:
+        """Same document, two spellings, same module namespace."""
+        (tmp_path / "glib.vera").write_text(self.LIB, encoding="utf-8")
+        entry = tmp_path / "entry.vera"
+        entry.write_text(self.SRC, encoding="utf-8")
+        original = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            rel = VerificationSession().verify_source(
+                self.SRC, file="entry.vera",
+            )
+        finally:
+            os.chdir(original)
+        abs_ = VerificationSession().verify_source(self.SRC, file=str(entry))
+        assert len(rel.obligations) == len(abs_.obligations), (
+            len(rel.obligations), len(abs_.obligations))
+
+
+class TestModuleAwareDiagnosticsReachTheEditor:
+    """The module-aware check's errors must be published (#1282).
+
+    `analyze` type-checks module-BLIND and then calls `verify_source`,
+    which type-checks module-AWARE.  Only the second sees resolver
+    errors and module-typed errors, and it returns them as
+    `check_diagnostics` — which `analyze` discarded.  So a real type
+    error in a cross-module call produced a document with a warning, no
+    obligations, and no sign that anything had failed.
+    """
+
+    HDR = "  requires(true)\n  ensures(true)\n  effects(pure)\n"
+    LIB = (
+        "module glib;\n\npublic fn takes_int(@Int -> @Int)\n"
+        "  requires(true)\n  ensures(true)\n  effects(pure)\n"
+        "{ @Int.0 }\n"
+    )
+
+    def _codes(self, tmp_path: pathlib.Path, lib: str | None,
+               src: str) -> list[str | None]:
+        if lib is not None:
+            (tmp_path / "glib.vera").write_text(lib, encoding="utf-8")
+        entry = tmp_path / "entry.vera"
+        entry.write_text(src, encoding="utf-8")
+        a = analyze(VerificationSession(), entry.as_uri(), src)
+        return [d.code for d in to_lsp_diagnostics(a)]
+
+    def test_a_module_typed_error_is_published(
+        self, tmp_path: pathlib.Path,
+    ) -> None:
+        codes = self._codes(
+            tmp_path, self.LIB,
+            f'import glib;\n\npublic fn main(@Unit -> @Int)\n{self.HDR}'
+            '{ glib::takes_int("nope") }\n',
+        )
+        assert "E202" in codes, codes
+
+    def test_a_missing_module_is_published(
+        self, tmp_path: pathlib.Path,
+    ) -> None:
+        codes = self._codes(
+            tmp_path, None,
+            f'import nosuch;\n\npublic fn main(@Unit -> @Int)\n{self.HDR}'
+            '{ nosuch::f(1) }\n',
+        )
+        assert "E012" in codes, codes
+
+    def test_a_clean_document_gains_no_duplicates(
+        self, tmp_path: pathlib.Path,
+    ) -> None:
+        """Appending must not double-report what was already published.
+
+        The module-aware check re-derives the same warnings the
+        module-blind one produced, so a blind append shows each twice.
+        """
+        codes = self._codes(
+            tmp_path, self.LIB,
+            f'import glib;\n\npublic fn main(@Unit -> @Int)\n{self.HDR}'
+            '{ glib::takes_int(1) }\n',
+        )
+        assert len(codes) == len(set(codes)), codes
+
+    def test_a_missing_module_reports_each_diagnostic_once(
+        self, tmp_path: pathlib.Path,
+    ) -> None:
+        """The overlap case: E230 is on BOTH sides, E012 on one."""
+        codes = self._codes(
+            tmp_path, None,
+            f'import nosuch;\n\npublic fn main(@Unit -> @Int)\n{self.HDR}'
+            '{ nosuch::f(1) }\n',
+        )
+        assert codes.count("E230") == 1, codes
+
+
 class TestHover:
     def test_hover_reports_smallest_enclosing_expression_type(self) -> None:
         a = _analyze(FEATURE_SRC)
@@ -1133,13 +1282,26 @@ class TestSpeculativeEdit:
         subtraction obligation."""
         weak = SPEC_BASE.replace("requires(@Nat.0 >= 1)", "requires(true)")
         session = VerificationSession()
-        result = session.verify_source(weak, file="file:///w.vera")
-        baseline = result.obligations
+        # Through `analyze`, as the server does: a baseline built by a
+        # second `verify_source` call spelling the document differently
+        # from the speculative side shares no obligation identities, so
+        # everything reads as newly discharged and the assertion passes
+        # whatever the delta actually says (PR #1282 review).
+        baseline = analyze(session, SPEC_URI, weak).obligations
+        assert baseline, "no baseline obligations to diff against"
         out = speculative_edit(
-            session, baseline, "file:///w.vera", SPEC_BASE,
+            session, baseline, SPEC_URI, SPEC_BASE,
         )
         dis = out["proof_delta"]["newly_discharged"]
-        assert any(i["kind"] == "nat_sub" for i in dis)
+        assert any(i["kind"] == "nat_sub" for i in dis), dis
+        # `nat_sub` is the obligation that SURVIVES the edit — same
+        # expression, same site, only its provability changes — so it
+        # must be re-proved rather than replaced.  A baseline keyed
+        # apart from the speculative run reports it as removed, which
+        # is what distinguishes the two.  (`requires` legitimately does
+        # appear in `removed`: this edit rewrites that contract.)
+        removed = out["proof_delta"]["removed"]
+        assert not any(i["kind"] == "nat_sub" for i in removed), removed
 
     def test_parse_error_reports_not_ok(self) -> None:
         session, baseline = self._baseline()

@@ -54,6 +54,24 @@ class TestModuleFixtureBuilders:
         assert not real.file_path.exists(), real.file_path
         assert not fake.file_path.exists(), fake.file_path
 
+    def test_a_failed_write_leaves_no_temp_file(self) -> None:
+        """The cleanup contract holds even when the write fails.
+
+        `delete=False` means the file outlives the context manager, so
+        anything raising between its creation and the `try` that removes
+        it stranded the file — the one case the contract's own docstring
+        promised could not happen (PR #1282 review).  A non-`str` source
+        makes `f.write` raise inside that window without mocking.
+        """
+        import glob
+        import tempfile
+
+        pattern = str(Path(tempfile.gettempdir()) / "*.vera")
+        before = set(glob.glob(pattern))
+        with pytest.raises(TypeError):
+            resolved_module(("m",), object())  # type: ignore[arg-type]
+        assert set(glob.glob(pattern)) - before == set()
+
     def test_they_differ_by_parse_provenance_not_file_existence(
         self,
     ) -> None:

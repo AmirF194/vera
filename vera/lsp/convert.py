@@ -84,7 +84,14 @@ def uri_to_path(uri: str) -> str:
     separate ``unquote`` here — a second one would corrupt a path
     containing a literal ``%``.
     """
-    parsed = urllib.parse.urlsplit(uri)
+    try:
+        parsed = urllib.parse.urlsplit(uri)
+    except ValueError:
+        # A malformed authority — `file://[` is "Invalid IPv6 URL" — raises
+        # out of the SPLIT, before any guard below could run.  Same escape
+        # route the `URLError` took, and the same answer: a URI this
+        # malformed names no path, so it stays an opaque label.
+        return uri
     if parsed.scheme.lower() != "file":
         return uri
     if parsed.netloc and parsed.netloc.lower() != "localhost":

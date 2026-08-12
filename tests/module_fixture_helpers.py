@@ -60,12 +60,20 @@ def resolved_module(path: tuple[str, ...], source: str) -> ResolvedModule:
     consumer needs, since none of them reopens it (see the module
     docstring).
     """
+    # The name is captured and the try entered BEFORE anything that can
+    # fail: `delete=False` means the file outlives the context manager, so
+    # a write or flush error inside it would strand the very file this
+    # helper promises to remove (PR #1282 review).
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".vera", delete=False, encoding="utf-8",
     ) as f:
-        f.write(source)
-        f.flush()
         fp = f.name
+        try:
+            f.write(source)
+            f.flush()
+        except BaseException:
+            os.unlink(fp)
+            raise
     try:
         return ResolvedModule(
             path=path,

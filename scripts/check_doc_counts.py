@@ -223,6 +223,56 @@ def check_history_row_format(history_text: str) -> list[str]:
     return errors
 
 
+def check_conformance_skip_total(root: Path) -> list[str]:
+    """Gate TESTING.md's conformance-stage skip total against its table.
+
+    The "Skipped tests" section states a total and then enumerates every
+    skipped stage, one row each — two statements of the same number, so
+    they can disagree.  They did: three check-level conformance programs
+    added six rows and the total stayed at 85 while the table said 91
+    (PR #1282 review).  Nothing read either number, which is the same
+    blind spot the corpus counts had.
+
+    Checked against the ROW COUNT rather than by running pytest: the
+    rows are what a reader is counting, the comparison is free, and the
+    suite already proves the rows match reality (a wrong row is a
+    skipped test that does not exist).  A reworded total is an error,
+    not a skip.
+    """
+    errors: list[str] = []
+    text = (root / "TESTING.md").read_text(encoding="utf-8")
+    lines = text.splitlines()
+    try:
+        start = next(i for i, ln in enumerate(lines)
+                     if ln.startswith("### Skipped tests"))
+    except StopIteration:
+        return ["TESTING.md: no '### Skipped tests' section — it moved or"
+                " was renamed, so its total is no longer gated"]
+    end = next(
+        (i for i, ln in enumerate(lines[start + 1:], start + 1)
+         if ln.startswith("## ")),
+        len(lines),
+    )
+    section = lines[start:end]
+    rows = [ln for ln in section if ln.startswith("| `test_")]
+
+    m = re.search(
+        r"skips ([\d,]+) conformance-stage tests", "\n".join(section))
+    if not m:
+        errors.append(
+            "TESTING.md: the 'skips N conformance-stage tests' sentence was"
+            " not found — it moved or was reworded, so it is no longer gated"
+        )
+    else:
+        cited = int(m.group(1).replace(",", ""))
+        if cited != len(rows):
+            errors.append(
+                f"TESTING.md conformance-stage skips: doc says {cited},"
+                f" the table below it lists {len(rows)}"
+            )
+    return errors
+
+
 def check_corpus_count(root: Path) -> list[str]:
     """Gate the cited corpus-program count in every document that states it.
 
@@ -1158,6 +1208,7 @@ def main() -> int:
     # ------------------------------------------------------------------
 
     errors.extend(check_corpus_count(root))
+    errors.extend(check_conformance_skip_total(root))
 
     # ------------------------------------------------------------------
     # Report

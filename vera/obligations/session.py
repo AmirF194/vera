@@ -170,8 +170,14 @@ class VerificationSession:
             # to the non-existent `vscode-vfs:/host` — so the "not found"
             # story comes from the import check rather than from a resolver
             # rooted at a phantom.
+            # `.` is ambiguous: it is what `Path(file).parent` gives for a
+            # path-less document AND for a genuine relative one
+            # (`Path("entry.vera").parent`), whose directory really is the
+            # CWD.  `is_file()` separates them — a relative document that
+            # exists on disk keeps its siblings, which keying on the parent
+            # alone had silently taken away (PR #1282 review).
             parent = path.parent
-            if parent != Path(".") and parent.is_dir():
+            if (parent != Path(".") or path.is_file()) and parent.is_dir():
                 resolver = ModuleResolver(_root=parent)
                 resolved_modules = resolver.resolve_imports(program, path)
                 resolver_errors = resolver.errors

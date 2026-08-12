@@ -113,9 +113,30 @@ def analyze(
 
     if not any(d.severity == "error" for d in check_diags):
         result = session.verify_source(text, file=path)
+        # The check above ran module-BLIND (no `resolved_modules`), and
+        # `verify_source` re-checks module-AWARE.  Only the second sees the
+        # resolver's errors and any error that needs an imported signature
+        # to detect, and it hands them back as `check_diagnostics` — which
+        # was discarded, so `glib::takes_int("nope")` published a warning,
+        # produced no obligations, and said nothing about the E202 that had
+        # stopped verification (PR #1282 review).  Appended here, minus
+        # anything the blind check already reported: the module-aware pass
+        # re-derives those, and a straight append shows each twice.
+        seen = {_diag_key(d) for d in analysis.diagnostics}
+        analysis.diagnostics += [
+            d for d in result.check_diagnostics if _diag_key(d) not in seen
+        ]
         analysis.diagnostics += result.verify_diagnostics
         analysis.obligations = result.obligations
     return analysis
+
+
+def _diag_key(d: Diagnostic) -> tuple[object, ...]:
+    """Identity of a diagnostic for de-duplication across two passes."""
+    return (
+        d.error_code, d.severity, d.description,
+        d.location.line, d.location.column,
+    )
 
 
 def _tier_hints(analysis: Analysis) -> list[lsp.Diagnostic]:
