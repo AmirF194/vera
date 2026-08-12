@@ -84,7 +84,7 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `  core.py` | 1,032 | | TypeChecker class, orchestration, contracts, constraint validation | |
 | `  resolution.py` | 486 | | AST TypeExpr → semantic Type, inference | |
 | `  modules.py` | 285 | | Cross-module registration (C7b/C7c), plus the per-module body check that makes a module's diagnostics independent of which file `vera check` was given (#1244) | |
-| `  registration.py` | 727 | | Pass 1 forward declarations, ability registration | |
+| `  registration.py` | 863 | | Pass 1 forward declarations, ability registration | |
 | `  expressions.py` | 1,405 | | Expression synthesis (bidirectional), operators, statements | |
 | `  eq_ability.py` | 199 | | Eq ability derivation checks | |
 | `  sql.py` | 309 | | SQL literal-provenance resolution + placeholder counting (#309) | `resolve_literal_string()`, `count_placeholders()` |
@@ -751,7 +751,7 @@ The `ERROR_CODES` dict in `errors.py` maps every code to a short description (15
 
 ## Test Suite
 
-Testing spans a **pytest suite** of 10,223 tests across 160 files — compiler-internals unit tests plus a **conformance suite** (210 programs in `tests/conformance/` validating every language feature against the spec) and **example programs** (42 end-to-end demos). The conformance suite is the definitive specification artifact — each program tests one feature and serves as a minimal working example.
+Testing spans a **pytest suite** of 10,282 tests across 160 files — compiler-internals unit tests plus a **conformance suite** (213 programs in `tests/conformance/` validating every language feature against the spec) and **example programs** (42 end-to-end demos). The conformance suite is the definitive specification artifact — each program tests one feature and serves as a minimal working example.
 
 See **[TESTING.md](../TESTING.md)** for the comprehensive testing reference -- test file table, conformance suite details, compiler code coverage, language feature coverage, helper conventions, validation scripts, CI pipeline, and guidelines for adding tests.
 
