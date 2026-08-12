@@ -14,7 +14,10 @@ from vera import ast
 from vera.errors import Diagnostic, SourceLocation
 from vera.monomorphize import (
     canonicalize_type_aliases,
+    importer_occupied_bare_names,
     module_qualified_generic_names,
+    module_qualified_generic_targets,
+    public_generic_names,
 )
 
 if TYPE_CHECKING:
@@ -235,6 +238,29 @@ class CrossModuleMixin:
         # it shadows the namespace identically and must be collected too.
         local_fn_names = self._collect_local_fn_names(program)
         self._local_shadowed_fn_names = local_fn_names
+        # #1274 (F3): the GENERIC classification below reads the bare-name set
+        # through the shared derivation instead, so the verifier — which holds
+        # the pre-Pass-0 AST — computes the identical set from its own copy.
+        # `local_fn_names` above stays the post-hoist walk its other consumers
+        # (`_register_shadowed_import`, `importer_visible`) were written
+        # against; the two agree on every `$`-free name, which is asserted
+        # directly rather than assumed (tests/test_module_generic_namespace_1274).
+        importer_bare_names = importer_occupied_bare_names(program)
+
+        # #1274 (F1): classify EVERY module's generics before rerouting ANY
+        # module's bodies.  A module's bare call can name a generic it imported
+        # rather than one it declares (`mid` calls `deep`'s `gen`), and the
+        # reroute target is the OWNING module — so the per-module pass below
+        # needs every other module's answer already computed.
+        qualified_by_path: dict[tuple[str, ...], set[str]] = {}
+        public_generics_by_path: dict[tuple[str, ...], set[str]] = {}
+        for mod in self._resolved_modules:
+            qualified_by_path[mod.path] = module_qualified_generic_names(
+                mod.program, import_names.get(mod.path), importer_bare_names,
+            )
+            public_generics_by_path[mod.path] = public_generic_names(
+                mod.program,
+            )
 
         # Provenance tracking for collision detection
         fn_provenance: dict[str, tuple[str, ...]] = {}
@@ -304,9 +330,19 @@ class CrossModuleMixin:
             # registration below, and the verifier drives it too, so the two
             # sides of the #732 differential can never disagree about which
             # namespace a module generic's clone lives in.
-            module_qualified_generics = module_qualified_generic_names(
-                mod.program, name_filter, local_fn_names,
+            # #1274 (F1): this module's own qualified-only generics AND the
+            # ones it can name through its imports, each mapped to its OWNING
+            # module — the `mod$<path>$name` identity is per-owner, so `mid`'s
+            # bare `gen` must reroute to `mod$deep$gen`.
+            module_qualified_targets = module_qualified_generic_targets(
+                mod.program, qualified_by_path, public_generics_by_path,
+                mod.path,
             )
+            # The REGISTRATION split below is about this module's OWN
+            # declarations, so it reads this module's own classification —
+            # never the imports' union, which answers a different question
+            # (which bare CALLS from here must reroute, and to whom).
+            module_own_qualified = qualified_by_path[mod.path]
             for fn_name, sig in temp._fn_sigs.items():
                 # Collision detection: same name from different module
                 if fn_name in fn_provenance:
@@ -583,7 +619,7 @@ class CrossModuleMixin:
                 # the call nodes change; name/params/sig are untouched, so the
                 # ``temp._fn_sigs``-keyed registration lookups below stay valid.
                 routed = self._reroute_module_qualified_generic_calls(
-                    tld.decl, mod.path, module_qualified_generics,
+                    tld.decl, module_qualified_targets,
                 )
                 # #774: an imported PUBLIC generic is monomorphized by the
                 # importer (Pass 1.5) at its own call sites — it can't be
@@ -603,7 +639,7 @@ class CrossModuleMixin:
                 # generic calls ANOTHER of its module's) reaches the sibling's
                 # ``mod$<path>$sibling`` clone.
                 if tld.decl.forall_vars:
-                    if tld.decl.name in module_qualified_generics:
+                    if tld.decl.name in module_own_qualified:
                         self._shadowed_imported_generic_decls.setdefault(
                             mod.path, {},
                         ).setdefault(tld.decl.name, routed)
@@ -854,25 +890,28 @@ class CrossModuleMixin:
     @staticmethod
     def _reroute_module_qualified_generic_calls(
         decl: ast.FnDecl,
-        module_path: tuple[str, ...],
-        qualified_generics: set[str],
+        qualified_targets: dict[str, tuple[str, ...]],
     ) -> ast.FnDecl:
         """Rewrite bare calls to a module's QUALIFIED-ONLY generics into
         synthetic ``ModuleCall``s (#1000, widened by #1274).
 
-        An imported body may call one of its module's own generics by bare name.
+        An imported body may call a generic by bare name — one its own module
+        declares, or one it imported (#1274 F1: ``mid`` calling ``deep``'s).
         Once the importer clones that body, the bare name is resolved in the
         IMPORTER's flat namespace — where it dangles (the generic is
         unimportable or outside the filter) or a same-named local captures it,
         unless the generic owns that name outright
         (:func:`vera.monomorphize.module_qualified_generic_names`).  Rewriting
-        each such ``FnCall`` to ``ModuleCall(module_path, name)`` routes it
-        through the existing shadowed-generic discovery + desugar
+        each such ``FnCall`` to ``ModuleCall(owner, name)`` routes it through the
+        existing shadowed-generic discovery + desugar
         (``_resolve_module_call_wasm_name`` → ``_module_qualified_generic_bases``
-        → the ``mod$<path>$name`` clone), so it reaches the module's own version.
-        Only the call NODE changes (``FnCall`` → ``ModuleCall`` with the same
-        args, recursively rerouted); every other node — including nested
-        ``AnonFn`` / ``where`` bodies — is structurally preserved with its span.
+        → the ``mod$<path>$name`` clone), so it reaches the DECLARING module's
+        version.  *qualified_targets* maps each such bare name to that owner,
+        which is why it is a map and not a set: ``mid``'s ``gen`` must reach
+        ``mod$deep$gen``, not ``mod$mid$gen``.  Only the call NODE changes
+        (``FnCall`` → ``ModuleCall`` with the same args, recursively rerouted);
+        every other node — including nested ``AnonFn`` / ``where`` bodies — is
+        structurally preserved with its span.
 
         Delegates to the shared shadow-aware walk
         (:func:`vera.monomorphize.reroute_module_qualified_generic_calls`) so
@@ -884,9 +923,10 @@ class CrossModuleMixin:
         from vera.monomorphize import reroute_module_qualified_generic_calls
 
         return reroute_module_qualified_generic_calls(
-            decl, qualified_generics,
+            decl, qualified_targets,
             lambda call, args: ast.ModuleCall(
-                path=module_path, name=call.name, args=args, span=call.span,
+                path=qualified_targets[call.name], name=call.name,
+                args=args, span=call.span,
             ),
         )
 

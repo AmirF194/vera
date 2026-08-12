@@ -28,7 +28,10 @@ from vera.monomorphize import (
     Monomorphizer,
     collect_nested_generic_decls,
     declared_return_clone_key,
+    importer_occupied_bare_names,
     module_qualified_generic_names,
+    module_qualified_generic_targets,
+    public_generic_names,
     qualify_nested_generic_decls,
     reroute_module_qualified_generic_calls,
 )
@@ -1687,26 +1690,23 @@ class ContractVerifier:
 
     @staticmethod
     def _local_fn_names(program: ast.Program) -> set[str]:
-        """All locally-declared function names, incl. recursive where-fns.
+        """The bare source names this program's own declarations occupy.
 
-        Mirrors codegen's ``CrossModuleMixin._collect_local_fn_names`` — a
-        ``where``-fn flattens to a bare ``$name`` in the single WASM module
-        just like a top-level fn, so it shadows an imported name identically.
-        Used to split imported generics into unshadowed (route bare +
-        qualified) vs shadowed (qualified-only) exactly as codegen does, so the
-        #774 discovery stays in lockstep.
+        Delegates to the SHARED
+        :func:`vera.monomorphize.importer_occupied_bare_names`, which codegen
+        drives too — the importer-side input to the qualified-only predicate,
+        so the two sides cannot classify an imported generic differently.
+
+        This used to be a private walk counting EVERY ``where``-helper, which
+        was the pre-Pass-0 shape: codegen consults the name set only after the
+        generic-helper qualification (#1014) and the non-generic hoist (#991)
+        have moved those helpers out of the bare namespace, so a non-generic
+        helper named ``gen2`` made the verifier treat an imported ``gen2`` as
+        qualified-only while codegen let it own the bare name — codegen emitted
+        ``gen2$Bool``, the verifier verified ``mod$lib$gen2$Bool``, and each
+        side's clone went uncovered by the other (measured on the F3 shape).
         """
-        def walk(decl: ast.FnDecl) -> set[str]:
-            names = {decl.name}
-            for wfn in decl.where_fns or ():
-                names |= walk(wfn)
-            return names
-
-        out: set[str] = set()
-        for tld in program.declarations:
-            if isinstance(tld.decl, ast.FnDecl):
-                out |= walk(tld.decl)
-        return out
+        return importer_occupied_bare_names(program)
 
     def _imported_generic_decls(
         self, program: ast.Program,
@@ -1741,9 +1741,14 @@ class ContractVerifier:
         private: dict[str, ast.FnDecl] = {}
         for mod in self._resolved_modules:
             name_filter = self._import_names.get(mod.path)
-            # This module's QUALIFIED-ONLY generics → their reroute targets.
+            # This module's OWN qualified-only generics decide the split below;
+            # the reroute set is wider — #1274 (F1) — because a body here can
+            # bare-call a DIFFERENT module's qualified-only generic.
             qual_names = module_qualified_generic_names(
                 mod.program, name_filter, local_fn_names,
+            )
+            reroute_targets = self._qualified_generic_targets(
+                program, mod.path,
             )
             for tld in mod.program.declarations:
                 decl = tld.decl
@@ -1760,7 +1765,7 @@ class ContractVerifier:
                     public.setdefault(
                         decl.name,
                         self._reroute_to_module_qualified(
-                            decl, mod.path, qual_names,
+                            decl, reroute_targets,
                         ),
                     )
                     # #1208: first-seen-wins, in lockstep with the setdefault
@@ -1778,7 +1783,7 @@ class ContractVerifier:
                     private.setdefault(
                         self._module_qualified_base(mod.path, decl.name),
                         self._reroute_to_module_qualified(
-                            decl, mod.path, qual_names,
+                            decl, reroute_targets,
                         ),
                     )
                     self._generic_origins.setdefault(  # #1208
@@ -1787,11 +1792,40 @@ class ContractVerifier:
                     )
         return public, private
 
+    def _qualified_generic_targets(
+        self, program: ast.Program, mod_path: tuple[str, ...],
+    ) -> dict[str, tuple[str, ...]]:
+        """Bare name → owning module, for every qualified-only generic a body in
+        *mod_path* can reach by bare call (#1274 F1).
+
+        The verifier-side mirror of codegen's per-module target map, built from
+        the SAME shared derivations over the same module set, so the two sides
+        reroute the identical calls to the identical owners.
+        """
+        local_fn_names = self._local_fn_names(program)
+        qualified_by_path = {
+            m.path: module_qualified_generic_names(
+                m.program, self._import_names.get(m.path), local_fn_names,
+            )
+            for m in self._resolved_modules
+        }
+        public_by_path = {
+            m.path: public_generic_names(m.program)
+            for m in self._resolved_modules
+        }
+        mod = next(
+            (m for m in self._resolved_modules if m.path == mod_path), None,
+        )
+        if mod is None:  # pragma: no cover — defensive
+            return {}
+        return module_qualified_generic_targets(
+            mod.program, qualified_by_path, public_by_path, mod_path,
+        )
+
     def _reroute_to_module_qualified(
         self,
         decl: ast.FnDecl,
-        path: tuple[str, ...],
-        qual_names: set[str],
+        qual_targets: dict[str, tuple[str, ...]],
     ) -> ast.FnDecl:
         """Name-rename an imported body's bare calls to *path*'s qualified-only
         generics onto their ``mod$<path>$name`` discovery keys (#1029, #1274).
@@ -1806,13 +1840,14 @@ class ContractVerifier:
         under ``mod$<path>$name``), so its terminal renames the ``FnCall`` to that
         key rather than emitting a ``ModuleCall`` — keeping the #732 differential
         exact while both sides route the identical set of calls."""
-        if not qual_names:
+        if not qual_targets:
             return decl
         rename = {
-            n: self._module_qualified_base(path, n) for n in qual_names
+            n: self._module_qualified_base(owner, n)
+            for n, owner in qual_targets.items()
         }
         return reroute_module_qualified_generic_calls(
-            decl, qual_names,
+            decl, qual_targets,
             lambda call, args: replace(
                 call, name=rename[call.name], args=args,
             ),
@@ -1924,17 +1959,15 @@ class ContractVerifier:
                 mod.program,
                 name_prefix="mod$" + "$".join(mod.path) + "$",
             )
-            mod_qual_names = module_qualified_generic_names(
-                mod.program,
-                self._import_names.get(mod.path),
-                self._local_fn_names(program),
+            mod_qual_targets = self._qualified_generic_targets(
+                program, mod.path,
             )
-            if mod_qual_names:
+            if mod_qual_targets:
                 qmod = replace(qmod, declarations=tuple(
                     replace(
                         tld,
                         decl=self._reroute_to_module_qualified(
-                            tld.decl, mod.path, mod_qual_names,
+                            tld.decl, mod_qual_targets,
                         ),
                     )
                     if isinstance(tld.decl, ast.FnDecl) else tld
@@ -2163,13 +2196,21 @@ class ContractVerifier:
             qual_names = module_qualified_generic_names(
                 mod.program, self._import_names.get(mod.path), local_fn_names,
             )
+            # #1274 (F1): the reroute reaches a DIFFERENT module's generics too,
+            # each under its own owner's path.
+            reroute_targets = self._qualified_generic_targets(
+                program, mod.path,
+            )
 
-            def _reroute(decl: ast.FnDecl, path: tuple[str, ...] = mod.path,
-                         quals: set[str] = qual_names) -> ast.FnDecl:
+            def _reroute(
+                decl: ast.FnDecl,
+                targets: dict[str, tuple[str, ...]] = reroute_targets,
+            ) -> ast.FnDecl:
                 return reroute_module_qualified_generic_calls(
-                    decl, quals,
+                    decl, targets,
                     lambda call, args: ast.ModuleCall(
-                        path=path, name=call.name, args=args, span=call.span,
+                        path=targets[call.name], name=call.name,
+                        args=args, span=call.span,
                     ),
                 )
 
@@ -2279,9 +2320,11 @@ class ContractVerifier:
             trans_shadow: dict[str, set[tuple[str, ...]]] = {
                 name: set() for name in sib_decls
             }
-            mono.collect_calls_in_node(
-                clone, sib_decls, ctor_to_adt, trans_shadow,
-            )
+            # #1274 (F1): mirrors codegen's scope around the identical scan.
+            with mono.shadowed_module_scope(spath):
+                mono.collect_calls_in_node(
+                    clone, sib_decls, ctor_to_adt, trans_shadow,
+                )
             for s_name, s_types in trans_shadow.items():
                 for s_ct in s_types:
                     nxt = (spath, s_name, s_ct)

@@ -130,7 +130,7 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `  api.py` | 1,400 | | Public API, dataclasses, `compile()`/`execute()` orchestration, core IO host bindings (#421) | |
 | `  memory.py` | 105 | | Compile-time ADT layout helpers (`ConstructorLayout`, alignment) (#421) | |
 | `  core.py` | 2,805 | | CodeGenerator class, orchestration, ability op rewriting (Pass 1.6), skip propagation to callers (#1100) | |
-| `  modules.py` | 1,098 | | Cross-module registration + call detection (C7e), per-module alias + source scopes (#1111/#1186) — `_module_alias_scope` swaps the alias maps *and* the `AliasEnv` every codegen rendering goes through as one pair (#1208) | |
+| `  modules.py` | 1,241 | | Cross-module registration + call detection (C7e), per-module alias + source scopes (#1111/#1186) — `_module_alias_scope` swaps the alias maps *and* the `AliasEnv` every codegen rendering goes through as one pair (#1208) | |
 | `  registration.py` | 499 | | Pass 1 forward declarations, ADT layout | |
 | `  monomorphize.py` | 1,408 | | Generic instantiation, type inference, ability constraint checking (Pass 1.5) | |
 | `  functions.py` | 1,276 | | Function body compilation, GC prologue/epilogue (Pass 2) | |
@@ -751,7 +751,7 @@ The `ERROR_CODES` dict in `errors.py` maps every code to a short description (15
 
 ## Test Suite
 
-Testing spans a **pytest suite** of 10,198 tests across 160 files — compiler-internals unit tests plus a **conformance suite** (210 programs in `tests/conformance/` validating every language feature against the spec) and **example programs** (42 end-to-end demos). The conformance suite is the definitive specification artifact — each program tests one feature and serves as a minimal working example.
+Testing spans a **pytest suite** of 10,217 tests across 160 files — compiler-internals unit tests plus a **conformance suite** (210 programs in `tests/conformance/` validating every language feature against the spec) and **example programs** (42 end-to-end demos). The conformance suite is the definitive specification artifact — each program tests one feature and serves as a minimal working example.
 
 See **[TESTING.md](../TESTING.md)** for the comprehensive testing reference -- test file table, conformance suite details, compiler code coverage, language feature coverage, helper conventions, validation scripts, CI pipeline, and guidelines for adding tests.
 
