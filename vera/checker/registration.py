@@ -279,17 +279,36 @@ class RegistrationMixin:
         ``MyVeraThing``) stay ordinary: the reservation is anchored at the
         start and requires an uppercase or digit follower.
         """
-        if not _RESERVED_TYPE_PREFIX_RE.match(decl.name):
-            return
         kind = "alias" if isinstance(decl, ast.TypeAliasDecl) else "data type"
-        suggestion = decl.name.removeprefix("Vera")
+        self._check_reserved_decl_name(decl, decl.name, kind)
+
+    def _check_reserved_decl_name(
+        self, node: ast.Node, name: str, kind: str,
+    ) -> None:
+        """Emit E154 for any DECLARED name in the prelude's namespace.
+
+        The reservation is one rule, not one rule per namespace (#1260):
+        a type, an alias, an effect, an ability and a constructor all
+        name something the program declares, and all five run through
+        this single :data:`_RESERVED_TYPE_PREFIX_RE` call so the rails
+        cannot drift.  ``kind`` is the noun the message uses, and it is
+        load-bearing beyond wording: the fix text here says *rename*, and
+        that is the only escape any of these namespaces has.  The alias
+        escape the reference gate offers (``_resolve_named_type``, "write
+        the type out or declare your own alias") is a type-position
+        answer and would be wrong advice for an effect, an ability, or a
+        constructor, none of which can be aliased.
+        """
+        if not _RESERVED_TYPE_PREFIX_RE.match(name):
+            return
+        suggestion = name.removeprefix("Vera")
         if not suggestion[:1].isupper():
             # A digit follower strips to an unparseable name (`Vera0Fn`
             # -> `0Fn`); UPPER_IDENT needs a leading uppercase letter.
-            suggestion = f"My{decl.name}"
+            suggestion = f"My{name}"
         self._error(
-            decl,
-            f"{kind.capitalize()} name '{decl.name}' is reserved for the prelude.",
+            node,
+            f"{kind.capitalize()} name '{name}' is reserved for the prelude.",
             rationale=(
                 "Names beginning with 'Vera' followed by an uppercase "
                 "letter or digit are the prelude's internal namespace — "
@@ -298,8 +317,8 @@ class RegistrationMixin:
                 "'VeraA'/'VeraB'. A user declaration under such a name "
                 "re-types those internals: the program still type-checks, "
                 "then fails WebAssembly validation when it runs. Vera "
-                "reserves the namespace outright so the mistake is "
-                "refused where it is written."
+                "reserves the namespace outright, in every declaration "
+                "namespace, so the mistake is refused where it is written."
             ),
             fix=(
                 f"Rename the {kind} — any name not starting with 'Vera' "
@@ -332,8 +351,10 @@ class RegistrationMixin:
         variables (and a ``where`` helper's own, one scope deeper — the
         recursion mirrors :meth:`_check_reserved_fn_name`'s), and the type
         parameters of ``data``, ``type``, ``effect`` and ``ability``
-        declarations.  This is the type namespace only; the effect, ability
-        and constructor NAME namespaces are deliberately untouched here.
+        declarations.  This gate covers BINDERS; the names those same
+        declarations introduce — type, alias, effect, ability and
+        constructor alike — go through :meth:`_check_reserved_decl_name`
+        (#1260), on the same regex.
         """
         if isinstance(decl, ast.FnDecl):
             binders = decl.forall_vars or ()
@@ -679,6 +700,7 @@ class RegistrationMixin:
 
         ctors: dict[str, ConstructorInfo] = {}
         for ctor in decl.constructors:
+            self._check_reserved_decl_name(ctor, ctor.name, "constructor")
             field_types = None
             if ctor.fields is not None:
                 field_types = tuple(
@@ -725,6 +747,7 @@ class RegistrationMixin:
 
     def _register_effect(self, decl: ast.EffectDecl) -> None:
         """Register an effect and its operations."""
+        self._check_reserved_decl_name(decl, decl.name, "effect")
         self._check_reserved_type_params(decl)
         saved_params = dict(self.env.type_params)
         if decl.type_params:
@@ -752,6 +775,7 @@ class RegistrationMixin:
 
     def _register_ability(self, decl: ast.AbilityDecl) -> None:
         """Register an ability and its operations."""
+        self._check_reserved_decl_name(decl, decl.name, "ability")
         self._check_reserved_type_params(decl)
         saved_params = dict(self.env.type_params)
         if decl.type_params:

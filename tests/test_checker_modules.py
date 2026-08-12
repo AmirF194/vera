@@ -1004,6 +1004,70 @@ class TestReservedTypePrefix:
             codes = self._codes(src)
             assert "E154" not in codes, (binder, codes)
 
+    # -----------------------------------------------------------------
+    # Effect / ability / constructor NAMES (#1260)
+    # -----------------------------------------------------------------
+
+    def test_effect_name_in_the_reserved_namespace_is_E154(self) -> None:
+        """The reservation is one rule across every declaration namespace.
+
+        #1254 left it enforced in the type namespace alone, so
+        `effect VeraZed` checked clean — half a reservation, and the one
+        namespace a future prelude-internal effect would have to claim.
+        """
+        codes = self._codes("effect VeraZed {\n  op zap(Int -> Unit);\n}\n")
+        assert "E154" in codes, codes
+
+    def test_ability_name_in_the_reserved_namespace_is_E154(self) -> None:
+        codes = self._codes("ability VeraZed {\n  op size(Int -> Int);\n}\n")
+        assert "E154" in codes, codes
+
+    def test_constructor_name_in_the_reserved_namespace_is_E154(self) -> None:
+        """A constructor is a name a program declares, in its own namespace."""
+        codes = self._codes("public data Other { VeraZed(Int) }\n")
+        assert "E154" in codes, codes
+
+    def test_reserved_constructor_is_flagged_under_a_legal_parent(self) -> None:
+        """One error per offending constructor, parent name untouched."""
+        src = "public data Other { Fine(Int), VeraZed(Int), VeraOther }\n"
+        diags = typecheck(parse_to_ast(src), source=src)
+        e154 = [d for d in diags if d.error_code == "E154"]
+        assert len(e154) == 2, [d.description for d in diags]
+        assert all("Other'" not in d.description or "VeraOther" in
+                   d.description for d in e154), [d.description for d in e154]
+
+    def test_fix_text_offers_no_alias_escape_outside_the_type_namespace(
+        self,
+    ) -> None:
+        """Principle 1: the fix must be right PER NAMESPACE (#1260).
+
+        The type-position text offers "declare an alias outside the
+        reserved namespace"; an effect, ability, or constructor has no
+        alias escape, so its fix is a rename and nothing else.
+        """
+        for src, word in (
+            ("effect VeraZed {\n  op zap(Int -> Unit);\n}\n", "Effect"),
+            ("ability VeraZed {\n  op size(Int -> Int);\n}\n", "Ability"),
+            ("public data Other { VeraZed(Int) }\n", "Constructor"),
+        ):
+            diags = typecheck(parse_to_ast(src), source=src)
+            e154 = [d for d in diags if d.error_code == "E154"]
+            assert e154, (src, [d.error_code for d in diags])
+            assert e154[0].description.startswith(word), e154[0].description
+            assert "alias" not in (e154[0].fix or ""), e154[0].fix
+            assert "Zed" in (e154[0].fix or ""), e154[0].fix
+
+    def test_ordinary_names_stay_legal_in_all_three_namespaces(self) -> None:
+        """The anchoring holds wherever the rule is applied."""
+        for name in ("Veranda", "Vera_thing", "Vera"):
+            for src in (
+                f"effect {name} {{\n  op zap(Int -> Unit);\n}}\n",
+                f"ability {name} {{\n  op size(Int -> Int);\n}}\n",
+                f"public data Other {{ {name}(Int) }}\n",
+            ):
+                codes = self._codes(src)
+                assert "E154" not in codes, (src, codes)
+
     def test_module_declaration_surfaces_E154(self) -> None:
         mod_src = "module vmod;\ntype VeraResultMapFn = Int;\n"
         mod = ResolvedModule(

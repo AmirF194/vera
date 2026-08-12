@@ -1,0 +1,19 @@
+-- Conformance: an effect name in the reserved prelude namespace is a checker error (Chapter 8, Section 8.4.1)
+-- Tests: E154 — the reservation is one rule across every declaration
+-- namespace, not one rule per namespace (#1260).  An effect declared under
+-- `Vera` + an uppercase letter or digit claims a name the prelude's own
+-- internals may already resolve through at code generation, where the checker
+-- never sees them; enforced in the type namespace alone the reservation was
+-- half a rule, and each unenforced namespace is where a future internalization
+-- would recreate the teach-the-checker-or-break-user-spellings dilemma.
+effect VeraZed {
+  op zap(Int -> Unit);
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  0
+}
