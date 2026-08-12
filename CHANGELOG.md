@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-08-12
+
 ### Added
 
 - **Two more count citations and one more document are gated.** `scripts/check_doc_counts.py` pinned TESTING.md's total test count but not the passed/stress/skipped breakdown beside it, so a release that refreshed the number the gate reads could leave an arithmetically impossible parenthetical behind; the parts are now checked to sum to the collected total. It also gained the four counts in `vera/README.md`'s "Test Suite" paragraph — ungated in a file where only the module map was watched, and stale by 2,569 tests, 39 test files, 53 conformance programs and 5 examples when it was finally read. All four of those counts are read with thousands separators, so none of them switches its own check off by crossing a thousand, and they are read from the `## Test Suite` section alone: the pattern spans several sentences and therefore matches with `DOTALL`, which against the whole file let a reworded paragraph pair its head with digits from any later section and green off the decoy. Both checks treat a *reworded* sentence as an error rather than a skip, because a silent skip is the failure mode the gate exists to prevent. Separately, `scripts/check_debruijn_examples.py` puts `DE_BRUIJN.md` on the shared parse-only doc gate (now five documents), which is what had been missing when its two closure examples stopped parsing.
@@ -3272,7 +3274,8 @@ Small docs sweep — closes six aging documentation issues in one PR.  No code c
 - Grammar: handler body simplified to avoid LALR reduce/reduce conflict
 - `pyproject.toml`: corrected build backend, package discovery, PEP 639 compliance
 
-[Unreleased]: https://github.com/aallan/vera/compare/v0.1.9...HEAD
+[Unreleased]: https://github.com/aallan/vera/compare/v0.1.10...HEAD
+[0.1.10]: https://github.com/aallan/vera/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/aallan/vera/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/aallan/vera/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/aallan/vera/compare/v0.1.6...v0.1.7
