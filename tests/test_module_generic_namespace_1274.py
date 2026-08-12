@@ -30,12 +30,13 @@ is what every import shape must answer.
 
 from __future__ import annotations
 
-import pytest
-import wasmtime
-
 import re
 from pathlib import Path
 
+import pytest
+import wasmtime
+
+from vera.ast import Program
 from vera.checker import typecheck_with_artifacts
 from vera.codegen import compile as codegen_compile
 from vera.codegen import execute
@@ -849,9 +850,9 @@ public fn main(@Unit -> @Int)
 """
 
     @staticmethod
-    def _bare(program: object) -> set[str]:
+    def _bare(program: Program) -> set[str]:
         return {
-            n for n in importer_occupied_bare_names(program)  # type: ignore[arg-type]
+            n for n in importer_occupied_bare_names(program)
             if "$" not in n
         }
 

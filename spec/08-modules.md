@@ -186,11 +186,26 @@ program** only when all three hold:
   public declaration; a selective import admits only the names it lists);
 - the importing program does not itself declare that name (§8.5.2 shadowing).
 
-A declaration failing any of these is **qualified-only**: it remains callable —
-from its own module's bodies by bare name, and from an admitting importer by a
-module-qualified call — but it does not own the bare name in the importing
-program. Two same-named qualified-only declarations in different modules are
-distinct, and neither is the importer's.
+A declaration failing any of these is **qualified-only**: it does not own the
+bare name in the importing program. It is still called by bare name from its own
+module's bodies, which resolve in their own namespace as above.
+
+Qualified-only is not the same as importer-callable. A module-qualified call
+(§8.5.3) reaches a declaration only when it is `public` **and** its module is
+imported directly **and** the import list admits the name; the other cases are
+rejected rather than routed — a private declaration is `E232`, a name outside the
+import list is `E231`, and a module the program does not import at all is not in
+scope to qualify. So the only declarations that fail the bare-name predicate and
+remain callable by an importer are the public, admitted ones of a directly
+imported module that the importer also shadows. Everything else that is
+qualified-only — private declarations, names outside the import list, and
+everything in a transitively reached module — is reachable only from its own
+module's bodies; it is compiled under a module-qualified internal name (§8.9.1)
+so that the flattened namespace keeps it distinct, which is a naming rule, not a
+call surface.
+
+Two same-named qualified-only declarations in different modules are distinct, and
+neither is the importer's.
 
 A module reached only **transitively** (§8.6.4) contributes nothing to the
 importing program's namespace, so all of its declarations are qualified-only
