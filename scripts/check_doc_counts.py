@@ -22,9 +22,11 @@ Runs in a couple of seconds — fast enough for a pre-commit hook.
 """
 
 import json
+import os
 import re
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 
@@ -220,6 +222,124 @@ def check_history_row_format(history_text: str) -> list[str]:
                 f" ' — ' separators (max 1 — the bold lead-in dash;"
                 f" multi-clause rows belong in CHANGELOG.md)"
             )
+    return errors
+
+
+def project_version(root: Path) -> str:
+    """The `[project] version` in pyproject.toml.
+
+    `check_version_sync.py` is what pins this to the other four places
+    it appears, so reading the one file is enough here.
+    """
+    with (root / "pyproject.toml").open("rb") as handle:
+        return str(tomllib.load(handle)["project"]["version"])
+
+
+_RELEASE_TAG = re.compile(r"^v\d+\.\d+\.\d+(?:\.\d+)?$")
+
+# git reads the repository to operate on from the environment before it
+# reads `-C`, so these have to be cleared for `root` to mean `root`.
+# pre-commit sets them: this script runs as a hook, and inside that hook
+# `git -C <anywhere> tag` answers for the repository being committed to.
+GIT_REPO_ENV_VARS = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+)
+
+
+def git_env() -> dict[str, str]:
+    """The ambient environment with git's repository selectors removed."""
+    return {
+        k: v for k, v in os.environ.items() if k not in GIT_REPO_ENV_VARS
+    }
+
+
+def release_tags(root: Path) -> list[str] | None:
+    """Every release tag in this checkout, or ``None`` if git can't say.
+
+    ``None`` means "no evidence", NOT "zero releases" — a checkout whose
+    tags were never fetched must stand the check down rather than report
+    every documented count as wrong.  The `lint` job that runs this
+    script checks out with `fetch-depth: 0` (it needs full history for
+    `check_changelog_updated.py`'s `origin/main` diff), so the tags are
+    there in CI; this is the guard for anywhere they are not.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "tag", "--list"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=30,
+            check=False,
+            env=git_env(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    tags = [t for t in result.stdout.split() if _RELEASE_TAG.match(t)]
+    return tags or None
+
+
+def check_release_count(
+    readme_text: str,
+    history_text: str,
+    tags: list[str] | None,
+    version: str,
+) -> list[str]:
+    """The release count in README.md and HISTORY.md, against the tags.
+
+    The same hand-maintained number appears in two places — README's
+    status line and HISTORY's "By the numbers" total — so they can
+    disagree, and did (204/203, then 205/203).  Cross-checking them
+    against each other closed that, and nothing else: from v0.1.8 both
+    said 206 while the repository held 207 tags, agreeing with each
+    other the whole way down.  Two documents can be consistently wrong,
+    so the tags themselves are the oracle here.
+
+    The one permitted gap is the release being cut: `release.yml`
+    creates `vX.Y.Z` only after the merge, so on the PR that bumps
+    `version` to an untagged release the documented count is one ahead
+    of `git tag` — that is the convention (a release bumps both), not
+    drift.  Once the version IS tagged, the counts must match exactly.
+    """
+    errors: list[str] = []
+    m_readme = re.search(r"(\d+) releases,", readme_text)
+    m_history = re.search(r"(\d+) tagged releases", history_text)
+    if not m_readme:
+        errors.append(
+            "README.md: release count ('N releases,') not found"
+            " — the status line was reworded and is no longer gated"
+        )
+    if not m_history:
+        errors.append(
+            "HISTORY.md: release count ('N tagged releases') not found"
+            " — the totals line was reworded and is no longer gated"
+        )
+    if m_readme and m_history and m_readme.group(1) != m_history.group(1):
+        errors.append(
+            f"release count mismatch: README.md says {m_readme.group(1)},"
+            f" HISTORY.md says {m_history.group(1)} tagged releases"
+        )
+    if tags is None:
+        return errors
+
+    pending = 0 if f"v{version}" in set(tags) else 1
+    expected = len(tags) + pending
+    for label, match in (("README.md", m_readme), ("HISTORY.md", m_history)):
+        if match is None or int(match.group(1)) == expected:
+            continue
+        errors.append(
+            f"{label}: release count says {match.group(1)}, live is"
+            f" {expected} ({len(tags)} tags"
+            + (f" + v{version} pending" if pending else "")
+            + ")"
+        )
     return errors
 
 
@@ -1162,21 +1282,21 @@ def main() -> int:
 
     # README's status row and HISTORY's "By the numbers" total are the
     # same hand-maintained release count in two places; a release bumps
-    # both.  They disagreed for two releases (204/203, then 205/203)
-    # before this cross-check existed.
-    m_readme = re.search(r"(\d+) releases,", readme_md)
-    m_history = re.search(r"(\d+) tagged releases", history_md)
-    if not m_readme:
-        errors.append("README.md: release count ('N releases,') not found")
-    if not m_history:
-        errors.append(
-            "HISTORY.md: release count ('N tagged releases') not found"
+    # both.  They are checked against each other AND against `git tag`,
+    # because agreeing with each other is what they did all the way from
+    # v0.1.8 while both were two behind the repository.
+    tags = release_tags(root)
+    if tags is None:
+        print(
+            "NOTE: no release tags in this checkout — the release count"
+            " was cross-checked between README.md and HISTORY.md only.",
+            file=sys.stderr,
         )
-    if m_readme and m_history and m_readme.group(1) != m_history.group(1):
-        errors.append(
-            f"release count mismatch: README.md says {m_readme.group(1)},"
-            f" HISTORY.md says {m_history.group(1)} tagged releases"
+    errors.extend(
+        check_release_count(
+            readme_md, history_md, tags, project_version(root)
         )
+    )
 
     # ------------------------------------------------------------------
     # 17. Check the vera/README.md module map against the source tree

@@ -54,7 +54,9 @@ class TestModuleFixtureBuilders:
         assert not real.file_path.exists(), real.file_path
         assert not fake.file_path.exists(), fake.file_path
 
-    def test_a_failed_write_leaves_no_temp_file(self) -> None:
+    def test_a_failed_write_leaves_no_temp_file(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         """The cleanup contract holds even when the write fails.
 
         `delete=False` means the file outlives the context manager, so
@@ -62,15 +64,48 @@ class TestModuleFixtureBuilders:
         it stranded the file — the one case the contract's own docstring
         promised could not happen (PR #1282 review).  A non-`str` source
         makes `f.write` raise inside that window without mocking.
-        """
-        import glob
-        import tempfile
 
-        pattern = str(Path(tempfile.gettempdir()) / "*.vera")
-        before = set(glob.glob(pattern))
+        The evidence is the ONE path this call created — captured from
+        `NamedTemporaryFile`, the way the sibling test below captures
+        handles — and NOT a sweep of `gettempdir()` for `*.vera`.  The
+        sweep read a directory this process does not own: under
+        `pytest-xdist` every worker builds its fixtures in the same
+        system temp dir, so a sibling worker's `tmp*.vera`, alive for
+        the microseconds between this test's snapshot and its
+        assertion, was counted as a file this test stranded.  It was —
+        `AssertionError` over a `C:\\...\\tmp*.vera` on worker gw1 in
+        the v0.1.10 release push, an hour after the identical tree
+        passed, and reproducible on macOS at ~33%.  A name this call
+        captured cannot name another worker's file, so the race is gone
+        rather than relocated: no shared directory is read at all.
+        """
+        from tests import module_fixture_helpers as helpers
+
+        real_ntf = helpers.tempfile.NamedTemporaryFile
+        created: list[str] = []
+
+        def recording_ntf(*a: object, **kw: object) -> object:
+            handle = real_ntf(*a, **kw)  # type: ignore[arg-type]
+            created.append(handle.name)
+            return handle
+
+        # `helpers` resolves `NamedTemporaryFile` through the `tempfile`
+        # module at call time, so patching the attribute intercepts its
+        # creation; `monkeypatch` restores it at teardown.
+        monkeypatch.setattr(
+            helpers.tempfile, "NamedTemporaryFile", recording_ntf,
+        )
         with pytest.raises(TypeError):
-            resolved_module(("m",), object())  # type: ignore[arg-type]
-        assert set(glob.glob(pattern)) - before == set()
+            helpers.resolved_module(("m",), object())  # type: ignore[arg-type]
+
+        # Exactly one, or the builder no longer creates its file through
+        # `NamedTemporaryFile` and the survivor check below would be
+        # asserting over an empty list — green for the wrong reason.
+        assert len(created) == 1, created
+        stranded = [n for n in created if Path(n).exists()]
+        for name in stranded:  # don't become the litter being tested for
+            Path(name).unlink(missing_ok=True)
+        assert stranded == [], stranded
 
     def test_the_handle_is_closed_before_every_unlink(self) -> None:
         """Windows cannot delete a file whose handle is still open.
