@@ -67,10 +67,14 @@ def uri_to_path(uri: str) -> str:
       stray local path rather than a UNC mount — so the old fold was
       wrong on every version, and on 3.14 it took the request with it;
     * a degenerate URI that decodes to the empty string (``file://``,
-      ``file:``).  An empty ``file=`` is not "no file" downstream: the
-      resolver reads ``Path("").parent`` — the process CWD — and would
-      resolve a document's imports against wherever the server was
-      started;
+      ``file:``), so the label the pipeline carries stays recognisably a
+      URI rather than becoming ``""``.  This does NOT by itself stop the
+      resolver rooting at the process CWD — ``Path("file:")`` is exactly
+      as directory-less as ``Path("")``, both giving ``.`` — and an
+      earlier version of this note wrongly claimed it did.  That property
+      is enforced where the resolver is built
+      (:meth:`vera.obligations.session.VerificationSession.verify_source`),
+      which is the one place every caller passes through;
     * anything else ``url2pathname`` rejects, caught as a backstop so a
       future validation cannot reopen the same escape.
 

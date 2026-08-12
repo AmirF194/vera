@@ -18,6 +18,7 @@ Three layers, matching the #222 plan's testing strategy:
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -105,19 +106,38 @@ class TestUriToPath:
             assert uri_to_path(uri) == uri, uri
 
     def test_scheme_matching_is_case_insensitive(self) -> None:
-        """RFC 3986 §3.1: schemes are case-insensitive."""
-        assert uri_to_path("FILE:///tmp/x.vera") == "/tmp/x.vera"
-        assert uri_to_path("File:///tmp/x.vera") == "/tmp/x.vera"
+        """RFC 3986 §3.1: schemes are case-insensitive.
+
+        Asserted RELATIONALLY — every spelling gives the answer the
+        lowercase one gives — rather than against a literal
+        `/tmp/x.vera`, which is what `url2pathname` returns on POSIX and
+        not what it returns on Windows (`\\tmp\\x.vera`).  The property
+        is that case does not change the answer, and that is expressible
+        without naming the answer at all.  The inequality is the other
+        half: without it, three URIs all failing to convert would agree
+        with each other and satisfy the equality.
+        """
+        lowercase = uri_to_path("file:///tmp/x.vera")
+        for spelling in (
+            "FILE:///tmp/x.vera",
+            "File:///tmp/x.vera",
+            "fIlE:///tmp/x.vera",
+        ):
+            assert uri_to_path(spelling) == lowercase, spelling
+            assert uri_to_path(spelling) != spelling, spelling
 
     def test_a_file_uri_naming_no_path_stays_opaque(self) -> None:
         """`file://` and `file:` decode to the empty string.
 
-        An empty `file=` is not "no file" to the pipeline — the module
-        resolver would read `Path("").parent`, i.e. the process CWD, and
-        resolve a document's imports against wherever the server happens
-        to have been started, which is how an unrelated module on disk
-        gets pulled into an unrelated document.  Degenerate URIs stay
-        opaque instead.
+        This pins the returned STRING only — that a degenerate URI is
+        carried through as the opaque label it is, rather than becoming
+        `""` and looking like a path.  It does NOT stop the resolver
+        rooting at the CWD, and an earlier version of this docstring
+        claimed it did: `Path("file:")` is exactly as directory-less as
+        `Path("")`, so both give `.`.  That property is enforced at the
+        resolver root instead (`VerificationSession.verify_source`) and
+        tested by `TestPathlessDocumentIsolation` below — which is the
+        test this one was passing for the wrong reason.
         """
         for uri in ("file://", "file:"):
             assert uri_to_path(uri) == uri, uri
@@ -125,13 +145,23 @@ class TestUriToPath:
     def test_the_root_uri_is_a_path_not_a_degenerate(self) -> None:
         """`file:///` names the root directory, and that IS a path.
 
-        The empty-decode guard above must not swallow it: `/` resolves
+        The empty-decode guard must not swallow it: a root resolves
         imports against the filesystem root, which finds nothing and
         says so, where the CWD fallback finds whatever is lying there.
         Pinned so the guard stays keyed on emptiness rather than on
         "looks unlike a document".
+
+        Asserted as the PROPERTY "converted, and the result is a root",
+        not as the literal `/`: `url2pathname` returns the platform's
+        spelling, `/` on POSIX and `\\` on Windows.  A root is the path
+        that has no filename component and is its own parent, which is
+        true of both spellings.
         """
-        assert uri_to_path("file:///") == "/"
+        result = uri_to_path("file:///")
+        assert result != "file:///"          # it converted at all
+        root = pathlib.Path(result)
+        assert root.name == "", result       # no filename component
+        assert root.parent == root, result   # a root is its own parent
 
     def test_non_file_schemes_pass_through_unchanged(self) -> None:
         """`untitled:` and friends name no path — pre-existing behaviour.
@@ -622,6 +652,138 @@ class TestAnalyzeDiagnostics:
         assert any(d.severity == "error" for d in a.diagnostics)
 
 
+class TestPathlessDocumentIsolation:
+    """A document with no path on disk is analysed ALONE (#1246 review).
+
+    The resolver roots at `Path(file).parent`, and a document that names
+    no location gives `.` — the process CWD.  So a path-less document
+    searched for imports wherever the language server was started, and
+    whatever importable module was lying there became part of it.
+    Measured, not reasoned about: the same source, analysed from a CWD
+    that holds an importable `glib.vera` and from one that does not.
+    """
+
+    LIB = (
+        "module glib;\n"
+        "\n"
+        "public forall<T> fn pick(@T, @T -> @T)\n"
+        "  requires(true)\n"
+        "  ensures(true)\n"
+        "  effects(pure)\n"
+        "{\n"
+        "  @T.1\n"
+        "}\n"
+    )
+    SRC = (
+        "import glib;\n"
+        "\n"
+        "public fn main(@Nat, @Nat -> @Nat)\n"
+        "  requires(true)\n"
+        "  ensures(true)\n"
+        "  effects(pure)\n"
+        "{\n"
+        "  glib::pick(@Nat.1, @Nat.0)\n"
+        "}\n"
+    )
+    #: Every spelling of "this document has no path".
+    PATHLESS = ("untitled:Untitled-1", "file:", "file://", "",
+                "vscode-vfs://host/a.vera")
+
+    def _analyze_from(
+        self, cwd: pathlib.Path, uri: str,
+    ) -> object:
+        original = os.getcwd()
+        os.chdir(cwd)
+        try:
+            return analyze(VerificationSession(), uri, self.SRC)
+        finally:
+            os.chdir(original)
+
+    def test_a_pathless_document_ignores_a_module_in_the_cwd(
+        self, tmp_path: pathlib.Path,
+    ) -> None:
+        """The bug, at every path-less spelling.
+
+        Asserted as "no obligation belongs to a foreign file", which is
+        the property; an obligation COUNT would also move for unrelated
+        reasons, and did — a path-less document now verifies its own
+        function instead of being short-circuited by a resolver error.
+        """
+        holds = tmp_path / "holds"
+        holds.mkdir()
+        (holds / "glib.vera").write_text(self.LIB, encoding="utf-8")
+
+        for uri in self.PATHLESS:
+            a = self._analyze_from(holds, uri)
+            foreign = sorted({
+                ob.file for ob in a.obligations
+                if ob.file is not None and "glib" in ob.file
+            })
+            assert foreign == [], (uri, foreign)
+
+    def test_the_control_directory_holds_no_module_to_find(
+        self, tmp_path: pathlib.Path,
+    ) -> None:
+        """The control the positive is measured against.
+
+        Without it, "no foreign obligations" would also hold because the
+        fixture module was never importable in the first place.
+        """
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        holds = tmp_path / "holds"
+        holds.mkdir()
+        (holds / "glib.vera").write_text(self.LIB, encoding="utf-8")
+
+        for uri in self.PATHLESS:
+            a_empty = self._analyze_from(empty, uri)
+            a_holds = self._analyze_from(holds, uri)
+            assert (
+                [ob.file for ob in a_empty.obligations]
+                == [ob.file for ob in a_holds.obligations]
+            ), uri
+
+    def test_the_module_really_is_importable_from_that_directory(
+        self, tmp_path: pathlib.Path,
+    ) -> None:
+        """The premise: a REAL path in that directory does pull it in.
+
+        This is what makes the two tests above evidence rather than a
+        pair of tautologies — if the fixture were simply unimportable,
+        they would pass with the fix reverted.
+        """
+        holds = tmp_path / "holds"
+        holds.mkdir()
+        (holds / "glib.vera").write_text(self.LIB, encoding="utf-8")
+        entry = holds / "entry.vera"
+        entry.write_text(self.SRC, encoding="utf-8")
+
+        a = analyze(VerificationSession(), entry.as_uri(), self.SRC)
+        foreign = sorted({
+            ob.file for ob in a.obligations
+            if ob.file is not None and "glib" in ob.file
+        })
+        assert foreign, [ob.file for ob in a.obligations]
+
+    def test_the_unresolved_import_is_reported_not_swallowed(
+        self, tmp_path: pathlib.Path,
+    ) -> None:
+        """Isolation must not become silence.
+
+        Dropping the modules is only honest if the import that could not
+        resolve says so — otherwise a path-less document would look
+        fully analysed while a name in it went unresolved.
+        """
+        holds = tmp_path / "holds"
+        holds.mkdir()
+        (holds / "glib.vera").write_text(self.LIB, encoding="utf-8")
+
+        for uri in self.PATHLESS:
+            a = self._analyze_from(holds, uri)
+            codes = [d.error_code for d in a.diagnostics]
+            assert "E230" in codes, (uri, codes)
+
+
 class TestHover:
     def test_hover_reports_smallest_enclosing_expression_type(self) -> None:
         a = _analyze(FEATURE_SRC)
@@ -894,6 +1056,8 @@ class TestHoleCompletion:
 
 from vera.lsp.extensions import proof_delta, speculative_edit  # noqa: E402
 
+SPEC_URI = "file:///s.vera"
+
 SPEC_BASE = (
     "public fn f(@Nat -> @Nat)\n"
     "  requires(@Nat.0 >= 1)\n"
@@ -907,15 +1071,29 @@ SPEC_BASE = (
 
 class TestSpeculativeEdit:
     def _baseline(self) -> tuple[VerificationSession, list[object]]:
+        """A baseline built the way the SERVER builds one.
+
+        `vera/speculativeEdit` diffs against `server.analyses[uri]`,
+        which `analyze` produced — so the baseline is keyed on whatever
+        `analyze` passed as `file=`.  Building it here with a different
+        call, and a different `file=`, made both sides of the delta
+        agree with each other and neither agree with production: with
+        `analyze` on the path and `speculative_edit` on the raw URI, an
+        identical-text edit reported `unchanged: 0` and every obligation
+        `removed`, and this suite was green throughout (#1246 review).
+        Going through `analyze` is what makes these tests a guard.
+        """
         session = VerificationSession()
-        result = session.verify_source(SPEC_BASE, file="file:///s.vera")
-        assert result.ok
-        return session, result.obligations
+        analysis = analyze(session, SPEC_URI, SPEC_BASE)
+        assert not [d for d in analysis.diagnostics
+                    if d.severity == "error"], analysis.diagnostics
+        assert analysis.obligations
+        return session, analysis.obligations
 
     def test_identical_text_reports_all_unchanged(self) -> None:
         session, baseline = self._baseline()
         out = speculative_edit(
-            session, baseline, "file:///s.vera", SPEC_BASE,
+            session, baseline, SPEC_URI, SPEC_BASE,
         )
         assert out["ok"] is True
         assert out["proof_delta"]["unchanged"] == len(baseline)
@@ -932,7 +1110,7 @@ class TestSpeculativeEdit:
             "requires(@Nat.0 >= 1)", "requires(true)",
         )
         out = speculative_edit(
-            session, baseline, "file:///s.vera", broken,
+            session, baseline, SPEC_URI, broken,
         )
         und = out["proof_delta"]["newly_undischarged"]
         assert any(
@@ -941,7 +1119,11 @@ class TestSpeculativeEdit:
         )
         # The edit must NOT have been committed anywhere — the session
         # still replays the ORIGINAL source fully from cache.
-        again = session.verify_source(SPEC_BASE, file="file:///s.vera")
+        # Driven with the PATH, as every production caller is — the
+        # discharge cache is keyed on the obligations' `file`, so a
+        # replay probe spelling the document differently from the
+        # baseline measures the spelling rather than the cache.
+        again = session.verify_source(SPEC_BASE, file=uri_to_path(SPEC_URI))
         assert again.ok
         assert session.last_run_stats.replayed_fns >= 1
 
@@ -962,7 +1144,7 @@ class TestSpeculativeEdit:
     def test_parse_error_reports_not_ok(self) -> None:
         session, baseline = self._baseline()
         out = speculative_edit(
-            session, baseline, "file:///s.vera", "public fn broken(",
+            session, baseline, SPEC_URI, "public fn broken(",
         )
         assert out["ok"] is False
         assert out["proof_delta"] is None
@@ -972,7 +1154,7 @@ class TestSpeculativeEdit:
         session, baseline = self._baseline()
         bad = SPEC_BASE.replace("@Nat.0 - 1", '"not a nat"')
         out = speculative_edit(
-            session, baseline, "file:///s.vera", bad,
+            session, baseline, SPEC_URI, bad,
         )
         assert out["ok"] is False
         assert out["proof_delta"] is None
@@ -981,7 +1163,7 @@ class TestSpeculativeEdit:
     def test_deleted_function_reports_removed(self) -> None:
         session, baseline = self._baseline()
         out = speculative_edit(
-            session, baseline, "file:///s.vera",
+            session, baseline, SPEC_URI,
             "public fn g(@Int -> @Int)\n"
             "  requires(true) ensures(true) effects(pure)\n"
             "{ @Int.0 }\n",

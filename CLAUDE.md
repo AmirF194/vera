@@ -223,8 +223,10 @@ This repo uses [CodeRabbit](https://coderabbit.ai) for AI code review on pull re
 
 ## Cross-platform pitfalls (test fixtures)
 
-The CI matrix tests on `{ubuntu-latest, macos-15, macos-26, windows-latest} × {3.11, 3.12, 3.13}` plus an advisory `ubuntu-24.04-arm` × 3.12 cell (13 combinations; macOS pinned explicitly to insulate from silent `macos-latest` migration — see README §Supported platforms).  When writing test fixtures, three Windows-portability rules apply — see the **Test Fixture Conventions** section in `TESTING.md` for full examples:
+The CI matrix tests on `{ubuntu-latest, macos-15, macos-26, windows-latest} × {3.11, 3.12, 3.13}` plus an advisory `ubuntu-24.04-arm` × 3.12 cell (13 combinations; macOS pinned explicitly to insulate from silent `macos-latest` migration — see README §Supported platforms).  When writing test fixtures, five Windows-portability rules apply — see the **Test Fixture Conventions** section in `TESTING.md` for full examples:
 
 - `tempfile.NamedTemporaryFile` handed off to a subprocess MUST use `delete=False` + manual `Path.unlink()` (Windows can't reopen a held file).
 - Paths embedded into Vera string literals MUST be POSIX-form (`Path(tmp_path).as_posix()`); Windows backslashes trip Vera's `\U` escape grammar.
+- Repo-relative paths COMPARED as strings MUST be POSIX-form (`path.relative_to(ROOT).as_posix()`); a native-separator string makes every `startswith("tests/…")` match nothing, silently.
+- A path a stdlib converter RETURNED must be asserted by its PROPERTY, not its POSIX shape: `url2pathname` returns `\tmp\x` on Windows where it returns `/tmp/x` elsewhere, so compare against another call's result or against a path the test built, never a `/`-shaped literal.
 - Text I/O MUST pass `encoding="utf-8"` explicitly, enforced by `scripts/check_explicit_encoding.py` (pre-commit + CI lint, #645): every text-mode `open()` / `read_text()` / `write_text()` **and** every `subprocess.run/Popen/check_output(..., text=True)` capture. A deliberate non-UTF-8 site opts out with `# encoding-exempt: <reason>`. The `vera` CLI also reconfigures its stdout/stderr to UTF-8 at startup, so a Vera program printing `→` / `—` is UTF-8 on any locale. Together these replaced the `PYTHONUTF8=1` CI backstop (#641), which has been removed — no reliance on the runner's or a local Windows shell's locale.

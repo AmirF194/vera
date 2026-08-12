@@ -671,7 +671,7 @@ Mutation testing runs **locally** for now (the measure-all sweep is multi-day; C
 
 ## Test Fixture Conventions
 
-Cross-platform footguns hit by the post-#637 Windows CI rollout (PRs #639/#643/#644/#646).  Each has a workaround that makes the fixture portable across Linux / macOS / Windows.  This section is the one place they are stated; for the specific job of building a `ResolvedModule` fixture, `tests/module_fixture_helpers.py` applies all of them and is what a multi-module test should import (#1228).
+Cross-platform footguns, most from the post-#637 Windows CI rollout (PRs #639/#643/#644/#646) and the last from #1246's.  Each has a workaround that makes the fixture portable across Linux / macOS / Windows.  This section is the one place they are stated; for the specific job of building a `ResolvedModule` fixture, `tests/module_fixture_helpers.py` applies all of them and is what a multi-module test should import (#1228).
 
 ### Tempfiles handed off to subprocesses must use `delete=False`
 
@@ -732,6 +732,31 @@ origin = path.relative_to(ROOT).as_posix()
 Do the conversion where the string is *created*, not at each comparison: one `as_posix()` makes the property hold for every consumer, where a per-comparison fix has to be remembered by each new one.  `Path.parts` tuples are an equally portable alternative when you are matching whole segments rather than a prefix.
 
 Surfaced via `tests/test_slot_naming_differential.py::test_corpus_is_almost_entirely_parseable`, which re-anchored its floor on the maintained corpus (`examples/` + `tests/conformance/`) and went red on all three Windows cells with `AssertionError: (0, 428)` — the walk had collected all 428 files, and the *classification* matched none of them.  That test now also asserts no origin contains a backslash, so the regression names its own cause.
+
+### A path a converter RETURNED must not be asserted by its POSIX shape
+
+The two rules above are about paths the test *constructs* — embedded into Vera source, or compared as a repo-relative key.  This is their assertion-side twin: a path handed back by a standard-library converter is in the **platform's** spelling, so pinning it against a literal `/`-shaped string passes on Linux and macOS and fails on all three Windows cells.  `urllib.request.url2pathname("/tmp/x.vera")` is `/tmp/x.vera` on POSIX and `\tmp\x.vera` on Windows; `url2pathname("/")` is `/` and `\`.  The POSIX cells greening proves nothing about the Windows ones, which is what makes this class of assertion easy to write and impossible to notice locally.
+
+Assert the **property**, relationally, so no shape is named:
+
+```python
+# Wrong — a POSIX shape, so red on every Windows cell:
+assert uri_to_path("FILE:///tmp/x.vera") == "/tmp/x.vera"
+assert uri_to_path("file:///") == "/"
+
+# Right — case-insensitivity is "every spelling gives the same answer as
+# the lowercase one", and the inequality keeps three non-conversions from
+# satisfying it by all agreeing:
+lowercase = uri_to_path("file:///tmp/x.vera")
+assert uri_to_path("FILE:///tmp/x.vera") == lowercase
+assert uri_to_path("FILE:///tmp/x.vera") != "FILE:///tmp/x.vera"
+
+# Right — "is a root" holds of `/` and `\` alike:
+root = Path(uri_to_path("file:///"))
+assert root.name == "" and root.parent == root
+```
+
+Assertions that compare against a path the test itself built (`str(tmp_path / "x.vera")`, or a round-trip through `Path.as_uri()`) are already portable — the expected value is in the same spelling as the actual.  So are assertions that the INPUT comes back unchanged, which is how the opaque/pass-through cases are pinned.  Surfaced by `tests/test_lsp.py::TestUriToPath` (#1246), where two of nine assertions named a shape and seven did not.
 
 ### File I/O without explicit encoding falls back to the locale default
 
