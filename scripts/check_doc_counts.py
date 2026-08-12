@@ -224,7 +224,7 @@ def check_history_row_format(history_text: str) -> list[str]:
 
 
 def check_corpus_count(root: Path) -> list[str]:
-    """Gate the cited corpus-program count wherever TESTING.md states it.
+    """Gate the cited corpus-program count in every document that states it.
 
     The corpus is every ``*.vera`` under ``examples/`` and
     ``tests/conformance/`` **recursively** — the set
@@ -238,26 +238,53 @@ def check_corpus_count(root: Path) -> list[str]:
     cite it — the two are worded differently ("All N corpus programs" vs
     "All N ``examples/`` + ..."), so the pattern here keys on the script name
     that anchors both rows, not on the prose around the number.
+
+    TESTING.md was the only document gated, and CLAUDE.md and AGENTS.md then
+    went stale for exactly that reason: both cite the count in the comment on
+    the command that runs the script, and a fix driven by this script's own
+    output could not see them (adversarial review of PR C.6).  All three are
+    read here, each keyed on the script name.  Every pattern is anchored on
+    surrounding TEXT rather than on a bare numeral: a document-wide numeric
+    substitution is not safe, `E207` being a live example of a token this
+    count's own digits sit inside.
+
+    A document whose row is reworded away is an ERROR, not a skip — a silent
+    skip is the failure mode the gate exists to prevent.
     """
     errors: list[str] = []
     live = sum(
         len(list((root / d).rglob("*.vera")))
         for d in ("examples", "tests/conformance")
     )
-    testing = (root / "TESTING.md").read_text(encoding="utf-8")
-    rows = re.findall(
-        r"`check_corpus_canonical\.py`[^|\n]*\|[^|\n]*?All (\d+)\b", testing
+    # (document, pattern, what the pattern anchors on)
+    sites = (
+        # A table row: | `check_corpus_canonical.py` | All N ... |
+        ("TESTING.md",
+         r"`check_corpus_canonical\.py`[^|\n]*\|[^|\n]*?All (\d+)\b",
+         "table row"),
+        # A command-block comment: python scripts/check_corpus_canonical.py
+        # # Verify all N corpus programs ... / # All N corpus programs ...
+        ("CLAUDE.md",
+         r"check_corpus_canonical\.py[^\n]*?\ball (\d+) corpus programs",
+         "command comment"),
+        ("AGENTS.md",
+         r"check_corpus_canonical\.py[^\n]*?\ball (\d+) corpus programs",
+         "command comment"),
     )
-    if not rows:
-        errors.append(
-            "TESTING.md: no `check_corpus_canonical.py` row states a corpus"
-            " count — the rows moved or were reworded, so they are no longer gated"
-        )
-    for cited in rows:
-        if int(cited) != live:
+    for doc, pattern, anchor in sites:
+        text = (root / doc).read_text(encoding="utf-8")
+        rows = re.findall(pattern, text, re.IGNORECASE)
+        if not rows:
             errors.append(
-                f"TESTING.md corpus count: doc says {cited}, live is {live}"
+                f"{doc}: no `check_corpus_canonical.py` {anchor} states a"
+                f" corpus count — it moved or was reworded, so it is no"
+                f" longer gated"
             )
+        for cited in rows:
+            if int(cited) != live:
+                errors.append(
+                    f"{doc} corpus count: doc says {cited}, live is {live}"
+                )
     return errors
 
 

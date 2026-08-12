@@ -30,9 +30,20 @@ from tests.module_fixture_helpers import resolved_module
 # =====================================================================
 
 
-def _compile(source: str) -> CompileResult:
-    """Compile a Vera source string to WASM."""
-    # Write to a temp source and parse
+def _parse_from_temp_file(source: str) -> tuple[ast.Program, str]:
+    """Parse *source* through a real temp file: ``(program, path)``.
+
+    These tests need a real file because they exercise the module
+    pipeline through ``parse_file``, but nothing downstream re-reads the
+    path — codegen works off the returned program and the in-memory
+    source string, and keeps the path only as a diagnostic label.  So
+    the file is removed the moment it has been parsed.  ``delete=False``
+    plus a manual unlink is the Windows-portable pattern (an open
+    ``NamedTemporaryFile`` cannot be reopened there); see TESTING.md's
+    Test Fixture Conventions.  Six sites in this file each wrote the
+    temp file and never removed it, leaking one per call (#1228
+    adversarial round).
+    """
     import tempfile
 
     with tempfile.NamedTemporaryFile(
@@ -41,10 +52,16 @@ def _compile(source: str) -> CompileResult:
         f.write(source)
         f.flush()
         path = f.name
+    try:
+        return transform(parse_file(path)), path
+    finally:
+        Path(path).unlink(missing_ok=True)
 
-    tree = parse_file(path)
-    ast = transform(tree)
-    return compile(ast, source=source, file=path)
+
+def _compile(source: str) -> CompileResult:
+    """Compile a Vera source string to WASM."""
+    prog, path = _parse_from_temp_file(source)
+    return compile(prog, source=source, file=path)
 
 
 def _compile_ok(source: str) -> CompileResult:
@@ -183,19 +200,9 @@ private fn internal(@Int -> @Int)
         cls, source: str, modules: list,
     ) -> CompileResult:
         """Compile with resolved modules."""
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".vera", delete=False, encoding="utf-8"
-        ) as f:
-            f.write(source)
-            f.flush()
-            path = f.name
-
-        tree = parse_file(path)
-        ast = transform(tree)
+        prog, path = _parse_from_temp_file(source)
         return compile(
-            ast, source=source, file=path, resolved_modules=modules,
+            prog, source=source, file=path, resolved_modules=modules,
         )
 
     @classmethod
@@ -3304,18 +3311,9 @@ public fn main(@Unit -> @Int)
   requires(true) ensures(true) effects(pure)
 { pick(true, 42) }
 """
-        import tempfile
-
         from vera.codegen.core import CodeGenerator
 
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".vera", delete=False, encoding="utf-8"
-        ) as f:
-            f.write(source)
-            f.flush()
-            path = f.name
-        tree = parse_file(path)
-        prog = transform(tree)
+        prog, path = _parse_from_temp_file(source)
         gen = CodeGenerator(
             source=source, file=path, resolved_modules=mods,
         )
@@ -3366,18 +3364,9 @@ public fn main(@Unit -> @Int)
   requires(true) ensures(true) effects(pure)
 { nums(()) * 6 }
 """
-        import tempfile
-
         from vera.codegen.core import CodeGenerator
 
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".vera", delete=False, encoding="utf-8"
-        ) as f:
-            f.write(source)
-            f.flush()
-            path = f.name
-        tree = parse_file(path)
-        prog = transform(tree)
+        prog, path = _parse_from_temp_file(source)
         gen = CodeGenerator(
             source=source, file=path, resolved_modules=mods,
         )
@@ -3756,8 +3745,6 @@ public fn main(@Unit -> @Int)
         layer can still be handed.  The pairing is what keeps that
         refusal from being the only thing standing between a module
         alias and the prelude's parameter list."""
-        import tempfile
-
         from vera.codegen.core import CodeGenerator
 
         mods = [self._resolved(("mc",), """\
@@ -3778,14 +3765,7 @@ public fn main(@Unit -> @Int)
   effects(pure)
 { ident(42) }
 """
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".vera", delete=False, encoding="utf-8"
-        ) as f:
-            f.write(source)
-            f.flush()
-            path = f.name
-        tree = parse_file(path)
-        prog = transform(tree)
+        prog, path = _parse_from_temp_file(source)
         gen = CodeGenerator(source=source, file=path, resolved_modules=mods)
         result = gen.compile_program(prog)
         errors = [d for d in result.diagnostics if d.severity == "error"]
@@ -3818,8 +3798,6 @@ public fn main(@Unit -> @Int)
         all, and the arity-1 use below stops substituting — the missing
         pairing is loud, end to end.
         """
-        import tempfile
-
         from vera.codegen.core import CodeGenerator
 
         mods = [self._resolved(("palias",), """\
@@ -3840,14 +3818,7 @@ public fn main(@Unit -> @Int)
   effects(pure)
 { option_unwrap_or(palias::wrap(41), 0) + 1 }
 """
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".vera", delete=False, encoding="utf-8"
-        ) as f:
-            f.write(source)
-            f.flush()
-            path = f.name
-        tree = parse_file(path)
-        prog = transform(tree)
+        prog, path = _parse_from_temp_file(source)
         gen = CodeGenerator(source=source, file=path, resolved_modules=mods)
         result = gen.compile_program(prog)
         errors = [d for d in result.diagnostics if d.severity == "error"]

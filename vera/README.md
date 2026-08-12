@@ -120,7 +120,7 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `  cache.py` | 219 | | Invalidation keys (structural/callee/context hashes), DischargeCache | |
 | `  session.py` | 279 | | Warm-Z3 daemon: per-function replay vs re-verify in declaration order | |
 | `lsp/` | 1,420 | Serve | Language Server Protocol over stdio (#222 C/D/E/F) | `create_server()`, `vera lsp` |
-| `  convert.py` | 144 | | Span/SourceLocation/LSP coordinate conversions, UTF-16 transcoding | |
+| `  convert.py` | 181 | | Span/SourceLocation/LSP coordinate conversions, UTF-16 transcoding | |
 | `  documents.py` | 69 | | URI-keyed document store, full-text sync | |
 | `  features.py` | 323 | | Diagnostics + tier hints, hover, slot goto (keyed through `naming.slot_ref_key`, so parameterised and alias-spelled references resolve, and a `where` helper resolves in its own accumulated scope), hole completion | |
 | `  extensions.py` | 146 | | vera/speculativeEdit proof-delta | |

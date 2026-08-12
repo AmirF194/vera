@@ -20,7 +20,7 @@ Literal expressions produce values of the corresponding primitive type:
 
 Integer literals in a context expecting `Nat` are checked for non-negativity at compile time.
 
-Integer literals are also range-checked against their target machine type at compile time ([#812](https://github.com/aallan/vera/issues/812)): `Int` is a signed 64-bit integer (range `-2^63 .. 2^63 - 1`) and `Nat` an unsigned one (`0 .. 2^64 - 1`).  A literal outside its target's range is a compile error (**E149**) rather than an opaque codegen failure or a silent reinterpretation of its bit pattern — for example `18446744073709551615` is valid as `Nat` but not as `Int`.  (The magnitude `2^63` is valid only negated, as `Int`'s minimum `-9223372036854775808`.)
+Integer literals are also range-checked against their target machine type at compile time ([#812](https://github.com/aallan/vera/issues/812)): `Int` is a signed 64-bit integer (range `-2^63 .. 2^63 - 1`), `Nat` an unsigned one (`0 .. 2^64 - 1`), and a literal in a `Byte` context must lie in `0 .. 255`.  A literal outside its target's range is a compile error (**E149**) rather than an opaque codegen failure or a silent reinterpretation of its bit pattern — for example `18446744073709551615` is valid as `Nat` but not as `Int`, and `999` is valid as either but not as `Byte`.  (The magnitude `2^63` is valid only negated, as `Int`'s minimum `-9223372036854775808`.)  The check reads the target's base type, so a refinement over one (`{ @Byte | @Byte.0 < 10 }`) is range-checked as its base and the predicate is left to verification.
 
 ## 4.3 Slot References
 

@@ -23,10 +23,47 @@ document text.
 
 from __future__ import annotations
 
+import urllib.parse
+import urllib.request
+
 from lsprotocol import types as lsp
 
 from vera.ast import Span
 from vera.errors import SourceLocation
+
+
+def uri_to_path(uri: str) -> str:
+    """The filesystem path an LSP document URI names.
+
+    A fourth conversion at the same boundary, and the same rule: nobody
+    hand-rolls it.  LSP identifies documents by URI (``file:///a/b.vera``);
+    the compiler pipeline identifies them by path, and uses it — the
+    module resolver reads imports from ``Path(file).parent``.  Handing it
+    the raw URI made that parent the literal directory ``file:``, so a
+    document with imports resolved none of them: the entry stopped at the
+    resolver and the editor showed neither obligations nor tier hints, and
+    ``verify_source``'s early return meant the resolver's own errors were
+    not surfaced either — silently unverified (#1246 adversarial round,
+    contradicting LSP_SERVER.md's "module imports resolve from disk").
+
+    Only ``file:`` URIs name a path.  Anything else — ``untitled:``, a
+    virtual filesystem, or the bare labels the tests use — is returned
+    unchanged, which is the pre-existing behaviour: an opaque document
+    label the pipeline carries but never opens.
+
+    ``url2pathname`` does the percent-decoding and, on Windows, the
+    drive-letter transform (``/C:/x`` → ``C:\\x``), so no separate
+    ``unquote`` here — a second one would corrupt a path containing a
+    literal ``%``.  A non-empty authority is a UNC host and is folded
+    back into the path so it survives the transform.
+    """
+    if not uri.startswith("file:"):
+        return uri
+    parsed = urllib.parse.urlsplit(uri)
+    path = parsed.path
+    if parsed.netloc and parsed.netloc.lower() != "localhost":
+        path = f"//{parsed.netloc}{path}"
+    return urllib.request.url2pathname(path)
 
 
 class LineIndex:

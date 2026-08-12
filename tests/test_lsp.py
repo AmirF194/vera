@@ -34,6 +34,7 @@ from vera.lsp.convert import (
     location_to_range,
     position_to_cp,
     span_to_range,
+    uri_to_path,
 )
 from vera.lsp.documents import DocumentStore
 
@@ -41,6 +42,58 @@ from vera.lsp.documents import DocumentStore
 # code point but TWO UTF-16 code units, so LSP columns after it shift
 # by one relative to Python string indices.
 ASTRAL_LINE = "ab\U0001f389cd"
+
+
+class TestUriToPath:
+    """`uri_to_path` — the fourth conversion at the LSP boundary (#1246).
+
+    LSP identifies a document by URI; the compiler identifies it by
+    path, and USES the path (the module resolver reads imports from
+    `Path(file).parent`).  Handing the pipeline a raw `file://` URI made
+    that parent the literal directory `file:`.
+    """
+
+    def test_file_uri_round_trips_a_real_path(
+        self, tmp_path: pathlib.Path,
+    ) -> None:
+        target = tmp_path / "entry.vera"
+        target.write_text("", encoding="utf-8")
+        assert uri_to_path(target.as_uri()) == str(target)
+
+    def test_percent_escapes_are_decoded_once(
+        self, tmp_path: pathlib.Path,
+    ) -> None:
+        """A space escapes to `%20`; a literal `%` escapes to `%25`.
+
+        Decoding twice would turn `a%2520b` back into `a%20b` instead of
+        the literal `a%20b` the path really holds, so the round-trip
+        through a genuinely `%`-bearing name is the case that separates
+        one unquote from two.
+        """
+        for name in ("a b.vera", "a%20b.vera"):
+            target = tmp_path / name
+            target.write_text("", encoding="utf-8")
+            assert uri_to_path(target.as_uri()) == str(target), name
+
+    def test_localhost_authority_is_not_part_of_the_path(self) -> None:
+        """`file://localhost/x` names `/x`, not `//localhost/x`."""
+        assert uri_to_path("file://localhost/tmp/x.vera") == (
+            uri_to_path("file:///tmp/x.vera")
+        )
+
+    def test_non_file_schemes_pass_through_unchanged(self) -> None:
+        """`untitled:` and friends name no path — pre-existing behaviour.
+
+        The pipeline carries such a label without ever opening it, which
+        is what an unsaved buffer needs.
+        """
+        for uri in ("untitled:Untitled-1", "vscode-vfs://host/a.vera",
+                    "inmemory://model/1"):
+            assert uri_to_path(uri) == uri
+
+    def test_a_bare_path_is_already_a_path(self) -> None:
+        """Tests and the CLI-adjacent callers pass plain paths."""
+        assert uri_to_path("/tmp/x.vera") == "/tmp/x.vera"
 
 
 class TestLineIndex:
@@ -342,6 +395,73 @@ class TestAnalyzeDiagnostics:
         assert hints[0].severity == lsp.DiagnosticSeverity.Hint
         assert "Tier 1" in hints[0].message
         assert "dec" in hints[0].message
+
+    def test_a_file_uri_document_resolves_its_imports(
+        self, tmp_path: pathlib.Path,
+    ) -> None:
+        """The shipped entry point hands `analyze` a URI, not a path.
+
+        `server.py` passes `doc.uri` straight through, and the module
+        resolver reads imports from `Path(file).parent` — which for
+        `file:///a/b.vera` is the directory `file:`.  So a document with
+        imports resolved none of them, produced ZERO obligations and
+        zero hints, and said nothing about it: `verify_source` returns
+        its resolver errors as `check_diagnostics`, which `analyze`
+        does not collect.  Silently unverified, and contradicting
+        LSP_SERVER.md's "module imports resolve from disk" (#1246
+        adversarial round).
+        """
+        lib = tmp_path / "glib.vera"
+        lib.write_text(
+            "module glib;\n"
+            "\n"
+            "public forall<T> fn pick(@T, @T -> @T)\n"
+            "  requires(true)\n"
+            "  ensures(true)\n"
+            "  effects(pure)\n"
+            "{\n"
+            "  @T.1\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        entry = tmp_path / "entry.vera"
+        entry_src = (
+            "import glib;\n"
+            "\n"
+            "public fn main(@Nat, @Nat -> @Nat)\n"
+            "  requires(true)\n"
+            "  ensures(true)\n"
+            "  effects(pure)\n"
+            "{\n"
+            "  glib::pick(@Nat.1, @Nat.0)\n"
+            "}\n"
+        )
+        entry.write_text(entry_src, encoding="utf-8")
+
+        a = analyze(VerificationSession(), entry.as_uri(), entry_src)
+        assert a.obligations, "URI document produced no obligations"
+        assert a.path == str(entry), (a.path, str(entry))
+        # `uri` still answers the client-facing question unchanged.
+        assert a.uri == entry.as_uri()
+        # And the #1246 filter works on the REAL path: `glib`'s clone is
+        # in the stream, and only `main` gets a hint here.
+        assert str(lib) in {ob.file for ob in a.obligations}
+        hints = [d for d in to_lsp_diagnostics(a) if d.code == "tier"]
+        assert [h.message.split(":")[0] for h in hints] == ["main"], [
+            h.message for h in hints
+        ]
+
+    def test_definition_still_reports_the_uri_not_the_path(self) -> None:
+        """`textDocument/definition` Locations must carry a URI.
+
+        The path is what the compiler was driven with; the URI is what
+        the client is told.  Collapsing the two would have made
+        go-to-definition return a bare filesystem path.
+        """
+        a = analyze(VerificationSession(), "file:///t.vera", FEATURE_SRC)
+        loc = definition_at(a, lsp.Position(line=5, character=14))
+        assert loc is not None
+        assert loc.uri == "file:///t.vera", loc.uri
 
     def test_imported_modules_obligations_get_no_hint_here(
         self, tmp_path: pathlib.Path,

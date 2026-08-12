@@ -874,6 +874,13 @@ class TestReservedTypePrefix:
         diags = typecheck(parse_to_ast(source), source=source)
         return [d.error_code for d in diags]
 
+    def _diag(self, source: str) -> Diagnostic:
+        """The single E154 *source* produces (asserting there is one)."""
+        diags = typecheck(parse_to_ast(source), source=source)
+        e154 = [d for d in diags if d.error_code == "E154"]
+        assert len(e154) == 1, [(d.error_code, d.description) for d in diags]
+        return e154[0]
+
     def test_alias_spelling_a_twin_is_E154(self) -> None:
         codes = self._codes("type VeraOptionMapFn = Int;\n")
         assert "E154" in codes, codes
@@ -1048,6 +1055,78 @@ class TestReservedTypePrefix:
             assert e154[0].description.startswith(word), e154[0].description
             assert "alias" not in (e154[0].fix or ""), e154[0].fix
             assert "Zed" in (e154[0].fix or ""), e154[0].fix
+
+    def test_rationale_is_per_rail_because_the_consequence_is(self) -> None:
+        """A diagnostic must not state a consequence that cannot happen.
+
+        The type/alias rail's rationale names a real mechanism: the
+        prelude declares six reserved ALIASES, `inject_prelude` skips
+        one whose name the program already spells, and the user
+        declaration re-types the combinators' own signatures —
+        check-green, then a WebAssembly validation failure at run.  The
+        prelude declares no effect, ability or constructor in the
+        namespace at all, so nothing there can be re-typed: with the
+        gate bypassed, `data Other { VeraZed(Int) }` compiles AND runs.
+        Those three rails state the forward reason instead (the
+        namespace is reserved ahead of use).  `check_diagnostic_fields`
+        checks a rationale is present, never that it is true, so this is
+        the only rail against the wrong one.
+        """
+        occupied = self._diag("type VeraZed = Int;\n")
+        assert "re-types those internals" in occupied.rationale
+        assert "WebAssembly validation" in occupied.rationale
+
+        for src, kind in (
+            ("effect VeraZed {\n  op zap(Int -> Unit);\n}\n", "effect"),
+            ("ability VeraZed {\n  op size(Int -> Int);\n}\n", "ability"),
+            ("public data Other { VeraZed(Int) }\n", "constructor"),
+        ):
+            d = self._diag(src)
+            assert "re-types" not in d.rationale, (kind, d.rationale)
+            assert "WebAssembly validation" not in d.rationale, (
+                kind, d.rationale)
+            assert f"declares no {kind} there today" in d.rationale, (
+                kind, d.rationale)
+            assert "reserved ahead of use" in d.rationale, (kind, d.rationale)
+        # Both variants keep the shared statement of WHAT the namespace is.
+        assert "prelude's internal namespace" in occupied.rationale
+
+    def test_the_prelude_occupies_the_type_namespace_only(self) -> None:
+        """The premise the branch above rests on, measured not assumed.
+
+        If the prelude ever declares an effect, ability or constructor
+        in the reserved namespace, the "declares no X there today"
+        rationale becomes the false one and this fails first.
+        """
+        from vera import prelude as prelude_mod
+
+        found: dict[str, set[str]] = {}
+
+        def note(kind: str, name: str) -> None:
+            if name.startswith("Vera"):
+                found.setdefault(kind, set()).add(name)
+
+        for const in dir(prelude_mod):
+            value = getattr(prelude_mod, const)
+            if not isinstance(value, str) or "Vera" not in value:
+                continue
+            try:
+                prog = parse_to_ast(value)
+            except Exception:  # noqa: BLE001 — not every constant is a program
+                continue
+            for top in prog.declarations:
+                d = top.decl
+                note(type(d).__name__, getattr(d, "name", "") or "")
+                for tp in (getattr(d, "type_params", None) or ()):
+                    note("type_param", tp)
+                for fv in (getattr(d, "forall_vars", None) or ()):
+                    note("type_param", fv)
+                if isinstance(d, ast.DataDecl):
+                    for c in d.constructors:
+                        note("Constructor", c.name)
+
+        assert set(found) == {"TypeAliasDecl", "type_param"}, found
+        assert found["TypeAliasDecl"], found
 
     def test_ordinary_names_stay_legal_in_all_three_namespaces(self) -> None:
         """The anchoring holds wherever the rule is applied."""
