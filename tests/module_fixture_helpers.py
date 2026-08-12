@@ -2,29 +2,41 @@
 
 Six test files carried independent copies of the same two patterns for
 turning a source string into a :class:`~vera.resolver.ResolvedModule`.
-They are two patterns, not one, and which is correct depends on whether
-the code under test reads the module's ``file_path``:
+They are two patterns, not one, and what separates them is PARSE
+PROVENANCE — not whether a file survives the call, because neither
+leaves one:
 
-``resolved_module`` — writes the source to a real temporary file and
-parses THAT, so ``file_path`` names a file the pipeline can open.
-Required by anything that reports a location in the module, re-reads it,
-or keys on a real path.
+``resolved_module`` — writes the source to a real temporary file, parses
+THAT (:func:`~vera.parser.parse_file`), and deletes the file before
+returning.  The module carries real-file provenance: its program came
+through the on-disk parse path, and ``file_path`` is a well-formed
+absolute path of the shape the pipeline sees in production.
 
-``fake_resolved_module`` — parses the source in memory and labels it
-``/fake/<path>.vera``.  Cheaper, and correct wherever the file is never
-opened; the fake path is deliberately non-existent so a consumer that
-DOES open it fails loudly instead of reading something plausible.
+``fake_resolved_module`` — parses the source in memory
+(:func:`~vera.parser.parse_to_ast`) and labels the module
+``/fake/<path>.vera``.  Cheaper, and correct wherever the parse path
+does not matter; the label is conspicuously synthetic, so a path that
+turns up in a failure message is recognisable as a fixture's rather than
+a real module's.
 
-Both are Windows-portable, per the three rules in TESTING.md's "Test
-Fixture Conventions": ``delete=False`` plus a manual unlink (Windows
-cannot reopen a held ``NamedTemporaryFile``), explicit
-``encoding="utf-8"``, and — for callers embedding a fixture path into
-Vera source — POSIX-form paths via ``Path.as_posix()``.
+**Neither builder leaves a file on disk, and neither ``file_path`` can
+be opened after the call returns.**  That is safe because nothing
+downstream re-reads it: ``compile()`` and the checker work off the
+parsed program and the in-memory ``source`` string and keep the path
+only as a diagnostic label (PR #664 review — the one ``read_text`` under
+``vera/codegen/`` is the ``IO.read_file`` HOST binding, which reads
+whatever path the compiled program asks for at run time, not the
+module's).  A test that needs a module file to EXIST while it runs must
+therefore write one itself; these builders will not provide it.
+:func:`test_neither_builder_leaves_a_file_behind` pins the contract.
 
-The temp file is unlinked as soon as parsing is done: the resulting
-``ResolvedModule`` carries the parsed program and the source string, and
-the compiler works off those rather than re-reading the path (PR #664
-review).  One of the consolidated copies did not unlink, and leaked one
+Both are Windows-portable, per the rules in TESTING.md's "Test Fixture
+Conventions": ``delete=False`` plus a manual unlink (Windows cannot
+reopen a held ``NamedTemporaryFile``), explicit ``encoding="utf-8"``,
+and — for callers embedding a fixture path into Vera source —
+POSIX-form paths via ``Path.as_posix()``.
+
+One of the consolidated copies did not unlink at all, and leaked one
 temp file per fixture it built.
 """
 from __future__ import annotations
@@ -41,9 +53,12 @@ from vera.transform import transform
 def resolved_module(path: tuple[str, ...], source: str) -> ResolvedModule:
     """A ``ResolvedModule`` parsed from a real (temporary) file.
 
-    The file exists only for the duration of the parse; ``file_path``
-    keeps naming it afterwards, which is what the location-reporting
-    paths need it for.
+    The file exists for the parse and is deleted before this returns, so
+    ``file_path`` names a path that is no longer there.  What the module
+    keeps is the PROVENANCE — a program that came through the on-disk
+    parse path, under a realistic absolute path — which is all any
+    consumer needs, since none of them reopens it (see the module
+    docstring).
     """
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".vera", delete=False, encoding="utf-8",
@@ -67,10 +82,12 @@ def fake_resolved_module(
 ) -> ResolvedModule:
     """A ``ResolvedModule`` parsed in memory, labelled with a fake path.
 
-    For tests where nothing opens the module's file.  The path is
-    ``/fake/<dotted/path>.vera`` — a location that does not exist, so a
-    consumer that unexpectedly opens it raises rather than succeeding
-    against some other file.
+    For tests where the parse path does not matter.  The label is
+    ``/fake/<dotted/path>.vera`` — conspicuously synthetic, so a path
+    appearing in a failure message is recognisable as a fixture's.  Like
+    :func:`resolved_module` it leaves nothing on disk; the difference
+    between them is where the program was parsed from, not whether the
+    file survives.
     """
     return ResolvedModule(
         path=path,

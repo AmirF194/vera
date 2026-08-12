@@ -167,7 +167,7 @@ class ExpressionsMixin:
                 # about a consequence; at a call argument, E202; under a `let`,
                 # E170.  The literal keeps the type its context asked for, so
                 # the one real error is the only one reported.
-                self._error(
+                self._literal_range_error(
                     expr,
                     f"Integer literal {expr.value} is out of range for "
                     f"@Byte; the range is 0..255.",
@@ -183,8 +183,9 @@ class ExpressionsMixin:
                         "binding, argument or return a wider type such as "
                         "`@Nat` or `@Int`."
                     ),
-                    spec_ref='Chapter 4, Section 4.2 "Literals"',
-                    error_code="E149",
+                    # This pass KNOWS the target is `@Byte`, so it supersedes
+                    # an unconstrained verdict on the same literal.
+                    contextual=True,
                 )
                 return BYTE
             # #812: range-check the literal against its target machine type
@@ -201,7 +202,7 @@ class ExpressionsMixin:
             bound = _I64_MAX if targets_int else _U64_MAX
             if expr.value > bound:
                 type_name = "@Int (i64)" if targets_int else "@Nat (u64)"
-                self._error(
+                self._literal_range_error(
                     expr,
                     f"Integer literal {expr.value} is out of range for "
                     f"{type_name}; the maximum is {bound}.",
@@ -218,8 +219,9 @@ class ExpressionsMixin:
                         "wider target type (`@Nat` reaches "
                         f"{_U64_MAX} where `@Int` stops at {_I64_MAX})."
                     ),
-                    spec_ref='Chapter 4, Section 4.2 "Literals"',
-                    error_code="E149",
+                    # `expected is None` is a GUESS at `@Nat`, not knowledge
+                    # of the target — a later contextual verdict wins.
+                    contextual=expected is not None,
                 )
             # Non-negative integer literals are Nat (which is a subtype of
             # Int).  This lets literals like 0, 1, 42 satisfy Nat parameters

@@ -2085,6 +2085,128 @@ public fn f(@Unit -> @{ @Byte | @Byte.0 < 10 })
 """)]
         assert "E149" in codes, codes
 
+    def test_one_literal_gets_one_range_error_in_a_byte_predicate(
+        self,
+    ) -> None:
+        """One literal, one verdict (PR #1282 review).
+
+        A refinement predicate's operands are synthesised twice: once
+        with no expected type, where a literal past the u64 bound draws
+        the `@Nat` range error, and again against the refined base,
+        where the same literal draws the `@Byte` one.  Both fired, so a
+        single mistake produced two E149s naming two different bounds.
+        The unconstrained pass is a GUESS — it reports `@Nat` only
+        because nothing told it otherwise — so the contextual verdict
+        supersedes it rather than joining it.
+        """
+        errs = _errors("""
+public fn f(@Unit -> @{ @Byte | @Byte.0 < 18446744073709551616 })
+  requires(true) ensures(true) effects(pure)
+{ 5 }
+""")
+        e149 = [e for e in errs if e.error_code == "E149"]
+        assert len(e149) == 1, [e.description for e in e149]
+        assert "0..255" in e149[0].description, e149[0].description
+        assert "u64" not in e149[0].description, e149[0].description
+
+    def test_an_unconstrained_vast_literal_still_reports_u64(self) -> None:
+        """Superseding must not silence the #812 gate itself.
+
+        With no `@Byte` anywhere the unconstrained verdict is the only
+        one there is, and it must survive — a dedup that dropped it
+        would reopen the soundness hole #812 closed.
+        """
+        errs = _errors("""
+public fn f(@Unit -> @{ @Nat | @Nat.0 < 18446744073709551616 })
+  requires(true) ensures(true) effects(pure)
+{ 5 }
+""")
+        e149 = [e for e in errs if e.error_code == "E149"]
+        assert len(e149) == 1, [e.description for e in e149]
+        assert "u64" in e149[0].description, e149[0].description
+
+    def test_two_distinct_literals_keep_two_errors(self) -> None:
+        """Superseding is per-literal, not per-program.
+
+        A dedup keyed on the message or the error code rather than on
+        the occurrence would collapse these two into one.
+        """
+        errs = _errors("""
+public fn g(@Byte, @Byte -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ 0 }
+public fn f(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ g(999, 888) }
+""")
+        e149 = [e for e in errs if e.error_code == "E149"]
+        assert len(e149) == 2, [e.description for e in e149]
+        assert {"999", "888"} == {
+            n for n in ("999", "888")
+            if any(n in e.description for e in e149)
+        }
+
+    def test_the_same_bad_value_twice_keeps_two_errors(self) -> None:
+        """The sharper form: identical VALUE, identical message.
+
+        Two occurrences of `999` produce two messages that differ only
+        in position, so a supersede keyed on anything but the
+        occurrence — the value, the text, the error code — collapses
+        them and the program looks like it has one mistake.
+        """
+        errs = _errors("""
+public fn g(@Byte, @Byte -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ 0 }
+public fn f(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ g(999, 999) }
+""")
+        e149 = [e for e in errs if e.error_code == "E149"]
+        assert len(e149) == 2, [e.description for e in e149]
+        assert len({e.location.column for e in e149}) == 2, [
+            e.location.column for e in e149
+        ]
+
+    def test_a_bad_literal_and_a_bad_arity_are_two_true_errors(self) -> None:
+        """The literal check runs ahead of the arity gate (PR #1282 review).
+
+        `g(999)` against a two-parameter `g` used to report the arity
+        mismatch alone, because the argument never reached a `@Byte`
+        context.  Both statements are true and neither implies the
+        other, so both are reported — a count increase in a position
+        that is not a join, unlike the multi-literal branch case.
+        """
+        codes = [e.error_code for e in _errors("""
+public fn g(@Byte, @Byte -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ 0 }
+public fn f(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ g(999) }
+""")]
+        assert "E149" in codes, codes
+        assert "E201" in codes, codes
+
+    def test_an_unknown_callee_still_reports_only_itself(self) -> None:
+        """No callee, no expected type, so no `@Byte` verdict to add.
+
+        The complement of the arity case: the range check reaches the
+        literal only where something told it the target type, so an
+        unresolved call is unchanged rather than gaining a second
+        diagnostic.  (E200 is a *warning* here, so the assertion has to
+        look at both streams — an `_errors`-only check would read the
+        empty error list as agreement.)
+        """
+        src = """
+public fn f(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ nosuch(999) }
+"""
+        codes = [d.error_code for d in _errors(src) + _warnings(src)]
+        assert "E149" not in codes, codes
+        assert "E200" in codes, codes
+
     def test_byte_context_reports_the_byte_bound_not_the_u64_one(
         self,
     ) -> None:

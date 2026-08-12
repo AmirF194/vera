@@ -81,6 +81,58 @@ class TestUriToPath:
             uri_to_path("file:///tmp/x.vera")
         )
 
+    def test_a_foreign_authority_never_raises(self) -> None:
+        """`file://host/...` names a file on ANOTHER machine (G1).
+
+        Python 3.14's `url2pathname` validates the authority and raises
+        `URLError` for anything but localhost — before the fold that was
+        meant to handle it ever ran.  `analyze` calls this outside its
+        try/except and `analyze_and_publish` has none, so the exception
+        escaped the didOpen/didChange handler and took the request with
+        it.  3.13 returned a `//host/...` string instead, which on POSIX
+        is not a UNC mount but a stray local path — so the old behaviour
+        was wrong on every version, just differently.
+
+        This process can only open a LOCAL file, so a remote authority
+        names no path here and the URI stays an opaque label — the same
+        answer on every Python and platform.
+        """
+        for uri in (
+            "file://myserver/share/x.vera",
+            "file://127.0.0.1/tmp/x.vera",
+            "file://example.com/a/b.vera",
+        ):
+            assert uri_to_path(uri) == uri, uri
+
+    def test_scheme_matching_is_case_insensitive(self) -> None:
+        """RFC 3986 §3.1: schemes are case-insensitive."""
+        assert uri_to_path("FILE:///tmp/x.vera") == "/tmp/x.vera"
+        assert uri_to_path("File:///tmp/x.vera") == "/tmp/x.vera"
+
+    def test_a_file_uri_naming_no_path_stays_opaque(self) -> None:
+        """`file://` and `file:` decode to the empty string.
+
+        An empty `file=` is not "no file" to the pipeline — the module
+        resolver would read `Path("").parent`, i.e. the process CWD, and
+        resolve a document's imports against wherever the server happens
+        to have been started, which is how an unrelated module on disk
+        gets pulled into an unrelated document.  Degenerate URIs stay
+        opaque instead.
+        """
+        for uri in ("file://", "file:"):
+            assert uri_to_path(uri) == uri, uri
+
+    def test_the_root_uri_is_a_path_not_a_degenerate(self) -> None:
+        """`file:///` names the root directory, and that IS a path.
+
+        The empty-decode guard above must not swallow it: `/` resolves
+        imports against the filesystem root, which finds nothing and
+        says so, where the CWD fallback finds whatever is lying there.
+        Pinned so the guard stays keyed on emptiness rather than on
+        "looks unlike a document".
+        """
+        assert uri_to_path("file:///") == "/"
+
     def test_non_file_schemes_pass_through_unchanged(self) -> None:
         """`untitled:` and friends name no path — pre-existing behaviour.
 
@@ -450,6 +502,29 @@ class TestAnalyzeDiagnostics:
         assert [h.message.split(":")[0] for h in hints] == ["main"], [
             h.message for h in hints
         ]
+
+    def test_analyze_survives_every_document_uri_shape(self) -> None:
+        """The escape route G1 travelled, closed at the source.
+
+        `analyze` calls `uri_to_path` BEFORE its try/except, and
+        `analyze_and_publish` has none — so a raise here left the
+        didOpen/didChange handler rather than becoming a diagnostic.
+        A conversion on that path must be total.
+        """
+        for uri in (
+            "file://myserver/share/x.vera",
+            "file://127.0.0.1/tmp/x.vera",
+            "file://localhost/tmp/x.vera",
+            "FILE:///tmp/x.vera",
+            "file://",
+            "file:",
+            "untitled:Untitled-1",
+            "vscode-vfs://host/a.vera",
+            "",
+        ):
+            a = analyze(VerificationSession(), uri, FEATURE_SRC)
+            assert a.uri == uri, uri
+            assert isinstance(a.path, str), uri
 
     def test_definition_still_reports_the_uri_not_the_path(self) -> None:
         """`textDocument/definition` Locations must carry a URI.

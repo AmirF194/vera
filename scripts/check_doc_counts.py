@@ -248,37 +248,45 @@ def check_corpus_count(root: Path) -> list[str]:
     substitution is not safe, `E207` being a live example of a token this
     count's own digits sit inside.
 
-    A document whose row is reworded away is an ERROR, not a skip — a silent
-    skip is the failure mode the gate exists to prevent.
+    A citation that is reworded away is an ERROR, not a skip — a silent skip
+    is the failure mode the gate exists to prevent.  That is checked PER ROW,
+    not per document: TESTING.md cites the count twice, and a
+    "at least one row still matches" test greened while one of the two was
+    reworded into invisibility (PR #1282 review).  Each document therefore
+    declares how many citations it is expected to carry, and a mismatch in
+    either direction is reported — a citation lost to rewording, or a new one
+    added without being counted here.
     """
     errors: list[str] = []
     live = sum(
         len(list((root / d).rglob("*.vera")))
         for d in ("examples", "tests/conformance")
     )
-    # (document, pattern, what the pattern anchors on)
+    # (document, pattern, expected number of citations, what it anchors on)
     sites = (
-        # A table row: | `check_corpus_canonical.py` | All N ... |
+        # Two table rows: | `check_corpus_canonical.py` | All N ... |
         ("TESTING.md",
          r"`check_corpus_canonical\.py`[^|\n]*\|[^|\n]*?All (\d+)\b",
-         "table row"),
+         2, "table row"),
         # A command-block comment: python scripts/check_corpus_canonical.py
         # # Verify all N corpus programs ... / # All N corpus programs ...
         ("CLAUDE.md",
          r"check_corpus_canonical\.py[^\n]*?\ball (\d+) corpus programs",
-         "command comment"),
+         1, "command comment"),
         ("AGENTS.md",
          r"check_corpus_canonical\.py[^\n]*?\ball (\d+) corpus programs",
-         "command comment"),
+         1, "command comment"),
     )
-    for doc, pattern, anchor in sites:
+    for doc, pattern, expected, anchor in sites:
         text = (root / doc).read_text(encoding="utf-8")
         rows = re.findall(pattern, text, re.IGNORECASE)
-        if not rows:
+        if len(rows) != expected:
             errors.append(
-                f"{doc}: no `check_corpus_canonical.py` {anchor} states a"
-                f" corpus count — it moved or was reworded, so it is no"
-                f" longer gated"
+                f"{doc}: expected {expected} `check_corpus_canonical.py`"
+                f" {anchor}(s) stating a corpus count, found {len(rows)} —"
+                f" one moved or was reworded (so it is no longer gated), or"
+                f" a new citation needs adding to check_corpus_count's"
+                f" expected count"
             )
         for cited in rows:
             if int(cited) != live:

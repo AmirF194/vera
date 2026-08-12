@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import urllib.parse
 import urllib.request
+from urllib.error import URLError
 
 from lsprotocol import types as lsp
 
@@ -33,7 +34,7 @@ from vera.errors import SourceLocation
 
 
 def uri_to_path(uri: str) -> str:
-    """The filesystem path an LSP document URI names.
+    """The filesystem path an LSP document URI names, or the URI itself.
 
     A fourth conversion at the same boundary, and the same rule: nobody
     hand-rolls it.  LSP identifies documents by URI (``file:///a/b.vera``);
@@ -46,24 +47,49 @@ def uri_to_path(uri: str) -> str:
     not surfaced either — silently unverified (#1246 adversarial round,
     contradicting LSP_SERVER.md's "module imports resolve from disk").
 
-    Only ``file:`` URIs name a path.  Anything else — ``untitled:``, a
-    virtual filesystem, or the bare labels the tests use — is returned
-    unchanged, which is the pre-existing behaviour: an opaque document
-    label the pipeline carries but never opens.
+    **Total by construction.**  Every caller is on the didOpen/didChange
+    path, where a raised exception escapes the request handler, so this
+    returns a string for every input and never raises.  When a URI names
+    no path this process can open, the URI is returned unchanged — an
+    opaque document label the pipeline carries but never opens, which is
+    the pre-existing behaviour and exactly what an unsaved buffer needs.
+    Four kinds of input take that route:
 
-    ``url2pathname`` does the percent-decoding and, on Windows, the
-    drive-letter transform (``/C:/x`` → ``C:\\x``), so no separate
-    ``unquote`` here — a second one would corrupt a path containing a
-    literal ``%``.  A non-empty authority is a UNC host and is folded
-    back into the path so it survives the transform.
+    * a non-``file:`` scheme — ``untitled:``, a virtual filesystem, or
+      the bare labels the tests use.  Matched case-insensitively, per
+      RFC 3986 §3.1 (``FILE:///x`` is the same scheme as ``file:///x``);
+    * an authority naming another host (``file://server/share/x``).  This
+      process can only open a LOCAL file, so a remote authority names no
+      path here.  Deciding it *here* also makes the answer the same on
+      every Python: 3.14's ``url2pathname`` validates the authority and
+      raises :exc:`~urllib.error.URLError` for anything but localhost,
+      while 3.13 returned a ``//server/...`` string that on POSIX is a
+      stray local path rather than a UNC mount — so the old fold was
+      wrong on every version, and on 3.14 it took the request with it;
+    * a degenerate URI that decodes to the empty string (``file://``,
+      ``file:``).  An empty ``file=`` is not "no file" downstream: the
+      resolver reads ``Path("").parent`` — the process CWD — and would
+      resolve a document's imports against wherever the server was
+      started;
+    * anything else ``url2pathname`` rejects, caught as a backstop so a
+      future validation cannot reopen the same escape.
+
+    An empty authority and ``localhost`` both mean *this* host and take
+    the normal path.  ``url2pathname`` does the percent-decoding and, on
+    Windows, the drive-letter transform (``/C:/x`` → ``C:\\x``), so no
+    separate ``unquote`` here — a second one would corrupt a path
+    containing a literal ``%``.
     """
-    if not uri.startswith("file:"):
-        return uri
     parsed = urllib.parse.urlsplit(uri)
-    path = parsed.path
+    if parsed.scheme.lower() != "file":
+        return uri
     if parsed.netloc and parsed.netloc.lower() != "localhost":
-        path = f"//{parsed.netloc}{path}"
-    return urllib.request.url2pathname(path)
+        return uri
+    try:
+        path = urllib.request.url2pathname(parsed.path)
+    except URLError:
+        return uri
+    return path or uri
 
 
 class LineIndex:

@@ -530,18 +530,29 @@ source of truth for declaration-index assignment.
 
 `tests/module_fixture_helpers.py` cuts across all three suites: it builds the
 `ResolvedModule` fixtures the multi-module tests need, and its two functions
-are two different things rather than one with an option.
-`resolved_module(path, source)` writes the source to a real temporary file and
-parses THAT, so `file_path` names a file the pipeline can open — required
-wherever a location in the module is reported or the path is keyed on.
-`fake_resolved_module(path, source)` parses in memory and labels the module
-`/fake/<path>.vera`, which is cheaper and correct wherever the file is never
-opened; the fake path deliberately does not exist, so a consumer that DOES open
-it fails loudly.  Both are the canonical implementation of the tempfile,
-encoding and path rules in [Test Fixture Conventions](#test-fixture-conventions)
-below — six files carried their own copies before #1228, one of which leaked a
-temp file per fixture, and a new multi-module test should import from here
-rather than write a seventh.
+are two different things rather than one with an option.  What separates them
+is **parse provenance**, not whether a file survives the call — **neither
+leaves one on disk, and neither `file_path` can be opened after it returns**.
+`resolved_module(path, source)` writes the source to a real temporary file,
+parses THAT via `parse_file`, and deletes it before returning: the module keeps
+a program that came through the on-disk parse path, under a realistic absolute
+path.  `fake_resolved_module(path, source)` parses in memory via `parse_to_ast`
+and labels the module `/fake/<path>.vera` — cheaper, and correct wherever the
+parse path does not matter; the label is conspicuously synthetic, so a path in
+a failure message is recognisable as a fixture's.
+
+Deleting is safe because nothing downstream reopens `file_path`: `compile()`
+and the checker work off the parsed program and the in-memory `source` string
+and keep the path only as a diagnostic label (PR #664 review).  A test that
+needs a module file to EXIST while it runs must write one itself.
+`TestModuleFixtureBuilders` in `test_checker_modules.py` pins all of that,
+including a cross-module type-check against an already-deleted path.
+
+Both are the canonical implementation of the tempfile, encoding and path rules
+in [Test Fixture Conventions](#test-fixture-conventions) below — six files
+carried their own copies before #1228, one of which leaked a temp file per
+fixture, and a new multi-module test should import from here rather than write
+a seventh.
 
 ```python
 # test_checker_*.py pattern (helpers from tests/checker_helpers.py):

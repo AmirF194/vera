@@ -20,8 +20,70 @@ from tests.checker_helpers import (
     _errors,
 )
 from tests.module_fixture_helpers import (
+    fake_resolved_module,
+    resolved_module,
+)
+from tests.module_fixture_helpers import (
     fake_resolved_module as _resolved_module,
 )
+
+
+class TestModuleFixtureBuilders:
+    """The contract `tests/module_fixture_helpers.py` documents (#1228).
+
+    Both builders delete/never create the file their `file_path` names,
+    which is safe only because nothing downstream reopens it — the
+    checker and `compile()` work off the parsed program and the
+    in-memory source.  The docstrings said `resolved_module` produced "a
+    file the pipeline can open", which was never true after the unlink
+    (PR #1282 review); this pins what IS true, so the wording cannot
+    drift back.
+    """
+
+    SRC = (
+        "module m;\n"
+        "\n"
+        "public fn f(@Int -> @Int)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ @Int.0 }\n"
+    )
+
+    def test_neither_builder_leaves_a_file_behind(self) -> None:
+        real = resolved_module(("m",), self.SRC)
+        fake = fake_resolved_module(("m",), self.SRC)
+        assert not real.file_path.exists(), real.file_path
+        assert not fake.file_path.exists(), fake.file_path
+
+    def test_they_differ_by_parse_provenance_not_file_existence(
+        self,
+    ) -> None:
+        """`resolved_module`'s path is realistic; `fake`'s is synthetic."""
+        real = resolved_module(("m",), self.SRC)
+        fake = fake_resolved_module(("m",), self.SRC)
+        assert real.file_path.is_absolute()
+        assert real.file_path.suffix == ".vera"
+        assert "/fake/" not in real.file_path.as_posix(), real.file_path
+        assert fake.file_path.as_posix() == "/fake/m.vera", fake.file_path
+
+    def test_a_deleted_path_still_type_checks_against_the_module(
+        self,
+    ) -> None:
+        """The reason the deletion is safe, exercised rather than asserted.
+
+        If any consumer reopened `file_path`, this would fail — the file
+        is gone by the time the importer is checked.
+        """
+        mod = resolved_module(("m",), self.SRC)
+        assert not mod.file_path.exists()
+        prog = parse_to_ast(
+            "import m;\n"
+            "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ m::f(1) }\n"
+        )
+        diags = typecheck(prog, source="", resolved_modules=[mod])
+        errors = [d for d in diags if d.severity == "error"]
+        assert not errors, [d.description for d in errors]
 
 
 # =====================================================================
