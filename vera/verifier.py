@@ -420,6 +420,9 @@ class ContractVerifier:
         # gap above (their bodies live in another module, unreached by the
         # `program.declarations` verify loop).  Name → module FnDecl.
         self._imported_generic_verify_decls: dict[str, ast.FnDecl] = {}
+        self._qualified_targets_cache: (
+            dict[tuple[str, ...], dict[str, tuple[str, ...]]] | None
+        ) = None
         # PR #972 review (pre-existing): the instance's TypeVar → concrete-Type
         # mapping while a monomorphized clone is being verified, None otherwise.
         # The #747 side-tables are SPAN-keyed and clone nodes keep their source
@@ -1745,7 +1748,7 @@ class ContractVerifier:
             # the reroute set is wider — #1274 (F1) — because a body here can
             # bare-call a DIFFERENT module's qualified-only generic.
             qual_names = module_qualified_generic_names(
-                mod.program, name_filter, local_fn_names,
+                mod.program, name_filter, local_fn_names, direct=mod.direct,
             )
             reroute_targets = self._qualified_generic_targets(
                 program, mod.path,
@@ -1801,26 +1804,36 @@ class ContractVerifier:
         The verifier-side mirror of codegen's per-module target map, built from
         the SAME shared derivations over the same module set, so the two sides
         reroute the identical calls to the identical owners.
+
+        Memoised for the whole ``register_program`` run.  Three loops ask for
+        this per module and each answer needs EVERY module classified, so
+        recomputing made registration quadratic in the module count — paid on
+        every edit in the LSP's warm session.  The inputs (the resolved set,
+        its import lists, the entry's declarations) are fixed for a run, and
+        the cache is cleared where the other per-run registries are.
         """
-        local_fn_names = self._local_fn_names(program)
-        qualified_by_path = {
-            m.path: module_qualified_generic_names(
-                m.program, self._import_names.get(m.path), local_fn_names,
-            )
-            for m in self._resolved_modules
-        }
-        public_by_path = {
-            m.path: public_generic_names(m.program)
-            for m in self._resolved_modules
-        }
-        mod = next(
-            (m for m in self._resolved_modules if m.path == mod_path), None,
-        )
-        if mod is None:  # pragma: no cover — defensive
-            return {}
-        return module_qualified_generic_targets(
-            mod.program, qualified_by_path, public_by_path, mod_path,
-        )
+        cached = self._qualified_targets_cache
+        if cached is None:
+            local_fn_names = self._local_fn_names(program)
+            qualified_by_path = {
+                m.path: module_qualified_generic_names(
+                    m.program, self._import_names.get(m.path), local_fn_names,
+                    direct=m.direct,
+                )
+                for m in self._resolved_modules
+            }
+            public_by_path = {
+                m.path: public_generic_names(m.program)
+                for m in self._resolved_modules
+            }
+            cached = {
+                m.path: module_qualified_generic_targets(
+                    m.program, qualified_by_path, public_by_path, m.path,
+                )
+                for m in self._resolved_modules
+            }
+            self._qualified_targets_cache = cached
+        return cached.get(mod_path, {})
 
     def _reroute_to_module_qualified(
         self,
@@ -1877,6 +1890,11 @@ class ContractVerifier:
         self._shadowed_module_generic_verify = {}
         self._imported_generic_verify_decls = {}
         self._generic_origins = {}
+        # #1274 (F1): the per-module reroute targets are derived purely from the
+        # resolved set and this program's declarations, so they are stable for
+        # the run and rebuilt once — cleared here with the registries beside
+        # them, since a warm session re-registers with a changed program.
+        self._qualified_targets_cache = None
 
         disc = _replace(program)
         # #1014: qualify nested generic helper names on the discovery copy —
@@ -2195,6 +2213,7 @@ class ContractVerifier:
         for mod in self._resolved_modules:
             qual_names = module_qualified_generic_names(
                 mod.program, self._import_names.get(mod.path), local_fn_names,
+                direct=mod.direct,
             )
             # #1274 (F1): the reroute reaches a DIFFERENT module's generics too,
             # each under its own owner's path.

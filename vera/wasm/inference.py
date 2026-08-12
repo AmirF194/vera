@@ -122,8 +122,10 @@ class InferenceMixin:
         #   QualifiedCall     → from `_infer_qualified_call_wasm_type`
         #   ConstructorCall   → "i32" (heap ptr) if known
         #   NullaryConstructor → "i32" (heap ptr) if known
-        #   MatchExpr         → from first arm body
-        #   IfExpr            → from then-branch
+        #   MatchExpr         → from the first arm whose body infers a type
+        #                       (an all-throwing arm contributes none, #1276)
+        #   IfExpr            → from the then-branch, falling back to the else
+        #                       branch when the then-branch is typeless (#1276)
         #   Block             → from trailing expr
         #   HandleExpr        → from body
         #   IndexExpr         → from element type

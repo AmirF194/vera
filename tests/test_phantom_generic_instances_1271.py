@@ -257,23 +257,75 @@ class TestPrimitiveSpelledBinder:
         expected = {"Int": 5, "Bool": True, "String": "x", "Float64": 1.5}
         assert execute(result, fn_name="main").value == expected[binder]
 
+    # A control has to CREATE a phantom candidate, not merely fail to create
+    # one — and the scope has to be one discovery actually WALKS.  A top-level
+    # generic's template is never scanned (only its clones are), so a `forall<Q>`
+    # top-level calling `leaf(@Q.0)` yields no candidate at all; the phantom
+    # arises where a still-generic helper under a generic parent is scanned.
+    # `helper<Q>` therefore hands `leaf` arguments typed by its own binder, and
+    # discovery binds `leaf`'s variable to the NAME `Q`.  Two earlier versions of
+    # this control were vacuous — one used a template nothing called, one put the
+    # binder at the top level — and both held under ANY filter, including none.
+    _Q_BINDER_CONTROL = """
+private forall<W> fn leaf(@W, @W -> @W)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  @W.0
+}
+
+private forall<T> fn parent(@T -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  if helper(true, false) then { 7 } else { 3 }
+}
+where {
+  forall<Q> fn helper(@Q, @Q -> @Q)
+    requires(true)
+    ensures(true)
+    effects(pure)
+  {
+    leaf(@Q.1, @Q.0)
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  parent(1)
+}
+"""
+
     def test_non_primitive_binder_control(self) -> None:
         """The control: a binder spelled `Q` names no type, so `Q` IS a type
-        variable — and a phantom at it is still filtered.  Without this the
-        primitive subtraction could have been a blanket "never filter" and
-        looked identical on the rows above.
+        variable — a phantom AT it is still filtered, while the real
+        instantiation the enclosing scope's binding produces survives.
 
-        `idg` is never called in this fixture, so its own template-only
-        `[E604]` is expected and pre-existing (an uninstantiated generic
-        template draws one whatever its binder is spelled) — the assertion is
-        about phantom CLONES, which is what this filter governs.
+        This is what stops the primitive subtraction from degenerating into
+        "never filter": the rows above would look identical under a filter that
+        did nothing, and only a live phantom candidate distinguishes them.
         """
-        names, _ = _compile_probe(_primitive_binder("Q", "5", "Int"))
-        assert "idw$Int" in names, f"the real clone must survive: {sorted(names)}"
-        assert not _phantoms(names), (
-            f"a `Q` binder is a genuine type variable — a phantom at it must "
-            f"still be filtered, got {sorted(_phantoms(names))}"
+        names, skips = _compile_probe(self._Q_BINDER_CONTROL)
+        assert "leaf$Q" not in names, (
+            f"`Q` is a genuine type variable — `leaf` instantiated at the NAME "
+            f"`Q` is a phantom and must be filtered, got {sorted(names)}"
         )
+        assert not _phantoms(names), (
+            f"no clone may be keyed by a type variable, got "
+            f"{sorted(_phantoms(names))}"
+        )
+        # The real instantiation the enclosing scope's binding produces, which
+        # the filter must not take with it.
+        assert "leaf$Bool" in names, (
+            f"the filter removed a REAL instantiation — expected leaf$Bool "
+            f"in {sorted(names)}"
+        )
+        assert not skips, f"the compile is not skip-clean — {skips}"
 
 
 @pytest.mark.parametrize(

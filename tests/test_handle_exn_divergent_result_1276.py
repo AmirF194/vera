@@ -33,9 +33,9 @@ import wasmtime
 from vera.checker import typecheck_with_artifacts
 from vera.codegen import compile as codegen_compile
 from vera.codegen import execute
-from vera.codegen.api import CompileResult
+from vera.codegen.api import CompileResult, WasmTrapError
 from vera.parser import parse_to_ast
-from vera.runtime.traps import WasmTrapError
+
 
 # The issue's repro: an Int-payload inner handler whose clause rethrows at the
 # outer handler's Bool payload, over a body that throws.  Both diverge.

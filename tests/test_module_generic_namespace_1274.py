@@ -41,7 +41,11 @@ from vera.codegen import compile as codegen_compile
 from vera.codegen import execute
 from vera.codegen.api import CompileResult
 from vera.codegen.core import CodeGenerator
-from vera.monomorphize import importer_occupied_bare_names
+from vera.monomorphize import (
+    importer_occupied_bare_names,
+    module_qualified_generic_names,
+    qualify_nested_generic_decls,
+)
 from vera.parser import parse_to_ast
 from vera.resolver import ModuleResolver, ResolvedModule
 from vera.runtime.traps import WasmTrapError
@@ -485,6 +489,208 @@ public fn main(@Unit -> @Int)
         assert _value(result) == ("ok", LIB_ANSWER)
 
 
+class TestTransitiveVisibility:
+    """A module reached only TRANSITIVELY contributes nothing to the entry's
+    namespace (spec §8.6.4), so none of its generics can own the entry's bare
+    name.
+
+    The classification asked ``import_names.get(path)``, which answers ``None``
+    for such a module — the same spelling that means "wildcard import" — so
+    every public generic of a transitive module was read as a bare-name owner.
+    Latent rather than live: the checker refuses a bare call to it from the
+    entry (`E200`), and two transitive namesakes are refused by the E608
+    collision rail (#1281), so no program observed the misclassification.  It is
+    corrected for parity, because the predicate is supposed to BE §8.6.4 and a
+    reader who trusts it should not have to know which rail happens to cover a
+    given shape.
+
+    Driven through the production `ModuleResolver`, which is what sets
+    ``direct``; a hand-built `ResolvedModule` defaults it to ``True`` and would
+    never exercise this path.
+    """
+
+    _DEEP = f"""\
+module deep;
+
+public forall<T> fn gen(@T -> @Int)
+  requires(true)
+  ensures(@Int.result == {LIB_ANSWER})
+  effects(pure)
+{{ {LIB_ANSWER} }}
+"""
+
+    _MID = f"""\
+module mid;
+
+import deep;
+
+public fn door(@Bool -> @Int)
+  requires(true)
+  ensures(@Int.result == {LIB_ANSWER})
+  effects(pure)
+{{ gen(@Bool.0) }}
+"""
+
+    _MAIN = f"""\
+import mid(door);
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == {LIB_ANSWER})
+  effects(pure)
+{{ door(true) }}
+"""
+
+    def _resolve(self, tmp_path: Path):
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        for name, src in (("deep.vera", self._DEEP), ("mid.vera", self._MID),
+                          ("main.vera", self._MAIN)):
+            (tmp_path / name).write_text(src, encoding="utf-8")
+        mainp = tmp_path / "main.vera"
+        program = parse_to_ast(self._MAIN)
+        resolved = ModuleResolver(_root=tmp_path).resolve_imports(
+            program, mainp,
+        )
+        return program, resolved
+
+    def test_production_resolution_marks_deep_transitive(
+        self, tmp_path: Path,
+    ) -> None:
+        """The precondition the hand-built fixtures cannot supply."""
+        _program, resolved = self._resolve(tmp_path)
+        by_path = {m.path: m.direct for m in resolved}
+        assert by_path == {("mid",): True, ("deep",): False}, (
+            f"expected mid direct and deep transitive, got {by_path}"
+        )
+
+    def test_transitive_generic_is_qualified_only(
+        self, tmp_path: Path,
+    ) -> None:
+        """`deep`'s public generic must NOT own the entry's bare name."""
+        program, resolved = self._resolve(tmp_path)
+        import_names = {
+            imp.path: (set(imp.names) if imp.names is not None else None)
+            for imp in program.imports
+        }
+        bare = importer_occupied_bare_names(program)
+        deep = next(m for m in resolved if m.path == ("deep",))
+        qualified = module_qualified_generic_names(
+            deep.program, import_names.get(deep.path), bare,
+            direct=deep.direct,
+        )
+        assert qualified == {"gen"}, (
+            f"a transitive module's generics are all qualified-only — the "
+            f"entry's namespace does not hold them at all (§8.6.4); "
+            f"got {sorted(qualified)}"
+        )
+
+    def test_hop_through_the_transitive_module_still_runs(
+        self, tmp_path: Path,
+    ) -> None:
+        """And the end-to-end answer is unchanged: `mid`'s bare call reaches
+        `deep`'s generic under its owner's identity."""
+        verify_errors, result, cg_errors = _build(
+            tmp_path,
+            {"deep.vera": self._DEEP, "mid.vera": self._MID,
+             "main.vera": self._MAIN},
+        )
+        assert not cg_errors, f"codegen errors: {cg_errors}"
+        assert not verify_errors, f"verify errors: {verify_errors}"
+        assert _value(result) == ("ok", LIB_ANSWER)
+
+
+class TestUserWrittenQualifiedCall:
+    """A qualified call the USER wrote, not one the reroute synthesized.
+
+    `deep::gen(true)` carries the bare name `gen` on a `ModuleCall`, and the
+    importer declares its own `gen`.  Discovery must key the instantiation to
+    the module's declaration, not to whichever generic owns the bare name —
+    otherwise the clone that runs and the clone that is verified are different
+    functions.
+    """
+
+    _DEEP = f"""\
+module deep;
+
+public forall<T> fn gen(@T -> @Int)
+  requires(true)
+  ensures(@Int.result == {LIB_ANSWER})
+  effects(pure)
+{{ {LIB_ANSWER} }}
+"""
+
+    _MAIN = f"""\
+import deep(gen);
+
+private forall<T> fn gen(@T -> @Int)
+  requires(true)
+  ensures(@Int.result == {MAIN_ANSWER})
+  effects(pure)
+{{ {MAIN_ANSWER} }}
+
+public fn useLocal(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == {MAIN_ANSWER})
+  effects(pure)
+{{ gen(true) }}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == {LIB_ANSWER})
+  effects(pure)
+{{ deep::gen(true) }}
+"""
+
+    def test_qualified_call_reaches_the_declaring_module(
+        self, tmp_path: Path,
+    ) -> None:
+        verify_errors, result, cg_errors = _build(
+            tmp_path, {"deep.vera": self._DEEP, "main.vera": self._MAIN},
+        )
+        assert not cg_errors, f"codegen errors: {cg_errors}"
+        assert not verify_errors, f"verify errors: {verify_errors}"
+        assert _value(result) == ("ok", LIB_ANSWER), (
+            "deep::gen(true) must run the MODULE's generic"
+        )
+        assert _value(result, "useLocal") == ("ok", MAIN_ANSWER), (
+            "the importer's own gen must keep the bare name"
+        )
+
+    def test_qualified_call_is_symmetric(self, tmp_path: Path) -> None:
+        """Both sides key it to the module's declaration."""
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "deep.vera").write_text(self._DEEP, encoding="utf-8")
+        mainp = tmp_path / "main.vera"
+        mainp.write_text(self._MAIN, encoding="utf-8")
+        program = parse_to_ast(self._MAIN)
+        resolved = ModuleResolver(_root=tmp_path).resolve_imports(
+            program, mainp,
+        )
+        gen = CodeGenerator(
+            source=self._MAIN, file=str(mainp), resolved_modules=resolved,
+        )
+        gen.compile_program(parse_to_ast(self._MAIN))
+        codegen_set = set(getattr(gen, "_emitted_instances", set()))
+        verifier = ContractVerifier(
+            source=self._MAIN, file=str(mainp), resolved_modules=resolved,
+        )
+        verifier.register_program(parse_to_ast(self._MAIN))
+        verifier_set = {
+            (n, ct) for n, cts in verifier._instances.items() for ct in cts
+        }
+        assert ("mod$deep$gen", ("Bool",)) in codegen_set, (
+            f"the qualified call's clone belongs to `deep`, got "
+            f"{sorted(codegen_set)}"
+        )
+        assert ("gen", ("Bool",)) in codegen_set, (
+            f"the importer's own gen<Bool> is a separate clone, got "
+            f"{sorted(codegen_set)}"
+        )
+        assert codegen_set == verifier_set, (
+            f"codegen {sorted(codegen_set)} != verifier {sorted(verifier_set)}"
+        )
+
+
 class TestImporterBareNamesAreOneSet:
     """The importer-side input to the predicate must be the SAME set on both
     sides, or the shared predicate classifies one imported generic two ways.
@@ -587,25 +793,121 @@ public fn main(@Unit -> @Int)
             f"{sorted(verifier_set - codegen_set)}"
         )
 
-    def test_bare_name_set_is_idempotent_across_the_hoist(self) -> None:
-        """The property that lets one derivation serve both sides: run it on the
-        POST-transform program and the answer this predicate consumes — the
-        ``$``-free names — is unchanged.  Only mangled entries are added, and a
-        mangled name can never equal a module's source identifier."""
-        pre = parse_to_ast(self._MAIN_NONGENERIC_HELPER)
-        gen = CodeGenerator(source=self._MAIN_NONGENERIC_HELPER, file="m.vera")
-        post = gen._hoist_nongeneric_where_helpers(pre)
-        bare_pre = {n for n in importer_occupied_bare_names(pre) if "$" not in n}
-        bare_post = {
-            n for n in importer_occupied_bare_names(post) if "$" not in n
+    # Every helper shape the derivation distinguishes, in one program:
+    #   `plainHelper`   — non-generic under a NON-generic parent  → hoisted away
+    #   `genHelper`     — a GENERIC helper                        → qualified away
+    #   `underGeneric`  — non-generic under a GENERIC PARENT      → retained
+    #   `underGenHelper`— non-generic under a GENERIC HELPER      → retained
+    # A fixture missing any of them would let a one-legged assertion look total.
+    _ALL_HELPER_SHAPES = f"""\
+import lib;
+
+public fn plainParent(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == {MAIN_ANSWER})
+  effects(pure)
+{{ plainHelper(()) + genHelper(true) }}
+  where {{
+    fn plainHelper(@Unit -> @Int)
+      requires(true)
+      ensures(true)
+      effects(pure)
+    {{ 1 }}
+
+    forall<T> fn genHelper(@T -> @Int)
+      requires(true)
+      ensures(true)
+      effects(pure)
+    {{ underGenHelper(()) }}
+      where {{
+        fn underGenHelper(@Unit -> @Int)
+          requires(true)
+          ensures(true)
+          effects(pure)
+        {{ 2 }}
+      }}
+  }}
+
+public forall<T> fn genParent(@T -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{{ underGeneric(()) }}
+  where {{
+    fn underGeneric(@Unit -> @Int)
+      requires(true)
+      ensures(true)
+      effects(pure)
+    {{ 3 }}
+  }}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == {LIB_ANSWER})
+  effects(pure)
+{{ door(true) }}
+"""
+
+    @staticmethod
+    def _bare(program: object) -> set[str]:
+        return {
+            n for n in importer_occupied_bare_names(program)  # type: ignore[arg-type]
+            if "$" not in n
         }
-        assert bare_pre == bare_post, (
-            f"the derivation is not hoist-idempotent: pre={sorted(bare_pre)} "
-            f"post={sorted(bare_post)}"
+
+    def test_bare_name_set_is_idempotent_across_pass0_transforms(self) -> None:
+        """The property that lets ONE derivation serve both sides: run it on a
+        post-transform program and the answer this predicate consumes — the
+        ``$``-free names — is unchanged.  Only mangled entries are added, and a
+        mangled name can never equal a module's source identifier.
+
+        Asserted for BOTH Pass-0 transforms and for their composition in the
+        order codegen applies them, over a program carrying every helper shape
+        the derivation distinguishes — a fixture with only a plain helper would
+        let a one-legged assertion pass while the generic leg was untested.
+        """
+        pre = parse_to_ast(self._ALL_HELPER_SHAPES)
+        gen = CodeGenerator(source=self._ALL_HELPER_SHAPES, file="m.vera")
+        qualified = qualify_nested_generic_decls(pre)
+        hoisted = gen._hoist_nongeneric_where_helpers(pre)
+        composed = gen._hoist_nongeneric_where_helpers(qualified)
+
+        expected = self._bare(pre)
+        for label, transformed in (
+            ("qualify_nested_generic_decls", qualified),
+            ("_hoist_nongeneric_where_helpers", hoisted),
+            ("qualify then hoist", composed),
+        ):
+            assert self._bare(transformed) == expected, (
+                f"the derivation is not idempotent across {label}: "
+                f"pre={sorted(expected)} post={sorted(self._bare(transformed))}"
+            )
+
+    def test_each_helper_shape_is_classified_as_the_transforms_leave_it(
+        self,
+    ) -> None:
+        """The positional half: idempotence alone would hold for a derivation
+        that answered the same WRONG set every time, so each shape's membership
+        is pinned individually against what the transforms actually do."""
+        bare = self._bare(parse_to_ast(self._ALL_HELPER_SHAPES))
+        assert "plainHelper" not in bare, (
+            "a non-generic helper under a non-generic parent is hoisted to a "
+            "$-qualified top-level decl, so it occupies no bare name"
         )
-        assert "gen2" not in bare_pre, (
-            "a non-generic where-helper does not occupy a bare name after the "
-            "hoist, so it must not be counted as shadowing an import"
+        assert "genHelper" not in bare, (
+            "a generic helper is renamed to parent$where$genHelper by the "
+            "qualification, so it occupies no bare name"
+        )
+        assert "underGeneric" in bare, (
+            "a non-generic helper under a GENERIC parent is touched by neither "
+            "transform — the hoist skips generic subtrees — so it keeps its "
+            "bare name and does shadow an import"
+        )
+        assert "underGenHelper" in bare, (
+            "same for a non-generic helper under a generic HELPER"
+        )
+        assert {"plainParent", "genParent", "main"} <= bare, (
+            "every top-level function occupies its own bare name"
         )
 
 

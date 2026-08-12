@@ -257,6 +257,7 @@ class CrossModuleMixin:
         for mod in self._resolved_modules:
             qualified_by_path[mod.path] = module_qualified_generic_names(
                 mod.program, import_names.get(mod.path), importer_bare_names,
+                direct=mod.direct,
             )
             public_generics_by_path[mod.path] = public_generic_names(
                 mod.program,

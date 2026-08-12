@@ -607,12 +607,14 @@ def importer_occupied_bare_names(program: ast.Program) -> set[str]:
     generic ancestor (the hoist skips generic subtrees, and the qualification
     only renames generic nodes).
 
-    The rule is deliberately stated over the SOURCE shape so it is idempotent:
-    run it on the post-transform program and the extra top-level entries are
-    all ``$``-mangled, which can never equal a module's source identifier, so
-    the answer this predicate consumes is unchanged.  That is what lets the
-    verifier — which holds the pre-transform AST — and codegen — which holds
-    the post-transform one — reach the same set.
+    The rule is deliberately stated over the SOURCE shape so it is idempotent
+    across BOTH transforms and their composition: run it on any of those
+    programs and the extra top-level entries are all ``$``-mangled, which can
+    never equal a module's source identifier, so the answer this predicate
+    consumes is unchanged.  That is what lets the verifier — which holds the
+    pre-transform AST — and codegen — which holds the post-transform one —
+    reach the same set, and all three legs are asserted directly over a program
+    carrying every helper shape this rule distinguishes.
 
     Pre-fix they did not: the verifier's walk counted a non-generic
     ``where``-helper named ``gen2`` as occupying the bare name while codegen,
@@ -641,6 +643,8 @@ def module_qualified_generic_names(
     module_program: ast.Program,
     name_filter: set[str] | None,
     local_fn_names: set[str],
+    *,
+    direct: bool = True,
 ) -> set[str]:
     """The module's top-level generics reached ONLY under ``mod$<path>$name``.
 
@@ -668,7 +672,9 @@ def module_qualified_generic_names(
 
     ``local_fn_names`` is the importer's occupied bare-name set (the same one
     ``_register_shadowed_import`` consults); ``name_filter`` is ``None`` for a
-    wildcard import.
+    wildcard import.  ``direct`` is ``ResolvedModule.direct``: a module reached
+    only transitively contributes nothing to the entry's namespace, so all of
+    its generics are qualified-only whatever their visibility.
     """
     out: set[str] = set()
     for tld in module_program.declarations:
@@ -676,7 +682,14 @@ def module_qualified_generic_names(
         if not isinstance(decl, ast.FnDecl) or not decl.forall_vars:
             continue
         owns_bare_name = (
-            (tld.visibility or "private") == "public"
+            # A TRANSITIVE module's declarations are not in the entry program's
+            # namespace at all (spec §8.6.4 — visibility is the importer's
+            # property), so none of them can own its bare name.  Without this
+            # the `import_names` lookup answers `None` for such a module — the
+            # spelling that means "wildcard import" — and every one of its
+            # public generics was classified a bare-name owner.
+            direct
+            and (tld.visibility or "private") == "public"
             and (name_filter is None or decl.name in name_filter)
             and decl.name not in local_fn_names
         )
