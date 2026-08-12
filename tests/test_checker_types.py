@@ -95,12 +95,17 @@ private fn foo(@Unit -> @Byte)
 """)
 
     def test_byte_lit_overflow_rejected(self) -> None:
-        """256 is out of Byte range — should be rejected."""
+        """256 is out of Byte range — rejected, naming the range (#1252).
+
+        Until #1252 this was reported as a return-type mismatch ("body
+        has type Nat"), which described the fall-through rather than
+        the literal that caused it.
+        """
         _check_err("""
 private fn foo(@Unit -> @Byte)
   requires(true) ensures(true) effects(pure)
 { 256 }
-""", "body has type")
+""", "out of range for @Byte")
 
     def test_byte_lit_negative_rejected(self) -> None:
         """Negative integer is not a valid Byte."""
@@ -130,10 +135,11 @@ private fn foo(@Unit -> @Byte)
 """)
 
     def test_byte_lit_coercion_refined_let_out_of_range_rejected(self) -> None:
-        """The refined-Byte coercion is bounded by the Byte range: `300` bound
-        to `{ @Byte | @Byte.0 < 10 }` stays @Nat (not a Byte) and the let
-        binding is rejected with E170 — proving the coercion is not a blanket
-        literal→Byte acceptance."""
+        """The refined-Byte coercion is bounded by the Byte range: `300`
+        bound to `{ @Byte | @Byte.0 < 10 }` is rejected, proving the
+        coercion is not a blanket literal→Byte acceptance.  Since #1252
+        the rejection is E149 at the literal (naming 0..255) rather than
+        E170 at the binding, which only saw the resulting @Nat."""
         _check_err("""
 private fn foo(@Unit -> @Byte)
   requires(true) ensures(true) effects(pure)
@@ -141,7 +147,7 @@ private fn foo(@Unit -> @Byte)
   let @{ @Byte | @Byte.0 < 10 } = 300;
   @Byte.0
 }
-""", "Let binding expects")
+""", "out of range for @Byte")
 
 
 # =====================================================================
@@ -2005,6 +2011,93 @@ public fn f(@Unit -> @Int)
 { -18446744073709551616 }
 """)
 
+    # -----------------------------------------------------------------
+    # `@Byte` is a target type too (#1252)
+    # -----------------------------------------------------------------
+
+    def test_byte_literal_past_255_is_E149(self) -> None:
+        """The `@Byte` bound is 255, and it is the same range check.
+
+        The coercion accepted 0..255 in a `@Byte` context and let
+        anything else fall through to `@Nat`, so the literal's own
+        mistake was only ever reported by whatever downstream mismatch
+        the `@Nat` then caused.
+        """
+        errs = _errors("""
+public fn f(@Unit -> @Byte)
+  requires(true) ensures(true) effects(pure)
+{ 999 }
+""")
+        e149 = [e for e in errs if e.error_code == "E149"]
+        assert e149, [(e.error_code, e.description) for e in errs]
+        assert "999" in e149[0].description, e149[0].description
+        assert "255" in e149[0].description, e149[0].description
+
+    def test_byte_literal_at_255_still_ok(self) -> None:
+        _check_ok("""
+public fn f(@Unit -> @Byte)
+  requires(true) ensures(true) effects(pure)
+{ 255 }
+""")
+
+    def test_out_of_range_byte_in_a_join_names_the_range(self) -> None:
+        """#1252: the branch disagreement was a consequence, not the cause.
+
+        `let @Byte = if c then { 999 } else { 3 }` reported E301
+        "then-branch is Nat, else-branch is Byte" — a true statement
+        about a program whose actual mistake is that 999 is not a
+        `@Byte`.  The expectation IS pushed into both branches (which
+        is why `3` typed as `@Byte` at all); only the out-of-range
+        literal declined it.
+        """
+        src = """
+public fn f(@Bool -> @Byte)
+  requires(true) ensures(true) effects(pure)
+{
+  let @Byte = if @Bool.0 then { 999 } else { 3 };
+  @Byte.0
+}
+"""
+        codes = [e.error_code for e in _errors(src)]
+        assert "E149" in codes, codes
+        assert "E301" not in codes, codes
+        assert "E170" not in codes, codes
+
+    def test_out_of_range_byte_argument_names_the_range(self) -> None:
+        """The same at a call argument, where E202 told the same story."""
+        codes = [e.error_code for e in _errors("""
+public fn g(@Byte -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ 0 }
+public fn f(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ g(999) }
+""")]
+        assert "E149" in codes, codes
+        assert "E202" not in codes, codes
+
+    def test_refined_byte_base_gets_the_byte_range_too(self) -> None:
+        """#865's refinement wrapper is transparent in both directions."""
+        codes = [e.error_code for e in _errors("""
+public fn f(@Unit -> @{ @Byte | @Byte.0 < 10 })
+  requires(true) ensures(true) effects(pure)
+{ 999 }
+""")]
+        assert "E149" in codes, codes
+
+    def test_byte_context_reports_the_byte_bound_not_the_u64_one(
+        self,
+    ) -> None:
+        """A vast literal in a `@Byte` context gets ONE error, about Byte."""
+        errs = _errors("""
+public fn f(@Unit -> @Byte)
+  requires(true) ensures(true) effects(pure)
+{ 18446744073709551616 }
+""")
+        e149 = [e for e in errs if e.error_code == "E149"]
+        assert len(e149) == 1, [(e.error_code, e.description) for e in errs]
+        assert "255" in e149[0].description, e149[0].description
+
 
 # =====================================================================
 # #898 — cross-argument type-argument merge for a generic bound by
@@ -2848,7 +2941,10 @@ public fn main(@Unit -> @Bool)
     def test_handler_init_intlit_coercion(self) -> None:
         """The init-expected change also enables IntLit coercion for
         non-ctor inits: `@Byte = 5` checks (bidirectional IntLit -> Byte,
-        as at every other expected-type site); out-of-range stays E331."""
+        as at every other expected-type site); out-of-range is still
+        rejected — since #1252 by E149 at the literal, which names the
+        0..255 range instead of describing the @Byte/@Nat mismatch the
+        fall-through produced."""
         _check_ok("""
 public fn main(@Unit -> @Int)
   requires(true) ensures(true) effects(pure)
@@ -2872,7 +2968,7 @@ public fn main(@Unit -> @Int)
     0
   }
 }
-""", "Handler state initial value")
+""", "out of range for @Byte")
 
     def test_compat_fn_effect_row_not_wildcarded(self) -> None:
         """Unit-level guardrail on `_compatible_modulo_typevars`: a fresh

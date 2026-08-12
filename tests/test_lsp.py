@@ -18,6 +18,7 @@ Three layers, matching the #222 plan's testing strategy:
 from __future__ import annotations
 
 import json
+import pathlib
 import subprocess
 import sys
 
@@ -341,6 +342,75 @@ class TestAnalyzeDiagnostics:
         assert hints[0].severity == lsp.DiagnosticSeverity.Hint
         assert "Tier 1" in hints[0].message
         assert "dec" in hints[0].message
+
+    def test_imported_modules_obligations_get_no_hint_here(
+        self, tmp_path: pathlib.Path,
+    ) -> None:
+        """A hint belongs to the document its obligations live in (#1246).
+
+        Verifying an entry program verifies the imported modules it
+        pulls in, so the obligation stream carries `glib`'s functions
+        beside the entry's own.  `publishDiagnostics` is per-URI, and
+        `glib`'s line numbers index `glib.vera` — placed in this
+        document they land on whatever text happens to occupy that
+        line, or past its end.  Before `ProofObligation.file` (#1239)
+        nothing could tell them apart.
+        """
+        lib = tmp_path / "glib.vera"
+        lib.write_text(
+            "module glib;\n"
+            "\n"
+            "public forall<T> fn pick(@T, @T -> @T)\n"
+            "  requires(true)\n"
+            "  ensures(true)\n"
+            "  effects(pure)\n"
+            "{\n"
+            "  @T.1\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        entry = tmp_path / "entry.vera"
+        entry_src = (
+            "import glib;\n"
+            "\n"
+            "public fn main(@Nat, @Nat -> @Nat)\n"
+            "  requires(true)\n"
+            "  ensures(true)\n"
+            "  effects(pure)\n"
+            "{\n"
+            "  glib::pick(@Nat.1, @Nat.0)\n"
+            "}\n"
+        )
+        entry.write_text(entry_src, encoding="utf-8")
+
+        a = analyze(VerificationSession(), str(entry), entry_src)
+        # The premise: the stream really does carry both files.
+        files = {ob.file for ob in a.obligations}
+        assert str(lib) in files, files
+        assert str(entry) in files, files
+
+        hints = [d for d in to_lsp_diagnostics(a) if d.code == "tier"]
+        assert [h.message.split(":")[0] for h in hints] == ["main"], [
+            h.message for h in hints
+        ]
+        # And the one hint that IS published still points at a line of
+        # this document rather than at a line number borrowed from it.
+        assert hints[0].range.start.line < len(entry_src.splitlines())
+
+    def test_hint_survives_an_obligation_without_a_file(self) -> None:
+        """`file=None` means "not from a verifier run", not "foreign".
+
+        Every obligation the verifier reifies from a run carries the
+        file it was given, so `None` only reaches here from a
+        hand-constructed record; dropping those would silently delete
+        a hint rather than move it.
+        """
+        a = _analyze(FEATURE_SRC)
+        assert a.obligations
+        for ob in a.obligations:
+            ob.file = None
+        hints = [d for d in to_lsp_diagnostics(a) if d.code == "tier"]
+        assert len(hints) == 1, [h.message for h in hints]
 
     def test_violated_function_gets_no_cheerful_hint(self) -> None:
         a = _analyze(

@@ -112,9 +112,21 @@ def _tier_hints(analysis: Analysis) -> list[lsp.Diagnostic]:
     obligation site.  ``violated`` obligations already have their own
     error diagnostics, so they exclude a function from getting a
     cheerful Tier-1 hint without re-stating the failure.
+
+    Only obligations belonging to THIS document contribute (#1246).
+    Verifying an entry program verifies the modules it imports, so the
+    stream carries their functions too, and their line numbers index
+    their own files — placed here they land on whatever this document
+    happens to have on that line, or past its end.  ``publishDiagnostics``
+    is per-URI, so an imported module's hint is not this document's to
+    publish under any line.  ``file is None`` means the record came from
+    outside a verifier run (see :class:`ProofObligation`), never from
+    another module, so it keeps its hint rather than losing one silently.
     """
     by_fn: dict[str, list[ProofObligation]] = {}
     for ob in analysis.obligations:
+        if ob.file is not None and ob.file != analysis.uri:
+            continue
         by_fn.setdefault(ob.fn_name, []).append(ob)
 
     hints: list[lsp.Diagnostic] = []
