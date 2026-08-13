@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+Grammar fix.
+
+- Grammar: the effect rule now carries all ten built-in effects —
+  `HttpServer`, `Inference`, `Random` and `DB` were missing, so
+  `DB.query(...)` highlighted as an ordinary type reference rather than
+  as an effect. The README's copy of the same list was stale in the same
+  way and is corrected with it. A gate in the main repository
+  (`scripts/check_editor_grammars.py`) now holds both against
+  `vera effects --json`, so the next effect cannot land without them.
+
 ## 0.2.1
 
 Security fix.
