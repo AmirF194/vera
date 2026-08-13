@@ -79,7 +79,7 @@ _PROVIDERS: dict[str, _ProviderConfig] = {
     "deepseek": _ProviderConfig(
         env_key="VERA_DEEPSEEK_API_KEY",
         url="https://api.deepseek.com/v1/chat/completions",
-        default_model="deepseek-v4-flash",
+        default_model="deepseek-v4-pro",
         auth_style="bearer",
         response_style="openai",
     ),

@@ -922,8 +922,12 @@ class TestInferenceProviderDispatch:
         # Bearer auth (OpenAI-compatible), not Anthropic-style key header
         assert req.get_header("Authorization") == "Bearer sk-deepseek"
         assert req.get_header("X-api-key") is None
+        assert req.get_header("Content-type") == "application/json"
         sent_body = json.loads(req.data.decode())
-        assert sent_body["model"] == "deepseek-v4-flash"
+        # Literal, not _PROVIDERS[...].default_model: the registry-derived
+        # form pins the value to itself and stays green through any edit to
+        # the row, so it could not prove the flagship default landed.
+        assert sent_body["model"] == "deepseek-v4-pro"
         # The exact turn list, not just the key: a presence check stays green
         # with the role flipped, the content dropped, or the list emptied.
         assert sent_body["messages"] == [{"role": "user", "content": "prompt"}]
@@ -943,14 +947,19 @@ class TestInferenceProviderDispatch:
                 result_src,
                 env_vars={"VERA_DEEPSEEK_API_KEY": "sk-deepseek-test"},
             )
+            # Provider name AND the key handed to it: _call_inference_provider
+            # takes (provider, prompt, model, api_key) positionally, so index 3
+            # is the key. Naming the right provider while reading another row's
+            # env var would satisfy the name check alone.
             assert mock_provider.call_args[0][0] == "deepseek"
+            assert mock_provider.call_args[0][3] == "sk-deepseek-test"
 
     #: Every provider that precedes deepseek in the registry, listed literally
     #: rather than sliced out of _PROVIDERS: a derived list would shrink to
     #: match a relocated deepseek row and pass vacuously, and a single
     #: hardcoded 'anthropic' case would stay green while openai, moonshot,
-    #: mistral silently lost precedence.
-    _PROVIDERS_BEFORE_DEEPSEEK = ("anthropic", "openai", "moonshot", "mistral")
+    #: mistral, or xai silently lost precedence.
+    _PROVIDERS_BEFORE_DEEPSEEK = ("anthropic", "openai", "moonshot", "mistral", "xai")
 
     @pytest.mark.parametrize("earlier", _PROVIDERS_BEFORE_DEEPSEEK)
     def test_deepseek_key_does_not_preempt_earlier_provider(self, earlier: str) -> None:
@@ -968,6 +977,11 @@ class TestInferenceProviderDispatch:
                 "VERA_DEEPSEEK_API_KEY": "sk-deepseek-test",
             })
             assert mock_provider.call_args[0][0] == earlier
+            # The winning provider's own key must be the one forwarded
+            # (index 3 of the positional call). Both keys are set here, so
+            # asserting the name alone would pass on a dispatch that picked
+            # the right row and then read deepseek's key out of the environment.
+            assert mock_provider.call_args[0][3] == "sk-earlier-test"
 
     def test_multi_key_auto_detect_respects_provider_order(self) -> None:
         """When multiple keys are set, _PROVIDERS insertion order determines which wins.
