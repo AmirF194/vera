@@ -1994,6 +1994,92 @@ NESTED_HANDLERS = "\n".join([
   }"""),
 ])
 
+# The handler's STATE INITIALISER, the third sub-tree of a HandleExpr
+# and the one with its own reason for propagating.  A clause body runs
+# outside the handler because that is what a clause IS; the initialiser
+# runs outside it because it is evaluated in the ENCLOSING scope,
+# before the handler is installed at all — `_check_handle` synths
+# `state.init_expr` before it extends `env.current_effect_row` with the
+# handled effect (`vera/checker/control.py`), and codegen evaluates the
+# init expression before pushing the cell (`_translate_handle_state`
+# step 1, `vera/wasm/calls_handlers.py`).  `body_call` is the positive
+# control: the same handler spelling DOES prune a call in its body.
+STATE_INIT = "\n".join([
+    _fn("target", "@Nat.0"),
+    _fn("init_call", """handle[State<Int>](@Int = nat_to_int(target(@Nat.0))) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) }
+  } in {
+    get(());
+    @Nat.0
+  }"""),
+    _fn("body_call", _HANDLED),
+])
+
+# The same boundary as the checker states it, in a program whose caller
+# is `pure`: a `State<Int>`-effectful call in the initialiser of a
+# `handle[State<Int>]` is an E125 against the enclosing row, while the
+# identical call in that handler's body is clean.  This is the fact the
+# closure rule above rests on, so it is pinned rather than asserted in
+# a comment.
+_STATE_INIT_BUMP = """private fn bump(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<State<Int>>)
+{
+  get(())
+}
+"""
+
+STATE_INIT_UNDISCHARGED = _STATE_INIT_BUMP + """
+private fn caller_init(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>](@Int = bump(())) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) }
+  } in {
+    get(())
+  }
+}
+"""
+
+STATE_BODY_DISCHARGED = _STATE_INIT_BUMP + """
+private fn caller_body(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>](@Int = 5) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) }
+  } in {
+    bump(())
+  }
+}
+"""
+
+# An ALIAS-spelled handler.  `target` DECLARES `<State<Int>>` (a
+# declared-but-unused row is legal), so `alias_handled` staying `pure`
+# is only possible if `handle[State<MyAlias>]` discharges `State<Int>`
+# — which it does, `type MyAlias = Int` resolving to the same instance.
+# The bound, though, compares the handler's SOURCE SPELLING to the
+# request string, so a `State<Int>` request does not match it and the
+# edge survives: an under-prune, in the safe direction.  Documented
+# behaviour until #1292 swaps the comparison onto resolved instances.
+ALIAS_HANDLER = "type MyAlias = Int;\n\n" + "\n".join([
+    _fn("target", "@Nat.0", "<State<Int>>"),
+    _fn("alias_handled", """handle[State<MyAlias>](@MyAlias = 0) {
+    get(@Unit) -> { resume(@MyAlias.0) },
+    put(@MyAlias) -> { resume(()) }
+  } in {
+    put(1);
+    target(@Nat.0)
+  }"""),
+])
+
 
 class TestTransitiveCallers:
     def test_diamond_closure_in_declaration_order(self) -> None:
@@ -2039,6 +2125,68 @@ class TestTransitiveCallers:
         assert transitive_callers(
             _program(HANDLER_EDGES), "target", "State<Nat>",
         ) == ["target", "in_clause", "other_effect"]
+
+    def test_state_initialiser_call_keeps_the_edge(self) -> None:
+        """A handler's STATE INITIALISER is not discharged by that
+        handler, so the only call site there still propagates.
+
+        `body_call` is the positive control: the same handler spelling
+        prunes a call in its *body*, so the surviving `init_call` edge
+        is the initialiser boundary and not a key nothing matches.
+        Pruning the initialiser is the unsafe direction — the caller
+        would be left `pure` and its own call site would fail E125, as
+        the companion test below shows.
+        """
+        assert transitive_callers(
+            _program(STATE_INIT), "target", "State<Int>",
+        ) == ["target", "init_call"]
+
+    def test_state_initialiser_is_undischarged_at_the_checker(self) -> None:
+        """The language fact the rule above rests on.
+
+        The initialiser is evaluated in the enclosing scope, before the
+        handler is installed, so a `State<Int>` call there is an E125
+        against a `pure` caller's row.  The body half is the contrast:
+        the identical call inside the handler's body is clean, which is
+        what makes E125 the *initialiser's* property rather than the
+        handler's.
+        """
+        init = analyze(VerificationSession(), URI, STATE_INIT_UNDISCHARGED)
+        assert "E125" in [d.error_code for d in init.diagnostics]
+        body = analyze(VerificationSession(), URI, STATE_BODY_DISCHARGED)
+        assert not [
+            d for d in body.diagnostics if d.severity == "error"
+        ], body.diagnostics
+
+    def test_alias_spelled_handler_does_not_bound(self) -> None:
+        """#1292: the bound compares source spellings, not resolved
+        effect instances.
+
+        Both halves are pinned on the one fixture.  The checker's: the
+        program is error-free, and it can only be — `alias_handled` is
+        `pure` around a call to a `<State<Int>>`-declaring `target` —
+        if `handle[State<MyAlias>]` discharges `State<Int>`.  The
+        closure's: a `State<Int>` request does not match the key that
+        handler spells, so the caller keeps an edge it does not need.
+
+        An under-prune writes a row the program can live without and
+        still type-checks, so this is the safe side of the same
+        asymmetry that keeps a mismatched type argument's edge.  The
+        alias-spelled request is the discriminating control: it *does*
+        prune, so the surviving `State<Int>` edge is the spelling
+        comparison and not an unmatchable key.
+        """
+        a = analyze(VerificationSession(), URI, ALIAS_HANDLER)
+        assert a.program is not None
+        assert not [
+            d for d in a.diagnostics if d.severity == "error"
+        ], a.diagnostics
+        assert transitive_callers(a.program, "target", "State<Int>") == [
+            "target", "alias_handled",
+        ]
+        assert transitive_callers(a.program, "target", "State<MyAlias>") == [
+            "target",
+        ]
 
     def test_matching_type_argument_prunes_the_edge(self) -> None:
         """Positive control for the fixture below: the same

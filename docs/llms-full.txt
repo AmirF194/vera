@@ -2906,11 +2906,22 @@ the effect there, so a caller that wraps every one of its call sites
 is left unrewritten and nothing propagates past it. A caller that also
 reaches the callee on an unhandled path is still rewritten — the
 effect genuinely escapes along that path — and a call in a handler
-*clause* propagates, since a clause body runs outside its own handler.
-The handler has to name the same effect *instance*, type arguments
-included: `handle[State<Nat>]` does not discharge `State<Int>`, so a
-caller around it still gets the row. Propagation stops at the file
-boundary, by design: module-qualified calls are not followed.
+*clause* propagates, since a clause body runs outside its own handler,
+as does one in the handler's *state initialiser*, which is evaluated
+in the enclosing scope before the handler is installed.
+The bound compares the `handle[...]` head's **spelling** to the
+requested effect, type arguments included and as written rather than
+as resolved. So `handle[State<Nat>]` does not bound a `State<Int>`
+propagation and a caller around it still gets the row — which it
+needs, since the checker discharges against effect *instance*
+equality. An alias spelling of the same instance
+(`handle[State<MyAlias>]` with `type MyAlias = Int`) does not bound it
+either, though the checker does discharge that one: there the
+comparison under-prunes, leaving a row the program does not need,
+which still type-checks. That is the documented behaviour until
+[#1292](https://github.com/aallan/vera/issues/1292) keys the bound on
+the resolved instance. Propagation stops at the file boundary, by
+design: module-qualified calls are not followed.
 
 Rows are rewritten for top-level functions only. A call inside a
 `where` block attributes to the top-level function containing it —
@@ -2937,10 +2948,14 @@ every step.
 
 ## Current limitations
 
+A row without an issue link is deliberate behaviour rather than
+tracked work.
+
 | Limitation | Issue |
 |-----------|-------|
 | Single-file model: module imports resolve from disk, relative to the analysed document's own path, not from open editor buffers — so unsaved edits to an imported module are invisible until saved. A document that names no local path resolves no imports and is analysed alone: an `untitled:` buffer or other non-`file:` URI, and a `file://host/…` URI naming another machine (carried opaquely — it used to raise out of the didOpen handler on Python 3.14). | [#724](https://github.com/aallan/vera/issues/724) |
 | Slot go-to-definition covers parameters only — references binding through `let`/`match` have no definition site to jump to yet. | [#181](https://github.com/aallan/vera/issues/181) |
+| `vera/addEffect` propagation stops at the file boundary, by design: the closure runs over unqualified call names, so a module-qualified call is not followed and a caller in another file is never rewritten. | — |
 
 ## Under the hood
 
@@ -3235,7 +3250,7 @@ The reference compiler is under active development. The current release includes
 
 - A seven-stage pipeline: parse, transform, resolve, typecheck, verify, compile, execute
 - A 14-chapter formal specification
-- 10,403 tests, including a 214-program conformance suite
+- 10,406 tests, including a 214-program conformance suite
 - 42 working example programs
 - 164 built-in functions covering strings, arrays, math, parsing, and data types
 - Four built-in abilities (Eq, Ord, Hash, Show) with constrained generics and ADT auto-derivation

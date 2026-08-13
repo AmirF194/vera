@@ -66,9 +66,19 @@ the effect around every one of its call sites is left unrewritten.  A
 caller that also reaches the callee on an unhandled path is still
 rewritten — the effect genuinely escapes along that path.  A call in a
 handler *clause* is not discharged by that handler (clause bodies run
-outside it), so it propagates.  A handler only bounds the propagation
-when its effect matches instance-for-instance — ``handle[State<Nat>]``
-does not discharge ``State<Int>`` — and any mismatch keeps the edge.
+outside it), so it propagates; nor is a call in the handler's *state
+initialiser*, which is evaluated in the enclosing scope before the
+handler is installed.  A handler bounds the propagation only when
+its ``handle[...]`` head is SPELLED the way the request is: type
+arguments included, and compared as written rather than as resolved.
+So ``handle[State<Nat>]`` does not bound a ``State<Int>``
+propagation — which it must not, the checker discharging against
+effect-instance equality — and an alias spelling of the *same*
+instance (``handle[State<MyAlias>]``, ``type MyAlias = Int``) does not
+bound it either, though the checker discharges that one.  Every
+non-match keeps the edge, so the comparison under-prunes rather than
+over-prunes: a surviving edge writes a row the program may not need,
+which still type-checks (#1292).
 Propagation remains single-file (module-qualified calls do not
 propagate across the file boundary).  Row identity, separately, is the
 base name before any type arguments, so ``State<Int>`` will not be
@@ -347,9 +357,16 @@ def _effect_instance_key(ref_text: str) -> str:
 
 
 def _handled_effect_key(ref: ast.EffectRefNode) -> str:
-    """The ``handle[...]`` head's full-instance identity, in the same
-    spelling :func:`_effect_instance_key` produces from a request
-    string.
+    """The ``handle[...]`` head as SPELLED, in the same form
+    :func:`_effect_instance_key` produces from a request string.
+
+    A spelling, not a resolved effect instance: type names are
+    compared as written, so an alias of the requested argument
+    (``handle[State<MyAlias>]`` against a ``State<Int>`` request)
+    reads as a different key even though the checker discharges it.
+    That under-prunes — the caller keeps an edge it does not need —
+    and is tracked as #1292, which will key the comparison on the
+    resolved instance instead.
 
     Anything this cannot spell exactly is spelled *unmatchably* — a
     string no request can equal — so the call site is left unpruned.
@@ -403,12 +420,26 @@ def _unhandled_callee_names(
     Containment is structural (the handled sub-tree) rather than
     span-arithmetic: identical answers where both apply, and no
     special case for nodes carrying no span.  Only the handler's
-    ``body`` is pruned.  Its clauses and state initialiser are not —
-    a clause body runs *outside* its own handler, so an effect
-    performed there still escapes to the enclosing function.
+    ``body`` is pruned; its clauses and its state initialiser each
+    escape it for their **own** reason, not a shared one:
 
-    Handler identity is the full instance including type arguments
-    (:func:`_handled_effect_key`); any mismatch keeps the edge.
+    * A clause body runs *outside* its own handler — that is what a
+      clause is — so an effect performed there still escapes to the
+      enclosing function.
+    * The state initialiser escapes earlier still: it is evaluated in
+      the ENCLOSING scope, before the handler is installed at all.
+      ``ControlFlowMixin._check_handle`` (``vera/checker/control.py``)
+      synths ``state.init_expr`` before it extends
+      ``env.current_effect_row`` with the handled effect, and codegen
+      matches that order (``_translate_handle_state`` step 1 in
+      ``vera/wasm/calls_handlers.py`` evaluates the init expression
+      *before* pushing the new cell, because the init expr belongs to
+      the enclosing scope).  So an effectful call there is checked
+      against the caller's own row — E125 if the caller is ``pure``.
+
+    Handler identity is the ``handle[...]`` head's source spelling,
+    type arguments included (:func:`_handled_effect_key`); any
+    non-match keeps the edge.
     """
     if effect is None:
         return direct_callee_names(decl)
@@ -446,12 +477,26 @@ def transitive_callers(
     discharges the effect and the caller needs no row of its own.  A
     caller that reaches the callee on *any* unhandled path keeps its
     edge — the deliberately conservative reading, since the effect
-    genuinely escapes along that path.  Handler identity is the full
-    effect instance, type arguments included: ``handle[State<Nat>]``
-    does **not** bound a ``State<Int>`` propagation, because the
-    checker discharges against ``EffectInstance`` equality and the
-    call site would fail E125 without the row.  Only an exact match
-    prunes; every other outcome keeps the edge.
+    genuinely escapes along that path.
+
+    Handler identity is the ``handle[...]`` head's source SPELLING,
+    type arguments included, compared to the request string — not the
+    resolved effect instance (#1292).  Two consequences, in opposite
+    directions:
+
+    * ``handle[State<Nat>]`` does **not** bound a ``State<Int>``
+      propagation.  Required: the checker discharges against
+      ``EffectInstance`` equality, so the call site would fail E125
+      without the row.
+    * ``handle[State<MyAlias>]`` with ``type MyAlias = Int`` does not
+      bound one either, though the checker *does* discharge that one.
+      The comparison under-prunes here, leaving the caller a row it
+      does not need — which still type-checks, so it is the safe
+      direction, and it is the documented behaviour until #1292 swaps
+      the comparison onto resolved instances.
+
+    Only a matching spelling prunes; every other outcome keeps the
+    edge.
     """
     fns = _top_level_fns(program)
     if fn_name not in fns:
