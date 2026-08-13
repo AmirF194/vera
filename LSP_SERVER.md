@@ -211,6 +211,36 @@ row already carries the effect, nothing runs and the no-op shape comes
 back (`"applied": false, "ok": true, "proof_delta": null,
 "rewritten": []`).
 
+The closure is **bounded at handlers**: a call site inside a
+`handle[E]` body contributes no edge, because the handler discharges
+the effect there, so a caller that wraps every one of its call sites
+is left unrewritten and nothing propagates past it. A caller that also
+reaches the callee on an unhandled path is still rewritten — the
+effect genuinely escapes along that path — and a call in a handler
+*clause* propagates, since a clause body runs outside its own handler,
+as does one in the handler's *state initialiser*, which is evaluated
+in the enclosing scope before the handler is installed.
+The bound compares the `handle[...]` head's **spelling** to the
+requested effect, type arguments included and as written rather than
+as resolved. So `handle[State<Nat>]` does not bound a `State<Int>`
+propagation and a caller around it still gets the row — which it
+needs, since the checker discharges against effect *instance*
+equality. An alias spelling of the same instance
+(`handle[State<MyAlias>]` with `type MyAlias = Int`) does not bound it
+either, though the checker does discharge that one: there the
+comparison under-prunes, leaving a row the program does not need,
+which still type-checks. That is the documented behaviour until
+[#1292](https://github.com/aallan/vera/issues/1292) keys the bound on
+the resolved instance. Propagation stops at the file boundary, by
+design: module-qualified calls are not followed.
+
+Rows are rewritten for top-level functions only. A call inside a
+`where` block attributes to the top-level function containing it —
+that is what the closure reports, and the handler bound applies inside
+a helper body the same way — but the helper's own `effects(...)` row is
+never rewritten, so a helper that itself needs the new effect leaves
+the candidate refused at the gate rather than half-applied.
+
 Declared-but-unused effects are legal in Vera, so the agent ordering
 "propagate rows first, then write the effectful code" type-checks at
 every step.
@@ -229,11 +259,14 @@ every step.
 
 ## Current limitations
 
+A row without an issue link is deliberate behaviour rather than
+tracked work.
+
 | Limitation | Issue |
 |-----------|-------|
 | Single-file model: module imports resolve from disk, relative to the analysed document's own path, not from open editor buffers — so unsaved edits to an imported module are invisible until saved. A document that names no local path resolves no imports and is analysed alone: an `untitled:` buffer or other non-`file:` URI, and a `file://host/…` URI naming another machine (carried opaquely — it used to raise out of the didOpen handler on Python 3.14). | [#724](https://github.com/aallan/vera/issues/724) |
 | Slot go-to-definition covers parameters only — references binding through `let`/`match` have no definition site to jump to yet. | [#181](https://github.com/aallan/vera/issues/181) |
-| `vera/addEffect` is handler-unaware: a caller that handles the effect in a `handle[E]` block is still rewritten. Propagation also stops at the file boundary, by design. | [#725](https://github.com/aallan/vera/issues/725) |
+| `vera/addEffect` propagation stops at the file boundary, by design: the closure runs over unqualified call names, so a module-qualified call is not followed and a caller in another file is never rewritten. | — |
 
 ## Under the hood
 
