@@ -1,0 +1,25 @@
+-- Conformance: `resume` is not available as a function name (Chapter 5, Section 5.2)
+-- Tests: E153 — a user fn named `resume` is rejected at its declaration.
+-- Unlike the other reserved names this one is no parse-level trap: `resume` is
+-- not a keyword token in `vera/grammar.lark`, so the declaration parses and a
+-- bare `resume(7)` outside a handler resolves to it and runs.  What it collides
+-- with is the binding the checker injects into every handler clause body for
+-- the effect-resumption operator, which gives one spelling two meanings by
+-- position — and makes clause bodies elsewhere in the file resolve against the
+-- declared signature, rejecting handlers that are otherwise valid.  Chapter 1,
+-- Section 1.4 reserves the identifier; this gate enforces it.
+public fn resume(@Int -> @Int)
+  requires(true)
+  ensures(@Int.result >= 0)
+  effects(pure)
+{
+  5
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  0
+}

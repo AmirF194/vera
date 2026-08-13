@@ -696,7 +696,7 @@ ERROR_CODES: dict[str, str] = {
     "E150": "Cannot import private declaration",
     "E151": "Function redefines a built-in",
     "E152": "Effect redeclares a built-in effect",
-    "E153": "Function name is reserved by the grammar",
+    "E153": "Function name is reserved",
     "E154": "Name is reserved for the prelude",
     "E160": "Array index must be Int or Nat",
     "E161": "Cannot index non-array type",

@@ -192,7 +192,7 @@ purpose-directory reorganisation.
 | `p_stateless.vera` | Stateless `State<Int>` put/get: `put(7)` then `get` — minimal stateless baseline | session |
 | `p_stateless_ref.vera` | Stateless put clause whose body re-puts `@Int.0 + 100` — a put from within the put clause itself | session |
 | `w_put.vera` | Where-helper NAMED `put` — does the effect-op fallback misfire on a non-effect call? | round2_family |
-| `w_resume.vera` | Where-helper named `resume` — reserved-name misfire twin | round2_family |
+| `w_resume.vera` | Where-helper named `resume` — reserved-name misfire twin. Answered: the name is now reserved (**E153**), so this program fails `check`; the shape is held by `tests/conformance/ch05_reserved_resume_fn_rejected.vera` and `TestReservedResumeFnName` | round2_family |
 
 ### checker_gates/ (76 files)
 

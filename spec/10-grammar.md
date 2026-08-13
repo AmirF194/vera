@@ -393,6 +393,8 @@ with_clause: WITH AT type_expr ASSIGN expr
 // keyword terminal, so resume(expr) is parsed as a regular fn_call.
 ```
 
+`resume` stays an ordinary `LOWER_IDENT` at every point above: no production and no terminal mentions it, and the parser gives it no special treatment. Its reservation as a function name (Chapter 1, Section 1.4) is therefore enforced after parsing, by the checker — `fn resume(...)` parses and is then rejected **E153** (Chapter 5, Section 5.2). The two statements are about different phases and do not conflict.
+
 ### 10.3.16 Array Literals
 
 ```ebnf
