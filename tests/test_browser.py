@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import json
 import math
+import random
 import shutil
+import struct
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -27,6 +29,7 @@ from vera.checker import typecheck
 from vera.parser import parse_file
 from vera.resolver import ModuleResolver
 from vera.transform import transform
+from vera.wasm.json_serde import format_json_number
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -207,6 +210,43 @@ def _both_stdouts(src: str, tmp_path: Path, name: str = "parity") -> tuple[str, 
         f"Node harness reported error: {node.get('error')!r}"
     )
     return str(py_out), str(node["stdout"])
+
+
+def _both_failures(src: str, tmp_path: Path, name: str) -> tuple[str, str]:
+    """Compile ``src`` ONCE, run the same ``.wasm`` under both runtimes
+    expecting each to FAIL, and return ``(native_message, browser_message)``.
+
+    The failure-side counterpart to :func:`_both_stdouts`, for operations
+    whose contract is "refuse loudly" rather than "return a value".  Each
+    side asserts that the call did not succeed, so a host that quietly
+    produced output — which is exactly what the browser did with a NaN
+    ``JNumber`` before #1293 — fails here rather than reading as a pass.
+    """
+    src_path = tmp_path / f"{name}.vera"
+    src_path.write_text(src, encoding="utf-8")
+    wasm_path, result = _compile_file(src_path, tmp_path)
+
+    try:
+        native_out = _run_python(result)
+    except Exception as exc:  # noqa: BLE001 — any failure is the signal
+        native_msg = str(exc)
+    else:
+        raise AssertionError(
+            "native runtime did not fail; "
+            f"stdout={native_out.stdout!r}"
+        )
+
+    node = _run_node(wasm_path)
+    browser_msg = str(node.get("error") or "")
+    assert browser_msg, (
+        "browser runtime did not fail; "
+        f"stdout={node['stdout']!r}"
+    )
+    assert node["stdout"] == "", (
+        "browser runtime produced output on a failing call: "
+        f"{node['stdout']!r}"
+    )
+    return native_msg, browser_msg
 
 
 def _parity_stdout(src: str, tmp_path: Path, name: str = "parity") -> str:
@@ -3137,8 +3177,10 @@ _SET_ELEMENT_CASES = [
     ("bool", "Bool", "true", "false"),
 ]
 
-# (id, JSON input as written in Vera source, expected browser
+# (id, JSON input as written in Vera source, expected canonical
 #  json_stringify output).  One case per Json ADT tag, plus nesting.
+# Since #1293 the expected string is the *shared* output of both hosts,
+# not the browser's alone: spec §9.7.1 names the compact form canonical.
 _JSON_TAG_CASES = [
     ("jnull", "null", "null"),
     ("jbool_true", "true", "true"),
@@ -3155,6 +3197,46 @@ _JSON_TAG_CASES = [
     ("array_of_objects", '[{\\"k\\":1},{\\"k\\":2}]', '[{"k":1},{"k":2}]'),
     ("empty_array", "[]", "[]"),
     ("empty_object", "{}", "{}"),
+]
+
+# (id, JSON input as written in Vera source, expected canonical output).
+# Number rendering is where the two hosts diverged most widely (#1293):
+# the integral ``1`` → ``1.0`` mutation the issue names is one row of a
+# larger table, because Python's ``repr`` and ECMAScript's
+# Number::toString disagree on *four* independent boundaries.  Every row
+# here was measured on both hosts before the fix and is a boundary, not a
+# sample: the exponential thresholds (10^21 upward, 10^-7 downward), the
+# exponent's own spelling, and negative zero.
+_JSON_NUMBER_CASES = [
+    # Integral values render without a fractional part — the #1293 axis.
+    ("integral", "[1,2]", "[1,2]"),
+    ("integral_negative", "[-1]", "[-1]"),
+    ("integral_zero", "[0]", "[0]"),
+    # Negative zero keeps its sign bit through the ADT but renders "0".
+    ("negative_zero", "[-0.0]", "[0]"),
+    # Fractional values are untouched by the integral rule.
+    ("fractional", "[1.5,2.25]", "[1.5,2.25]"),
+    ("fractional_small", "[0.1]", "[0.1]"),
+    ("fractional_long", "[12345.6789]", "[12345.6789]"),
+    # Upper exponential boundary: plain digits below 10^21, exponent at
+    # and above it.  Python's repr switches at 10^16 instead.
+    ("plain_1e15", "[1e15]", "[1000000000000000]"),
+    ("plain_1e16", "[1e16]", "[10000000000000000]"),
+    ("plain_1e20", "[1e20]", "[100000000000000000000]"),
+    ("exp_1e21", "[1e21]", "[1e+21]"),
+    ("exp_1e30", "[1e30]", "[1e+30]"),
+    ("plain_17_digits", "[123456789012345680]", "[123456789012345680]"),
+    # Lower exponential boundary: plain digits down to 10^-6, exponent
+    # below it.  Python's repr switches at 10^-5 instead.
+    ("plain_1e_minus_6", "[0.000001]", "[0.000001]"),
+    ("exp_1e_minus_7", "[1e-7]", "[1e-7]"),
+    ("exp_1e_minus_300", "[1e-300]", "[1e-300]"),
+    # Exponent spelling: no zero padding, explicit sign only when
+    # positive... which is exactly where Python writes "1e-07".
+    ("exp_multi_digit_mantissa", "[1.25e-9]", "[1.25e-9]"),
+    ("exp_max_double", "[1.7976931348623157e308]",
+     "[1.7976931348623157e+308]"),
+    ("exp_min_subnormal", "[5e-324]", "[5e-324]"),
 ]
 
 
@@ -3425,6 +3507,22 @@ private fn round_trip(@String -> @String)
 """
 
 
+def _json_round_trip_src(json_text: str, *, times: int = 1) -> str:
+    """A ``main`` that parses ``json_text`` and stringifies it ``times``
+    times, re-parsing between each — the observable form of the
+    ``json_stringify ∘ json_parse`` idempotence property."""
+    inner = 'round_trip("' + json_text + '")'
+    for _ in range(times - 1):
+        inner = f"round_trip({inner})"
+    return _JSON_ROUND_TRIP_PRELUDE + f"""
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{{
+  IO.print({inner})
+}}
+"""
+
+
 class TestBrowserJsonRoundTrip349:
     """``readJson`` / ``json_stringify`` coverage (#349).
 
@@ -3433,24 +3531,12 @@ class TestBrowserJsonRoundTrip349:
     ``readJson`` — all six ADT tags including the ``decodeMap``-backed
     JObject arm — never ran in the browser.
 
-    These are Node-only assertions rather than parity assertions
-    because ``json_stringify`` genuinely diverges between the two hosts;
-    see :meth:`TestBrowserJsonStringifyParity349.test_number_and_spacing`
-    for the pinned divergence.  Pinning the browser side still catches a
-    regression in ``readJson``'s tag decoding, which is what was
-    uncovered.
+    These were Node-only assertions while ``json_stringify`` diverged
+    between the hosts (#1293).  Since that closed they are full parity
+    assertions: the same ``.wasm`` runs under both runtimes and one
+    expected string covers both, so a regression in either host's
+    serializer — not just ``readJson``'s tag decoding — fails here.
     """
-
-    @staticmethod
-    def _node_stdout(src: str, tmp_path: Path, name: str) -> str:
-        src_path = tmp_path / f"{name}.vera"
-        src_path.write_text(src, encoding="utf-8")
-        wasm_path, _ = _compile_file(src_path, tmp_path)
-        node = _run_node(wasm_path)
-        assert not node.get("error"), (
-            f"Node harness reported error: {node.get('error')!r}"
-        )
-        return str(node["stdout"])
 
     @pytest.mark.parametrize(
         ("case_id", "json_text", "expected"),
@@ -3460,61 +3546,192 @@ class TestBrowserJsonRoundTrip349:
     def test_json_stringify_tag_round_trip(
         self, case_id: str, json_text: str, expected: str, tmp_path: Path,
     ) -> None:
-        src = _JSON_ROUND_TRIP_PRELUDE + f"""
-public fn main(@Unit -> @Unit)
-  requires(true) ensures(true) effects(<IO>)
-{{
-  IO.print(round_trip("{json_text}"))
-}}
-"""
-        assert self._node_stdout(src, tmp_path, f"json_{case_id}") == expected
+        src = _json_round_trip_src(json_text)
+        assert _parity_stdout(src, tmp_path, f"json_{case_id}") == expected
 
 
 class TestBrowserJsonStringifyParity349:
-    """``json_stringify`` does NOT match the native runtime (#349 finding,
-    tracked as #1293).
+    """``json_stringify`` agrees byte for byte across the two runtimes
+    (#349 finding, tracked as #1293, closed by the canonical form).
 
-    The Python host calls ``json.dumps(value, ensure_ascii=False,
-    allow_nan=False)`` — default ``", "`` / ``": "`` separators, and
-    ``read_json`` hands it Python ``float``\\ s so an integral JNumber
-    renders as ``1.0``.  The browser host calls bare
-    ``JSON.stringify(value)`` — no separator padding, and JS renders an
-    integral ``Number`` as ``1``.
+    Both hosts emit the compact form spec §9.7.1 pins: ``,`` / ``:``
+    with no padding, and numbers rendered by ECMAScript's
+    Number::toString.  Before the fix the Python host called
+    ``json.dumps(value, ensure_ascii=False, allow_nan=False)`` — ``", "``
+    / ``": "`` separators, and ``read_json`` hands it Python ``float``\\ s
+    so an integral JNumber rendered as ``1.0`` — while the browser host
+    called bare ``JSON.stringify(value)``.
 
-    Every other Json binding is byte-identical across the two runtimes;
-    this one is not, and nothing in the suite noticed because
-    ``json_stringify`` had no browser-side caller until #349 added one.
-
-    Both sides are pinned as exact strings rather than marked ``xfail``:
-    a bare ``xfail`` accepts *any* failure, so a broken compile, a dead
-    Node harness or an unrelated ``runtime.mjs`` regression would all
-    read as "yes, the known divergence" and this — the only browser-side
-    coverage of ``json_stringify`` — would stay green through a real
-    regression.  Pinning both outputs tolerates exactly the documented
-    difference and nothing else.
-
-    Converging the two hosts therefore fails **five** browser assertions,
-    not one: this test, plus the ``jarray``, ``jobject``, ``nested`` and
-    ``array_of_objects`` entries of :data:`_JSON_TAG_CASES` — the four
-    whose pinned strings carry a separator or an integral number.  (The
-    other seven tag cases are already byte-identical across the hosts.)
-    That red is the prompt to collapse each pinned pair into a single
-    parity assertion.
+    The class is a parity battery rather than a pair of pinned strings
+    because there is no longer a divergence to pin.  It keeps the shape
+    that made the pins useful: an exact expected string on every case, so
+    a broken compile, a dead Node harness or an unrelated ``runtime.mjs``
+    regression cannot read as "as expected".
     """
 
     def test_number_and_spacing(self, tmp_path: Path) -> None:
-        src = _JSON_ROUND_TRIP_PRELUDE + """
+        """The headline #1293 case: integral numbers and separators."""
+        src = _json_round_trip_src("[1,2]")
+        assert _parity_stdout(src, tmp_path, "json_parity") == "[1,2]"
+
+    @pytest.mark.parametrize(
+        ("case_id", "json_text", "expected"),
+        _JSON_NUMBER_CASES,
+        ids=[c[0] for c in _JSON_NUMBER_CASES],
+    )
+    def test_number_rendering_boundaries(
+        self, case_id: str, json_text: str, expected: str, tmp_path: Path,
+    ) -> None:
+        """Every boundary where ``repr(float)`` and Number::toString part
+        company, not only the integral one #1293's title names.
+
+        Fixing the integral case alone would leave ``1e16``, ``1e-7``,
+        ``0.000001`` and ``-0.0`` diverging, and a battery built only
+        around the reported symptom would not have noticed.
+        """
+        src = _json_round_trip_src(json_text)
+        assert _parity_stdout(src, tmp_path, f"jsonnum_{case_id}") == expected
+
+    @pytest.mark.parametrize(
+        ("case_id", "json_text", "expected"),
+        _JSON_TAG_CASES + _JSON_NUMBER_CASES,
+        ids=[c[0] for c in _JSON_TAG_CASES + _JSON_NUMBER_CASES],
+    )
+    def test_stringify_is_idempotent(
+        self, case_id: str, json_text: str, expected: str, tmp_path: Path,
+    ) -> None:
+        """``json_stringify(json_parse(·))`` is a fixed point on both hosts.
+
+        A canonical form that is not idempotent is not canonical: feeding
+        one host's output back through the pair must land on the same
+        bytes, or ``1`` → ``1.0`` → ``1.0`` style drift can still
+        accumulate across a pipeline.  Three passes, so a form that only
+        stabilises after the first is caught too.
+        """
+        src = _json_round_trip_src(json_text, times=3)
+        assert _parity_stdout(src, tmp_path, f"jsonidem_{case_id}") == expected
+
+
+class TestBrowserJsonStringifyNonFinite1293:
+    """A non-finite ``JNumber`` refuses to serialise on BOTH hosts (#1293).
+
+    RFC 8259 has no NaN and no Infinity, so there is no right answer to
+    return — only a right way to fail.  The native host has always
+    refused; the browser silently emitted ``null``, turning a value the
+    format cannot carry into a *different, valid* value that no later
+    consumer can tell from a genuine JSON ``null``.  That is the silent
+    wrong answer DESIGN §Design principles 2 rules out, and it is the
+    asymmetry #1293 folds in beside the formatting axes.
+
+    The assertion is deliberately two-sided: the call must raise, **and**
+    nothing may reach stdout.  Asserting only "raises" would still pass a
+    host that printed ``null`` and then failed for some later reason.
+    """
+
+    _SRC = """
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
-{
-  IO.print(round_trip("[1,2]"))
-}
+{{
+  IO.print(json_stringify(JNumber({expr})))
+}}
 """
-        native, browser = _both_stdouts(src, tmp_path, "json_parity")
-        assert native == "[1.0, 2.0]"
-        # Known divergence, deliberately not fixed on a tests-only branch:
-        # bare JSON.stringify gives compact separators and integral numbers.
-        assert browser == "[1,2]"
+
+    @pytest.mark.parametrize(
+        ("case_id", "expr"),
+        [
+            ("nan", "nan()"),
+            ("infinity", "infinity()"),
+            ("negative_infinity", "0.0 - infinity()"),
+        ],
+    )
+    def test_non_finite_fails_on_both_hosts(
+        self, case_id: str, expr: str, tmp_path: Path,
+    ) -> None:
+        native, browser = _both_failures(
+            self._SRC.format(expr=expr), tmp_path, f"jsonnf_{case_id}",
+        )
+        # One shared sentence, so a caller reading either host's failure
+        # learns the same thing.  Substring, not equality: wasmtime and
+        # the Node harness each wrap the host message in their own frame.
+        needle = "not representable in JSON"
+        assert needle in native, native
+        assert needle in browser, browser
+
+
+class TestCanonicalNumberFormatMatchesEcmascript1293:
+    """``format_json_number`` is differentially checked against the real
+    ``JSON.stringify``, not against a table someone typed (#1293).
+
+    The reference host now renders numbers itself instead of delegating
+    to ``json.dumps``, so "matches ECMAScript" became a claim about a
+    reimplementation.  A hand-written boundary table — which
+    ``TestCanonicalNumberFormat`` in ``tests/test_codegen_json.py`` also
+    has — only proves the cases its author thought of, and those are the
+    cases the implementation was written to handle.  This runs the two
+    implementations against each other over a deterministic random
+    sample of doubles drawn from raw bit patterns, so the inputs are not
+    ones either side was designed around.
+    """
+
+    @staticmethod
+    def _ecmascript_strings(values: list[float], tmp_path: Path) -> list[str]:
+        """``JSON.stringify(n)`` for each value, computed by Node."""
+        literals = [repr(v) for v in values]
+        script = tmp_path / "numfmt.mjs"
+        script.write_text(
+            "const xs = " + json.dumps(literals) + ";\n"
+            "console.log(JSON.stringify("
+            "xs.map(s => JSON.stringify(Number(s)))));\n",
+            encoding="utf-8",
+        )
+        proc = subprocess.run(
+            [NODE or "node", str(script)],
+            capture_output=True, text=True, encoding="utf-8",
+            timeout=60, check=True,
+        )
+        return list(json.loads(proc.stdout))
+
+    def test_random_doubles_match_json_stringify(self, tmp_path: Path) -> None:
+        # Seeded: a flaky parity test is worse than a smaller sample.
+        rng = random.Random(20260813)
+        values: list[float] = []
+        while len(values) < 2000:
+            bits = rng.getrandbits(64)
+            (candidate,) = struct.unpack("<d", struct.pack("<Q", bits))
+            if math.isfinite(candidate):
+                values.append(candidate)
+        # Mix in magnitudes the uniform bit sampler almost never lands
+        # on: small integers and the exponential thresholds.
+        values.extend(float(i) for i in range(-50, 51))
+        values.extend([
+            1e-7, 1e-6, 1e15, 1e16, 1e20, 1e21, 1e30, 5e-324,
+            1.7976931348623157e308, 0.1, 0.5, 1.5, -0.0,
+        ])
+
+        expected = self._ecmascript_strings(values, tmp_path)
+        mismatches = [
+            (v, format_json_number(v), want)
+            for v, want in zip(values, expected)
+            if format_json_number(v) != want
+        ]
+        assert not mismatches, (
+            f"{len(mismatches)} of {len(values)} doubles render differently "
+            f"from JSON.stringify; first five: {mismatches[:5]}"
+        )
+
+    def test_the_differential_can_fail(self, tmp_path: Path) -> None:
+        """The differential above is only evidence if it can go red.
+
+        ``repr`` is what the old ``json.dumps`` path emitted, and it is
+        the natural wrong answer here, so the check that would have
+        passed the pre-#1293 implementation is run explicitly and
+        required to FAIL.  Without this, a broken Node invocation or an
+        empty sample would make the differential vacuously green.
+        """
+        values = [1.0, 1e16, 1e-7, -0.0]
+        expected = self._ecmascript_strings(values, tmp_path)
+        assert expected == ["1", "10000000000000000", "1e-7", "0"]
+        assert [repr(v) for v in values] != expected
 
 
 class TestBrowserHostErrorPaths349:

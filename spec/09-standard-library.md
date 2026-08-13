@@ -2076,7 +2076,18 @@ The `Json` type is provided by the standard prelude — no explicit `data` decla
 | Function | Signature | Description |
 |----------|-----------|-------------|
 | `json_parse(s)` | `(String) → Result<Json, String>` | Parse a JSON string; `Err` on invalid input |
-| `json_stringify(j)` | `(Json) → String` | Serialize a Json value to a JSON string |
+| `json_stringify(j)` | `(Json) → String` | Serialize a Json value to its canonical JSON string |
+
+**Canonical serialization.** `json_stringify` has exactly one output form, per the one-canonical-form principle (§0.2.3), and every runtime produces it byte for byte (§12.9.3):
+
+- **Separators.** `,` between elements and members, `:` between a key and its value, with no surrounding whitespace. No indentation, no trailing newline.
+- **Object members.** Emitted in the insertion order of the underlying `Map<String, Json>`, not sorted.
+- **Strings.** Escaped per RFC 8259, with non-ASCII characters emitted literally rather than as `\uXXXX` escapes.
+- **Numbers.** Rendered by ECMAScript's `Number::toString` with radix 10 ([ECMA-262 §6.1.6.1.20](https://tc39.es/ecma262/#sec-numeric-types-number-tostring)). A `JNumber` wraps a `Float64`, so this is the rendering rule that matters most: an integral value carries no fractional part (`1`, not `1.0`), the notation switches to exponential at and above `1e21` and below `1e-6`, the exponent is signed and unpadded (`1e-7`, not `1e-07`), and negative zero renders `0`.
+
+The number rule is what makes serialization non-destructive: a document containing `1` re-serializes as `1`. A form that wrote `1.0` would silently alter integral values in transit, which §0.2.2 (explicitness, no implicit behaviour) rules out.
+
+`NaN` and infinities have no JSON representation. `json_stringify` on a `JNumber` holding one **fails** rather than substituting `null` — substituting would turn a value the format cannot carry into a different, valid one that no consumer could distinguish from a genuine `JNull`. Guard with `float_is_nan` / `float_is_infinite` (§9.6.12) before serializing.
 
 **Object access:**
 

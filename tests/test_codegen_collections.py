@@ -811,12 +811,12 @@ public fn main(@Unit -> @Unit)
   IO.print(json_stringify(@Json.0))
 }
 """
-        # Exact rendered output.  Python's json.dumps default
-        # separators include a space after the colon, so the
-        # form is `{"name": "hi"}` (NOT the compact `{"name":"hi"}`).
+        # Exact rendered output, in the canonical form spec §9.7.1
+        # pins: `:` with no padding (#1293 — this read `{"name": "hi"}`
+        # while the reference host still went through json.dumps).
         # Without the host-side mask json_stringify would emit
         # `{}` instead.
-        assert _run_io(source, fn="main") == '{"name": "hi"}'
+        assert _run_io(source, fn="main") == '{"name":"hi"}'
 
     # --- Unit tests for the _validate_wrap_handle helper ---
     #

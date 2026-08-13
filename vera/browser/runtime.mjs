@@ -2626,7 +2626,25 @@ function buildImportObject(module, moduleBytes) {
   if (needed.has("json_stringify")) {
     imports.vera.json_stringify = (ptr) => {
       const value = readJson(ptr);
-      const text = JSON.stringify(value);
+      // #1293: RFC 8259 has no NaN and no Infinity, so there is no
+      // right value to return for one — only a right way to fail.
+      // Bare JSON.stringify writes "null", swapping a value the format
+      // cannot carry for a different, perfectly valid one that no later
+      // consumer can distinguish from a genuine null.  The reference
+      // runtime has always refused; the replacer makes this host refuse
+      // with the same sentence.  The compact form JSON.stringify
+      // already emits IS the canonical form (spec §9.7.1), so nothing
+      // else about the call changes.
+      const text = JSON.stringify(value, (_key, v) => {
+        if (typeof v === "number" && !Number.isFinite(v)) {
+          throw new Error(
+            `json_stringify: ${String(v)} is not representable in JSON — ` +
+            `RFC 8259 has no NaN or Infinity.  Guard with float_is_nan / ` +
+            `float_is_infinite before serialising.`
+          );
+        }
+        return v;
+      });
       // JSON.stringify can return undefined for unsupported values
       // (e.g. bare undefined, symbols, functions).  Fall back to "null"
       // to match the JSON spec and avoid allocString crashing.
