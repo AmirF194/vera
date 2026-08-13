@@ -67,6 +67,9 @@ def bare_call_denotes_user_fn(
 
     * the checker's ``_check_call_with_args`` — the derivation, over its
       LEXICAL function scope (#991);
+    * the checker's ``_collect_expr_effects``, the ``async(e)``
+      commutativity walk, so the row it reasons about is the row the
+      resolution above bound;
     * ``_translate_call`` in :mod:`vera.wasm.calls` — the bare dispatch, over
       codegen's flat ``_fn_sigs`` mirror (``_known_fns``): a user-owned name
       skips the clause-inline registry, the host-cell intrinsics, and the
@@ -74,6 +77,10 @@ def bare_call_denotes_user_fn(
     * the three bare-``FnCall`` inference sites in :mod:`vera.wasm.inference`
       and :mod:`vera.wasm.context`, so a shadowed name is typed from the
       function table rather than from the operation's result registry;
+    * ``_handler_always_throws`` in :mod:`vera.wasm.calls_handlers`, whose
+      ``throw_installed`` question is the same one for ``Exn``'s operation:
+      a bare ``throw`` in a clause body is the op only where no declaration
+      owns the name;
     * :class:`~vera.monomorphize.Monomorphizer`'s discovery walk, over
       ``MonoContext.fn_names``, so the clone it discovers for a ``get(())``
       in a value position is the clone the rewrite emits.
@@ -88,12 +95,22 @@ def bare_call_denotes_user_fn(
 
     *user_fn_names* is a membership view, not a fixed set, so each consumer
     supplies the table it actually resolves against — the checker a lexical
-    scope walk, codegen its flat signature keys.  Those tables are not
-    identical (codegen keys a local ``where`` helper by its bare name; #1015
-    hoists an imported one to ``parent$where$name``), which is the same
-    documented imprecision the verifier's ``fn_names`` mirrors — but the
-    RULE applied to them is now one function, so the sites cannot answer
-    differently about the table they share.
+    scope walk, codegen its flat signature keys.  One rule over two tables
+    is one answer only where the tables agree, and they do not everywhere:
+    codegen's ``_fn_sigs`` keys an import the call site cannot see under its
+    BARE name, so a ``private fn get`` in an imported module — or a public
+    one a selective import excludes — makes this predicate answer
+    "user-owned" at a site where the checker resolved the operation.  That
+    residual is a live defect, tracked as #1299 with a demonstrated silent
+    wrong value and a demonstrated load failure, and it is a property of the
+    TABLE rather than of the rule; the fix belongs to ``_known_fns``, which
+    has to become the names visible at the compiling declaration's module
+    scope.  A ``where`` helper is NOT such a case, though the flat keying
+    invites the assumption: #1015 and the non-generic hoist move every
+    helper out of the bare namespace before registration (a local one is
+    ``holder$where$get``), and the call sites inside its holder are rewritten
+    with it, so a helper named after an operation shadows the name in its own
+    body and nowhere else — which is exactly the checker's lexical answer.
     """
     return name in user_fn_names
 

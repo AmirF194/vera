@@ -670,13 +670,20 @@ class WasmContext(
 
         Codegen's leg of :func:`~vera.slots.bare_call_denotes_user_fn`, over
         the flat ``_fn_sigs`` mirror.  Every bare-call site that consults an
-        op registry — the clause-inline dispatch, the host-cell intrinsics,
-        the #1233 addressability gate, and the three result-type inference
-        sites — asks this first, so a name the checker resolved to a user
-        declaration is lowered as the ordinary call the checker typed.
+        op registry asks this first, so a name the checker resolved to a user
+        declaration is lowered as the ordinary call the checker typed: the
+        clause-inline dispatch, the host-cell intrinsics, the #1233
+        addressability gate, the three result-type inference sites, and
+        ``_handler_always_throws``'s ``throw_installed`` question, which is
+        the same one for ``Exn``'s operation.
 
         Not for the QUALIFIED spelling: ``State.get(())`` names the effect,
         so no declaration can shadow it and the registries answer directly.
+
+        The ``_fn_sigs`` mirror is not scope-accurate — it keys an import the
+        call site cannot see under its bare name, so this can answer
+        "user-owned" where the checker resolved the operation (#1299).  The
+        rule is right and the table is wrong; the fix is that table's.
         """
         return not bare_call_denotes_user_fn(name, self._known_fns)
 

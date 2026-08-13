@@ -712,21 +712,41 @@ class CallsMixin:
                 # from this mixin; conservatively non-commutative.
                 acc.add(f"<{node.qualifier}.{node.name}>")
         elif isinstance(node, ast.FnCall):
-            op_info = self.env.lookup_effect_op(node.name)
+            # #991: resolve lexically like the call checker above, so a
+            # same-named helper in a sibling tree can't contribute the
+            # WRONG effect row to the commutativity analysis.
+            #
+            # #1284: and DECLARATIONS FIRST, which is the rest of what "like
+            # the call checker above" means — this walk asked
+            # `lookup_effect_op` first, so a user function named after a
+            # built-in operation contributed the OPERATION's parent effect
+            # instead of its own declared row.  Wrong in both directions and
+            # both measured: a PURE `fn get` in a program containing no
+            # State at all drew `[W002] async argument performs State
+            # effects`, and a `fn get` performing IO under a row naming
+            # `Http` first drew NO warning, because `Http` is inside the
+            # commutative whitelist and the operation is what the walk
+            # thought it had found.  Same predicate as the resolution at the
+            # top of this file, so the analysis reasons about the row the
+            # checker actually bound.
+            fn_info = (
+                self._lookup_function_scoped(node.name)
+                if bare_call_denotes_user_fn(node.name, self._user_fn_names)
+                else None
+            )
+            op_info = (
+                self.env.lookup_effect_op(node.name)
+                if fn_info is None else None
+            )
             if op_info is not None:
                 acc.add(op_info.parent_effect)
-            else:
-                # #991: resolve lexically like the call checker above, so a
-                # same-named helper in a sibling tree can't contribute the
-                # WRONG effect row to the commutativity analysis.
-                fn_info = self._lookup_function_scoped(node.name)
-                if fn_info is None:
-                    acc.add(f"<{node.name}>")
-                elif isinstance(fn_info.effect, ConcreteEffectRow):
-                    for ei in fn_info.effect.effects:
-                        acc.add(ei.name)
-                elif not isinstance(fn_info.effect, PureEffectRow):
-                    acc.add(f"<{node.name}>")
+            elif fn_info is None:
+                acc.add(f"<{node.name}>")
+            elif isinstance(fn_info.effect, ConcreteEffectRow):
+                for ei in fn_info.effect.effects:
+                    acc.add(ei.name)
+            elif not isinstance(fn_info.effect, PureEffectRow):
+                acc.add(f"<{node.name}>")
         for field in _dc.fields(node):
             value = getattr(node, field.name)
             if isinstance(value, ast.Node):
