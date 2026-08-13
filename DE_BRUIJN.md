@@ -388,10 +388,12 @@ Aliases turn a positional question into a named one without reintroducing names 
 
   Fix:
 
-    Ensure enough Metres bindings are in scope, or use a lower index.
+    Ensure enough Metres bindings are in scope, or use a lower index. Available bindings: @Feet.0: Int; @Meters.0: Int.
 
   See: Chapter 3, Section 3.4 "Reference Resolution"
 ```
+
+Each entry in that table pairs a slot reference you can write — alias spelling and all — with the type it resolves to, which is why both entries end in `Int` while the message says no `Metres` binding exists. Write `@Int.0` in the same body and it reports no `Int` bindings above those same two entries: the head is opaque (§6.1), so `@Meters.0` and `@Feet.0` are the only ways in.
 
 ### 6.3 When two spellings share a stack
 

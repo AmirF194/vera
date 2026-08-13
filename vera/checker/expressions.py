@@ -8,6 +8,7 @@ quantifiers, and old/new contract expressions.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import ClassVar
 
 from vera import ast
@@ -59,6 +60,39 @@ _STATE_FORM_PLACEMENT_FIX = (
     "(Section 7.9.1), and old()/new() are the only contract forms that "
     "name state."
 )
+
+
+# Widest `Available bindings:` table any diagnostic renders (#558).  The
+# scope it reports is unbounded — one row per binding — and the LSP
+# concatenates the fix into the hover message, so a wide function turns
+# one diagnostic into a wall of rows.  12 sits above the measured corpus:
+# across the 2,080 slot-reference positions in `tests/**/*.vera` and
+# `examples/` the table is 7 rows at p95 and 11 at p99, so every site
+# through the 99th percentile still renders complete and only the tail
+# (12 of 2,080) elides.  The cap is a RENDERING rule — see
+# `_render_scope_table` — not a change to `_collect_scope_bindings()`,
+# whose other consumer is the LSP typed-hole completion, where a dropped
+# row is a missing completion item.
+_SCOPE_TABLE_MAX_ROWS = 12
+
+
+def _render_scope_table(bindings: Sequence[tuple[str, str]]) -> str:
+    """Render in-scope bindings as ``@T.n: Type; …``, capped.
+
+    One rule for every table: the first `_SCOPE_TABLE_MAX_ROWS` rows in
+    scope order, then ``; … and K more`` naming how many rows are not
+    shown.  Rows are dropped off the END, so a rendered ``@T.n`` means
+    the same thing capped or not — the reader can use any row printed.
+
+    Shared by the E130 unresolved-slot fix and the W001 hole hint so the
+    two cannot disagree about the scope they both describe.
+    """
+    shown = bindings[:_SCOPE_TABLE_MAX_ROWS]
+    table = "; ".join(f"{ref}: {ty}" for ref, ty in shown)
+    hidden = len(bindings) - len(shown)
+    if hidden:
+        table += f"; … and {hidden} more"
+    return table
 
 
 class ExpressionsMixin:
@@ -417,6 +451,20 @@ class ExpressionsMixin:
             else:
                 fix = (f"Ensure enough {tname} bindings are in scope, or use a "
                        f"lower index.")
+            # #558: append the slot table AT THE ERROR POSITION — deep in a
+            # match arm the stack has grown past the signature, which is all
+            # `--explain-slots` shows.  Rendered through the same
+            # `_render_scope_table` as the W001 hole hint, so the read-time
+            # and write-time diagnostics agree on both the set and the cap.
+            # The table is the WHOLE scope, zero-size bindings included:
+            # the index range in the description counts them, so hiding
+            # them makes one diagnostic report two different scopes (a
+            # `@Unit.1` against `(@Unit, @Int)` would say "valid indices:
+            # 0..0" above a table with no Unit row).  A zero-size read is
+            # E182's job, and it says what to write instead.
+            scope = self._collect_scope_bindings()
+            if scope:
+                fix += f" Available bindings: {_render_scope_table(scope)}."
             self._error(
                 ref,
                 f"Cannot resolve @{tname}.{ref.index}: "
@@ -1205,9 +1253,13 @@ class ExpressionsMixin:
         """All bindings in scope, innermost first, as
         ``(slot_ref_string, pretty_type_string)`` pairs.
 
-        Shared by the W001 hole diagnostic's fix hint and the LSP
-        typed-hole completion (#222 Phase D) — same data, two
-        renderings.
+        Shared by the W001 hole diagnostic's fix hint, the E130
+        unresolved-slot fix (#558) and the LSP typed-hole completion
+        (#222 Phase D) — same data, three renderings.
+
+        Returns the WHOLE scope.  The two message renderings cap what
+        they print (`_render_scope_table`); completion consumes the list
+        itself, where a dropped row is a missing completion item.
         """
         bindings: list[tuple[str, str]] = []
         index_by_type: dict[str, int] = {}
@@ -1239,9 +1291,7 @@ class ExpressionsMixin:
             ))
 
         if bindings:
-            context = "; ".join(
-                f"{ref}: {ty}" for ref, ty in bindings
-            )
+            context = _render_scope_table(bindings)
             fix_hint = (
                 f"Replace ? with an expression of type {expected_str}. "
                 f"Available bindings: {context}."

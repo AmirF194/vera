@@ -4,13 +4,19 @@ Split from tests/test_checker.py (#420). Shared helpers live in tests/checker_he
 """
 from __future__ import annotations
 
+import pytest
+
 from vera import ast
+from vera.checker import typecheck_with_artifacts
+from vera.checker.expressions import _SCOPE_TABLE_MAX_ROWS
+from vera.parser import parse_to_ast
 
 from tests.checker_helpers import (
     _check,
     _check_err,
     _check_ok,
     _errors,
+    _warnings,
 )
 
 
@@ -199,6 +205,330 @@ private fn f(@Bool, @Int -> @Int)
         assert e140, "expected an E140 diagnostic for `@Bool.0 + @Int.0`"
         assert e140[0].fix.strip(), "E140 must carry a non-empty fix"
         assert "Fix:" in e140[0].format()
+
+
+# =====================================================================
+# #558 — E130 carries the in-scope slot table
+# =====================================================================
+
+
+class TestSlotTableInE130:
+    """#558 option (a): an unresolved-slot error lists every binding in
+    scope at the error position with its resolved `@T.n`, so the right
+    index can be read off the diagnostic instead of reconstructed by
+    writing a typed hole and re-running.  Same rendering as the W001
+    hole hint ("Available bindings: ...")."""
+
+    @pytest.mark.parametrize("src,expected", [
+        pytest.param("""\
+private fn f(@Int, @Int -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ @Int.3 }
+""", "Available bindings: @Int.0: Int; @Int.1: Int.",
+            id="index_out_of_range"),
+        pytest.param("""\
+private fn f(@Bool -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ @Int.0 }
+""", "Available bindings: @Bool.0: Bool.",
+            id="no_binding_of_that_type"),
+        pytest.param("""\
+private fn f(-> @Int)
+  requires(true) ensures(true) effects(pure)
+{ @Int.0 }
+""", None,
+            id="empty_scope_lists_nothing"),
+    ])
+    def test_e130_fix_lists_scope_bindings(
+        self, src: str, expected: str | None,
+    ) -> None:
+        e130 = [d for d in _errors(src) if d.error_code == "E130"]
+        assert e130, "expected an E130 diagnostic"
+        if expected is None:
+            assert "Available bindings" not in e130[0].fix, \
+                f"nothing is in scope, got: {e130[0].fix!r}"
+        else:
+            assert e130[0].fix.endswith(expected), \
+                f"expected fix ending {expected!r}, got: {e130[0].fix!r}"
+
+    def test_e130_in_match_arm_lists_arm_bindings(self) -> None:
+        """The issue's motivating case: deep in a match arm the slot stack
+        has grown past the signature, which is all `--explain-slots` shows.
+        The arm's own binding must appear in the table alongside the
+        parameter it shadows."""
+        e130 = [d for d in _errors("""
+private data Term { Var(Int), Abs(Term), App(Term, Term) }
+
+private fn f(@Term -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  match @Term.0 {
+    Var(@Int) -> 0,
+    Abs(@Term) -> @Int.9,
+    App(@Term, @Term) -> 0
+  }
+}
+""") if d.error_code == "E130"]
+        assert e130, "expected an E130 diagnostic in the Abs arm"
+        assert "@Term.0: Term" in e130[0].fix, \
+            f"arm binding missing from the table: {e130[0].fix!r}"
+        assert "@Term.1: Term" in e130[0].fix, \
+            f"shadowed parameter missing from the table: {e130[0].fix!r}"
+
+    def test_e130_table_covers_the_indices_it_calls_valid(self) -> None:
+        """The table and the index range in the same diagnostic must
+        describe one scope.  `@Unit.1` against `(@Unit, @Int)` reports
+        "valid indices: 0..0" and offers a lower index, so `@Unit.0` has
+        to be in the table — omitting it makes the one diagnostic say both
+        that a Unit binding exists and that none does, and the reader who
+        believes the table writes a different wrong index."""
+        e130 = [d for d in _errors("""\
+private fn f(@Unit, @Int -> @Unit)
+  requires(true) ensures(true) effects(pure)
+{ @Unit.1 }
+""") if d.error_code == "E130"]
+        assert e130, "expected an E130 diagnostic"
+        assert "valid indices: 0..0" in e130[0].description
+        assert "@Unit.0: Unit" in e130[0].fix, \
+            f"the index the message calls valid is not in the table: " \
+            f"{e130[0].fix!r}"
+
+    def test_e130_and_w001_tables_agree(self) -> None:
+        """Same label, same scope position, so the same set: the E130 fix
+        and the W001 hole hint both render `_collect_scope_bindings()`
+        whole.  Two "Available bindings:" lists that disagree are worse
+        than one of them not existing."""
+        sig = """\
+private fn f(@Unit, @Bool -> @Int)
+  requires(true) ensures(true) effects(pure)
+"""
+        e130 = [d for d in _errors(sig + "{ @Int.0 }")
+                if d.error_code == "E130"]
+        w001 = [d for d in _warnings(sig + "{ ? }")
+                if d.error_code == "W001"]
+        assert e130 and w001, "expected both diagnostics"
+        table = "Available bindings: @Bool.0: Bool; @Unit.0: Unit."
+        assert e130[0].fix.endswith(table), f"E130: {e130[0].fix!r}"
+        assert w001[0].fix.endswith(table), f"W001: {w001[0].fix!r}"
+
+    def test_handler_state_hint_keeps_its_guidance_and_gains_the_table(
+        self,
+    ) -> None:
+        """The append runs after *every* fix branch, including the two
+        specialised ones, so each has to keep its tailored text.
+
+        #973's handler-state branch fires only at count == 0, and the
+        table is still worth appending there: it is what shows the reader
+        that `@Unit.0` is the one thing actually in scope.  Asserting
+        both halves means neither the append nor the tailored text can
+        regress without a failure — a table-only assertion would stay
+        green if the specialised branch were flattened to the generic
+        message."""
+        e130 = [d for d in _errors("""\
+private fn foo(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[State<Int>](@Int = 0) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) } with @Int = @Int.0
+  } in {
+    @Int.0
+  }
+}
+""") if d.error_code == "E130"]
+        assert e130, "expected E130 for the handler-state slot read"
+        assert "get(())" in e130[0].fix, \
+            f"tailored handler-state guidance lost: {e130[0].fix!r}"
+        assert e130[0].fix.endswith("Available bindings: @Unit.0: Unit."), \
+            f"table not appended after the handler-state fix: {e130[0].fix!r}"
+
+    def test_where_helper_hint_keeps_its_guidance_and_gains_the_table(
+        self,
+    ) -> None:
+        """The other specialised branch, same two-sided assertion.
+
+        #969's where-helper branch also fires only at count == 0.  Here
+        the table is the more useful half: it names the helper's own
+        parameter, which is what the reader has to pass the outer value
+        into."""
+        e130 = [d for d in _errors("""\
+private fn outer(@Int -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ helper(true) }
+where {
+  fn helper(@Bool -> @Int)
+    requires(true) ensures(true) effects(pure)
+  { @Int.0 }
+}
+""") if d.error_code == "E130"]
+        assert e130, "expected E130 for the outer-slot read in the helper"
+        assert "param-rooted" in e130[0].fix, \
+            f"tailored where-helper guidance lost: {e130[0].fix!r}"
+        assert e130[0].fix.endswith("Available bindings: @Bool.0: Bool."), \
+            f"table not appended after the where-helper fix: {e130[0].fix!r}"
+
+    def test_result_is_not_a_binding_and_stays_out_of_the_table(self) -> None:
+        """SKILL.md tells the reader `@T.result` never appears in the
+        table, `ensures` included.  Pin both halves of that claim, or a
+        `_collect_scope_bindings()` change falsifies the docs silently.
+
+        The table has to omit `.result` *and* `@Int.result` has to keep
+        resolving: a table listing it would send the reader looking for a
+        slot index that does not exist, and a `.result` that stopped
+        resolving would make the sentence true for the wrong reason."""
+        ensures = "ensures(@Int.result == @Int.{})"
+        e130 = [d for d in _errors(f"""\
+private fn f(@Int -> @Int)
+  requires(true)
+  {ensures.format(9)}
+  effects(pure)
+{{ @Int.0 }}
+""") if d.error_code == "E130"]
+        assert e130, "expected E130 for the out-of-range slot in ensures"
+        assert ".result" not in e130[0].fix, \
+            f"`.result` leaked into the table: {e130[0].fix!r}"
+        assert e130[0].fix.endswith("Available bindings: @Int.0: Int."), \
+            f"expected the parameter table only, got: {e130[0].fix!r}"
+        # The same `ensures` with the index the table offers: `@Int.result`
+        # resolves, so the omission is about what a slot binding IS, not
+        # about `.result` being unavailable in `ensures`.
+        _check_ok(f"""\
+private fn f(@Int -> @Int)
+  requires(true)
+  {ensures.format(0)}
+  effects(pure)
+{{ @Int.0 }}
+""")
+
+
+# =====================================================================
+# #558 — the slot table is capped
+# =====================================================================
+
+
+def _wide_fn(params: int, index: int) -> str:
+    """A signature binding `params` Int slots, reading `@Int.index`."""
+    return (
+        f"private fn wide({', '.join(['@Int'] * params)} -> @Int)\n"
+        f"  requires(true) ensures(true) effects(pure)\n"
+        f"{{ @Int.{index} }}\n"
+    )
+
+
+def _table_of(fix: str) -> str:
+    """The `Available bindings:` segment of a fix, without its full stop."""
+    _, _, table = fix.partition("Available bindings: ")
+    return table.rstrip(".")
+
+
+class TestSlotTableCap:
+    """The table is rendered at most `_SCOPE_TABLE_MAX_ROWS` rows wide.
+
+    Unbounded, it grows with the scope — and the LSP concatenates the
+    fix into the hover message, so a wide function turns one diagnostic
+    into a wall of rows nobody reads.  The cap is one rule applied to
+    the rendering, not to `_collect_scope_bindings()`: the LSP's
+    typed-hole completion consumes the same set as structured data and
+    must keep every row.
+    """
+
+    def test_cap_leaves_the_measured_corpus_untouched(self) -> None:
+        """The cap has to sit above real scopes, not in the middle of
+        them.  Measured over the 2,080 slot-reference positions in
+        `tests/**/*.vera` and `examples/`, the table is 7 rows at p95 and
+        11 at p99, so a cap at 12 renders every site through the 99th
+        percentile complete and bites only the tail.
+
+        Pinned by equality rather than by a floor.  Every other test in
+        this class derives its expectation from the constant, so they
+        follow a cap change silently; a floor here follows it too, in
+        the one direction the cap exists to prevent — a raised cap
+        re-widens the hover and no test in the file objects.  `== 12`
+        makes moving the cap an edit to this line, with the corpus
+        measurement above it to re-derive the new value from."""
+        assert _SCOPE_TABLE_MAX_ROWS == 12, \
+            "the cap is pinned to the corpus-derived value: at or below " \
+            "the p99 (11 rows) it truncates ordinary diagnostics, and " \
+            "above it the hover re-widens — re-measure, then update this pin"
+
+    def test_table_is_complete_at_the_cap(self) -> None:
+        """At exactly the cap every row is present and nothing is
+        elided — the boundary belongs to the complete side."""
+        n = _SCOPE_TABLE_MAX_ROWS
+        e130 = [d for d in _errors(_wide_fn(n, n)) if d.error_code == "E130"]
+        assert e130, "expected an E130 diagnostic"
+        expected = "; ".join(f"@Int.{i}: Int" for i in range(n))
+        assert e130[0].fix.endswith(f"Available bindings: {expected}."), \
+            f"table not complete at the cap: {e130[0].fix!r}"
+        assert "…" not in e130[0].fix, \
+            f"overflow marker at the cap: {e130[0].fix!r}"
+
+    @pytest.mark.parametrize("extra", [1, 5, 18], ids=["one", "five", "18"])
+    def test_table_overflows_past_the_cap(self, extra: int) -> None:
+        """One row past the cap the suffix appears, and `K` counts the
+        rows the reader is not being shown — not the scope size, and not
+        the cap."""
+        n = _SCOPE_TABLE_MAX_ROWS + extra
+        e130 = [d for d in _errors(_wide_fn(n, n)) if d.error_code == "E130"]
+        assert e130, "expected an E130 diagnostic"
+        shown = "; ".join(
+            f"@Int.{i}: Int" for i in range(_SCOPE_TABLE_MAX_ROWS)
+        )
+        assert e130[0].fix.endswith(
+            f"Available bindings: {shown}; … and {extra} more."), \
+            f"expected {extra} rows elided, got: {e130[0].fix!r}"
+
+    def test_every_rendered_row_still_resolves(self) -> None:
+        """Truncation must drop rows off the end, never renumber the
+        ones it keeps.  Take the review's measured shape — 30 same-typed
+        params — and feed each rendered row back as the body: a shifted
+        index would type-check to the wrong parameter, or not at all."""
+        e130 = [d for d in _errors(_wide_fn(30, 99)) if d.error_code == "E130"]
+        assert e130, "expected an E130 diagnostic"
+        rows = _table_of(e130[0].fix).split("; ")
+        assert rows[-1] == "… and 18 more", f"unexpected tail: {rows[-1]!r}"
+        for row in rows[:-1]:
+            ref, _, ty = row.partition(": ")
+            assert ty == "Int", f"row reports the wrong type: {row!r}"
+            _check_ok(
+                f"private fn wide({', '.join(['@Int'] * 30)} -> @Int)\n"
+                f"  requires(true) ensures(true) effects(pure)\n"
+                f"{{ {ref} }}\n"
+            )
+
+    def test_e130_and_w001_agree_past_the_cap(self) -> None:
+        """The two renderings share one cap for the same reason they
+        share one set: a hole and an unresolved slot at the same scope
+        position must not disagree about what is in scope."""
+        params = ", ".join(["@Int"] * (_SCOPE_TABLE_MAX_ROWS + 3))
+        sig = (f"private fn wide({params} -> @Int)\n"
+               f"  requires(true) ensures(true) effects(pure)\n")
+        e130 = [d for d in _errors(sig + "{ @Int.99 }")
+                if d.error_code == "E130"]
+        w001 = [d for d in _warnings(sig + "{ ? }")
+                if d.error_code == "W001"]
+        assert e130 and w001, "expected both diagnostics"
+        assert _table_of(e130[0].fix) == _table_of(w001[0].fix), \
+            f"E130: {e130[0].fix!r}\nW001: {w001[0].fix!r}"
+        assert _table_of(e130[0].fix).endswith("… and 3 more")
+
+    def test_completion_data_keeps_every_binding(self) -> None:
+        """The cap is a rendering rule.  `_collect_scope_bindings()` feeds
+        the LSP typed-hole completion (#222 Phase D) as a list, where a
+        missing row is a missing completion item, so the collector itself
+        stays uncapped."""
+        n = _SCOPE_TABLE_MAX_ROWS + 8
+        src = (
+            f"private fn wide({', '.join(['@Int'] * n)} -> @Int)\n"
+            f"  requires(true) ensures(true) effects(pure)\n"
+            f"{{ ? }}\n"
+        )
+        _diags, arts = typecheck_with_artifacts(parse_to_ast(src), src)
+        assert len(arts.holes) == 1, \
+            f"expected one hole site, got {len(arts.holes)}"
+        assert len(arts.holes[0].bindings) == n, \
+            f"completion lost rows to the cap: " \
+            f"{len(arts.holes[0].bindings)} of {n}"
 
 
 # =====================================================================
