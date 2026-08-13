@@ -1,0 +1,130 @@
+-- Chapter 7, Section 7.4 — a bare call names a DECLARATION before an operation.
+-- Tests: a user fn shadowing get/put inside a handled body, under same-family and
+-- different-family handler nesting, beside the qualified spelling that still
+-- reaches the cell.
+--
+-- A bare op resolves only for a name no declaration occupies, and that rule holds
+-- everywhere a declaration is in scope — a handled body is not an exception.  The
+-- qualified State.get / State.put name the effect, so no declaration can shadow
+-- them: writing both spellings in one program is what makes the user's function
+-- and the cell distinguishable, and every value below reads one of the two.
+private fn get(@Nat -> @Nat)
+  requires(true)
+  ensures(@Nat.result == @Nat.0 + 1)
+  effects(pure)
+{
+  @Nat.0 + 1
+}
+
+private fn put(@Nat -> @Nat)
+  requires(true)
+  ensures(@Nat.result == @Nat.0 * 2)
+  effects(pure)
+{
+  @Nat.0 * 2
+}
+
+-- Both bare calls in the handled body are the USER's functions — get(3) is 4 and
+-- put(3) is 6 — while the cell, reached through the qualified spelling, keeps the
+-- 5 the handler seeded: 4 * 100 + 6 * 10 + 5 = 465.  Neither 4 nor 6 can be the
+-- cell's value, so a call routed to the intrinsic cannot produce this result.
+private fn shadowed_body(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>](@Int = 5) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) }
+  } in {
+    nat_to_int(get(3)) * 100 + nat_to_int(put(3)) * 10 + State.get(())
+  }
+}
+
+-- Same-family nesting.  The inner handler's `with` state override is clause scope,
+-- and the get(3) written there is the user's function, so the cell it stores is 4
+-- rather than the 9 the qualified put wrote: the enclosing-context addressing
+-- question (7.5.2) never arises for a call that reaches no cell at all.
+private fn nested_same_family(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>](@Int = 1) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) }
+  } in {
+    handle[State<Int>](@Int = 2) {
+      get(@Unit) -> { resume(@Int.0) },
+      put(@Int) -> { resume(()) } with @Int = nat_to_int(get(3))
+    } in {
+      State.put(9);
+      State.get(())
+    }
+  }
+}
+
+-- Different-family nesting.  The outer cell is Bool and the inner is Int, so the
+-- widths differ: a user call lowered to the enclosing handler's getter would put an
+-- i32 where an i64 belongs.  Same 4 as above, from the same clause-scope override.
+private fn nested_cross_family(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Bool>](@Bool = false) {
+    get(@Unit) -> { resume(@Bool.0) },
+    put(@Bool) -> { resume(()) }
+  } in {
+    handle[State<Int>](@Int = 2) {
+      get(@Unit) -> { resume(@Int.0) },
+      put(@Int) -> { resume(()) } with @Int = nat_to_int(get(3))
+    } in {
+      State.put(9);
+      State.get(())
+    }
+  }
+}
+
+-- The declared-row spelling of the same rule: the bare get is the user's function
+-- and the qualified one reads the caller's cell.  4 * 10 + 6 = 46.
+private fn shadowed_row(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<State<Int>>)
+{
+  nat_to_int(get(3)) * 10 + State.get(())
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 0)
+  effects(pure)
+{
+  let @Int = shadowed_body(());
+  if @Int.0 != 465 then {
+    1
+  } else {
+    let @Int = nested_same_family(());
+    if @Int.0 != 4 then {
+      2
+    } else {
+      let @Int = nested_cross_family(());
+      if @Int.0 != 4 then {
+        3
+      } else {
+        let @Int = handle[State<Int>](@Int = 6) {
+          get(@Unit) -> { resume(@Int.0) },
+          put(@Int) -> { resume(()) }
+        } in {
+          shadowed_row(())
+        };
+        if @Int.0 != 46 then {
+          4
+        } else {
+          0
+        }
+      }
+    }
+  }
+}

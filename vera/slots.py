@@ -25,12 +25,13 @@ function ``fn foo(@Int, @Int -> @Int)``:
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Iterable, Iterator
+from collections.abc import Container, Iterable, Iterator
 
 from vera import ast, naming
 from vera.naming import AliasEnv
 
 __all__ = [
+    "bare_call_denotes_user_fn",
     "effect_op_result_names",
     "family_fallback_name",
     "fn_scopes",
@@ -40,6 +41,61 @@ __all__ = [
     "slot_table_dict",
     "type_expr_slot_name",
 ]
+
+
+# ------------------------------------------------------------------
+# Bare-call ownership: whose declaration does this name denote?
+# ------------------------------------------------------------------
+
+def bare_call_denotes_user_fn(
+    name: str, user_fn_names: Container[str],
+) -> bool:
+    """Whether a BARE call to *name* denotes a USER function (#1284).
+
+    THE one answer to "is this ``get`` the user's declaration or the
+    handler's operation?", for every subsystem that has to know.  The rule
+    is the type checker's, because the checker's answer is the one the
+    program was accepted under: :meth:`CallsMixin._check_call_with_args`
+    looks a bare name up as a *function* before it looks it up as an effect
+    operation, so a declaration named ``get`` owns every bare ``get(...)``
+    in its scope — provably, since an arity or argument-type error at such
+    a call site reports against the USER's signature (E201/E202), never the
+    operation's.  Spec §7.4 resolves a bare op only for a name no
+    declaration occupies.
+
+    Consumers, each passing its OWN name table:
+
+    * the checker's ``_check_call_with_args`` — the derivation, over its
+      LEXICAL function scope (#991);
+    * ``_translate_call`` in :mod:`vera.wasm.calls` — the bare dispatch, over
+      codegen's flat ``_fn_sigs`` mirror (``_known_fns``): a user-owned name
+      skips the clause-inline registry, the host-cell intrinsics, and the
+      #1233 addressability gate, and lowers as the ordinary call it is;
+    * the three bare-``FnCall`` inference sites in :mod:`vera.wasm.inference`
+      and :mod:`vera.wasm.context`, so a shadowed name is typed from the
+      function table rather than from the operation's result registry;
+    * :class:`~vera.monomorphize.Monomorphizer`'s discovery walk, over
+      ``MonoContext.fn_names``, so the clone it discovers for a ``get(())``
+      in a value position is the clone the rewrite emits.
+
+    What this deliberately does NOT gate is the op REGISTRIES themselves.
+    "Whose name is this?" and "which cell does the operation reach?" are two
+    questions, and answering the second with the first is what #1284 was:
+    the registries stay complete, so the QUALIFIED spelling
+    (``State.get(())``, which names the effect and so cannot be shadowed),
+    ``new(State<T>)``, ``old(State<T>)``, and the addressability gate keep
+    reaching their cell in a program that also declares ``fn get``.
+
+    *user_fn_names* is a membership view, not a fixed set, so each consumer
+    supplies the table it actually resolves against — the checker a lexical
+    scope walk, codegen its flat signature keys.  Those tables are not
+    identical (codegen keys a local ``where`` helper by its bare name; #1015
+    hoists an imported one to ``parent$where$name``), which is the same
+    documented imprecision the verifier's ``fn_names`` mirrors — but the
+    RULE applied to them is now one function, so the sites cannot answer
+    differently about the table they share.
+    """
+    return name in user_fn_names
 
 
 # ------------------------------------------------------------------
@@ -119,9 +175,10 @@ def effect_op_result_names(
     SOURCE ORDER, first wins, and an effect whose type argument has no
     slot name at all contributes nothing: both mirror the guards in
     ``codegen/functions.py``'s row loop, which a divergence here would
-    desync from.  Callers that additionally shadow-guard on their own
-    function table (the declared-row site does; the handler site does not)
-    apply that filter to this result.
+    desync from.  Shadowing is NOT filtered here and no caller filters it
+    on the way in (#1284): this table says what the operation results in,
+    and whether a given call site is the operation at all is
+    :func:`bare_call_denotes_user_fn`'s question, asked at the call site.
     """
     out: dict[str, str] = {}
     for eff in effects:

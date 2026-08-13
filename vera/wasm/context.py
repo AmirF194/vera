@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Callable
 from vera import ast
 from vera.naming import EMPTY_ALIAS_ENV, AliasEnv
 from vera.skip import DERIVED_HELPER_DEPTH_CAP, CodegenSkip
+from vera.slots import bare_call_denotes_user_fn
 
 if TYPE_CHECKING:
     from vera.codegen import ConstructorLayout
@@ -89,6 +90,7 @@ class WasmContext(
         effect_op_result_wt: dict[str, str | None] | None = None,
         effect_op_result_vera: dict[str, str | None] | None = None,
         effect_op_cells: dict[str, CellNames] | None = None,
+        state_getters: dict[str, str] | None = None,
         ctor_layouts: dict[str, ConstructorLayout] | None = None,
         adt_type_names: set[str] | None = None,
         generic_fn_info: (
@@ -144,6 +146,21 @@ class WasmContext(
         # Only State get/put have entries; `throw` and user-effect ops reach
         # no host cell and are absent.
         self._effect_op_cells: dict[str, CellNames] = effect_op_cells or {}
+        # #1285: cell FAMILY -> that cell's `$vera.state_get_<T>` import.
+        # The four registries above are keyed by op NAME, which is the right
+        # key for a call site (`get(())` names no family, so it means
+        # whichever cell the row or the enclosing handler binds) and the
+        # wrong key for a contract: `new(State<Bool>)` names its family
+        # explicitly, exactly as `old(State<Bool>)` does.  Reading the
+        # name-keyed registry gave `new()` whichever family's getter was
+        # installed LAST, so under `effects(<State<Int>, State<Bool>>)` a
+        # `new(State<Bool>)` read `state_get_Int` — an i64 into the Bool
+        # comparison's `i32.eq`, check-green and verify-green, dead at load.
+        # Keyed and populated so `new()` resolves the way `old()` already
+        # did (`_state_effect_family` on both sides), and NOT filtered by
+        # bare-call ownership (#1284): a contract form names the effect, so
+        # a user `fn get` cannot shadow it.
+        self._state_getters: dict[str, str] = state_getters or {}
         # #976 option C: op_name -> :class:`StateClauseEntry` for the
         # innermost enclosing ``handle[State<T>]``.  When a get/put call site
         # has an entry here, the clause BODY is inlined at the site
@@ -204,7 +221,12 @@ class WasmContext(
         )
         # Constructor name → ADT name reverse mapping
         self._ctor_to_adt: dict[str, str] = ctor_to_adt or {}
-        # Known locally-defined function names (for cross-module guard rail)
+        # Known locally-defined function names (for cross-module guard rail,
+        # and — #1284 — codegen's leg of the bare-call ownership predicate:
+        # this is the flat mirror of `_fn_sigs` the checker's lexical scope
+        # is compared against).  Empty when a context is built without one,
+        # which answers "no name is shadowed" — the pre-#1284 behaviour, and
+        # the safe default for a context that compiles no user declarations.
         self._known_fns: set[str] = known_fns or set()
         # Per-field ADT type-param indices for sparse constructors (e.g. Err → (1,))
         self._ctor_adt_tp_indices: dict[str, tuple[int | None, ...]] = (
@@ -642,6 +664,21 @@ class WasmContext(
     def get_old_state_local(self, type_name: str) -> int | None:
         """Get the local index holding the old() snapshot for a State type."""
         return self._old_state_locals.get(type_name)
+
+    def _bare_call_denotes_op(self, name: str) -> bool:
+        """Is a BARE call to *name* here the effect operation? (#1284)
+
+        Codegen's leg of :func:`~vera.slots.bare_call_denotes_user_fn`, over
+        the flat ``_fn_sigs`` mirror.  Every bare-call site that consults an
+        op registry — the clause-inline dispatch, the host-cell intrinsics,
+        the #1233 addressability gate, and the three result-type inference
+        sites — asks this first, so a name the checker resolved to a user
+        declaration is lowered as the ordinary call the checker typed.
+
+        Not for the QUALIFIED spelling: ``State.get(())`` names the effect,
+        so no declaration can shadow it and the registries answer directly.
+        """
+        return not bare_call_denotes_user_fn(name, self._known_fns)
 
     def alloc_param(self) -> int:
         """Allocate a parameter slot (already in WASM signature).
@@ -1124,7 +1161,12 @@ class WasmContext(
             return True
         if isinstance(expr, ast.UnitLit):
             return True
-        if isinstance(expr, ast.FnCall) and expr.name in self._effect_ops:
+        # #1284: bare form, so the ownership predicate decides whether the
+        # op registry answers at all — a user `fn put` returning a value is
+        # not void just because the handler's `put` is.
+        if (isinstance(expr, ast.FnCall)
+                and self._bare_call_denotes_op(expr.name)
+                and expr.name in self._effect_ops):
             _name, is_void = self._effect_ops[expr.name]
             return is_void
         # User-defined fns declared with @Unit return type — registry stores

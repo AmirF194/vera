@@ -20,6 +20,7 @@ each handle a specific concern:
 
 from __future__ import annotations
 
+from collections.abc import Callable, Container
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
@@ -57,6 +58,23 @@ from vera.checker.registration import RegistrationMixin
 from vera.checker.expressions import ExpressionsMixin
 from vera.checker.calls import CallsMixin
 from vera.checker.control import ControlFlowMixin
+
+
+class _ScopedFnNames:
+    """Membership over the checker's LEXICAL function scope (#1284).
+
+    A view rather than a set because the scope is a stack that changes as
+    checking descends: materialising it would freeze an answer the checker
+    itself would give differently one frame later.
+    """
+
+    __slots__ = ("_lookup",)
+
+    def __init__(self, lookup: Callable[[str], object | None]) -> None:
+        self._lookup = lookup
+
+    def __contains__(self, name: object) -> bool:
+        return isinstance(name, str) and self._lookup(name) is not None
 
 
 # =====================================================================
@@ -913,6 +931,19 @@ class TypeChecker(
         if top is not None:
             return top
         return self.env.lookup_function(name)
+
+    @property
+    def _user_fn_names(self) -> Container[str]:
+        """The checker's function table, as a membership view (#1284).
+
+        What :func:`~vera.slots.bare_call_denotes_user_fn` consults on this
+        side: a name is the user's declaration here exactly when
+        :meth:`_lookup_function_scoped` resolves it, so the ownership
+        predicate reads the LEXICAL scope this checker resolves against —
+        not a flattened copy of it that could answer differently.  Codegen
+        passes its own flat ``_fn_sigs`` mirror to the same predicate.
+        """
+        return _ScopedFnNames(self._lookup_function_scoped)
 
     def _type_expr_to_slot_name(self, te: ast.TypeExpr) -> str:
         """Extract the canonical slot name from a type expression used as a

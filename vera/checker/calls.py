@@ -8,6 +8,7 @@ orchestration.
 from __future__ import annotations
 
 from vera import ast
+from vera.slots import bare_call_denotes_user_fn
 from vera.checker.sql import (
     count_placeholders,
     resolve_array_len,
@@ -131,9 +132,22 @@ class CallsMixin:
         # last-wins registry, so a diamond of same-named helpers with
         # DIFFERENT signatures checks each parent against its OWN helper
         # (the flat lookup falsely E121'd a valid program).
-        fn_info = self._lookup_function_scoped(name)
-        if fn_info:
-            return self._check_fn_call_with_info(fn_info, args, node)
+        #
+        # #1284: user-fn-FIRST is not an implementation detail of this
+        # function, it is the language's bare-call ownership rule (spec
+        # §7.4: a bare op resolves only for a name no declaration occupies),
+        # and codegen has to lower every such call site the way this
+        # resolution read it.  Asking through the shared predicate is what
+        # makes the checker's answer and codegen's the same rule over two
+        # tables rather than two rules that happened to agree: the two
+        # codegen legs used to disagree, and a `fn get` called under a
+        # `handle[State<T>]` lowered to the host cell intrinsic — a silently
+        # wrong value, a module WASM validation rejected, or a spurious
+        # [E602] naming a State operation the user never wrote.
+        if bare_call_denotes_user_fn(name, self._user_fn_names):
+            fn_info = self._lookup_function_scoped(name)
+            if fn_info is not None:
+                return self._check_fn_call_with_info(fn_info, args, node)
 
         # Maybe it's an effect operation
         op_info = self.env.lookup_effect_op(name)

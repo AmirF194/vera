@@ -2737,14 +2737,22 @@ public fn go(@Int -> @Int)
 }
 """
 
-    def test_qualified_put_user_shadow_is_loud(self) -> None:
-        """A user fn named `put` in a DELEGATED context (handler in the
-        caller): the fn-level effect-op mapping is skipped by the shadow
-        carve-out, so the round-4 delegation dispatched the synthesized
-        bare call to the USER fn silently (checker semantics: the
-        builtin op).  The delegation is now gated on the dispatcher
-        actually resolving the op — the unresolved case fails loudly at
-        module compile (the pre-round-4 behaviour)."""
+    def test_qualified_put_reaches_the_cell_past_a_user_shadow(self) -> None:
+        """A user fn named `put` alongside a QUALIFIED `State.put(5)`.
+
+        The checker's semantics have always been the builtin op — the
+        qualifier names the effect, so no declaration can shadow it — and
+        this now lowers that way.  It could not before #1284: the effect-op
+        registry was withheld whenever a user function owned the name, which
+        answered "whose name is this?" and "which cell does the op reach?"
+        with one table, so the qualified spelling lost its cell too and the
+        module failed to link (`unknown func: $vera.put`).  The registry is
+        now complete and ownership is asked at the bare dispatch, so the two
+        spellings differ only where the language says they do.
+
+        The bare `get(())` beside it is NOT shadowed and reads the same
+        cell, so the value is the one `State.put` stored.
+        """
         with _resolved_pipeline(self._QUAL_USER_SHADOW) as (
                 program, arts, resolved, path):
             result = codegen_compile(
@@ -2752,11 +2760,12 @@ public fn go(@Int -> @Int)
                 resolved_modules=resolved,
                 expr_semantic_types=arts.expr_semantic_types,
             )
-            assert not result.ok
-            msgs = [d.description for d in result.diagnostics]
-            assert any(
-                "unknown func" in m and "$vera.put" in m for m in msgs
-            ), msgs
+            assert result.ok, [d.description for d in result.diagnostics]
+            assert "call $vera.state_put_Int" in result.wat
+            # The user's own `put` is still emitted and still callable — it
+            # is simply not what the qualified site denotes.
+            assert "(func $put " in result.wat
+        assert _run(self._QUAL_USER_SHADOW, "go", 7) == 5
 
 
 class TestClauseClassCollisionBothDirections:

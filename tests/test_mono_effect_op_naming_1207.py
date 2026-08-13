@@ -195,11 +195,16 @@ public fn main(@Unit -> @Int)
 }
 """
 
-# A user function named `get` INSIDE a handler body: the operation wins,
-# matching codegen's unconditional `_effect_ops` overwrite in
-# `_translate_handle_state` (unlike the declared-row site below, where the
-# function wins).  Its `@Int` return is what makes the case discriminate —
-# resolving to the function would name `pick$Int`, the cell names `pick$Nat`.
+# A user function named `get` INSIDE a handler body: the FUNCTION wins, as
+# it does at the declared-row site — the checker resolves a bare name to a
+# declaration of it wherever one is in scope, handler body included, and
+# both discovery and the rewrite now ask that one question at the call site
+# (#1284).  Its `@Int` return is what makes the case discriminate: resolving
+# to the cell would name `pick$Nat`, the function names `pick$Int`.
+#
+# This case previously expected `pick$Nat`, pinning codegen's unconditional
+# `_effect_ops` overwrite in `_translate_handle_state` as the oracle — a
+# value the checker never agreed with, and the disagreement #1284 is.
 _USER_GET_UNDER_HANDLER = """
 private fn get(@Unit -> @Int)
   requires(true)
@@ -231,7 +236,7 @@ _CASES = [
     ("direct_arg", _DIRECT_ARG, "second$Nat", 9),
     ("exn_nested_in_state", _EXN_IN_STATE, "pick$Nat", 9),
     ("nested_distinct_state", _NESTED_DISTINCT_STATE, "pick$Int", 15),
-    ("user_get_under_handler", _USER_GET_UNDER_HANDLER, "pick$Nat", 9),
+    ("user_get_under_handler", _USER_GET_UNDER_HANDLER, "pick$Int", 9),
 ]
 
 # The BUILTIN sibling of the same value position: `get(())` as an

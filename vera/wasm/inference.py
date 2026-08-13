@@ -526,11 +526,13 @@ class InferenceMixin:
         # a fn declaring `<State<T>>`) is an `ast.FnCall`, not a
         # `QualifiedCall`.  Its result WAT type is the op's registered
         # result type — needed when the call sits directly in a
-        # constructor-argument (A1) or match-scrutinee (A2) position.  The
-        # `_effect_ops` guard in codegen/functions.py only registers ops a
-        # user fn does NOT shadow, so a same-named user fn still reaches the
-        # `_fn_ret_types` lookup below.
-        if expr.name in self._effect_ops:
+        # constructor-argument (A1) or match-scrutinee (A2) position.
+        # #1284: the registry is complete (it says which cell an op name
+        # reaches, shadowed or not), so whether THIS site is the op is the
+        # ownership predicate's question — a same-named user fn falls
+        # through to the `_fn_ret_types` lookup below, the same answer the
+        # dispatch in `_translate_call` will emit a call for.
+        if self._bare_call_denotes_op(expr.name) and expr.name in self._effect_ops:
             _target, is_void = self._effect_ops[expr.name]
             if expr.name == "throw" or is_void:
                 return None
@@ -1030,13 +1032,15 @@ class InferenceMixin:
             # #1006: an effect op in a Vera-type-needing position (the
             # array-literal ELEMENT case) — the op is not in the fn tables,
             # so consult the op registry first.  Guarded on `_effect_ops`
-            # membership: op names only bind where ops are injected, and a
-            # user fn shadowing an op name is kept OUT of `_effect_ops` (the
-            # `_fn_sigs` guard at both injection sites), so a shadowed name
-            # still resolves through the normal fn path below.  `get` maps
-            # to State<T>'s T; `put`/`throw` record no Vera result type and
-            # return None (unchanged skip for value-position uses).
-            if expr.name in self._effect_ops:
+            # membership (op names only bind where ops are injected) AND on
+            # bare-call ownership (#1284), so a user fn shadowing an op name
+            # resolves through the normal fn path below — the registry
+            # itself no longer withholds the name, because it answers which
+            # cell the op reaches rather than whose name this is.  `get`
+            # maps to State<T>'s T; `put`/`throw` record no Vera result type
+            # and return None (unchanged skip for value-position uses).
+            if (self._bare_call_denotes_op(expr.name)
+                    and expr.name in self._effect_ops):
                 return self._effect_op_result_vera.get(expr.name)
             return self._infer_fncall_vera_type(expr)
         if isinstance(expr, ast.StringLit):
