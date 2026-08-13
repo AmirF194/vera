@@ -981,7 +981,7 @@ The repository configures 35 hooks across two stages: 33 run at the commit stage
 | `check_limitations_sync.py` | Limitation tables consistent across KNOWN_ISSUES.md, vera/README.md, spec chapters, SKILL.md, and LSP_SERVER.md |
 | `check_licenses.py` | All package licenses are MIT-compatible |
 | `build_site.py` | Regenerate AI-readable site assets (llms.txt, llms-full.txt, robots.txt, sitemap.xml, index.md) |
-| `browser parity` | Browser runtime produces identical output to Python runtime |
+| `browser parity` | Browser runtime matches the Python runtime across the surface the two share |
 | `check-changelog-updated` (pre-push) | CHANGELOG has a new entry when substantive files changed |
 | `uv-lock-check` (pre-push) | `uv.lock` is in sync with `pyproject.toml` |
 
