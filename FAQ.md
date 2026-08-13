@@ -170,7 +170,7 @@ vera compile --target browser examples/hello_world.vera
 #   index.html
 ```
 
-Serve it with any HTTP server and open `index.html` — no build step, no bundler, no dependencies. The JavaScript runtime provides browser-appropriate implementations of all Vera host bindings: `IO.print` writes to the page, `IO.read_line` uses `prompt()`, and all other operations (State, contracts, Markdown) work identically to the wasmtime runtime.
+Serve it with any HTTP server and open `index.html` — no build step, no bundler, no dependencies. The JavaScript runtime provides browser-appropriate implementations of all Vera host bindings: `IO.print` writes to the page, `IO.read_line` uses `prompt()`, and all other operations (State, contracts, Markdown) work identically to the wasmtime runtime, with two documented exceptions: `json_stringify` ([#1293](https://github.com/aallan/vera/issues/1293)) and `md_render` ([#1294](https://github.com/aallan/vera/issues/1294)) still differ between the two hosts.
 
 The runtime also works in Node.js:
 
@@ -178,7 +178,7 @@ The runtime also works in Node.js:
 node --experimental-wasm-exnref vera/browser/harness.mjs module.wasm
 ```
 
-Mandatory parity tests enforce that the browser runtime produces identical results to the wasmtime runtime on every PR.
+Mandatory parity tests enforce that on every PR — except for the two divergences above, where each runtime's exact output is pinned separately so a fix goes red rather than passing unnoticed.
 
 
 ## How does contract-driven testing work?
@@ -277,7 +277,7 @@ The reference compiler is under active development. The current release includes
 
 - A seven-stage pipeline: parse, transform, resolve, typecheck, verify, compile, execute
 - A 14-chapter formal specification
-- 10,406 tests, including a 214-program conformance suite
+- 10,440 tests, including a 214-program conformance suite
 - 42 working example programs
 - 164 built-in functions covering strings, arrays, math, parsing, and data types
 - Four built-in abilities (Eq, Ord, Hash, Show) with constrained generics and ADT auto-derivation
