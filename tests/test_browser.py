@@ -213,8 +213,9 @@ def _parity_stdout(src: str, tmp_path: Path, name: str = "parity") -> str:
     """Compile ``src`` ONCE, run it under both runtimes, assert byte-identical
     stdout, and return the (shared) value.
 
-    Mirrors the private helper in ``TestBrowserDecimalExact856``, hoisted to
-    module scope so the #349 coverage classes below can share it.
+    The single parity helper for the whole module: ``TestBrowserDecimalExact856``
+    and the #349 coverage classes below both call it, passing ``name`` to keep
+    their fixtures' ``.vera`` filenames distinct.
     """
     py_out, node_out = _both_stdouts(src, tmp_path, name)
     assert node_out == py_out, (
@@ -2638,25 +2639,6 @@ class TestBrowserDecimalExact856:
     values / the self-contradiction); post-fix GREEN.
     """
 
-    def _parity_stdout(self, src: str, tmp_path: Path) -> str:
-        """Compile once, run under wasmtime and Node, assert byte-exact
-        stdout, and return the (shared) value."""
-        src_path = tmp_path / "dec856.vera"
-        src_path.write_text(src, encoding="utf-8")
-        wasm_path, result = _compile_file(src_path, tmp_path)
-        py_out = _run_python(result).stdout
-        node = _run_node(wasm_path)
-        assert not node.get("error"), (
-            f"Node harness reported error: {node.get('error')!r}"
-        )
-        node_out = node["stdout"]
-        assert node_out == py_out, (
-            "Browser↔native Decimal divergence:\n"
-            f"  Python (wasmtime): {py_out!r}\n"
-            f"  Node   (browser):  {node_out!r}"
-        )
-        return py_out
-
     # --- helper prelude used by every fixture -----------------------
     # ``d(s)`` parses a decimal string with a 0 fallback (all inputs are
     # valid, so the fallback is never taken); ``show`` renders it.
@@ -2678,7 +2660,7 @@ public fn main(@Unit -> @Unit)
   IO.print(decimal_to_string(decimal_add(d("0.1"), d("0.2"))))
 }
 """
-        assert self._parity_stdout(src, tmp_path) == "0.3"
+        assert _parity_stdout(src, tmp_path, "dec856") == "0.3"
 
     def test_sub_0_3_minus_0_1_is_exact(self, tmp_path: Path) -> None:
         """0.3 - 0.1 is exactly 0.2 — the subtraction dual of the 0.1+0.2
@@ -2691,7 +2673,7 @@ public fn main(@Unit -> @Unit)
   IO.print(decimal_to_string(decimal_sub(d("0.3"), d("0.1"))))
 }
 """
-        assert self._parity_stdout(src, tmp_path) == "0.2"
+        assert _parity_stdout(src, tmp_path, "dec856") == "0.2"
 
     def test_mul_high_precision(self, tmp_path: Path) -> None:
         """A product with >16 significant digits that `Number` rounds
@@ -2704,7 +2686,7 @@ public fn main(@Unit -> @Unit)
     decimal_mul(d("1.23456789012345"), d("1.00000000000001"))))
 }
 """
-        assert self._parity_stdout(src, tmp_path) == "1.234567890123462345678901234"
+        assert _parity_stdout(src, tmp_path, "dec856") == "1.234567890123462345678901234"
 
     def test_div_repeating_and_ideal_exponent(self, tmp_path: Path) -> None:
         """Division: 1/3 keeps 28 sig digits; 2.00/4 preserves the
@@ -2731,7 +2713,7 @@ public fn main(@Unit -> @Unit)
 }
 """
         expected = "0.3333333333333333333333333333|0.50"
-        assert self._parity_stdout(src, tmp_path) == expected
+        assert _parity_stdout(src, tmp_path, "dec856") == expected
 
     def test_div_by_zero_is_none(self, tmp_path: Path) -> None:
         """Division by zero returns None in both runtimes."""
@@ -2745,7 +2727,7 @@ public fn main(@Unit -> @Unit)
   }
 }
 """
-        assert self._parity_stdout(src, tmp_path) == "none"
+        assert _parity_stdout(src, tmp_path, "dec856") == "none"
 
     def test_round_half_even(self, tmp_path: Path) -> None:
         """round() uses ROUND_HALF_EVEN like Python's quantize, not
@@ -2762,7 +2744,7 @@ public fn main(@Unit -> @Unit)
   IO.print(@String.0)
 }
 """
-        assert self._parity_stdout(src, tmp_path) == "0.12|2.68|-0"
+        assert _parity_stdout(src, tmp_path, "dec856") == "0.12|2.68|-0"
 
     def test_neg_and_abs_edges(self, tmp_path: Path) -> None:
         """neg canonicalises signed zero to positive; abs clears sign;
@@ -2779,7 +2761,7 @@ public fn main(@Unit -> @Unit)
   IO.print(@String.0)
 }
 """
-        assert self._parity_stdout(src, tmp_path) == "0|-1.50|3.14"
+        assert _parity_stdout(src, tmp_path, "dec856") == "0|-1.50|3.14"
 
     def test_compare_eq_self_consistency(self, tmp_path: Path) -> None:
         """The self-contradiction pair: "1.0" vs "1".  Both operations,
@@ -2800,7 +2782,7 @@ public fn main(@Unit -> @Unit)
   IO.print(@String.0)
 }
 """
-        assert self._parity_stdout(src, tmp_path) == "equal|eq"
+        assert _parity_stdout(src, tmp_path, "dec856") == "equal|eq"
 
     def test_compare_ordering_directions(self, tmp_path: Path) -> None:
         """compare returns Less / Greater on unequal values, matching
@@ -2819,7 +2801,7 @@ public fn main(@Unit -> @Unit)
   IO.print(@String.0)
 }
 """
-        assert self._parity_stdout(src, tmp_path) == "less|greater"
+        assert _parity_stdout(src, tmp_path, "dec856") == "less|greater"
 
     def test_eq_normalized_values(self, tmp_path: Path) -> None:
         """eq is numeric: 0.10 == 0.1, but 0.1 != 0.2."""
@@ -2833,7 +2815,7 @@ public fn main(@Unit -> @Unit)
   IO.print(@String.0)
 }
 """
-        assert self._parity_stdout(src, tmp_path) == "yn"
+        assert _parity_stdout(src, tmp_path, "dec856") == "yn"
 
     def test_big_integer_add_no_float_rounding(self, tmp_path: Path) -> None:
         """Integers beyond Number.MAX_SAFE_INTEGER add exactly."""
@@ -2845,7 +2827,7 @@ public fn main(@Unit -> @Unit)
     decimal_add(d("9007199254740993"), d("9007199254740993"))))
 }
 """
-        assert self._parity_stdout(src, tmp_path) == "18014398509481986"
+        assert _parity_stdout(src, tmp_path, "dec856") == "18014398509481986"
 
     def test_neg_abs_context_rounding_29_digits(self, tmp_path: Path) -> None:
         """Python's unary minus and abs() APPLY THE CONTEXT: a 29-digit
@@ -2865,7 +2847,7 @@ public fn main(@Unit -> @Unit)
 """
         expected = ("-1.234567890123456789012345679E+28"
                     "|1.234567890123456789012345679E+28")
-        assert self._parity_stdout(src, tmp_path) == expected
+        assert _parity_stdout(src, tmp_path, "dec856") == expected
 
     def test_round_negative_places_beyond_prec(self, tmp_path: Path) -> None:
         """For places <= -28 the Python host's quantum ``Decimal(10)**-places``
@@ -2886,7 +2868,7 @@ public fn main(@Unit -> @Unit)
 }
 """
         expected = "5.2746000000000000000000000E+29|0E+10|0E+1"
-        assert self._parity_stdout(src, tmp_path) == expected
+        assert _parity_stdout(src, tmp_path, "dec856") == expected
 
     def test_round_absurd_places_overflow_fallback(self, tmp_path: Path) -> None:
         """places < -Emax (-999999): the Python host's quantum
@@ -2907,7 +2889,7 @@ public fn main(@Unit -> @Unit)
   IO.print(@String.0)
 }
 """
-        assert self._parity_stdout(src, tmp_path) == "1|0E+999972"
+        assert _parity_stdout(src, tmp_path, "dec856") == "1|0E+999972"
 
     def test_binary_ops_large_finite_no_overflow(self, tmp_path: Path) -> None:
         """Large finite operands (the from_string grammar admits exponent
@@ -2940,7 +2922,7 @@ public fn main(@Unit -> @Unit)
 }
 """
         expected = "1E+1999998|2E+999999|2E+999999|1E+1999998"
-        assert self._parity_stdout(src, tmp_path) == expected
+        assert _parity_stdout(src, tmp_path, "dec856") == expected
 
     def test_compare_eq_negative_operands(self, tmp_path: Path) -> None:
         """Negative-operand compare/eq parity: trailing-zero-equal pairs
@@ -2966,7 +2948,7 @@ public fn main(@Unit -> @Unit)
   IO.print(@String.0)
 }
 """
-        assert self._parity_stdout(src, tmp_path) == "equal|eq|less|less"
+        assert _parity_stdout(src, tmp_path, "dec856") == "equal|eq|less|less"
 
     def test_from_string_acceptance_parity(self, tmp_path: Path) -> None:
         """Both runtimes accept EXACTLY the spec §9.7.2 grammar (ASCII
@@ -3017,7 +2999,7 @@ public fn main(@Unit -> @Unit)
         # boundary), then thirteen rejects (specials, underscores,
         # unicode digits, malformed, out-of-range exponent tokens incl.
         # the beyond-MAX_SAFE_INTEGER probe).
-        assert self._parity_stdout(src, tmp_path) == "y" * 8 + "n" * 13
+        assert _parity_stdout(src, tmp_path, "dec856") == "y" * 8 + "n" * 13
 
     def test_from_string_exponent_token_bound(self, tmp_path: Path) -> None:
         """Exponent tokens beyond MAX_SAFE_INTEGER (CR finding
@@ -3041,7 +3023,7 @@ public fn main(@Unit -> @Unit)
   }
 }
 """
-        assert self._parity_stdout(src, tmp_path) == "none"
+        assert _parity_stdout(src, tmp_path, "dec856") == "none"
 
     def test_from_float_formatting_parity(self, tmp_path: Path) -> None:
         """``decimal_from_float`` mirrors Python's ``Decimal(str(v))``,
@@ -3064,7 +3046,7 @@ public fn main(@Unit -> @Unit)
   IO.print(@String.0)
 }
 """
-        assert self._parity_stdout(src, tmp_path) == "100.0|200.0|0.0001|3.14"
+        assert _parity_stdout(src, tmp_path, "dec856") == "100.0|200.0|0.0001|3.14"
 
 
 class TestDbBrowserStub229:
@@ -3489,7 +3471,8 @@ public fn main(@Unit -> @Unit)
 
 
 class TestBrowserJsonStringifyParity349:
-    """``json_stringify`` does NOT match the native runtime (#349 finding).
+    """``json_stringify`` does NOT match the native runtime (#349 finding,
+    tracked as #1293).
 
     The Python host calls ``json.dumps(value, ensure_ascii=False,
     allow_nan=False)`` — default ``", "`` / ``": "`` separators, and
@@ -3508,8 +3491,15 @@ class TestBrowserJsonStringifyParity349:
     read as "yes, the known divergence" and this — the only browser-side
     coverage of ``json_stringify`` — would stay green through a real
     regression.  Pinning both outputs tolerates exactly the documented
-    difference and nothing else; fixing ``runtime.mjs`` fails the browser
-    assertion, which is the prompt to collapse the two into one.
+    difference and nothing else.
+
+    Converging the two hosts therefore fails **five** browser assertions,
+    not one: this test, plus the ``jarray``, ``jobject``, ``nested`` and
+    ``array_of_objects`` entries of :data:`_JSON_TAG_CASES` — the four
+    whose pinned strings carry a separator or an integral number.  (The
+    other seven tag cases are already byte-identical across the hosts.)
+    That red is the prompt to collapse each pinned pair into a single
+    parity assertion.
     """
 
     def test_number_and_spacing(self, tmp_path: Path) -> None:
@@ -3708,18 +3698,29 @@ public fn main(@Unit -> @Unit)
 
 
 class TestBrowserMarkdownRenderParity349:
-    """``md_render`` diverges from the native runtime on lazy
-    continuation lines (#349 finding).
+    """``md_render`` diverges from the native runtime on any multi-line
+    paragraph (#349 finding, tracked as #1294).
 
-    Native joins a list item's continuation onto the item ("- first
-    continued"); the browser keeps the newline and emits the
-    continuation as its own line.  The same input also drops the
-    ``> `` prefix from a fenced line inside a blockquote in the browser
-    but not natively.
+    The rule is not "list lazy continuations" — that was the first case
+    found, not the scope.  The browser preserves a paragraph's internal
+    soft line breaks and does not re-apply the container prefix (``> ``,
+    list-item indent) on output, where the native renderer collapses
+    them to spaces.  A bare ``hello\\nworld`` paragraph diverges too.
 
-    ``examples/markdown.vera`` is flat enough to miss both, and nothing
-    else rendered Markdown under Node, so the divergence has never been
-    caught.
+    Worse, the browser render is **not stable**: re-rendering its own
+    output moves the continuation out of its container (``> a b`` →
+    ``> a\\nb`` → ``> a\\n\\nb``, where ``b`` is no longer quoted), so
+    the browser breaks the round-trip property spec §9.7.6 states for
+    ``md_render`` itself, as well as §12.9.3's identical-results
+    requirement.  The native renderer is a fixed point on every case
+    below.  Parsing is unaffected — ``md_has_heading`` /
+    ``md_has_code_block`` / ``md_extract_code_blocks`` are byte-identical
+    across the runtimes — so the defect is scoped to the renderer in
+    ``vera/browser/runtime.mjs``.
+
+    ``examples/markdown.vera`` is flat enough to miss all of it, and
+    nothing else rendered Markdown under Node, so the divergence has
+    never been caught.
 
     Both sides are pinned as exact strings rather than marked ``xfail``
     for the same reason as ``TestBrowserJsonStringifyParity349``: a bare
@@ -3744,3 +3745,62 @@ public fn main(@Unit -> @Unit)
         # Known divergence, deliberately not fixed on a tests-only branch:
         # the browser's parseBlocks keeps the continuation as its own line.
         assert browser == "- first\ncontinued"
+
+    def test_blockquote_fence_render_is_destructive(self, tmp_path: Path) -> None:
+        """The nesting battery's blockquote — an h2 and a fenced block
+        inside ``> `` — pinned end to end, because this is the case where
+        the instability stops being cosmetic and destroys the document.
+
+        The battery above computes this render but only substring-asserts
+        it, so the exact strings were unpinned.  Rendering once already
+        strips the ``> `` from the fence's contents in the browser;
+        rendering *that* output again fragments the fence into three and
+        lifts ``x = 1`` clean out of the quote, at which point no
+        subsequent parse can recover the original document.  The native
+        renderer returns the same bytes both times.
+
+        A renderer fix moves at least one of these pins, which is the
+        intent: it must go red and be updated deliberately rather than
+        drifting silently.
+        """
+        one = r"""
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  match md_parse("> ## Quoted\n>\n> ```py\n> x = 1\n> ```\n") {
+    Ok(@MdBlock) -> IO.print(md_render(@MdBlock.0)),
+    Err(@String) -> IO.print(string_concat("ERR:", @String.0))
+  }
+}
+"""
+        native1, browser1 = _both_stdouts(one, tmp_path, "md_bq_once")
+        assert native1 == "> ## Quoted\n> ```py\n> x = 1\n> ```"
+        # The fence's contents lose the blockquote prefix in the browser.
+        assert browser1 == "> ## Quoted\n> ```py\nx = 1\n> ```"
+
+        # Render 2: md_render(md_parse(md_render(md_parse(src)))).
+        two = r"""
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  match md_parse("> ## Quoted\n>\n> ```py\n> x = 1\n> ```\n") {
+    Ok(@MdBlock) -> match md_parse(md_render(@MdBlock.0)) {
+      Ok(@MdBlock) -> IO.print(md_render(@MdBlock.0)),
+      Err(@String) -> IO.print(string_concat("ERR2:", @String.0))
+    },
+    Err(@String) -> IO.print(string_concat("ERR:", @String.0))
+  }
+}
+"""
+        native2, browser2 = _both_stdouts(two, tmp_path, "md_bq_twice")
+        # Native is a fixed point — re-rendering changes nothing.
+        assert native2 == native1
+        # The browser is not: the fence fragments and `x = 1` escapes the
+        # blockquote entirely.
+        assert browser2 == (
+            "> ## Quoted\n> ```py\n\n> ```\n\nx = 1\n\n> ```\n\n> ```"
+        )
+        # Stated as a relation as well as two literals, so that updating
+        # both pins to one value — which is what a *partial* fix looks
+        # like — cannot quietly assert a stability the browser lacks.
+        assert browser2 != browser1
