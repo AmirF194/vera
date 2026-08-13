@@ -638,7 +638,7 @@ The browser runtime provides browser-appropriate implementations of IO operation
 |-----------|-------------------|------------------------------|
 | `IO.print` | Appends to internal buffer, flushed via `getStdout()` | Writes to stdout capture buffer |
 | `IO.read_line` | Reads from pre-queued input array, falls back to `prompt()` | Reads from `stdin` parameter or process stdin |
-| `IO.read_char` | Returns `Result.Err` — depends on JSPI suspend/resume ([#609](https://github.com/aallan/vera/issues/609), [#618](https://github.com/aallan/vera/issues/618)) | Termios raw-mode on TTY (Unix), `msvcrt.getwch()` (Windows), unbuffered read on piped input |
+| `IO.read_char` | Returns `Result.Err` — the operation shipped natively in [#618](https://github.com/aallan/vera/issues/618); the browser half is pending JSPI suspend/resume ([#609](https://github.com/aallan/vera/issues/609)) | Termios raw-mode on TTY (Unix), `msvcrt.getwch()` (Windows), unbuffered read on piped input |
 | `IO.read_file` | Returns `Result.Err("File I/O not available in browser")` | Reads from filesystem |
 | `IO.write_file` | Returns `Result.Err("File I/O not available in browser")` | Writes to filesystem |
 | `IO.args` | Returns configurable array (default empty) | Returns CLI arguments |
