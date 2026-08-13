@@ -714,7 +714,13 @@ function parseBlocks(text) {
       i++;
     }
     if (paraLines.length > 0) {
-      blocks.push(new MdParagraph(parseInlines(paraLines.join('\n'))));
+      // #1294: joined with a space, not a newline.  Spec §9.7.3 excludes
+      // hard and soft line breaks from the ADT — "collapsed into
+      // paragraph text" — so a paragraph's internal breaks have to go
+      // somewhere at parse time or they survive into MdText, where no
+      // renderer can tell them from text the author wrote.  This is what
+      // `" ".join(para_lines)` does in vera/markdown.py.
+      blocks.push(new MdParagraph(parseInlines(paraLines.join(' '))));
     }
   }
   return blocks;
@@ -737,7 +743,12 @@ function parseMarkdown(text) {
 function renderInline(node) {
   switch (node.tag) {
     case 'MdText': return node.text;
-    case 'MdCode': return '`' + node.text + '`';
+    case 'MdCode':
+      // A span containing a backtick needs a longer fence and padding
+      // spaces, or it re-parses as a shorter span plus stray text.
+      return node.text.includes('`')
+        ? '`` ' + node.text + ' ``'
+        : '`' + node.text + '`';
     case 'MdEmph': return '*' + node.children.map(renderInline).join('') + '*';
     case 'MdStrong': return '**' + node.children.map(renderInline).join('') + '**';
     case 'MdLink': return '[' + node.children.map(renderInline).join('') + '](' + node.url + ')';
@@ -746,44 +757,77 @@ function renderInline(node) {
   }
 }
 
-function renderBlock(node, indent = '') {
+/**
+ * Render a block to an array of LINES, mirroring `_render_block` in
+ * vera/markdown.py.
+ *
+ * #1294: the previous version returned one string and threaded a prefix
+ * down as an `indent` argument, which a container could only apply to
+ * the *first* line of each child — a fenced block inside a blockquote
+ * lost the `> ` on its body, and re-rendering that output moved the
+ * body out of the quote.  Lines are the unit a container prefixes, so
+ * they are the unit this returns: every caller re-applies its own
+ * prefix to every line it receives, which is what makes the render a
+ * fixed point.
+ */
+function renderBlockLines(node) {
   switch (node.tag) {
     case 'MdParagraph':
-      return indent + node.children.map(renderInline).join('') + '\n';
+      return [node.children.map(renderInline).join('')];
     case 'MdHeading':
-      return indent + '#'.repeat(node.level) + ' ' + node.children.map(renderInline).join('') + '\n';
+      return ['#'.repeat(node.level) + ' ' + node.children.map(renderInline).join('')];
     case 'MdCodeBlock':
-      return indent + '```' + node.lang + '\n' + node.code + '\n' + indent + '```\n';
-    case 'MdBlockQuote':
-      return node.children.map(c => renderBlock(c, indent + '> ')).join('');
+      return ['```' + node.lang, ...node.code.split('\n'), '```'];
+    case 'MdBlockQuote': {
+      const out = [];
+      for (const child of node.children) {
+        for (const line of renderBlockLines(child)) {
+          out.push(line ? '> ' + line : '>');
+        }
+      }
+      return out;
+    }
     case 'MdList': {
-      return node.items.map((item, idx) => {
-        const prefix = node.ordered ? `${idx + 1}. ` : '- ';
-        return item.map((b, bi) => (bi === 0 ? indent + prefix : indent + '  ') + renderBlock(b).trimStart()).join('');
-      }).join('');
+      const out = [];
+      node.items.forEach((item, idx) => {
+        const marker = node.ordered ? `${idx + 1}.` : '-';
+        const indent = ' '.repeat(marker.length + 1);
+        const itemLines = [];
+        for (const child of item) itemLines.push(...renderBlockLines(child));
+        itemLines.forEach((line, j) => {
+          out.push(j === 0 ? marker + ' ' + line : indent + line);
+        });
+      });
+      return out;
     }
     case 'MdThematicBreak':
-      return indent + '---\n';
+      return ['---'];
     case 'MdTable': {
-      if (node.rows.length === 0) return '';
-      const header = '| ' + node.rows[0].map(cells => cells.map(renderInline).join('')).join(' | ') + ' |\n';
-      const sep = '| ' + node.rows[0].map(() => '---').join(' | ') + ' |\n';
-      const body = node.rows.slice(1).map(row =>
-        '| ' + row.map(cells => cells.map(renderInline).join('')).join(' | ') + ' |\n'
-      ).join('');
-      return indent + header + indent + sep + body;
+      if (node.rows.length === 0) return [];
+      const cell = cells => cells.map(renderInline).join('');
+      const out = ['| ' + node.rows[0].map(cell).join(' | ') + ' |'];
+      out.push('| ' + node.rows[0].map(() => '---').join(' | ') + ' |');
+      for (const row of node.rows.slice(1)) {
+        out.push('| ' + row.map(cell).join(' | ') + ' |');
+      }
+      return out;
     }
-    case 'MdDocument':
-      return node.children.map(c => renderBlock(c, indent)).join('\n');
+    case 'MdDocument': {
+      const out = [];
+      node.children.forEach((child, i) => {
+        if (i > 0) out.push('');
+        out.push(...renderBlockLines(child));
+      });
+      return out;
+    }
     default:
-      return '';
+      return [];
   }
 }
 
 function renderMarkdown(doc) {
   // Match Python's "\n".join(lines) — no trailing newline.
-  const raw = renderBlock(doc);
-  return raw.endsWith('\n') ? raw.slice(0, -1) : raw;
+  return renderBlockLines(doc).join('\n');
 }
 
 // -- Query helpers --

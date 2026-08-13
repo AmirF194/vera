@@ -3923,14 +3923,13 @@ class TestBrowserMarkdownNesting349:
     run when a heading or fence is nested inside another block.
     ``examples/markdown.vera`` is flat, so none of them ever ran.
 
-    ``md_render`` diverges on exactly this input — see
-    :class:`TestBrowserMarkdownRenderParity349` — so the rendered
-    prefix is asserted browser-side only.  The three parse-side fields
-    behind it are host-agnostic, and that is *checked* rather than
-    asserted in prose: the same module runs under both runtimes and the
-    trailing fields are compared.  It is the claim #1294 rests on when
-    it scopes the defect to the renderer, so it needs a differential,
-    not a docstring.
+    ``md_render`` used to diverge on exactly this input (#1294), so the
+    rendered prefix was asserted browser-side only.  It now agrees, and
+    the whole string is compared across the two runtimes.  The three
+    parse-side fields are still compared separately as well: they were
+    the control that scoped #1294 to the renderer, and keeping them
+    named means a future renderer regression cannot be mistaken for a
+    parser one.
     """
 
     # A blockquote wrapping an h2 and a fenced block, so the recursive
@@ -3955,121 +3954,261 @@ public fn main(@Unit -> @Unit)
 
     def test_nested_walks_and_list_continuations(self, tmp_path: Path) -> None:
         native, browser = _both_stdouts(self._SRC, tmp_path, "md_nesting")
+        # Whole string, renderer included, since #1294 closed.
+        assert browser == native
         rendered, has_h2, has_py, n_blocks = browser.rsplit("|", 3)
-        # The parse-side fields must be byte-identical across the two
-        # runtimes; only the rendered prefix is allowed to diverge.
+        # The parse-side fields kept as a named control: they are what
+        # scoped #1294 to the renderer, so a future divergence can still
+        # be told apart from a parser one.
         assert native.rsplit("|", 3)[1:] == [has_h2, has_py, n_blocks]
-        # Continuation lines survived the per-item loop in both list kinds.
-        assert "continued" in rendered
-        assert "also one" in rendered
+        # Continuation lines survived the per-item loop in both list kinds
+        # *and* stayed inside their item, which is the renderer's half.
+        assert "- first continued" in rendered
+        assert "1. one also one" in rendered
         # Recursive descents found the h2 and the fence inside the quote.
         assert (has_h2, has_py, n_blocks) == ("true", "true", "1")
 
 
+_MD_ROUND_TRIP_PRELUDE = r"""
+private fn md_round_trip(@String -> @String)
+  requires(true) ensures(true) effects(pure)
+{
+  match md_parse(@String.0) {
+    Ok(@MdBlock) -> md_render(@MdBlock.0),
+    Err(@String) -> string_concat("ERR:", @String.0)
+  }
+}
+"""
+
+
+def _md_round_trip_src(markdown: str, *, times: int = 1) -> str:
+    """A ``main`` that runs ``markdown`` through ``md_render ∘ md_parse``
+    ``times`` times and prints the result.
+
+    ``markdown`` is written as it appears inside a Vera string literal —
+    ``\n`` as the two characters, which Vera's lexer turns into a
+    newline.
+    """
+    inner = 'md_round_trip("' + markdown + '")'
+    for _ in range(times - 1):
+        inner = f"md_round_trip({inner})"
+    return _MD_ROUND_TRIP_PRELUDE + f"""
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{{
+  IO.print({inner})
+}}
+"""
+
+
+# (id, Markdown as written in a Vera string literal, canonical render).
+# The four cases #1294 measured across the two hosts, in the order its
+# table lists them.
+_MD_RENDER_CASES = [
+    ("list_continuation", r"- first\n  continued\n", "- first continued"),
+    ("blockquote_pair", r"> a\n> b\n", "> a b"),
+    (
+        "nested_bq_fence",
+        r"> ## Quoted\n>\n> ```py\n> x = 1\n> ```\n",
+        "> ## Quoted\n> ```py\n> x = 1\n> ```",
+    ),
+    ("plain_paragraph", r"hello\nworld\n", "hello world"),
+]
+
+# Corpus for the §9.7.3 round-trip property.  The first eight mirror
+# ``TestRoundTrip`` in ``tests/test_markdown.py``, so the two runtimes
+# are held to the corpus the reference renderer is already held to; the
+# rest are the container/multi-line shapes #1294 was about, which that
+# corpus has none of — every one of its eight entries is single-line or
+# fence-only, which is exactly why a renderer that dropped container
+# prefixes passed it.
+_MD_ROUND_TRIP_CORPUS = [
+    ("heading", r"# Hello"),
+    ("paragraph", r"Some text here."),
+    ("fence", r"```python\nprint(42)\n```"),
+    ("thematic_break", r"---"),
+    ("unordered_list", r"- item 1\n- item 2"),
+    ("ordered_list", r"1. first\n2. second"),
+    ("blockquote", r"> quoted"),
+    ("table", r"| A | B |\n| --- | --- |\n| 1 | 2 |"),
+    ("list_continuation", r"- first\n  continued\n"),
+    ("ordered_continuation", r"1. one\n   also one\n2. two\n"),
+    ("blockquote_pair", r"> a\n> b\n"),
+    ("nested_bq_fence", r"> ## Quoted\n>\n> ```py\n> x = 1\n> ```\n"),
+    ("plain_paragraph", r"hello\nworld\n"),
+    ("quoted_list", r"> - a\n>   b\n> - c\n"),
+    ("quoted_multiline_fence", r"> ```sh\n> one\n> two\n> ```\n"),
+    ("list_with_fence", r"- item\n  ```py\n  a = 1\n  b = 2\n  ```\n"),
+    ("inlines", r"*em* and **strong** and `code` in one line\n"),
+    ("link_and_image", r"[text](http://example.com) then ![alt](img.png)\n"),
+    (
+        "multi_block_document",
+        r"# Title\n\nIntro line\ncontinued here.\n\n> note one\n> note two"
+        r"\n\n- a\n  b\n- c\n\n```rs\nfn one() {}\nfn two() {}\n```\n\n---\n",
+    ),
+]
+
+
 class TestBrowserMarkdownRenderParity349:
-    """``md_render`` diverges from the native runtime on any multi-line
-    paragraph (#349 finding, tracked as #1294).
+    """``md_render`` agrees with the reference renderer and is a fixed
+    point (#349 finding, tracked as #1294, closed).
 
-    The rule is not "list lazy continuations" — that was the first case
-    found, not the scope.  The browser preserves a paragraph's internal
-    soft line breaks and does not re-apply the container prefix (``> ``,
-    list-item indent) on output, where the native renderer collapses
-    them to spaces.  A bare ``hello\\nworld`` paragraph diverges too.
-
-    Worse, the browser render is **not stable**: re-rendering its own
-    output moves the continuation out of its container (``> a b`` →
-    ``> a\\nb`` → ``> a\\n\\nb``, where ``b`` is no longer quoted), so
-    the browser breaks the round-trip property spec §9.7.6 states for
-    ``md_render`` itself, as well as §12.9.3's identical-results
-    requirement.  The native renderer is a fixed point on every case
-    below.  Parsing is unaffected — ``md_has_heading`` /
-    ``md_has_code_block`` / ``md_extract_code_blocks`` are byte-identical
-    across the runtimes — so the defect is scoped to the renderer in
-    ``vera/browser/runtime.mjs``.
+    The browser used to preserve a paragraph's internal soft line breaks
+    and not re-apply the container prefix (``> ``, list-item indent) on
+    output, where the reference renderer collapses the breaks to spaces
+    and prefixes every line of every child.  The scope was any
+    multi-line paragraph, not the list lazy continuation first observed,
+    and the render was **not stable**: re-rendering its own output moved
+    content out of its container (``> a b`` → ``> a\\nb`` →
+    ``> a\\n\\nb``), so it broke both the round-trip property spec §9.7.3
+    states for ``md_render`` and §12.9.3's identical-results requirement.
+    On a blockquote wrapping a heading and a fenced block it destroyed
+    the document outright the second time round.
 
     ``examples/markdown.vera`` is flat enough to miss all of it, and
-    nothing else rendered Markdown under Node, so the divergence has
-    never been caught.
-
-    Both sides are pinned as exact strings rather than marked ``xfail``
-    for the same reason as ``TestBrowserJsonStringifyParity349``: a bare
-    ``xfail`` would swallow a compile failure, a dead Node harness or an
-    unrelated ``runtime.mjs`` regression, and this is the only
-    browser-side coverage of ``md_render``.
+    nothing else rendered Markdown under Node, which is why it went
+    uncaught.  The battery below is therefore three-layered — cross-host
+    equality, an exact expected string, and stability under re-render —
+    because equality alone would pass two hosts that agree on the wrong
+    answer, and an exact string alone would pass a renderer that is
+    correct once and drifts on the second pass.
     """
 
-    def test_lazy_continuation(self, tmp_path: Path) -> None:
-        src = r"""
-public fn main(@Unit -> @Unit)
-  requires(true) ensures(true) effects(<IO>)
-{
-  match md_parse("- first\n  continued\n") {
-    Ok(@MdBlock) -> IO.print(md_render(@MdBlock.0)),
-    Err(@String) -> IO.print(string_concat("ERR:", @String.0))
-  }
-}
-"""
-        native, browser = _both_stdouts(src, tmp_path, "md_parity")
-        assert native == "- first continued"
-        # Known divergence, deliberately not fixed on a tests-only branch:
-        # the browser's parseBlocks keeps the continuation as its own line.
-        assert browser == "- first\ncontinued"
+    @pytest.mark.parametrize(
+        ("case_id", "markdown", "expected"),
+        _MD_RENDER_CASES,
+        ids=[c[0] for c in _MD_RENDER_CASES],
+    )
+    def test_render_matches_across_hosts(
+        self, case_id: str, markdown: str, expected: str, tmp_path: Path,
+    ) -> None:
+        """Byte-identical across the hosts, and equal to the reference
+        renderer's answer written out."""
+        src = _md_round_trip_src(markdown)
+        assert _parity_stdout(src, tmp_path, f"md1_{case_id}") == expected
 
-    def test_blockquote_fence_render_is_destructive(self, tmp_path: Path) -> None:
-        """The nesting battery's blockquote — an h2 and a fenced block
-        inside ``> `` — pinned end to end, because this is the case where
-        the instability stops being cosmetic and destroys the document.
+    @pytest.mark.parametrize(
+        ("case_id", "markdown", "expected"),
+        _MD_RENDER_CASES,
+        ids=[c[0] for c in _MD_RENDER_CASES],
+    )
+    def test_render_is_stable_under_re_render(
+        self, case_id: str, markdown: str, expected: str, tmp_path: Path,
+    ) -> None:
+        """Rendering the render changes nothing, on both hosts.
 
-        The battery above computes this render but only substring-asserts
-        it, so the exact strings were unpinned.  Rendering once already
-        strips the ``> `` from the fence's contents in the browser;
-        rendering *that* output again fragments the fence into three and
-        lifts ``x = 1`` clean out of the quote, at which point no
-        subsequent parse can recover the original document.  The native
-        renderer returns the same bytes both times.
-
-        A renderer fix moves at least one of these pins, which is the
-        intent: it must go red and be updated deliberately rather than
-        drifting silently.
+        This is where the browser's defect stopped being cosmetic: the
+        nested blockquote's second render fragmented the fence into
+        three and lifted ``x = 1`` clean out of the quote, past recovery
+        by any subsequent parse.
         """
-        one = r"""
-public fn main(@Unit -> @Unit)
-  requires(true) ensures(true) effects(<IO>)
-{
-  match md_parse("> ## Quoted\n>\n> ```py\n> x = 1\n> ```\n") {
-    Ok(@MdBlock) -> IO.print(md_render(@MdBlock.0)),
-    Err(@String) -> IO.print(string_concat("ERR:", @String.0))
-  }
-}
-"""
-        native1, browser1 = _both_stdouts(one, tmp_path, "md_bq_once")
-        assert native1 == "> ## Quoted\n> ```py\n> x = 1\n> ```"
-        # The fence's contents lose the blockquote prefix in the browser.
-        assert browser1 == "> ## Quoted\n> ```py\nx = 1\n> ```"
+        src = _md_round_trip_src(markdown, times=2)
+        assert _parity_stdout(src, tmp_path, f"md2_{case_id}") == expected
 
-        # Render 2: md_render(md_parse(md_render(md_parse(src)))).
-        two = r"""
+    @pytest.mark.parametrize(
+        ("case_id", "markdown"),
+        _MD_ROUND_TRIP_CORPUS,
+        ids=[c[0] for c in _MD_ROUND_TRIP_CORPUS],
+    )
+    def test_round_trip_property_holds_on_both_hosts(
+        self, case_id: str, markdown: str, tmp_path: Path,
+    ) -> None:
+        """``md_parse(md_render(b)) == Ok(b)`` (spec §9.7.3), in its
+        observable form.
+
+        Vera has no structural equality on ``MdBlock``, so the property
+        is exercised through the one channel a Vera program can see:
+        ``md_render`` composed with ``md_parse`` reaches a fixed point
+        after the first application.  If a round trip lost or moved
+        structure, the second render would differ from the first — which
+        is exactly how the browser's blockquote failure showed up.  Both
+        hosts must reach the *same* fixed point, so this is a parity
+        assertion as well as a property one.
+        """
+        once = _parity_stdout(
+            _md_round_trip_src(markdown), tmp_path, f"mdrt1_{case_id}",
+        )
+        twice = _parity_stdout(
+            _md_round_trip_src(markdown, times=2), tmp_path,
+            f"mdrt2_{case_id}",
+        )
+        assert twice == once
+        assert not once.startswith("ERR:"), once
+
+
+class TestBrowserMarkdownRenderConstructedAdt1294:
+    """``md_render`` on ADTs a Vera program *built*, not parsed (#1294).
+
+    Every other Markdown case in this file reaches the renderer through
+    ``md_parse``, so it can only exercise the shapes the parser happens
+    to produce.  ``MdBlock`` and ``MdInline`` are ordinary prelude ADTs
+    a program can construct directly, and those values reach the same
+    host import — so a renderer rule that only the parser never triggers
+    is still reachable, and still has to agree across the two hosts.
+    """
+
+    def test_code_span_containing_a_backtick(self, tmp_path: Path) -> None:
+        """A code span holding a backtick needs the longer fence.
+
+        Neither parser produces one — both stop a span at the first
+        closing backtick — so this rule is reachable only from a
+        constructed ADT, which is exactly why the browser renderer was
+        missing it while every parse-driven test passed.  Wrapping it in
+        a single backtick pair would re-parse as an empty span followed
+        by stray text, so the round trip is checked too.
+        """
+        src = """
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
-  match md_parse("> ## Quoted\n>\n> ```py\n> x = 1\n> ```\n") {
-    Ok(@MdBlock) -> match md_parse(md_render(@MdBlock.0)) {
-      Ok(@MdBlock) -> IO.print(md_render(@MdBlock.0)),
-      Err(@String) -> IO.print(string_concat("ERR2:", @String.0))
-    },
-    Err(@String) -> IO.print(string_concat("ERR:", @String.0))
-  }
+  IO.print(md_render(MdDocument([MdParagraph([MdCode("a`b")])])))
 }
 """
-        native2, browser2 = _both_stdouts(two, tmp_path, "md_bq_twice")
-        # Native is a fixed point — re-rendering changes nothing.
-        assert native2 == native1
-        # The browser is not: the fence fragments and `x = 1` escapes the
-        # blockquote entirely.
-        assert browser2 == (
-            "> ## Quoted\n> ```py\n\n> ```\n\nx = 1\n\n> ```\n\n> ```"
+        assert _parity_stdout(src, tmp_path, "md_code_tick") == "`` a`b ``"
+
+    def test_multi_line_code_block_inside_a_blockquote(
+        self, tmp_path: Path,
+    ) -> None:
+        """Every line of a container's child carries the prefix.
+
+        The single case that a first-line-only prefix cannot fake, and
+        the one whose second render destroyed the document.  Built
+        directly so the assertion is about the renderer alone.
+        """
+        src = """
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  IO.print(md_render(MdDocument([MdBlockQuote([
+    MdCodeBlock("sh", "one\\ntwo\\nthree")
+  ])])))
+}
+"""
+        assert _parity_stdout(src, tmp_path, "md_bq_fence_adt") == (
+            "> ```sh\n> one\n> two\n> three\n> ```"
         )
-        # Stated as a relation as well as two literals, so that updating
-        # both pins to one value — which is what a *partial* fix looks
-        # like — cannot quietly assert a stability the browser lacks.
-        assert browser2 != browser1
+
+    def test_blank_line_between_blocks_inside_a_blockquote(
+        self, tmp_path: Path,
+    ) -> None:
+        """The separator between a document's blocks is itself quoted.
+
+        A blockquote wrapping two paragraphs renders the gap as a bare
+        ``>``, not as an empty line — an empty line would end the quote
+        on re-parse and split one blockquote into two.
+        """
+        src = """
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  IO.print(md_render(MdDocument([MdBlockQuote([
+    MdDocument([
+      MdParagraph([MdText("first")]),
+      MdParagraph([MdText("second")])
+    ])
+  ])])))
+}
+"""
+        assert _parity_stdout(src, tmp_path, "md_bq_blank_adt") == (
+            "> first\n>\n> second"
+        )

@@ -615,7 +615,7 @@ Browser bundle: examples/hello_world_browser/
   index.html
 ```
 
-Self-contained — no bundler. Serve with any HTTP server (`python -m http.server`). `IO.print` writes to the page; every other operation the browser target supports works identically to the CLI, apart from two tracked bugs where the hosts disagree — `json_stringify` ([#1293](https://github.com/aallan/vera/issues/1293)) and `md_render` ([#1294](https://github.com/aallan/vera/issues/1294)). Parity tests enforce this on every PR, pinning each host's current output for those two so a fix goes red rather than passing unnoticed. *Note: `Inference.complete` and every `DB` operation return an error in the browser — a deliberate platform boundary, since the credentials they need would be readable from page source; reach them through a server-side proxy via `Http`.*
+Self-contained — no bundler. Serve with any HTTP server (`python -m http.server`). `IO.print` writes to the page; every other operation the browser target supports works identically to the CLI. `json_stringify` and `md_render` reach that identity by emitting a canonical form the specification states (§9.7.1, §9.7.3) rather than by the hosts happening to agree, so parity tests check them against that form as well as against each other, on every PR. *Note: `Inference.complete` and every `DB` operation return an error in the browser — a deliberate platform boundary, since the credentials they need would be readable from page source; reach them through a server-side proxy via `Http`.*
 
 ### WASI components
 

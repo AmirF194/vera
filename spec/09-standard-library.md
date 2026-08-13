@@ -2267,7 +2267,14 @@ public fn md_render(@MdBlock -> @String)
   effects(pure)
 ```
 
-Renders an `MdBlock` to a canonical Markdown string. Always succeeds. The round-trip property `md_parse(md_render(b)) == Ok(b)` should hold: rendering then re-parsing preserves structure.
+Renders an `MdBlock` to a canonical Markdown string. Always succeeds. The round-trip property `md_parse(md_render(b)) == Ok(b)` should hold: rendering then re-parsing preserves structure. Every runtime produces the same string (§12.9.3).
+
+Two rules carry that property, and both follow from the ADT having no line-break node (see the design note above):
+
+- **A paragraph is one line.** Its inline content is rendered without internal newlines. A parser collapses a paragraph's soft line breaks to spaces on the way in, so nothing survives to be re-emitted.
+- **A container prefixes every line of every child.** A block quote writes `> ` before each rendered line and a bare `>` for a blank one; a list item writes its marker before the first line and an equal-width indent before the rest. Prefixing only a child's first line would leave a fenced block's body — or a nested block's continuation — outside its container, and the next `md_parse` would read it as a sibling.
+
+Together these make `md_render` a fixed point: rendering its own output returns the same bytes.
 
 **Accessor functions for contracts:**
 
