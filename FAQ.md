@@ -172,6 +172,8 @@ vera compile --target browser examples/hello_world.vera
 
 Serve it with any HTTP server and open `index.html` — no build step, no bundler, no dependencies. The JavaScript runtime provides browser-appropriate implementations of all Vera host bindings: `IO.print` writes to the page, `IO.read_line` uses `prompt()`, and all other operations (State, contracts, Markdown) work identically to the wasmtime runtime, with two documented exceptions: `json_stringify` ([#1293](https://github.com/aallan/vera/issues/1293)) and `md_render` ([#1294](https://github.com/aallan/vera/issues/1294)) still differ between the two hosts.
 
+Two effects are refused outright rather than merely differing. `Inference` and `DB` return an explanatory `Err` from every operation in the browser, because the API key or database credential they would need is readable from page source and network traffic in client-side JavaScript. Reach them through a server-side endpoint and call it with `Http`, which does run in the browser — it is backed by `XMLHttpRequest`, not a stub. That refusal is a deliberate platform boundary, not a divergence awaiting a fix like the two above; spec §9.5.5 states it for `Inference`.
+
 The runtime also works in Node.js:
 
 ```bash

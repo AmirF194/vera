@@ -867,7 +867,12 @@ class TestInferenceProviderDispatch:
             return_value="ok",
         ) as mock_provider:
             execute(result_src, env_vars={"VERA_XAI_API_KEY": "sk-xai-test"})
+            # Provider name AND the key handed to it: _call_inference_provider
+            # takes (provider, prompt, model, api_key) positionally, so index 3
+            # is the key. Naming the right provider while reading another row's
+            # env var would satisfy the name check alone.
             assert mock_provider.call_args[0][0] == "xai"
+            assert mock_provider.call_args[0][3] == "sk-xai-test"
 
     #: Every provider that precedes xai in the registry, listed literally
     #: rather than sliced out of _PROVIDERS: derived order would shrink to
@@ -895,6 +900,11 @@ class TestInferenceProviderDispatch:
                 "VERA_XAI_API_KEY": "sk-xai-test",
             })
             assert mock_provider.call_args[0][0] == earlier
+            # The winning provider's own key must be the one forwarded
+            # (index 3 of the positional call). Both keys are set here, so
+            # asserting the name alone would pass on a dispatch that picked
+            # the right row and then read xai's key out of the environment.
+            assert mock_provider.call_args[0][3] == "sk-earlier-test"
 
     def test_multi_key_auto_detect_respects_provider_order(self) -> None:
         """When multiple keys are set, _PROVIDERS insertion order determines which wins.
