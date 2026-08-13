@@ -10,6 +10,7 @@ report them.
 from __future__ import annotations
 
 import importlib.util
+import re
 from pathlib import Path
 from typing import Any
 
@@ -47,8 +48,13 @@ def test_shipped_grammars_agree() -> None:
 
 
 def test_allowlist_stays_small() -> None:
-    """Past a handful of entries the header-only comparison is the wrong model."""
-    assert len(_MOD.ALLOWLIST) <= 15
+    """Past a handful of entries the header-only comparison is the wrong model.
+
+    The bound sits one above the six entries reviewed, so a seventh is a
+    deliberate act with a reason attached and an eighth cannot be added without
+    arguing here first.  A bound with room to spare is not a bound.
+    """
+    assert len(_MOD.ALLOWLIST) <= 7
 
 
 def test_qualified_and_module_call_are_never_reported() -> None:
@@ -91,11 +97,76 @@ def test_every_waivers_premise_is_checked(name: str) -> None:
     if waiver.lark_alias is None:
         # start/program are plain headers on their own side; there is no alias
         # claim left to check once the side check above holds.
+        assert waiver.lark_rule is None, "an alias and its rule are set together"
         return
-    # Deleting the alias the reason names must fail too.
+    assert waiver.lark_rule is not None, "an alias and its rule are set together"
+    # Deleting the alternative the reason names must fail too.
     stripped = _lark_text().replace(f"-> {waiver.lark_alias}", "")
     _, _, unsound = _MOD.drift(lark, spec, stripped)
-    assert (name, f"no `-> {waiver.lark_alias}` alias left in {_MOD.LARK}") in unsound
+    expected = (
+        f"no `-> {waiver.lark_alias}` alternative on "
+        f"`{waiver.lark_rule}` left in {_MOD.LARK}"
+    )
+    assert (name, expected) in unsound
+
+
+def test_an_alias_named_only_in_a_comment_does_not_hold_a_waiver_up() -> None:
+    """A commented-out production must not keep its waiver's premise alive.
+
+    Commenting a production out deletes it; the ``-> alias`` left behind in the
+    comment text is prose.  Searching the raw file for the alias let that prose
+    hold the waiver up, so deleting the alternative the waiver rests on kept the
+    gate green — the exact failure the premise check exists to catch.
+    """
+    holed = re.sub(r"^(.*-> qualified_call.*)$", r"// \1", _lark_text(), flags=re.M)
+    assert "-> qualified_call" in holed, "the comment still names the alias"
+
+    lark, spec = _repo_rules()
+    _, _, unsound = _MOD.drift(lark, spec, holed)
+    problems = {name: problem for name, problem in unsound}
+    assert "qualified_call" in problems
+    assert "qualified_call" in problems["qualified_call"]
+
+
+def test_a_waived_alias_must_sit_on_the_production_its_reason_names() -> None:
+    """The premise is "``fn_call`` has this alternative", not "the file does".
+
+    ``constructor_call`` and ``named_type`` are generic aliases; searching the
+    whole file for the bare name is satisfied by any occurrence anywhere, so a
+    waiver reading "Lark folds it into ``fn_call``'s alternative" survived that
+    alternative moving to another rule entirely.
+    """
+    moved = re.sub(r"[ \t]*-> constructor_call[ \t]*$", "", _lark_text(), flags=re.M)
+    moved += '\ndecoy: UPPER_IDENT "(" arg_list? ")" -> constructor_call\n'
+    assert "-> constructor_call" in moved, "the alias still exists, on another rule"
+
+    lark, spec = _repo_rules()
+    _, _, unsound = _MOD.drift(lark, spec, moved)
+    problems = {name: problem for name, problem in unsound}
+    assert "tuple_literal" in problems
+    assert "constructor_call" in problems["tuple_literal"]
+    assert "fn_call" in problems["tuple_literal"], "names the production it left"
+
+
+def test_one_broken_waiver_yields_one_instruction() -> None:
+    """Two buckets firing for one name gave two contradictory instructions.
+
+    A spent waiver whose alias is also gone was reported both as "both files now
+    have it, delete the entry" and as "the premise broke, restore what it names".
+    Only one of those can be the next edit.
+    """
+    stripped = re.sub(r"[ \t]*-> qualified_call[ \t]*$", "", _lark_text(), flags=re.M)
+    assert "-> qualified_call" not in stripped
+
+    lark, spec = _repo_rules()
+    actionable, stale, unsound = _MOD.drift(lark | {"qualified_call"}, spec, stripped)
+    reported = (
+        [n for n in actionable if n == "qualified_call"]
+        + [n for n in stale if n == "qualified_call"]
+        + [n for n, _ in unsound if n == "qualified_call"]
+    )
+    assert reported == ["qualified_call"]
+    assert stale == ["qualified_call"], "the waiver is spent; deleting it is the fix"
 
 
 def test_a_name_deleted_from_both_files_is_not_reported_as_agreement() -> None:
@@ -161,9 +232,9 @@ def test_extractors_are_not_vacuous() -> None:
         ('fn_call: UPPER_IDENT "." LOWER_IDENT -> qualified_call', {"fn_call"}),
         ("       | module_path -> module_call", set()),
         # Terminals are upper-case and out of scope.
-        ('LOWER_IDENT: /[a-z]\\w*/', set()),
+        ("LOWER_IDENT: /[a-z]\\w*/", set()),
         # Directives, comments, continuations and blanks contribute nothing.
-        ('%ignore WS', set()),
+        ("%ignore WS", set()),
         ("// assert_stmt: gone", set()),
         ("         | assert_expr", set()),
         ("", set()),
@@ -188,7 +259,7 @@ def test_extract_lark_rules(text: str, expected: set[str], tmp_path: Path) -> No
         ("The rule fn_call: is described below.", set()),
         # A fence must close before the next block starts.
         ("```ebnf\na: X\n```\n```vera\nb: Y\n```\n```ebnf\nc: Z\n```", {"a", "c"}),
-        ("```ebnf\nASSERT: \"assert\"\n```", set()),
+        ('```ebnf\nASSERT: "assert"\n```', set()),
         ("```ebnf\n// assert_stmt: gone\n```", set()),
     ],
 )
