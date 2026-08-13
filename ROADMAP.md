@@ -41,6 +41,7 @@ Exit criterion: each listed drift class has a generator or a gate, and a release
 | [#735](https://github.com/aallan/vera/issues/735) | **Builtin dispatch table** — replace the 475-line `_translate_call` if-chain with a `{name: BuiltinSpec}` table, then have checker registration and the spec §9 tables consume it.  One table, three consumers. |
 | [#828](https://github.com/aallan/vera/issues/828) | `error_code` uniqueness — one stable code per diagnostic concept, enforced by a collision gate on the registry. |
 | [#954](https://github.com/aallan/vera/issues/954) | Single-source the `E001` example — generate all five doc mirrors from `vera/errors.py` instead of guarding hand-copies. |
+| [#1291](https://github.com/aallan/vera/issues/1291) | Rendered diagnostic output in docs — a `text` fence carrying compiler output is replayed against live output by a gate, the shape the `vera` fences already have. |
 | [#653](https://github.com/aallan/vera/issues/653) | Spec audit for §0.2 / §0.3 design-principle violations — the spec held to its own principles. |
 | [#540](https://github.com/aallan/vera/issues/540) | lychee + markdownlint MD051 cross-doc anchor validation. |
 
@@ -63,6 +64,7 @@ Exit criterion: the Http and Inference limitation rows are retired; an agent can
 | [#373](https://github.com/aallan/vera/issues/373) | Host-import `Array<Float64>` returns (`alloc_result_ok_float_array`) — the infrastructure #371 needs. |
 | [#371](https://github.com/aallan/vera/issues/371) | `Inference.embed` — vector embeddings, unblocked by #373. |
 | [#451](https://github.com/aallan/vera/issues/451) | Provider: Google Gemini. |
+| [#1289](https://github.com/aallan/vera/issues/1289) | Provider registry — a model name reaches the toolchain as data rather than a compiler-source edit to `_PROVIDERS`. |
 | [#380](https://github.com/aallan/vera/issues/380) | Example: handler mocking for Inference (unblocked by #372). |
 
 ## Stage 22 — The verified tool server
@@ -98,6 +100,7 @@ Exit criterion: the LSP limitation rows are retired, and a fresh VeraBench run (
 | [#724](https://github.com/aallan/vera/issues/724) | LSP: buffer-aware module resolution (imports currently resolve from disk, not open buffers). |
 | [#181](https://github.com/aallan/vera/issues/181) | Slot go-to-definition and mechanical slot-index rewriting beyond parameters (`let`/`match` bindings). |
 | [#558](https://github.com/aallan/vera/issues/558) | `--explain-slots-at <line>:<col>` — query the slot table at any position, not only where a diagnostic already fires. |
+| [#1292](https://github.com/aallan/vera/issues/1292) | LSP: `vera/addEffect` bounds handlers by resolved effect instance, so an alias-spelled `handle[State<MyAlias>]` prunes what `State<Int>` prunes. |
 | [#523](https://github.com/aallan/vera/issues/523) | `vera context` — token-budgeted project export for agents. |
 | [#698](https://github.com/aallan/vera/issues/698) | `vera shape` — function-archetype histograms per module. |
 | [#224](https://github.com/aallan/vera/issues/224) | REPL — the shortest feedback path is currently `vera run` on a file. |
@@ -138,7 +141,7 @@ Beyond the staged sprints — grouped by arc, each pulled forward by its trigger
 
 **Standard library long tail** — [#367](https://github.com/aallan/vera/issues/367) Markdown extractors, [#368](https://github.com/aallan/vera/issues/368) HTML accessors, [#507](https://github.com/aallan/vera/issues/507) ability-dispatched array operations, [#509](https://github.com/aallan/vera/issues/509) Unicode-aware string built-ins phase 2, [#1143](https://github.com/aallan/vera/issues/1143) `<DB>` effect phases 2–3 — named columns (via Map), typed rows (via JSON), and further backends.
 
-**Compiler internals** — [#672](https://github.com/aallan/vera/issues/672) canonical WAT formatter, [#745](https://github.com/aallan/vera/issues/745) narrow the wrap-table / Phase 2c emission to `decimal_ops_used` only, [#739](https://github.com/aallan/vera/issues/739) typed `Protocol` interfaces for the mixin mypy carve-outs.
+**Compiler internals** — [#672](https://github.com/aallan/vera/issues/672) canonical WAT formatter, [#745](https://github.com/aallan/vera/issues/745) narrow the wrap-table / Phase 2c emission to `decimal_ops_used` only, [#739](https://github.com/aallan/vera/issues/739) typed `Protocol` interfaces for the mixin mypy carve-outs, [#1275](https://github.com/aallan/vera/issues/1275) memoise module registration so `check`/`verify` stop re-running the per-module harvest checker once per module.
 
 ## Ongoing threads
 

@@ -59,9 +59,11 @@ fn          let         if          then        else
 match       data        type        module      import
 public      private     requires    ensures     invariant
 decreases   assert      assume      effect      handle
-resume      with        in          forall      where
-true        false       pure
+resume      with        in          forall      exists
+where       true        false       pure
 ```
+
+`handle` is the one exception, and only for function names: `public fn handle(@Request -> @Response)` is the entry point a *host* invokes under `vera serve` and `wasi:http` (Chapter 9, Section 9.5.6), so a function of that name is not dead code and stays legal. A future host-invoked entry point is exempted on the same grounds; nothing else is. Chapter 5, Section 5.2 gives the full reasoning and the **E153** rule.
 
 ## 1.5 Operators and Punctuation
 

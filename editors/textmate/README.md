@@ -18,7 +18,7 @@ Then restart TextMate or select **Bundles → Bundle Editor → Reload Bundles**
 
 ## What gets highlighted
 
-The grammar covers the full Vera language as of v0.0.169.
+The grammar covers the full Vera language. Its effect names are gated against the compiler's own effect registry by `scripts/check_editor_grammars.py`, so a new built-in effect cannot ship without the grammar and the list below learning about it.
 
 **Slot references** are the most distinctive feature of Vera syntax, and the bundle treats them as first-class citizens. Full references like `@Int.0`, `@Array<String>.1`, and `@Nat.result` are scoped as `variable.other.slot`, while bare bindings in match arms (e.g. `Some(@Int)`) are scoped as `variable.other.slot-binding`. Both are visually distinct from all other tokens.
 

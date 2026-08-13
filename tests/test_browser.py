@@ -3637,9 +3637,10 @@ public fn main(@Unit -> @Unit)
         assert browser == "err"
 
     def test_read_char_is_err_stub_in_browser(self, tmp_path: Path) -> None:
-        """``IO.read_char`` needs JSPI suspend/resume (#609, #618); until
-        that lands ``hostReadChar`` is an ``Err`` stub, so a program
-        using it links and runs rather than failing to instantiate.
+        """``IO.read_char`` shipped natively in #618; the browser half
+        needs JSPI suspend/resume (#609, still open).  Until that lands
+        ``hostReadChar`` is an ``Err`` stub, so a program using it links
+        and runs rather than failing to instantiate.
         """
         src = """
 public fn main(-> @Int)

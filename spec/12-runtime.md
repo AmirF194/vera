@@ -649,8 +649,12 @@ The browser runtime provides browser-appropriate implementations of IO operation
 | `IO.stderr` | Appends to internal buffer, flushed via `getStderr()` | Writes to `sys.stderr` or capture buffer |
 | `async(Http.get/post(...))` (#841) | Eager: the request fires synchronously (XHR) at the `async(...)` point; `await` returns the buffered outcome | Concurrent: the request runs on a host worker thread; `await` blocks for it |
 | `vera serve` / `<HttpServer>` handlers (#305) | Not available — the browser runtime does not host an HTTP accept loop | `vera serve` drives the accept loop with instance-per-request isolation |
+| `Inference.complete` (§9.5.5) | Returns an explanatory `Result.Err` from every call — an API key in client-side JavaScript is readable from page source and network traffic; reach a provider through a server-side endpoint called with `Http` | Calls the configured provider over HTTPS |
+| `DB.query` / `DB.execute` (§9.5.7) | Returns an explanatory `Result.Err` from every operation — the same credential-exposure boundary as `Inference` | Executes SQL against the database `VERA_DB_URL` selects |
 
-All non-IO operations (State, contracts, Markdown) produce identical results in both runtimes; for fused async the *values* are identical and only request timing differs (spec-conformant — §9.5.4 says an implementation MAY evaluate concurrently). This is enforced by mandatory parity tests.
+The `<HttpServer>`, `Inference` and `DB` rows are a deliberate platform boundary rather than a divergence awaiting a fix: the browser refuses those operations because the accept loop or credential they need has no safe home on that platform, and refusing is the behaviour the browser target defines for them.
+
+All non-IO operations (State, contracts, Markdown) produce identical results in both runtimes, with two exceptions that are tracked bugs rather than part of the browser target's definition: `json_stringify` ([#1293](https://github.com/aallan/vera/issues/1293)) and `md_render` ([#1294](https://github.com/aallan/vera/issues/1294)) differ between the hosts. For fused async the *values* are identical and only request timing differs (spec-conformant — §9.5.4 says an implementation MAY evaluate concurrently). Mandatory parity tests enforce identical results everywhere else; for those two they pin each host's current output as its own string, so a fix on either side goes red rather than passing unnoticed, and the pins collapse into an equality assertion once the outputs agree.
 
 ### 12.9.4 Memory Protocol
 
@@ -675,6 +679,8 @@ The `index.html` file uses an ES module script that imports from `vera-runtime.m
 
 ### 12.9.6 Parity Testing
 
-The browser parity test suite (`tests/test_browser.py`) runs every compilable example through both the Python/wasmtime runtime and the Node.js/JS-runtime, asserting identical stdout output. This catches any drift between the two implementations. The tests cover IO operations, State operations, contract violations, Markdown parsing/rendering, and browser bundle emission.
+The browser parity test suite (`tests/test_browser.py`) runs every compilable example — and per-binding batteries over the Map, Set, Decimal, Json, Regex and Markdown host imports — through both the Python/wasmtime runtime and the Node.js/JS-runtime, asserting identical stdout output. This catches drift between the two implementations everywhere the two exceptions below do not apply. The tests cover IO operations, State operations, contract violations, Markdown parsing/rendering, and browser bundle emission.
+
+The two operations where the hosts already disagree — `json_stringify` ([#1293](https://github.com/aallan/vera/issues/1293)) and `md_render` ([#1294](https://github.com/aallan/vera/issues/1294)), §12.9.3 — are the exception to the equality assertion: each runtime's current output is pinned as its own string, so the divergence cannot widen unnoticed and a fix on either side goes red. The same per-host pinning covers the browser stubs `IO.read_file` and `IO.read_char`, whose non-parity is by design.
 
 Pre-commit hooks trigger parity tests on any change to the host binding surface (`vera/browser/`, `vera/codegen/api.py`, `vera/wasm/markdown.py`, `vera/markdown.py`). CI runs the full parity suite on every PR.

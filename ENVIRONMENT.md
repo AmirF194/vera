@@ -27,7 +27,7 @@ The `Inference` effect ([spec/07-effects.md](spec/07-effects.md)) reaches an LLM
 - `VERA_XAI_API_KEY` (Grok)
 - `VERA_DEEPSEEK_API_KEY`
 
-Set exactly one (or use [`VERA_INFERENCE_PROVIDER`](#explicit-provider--model-overrides) to force a choice when more than one is set).  The conformance tests `tests/conformance/ch09_inference.vera` and `tests/conformance/ch09_http.vera` are skipped in CI because no provider key is set there; to run them locally:
+The order above is the registry order, and detection walks it and takes the **first** provider whose key is set — so setting more than one key is deterministic rather than ambiguous, but silently ignores every key after the first.  Set exactly one, or use [`VERA_INFERENCE_PROVIDER`](#explicit-provider--model-overrides) to name the one you mean.  The conformance tests `tests/conformance/ch09_inference.vera` and `tests/conformance/ch09_http.vera` are skipped in CI because no provider key is set there; to run them locally:
 
 ```bash
 export VERA_ANTHROPIC_API_KEY=sk-ant-...   # or any other key above, e.g. VERA_XAI_API_KEY=xai-...
@@ -38,7 +38,7 @@ The same export works for `examples/inference.vera` from `README.md`.
 
 ## Explicit provider / model overrides
 
-- **`VERA_INFERENCE_PROVIDER`** — set to `anthropic`, `openai`, `moonshot`, `mistral`, `xai`, or `deepseek` to force the runtime to use that provider, overriding the auto-detect-by-key logic.  Useful when more than one provider key is set in the environment (e.g. a development shell).
+- **`VERA_INFERENCE_PROVIDER`** — set to `anthropic`, `openai`, `moonshot`, `mistral`, `xai`, or `deepseek` to force the runtime to use that provider, overriding the auto-detect-by-key logic.  Useful when more than one provider key is set in the environment (e.g. a development shell), where auto-detection would otherwise take the first key in the order listed above.
 - **`VERA_INFERENCE_MODEL`** — set to a provider-specific model identifier to override the default model.  Each provider has its own default; consult the provider's docs for valid model strings.
 
 Both are optional.  When unset, the runtime uses auto-detection and the provider's default model.
