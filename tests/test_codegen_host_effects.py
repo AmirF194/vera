@@ -848,6 +848,7 @@ class TestInferenceProviderDispatch:
         # Bearer auth (OpenAI-compatible), not Anthropic-style key header
         assert req.get_header("Authorization") == "Bearer sk-xai"
         assert req.get_header("X-api-key") is None
+        assert req.get_header("Content-type") == "application/json"
         sent_body = json.loads(req.data.decode())
         assert sent_body["model"] == "grok-4.6"
         # The exact turn list, not just the key: a presence check stays green
