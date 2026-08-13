@@ -556,7 +556,7 @@ private fn classify(@String -> @Result<String, String>)
 | `VERA_MISTRAL_API_KEY` | Mistral AI API key |
 | `VERA_XAI_API_KEY` | xAI (Grok) API key |
 | `VERA_INFERENCE_PROVIDER` | Force a provider (`anthropic`, `openai`, `moonshot`, `mistral`, `xai`); auto-detected from whichever key is set if unset |
-| `VERA_INFERENCE_MODEL` | Override the model (defaults: `claude-haiku-4-5-20251001`, `gpt-4o-mini`, `kimi-k2-0905-preview`, `mistral-small-latest`, `grok-4.3`) |
+| `VERA_INFERENCE_MODEL` | Override the model.  Each provider's default is its flagship general-chat model: `claude-opus-5`, `gpt-5.6-sol`, `kimi-k3`, `mistral-large-latest`, `grok-4.6`.  A cheaper tier is reached by setting this variable |
 
 **Browser:** `Inference.complete` returns a detailed `Err` in browser runtimes — embedding API keys in client-side JavaScript is a security risk. Use a server-side proxy with the `Http` effect instead.
 

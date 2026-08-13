@@ -752,6 +752,10 @@ class TestInferenceProviderDispatch:
         assert "max_tokens" in sent_body
         assert "messages" in sent_body
         assert sent_body["max_tokens"] == 1024
+        # Literal, not _PROVIDERS[...].default_model: the registry-derived
+        # form pins the value to itself and stays green through any edit
+        # to the row, so it could not prove the flagship flip landed.
+        assert sent_body["model"] == "claude-opus-5"
 
     def test_openai_provider(self) -> None:
         """OpenAI branch uses correct endpoint, bearer auth, and OpenAI-compatible body."""
@@ -771,7 +775,10 @@ class TestInferenceProviderDispatch:
         assert req.get_header("X-api-key") is None
         assert req.get_header("Content-type") == "application/json"
         sent_body = json.loads(req.data.decode())
-        assert sent_body["model"] == _PROVIDERS["openai"].default_model
+        # Literal, not _PROVIDERS[...].default_model: the registry-derived
+        # form pinned the value to itself and stayed green through any edit
+        # to the row, so it could not prove the flagship flip landed.
+        assert sent_body["model"] == "gpt-5.6-sol"
         assert "messages" in sent_body
         assert "max_tokens" not in sent_body
 
@@ -789,7 +796,7 @@ class TestInferenceProviderDispatch:
         req = mock_urlopen.call_args[0][0]
         assert req.full_url == "https://api.moonshot.ai/v1/chat/completions"
         sent_body = json.loads(req.data.decode())
-        assert sent_body["model"] == "kimi-k2-0905-preview"
+        assert sent_body["model"] == "kimi-k3"
 
     def test_mistral_provider(self) -> None:
         """Mistral branch uses correct endpoint, default model, OpenAI-compatible format."""
@@ -808,7 +815,7 @@ class TestInferenceProviderDispatch:
         assert req.get_header("Authorization") == "Bearer sk-mistral"
         assert req.get_header("X-api-key") is None
         sent_body = json.loads(req.data.decode())
-        assert sent_body["model"] == "mistral-small-latest"
+        assert sent_body["model"] == "mistral-large-latest"
         # OpenAI-compatible body: has "messages", no Anthropic "max_tokens"
         assert "messages" in sent_body
         assert "max_tokens" not in sent_body
@@ -842,7 +849,7 @@ class TestInferenceProviderDispatch:
         assert req.get_header("Authorization") == "Bearer sk-xai"
         assert req.get_header("X-api-key") is None
         sent_body = json.loads(req.data.decode())
-        assert sent_body["model"] == "grok-4.3"
+        assert sent_body["model"] == "grok-4.6"
         # The exact turn list, not just the key: a presence check stays green
         # with the role flipped, the content dropped, or the list emptied.
         assert sent_body["messages"] == [{"role": "user", "content": "prompt"}]
