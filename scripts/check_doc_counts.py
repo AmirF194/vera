@@ -220,6 +220,101 @@ def check_contributing_hook_count(
     return []
 
 
+_CI_LINT_STEP = re.compile(
+    r"^\s+run:\s+(?:python\s+)?scripts/(\w+\.py)", re.MULTILINE
+)
+
+
+def _ci_lint_job(ci_text: str) -> str | None:
+    """The body of ci.yml's ``lint`` job, or ``None`` if it is not there.
+
+    Scoped to the one job rather than scanned whole-file: every other job
+    runs scripts too, and a whole-file scan would report them all as
+    undocumented.  Entry is gated on the ``jobs:`` key first, because
+    ``on:`` has two-space-indented children (``push:``, ``pull_request:``)
+    that are not jobs.
+    """
+    body: list[str] | None = None
+    in_jobs = False
+    for line in ci_text.splitlines():
+        if line.rstrip() == "jobs:":
+            in_jobs = True
+            continue
+        if not in_jobs:
+            continue
+        if re.match(r"^[a-z]", line):  # next top-level key ends `jobs:`
+            break
+        job = re.match(r"^  ([A-Za-z0-9_-]+):", line)
+        if job:
+            if job.group(1) == "lint":
+                body = []
+                continue
+            if body is not None:  # the next job ends lint's body
+                break
+        if body is not None:
+            body.append(line)
+    return "\n".join(body) if body is not None else None
+
+
+def check_ci_lint_scripts(testing_text: str, ci_text: str) -> list[str]:
+    """TESTING.md's CI-pipeline lint row against the workflow it describes.
+
+    The row hand-enumerates the scripts the lint job runs, in the job's own
+    order, and nothing tied the two together: a lint step added to
+    `.github/workflows/ci.yml` without a matching row entry left the
+    documentation describing 22 of the 23 scripts the job invokes, with
+    every gate green (found by hand on PR #1257, whose own script was the
+    omission).  It is the same hand-enumerated-list drift that PR's gate
+    exists to prevent, one layer out.
+
+    Order is compared, not just membership: the row reads as the sequence
+    the job runs, so a set-only comparison would let a reordered row lie.
+    A row or job that cannot be found is an error rather than a pass —
+    rewording either side must not switch the check off in silence.
+    """
+    body = _ci_lint_job(ci_text)
+    if body is None:
+        return [
+            "ci.yml: could not find the `lint` job under `jobs:`"
+            " — reword the check with the workflow"
+        ]
+    live = _CI_LINT_STEP.findall(body)
+    if not live:
+        return ["ci.yml: the `lint` job runs no `scripts/*.py` steps"]
+
+    rows = [
+        line for line in testing_text.splitlines()
+        if line.startswith("| **lint**")
+    ]
+    if len(rows) != 1:
+        return [
+            "TESTING.md: could not find the CI-pipeline `| **lint** |` row"
+            f" (matched {len(rows)}) — reword the check with the table"
+        ]
+    doc = re.findall(r"`(\w+\.py)`", rows[0])
+
+    if doc == live:
+        return []
+
+    errors = [
+        f"TESTING.md lint row: {name} runs in ci.yml's lint job but is"
+        " not listed"
+        for name in sorted(set(live) - set(doc))
+    ]
+    errors += [
+        f"TESTING.md lint row: {name} is listed but ci.yml's lint job"
+        " does not run it"
+        for name in sorted(set(doc) - set(live))
+    ]
+    if not errors:
+        errors.append(
+            "TESTING.md lint row: names the same scripts as ci.yml's lint"
+            " job but not in the same order, so the row cannot be read as"
+            f" the job's sequence — doc {doc}, workflow {live}"
+        )
+    return errors
+
+
 _HISTORY_VERSION_ROW = re.compile(r"^\| v\d+\.\d+\.[\d.]")
 
 
@@ -933,6 +1028,10 @@ def main() -> int:
                 f"TESTING.md CI job count: doc says {doc_ci},"
                 f" live is {live_ci_jobs}"
             )
+
+    # The lint job's contents, not just the job count: the row enumerates
+    # every script that job runs, and nothing held the two in step.
+    errors.extend(check_ci_lint_scripts(testing_md, ci_text))
 
     # ------------------------------------------------------------------
     # 6. Check inline conformance/example counts in TESTING.md body

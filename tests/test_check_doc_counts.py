@@ -15,8 +15,10 @@ is testable without a pytest collection run:
   against each other AND against the repository's tags.
 - ``check_contributing_hook_count`` — CONTRIBUTING.md's pre-commit hook
   count, against the live `.pre-commit-config.yaml`.
+- ``check_ci_lint_scripts`` — TESTING.md's CI-pipeline lint row against the
+  scripts `.github/workflows/ci.yml`'s lint job actually runs, in order.
 
-The last three share a failure mode with every other check here and it is
+The last four share a failure mode with every other check here and it is
 tested for each: a reworded sentence must be an ERROR, not a silent skip,
 or rewording switches the gate off.
 """
@@ -366,6 +368,130 @@ class TestContributingHookCount:
         errors = _MOD.check_contributing_hook_count(text, 33)
         assert len(errors) == 1
         assert "could not find" in errors[0]
+
+
+def _ci_workflow(*lint_scripts: str) -> str:
+    """A workflow whose ``lint`` job runs ``lint_scripts``, in order.
+
+    Deliberately carries decoys the check must not pick up: `on:` has
+    two-space-indented keys that are not jobs, and the `test`/`security`
+    jobs run scripts of their own.
+    """
+    steps = "".join(
+        f"      - name: Step {i}\n        run: python scripts/{name}\n"
+        for i, name in enumerate(lint_scripts)
+    )
+    return (
+        "name: CI\n\non:\n  push:\n    branches: [main]\n  pull_request:\n\n"
+        "jobs:\n"
+        "  test:\n    steps:\n      - run: python scripts/decoy_test.py\n\n"
+        "  lint:\n    steps:\n" + steps + "      - name: Lint (ruff)\n"
+        "        run: ruff check .\n\n"
+        "  security:\n    steps:\n      - run: python scripts/decoy_sec.py\n"
+    )
+
+
+def _lint_row(*scripts: str) -> str:
+    listed = ", ".join(f"`{s}`" for s in scripts)
+    return (
+        "## CI Pipeline\n\n"
+        "| Job | Matrix / Runner | What it checks |\n"
+        "|-----|----------------|---------------|\n"
+        f"| **lint** | Python 3.12 x Ubuntu | {listed}, `ruff check .`,"
+        " `uv lock --check` |\n"
+    )
+
+
+class TestCiLintScripts:
+    """TESTING.md's CI-pipeline lint row against the workflow it describes.
+
+    The row hand-enumerates the scripts the lint job runs, and nothing tied
+    the two together: PR #1257 added `check_editor_grammars.py` as a lint-job
+    step without adding it to the row, and the documentation described 22 of
+    23 scripts with every gate green.
+    """
+
+    def test_matching_row_passes(self) -> None:
+        assert _MOD.check_ci_lint_scripts(
+            _lint_row("check_a.py", "check_b.py"),
+            _ci_workflow("check_a.py", "check_b.py"),
+        ) == []
+
+    def test_only_the_lint_job_is_read(self) -> None:
+        # The fixture's other jobs run decoy_test.py and decoy_sec.py.  A
+        # whole-file scan would report both as undocumented; a job-scoped
+        # one reports nothing.
+        errors = _MOD.check_ci_lint_scripts(
+            _lint_row("check_a.py"), _ci_workflow("check_a.py")
+        )
+        assert errors == [], errors
+
+    def test_missing_entry_fails(self) -> None:
+        # The drift that actually shipped: a step in CI, absent from the row.
+        errors = _MOD.check_ci_lint_scripts(
+            _lint_row("check_a.py"),
+            _ci_workflow("check_a.py", "check_b.py"),
+        )
+        assert len(errors) == 1
+        assert "check_b.py" in errors[0]
+        assert "not listed" in errors[0]
+
+    def test_extra_entry_fails(self) -> None:
+        # The other direction: a row entry CI stopped running.
+        errors = _MOD.check_ci_lint_scripts(
+            _lint_row("check_a.py", "check_b.py"),
+            _ci_workflow("check_a.py"),
+        )
+        assert len(errors) == 1
+        assert "check_b.py" in errors[0]
+        assert "does not run it" in errors[0]
+
+    def test_order_mismatch_fails(self) -> None:
+        # Same set, different sequence.  The row reads as the job's order, so
+        # a set-only comparison would call this clean and let the row lie.
+        errors = _MOD.check_ci_lint_scripts(
+            _lint_row("check_b.py", "check_a.py"),
+            _ci_workflow("check_a.py", "check_b.py"),
+        )
+        assert len(errors) == 1
+        assert "not in the same order" in errors[0]
+
+    def test_reworded_row_is_an_error_not_a_skip(self) -> None:
+        # Renaming the job label loses the row; the scripts must stop being
+        # "checked" loudly, not quietly.
+        text = _lint_row("check_a.py").replace("| **lint**", "| **linting**")
+        errors = _MOD.check_ci_lint_scripts(text, _ci_workflow("check_a.py"))
+        assert len(errors) == 1
+        assert "could not find" in errors[0]
+
+    def test_missing_lint_job_is_an_error_not_a_skip(self) -> None:
+        # And the same on the workflow side — a renamed job would otherwise
+        # leave the row compared against nothing.
+        ci = _ci_workflow("check_a.py").replace("  lint:", "  linting:")
+        errors = _MOD.check_ci_lint_scripts(_lint_row("check_a.py"), ci)
+        assert len(errors) == 1
+        assert "could not find" in errors[0]
+        assert "lint" in errors[0]
+
+    def test_the_shipped_row_matches_the_workflow(self) -> None:
+        """The tree is currently clean — this is what keeps CI red if a lint
+        step is added without the row, which is how the drift got in."""
+        root = _SCRIPT.parent.parent
+        testing = (root / "TESTING.md").read_text(encoding="utf-8")
+        ci = (root / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        assert _MOD.check_ci_lint_scripts(testing, ci) == []
+
+    def test_the_shipped_row_with_an_entry_removed_fails(self) -> None:
+        """Mutation of the artefact rather than the checker: drop the entry
+        that actually drifted and the real files must go red."""
+        root = _SCRIPT.parent.parent
+        testing = (root / "TESTING.md").read_text(encoding="utf-8")
+        ci = (root / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        mutated = testing.replace("`check_editor_grammars.py`, ", "", 1)
+        assert mutated != testing
+        errors = _MOD.check_ci_lint_scripts(mutated, ci)
+        assert len(errors) == 1
+        assert "check_editor_grammars.py" in errors[0]
 
 
 def _readme(n: int) -> str:
