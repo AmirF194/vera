@@ -139,6 +139,20 @@ repos:
         pass_filenames: false
         files: '(\.md$|vera/environment\.py$|vera/prelude\.py$)'
 
+      # #683 — fails when a rule name exists in spec/10-grammar.md's EBNF but
+      # not in vera/grammar.lark, or the other way round.  Chapter 10 is the
+      # published map of the parse tree and drifted from it: the spec still
+      # called the assertion forms assert_stmt/assume_stmt after they became
+      # expressions, and three Lark rules (pure_effect, effect_set,
+      # with_clause) appeared in no EBNF block at all.  Rule names only — the
+      # bodies are not compared.
+      - id: grammar-alignment
+        name: grammar rule-name alignment
+        entry: .venv/bin/python scripts/check_grammar_alignment.py
+        language: system
+        pass_filenames: false
+        files: '(vera/grammar\.lark$|spec/10-grammar\.md$|scripts/check_grammar_alignment\.py$)'
+
       # Layer 1 of #626 — fails when any compile of an example or
       # conformance program emits [E602] (body unsupported) or
       # [E604] (param unsupported) outside the explicit allowlist

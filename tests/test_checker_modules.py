@@ -1353,11 +1353,17 @@ class TestReservedFnName:
 
     * ``old``, ``new`` — declaration accepted, call rejected (E030 / E031).
       Reserved here, as ``_STATE_FORM_FN_NAMES``.
-    * ``resume``, ``throw``, ``with``, ``in``, ``effect``, ``op``, ``data``,
-      ``type``, ``import``, ``public``, ``private``, ``requires``,
-      ``ensures``, ``effects``, ``decreases``, ``where``, ``then``, ``else``,
-      ``pure``, ``invariant`` — declaration *and* call both accepted.  Not
-      reserved; nothing is wrong with them.
+    * ``throw``, ``with``, ``in``, ``effect``, ``op``, ``data``, ``type``,
+      ``import``, ``public``, ``private``, ``requires``, ``ensures``,
+      ``effects``, ``decreases``, ``where``, ``then``, ``else``, ``pure``,
+      ``invariant`` — declaration *and* call both accepted.  Not reserved;
+      nothing is wrong with them.
+    * ``resume`` — declaration and call both accepted here too, which is why
+      this probe row once read "nothing is wrong with it".  Something is: the
+      accepted declaration collides with the resumption binding every handler
+      clause body carries, and breaks handlers elsewhere in the file.  It is
+      reserved as ``_HANDLER_OPERATOR_FN_NAMES`` and
+      :class:`TestReservedResumeFnName` owns that piece.
     * ``assert``, ``assume``, ``forall``, ``exists``, ``match``, ``if``,
       ``let``, ``fn``, ``true``, ``false`` — the keyword class, reserved by
       #1187 as ``_KEYWORD_FN_NAMES``; ``handle`` is carved back out as a
@@ -1868,6 +1874,234 @@ effect Renamer {{
 }}
 """)
         assert exc.value.diagnostic.error_code == "E005"
+
+
+class TestReservedResumeFnName:
+    """A ``fn`` named ``resume`` is rejected at its declaration (E153).
+
+    ``resume`` is unlike both earlier pieces.  It is not a grammar keyword —
+    ``vera/grammar.lark`` has no ``RESUME`` terminal, and ``resume`` lexes as
+    an ordinary ``LOWER_IDENT`` in every position — so the declaration parses
+    *and* unqualified calls to it resolve and run outside a handler clause.
+    It is not a declarable trap; it is a name collision.
+
+    Inside a handler clause body the checker binds ``resume`` to the
+    effect-resumption operator (``vera/checker/control.py``), typed from the
+    handled operation's return type.  One spelling would therefore mean two
+    different things depending on position — and worse, measured against the
+    pre-reservation tree, a top-level ``private fn resume(@Int -> @Int)``
+    made the clause bodies of an *otherwise valid* ``handle[State<Int>]``
+    resolve against the user's signature: ``put(@Int) -> { resume(()) }``
+    was rejected ``[E202]`` "has type Unit, expected Int", and with the
+    declaration removed the identical handler checked clean.  Declaring the
+    name broke working code elsewhere in the file.
+
+    Spec §1.4 already listed ``resume`` among the identifiers that MUST NOT
+    be used as function names; nothing enforced it.
+    """
+
+    @staticmethod
+    def _codes(errs: list[Diagnostic]) -> list[str]:
+        return [e.error_code for e in errs]
+
+    def test_fn_named_resume_is_E153(self) -> None:
+        errs = _errors("""
+public fn resume(@Int -> @Int)
+  requires(true) ensures(@Int.result >= 0) effects(pure)
+{ 5 }
+""")
+        assert "E153" in self._codes(errs), self._codes(errs)
+        diag = next(e for e in errs if e.error_code == "E153")
+        assert "resume" in diag.description
+        assert "reserved" in diag.description.lower()
+        assert diag.rationale and diag.fix and diag.spec_ref
+        assert "Chapter 5" in diag.spec_ref
+        assert "rename" in diag.fix.lower()
+
+    def test_private_fn_named_resume_is_E153(self) -> None:
+        """Visibility-independent: the collision is with the handler binding,
+        which a ``private`` declaration reaches just as well."""
+        errs = _errors("""
+private fn resume(@Int -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ @Int.0 }
+""")
+        assert "E153" in self._codes(errs), self._codes(errs)
+
+    def test_where_helper_named_resume_is_E153(self) -> None:
+        """A ``where``-helper named ``resume`` is rejected one scope deeper.
+
+        ``tests/probes/state_handlers/dispatch_paths/w_resume.vera`` is the
+        adversarial-review probe for exactly this shape.
+        """
+        errs = _errors("""
+private fn outer(@Int -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ resume(@Int.0) }
+where {
+  fn resume(@Int -> @Int)
+    requires(true) ensures(true) effects(pure)
+  { @Int.0 }
+}
+""")
+        assert "E153" in self._codes(errs), self._codes(errs)
+
+    def test_rationale_does_not_claim_resume_is_a_keyword(self) -> None:
+        """The keyword branch's reason would be false here.
+
+        It says the declaration parses only because the lexer reads the name
+        after ``fn``, and that in a body the spelling is always the keyword so
+        no unqualified call site can reach the declaration.  Both are false of
+        ``resume``: it is never a keyword token, and a bare ``resume(7)``
+        outside a handler resolved to the declaration and ran.  The diagnostic
+        must give the collision reason instead.
+        """
+        errs = _errors("""
+public fn resume(@Int -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ 5 }
+""")
+        diag = next(e for e in errs if e.error_code == "E153")
+        assert diag.rationale is not None
+        reason = diag.rationale.lower()
+        assert "keyword the grammar reserves" not in reason, diag.rationale
+        assert "no unqualified call site" not in reason, diag.rationale
+        assert "contract state form" not in reason, diag.rationale
+        assert "handler" in reason, diag.rationale
+
+    def test_resume_stays_available_inside_handler_clauses(self) -> None:
+        """The reservation is on *declarations* only.
+
+        The handler-clause binding is injected by the checker, not declared,
+        so every existing ``resume(...)`` call site is untouched.  This is the
+        blast-radius pin: reserving the name must not disturb the machinery
+        the name exists for.
+        """
+        _check_ok("""
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[State<Int>](@Int = 1) {
+    get(@Unit) -> { resume(5) },
+    put(@Int) -> { resume(()) }
+  } in {
+    get(())
+  }
+}
+""")
+
+    def test_wrong_typed_resume_argument_in_a_clause_is_still_E202(self) -> None:
+        """The clause binding stays type-checked, not merely present.
+
+        The companion to
+        :meth:`test_resume_stays_available_inside_handler_clauses`: that one
+        shows a correctly-typed ``resume`` still checks, this one shows a
+        wrongly-typed one is still caught.  A binding that accepted anything
+        would satisfy the first test alone.  ``State<Int>``'s ``get`` returns
+        ``Int``, so the clause's ``resume`` takes an ``Int`` and a ``String``
+        argument is E202.
+        """
+        errs = _errors("""
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[State<Int>](@Int = 1) {
+    get(@Unit) -> { resume("bad") },
+    put(@Int) -> { resume(()) }
+  } in {
+    get(())
+  }
+}
+""")
+        assert "E202" in self._codes(errs), self._codes(errs)
+        diag = next(e for e in errs if e.error_code == "E202")
+        assert "resume" in diag.description, diag.description
+
+    def test_a_rejected_resume_declaration_does_not_accuse_a_valid_handler(
+        self,
+    ) -> None:
+        """E153 is the whole story; the handler in the same file is innocent.
+
+        The rejected declaration used to stay in ``env.functions``, where the
+        lexically-scoped call lookup preferred it over the binding the clause
+        installs, so `put(@Int) -> { resume(()) }` — correct code — drew a
+        second error reading "has type Unit, expected Int", whose stated fix
+        would have broken it.  Same reason E151 and E152 skip registering what
+        they reject: one fault, one diagnostic, at the declaration.
+        """
+        errs = _errors("""
+private fn resume(@Int -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ @Int.0 }
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[State<Int>](@Int = 1) {
+    get(@Unit) -> { resume(5) },
+    put(@Int) -> { resume(()) }
+  } in {
+    get(())
+  }
+}
+""")
+        assert self._codes(errs) == ["E153"], [
+            (e.error_code, e.description) for e in errs
+        ]
+
+    def test_a_rejected_resume_where_helper_does_not_accuse_its_handler(
+        self,
+    ) -> None:
+        """The same, one scope deeper.
+
+        A where-helper is registered by the shared ``register_fn`` walk, so
+        stripping it at the top level alone would leave the cascade in place
+        here.
+        """
+        errs = _errors("""
+private fn outer(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[State<Int>](@Int = 1) {
+    get(@Unit) -> { resume(5) },
+    put(@Int) -> { resume(()) }
+  } in {
+    get(())
+  }
+}
+where {
+  fn resume(@Int -> @Int)
+    requires(true) ensures(true) effects(pure)
+  { @Int.0 }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ outer(()) }
+""")
+        assert self._codes(errs) == ["E153"], [
+            (e.error_code, e.description) for e in errs
+        ]
+
+    def test_resume_set_is_its_own_named_piece(self) -> None:
+        """``resume`` must not be filed under the keyword or state-form sets.
+
+        Both carry a rationale that would be false for it, and
+        ``TestReservedKeywordFnName.test_keyword_tuple_matches_checker_set``
+        pins the keyword set against a per-keyword test list ``resume`` has no
+        business joining.
+        """
+        from vera.checker.registration import (
+            _HANDLER_OPERATOR_FN_NAMES,
+            _KEYWORD_FN_NAMES,
+            _RESERVED_FN_NAMES,
+            _STATE_FORM_FN_NAMES,
+        )
+
+        assert _HANDLER_OPERATOR_FN_NAMES == frozenset({"resume"})
+        assert "resume" not in _KEYWORD_FN_NAMES
+        assert "resume" not in _STATE_FORM_FN_NAMES
+        assert "resume" in _RESERVED_FN_NAMES
 
 
 # =====================================================================

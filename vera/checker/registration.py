@@ -76,8 +76,10 @@ def builtin_effect_names() -> frozenset[str]:
 # surface later as a call-site error, the same one-canonical-form rule as E151
 # (built-in functions) and E152 (built-in effects).
 #
-# The set is assembled from three named pieces so a future addition joins the
-# right one deliberately.
+# The set is assembled from four named pieces so a future addition joins the
+# right one deliberately.  Piece 3 is the exception to the paragraph above: its
+# name *is* reachable from expression position, and is reserved because that
+# reachability collides with a binding the checker injects.
 
 # 1. The two contract state forms (#1181).  ``old_expr`` and ``new_expr`` in
 # ``vera/grammar.lark`` claim ``"old" "("`` and ``"new" "("``, and each demands
@@ -89,15 +91,39 @@ _STATE_FORM_FN_NAMES = frozenset({"old", "new"})
 # declaration position (#1187).  Each declares fine and none can be written in
 # expression position: a bare ``match(3)`` does not parse at all (``[E005]``),
 # and ``assert(3)`` / ``assume(3)`` are read as the statement forms and collide
-# (``[E121]`` + ``[E172]``/``[E173]``).  Keywords the lexer does *not* admit as
-# a function name (``resume``, ``with``, ``effect``, ``data``, …) need no entry
-# here — the parser already refuses those declarations.
+# (``[E121]`` + ``[E172]``/``[E173]``).  Membership is decided by what the
+# *lexer* does with the name, and it splits the rest of spec §1.4's keyword
+# list two ways.  ``with``, ``effect``, ``data``, ``type`` and their kind are
+# refused at parse: the contextual lexer does not admit them as a function
+# name, so no declaration reaches this checker at all.  ``resume`` is refused
+# by neither — it is not a keyword token anywhere — and is reserved below on
+# its own grounds, by the checker rather than the parser.
 _KEYWORD_FN_NAMES = frozenset({
     "assert", "assume", "forall", "exists", "match",
     "if", "let", "fn", "true", "false", "handle",
 })
 
-# 3. The carve-out: names a *host* invokes rather than Vera source, so being
+# 3. The handler-clause operator.  ``resume`` is reserved by spec §1.4, and it
+# is the one name here that is not a declarable trap: it is never a keyword
+# token, so ``fn resume(...)`` parses, and outside a handler clause a bare
+# ``resume(7)`` resolves to the declaration and runs.  What it collides with is
+# the binding ``check_handle_expr`` injects into ``env.functions`` for the
+# duration of each clause body (``vera/checker/control.py``), typed from the
+# handled operation's return type.  One spelling would mean the user's function
+# in one position and the resumption operator in another — and measured against
+# the pre-reservation tree it was worse than ambiguous: with a top-level
+# ``private fn resume(@Int -> @Int)`` in the file, an otherwise valid
+# ``handle[State<Int>]`` was rejected, its ``put`` clause's ``resume(())``
+# failing ``[E202]`` against the *user's* Int parameter.  Removing the
+# declaration made the identical handler check clean.  So the declaration is
+# refused here, at the checker: the parser has no keyword to refuse it with.
+# That shadowing is also cut off at its source, in
+# :meth:`TypeChecker._lookup_function_scoped`, which resolves these names
+# against the flat registry alone — otherwise the rejected declaration would
+# still draw a second, misleading error out of the correct clause bodies.
+_HANDLER_OPERATOR_FN_NAMES = frozenset({"resume"})
+
+# 4. The carve-out: names a *host* invokes rather than Vera source, so being
 # uncallable from expression position does not make them dead code.
 # ``public fn handle(@Request -> @Response)`` is the ``vera serve`` /
 # ``wasi:http`` entry point (spec §9.5.6, ``examples/http_server.vera``).  A
@@ -112,7 +138,8 @@ _HOST_INVOKED_FN_NAMES = frozenset({"handle"})
 # route deliberately — a name that is a trap in every unqualified position is
 # reserved outright rather than left half-usable.
 _RESERVED_FN_NAMES = (
-    (_STATE_FORM_FN_NAMES | _KEYWORD_FN_NAMES) - _HOST_INVOKED_FN_NAMES
+    (_STATE_FORM_FN_NAMES | _KEYWORD_FN_NAMES | _HANDLER_OPERATOR_FN_NAMES)
+    - _HOST_INVOKED_FN_NAMES
 )
 
 
@@ -432,16 +459,19 @@ class RegistrationMixin:
 
     def _check_reserved_fn_name(self, decl: ast.FnDecl) -> None:
         """Emit E153 if ``decl`` — or a nested where-helper — is named after a
-        contract state form (#1181) or a grammar keyword (#1187).
+        contract state form (#1181), a grammar keyword (#1187), or the
+        handler-clause resumption operator.
 
         Recurses into ``where_fns``: a helper is called in expression position
         exactly like a top-level function, so a helper named ``old`` or
-        ``match`` is unreachable for the same reason, one scope deeper.
+        ``match`` is unreachable for the same reason, one scope deeper, and a
+        helper named ``resume`` collides with the same injected binding.
 
         The rationale branches on which piece of :data:`_RESERVED_FN_NAMES`
-        the name came from — the two are reserved for different reasons, and
-        telling a reader that ``match`` is a "contract state form" would be
-        false.  The fix is the same on both branches: rename.
+        the name came from — the three are reserved for different reasons, and
+        telling a reader that ``match`` is a "contract state form", or that
+        ``resume`` is a keyword no call site can reach, would be false.  The
+        fix is the same on every branch: rename.
 
         The rejected declaration is still registered, unlike E151's.  There is
         no canonical built-in for the name to shadow here — nothing can resolve
@@ -471,6 +501,28 @@ class RegistrationMixin:
                     f"update its call sites. Only the exact spellings 'old' "
                     f"and 'new' are reserved — 'older' and 'renew' are "
                     f"ordinary function names."
+                )
+            elif n in _HANDLER_OPERATOR_FN_NAMES:
+                rationale = (
+                    f"'{n}' names the operator that resumes a suspended "
+                    f"effect operation, which the checker binds inside every "
+                    f"handler clause body. Unlike the other reserved names "
+                    f"this one is not a keyword and does parse as an ordinary "
+                    f"call, so the declaration would give '{n}(...)' two "
+                    f"meanings that depend on where it is written: this "
+                    f"function outside a handler clause, the resumption "
+                    f"operator inside one. Vera provides exactly one way to "
+                    f"express each construct, so the name means the operator "
+                    f"and nothing else."
+                )
+                fix = (
+                    f"Rename the function to an identifier that is not "
+                    f"reserved — one describing what it computes, such as "
+                    f"'{n}_with' or 'continue_from' — and update its call "
+                    f"sites. The reservation is on the whole identifier, so "
+                    f"'{n}d' or '{n}_at' are ordinary function names. "
+                    f"Resuming inside a handler clause is unaffected: that "
+                    f"'{n}' is bound by the handler, not declared."
                 )
             else:
                 rationale = (

@@ -150,6 +150,9 @@ jobs:
       - name: Check spec code blocks parse correctly
         run: python scripts/check_spec_examples.py
 
+      - name: Check spec EBNF and Lark grammar agree on rule names (#683)
+        run: python scripts/check_grammar_alignment.py
+
       - name: Check README code blocks parse correctly
         run: python scripts/check_readme_examples.py
 

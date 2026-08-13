@@ -46,7 +46,6 @@ ASSUME: "assume"
 ABILITY: "ability"
 EFFECT: "effect"
 HANDLE: "handle"
-RESUME: "resume"
 WITH: "with"
 IN: "in"
 FORALL: "forall"
@@ -60,10 +59,6 @@ NEW: "new"
 EFFECTS: "effects"
 EXISTS: "exists"
 RESULT: "result"
-SOME: "Some"
-NONE: "None"
-OK: "Ok"
-ERR: "Err"
 
 // Operators
 PLUS: "+"
@@ -96,7 +91,7 @@ LBRACKET: "["
 RBRACKET: "]"
 COMMA: ","
 SEMICOLON: ";"
-COLON: ":"
+DOUBLE_COLON: "::"
 BAR: "|"
 UNDERSCORE: "_"
 
@@ -179,8 +174,12 @@ decreases_clause: DECREASES LPAREN expr (COMMA expr)* RPAREN
 
 effect_clause: EFFECTS LPAREN effect_row RPAREN
 
-effect_row: PURE
-          | LT effect_list GT
+effect_row: pure_effect
+          | effect_set
+
+pure_effect: PURE
+
+effect_set: LT effect_list GT
 
 effect_list: effect_ref (COMMA effect_ref)*
            | UPPER_IDENT  // effect variable
@@ -294,8 +293,8 @@ primary_expr: INT_LIT
             | tuple_literal                 // Tuple(1, "hello")
             | old_expr                      // old(State<Int>)
             | new_expr                      // new(State<Int>)
-            | assert_stmt                   // assert(pred)
-            | assume_stmt                   // assume(pred)
+            | assert_expr                   // assert(pred)
+            | assume_expr                   // assume(pred)
             | forall_expr                   // forall(@Nat, bound, pred_fn)
             | exists_expr                   // exists(@Nat, bound, pred_fn)
             | LPAREN expr RPAREN            // parenthesized expression
@@ -362,8 +361,6 @@ block_expr: LBRACE block_contents RBRACE
 block_contents: statement* expr
 
 statement: let_stmt
-         | assert_stmt SEMICOLON
-         | assume_stmt SEMICOLON
          | expr SEMICOLON                 // expression statement (for effects)
 
 let_stmt: LET AT type_expr ASSIGN expr SEMICOLON
@@ -379,18 +376,20 @@ handle_expr: HANDLE LBRACKET effect_ref RBRACKET handler_state? LBRACE handler_c
 
 handler_state: LPAREN AT type_expr ASSIGN expr RPAREN
 
-handler_clause: LOWER_IDENT LPAREN handler_params? RPAREN ARROW handler_body
+handler_clause: LOWER_IDENT LPAREN handler_params? RPAREN ARROW handler_body with_clause?
 
 handler_params: AT type_expr (COMMA AT type_expr)*
 
 handler_body: expr
 // Block expressions ({ ... }) are reachable via expr, so no separate alternative is needed.
 
-// resume is a special built-in call within handler bodies:
-// resume(expr)
-// resume(expr) with @T = expr
-// These are parsed as regular function calls; 'resume' and 'with' are keywords.
+with_clause: WITH AT type_expr ASSIGN expr
+// The state update of a stateful handler clause: resume(expr) with @T = expr.
+// It attaches to the clause, not to resume — resume is a LOWER_IDENT, not a
+// keyword terminal, so resume(expr) is parsed as a regular fn_call.
 ```
+
+`resume` stays an ordinary `LOWER_IDENT` at every point above: no production and no terminal mentions it, and the parser gives it no special treatment. Its reservation as a function name (Chapter 1, Section 1.4) is therefore enforced after parsing, by the checker — `fn resume(...)` parses and is then rejected **E153** (Chapter 5, Section 5.2). The two statements are about different phases and do not conflict.
 
 ### 10.3.16 Array Literals
 
@@ -405,14 +404,16 @@ old_expr: OLD LPAREN effect_ref RPAREN
 
 new_expr: NEW LPAREN effect_ref RPAREN
 
-assert_stmt: ASSERT LPAREN expr RPAREN
+assert_expr: ASSERT LPAREN expr RPAREN
 
-assume_stmt: ASSUME LPAREN expr RPAREN
+assume_expr: ASSUME LPAREN expr RPAREN
 
 forall_expr: FORALL LPAREN AT type_expr COMMA expr COMMA anonymous_fn RPAREN
 
 exists_expr: EXISTS LPAREN AT type_expr COMMA expr COMMA anonymous_fn RPAREN
 ```
+
+`assert_expr` and `assume_expr` are expressions, reachable through `primary_expr` like any other. `assert(p);` is a statement only by way of `expr SEMICOLON`, which is also where it is almost always written; nothing stops either from appearing in any other expression position.
 
 ### 10.3.18 Tuple Literals
 

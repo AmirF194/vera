@@ -888,7 +888,22 @@ class TypeChecker(
         (E151, #815) is skipped — the built-in stays canonical.  With an
         empty stack (data invariants, op signatures) this is exactly the
         old flat lookup.
+
+        A handler-clause operator name skips both scoped tiers and resolves
+        against the flat registry alone, because that is the only place its
+        binding can live: ``check_handle_expr`` installs one there for the
+        duration of each clause body.  In a valid program this changes
+        nothing — the name is reserved (E153), so no declaration of it
+        exists to be found in either tier.  In a program that declares one
+        anyway, it stops the rejected declaration from shadowing the clause
+        binding and turning correct clause bodies into argument-type errors
+        against the user's signature, a second error chasing the first.  The
+        other reserved names need no such carve-out: nothing resolves to
+        ``old`` or ``match`` at all.
         """
+        from vera.checker.registration import _HANDLER_OPERATOR_FN_NAMES
+        if name in _HANDLER_OPERATOR_FN_NAMES:
+            return self.env.lookup_function(name)
         for frame in reversed(self._fn_scope_stack):
             for wfn in frame.where_fns or ():
                 if (wfn.name == name

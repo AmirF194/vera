@@ -27,13 +27,15 @@ private fn function_name(@ParamType1, @ParamType2 -> @ReturnType)
 }
 ```
 
-An identifier the grammar claims in expression position is unavailable as a function name. Two groups are affected.
+An identifier the grammar claims in expression position is unavailable as a function name. Two groups are affected, and a third name is reserved for a different reason.
 
 The first is the contract state forms `old` and `new` — in expression position `old(...)` and `new(...)` name an effect's state before and after a call, and take an effect reference rather than an arbitrary expression (Chapter 7, Section 7.9.2). A bare call written `old(x)` is therefore always read as a state reference, never as a function call.
 
 The second is the keywords the lexer admits as a name after `fn` but reads as the keyword everywhere else: `assert`, `assume`, `forall`, `exists`, `match`, `if`, `let`, `fn`, `true`, and `false`. A body containing `match(x)` does not parse as a call at all.
 
-In both groups the declaration parses and no bare call can reach it: a function under such a name cannot be called from its own file, and a module cannot call its own export. The only route that reaches one is a module-qualified call (`mod::old(...)`, Chapter 8), which parses through the module-call rule — leaving the name a trap in every unqualified position and half-usable cross-module. Vera reserves the whole identifier instead: declaring a function under any of these names is a compile error (**E153**); rename the function. The restriction is on the whole identifier, so names that merely begin with a reserved word — `older`, `renew`, `matched` — are ordinary function names.
+`resume` is reserved on separate grounds. It is not a keyword — a declaration parses, and outside a handler clause a bare `resume(...)` reaches it — but inside every handler clause body `resume` names the operator that resumes the suspended operation (Chapter 7, Section 7.5.2), bound there rather than declared. A function of that name would give one spelling two meanings by position, which the one-canonical-form rule does not admit. Chapter 1, Section 1.4 lists the identifier as reserved; **E153** enforces it, at the declaration and alone — a clause body in the same file still resolves `resume` to the operator, so the rejected declaration draws no second error. Resuming inside a handler clause is unaffected.
+
+In both of the first two groups the declaration parses and no bare call can reach it: a function under such a name cannot be called from its own file, and a module cannot call its own export. The only route that reaches one is a module-qualified call (`mod::old(...)`, Chapter 8), which parses through the module-call rule — leaving the name a trap in every unqualified position and half-usable cross-module. Vera reserves the whole identifier instead: declaring a function under any of these names is a compile error (**E153**); rename the function. The restriction is on the whole identifier, so names that merely begin with a reserved word — `older`, `renew`, `matched` — are ordinary function names.
 
 `handle` is the one exception. It is a keyword, and equally uncallable from Vera source, but `public fn handle(@Request -> @Response)` is the entry point a *host* invokes under `vera serve` and `wasi:http` (Chapter 9, Section 9.5.6), so it is not dead code and stays legal. A future host-invoked entry point is exempted on the same grounds; nothing else is.
 
