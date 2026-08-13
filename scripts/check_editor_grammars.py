@@ -8,12 +8,15 @@ reached the vscode and TextMate grammars, and ``DB`` (v0.1.7) reached none of
 the three.  The drift is silent: an unknown capitalised identifier falls
 through to the generic type-reference rule, so ``DB.query(...)`` still
 highlights as *something*, just not as an effect.  Nothing failed when an
-effect was added and the grammars were skipped, so four accumulated.
+effect was added and the grammars were skipped, so four accumulated.  The
+vscode and TextMate READMEs each repeat the list in prose and had drifted to
+the same stale six, so they are checked by the same comparison.
 
 Source of truth is :func:`vera.introspect.effects_payload` — the same registry
-``vera effects --json`` publishes, read in-process.  It is deliberately *not* a
-second hand-written copy of the list: a check whose expected value comes from
-the artefact it validates can only catch tampering, never drift.
+``vera effects --json`` publishes, read in-process from *this* checkout (hence
+the ``sys.path`` bootstrap below).  It is deliberately *not* a second
+hand-written copy of the list: a check whose expected value comes from the
+artefact it validates can only catch tampering, never drift.
 
 The test is word-boundary presence, and its error direction is the right way
 round.  **Absence is conclusive** — a name that appears nowhere in the grammar
@@ -26,10 +29,10 @@ later if presence ever produces a false pass.
 
 Scope is effects only.  Whether the four abilities (``Eq``/``Hash``/``Ord``/
 ``Show``) should highlight distinctly from ordinary types is an open design
-question (#1156 work-item 2), so they are not gated here.  Built-in *functions*
-are deliberately out of scope too: no grammar enumerates them (all three match
-calls with a generic "lowercase identifier followed by ``(``" pattern), so
-there is nothing to drift.
+question, tracked separately as #1295, so they are not gated here.  Built-in
+*functions* are deliberately out of scope too: no grammar enumerates them (all
+three match calls with a generic "lowercase identifier followed by ``(``"
+pattern), so there is nothing to drift.
 """
 
 from __future__ import annotations
@@ -39,7 +42,14 @@ import sys
 from collections.abc import Iterable
 from pathlib import Path
 
-from vera.introspect import effects_payload
+# Import from the working tree, not whatever `vera` is on PATH — a
+# pre-commit hook's interpreter is not the venv's (see CLAUDE.md), and from a
+# git worktree an editable install still points at the main checkout, so the
+# registry read would come from a different tree than the grammars.
+_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_ROOT))
+
+from vera.introspect import effects_payload  # noqa: E402
 
 # Every grammar that enumerates effect names, relative to the repo root.
 GRAMMARS = (
@@ -56,8 +66,34 @@ GRAMMARS = (
 # auto-scan: whether a file enumerates effect names is a human judgement (the
 # Vim ftdetect/ftplugin files do not), and a loud "add this to GRAMMARS" keeps
 # that judgement explicit instead of guessing.
+# ``.tmlanguage.json`` is listed beside ``.tmlanguage`` because the match is on
+# the whole filename: the vscode grammar is ``vera.tmLanguage.json``, so a copy
+# of it filed outside a syntax directory would otherwise slip past both halves
+# of the guard.  ``.scm`` catches the tree-sitter editors (Helix, Neovim,
+# Zed), whose highlight queries live in ``queries/`` rather than ``syntax/``.
 GRAMMAR_DIRS = frozenset({"syntax", "syntaxes"})
-GRAMMAR_SUFFIXES = (".tmlanguage", ".sublime-syntax", ".el")
+GRAMMAR_SUFFIXES = (
+    ".tmlanguage",
+    ".tmlanguage.json",
+    ".sublime-syntax",
+    ".el",
+    ".scm",
+)
+
+# The two extension READMEs repeat the effect list in prose, one bullet each,
+# and drifted to exactly the same stale six as the grammars they document.
+# They go through the same registry comparison — the presence test does not
+# care that the surrounding text is Markdown rather than a keyword rule, and a
+# documented list that has fallen behind the grammar is the same defect one
+# layer out.  Not part of GRAMMARS because the completeness guard is about
+# unchecked *grammars*, and a README is not one.
+PROSE = (
+    "editors/vscode/README.md",
+    "editors/textmate/README.md",
+)
+
+# Everything the gate reads, in report order.
+CHECKED = GRAMMARS + PROSE
 
 
 def effect_names() -> list[str]:
@@ -89,19 +125,20 @@ def discovered_grammars(root: Path) -> list[str]:
 
 
 def main(root: Path | None = None) -> int:
-    """Check every shipped editor grammar against the live effect
-    registry, reporting each effect a grammar fails to highlight.
+    """Check every shipped editor grammar, and the two extension READMEs that
+    repeat the effect list in prose, against the live effect registry —
+    reporting each effect a file fails to name.
 
-    Returns 0 when all grammars are complete, 1 otherwise.
+    Returns 0 when all of them are complete, 1 otherwise.
     """
-    root = root or Path(__file__).resolve().parent.parent
+    root = root or _ROOT
     names = effect_names()
     failures: list[str] = []
 
-    for rel in GRAMMARS:
+    for rel in CHECKED:
         path = root / rel
         if not path.exists():
-            failures.append(f"{rel}: grammar file not found")
+            failures.append(f"{rel}: file not found")
             print(f"  --/{len(names)}  {rel} — NOT FOUND")
             continue
         missing = missing_effects(path.read_text(encoding="utf-8"), names)
@@ -123,7 +160,8 @@ def main(root: Path | None = None) -> int:
                 "\nAdd the missing name(s) to each grammar's effect rule "
                 "(the `entity.name.type.effect.vera` alternation in the vscode "
                 "and TextMate grammars, the `veraEffectType` keyword list in "
-                "the Vim syntax file). Put longer names before their prefixes "
+                "the Vim syntax file), and to the effect bullet in each "
+                "extension README. Put longer names before their prefixes "
                 "in a regex alternation (`HttpServer` before `Http`).",
                 file=sys.stderr,
             )
@@ -138,8 +176,8 @@ def main(root: Path | None = None) -> int:
         return 1
 
     print(
-        f"OK: all {len(GRAMMARS)} editor grammars carry all "
-        f"{len(names)} built-in effects."
+        f"OK: all {len(GRAMMARS)} editor grammars and {len(PROSE)} extension "
+        f"READMEs carry all {len(names)} built-in effects."
     )
     return 0
 

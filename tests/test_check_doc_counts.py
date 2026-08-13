@@ -13,9 +13,11 @@ is testable without a pytest collection run:
   Test Suite paragraph.
 - ``check_release_count`` — README.md's and HISTORY.md's release counts,
   against each other AND against the repository's tags.
+- ``check_contributing_hook_count`` — CONTRIBUTING.md's pre-commit hook
+  count, against the live `.pre-commit-config.yaml`.
 
-The last two share a failure mode with every other check here and it is
-tested for both: a reworded sentence must be an ERROR, not a silent skip,
+The last three share a failure mode with every other check here and it is
+tested for each: a reworded sentence must be an ERROR, not a silent skip,
 or rewording switches the gate off.
 """
 
@@ -336,6 +338,34 @@ class TestVeraReadmeTestCounts:
         errors = _MOD.check_vera_readme_test_counts(text, 9382, 143, 196, 42)
         assert len(errors) == 1
         assert "no longer gated" in errors[0]
+
+
+class TestContributingHookCount:
+    """CONTRIBUTING.md's hook count, and what happens when the sentence moves.
+
+    The number is only tied to `.pre-commit-config.yaml` by this one
+    sentence, so a rewrite the pattern stops matching would switch the check
+    off in silence — the failure the TESTING.md twin already reports.
+    """
+
+    def test_matching_count_passes(self) -> None:
+        text = "The repository configures 33 hooks across both stages.\n"
+        assert _MOD.check_contributing_hook_count(text, 33) == []
+
+    def test_stale_count_fails(self) -> None:
+        text = "The repository configures 32 hooks across both stages.\n"
+        errors = _MOD.check_contributing_hook_count(text, 33)
+        assert len(errors) == 1
+        assert "doc says 32" in errors[0]
+        assert "live is 33" in errors[0]
+
+    def test_reworded_sentence_is_an_error_not_a_skip(self) -> None:
+        # Same true number, phrasing the pattern cannot see.  Reporting []
+        # here would mean any future rewording silently disarms the check.
+        text = "The repository sets up 33 pre-commit hooks in total.\n"
+        errors = _MOD.check_contributing_hook_count(text, 33)
+        assert len(errors) == 1
+        assert "could not find" in errors[0]
 
 
 def _readme(n: int) -> str:

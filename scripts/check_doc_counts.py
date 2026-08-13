@@ -193,6 +193,33 @@ def check_vera_readme_test_counts(
     return errors
 
 
+def check_contributing_hook_count(
+    contrib_text: str, live_hooks: int
+) -> list[str]:
+    """CONTRIBUTING.md's pre-commit hook count, against the live config.
+
+    One sentence is the whole tie between the documented number and
+    `.pre-commit-config.yaml`, so a rewording the pattern no longer matches
+    would take the check offline without saying so — the silent-skip failure
+    this script exists to prevent, and the one its TESTING.md twin already
+    reports.  A sentence that cannot be found is therefore an error, not a
+    pass.
+    """
+    m = re.search(r"configures (\d+) hooks", contrib_text)
+    if not m:
+        return [
+            "CONTRIBUTING.md: could not find the hook-count sentence"
+            " (`configures N hooks`) — reword the check with the prose"
+        ]
+    doc_hooks = int(m.group(1))
+    if doc_hooks != live_hooks:
+        return [
+            f"CONTRIBUTING.md: hook count: doc says {doc_hooks},"
+            f" live is {live_hooks}"
+        ]
+    return []
+
+
 _HISTORY_VERSION_ROW = re.compile(r"^\| v\d+\.\d+\.[\d.]")
 
 
@@ -949,14 +976,7 @@ def main() -> int:
 
     contrib_md = (root / "CONTRIBUTING.md").read_text(encoding="utf-8")
 
-    m = re.search(r"configures (\d+) hooks", contrib_md)
-    if m:
-        doc_hooks = int(m.group(1))
-        if doc_hooks != live_hooks:
-            errors.append(
-                f"CONTRIBUTING.md: hook count: doc says {doc_hooks},"
-                f" live is {live_hooks}"
-            )
+    errors.extend(check_contributing_hook_count(contrib_md, live_hooks))
 
     for m_iter in re.finditer(
         r"All (\d+) conformance programs", contrib_md

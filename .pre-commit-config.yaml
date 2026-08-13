@@ -153,11 +153,12 @@ repos:
         pass_filenames: false
         files: '(vera/grammar\.lark$|spec/10-grammar\.md$|scripts/check_grammar_alignment\.py$)'
 
-      # #1156 — fails when an editor grammar under editors/ omits a built-in
-      # effect name.  The grammars enumerate them by hand and drifted four
-      # effects behind the registry silently (an unknown capitalised name just
-      # falls through to the generic type rule), so nothing failed when adding
-      # an effect skipped them.  Triggered by the effect registry as well as
+      # #1156 — fails when an editor grammar under editors/, or one of the two
+      # extension READMEs that repeat the list in prose, omits a built-in
+      # effect name.  Both enumerate them by hand and drifted four effects
+      # behind the registry silently (an unknown capitalised name just falls
+      # through to the generic type rule), so nothing failed when adding an
+      # effect skipped them.  Triggered by the effect registry as well as
       # the grammars, since a new effect is what puts them out of date.
       - id: editor-grammars
         name: editor grammars
