@@ -1,6 +1,6 @@
 ---
 name: vera-language
-description: Write programs in the Vera programming language. Use when asked to write, edit, debug, or review Vera code (.vera files). Vera is a statically typed, purely functional language with algebraic effects, mandatory contracts, and typed slot references (@T.n) instead of variable names.
+description: Write programs in the Vera programming language. Use when asked to write, edit, debug, or review Vera code (.vera files). Vera is a statically typed, purely functional language with algebraic effects, mandatory contracts, and typed slot references (`@T.n`) instead of variable names.
 ---
 
 # Vera Language Reference
@@ -295,7 +295,7 @@ private fn clamp_to_range(@Int, @Int, @Int -> @Int)
 }
 ```
 
-## Slot References (@T.n)
+## Slot References (`@T.n`)
 
 **De Bruijn slot ordering is the most common source of bugs in Vera programs.** Before writing contracts, `ensures` clauses, or body expressions that involve multiple parameters of the same type, run `vera check --explain-slots` to confirm which index maps to which parameter. Do not rely on intuition.
 
@@ -355,7 +355,7 @@ private fn example(@Int -> @Int)
 }
 ```
 
-### @T.result
+### `@T.result`
 
 Only valid inside `ensures` clauses. Refers to the function's return value:
 
@@ -419,8 +419,10 @@ Example: for `fn divide(@Int, @Int -> @Int)`, the contract `requires(@Int.1 != 0
 3. Use the table to write contracts and body expressions with correct `@T.n` indices.
 4. If `vera check` reports E130 (unresolved slot), read the `Available bindings:` table in its
    own fix text — it lists the slot bindings in scope *at that reference* with their `@T.n`,
-   including the `let` and `match`-arm ones the signature table cannot show. `@T.result` is not
-   a slot binding, so it never appears there, not even inside `ensures`.
+   including the `let` and `match`-arm ones the signature table cannot show. The table renders
+   at most twelve rows and then `; … and K more`, so a scope wider than that shows its first
+   twelve bindings and names how many it withheld. `@T.result` is not a slot binding, so it
+   never appears there, not even inside `ensures`.
 
 The `--json` flag also works: `vera check --explain-slots --json` emits a `slot_environments`
 array, useful when processing diagnostics programmatically.
@@ -2156,7 +2158,7 @@ private fn greet(@String -> @Unit)
 }
 ```
 
-### Using @T.result outside ensures
+### Using `@T.result` outside ensures
 
 WRONG:
 ```vera
@@ -2443,7 +2445,7 @@ The full language specification is in the [`spec/`](https://github.com/aallan/ve
 | 0 | [Introduction](https://github.com/aallan/vera/blob/main/spec/00-introduction.md) | Design goals, diagnostics philosophy |
 | 1 | [Lexical Structure](https://github.com/aallan/vera/blob/main/spec/01-lexical-structure.md) | Tokens, operators, formatting |
 | 2 | [Types](https://github.com/aallan/vera/blob/main/spec/02-types.md) | Type system, refinement types |
-| 3 | [Slot References](https://github.com/aallan/vera/blob/main/spec/03-slot-references.md) | The @T.n reference system |
+| 3 | [Slot References](https://github.com/aallan/vera/blob/main/spec/03-slot-references.md) | The `@T.n` reference system |
 | 4 | [Expressions](https://github.com/aallan/vera/blob/main/spec/04-expressions.md) | Expressions and statements |
 | 5 | [Functions](https://github.com/aallan/vera/blob/main/spec/05-functions.md) | Functions and contracts |
 | 6 | [Contracts](https://github.com/aallan/vera/blob/main/spec/06-contracts.md) | Verification system |

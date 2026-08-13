@@ -473,9 +473,10 @@ Stages 19 and 20 run dual-threaded: community PRs against the single-source spri
 | v0.1.5 | 17 Jul | **The third burndown and the first PyPI release** — 29 bug-labelled issues fixed across the checker, codegen, and diagnostics, published to PyPI as `veralang` ([#737](https://github.com/aallan/vera/issues/737)). |
 | v0.1.6 | 20 Jul | **The comment system** — block comments nest, malformed ones get their own `E02x` diagnostics, annotation labels reach the AST, and `vera fmt` stops deleting comments it had silently dropped since the formatter was written ([#1112](https://github.com/aallan/vera/issues/1112)). |
 | v0.1.7 | 24 Jul | **SQL injection won't compile** — the built-in `<DB>` effect and a literal-provenance checker that makes SQL injection a compile-time error ([#309](https://github.com/aallan/vera/issues/309): `E207`/`E208`/`E209`), plus the bare-effect-op routing check (`E217`) and a Float64 rounding-assertion CI-flake fix. |
-| v0.1.8 | 27 Jul | **Editors and toolchain hygiene** — the VS Code extension reaches the Marketplace, Vim and Neovim gain a package, the ruff rule set is declared rather than inherited with five defect-class rules adopted, and the SQL checker's `E208` follows a `let` chain as `E207` already did ([#1106](https://github.com/aallan/vera/issues/1106)). |
-| v0.1.9 | 4 Aug | **The declarable-trap purge** — the reserved-name family completes: grammar keywords join `old`/`new` under E153 with a named host-invoked carve-out ([#1187](https://github.com/aallan/vera/issues/1187)), built-in effects cannot be redeclared (E152), and `Vera`-prefixed type names are reserved for the prelude (E154). `vera run` refuses a dropped entry instead of executing a sibling, imported functions' diagnostics and trap backtraces name their own module, `decreases` is enforced at run time, and codegen skips propagate to transitive callers with `call_indirect` emitted only when a table exists. |
-| v0.1.10 | 12 Aug | **The handler-machinery consolidation** — 37 bug-labelled issues fixed by giving each fact one derivation across the checker, verifier and codegen: a shared naming module, handler semantics, State/Exn family mangling, cross-module routing, boundary widths, and the clone namespace ([#1213](https://github.com/aallan/vera/issues/1213)). |
+| v0.1.8 | 27 Jul | **Editors and toolchain hygiene** — the VS Code extension reaches the Marketplace ([#1106](https://github.com/aallan/vera/issues/1106)). |
+| v0.1.9 | 4 Aug | **The declarable-trap purge** — the reserved-name family completes under E153 ([#1187](https://github.com/aallan/vera/issues/1187)). |
+| v0.1.10 | 12 Aug | **The handler-machinery consolidation** — 37 bugs fixed by giving each fact one derivation ([#1213](https://github.com/aallan/vera/issues/1213)). |
+| v0.1.11 | 13 Aug | **The community-PR queue clears** — seven third-party contributions reviewed and merged. |
 
 ---
 
@@ -496,4 +497,4 @@ Ten releases, chosen for the capability each one unlocked rather than even spaci
 | Spec chapters | 7 | 10 | 12 | 13 | 13 | 13 | 13 | 14 | 14 | 14 |
 | Python coverage | — | — | 90% | 96% | 95% | 95% | 95% | 95% | 95% | 95% |
 
-Total: **2,000+ commits, 208 tagged releases, 103 active development days.**
+Total: **2,000+ commits, 209 tagged releases, 103 active development days.**

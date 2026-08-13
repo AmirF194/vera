@@ -5,10 +5,15 @@ the raw corpus behind the roughly thirty defects that PR handled in the
 builtin `State`/`Exn` handler machinery (type aliases × handler
 combinatorics, clause-scope binding, dispatch-path parity, write-boundary
 guards).  Kept verbatim as review evidence and as the promotion pool for
-[#1213](https://github.com/aallan/vera/issues/1213): what remains is the
-material for the open issues below, and each burndown PR promotes its
-own shapes into `tests/conformance/` with manifest entries and deletes
-the probes it dispositioned.
+the handler-machinery burndown
+([#1213](https://github.com/aallan/vera/issues/1213), now closed): the
+issues listed below have all been through the cycle, and what remains is
+the material for
+[#1233](https://github.com/aallan/vera/issues/1233) — outward cell
+addressing for same-family nested handlers, the one issue this corpus
+still answers to.  Each burndown PR promotes its own shapes into
+`tests/conformance/` with manifest entries and deletes the probes it
+dispositioned.
 
 The slot-naming and cell-family shapes ([#1208](https://github.com/aallan/vera/issues/1208),
 [#1209](https://github.com/aallan/vera/issues/1209),

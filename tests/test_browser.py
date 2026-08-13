@@ -3636,10 +3636,50 @@ public fn main(@Unit -> @Unit)
         assert native == "ok"
         assert browser == "err"
 
+    def test_write_file_is_err_stub_in_browser(self, tmp_path: Path) -> None:
+        """``IO.write_file``'s browser stub, pinned the way its
+        ``read_file`` sibling is.
+
+        ``test_file_io_returns_error`` runs the ``file_io`` example
+        through Node and asserts only that the harness reported no
+        error, which holds whether ``hostWriteFile`` returns ``Err`` or
+        writes the file for real — smoke coverage, not a pin on the
+        branch.  This asserts the branch: the same module bytes print
+        ``ok`` under wasmtime and ``err`` under Node.
+
+        The target directory must be **writable**.  Against an
+        unwritable path the native host also returns ``Err``, so the
+        stub and a genuine permission failure would be
+        indistinguishable and the assertion would hold even if
+        ``hostWriteFile`` were fully implemented — the coinciding-default
+        trap that the ``read_file`` case documents in the other
+        direction.  Reading the file back afterwards is what proves the
+        native ``Ok`` arm really wrote, rather than merely reporting
+        success.
+        """
+        target = tmp_path / "written.txt"
+        # POSIX form: a Windows backslash would parse as a Vera escape.
+        src = """
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  match IO.write_file("%s", "written by vera") {
+    Ok(_) -> IO.print("ok"),
+    Err(@String) -> IO.print("err")
+  }
+}
+""" % target.as_posix()
+        native, browser = _both_stdouts(src, tmp_path, "write_file_stub")
+        assert native == "ok"
+        assert browser == "err"
+        # The native Ok arm is only meaningful if the write happened.
+        assert target.read_text(encoding="utf-8") == "written by vera"
+
     def test_read_char_is_err_stub_in_browser(self, tmp_path: Path) -> None:
-        """``IO.read_char`` needs JSPI suspend/resume (#609, #618); until
-        that lands ``hostReadChar`` is an ``Err`` stub, so a program
-        using it links and runs rather than failing to instantiate.
+        """``IO.read_char`` shipped natively in #618; the browser half
+        needs JSPI suspend/resume (#609, still open).  Until that lands
+        ``hostReadChar`` is an ``Err`` stub, so a program using it links
+        and runs rather than failing to instantiate.
         """
         src = """
 public fn main(-> @Int)

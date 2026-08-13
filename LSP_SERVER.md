@@ -270,9 +270,11 @@ tracked work.
 
 ## Under the hood
 
-The server is ~1,400 lines over the reusable obligation core in
-`vera/obligations/` (reified `ProofObligation` records, the warm
-incremental `VerificationSession`). Architecture notes live in the
+The server is a thin transport and feature layer over the reusable
+obligation core in `vera/obligations/` (reified `ProofObligation`
+records, the warm incremental `VerificationSession`). Architecture
+notes — and the per-module line counts, gated against the source tree
+so they cannot drift out of step with it — live in the
 [compiler README](vera/README.md) module map; the design history —
 including why the obligation core was built before any wire format —
 is the comment trail on
