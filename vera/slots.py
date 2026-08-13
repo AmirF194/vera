@@ -97,20 +97,30 @@ def bare_call_denotes_user_fn(
     supplies the table it actually resolves against — the checker a lexical
     scope walk, codegen its flat signature keys.  One rule over two tables
     is one answer only where the tables agree, and they do not everywhere:
-    codegen's ``_fn_sigs`` keys an import the call site cannot see under its
-    BARE name, so a ``private fn get`` in an imported module — or a public
-    one a selective import excludes — makes this predicate answer
-    "user-owned" at a site where the checker resolved the operation.  That
-    residual is a live defect, tracked as #1299 with a demonstrated silent
-    wrong value and a demonstrated load failure, and it is a property of the
-    TABLE rather than of the rule; the fix belongs to ``_known_fns``, which
-    has to become the names visible at the compiling declaration's module
-    scope.  A ``where`` helper is NOT such a case, though the flat keying
-    invites the assumption: #1015 and the non-generic hoist move every
+    codegen's ``_fn_sigs`` keys a name the call site cannot SEE under its
+    BARE name, so this predicate answers "user-owned" where the checker
+    resolved the operation.  Three routes are demonstrated — a ``private fn
+    get`` in an imported module, a public one a selective import excludes,
+    and a ``where`` helper of a ``forall<T>`` parent — and all three are one
+    defect, tracked as #1299.  It is a property of the TABLE rather than of
+    the rule, and the fix belongs to ``_known_fns``, which has to carry the
+    names visible in the compiling declaration's LEXICAL scope.
+
+    The ``where``-helper route is the one worth spelling out, because the
+    other two make it tempting to assume helpers are safe.  Under a
+    NON-generic parent they are: #1015 and the non-generic hoist move the
     helper out of the bare namespace before registration (a local one is
-    ``holder$where$get``), and the call sites inside its holder are rewritten
-    with it, so a helper named after an operation shadows the name in its own
-    body and nowhere else — which is exactly the checker's lexical answer.
+    ``holder$where$get``) and rewrite its holder's call sites with it, so it
+    shadows the name in its own body and nowhere else — the checker's
+    lexical answer exactly.  Under a GENERIC parent the helper keeps a bare
+    ``_fn_sigs`` key beside its clone-qualified one (measured: ``helper``
+    and ``id`` in ``tests/conformance/ch09_generic_where_helper.vera``), so
+    a sibling's bare ``get(())`` under a ``State`` row is claimed by a
+    helper it cannot see.  That route is always LOUD rather than silently
+    wrong, and for a reason worth keeping: the bare key exists in the
+    signature table while no bare SYMBOL is emitted — the helper is only
+    ever ``holder$Bool$where$get`` — so the call lands on ``unknown func:
+    failed to find name $get`` at WAT assembly, with no E-code.
     """
     return name in user_fn_names
 

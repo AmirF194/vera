@@ -680,8 +680,9 @@ class WasmContext(
         Not for the QUALIFIED spelling: ``State.get(())`` names the effect,
         so no declaration can shadow it and the registries answer directly.
 
-        The ``_fn_sigs`` mirror is not scope-accurate — it keys an import the
-        call site cannot see under its bare name, so this can answer
+        The ``_fn_sigs`` mirror is not scope-accurate — it keys a name the
+        call site cannot see under its bare name (an invisible import, or a
+        ``where`` helper of a ``forall<T>`` parent), so this can answer
         "user-owned" where the checker resolved the operation (#1299).  The
         rule is right and the table is wrong; the fix is that table's.
         """
