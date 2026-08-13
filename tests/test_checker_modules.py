@@ -1990,6 +1990,99 @@ public fn main(@Unit -> @Int)
 }
 """)
 
+    def test_wrong_typed_resume_argument_in_a_clause_is_still_E202(self) -> None:
+        """The clause binding stays type-checked, not merely present.
+
+        The companion to
+        :meth:`test_resume_stays_available_inside_handler_clauses`: that one
+        shows a correctly-typed ``resume`` still checks, this one shows a
+        wrongly-typed one is still caught.  A binding that accepted anything
+        would satisfy the first test alone.  ``State<Int>``'s ``get`` returns
+        ``Int``, so the clause's ``resume`` takes an ``Int`` and a ``String``
+        argument is E202.
+        """
+        errs = _errors("""
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[State<Int>](@Int = 1) {
+    get(@Unit) -> { resume("bad") },
+    put(@Int) -> { resume(()) }
+  } in {
+    get(())
+  }
+}
+""")
+        assert "E202" in self._codes(errs), self._codes(errs)
+        diag = next(e for e in errs if e.error_code == "E202")
+        assert "resume" in diag.description, diag.description
+
+    def test_a_rejected_resume_declaration_does_not_accuse_a_valid_handler(
+        self,
+    ) -> None:
+        """E153 is the whole story; the handler in the same file is innocent.
+
+        The rejected declaration used to stay in ``env.functions``, where the
+        lexically-scoped call lookup preferred it over the binding the clause
+        installs, so `put(@Int) -> { resume(()) }` — correct code — drew a
+        second error reading "has type Unit, expected Int", whose stated fix
+        would have broken it.  Same reason E151 and E152 skip registering what
+        they reject: one fault, one diagnostic, at the declaration.
+        """
+        errs = _errors("""
+private fn resume(@Int -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ @Int.0 }
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[State<Int>](@Int = 1) {
+    get(@Unit) -> { resume(5) },
+    put(@Int) -> { resume(()) }
+  } in {
+    get(())
+  }
+}
+""")
+        assert self._codes(errs) == ["E153"], [
+            (e.error_code, e.description) for e in errs
+        ]
+
+    def test_a_rejected_resume_where_helper_does_not_accuse_its_handler(
+        self,
+    ) -> None:
+        """The same, one scope deeper.
+
+        A where-helper is registered by the shared ``register_fn`` walk, so
+        stripping it at the top level alone would leave the cascade in place
+        here.
+        """
+        errs = _errors("""
+private fn outer(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{
+  handle[State<Int>](@Int = 1) {
+    get(@Unit) -> { resume(5) },
+    put(@Int) -> { resume(()) }
+  } in {
+    get(())
+  }
+}
+where {
+  fn resume(@Int -> @Int)
+    requires(true) ensures(true) effects(pure)
+  { @Int.0 }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{ outer(()) }
+""")
+        assert self._codes(errs) == ["E153"], [
+            (e.error_code, e.description) for e in errs
+        ]
+
     def test_resume_set_is_its_own_named_piece(self) -> None:
         """``resume`` must not be filed under the keyword or state-form sets.
 

@@ -4,10 +4,10 @@
 -- not a keyword token in `vera/grammar.lark`, so the declaration parses and a
 -- bare `resume(7)` outside a handler resolves to it and runs.  What it collides
 -- with is the binding the checker injects into every handler clause body for
--- the effect-resumption operator, which gives one spelling two meanings by
--- position — and makes clause bodies elsewhere in the file resolve against the
--- declared signature, rejecting handlers that are otherwise valid.  Chapter 1,
--- Section 1.4 reserves the identifier; this gate enforces it.
+-- the effect-resumption operator, which would give one spelling two meanings
+-- by position.  Chapter 1, Section 1.4 reserves the identifier; this gate
+-- enforces it, and alone: a clause body in the same file still resolves
+-- `resume` to the operator, so a rejected declaration draws no second error.
 public fn resume(@Int -> @Int)
   requires(true)
   ensures(@Int.result >= 0)

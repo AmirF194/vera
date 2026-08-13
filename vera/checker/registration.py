@@ -117,6 +117,10 @@ _KEYWORD_FN_NAMES = frozenset({
 # failing ``[E202]`` against the *user's* Int parameter.  Removing the
 # declaration made the identical handler check clean.  So the declaration is
 # refused here, at the checker: the parser has no keyword to refuse it with.
+# That shadowing is also cut off at its source, in
+# :meth:`TypeChecker._lookup_function_scoped`, which resolves these names
+# against the flat registry alone — otherwise the rejected declaration would
+# still draw a second, misleading error out of the correct clause bodies.
 _HANDLER_OPERATOR_FN_NAMES = frozenset({"resume"})
 
 # 4. The carve-out: names a *host* invokes rather than Vera source, so being
@@ -507,10 +511,9 @@ class RegistrationMixin:
                     f"call, so the declaration would give '{n}(...)' two "
                     f"meanings that depend on where it is written: this "
                     f"function outside a handler clause, the resumption "
-                    f"operator inside one. Worse, the declared signature is "
-                    f"what clause bodies elsewhere in the file resolve "
-                    f"against, so declaring it rejects handlers that are "
-                    f"otherwise valid."
+                    f"operator inside one. Vera provides exactly one way to "
+                    f"express each construct, so the name means the operator "
+                    f"and nothing else."
                 )
                 fix = (
                     f"Rename the function to an identifier that is not "
