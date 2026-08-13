@@ -4,6 +4,7 @@ Split from tests/test_codegen.py (#419). Shared helpers live in tests/codegen_he
 """
 from __future__ import annotations
 
+import pytest
 
 from vera.codegen import (
     execute,
@@ -751,6 +752,10 @@ class TestInferenceProviderDispatch:
         assert "max_tokens" in sent_body
         assert "messages" in sent_body
         assert sent_body["max_tokens"] == 1024
+        # Literal, not _PROVIDERS[...].default_model: the registry-derived
+        # form pins the value to itself and stays green through any edit
+        # to the row, so it could not prove the flagship flip landed.
+        assert sent_body["model"] == "claude-opus-5"
 
     def test_openai_provider(self) -> None:
         """OpenAI branch uses correct endpoint, bearer auth, and OpenAI-compatible body."""
@@ -770,7 +775,10 @@ class TestInferenceProviderDispatch:
         assert req.get_header("X-api-key") is None
         assert req.get_header("Content-type") == "application/json"
         sent_body = json.loads(req.data.decode())
-        assert sent_body["model"] == _PROVIDERS["openai"].default_model
+        # Literal, not _PROVIDERS[...].default_model: the registry-derived
+        # form pinned the value to itself and stayed green through any edit
+        # to the row, so it could not prove the flagship flip landed.
+        assert sent_body["model"] == "gpt-5.6-sol"
         assert "messages" in sent_body
         assert "max_tokens" not in sent_body
 
@@ -788,7 +796,7 @@ class TestInferenceProviderDispatch:
         req = mock_urlopen.call_args[0][0]
         assert req.full_url == "https://api.moonshot.ai/v1/chat/completions"
         sent_body = json.loads(req.data.decode())
-        assert sent_body["model"] == "kimi-k2-0905-preview"
+        assert sent_body["model"] == "kimi-k3"
 
     def test_mistral_provider(self) -> None:
         """Mistral branch uses correct endpoint, default model, OpenAI-compatible format."""
@@ -807,7 +815,7 @@ class TestInferenceProviderDispatch:
         assert req.get_header("Authorization") == "Bearer sk-mistral"
         assert req.get_header("X-api-key") is None
         sent_body = json.loads(req.data.decode())
-        assert sent_body["model"] == "mistral-small-latest"
+        assert sent_body["model"] == "mistral-large-latest"
         # OpenAI-compatible body: has "messages", no Anthropic "max_tokens"
         assert "messages" in sent_body
         assert "max_tokens" not in sent_body
@@ -823,6 +831,80 @@ class TestInferenceProviderDispatch:
         ) as mock_provider:
             execute(result_src, env_vars={"VERA_MISTRAL_API_KEY": "sk-mistral-test"})
             assert mock_provider.call_args[0][0] == "mistral"
+
+    def test_xai_provider(self) -> None:
+        """xAI branch uses correct endpoint, default model, OpenAI-compatible format."""
+        import json
+        from unittest.mock import patch, MagicMock
+        from vera.runtime.inference import _call_inference_provider
+
+        body = json.dumps({"choices": [{"message": {"content": "grok"}}]})
+        mock_urlopen = MagicMock(return_value=self._make_response(body))
+        with patch("urllib.request.urlopen", mock_urlopen):
+            result = _call_inference_provider("xai", "prompt", "", "sk-xai")
+        assert result == "grok"
+        req = mock_urlopen.call_args[0][0]
+        assert req.full_url == "https://api.x.ai/v1/chat/completions"
+        # Bearer auth (OpenAI-compatible), not Anthropic-style key header
+        assert req.get_header("Authorization") == "Bearer sk-xai"
+        assert req.get_header("X-api-key") is None
+        assert req.get_header("Content-type") == "application/json"
+        sent_body = json.loads(req.data.decode())
+        assert sent_body["model"] == "grok-4.6"
+        # The exact turn list, not just the key: a presence check stays green
+        # with the role flipped, the content dropped, or the list emptied.
+        assert sent_body["messages"] == [{"role": "user", "content": "prompt"}]
+        # OpenAI-compatible body carries no Anthropic "max_tokens"
+        assert "max_tokens" not in sent_body
+
+    def test_xai_auto_detect(self) -> None:
+        """xAI key auto-detected when no other keys are set."""
+        from unittest.mock import patch
+
+        result_src = _compile_ok(TestInferenceCollection._CLASSIFY_SOURCE)
+        with patch(
+            "vera.runtime.inference._call_inference_provider",
+            return_value="ok",
+        ) as mock_provider:
+            execute(result_src, env_vars={"VERA_XAI_API_KEY": "sk-xai-test"})
+            # Provider name AND the key handed to it: _call_inference_provider
+            # takes (provider, prompt, model, api_key) positionally, so index 3
+            # is the key. Naming the right provider while reading another row's
+            # env var would satisfy the name check alone.
+            assert mock_provider.call_args[0][0] == "xai"
+            assert mock_provider.call_args[0][3] == "sk-xai-test"
+
+    #: Every provider that precedes xai in the registry, listed literally
+    #: rather than sliced out of _PROVIDERS: derived order would shrink to
+    #: match a relocated xai row and pass vacuously.
+    _PROVIDERS_BEFORE_XAI = ("anthropic", "openai", "moonshot", "mistral")
+
+    @pytest.mark.parametrize("earlier", _PROVIDERS_BEFORE_XAI)
+    def test_xai_key_does_not_preempt_earlier_provider(self, earlier: str) -> None:
+        """xAI is last in the registry, so *every* earlier provider's key wins.
+
+        One case per provider ahead of xai, so moving the row up fails exactly
+        the providers it jumped instead of only the first one — appending must
+        leave every existing key's behaviour untouched.
+        """
+        from unittest.mock import patch
+        from vera.runtime.inference import _PROVIDERS
+
+        result_src = _compile_ok(TestInferenceCollection._CLASSIFY_SOURCE)
+        with patch(
+            "vera.runtime.inference._call_inference_provider",
+            return_value="ok",
+        ) as mock_provider:
+            execute(result_src, env_vars={
+                _PROVIDERS[earlier].env_key: "sk-earlier-test",
+                "VERA_XAI_API_KEY": "sk-xai-test",
+            })
+            assert mock_provider.call_args[0][0] == earlier
+            # The winning provider's own key must be the one forwarded
+            # (index 3 of the positional call). Both keys are set here, so
+            # asserting the name alone would pass on a dispatch that picked
+            # the right row and then read xai's key out of the environment.
+            assert mock_provider.call_args[0][3] == "sk-earlier-test"
 
     def test_multi_key_auto_detect_respects_provider_order(self) -> None:
         """When multiple keys are set, _PROVIDERS insertion order determines which wins.

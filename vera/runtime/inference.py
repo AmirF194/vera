@@ -24,39 +24,55 @@ class _ProviderConfig:
 
     env_key: str         # environment variable holding the API key
     url: str             # chat completions endpoint URL
-    default_model: str   # cheap/fast default when VERA_INFERENCE_MODEL is unset
+    default_model: str   # provider's flagship model when VERA_INFERENCE_MODEL is unset
     auth_style: str      # "anthropic" | "bearer"
     response_style: str  # "anthropic" | "openai"
 
 
 #: Registry of supported inference providers.
 #: Adding a new OpenAI-compatible provider is a one-row change here.
+#:
+#: Each row's ``default_model`` is that provider's flagship general-chat
+#: model, verified against the vendor's own live documentation when set.
+#: A vendor's cheap tier is reachable through ``VERA_INFERENCE_MODEL``;
+#: the default is not the place to trade capability for price, because a
+#: program's contracts are written against what the default can do.
 _PROVIDERS: dict[str, _ProviderConfig] = {
     "anthropic": _ProviderConfig(
         env_key="VERA_ANTHROPIC_API_KEY",
         url="https://api.anthropic.com/v1/messages",
-        default_model="claude-haiku-4-5-20251001",
+        default_model="claude-opus-5",
         auth_style="anthropic",
         response_style="anthropic",
     ),
     "openai": _ProviderConfig(
         env_key="VERA_OPENAI_API_KEY",
         url="https://api.openai.com/v1/chat/completions",
-        default_model="gpt-4o-mini",
+        default_model="gpt-5.6-sol",
         auth_style="bearer",
         response_style="openai",
     ),
     "moonshot": _ProviderConfig(
         env_key="VERA_MOONSHOT_API_KEY",
         url="https://api.moonshot.ai/v1/chat/completions",
-        default_model="kimi-k2-0905-preview",
+        default_model="kimi-k3",
         auth_style="bearer",
         response_style="openai",
     ),
     "mistral": _ProviderConfig(
         env_key="VERA_MISTRAL_API_KEY",
         url="https://api.mistral.ai/v1/chat/completions",
-        default_model="mistral-small-latest",
+        default_model="mistral-large-latest",
+        auth_style="bearer",
+        response_style="openai",
+    ),
+    # New providers append here: insertion order is the auto-detect
+    # precedence, so prepending would change which key wins when
+    # several are set.
+    "xai": _ProviderConfig(
+        env_key="VERA_XAI_API_KEY",
+        url="https://api.x.ai/v1/chat/completions",
+        default_model="grok-4.6",
         auth_style="bearer",
         response_style="openai",
     ),

@@ -1,5 +1,5 @@
 <svg width="920" height="484" viewBox="0 0 920 484" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title">
-  <title id="title">The wasmtime host layer: execute() registers one pluggable family adapter per optional effect into the Linker — most stateless and conditional on use, Decimal and State carrying an explicit store execute() reads back — while IO stays inline in execute() because its callbacks write the state that becomes the return value. The compiled module's import interface is the portability contract the browser runtime implements in parallel.</title>
+  <title id="title">The wasmtime host layer: execute() registers one pluggable family adapter per optional effect into the Linker — most stateless and conditional on use, Decimal, State and the fused Async adapter carrying an explicit store execute() reads back — while IO stays inline in execute() because its callbacks write the state that becomes the return value. The compiled module's import interface is the portability contract the browser runtime implements in parallel.</title>
   <!-- Design system: see architecture.svg. Grounded in vera/README.md §Host-binding families. -->
   <defs>
     <marker id="arr" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -81,10 +81,10 @@
     <rect class="pill" x="590" y="254" width="58" height="24" rx="12"/><text class="m pt" x="619" y="270" text-anchor="middle">set</text>
     <rect class="pill" x="656" y="254" width="82" height="24" rx="12"/><text class="m pt" x="697" y="270" text-anchor="middle">decimal ◆</text>
     <rect class="pill" x="746" y="254" width="66" height="24" rx="12"/><text class="m pt" x="779" y="270" text-anchor="middle">http</text>
-    <rect class="pill" x="56"  y="286" width="98" height="24" rx="12"/><text class="m pt" x="105" y="302" text-anchor="middle">async_http</text>
-    <rect class="pill" x="162" y="286" width="90" height="24" rx="12"/><text class="m pt" x="207" y="302" text-anchor="middle">inference</text>
-    <rect class="pill" x="260" y="286" width="72" height="24" rx="12"/><text class="m pt" x="296" y="302" text-anchor="middle">state ◆</text>
-    <text class="f d" x="56" y="332">◆ the two stateful families: execute() creates their store, passes it as one explicit parameter, and reads it back</text>
+    <rect class="pill" x="56"  y="286" width="112" height="24" rx="12"/><text class="m pt" x="112" y="302" text-anchor="middle">async_http ◆</text>
+    <rect class="pill" x="176" y="286" width="90" height="24" rx="12"/><text class="m pt" x="221" y="302" text-anchor="middle">inference</text>
+    <rect class="pill" x="274" y="286" width="72" height="24" rx="12"/><text class="m pt" x="310" y="302" text-anchor="middle">state ◆</text>
+    <text class="f d" x="56" y="332">◆ the three stateful families: execute() creates their store, passes it as one explicit parameter, and reads it back</text>
   </g>
 
   <!-- marshalling base -->
