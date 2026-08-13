@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.11] - 2026-08-13
+
 ### Added
 
 - **`[E130]` lists the bindings in scope at the error position** ([#558](https://github.com/aallan/vera/issues/558)). An unresolved slot reference reported only how many same-typed bindings existed, so recovering the right index meant tracing pattern pushes and `let`s by hand, or writing a typed hole and re-running — `vera check --explain-slots` stops at the signature and is no help several levels into a `match` arm. The fix text now ends with the same `Available bindings: @T.n: Type; …` table the `W001` typed-hole warning already emits, rendered from the scope at the reference itself, so the read-time diagnostic carries what the write-time one always did — the same set from the same helper, zero-size bindings included, because the index range in the description counts them and hiding them would make one diagnostic describe two different scopes (`@Unit.1` against `(@Unit, @Int)` reporting "valid indices: 0..0" above a table with no `Unit` row). A zero-size read stays `E182`'s to explain. Nothing is appended when no binding is in scope. The table renders at most twelve rows and then `; … and K more`, because the scope it reports is unbounded and the language server concatenates the fix into the hover message, so a wide function would turn one diagnostic into a wall of rows nobody reads — thirty same-typed parameters rendered a 492-character fix. Twelve sits above the measured corpus: across the 2,080 slot-reference positions in `tests/**/*.vera` and `examples/` the table is 7 rows at the 95th percentile and 11 at the 99th, so every position through the 99th renders complete and 12 of the 2,080 elide. `W001` renders through the same capped helper, so the two diagnostics still agree row for row; the LSP's typed-hole completion consumes the binding list itself and keeps every row, since there a dropped row is a missing completion item. This is the issue's option (a); the positional query (option (b), `--explain-slots-at <line>:<col>`) stays open on the roadmap.
@@ -3308,7 +3310,8 @@ Small docs sweep — closes six aging documentation issues in one PR.  No code c
 - Grammar: handler body simplified to avoid LALR reduce/reduce conflict
 - `pyproject.toml`: corrected build backend, package discovery, PEP 639 compliance
 
-[Unreleased]: https://github.com/aallan/vera/compare/v0.1.10...HEAD
+[Unreleased]: https://github.com/aallan/vera/compare/v0.1.11...HEAD
+[0.1.11]: https://github.com/aallan/vera/compare/v0.1.10...v0.1.11
 [0.1.10]: https://github.com/aallan/vera/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/aallan/vera/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/aallan/vera/compare/v0.1.7...v0.1.8
