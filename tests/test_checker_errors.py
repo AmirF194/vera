@@ -437,10 +437,19 @@ class TestSlotTableCap:
         them.  Measured over the 2,080 slot-reference positions in
         `tests/**/*.vera` and `examples/`, the table is 7 rows at p95 and
         11 at p99, so a cap at 12 renders every site through the 99th
-        percentile complete and bites only the tail."""
-        assert _SCOPE_TABLE_MAX_ROWS >= 12, \
-            "a cap at or below the corpus p99 (11 rows) truncates ordinary " \
-            "diagnostics"
+        percentile complete and bites only the tail.
+
+        Pinned by equality rather than by a floor.  Every other test in
+        this class derives its expectation from the constant, so they
+        follow a cap change silently; a floor here follows it too, in
+        the one direction the cap exists to prevent — a raised cap
+        re-widens the hover and no test in the file objects.  `== 12`
+        makes moving the cap an edit to this line, with the corpus
+        measurement above it to re-derive the new value from."""
+        assert _SCOPE_TABLE_MAX_ROWS == 12, \
+            "the cap is pinned to the corpus-derived value: at or below " \
+            "the p99 (11 rows) it truncates ordinary diagnostics, and " \
+            "above it the hover re-widens — re-measure, then update this pin"
 
     def test_table_is_complete_at_the_cap(self) -> None:
         """At exactly the cap every row is present and nothing is
