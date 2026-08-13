@@ -6,7 +6,7 @@ This is the single source of truth for Vera's testing infrastructure, coverage d
 
 | Metric | Value |
 |--------|-------|
-| **Tests** | 10,372 across 161 files (~109,000 lines of test code; 10,206 passed + 26 stress, 140 skipped) |
+| **Tests** | 10,389 across 161 files (~109,000 lines of test code; 10,223 passed + 26 stress, 140 skipped) |
 | **Compiler code coverage** | 95% Python, 61% JavaScript — 91% combined (CI minimum: 80%) |
 | **Conformance programs** | 214 programs across 9 spec chapters, validating every language feature |
 | **Example programs** | 42, all validated through `vera check` + `vera verify` |

@@ -42,7 +42,8 @@ Source (.vera)
 7   Execute      runtime/ + wasmtime          vera run / test / serve
 
 Cross-cutting: cli.py (orchestrates every stage) / errors.py (Diagnostic,
-E-codes) / formatter.py (vera fmt) / tester.py (vera test).
+E- and W-series diagnostic codes) / formatter.py (vera fmt) /
+tester.py (vera test).
 naming.py answers "what is this type expression called?" once -- stages 5
 and 6, tester.py and lsp/ all render slot names and State/Exn cell families
 through it, never their own.
@@ -751,7 +752,7 @@ The `ERROR_CODES` dict in `errors.py` maps every code to a short description (15
 
 ## Test Suite
 
-Testing spans a **pytest suite** of 10,372 tests across 161 files — compiler-internals unit tests plus a **conformance suite** (214 programs in `tests/conformance/` validating every language feature against the spec) and **example programs** (42 end-to-end demos). The conformance suite is the definitive specification artifact — most programs target a single feature, though some (slot references, match, contracts) span several, and each serves as a minimal working example.
+Testing spans a **pytest suite** of 10,389 tests across 161 files — compiler-internals unit tests plus a **conformance suite** (214 programs in `tests/conformance/` validating every language feature against the spec) and **example programs** (42 end-to-end demos). The conformance suite is the definitive specification artifact — most programs target a single feature, though some (slot references, match, contracts) span several, and each serves as a minimal working example.
 
 See **[TESTING.md](../TESTING.md)** for the comprehensive testing reference -- test file table, conformance suite details, compiler code coverage, language feature coverage, helper conventions, validation scripts, CI pipeline, and guidelines for adding tests.
 
