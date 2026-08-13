@@ -518,10 +518,25 @@ def _render_block(block: MdBlock) -> list[str]:
         return lines
 
     if isinstance(block, MdBlockQuote):
+        if not block.children:
+            # A quote with nothing in it still occupies a line.  Render
+            # it as no lines at all and the block vanishes on re-parse,
+            # leaving the document's separator as a stray blank line —
+            # `---\n>` renders `---\n` and comes back as just `---`.
+            return [">"]
         result = []
-        for child in block.children:
-            child_lines = _render_block(child)
-            for line in child_lines:
+        for i, child in enumerate(block.children):
+            # #1294 review: a bare ``>`` between children, exactly as
+            # MdDocument puts a blank line between its own.  Without it
+            # a quote holding two paragraphs renders as two adjacent
+            # quoted lines, which re-parses as ONE paragraph — the
+            # structure is gone and no later pass can tell.  The
+            # separator is unconditional rather than emitted only where
+            # the next block would otherwise merge: one construct, one
+            # textual representation (§0.2.3).
+            if i > 0:
+                result.append(">")
+            for line in _render_block(child):
                 result.append(f"> {line}" if line else ">")
         return result
 
@@ -563,6 +578,27 @@ def _render_block(block: MdBlock) -> list[str]:
     return []
 
 
+def _render_code_span(code: str) -> str:
+    """Fence a code span so it reads back as itself.
+
+    The fence is one backtick longer than the longest run *inside* the
+    content, because `_parse_inlines` closes a span on the first run of
+    equal length — a fixed two-backtick fence therefore terminates on
+    the content's own ``` `` ``` and loses the rest.  Padding spaces are
+    added only when the content starts or ends with a backtick, where
+    they are what keeps the fence and the content from merging into one
+    longer run; the parser strips exactly one such pair.
+    """
+    longest = 0
+    run = 0
+    for ch in code:
+        run = run + 1 if ch == "`" else 0
+        longest = max(longest, run)
+    fence = "`" * (longest + 1)
+    pad = " " if code.startswith("`") or code.endswith("`") else ""
+    return f"{fence}{pad}{code}{pad}{fence}"
+
+
 def _render_inlines(inlines: tuple[MdInline, ...]) -> str:
     """Render inline content to a string."""
     parts: list[str] = []
@@ -570,11 +606,7 @@ def _render_inlines(inlines: tuple[MdInline, ...]) -> str:
         if isinstance(inline, MdText):
             parts.append(inline.text)
         elif isinstance(inline, MdCode):
-            # Use backtick wrapping that avoids conflicts
-            if "`" in inline.code:
-                parts.append(f"`` {inline.code} ``")
-            else:
-                parts.append(f"`{inline.code}`")
+            parts.append(_render_code_span(inline.code))
         elif isinstance(inline, MdEmph):
             parts.append(f"*{_render_inlines(inline.children)}*")
         elif isinstance(inline, MdStrong):

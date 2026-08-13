@@ -509,12 +509,27 @@ function parseInlines(text) {
   const n = text.length;
 
   while (i < n) {
-    // Code span
+    // Code span: a run of N backticks closes on the next run of N,
+    // mirroring _parse_inlines in vera/markdown.py.  This scanned for
+    // the next *single* backtick, so ``x`` opened an empty span at the
+    // first tick and dropped the content out of the span entirely.
+    // With no closing run the scan falls through to the plain-text
+    // accumulator below, as it did before.
     if (text[i] === '`') {
-      let end = text.indexOf('`', i + 1);
-      if (end !== -1) {
-        result.push(new MdCode(text.slice(i + 1, end)));
-        i = end + 1;
+      let runEnd = i;
+      while (runEnd < n && text[runEnd] === '`') runEnd++;
+      const runLen = runEnd - i;
+      const closeIdx = text.indexOf('`'.repeat(runLen), runEnd);
+      if (closeIdx !== -1) {
+        let content = text.slice(runEnd, closeIdx);
+        // Undo the renderer's padding: exactly one leading and one
+        // trailing space, and only when both are present.
+        if (content.length >= 2 && content.startsWith(' ')
+            && content.endsWith(' ')) {
+          content = content.slice(1, -1);
+        }
+        result.push(new MdCode(content));
+        i = closeIdx + runLen;
         continue;
       }
     }
@@ -588,6 +603,21 @@ function parseInlines(text) {
 
 // -- Block parser --
 
+/**
+ * Does this line open a block-level construct?  Mirrors
+ * `_is_block_start` in vera/markdown.py, regex for regex.  It is the
+ * predicate that bounds a blockquote's lazy continuation: an unmarked
+ * line belongs to the open quote unless it starts a block of its own.
+ */
+function isBlockStart(line) {
+  return /^#{1,6}\s/.test(line)              // ATX heading
+    || /^(`{3,}|~{3,})/.test(line)           // fence
+    || /^(?:---+|\*{3,}|_{3,})\s*$/.test(line)  // thematic break
+    || /^>/.test(line)                       // block quote
+    || /^[-*+]\s/.test(line)                 // unordered item
+    || /^\d+[.)]\s/.test(line);              // ordered item
+}
+
 function parseBlocks(text) {
   const lines = text.split('\n');
   const blocks = [];
@@ -639,11 +669,26 @@ function parseBlocks(text) {
       continue;
     }
 
-    // Block quote: > ...
-    if (line.startsWith('> ') || line === '>') {
+    // Block quote: '>' optionally followed by ONE whitespace character,
+    // mirroring _BLOCKQUOTE_LINE = ^>\s? in vera/markdown.py.  The old
+    // predicate demanded the space, so `>no space` fell through to the
+    // paragraph branch and parsed as literal text where the reference
+    // read a quote.
+    if (/^>/.test(line)) {
       const quoteLines = [];
-      while (i < lines.length && (lines[i].startsWith('> ') || lines[i] === '>')) {
-        quoteLines.push(lines[i].startsWith('> ') ? lines[i].slice(2) : '');
+      while (i < lines.length) {
+        const marked = lines[i].match(/^>\s?(.*)$/);
+        if (marked) {
+          quoteLines.push(marked[1]);
+        } else if (lines[i].trim() !== '' && !isBlockStart(lines[i])) {
+          // Lazy continuation (markdown.py's `elif` in the same loop):
+          // an unmarked, non-blank line that opens no block of its own
+          // continues the quote's paragraph.  Without this branch the
+          // line escaped the quote entirely.
+          quoteLines.push(lines[i]);
+        } else {
+          break;
+        }
         i++;
       }
       const inner = parseBlocks(quoteLines.join('\n'));
@@ -706,7 +751,9 @@ function parseBlocks(text) {
     while (i < lines.length && lines[i].trim() !== '' &&
            !lines[i].match(/^#{1,6}\s/) &&
            !lines[i].match(/^(`{3,}|~{3,})/) &&
-           !lines[i].startsWith('> ') &&
+           // '^>' , not "starts with '> '": a paragraph ends at any
+           // quote marker, spaced or not (mirrors _BLOCKQUOTE_LINE).
+           !/^>/.test(lines[i]) &&
            !/^[-*]\s/.test(lines[i]) &&
            !/^\d+\.\s/.test(lines[i]) &&
            !/^(\*{3,}|-{3,}|_{3,})\s*$/.test(lines[i])) {
@@ -743,12 +790,22 @@ function parseMarkdown(text) {
 function renderInline(node) {
   switch (node.tag) {
     case 'MdText': return node.text;
-    case 'MdCode':
-      // A span containing a backtick needs a longer fence and padding
-      // spaces, or it re-parses as a shorter span plus stray text.
-      return node.text.includes('`')
-        ? '`` ' + node.text + ' ``'
-        : '`' + node.text + '`';
+    case 'MdCode': {
+      // One backtick longer than the content's longest run, padded only
+      // when the content starts or ends with one — mirrors
+      // _render_code_span.  A fixed two-backtick fence terminates on
+      // the content's own `` and loses the rest.
+      let longest = 0;
+      let run = 0;
+      for (const ch of node.text) {
+        run = ch === '`' ? run + 1 : 0;
+        if (run > longest) longest = run;
+      }
+      const fence = '`'.repeat(longest + 1);
+      const pad = (node.text.startsWith('`') || node.text.endsWith('`'))
+        ? ' ' : '';
+      return fence + pad + node.text + pad + fence;
+    }
     case 'MdEmph': return '*' + node.children.map(renderInline).join('') + '*';
     case 'MdStrong': return '**' + node.children.map(renderInline).join('') + '**';
     case 'MdLink': return '[' + node.children.map(renderInline).join('') + '](' + node.url + ')';
@@ -779,12 +836,18 @@ function renderBlockLines(node) {
     case 'MdCodeBlock':
       return ['```' + node.lang, ...node.code.split('\n'), '```'];
     case 'MdBlockQuote': {
+      // An empty quote still occupies a line; rendering it as nothing
+      // makes the block vanish on re-parse (mirrors _render_block).
+      if (node.children.length === 0) return ['>'];
       const out = [];
-      for (const child of node.children) {
+      node.children.forEach((child, i) => {
+        // A bare '>' between children, mirroring _render_block: without
+        // it a quote holding two paragraphs re-parses as one.
+        if (i > 0) out.push('>');
         for (const line of renderBlockLines(child)) {
           out.push(line ? '> ' + line : '>');
         }
-      }
+      });
       return out;
     }
     case 'MdList': {
@@ -2689,10 +2752,21 @@ function buildImportObject(module, moduleBytes) {
         }
         return v;
       });
-      // JSON.stringify can return undefined for unsupported values
-      // (e.g. bare undefined, symbols, functions).  Fall back to "null"
-      // to match the JSON spec and avoid allocString crashing.
-      return allocString(text !== undefined ? text : "null");
+      // JSON.stringify returns undefined for values with no JSON form
+      // (bare undefined, symbols, functions).  readJson cannot produce
+      // one, so this is unreachable — but it used to fall back to
+      // "null", which is the same silent substitution #1293 removed one
+      // layer up, and an unreachable branch is exactly where a silent
+      // wrong answer survives unnoticed.  Raise instead, matching
+      // dumps_canonical's TypeError for a value outside read_json's
+      // domain: whatever produced it, the ADT walk is wrong.
+      if (text === undefined) {
+        throw new Error(
+          "json_stringify: readJson produced a value with no JSON " +
+          "representation; the ADT walk is wrong"
+        );
+      }
+      return allocString(text);
     };
   }
 

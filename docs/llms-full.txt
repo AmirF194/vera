@@ -3147,7 +3147,7 @@ vera compile --target browser examples/hello_world.vera
 #   index.html
 ```
 
-Serve it with any HTTP server and open `index.html` — no build step, no bundler, no dependencies. The JavaScript runtime provides browser-appropriate implementations of all Vera host bindings: `IO.print` writes to the page, `IO.read_line` uses `prompt()`, and all other operations (State, contracts, JSON, Markdown) work identically to the wasmtime runtime. `json_stringify` and `md_render` reach that identity by emitting a canonical form the specification states — §9.7.1 and §9.7.3 — rather than by the two hosts happening to agree, which is what the parity suite checks them against.
+Serve it with any HTTP server and open `index.html` — no build step, no bundler, no dependencies. The JavaScript runtime provides browser-appropriate implementations of all Vera host bindings: `IO.print` writes to the page, `IO.read_line` uses `prompt()`, and all other operations (State, contracts, JSON, Markdown rendering) work identically to the wasmtime runtime. `json_stringify` and `md_render` reach that identity by emitting a canonical form the specification states — §9.7.1 and §9.7.3 — rather than by the two hosts happening to agree, which is what the parity suite checks them against. `md_parse` is the exception: the two hand-written parsers still disagree on how a paragraph's plain-text runs are grouped — invisible to `md_render`, since they concatenate to the same text — and on a few block markers the §9.7.3 subset leaves open, such as a `+` bullet or a list nested more than two deep. That is a tracked bug, listed in [KNOWN_ISSUES.md](https://github.com/aallan/vera/blob/main/KNOWN_ISSUES.md).
 
 Two effects are refused outright rather than merely differing. `Inference` and `DB` return an explanatory `Err` from every operation in the browser, because the API key or database credential they would need is readable from page source and network traffic in client-side JavaScript. Reach them through a server-side endpoint and call it with `Http`, which does run in the browser — it is backed by `XMLHttpRequest`, not a stub. That refusal is a deliberate platform boundary; spec §9.5.5 states it for `Inference`.
 
@@ -3256,7 +3256,7 @@ The reference compiler is under active development. The current release includes
 
 - A seven-stage pipeline: parse, transform, resolve, typecheck, verify, compile, execute
 - A 14-chapter formal specification
-- 10,676 tests, including a 216-program conformance suite
+- 10,714 tests, including a 216-program conformance suite
 - 42 working example programs
 - 164 built-in functions covering strings, arrays, math, parsing, and data types
 - Four built-in abilities (Eq, Ord, Hash, Show) with constrained generics and ADT auto-derivation

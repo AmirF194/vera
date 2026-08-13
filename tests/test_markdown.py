@@ -312,12 +312,115 @@ class TestRoundTrip:
         "1. first\n2. second",
         "> quoted",
         "| A | B |\n| --- | --- |\n| 1 | 2 |",
+        # Multi-child containers.  Every entry above is single-line or
+        # fence-only, so none of them can see a container that drops the
+        # separator between its children — which the blockquote arm did
+        # until v0.1.12 (#1294 review), turning two quoted paragraphs
+        # into one.
+        "> a\n>\n> b",
+        "> a\n>\n> - b\n> - c",
+        "> # H\n>\n> para\n>\n> ```py\n> x = 1\n> ```",
     ])
     def test_round_trip(self, markdown: str) -> None:
         doc = parse_markdown(markdown)
         rendered = render_markdown(doc)
         doc2 = parse_markdown(rendered)
         assert doc == doc2
+
+    @pytest.mark.parametrize("markdown", [
+        "> a\n>\n> b",
+        "> a\n>\n> - b\n> - c",
+        "> # H\n>\n> para\n>\n> ```py\n> x = 1\n> ```",
+        "- item 1\n- item 2",
+        "> quoted",
+        # An empty quote is a block like any other: it has to survive
+        # its own render, or a `>` in a document disappears on the
+        # round trip and takes the document's block spacing with it.
+        ">",
+        "---\n>",
+        "> a\n\n>\n\n> b",
+    ])
+    def test_render_is_a_fixed_point(self, markdown: str) -> None:
+        """Rendering the render changes nothing.
+
+        The ADT equality above is the property spec §9.7.3 states; this
+        is the weaker string form the cross-host battery in
+        ``tests/test_browser.py`` can observe.  Both are asserted here
+        so a future divergence between them is visible: a renderer that
+        satisfies the string form while losing structure would pass one
+        and fail the other.
+        """
+        once = render_markdown(parse_markdown(markdown))
+        twice = render_markdown(parse_markdown(once))
+        assert twice == once
+
+    @pytest.mark.parametrize(("code", "rendered"), [
+        ("code", "`code`"),
+        ("a`b", "``a`b``"),
+        ("a``b", "```a``b```"),
+        ("`x", "`` `x ``"),
+        ("x`", "`` x` ``"),
+        (" ", "` `"),
+    ])
+    def test_code_span_fence_round_trips(
+        self, code: str, rendered: str,
+    ) -> None:
+        """A code span is fenced with one more backtick than its longest
+        internal run, padded only when it starts or ends with one.
+
+        The old rule was "two backticks and padding spaces if the
+        content holds any backtick", which is right for one backtick and
+        wrong for two: ``MdCode("a``b")`` rendered ``` `` a``b `` ```,
+        whose closing run is the one *inside* the content, so it read
+        back as a different document.
+
+        The round trip is asserted with the span preceded by text.  A
+        three-backtick fence at the *start of a line* is a block fence
+        to the block parser, which is a separate collision — pinned on
+        its own below rather than folded in here, so this case tests the
+        inline rule and nothing else.
+        """
+        doc = MdParagraph((MdCode(code),))
+        assert render_markdown(doc) == rendered
+
+        embedded = MdParagraph((MdText("x "), MdCode(code)))
+        line = render_markdown(embedded)
+        assert line == "x " + rendered
+        assert parse_markdown(line).children[0] == embedded
+
+    def test_code_span_needing_a_triple_fence_collides_at_line_start(
+        self,
+    ) -> None:
+        """A span whose content holds ``` `` ``` needs a three-backtick
+        fence, and at the start of a line that IS a block fence.
+
+        Measured, not assumed: the block parser matches
+        ``^(`{3,}|~{3,})`` before any inline parsing happens, so the
+        paragraph is read as an empty fenced code block whose language
+        tag is the rest of the line.  There is no escape syntax in the
+        §9.7.3 subset to write it another way, so the shape is simply
+        not representable at line start — the same on both runtimes,
+        since neither has anything to disagree about.  Pinned so the
+        limitation is visible rather than inferred from a gap.
+        """
+        doc = MdParagraph((MdCode("a``b"),))
+        line = render_markdown(doc)
+        assert line == "```a``b```"
+        assert parse_markdown(line).children[0] == MdCodeBlock("a``b```", "")
+
+    def test_blockquote_children_are_separated(self) -> None:
+        """A blockquote separates its children with a bare ``>``.
+
+        Directly pinned, not inferred from the round trip, because the
+        round trip is satisfiable in two ways and only one is right: a
+        renderer could also "preserve structure" by merging the two
+        paragraphs at parse time.  The bytes say which happened.
+        """
+        doc = MdBlockQuote((
+            MdParagraph((MdText("first"),)),
+            MdParagraph((MdText("second"),)),
+        ))
+        assert render_markdown(doc) == "> first\n>\n> second"
 
 
 # =====================================================================

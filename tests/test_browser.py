@@ -12,6 +12,8 @@ Requirements:
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import math
 import random
@@ -29,7 +31,7 @@ from vera.checker import typecheck
 from vera.parser import parse_file
 from vera.resolver import ModuleResolver
 from vera.transform import transform
-from vera.wasm.json_serde import format_json_number
+from vera.wasm.json_serde import _non_finite_message, format_json_number
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -226,8 +228,16 @@ def _both_failures(src: str, tmp_path: Path, name: str) -> tuple[str, str]:
     src_path.write_text(src, encoding="utf-8")
     wasm_path, result = _compile_file(src_path, tmp_path)
 
+    # ``execute`` discards its stdout buffer when the exception is not a
+    # wasmtime trap, so the buffer cannot answer "did it print anything
+    # first?".  ``tee_stdout`` mirrors every ``IO.print`` to
+    # ``sys.stdout`` as it happens, which survives the unwind — so
+    # redirecting it gives the native side the same observation the Node
+    # harness gives for free.
+    native_tee = io.StringIO()
     try:
-        native_out = _run_python(result)
+        with contextlib.redirect_stdout(native_tee):
+            native_out = execute(result, tee_stdout=True)
     except Exception as exc:  # noqa: BLE001 — any failure is the signal
         native_msg = str(exc)
     else:
@@ -235,6 +245,10 @@ def _both_failures(src: str, tmp_path: Path, name: str) -> tuple[str, str]:
             "native runtime did not fail; "
             f"stdout={native_out.stdout!r}"
         )
+    assert native_tee.getvalue() == "", (
+        "native runtime produced output on a failing call: "
+        f"{native_tee.getvalue()!r}"
+    )
 
     node = _run_node(wasm_path)
     browser_msg = str(node.get("error") or "")
@@ -3637,25 +3651,31 @@ public fn main(@Unit -> @Unit)
 """
 
     @pytest.mark.parametrize(
-        ("case_id", "expr"),
+        ("case_id", "expr", "rendered"),
         [
-            ("nan", "nan()"),
-            ("infinity", "infinity()"),
-            ("negative_infinity", "0.0 - infinity()"),
+            ("nan", "nan()", "NaN"),
+            ("infinity", "infinity()", "Infinity"),
+            ("negative_infinity", "0.0 - infinity()", "-Infinity"),
         ],
     )
     def test_non_finite_fails_on_both_hosts(
-        self, case_id: str, expr: str, tmp_path: Path,
+        self, case_id: str, expr: str, rendered: str, tmp_path: Path,
     ) -> None:
         native, browser = _both_failures(
             self._SRC.format(expr=expr), tmp_path, f"jsonnf_{case_id}",
         )
-        # One shared sentence, so a caller reading either host's failure
-        # learns the same thing.  Substring, not equality: wasmtime and
-        # the Node harness each wrap the host message in their own frame.
-        needle = "not representable in JSON"
-        assert needle in native, native
-        assert needle in browser, browser
+        # The WHOLE sentence, taken from the reference implementation, so
+        # the browser's hand-copied duplicate in ``runtime.mjs`` is held
+        # against the original rather than against a shared fragment
+        # short enough for both to satisfy while saying different things
+        # — including the value's own spelling ("NaN" / "Infinity" /
+        # "-Infinity"), which each host derives independently.
+        expected = _non_finite_message(rendered)
+        assert "not representable in JSON" in expected  # guards the guard
+        # Substring, not equality: wasmtime and the Node harness each
+        # wrap the host message in a frame of their own.
+        assert expected in native, native
+        assert expected in browser, browser
 
 
 class TestCanonicalNumberFormatMatchesEcmascript1293:
@@ -4010,9 +4030,15 @@ _MD_RENDER_CASES = [
     (
         "nested_bq_fence",
         r"> ## Quoted\n>\n> ```py\n> x = 1\n> ```\n",
-        "> ## Quoted\n> ```py\n> x = 1\n> ```",
+        # The bare `>` between the quote's two children survives the
+        # round trip since the #1294 review; the render is now the
+        # input back, byte for byte, minus the trailing newline.
+        "> ## Quoted\n>\n> ```py\n> x = 1\n> ```",
     ),
     ("plain_paragraph", r"hello\nworld\n", "hello world"),
+    # A quote holding two paragraphs — the shape whose separator the
+    # reference renderer dropped, merging them into one on re-parse.
+    ("blockquote_two_paragraphs", r"> a\n>\n> b\n", "> a\n>\n> b"),
 ]
 
 # Corpus for the §9.7.3 round-trip property.  The first eight mirror
@@ -4036,6 +4062,22 @@ _MD_ROUND_TRIP_CORPUS = [
     ("blockquote_pair", r"> a\n> b\n"),
     ("nested_bq_fence", r"> ## Quoted\n>\n> ```py\n> x = 1\n> ```\n"),
     ("plain_paragraph", r"hello\nworld\n"),
+    # Multi-child containers — the shape whose separator the reference
+    # renderer dropped (#1294 review).
+    ("blockquote_two_paragraphs", r"> a\n>\n> b\n"),
+    ("blockquote_para_then_list", r"> a\n>\n> - b\n> - c\n"),
+    ("blockquote_three_children",
+     r"> # H\n>\n> para\n>\n> ```py\n> x = 1\n> ```\n"),
+    # Lazy continuation: an unmarked line continues the quote.
+    ("blockquote_lazy_continuation", r"> a\nb\n"),
+    ("blockquote_no_space", r">no space\n"),
+    # An empty container: it has to survive its own render or the block
+    # disappears and the document's spacing goes with it.
+    ("blockquote_empty", r"---\n>\n"),
+    ("blockquote_empty_between", r"> a\n\n>\n\n> b\n"),
+    # A code span whose content holds a backtick — the shape that tells
+    # a run-length scan apart from a next-single-backtick scan.
+    ("code_span_interior_tick", r"``a`b``"),
     ("quoted_list", r"> - a\n>   b\n> - c\n"),
     ("quoted_multiline_fence", r"> ```sh\n> one\n> two\n> ```\n"),
     ("list_with_fence", r"- item\n  ```py\n  a = 1\n  b = 2\n  ```\n"),
@@ -4147,24 +4189,92 @@ class TestBrowserMarkdownRenderConstructedAdt1294:
     is still reachable, and still has to agree across the two hosts.
     """
 
-    def test_code_span_containing_a_backtick(self, tmp_path: Path) -> None:
-        """A code span holding a backtick needs the longer fence.
+    @pytest.mark.parametrize(("case_id", "code", "rendered"), [
+        ("plain", "code", "`code`"),
+        ("one_backtick", "a`b", "``a`b``"),
+        ("two_backticks", "a``b", "```a``b```"),
+        ("leading_backtick", "`x", "`` `x ``"),
+        ("trailing_backtick", "x`", "`` x` ``"),
+    ])
+    def test_code_span_fence(
+        self, case_id: str, code: str, rendered: str, tmp_path: Path,
+    ) -> None:
+        """The fence is one backtick longer than the content's longest
+        run, padded only when the content starts or ends with one.
 
-        Neither parser produces one — both stop a span at the first
-        closing backtick — so this rule is reachable only from a
-        constructed ADT, which is exactly why the browser renderer was
-        missing it while every parse-driven test passed.  Wrapping it in
-        a single backtick pair would re-parse as an empty span followed
-        by stray text, so the round trip is checked too.
+        Reachable only from a constructed ADT for the multi-backtick
+        cases, which is why the browser renderer was missing the rule
+        entirely while every parse-driven test passed — and why the
+        reference's own rule ("two backticks and padding") was wrong for
+        two backticks without anything noticing.
+        """
+        src = f"""
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{{
+  IO.print(md_render(MdDocument([MdParagraph([MdCode("{code}")])])))
+}}
+"""
+        assert _parity_stdout(src, tmp_path, f"md_tick_{case_id}") == rendered
+
+    @pytest.mark.parametrize(("case_id", "source", "expected"), [
+        # Content WITH an interior backtick, so a scan that stops at the
+        # next single tick lands somewhere else.  ``` ``double`` ``` on
+        # its own does not distinguish the two scans: both recover
+        # "double", which is how a wrong parser passes a plausible test.
+        ("interior_tick", r"``a`b``", "``a`b``"),
+        ("plain_double", r"``double``", "`double`"),
+        # A three-backtick run at the start of a line is a BLOCK fence
+        # before any inline parsing happens, so this is an unterminated
+        # code block whose language tag is the rest of the line.  Both
+        # hosts agree on that, which is the claim here; that the shape
+        # is unrepresentable at line start is a limitation of the
+        # §9.7.3 subset, pinned natively in tests/test_markdown.py.
+        ("triple_is_a_block_fence", r"```a``b```", "```a``b```\n\n```"),
+    ])
+    def test_code_span_parses_by_run_length(
+        self, case_id: str, source: str, expected: str, tmp_path: Path,
+    ) -> None:
+        """``md_parse`` closes a span on a run of EQUAL length.
+
+        The browser scanned for the next single backtick, so
+        ``` ``a`b`` ``` closed on the interior tick and left the rest as
+        stray text — a parse divergence, not a render one, and the
+        reason the fence rule above needs the parser fixed in the same
+        change: without it the browser cannot read back its own output.
+        """
+        src = f"""
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{{
+  match md_parse("{source}") {{
+    Ok(@MdBlock) -> IO.print(md_render(@MdBlock.0)),
+    Err(@String) -> IO.print(string_concat("ERR:", @String.0))
+  }}
+}}
+"""
+        assert _parity_stdout(src, tmp_path, f"md_span_{case_id}") == expected
+
+    def test_empty_blockquote_still_occupies_a_line(
+        self, tmp_path: Path,
+    ) -> None:
+        """A quote with no children renders as a bare ``>``.
+
+        Rendering it as no lines at all makes the block vanish on
+        re-parse and turns the document's separator into a stray blank
+        line, so ``---\\n>`` came back as just ``---``.  Built directly
+        *and* exercised through the corpus round trip below, because the
+        constructed form is what pins the bytes and the parsed form is
+        what proves the parser agrees they are the same block.
         """
         src = """
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
-  IO.print(md_render(MdDocument([MdParagraph([MdCode("a`b")])])))
+  IO.print(md_render(MdDocument([MdThematicBreak(), MdBlockQuote([])])))
 }
 """
-        assert _parity_stdout(src, tmp_path, "md_code_tick") == "`` a`b ``"
+        assert _parity_stdout(src, tmp_path, "md_empty_bq") == "---\n\n>"
 
     def test_multi_line_code_block_inside_a_blockquote(
         self, tmp_path: Path,
@@ -4188,14 +4298,19 @@ public fn main(@Unit -> @Unit)
             "> ```sh\n> one\n> two\n> three\n> ```"
         )
 
-    def test_blank_line_between_blocks_inside_a_blockquote(
+    def test_nested_documents_separator_is_quoted(
         self, tmp_path: Path,
     ) -> None:
-        """The separator between a document's blocks is itself quoted.
+        """A *nested ``MdDocument``* separates its blocks with a blank
+        line, and the enclosing quote turns that into a bare ``>``.
 
-        A blockquote wrapping two paragraphs renders the gap as a bare
-        ``>``, not as an empty line — an empty line would end the quote
-        on re-parse and split one blockquote into two.
+        The separator here comes from the ``MdDocument`` arm, not the
+        blockquote arm — the quote has exactly one child.  What this
+        pins is the quoting of a child's blank line: an unquoted empty
+        line would end the quote on re-parse and split one blockquote
+        into two.  The blockquote arm's own separator is a different
+        rule with a different owner, pinned by the test below on the
+        shape ``md_parse`` actually produces.
         """
         src = """
 public fn main(@Unit -> @Unit)
@@ -4210,5 +4325,32 @@ public fn main(@Unit -> @Unit)
 }
 """
         assert _parity_stdout(src, tmp_path, "md_bq_blank_adt") == (
+            "> first\n>\n> second"
+        )
+
+    def test_blockquote_separates_its_own_children(
+        self, tmp_path: Path,
+    ) -> None:
+        """The twin of the test above, on the shape the parser builds.
+
+        ``md_parse`` wraps a quote's blocks as ``MdBlockQuote``'s direct
+        children — there is no nested ``MdDocument`` — so the separator
+        has to come from the blockquote arm itself.  It did not: two
+        quoted paragraphs rendered as two adjacent quoted lines, which
+        ``md_parse`` reads back as ONE paragraph, silently and on both
+        hosts (#1294 review).  The test above passed throughout,
+        because the arm it exercises was never the broken one.
+        """
+        src = """
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  IO.print(md_render(MdDocument([MdBlockQuote([
+    MdParagraph([MdText("first")]),
+    MdParagraph([MdText("second")])
+  ])])))
+}
+"""
+        assert _parity_stdout(src, tmp_path, "md_bq_children_adt") == (
             "> first\n>\n> second"
         )

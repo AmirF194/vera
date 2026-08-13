@@ -2269,12 +2269,14 @@ public fn md_render(@MdBlock -> @String)
 
 Renders an `MdBlock` to a canonical Markdown string. Always succeeds. The round-trip property `md_parse(md_render(b)) == Ok(b)` should hold: rendering then re-parsing preserves structure. Every runtime produces the same string (§12.9.3).
 
-Two rules carry that property, and both follow from the ADT having no line-break node (see the design note above):
+Four rules carry that property. The first two follow from the ADT having no line-break node (see the design note above); the last two from a container needing to be readable back as one block:
 
 - **A paragraph is one line.** Its inline content is rendered without internal newlines. A parser collapses a paragraph's soft line breaks to spaces on the way in, so nothing survives to be re-emitted.
 - **A container prefixes every line of every child.** A block quote writes `> ` before each rendered line and a bare `>` for a blank one; a list item writes its marker before the first line and an equal-width indent before the rest. Prefixing only a child's first line would leave a fenced block's body — or a nested block's continuation — outside its container, and the next `md_parse` would read it as a sibling.
+- **A container separates its children.** A block quote writes a bare `>` between adjacent children, as a document writes a blank line between its own. Without it two quoted paragraphs render as two adjacent quoted lines, which re-parse as one paragraph. An empty container still occupies its line: a `MdBlockQuote` with no children renders `>`, because rendering it as nothing deletes the block and leaves the enclosing separator dangling.
+- **A code span is fenced longer than its content.** The fence is one backtick more than the longest backtick run inside the span, with a single padding space on each side when the content itself starts or ends with a backtick. A fixed-width fence terminates on a run inside the content. (A span needing three or more backticks is not representable at the start of a line, where that run is a fenced-code-block opener; there is no escape syntax in this subset.)
 
-Together these make `md_render` a fixed point: rendering its own output returns the same bytes.
+Together these should make `md_render` a fixed point: re-parsing and re-rendering its output returns the same bytes.
 
 **Accessor functions for contracts:**
 

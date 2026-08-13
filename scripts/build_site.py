@@ -615,7 +615,7 @@ Browser bundle: examples/hello_world_browser/
   index.html
 ```
 
-Self-contained — no bundler. Serve with any HTTP server (`python -m http.server`). `IO.print` writes to the page; every other operation the browser target supports works identically to the CLI. `json_stringify` and `md_render` reach that identity by emitting a canonical form the specification states (§9.7.1, §9.7.3) rather than by the hosts happening to agree, so parity tests check them against that form as well as against each other, on every PR. *Note: `Inference.complete` and every `DB` operation return an error in the browser — a deliberate platform boundary, since the credentials they need would be readable from page source; reach them through a server-side proxy via `Http`.*
+Self-contained — no bundler. Serve with any HTTP server (`python -m http.server`). `IO.print` writes to the page; every other operation the browser target supports works identically to the CLI, apart from `md_parse`, whose two hand-written implementations still disagree on a few shapes the §9.7.3 subset does not pin (a tracked bug). `json_stringify` and `md_render` reach that identity by emitting a canonical form the specification states (§9.7.1, §9.7.3) rather than by the hosts happening to agree, so parity tests check them against that form as well as against each other, on every PR. *Note: `Inference.complete` and every `DB` operation return an error in the browser — a deliberate platform boundary, since the credentials they need would be readable from page source; reach them through a server-side proxy via `Http`.*
 
 ### WASI components
 
