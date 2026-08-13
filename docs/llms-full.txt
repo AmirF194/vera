@@ -3143,7 +3143,7 @@ vera compile --target browser examples/hello_world.vera
 #   index.html
 ```
 
-Serve it with any HTTP server and open `index.html` — no build step, no bundler, no dependencies. The JavaScript runtime provides browser-appropriate implementations of all Vera host bindings: `IO.print` writes to the page, `IO.read_line` uses `prompt()`, and all other operations (State, contracts, Markdown) work identically to the wasmtime runtime.
+Serve it with any HTTP server and open `index.html` — no build step, no bundler, no dependencies. The JavaScript runtime provides browser-appropriate implementations of all Vera host bindings: `IO.print` writes to the page, `IO.read_line` uses `prompt()`, and all other operations (State, contracts, Markdown) work identically to the wasmtime runtime, with two documented exceptions: `json_stringify` ([#1293](https://github.com/aallan/vera/issues/1293)) and `md_render` ([#1294](https://github.com/aallan/vera/issues/1294)) still differ between the two hosts.
 
 The runtime also works in Node.js:
 
@@ -3151,7 +3151,7 @@ The runtime also works in Node.js:
 node --experimental-wasm-exnref vera/browser/harness.mjs module.wasm
 ```
 
-Mandatory parity tests enforce that the browser runtime produces identical results to the wasmtime runtime on every PR.
+Mandatory parity tests enforce that on every PR — except for the two divergences above, where each runtime's exact output is pinned separately so a fix goes red rather than passing unnoticed.
 
 
 ## How does contract-driven testing work?

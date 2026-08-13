@@ -3607,23 +3607,34 @@ public fn main(@Unit -> @Unit)
     def test_read_file_is_err_stub_in_browser(self, tmp_path: Path) -> None:
         """``IO.read_file`` has no browser implementation, so
         ``hostReadFile`` returns ``Err('File I/O not available in
-        browser')``.  Node-only: the native runtime really does read the
-        file, so this is a deliberate non-parity path (it is why
-        ``file_io`` is excluded from ``EXAMPLES_WITH_MAIN``).
+        browser')`` where the native runtime really reads the file.  A
+        deliberate non-parity path — it is why ``file_io`` is excluded
+        from ``EXAMPLES_WITH_MAIN`` — so both sides are pinned, not
+        compared.
+
+        The file must **exist**.  Against a missing path the native host
+        also returns ``Err``, so the browser stub and a genuine
+        not-found are indistinguishable and the assertion would hold
+        even if ``hostReadFile`` were fully implemented — the
+        coinciding-default trap.  Reading a file that is really there
+        is what makes ``Ok`` reachable on one side only.
         """
+        present = tmp_path / "present.txt"
+        present.write_text("hello", encoding="utf-8")
+        # POSIX form: a Windows backslash would parse as a Vera escape.
         src = """
-public fn main(-> @Int)
+public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
-  match IO.read_file("nonexistent.txt") {
-    Ok(@String) -> 1,
-    Err(@String) -> 0
+  match IO.read_file("%s") {
+    Ok(@String) -> IO.print("ok"),
+    Err(@String) -> IO.print("err")
   }
 }
-"""
-        wasm_path, _ = _compile_vera(src, tmp_path)
-        result = _run_node(wasm_path, fn="main")
-        assert result["value"] == 0
+""" % present.as_posix()
+        native, browser = _both_stdouts(src, tmp_path, "read_file_stub")
+        assert native == "ok"
+        assert browser == "err"
 
     def test_read_char_is_err_stub_in_browser(self, tmp_path: Path) -> None:
         """``IO.read_char`` needs JSPI suspend/resume (#609, #618); until
@@ -3655,10 +3666,14 @@ class TestBrowserMarkdownNesting349:
     run when a heading or fence is nested inside another block.
     ``examples/markdown.vera`` is flat, so none of them ever ran.
 
-    Node-only, because ``md_render`` diverges on exactly this input —
-    see :class:`TestBrowserMarkdownRenderParity349`.  The predicate and
-    extraction assertions below *are* host-agnostic and do match the
-    native runtime.
+    ``md_render`` diverges on exactly this input — see
+    :class:`TestBrowserMarkdownRenderParity349` — so the rendered
+    prefix is asserted browser-side only.  The three parse-side fields
+    behind it are host-agnostic, and that is *checked* rather than
+    asserted in prose: the same module runs under both runtimes and the
+    trailing fields are compared.  It is the claim #1294 rests on when
+    it scopes the defect to the renderer, so it needs a differential,
+    not a docstring.
     """
 
     # A blockquote wrapping an h2 and a fenced block, so the recursive
@@ -3682,14 +3697,11 @@ public fn main(@Unit -> @Unit)
 """
 
     def test_nested_walks_and_list_continuations(self, tmp_path: Path) -> None:
-        src_path = tmp_path / "md_nesting.vera"
-        src_path.write_text(self._SRC, encoding="utf-8")
-        wasm_path, _ = _compile_file(src_path, tmp_path)
-        node = _run_node(wasm_path)
-        assert not node.get("error"), (
-            f"Node harness reported error: {node.get('error')!r}"
-        )
-        rendered, has_h2, has_py, n_blocks = str(node["stdout"]).rsplit("|", 3)
+        native, browser = _both_stdouts(self._SRC, tmp_path, "md_nesting")
+        rendered, has_h2, has_py, n_blocks = browser.rsplit("|", 3)
+        # The parse-side fields must be byte-identical across the two
+        # runtimes; only the rendered prefix is allowed to diverge.
+        assert native.rsplit("|", 3)[1:] == [has_h2, has_py, n_blocks]
         # Continuation lines survived the per-item loop in both list kinds.
         assert "continued" in rendered
         assert "also one" in rendered
