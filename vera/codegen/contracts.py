@@ -85,12 +85,16 @@ class ContractsMixin:
             # @Pos.0 < 10 }` where `Pos = { @Int | @Int.0 > 0 }`): the
             # outer guard would compile only the outer predicate and
             # silently DROP the inner `> 0` membership — a soundness
-            # hole that wrongly accepts `f(-1)`.  The verifier already
-            # records such a narrowing as a Tier-3 E506 (its
-            # `_base_slot_name` returns None for a non-primitive base),
-            # so reject it loudly here at codegen (the "reject before
-            # codegen" choice) with a clean E618 — a non-zero-exit
-            # diagnostic, not a partial guard.  Returns None after
+            # hole that wrongly accepts `f(-1)`.  The verifier records
+            # such a narrowing Tier-3 and, since #1268,
+            # **UNGUARDED** — `_refined_boundary_codegen_guardable` bails
+            # on a refinement base for exactly this reason.  It used to
+            # claim `guarded`, so `vera verify` exited 0 promising a
+            # runtime check for a program `vera compile` then refuses:
+            # a promise about a run that can never happen.  Reject it
+            # loudly here at codegen (the "reject before codegen"
+            # choice) with a clean E618 — a non-zero-exit diagnostic,
+            # not a partial guard.  Returns None after
             # recording the error so the helper stays total; the
             # recorded error fails the compile.  This IS reachable.
             # `base` IS the inner `RefinementType` on this branch; the
@@ -202,6 +206,50 @@ class ContractsMixin:
             "  unreachable",
             "end",
         ]
+
+    def _emit_boundary_refinement_guard(
+        self,
+        ctx: WasmContext,
+        te: ast.TypeExpr,
+        value_local: int,
+        message_head: str,
+        env: WasmSlotEnv,
+    ) -> list[str] | None:
+        """The two guard halves — classify then lower — as ONE call, for a
+        boundary that reaches this layer from inside expression translation
+        (#1268).
+
+        Every other §2.6.5 guard site is CodeGenerator code that already
+        holds both halves and calls them in sequence.  A ``throw`` payload is
+        not: it is discovered mid-expression by :class:`WasmContext`, which
+        owns the representation decisions (which local, at what width) but
+        none of the lowering machinery — the string pool the trap message
+        interns into, the ``$vera.contract_fail`` import flag, the E617/E618
+        diagnostics.  So the context is handed this bound pair via
+        ``set_refinement_guard_emitter`` and supplies only the local.
+
+        Returns ``None`` for an unrefined *te* and for the two refined shapes
+        :meth:`_refinement_guard_parts` emits no guard for — an erased
+        ``@Unit`` base, and a nested refinement (which it also reports as a
+        loud E618).  The verifier's ``_refined_boundary_codegen_guardable``
+        mirrors exactly that set, so a caller recording the obligation
+        ``guarded`` is making a claim this method keeps.  The nested-refinement
+        half of that mirror is #1268's: it answered ``True`` there, so a
+        program `vera compile` refuses outright (E618) verified clean while
+        recording a Tier-3 runtime check that could never run.
+
+        *message_head* is everything before the predicate in the trap text,
+        so the message reads in the same shape as every other boundary's
+        (``Refinement violation in <where>\\n  <role>: <predicate> failed``).
+        """
+        parts = self._refinement_guard_parts(te)
+        if parts is None:
+            return None
+        predicate, base_name = parts
+        message = f"{message_head}: {ast.format_expr(predicate)} failed"
+        return self._emit_refinement_check(
+            ctx, predicate, base_name, value_local, message, env,
+        )
 
     def _resolve_type_alias(self, te: ast.TypeExpr) -> ast.TypeExpr:
         """Walk a ``type Foo = Bar`` alias chain to the underlying TypeExpr,

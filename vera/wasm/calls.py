@@ -537,8 +537,9 @@ class CallsMixin:
             # not — while an int literal defaults to `i64.const`, so
             # `throw(5)` into `Exn<{ @Byte | … }>` emitted a module WASM
             # validation rejects at load.  Same marking, same derivation,
-            # different op; the #1268 narrowing GUARD on this payload is a
-            # separate obligation and is deliberately NOT added here.
+            # different op — and, since #1268, the same narrowing GUARDS
+            # below: the payload is a write boundary in the full sense, not
+            # only in its width.
             is_exn_throw = (
                 call.name == "throw" and len(call.args) == 1
                 and cell is not None
@@ -578,7 +579,27 @@ class CallsMixin:
                 if arg_instrs is None:
                     return None
                 instructions.extend(arg_instrs)
-            if is_state_put:
+            # The write boundary's guards.  `throw` joined `put` here in
+            # #1268: its payload narrows into the `Exn<E>` slot exactly as
+            # `put`'s argument narrows into the cell, but it crossed no
+            # function boundary, so none of §2.6.5's composing guards covered
+            # it — `throw(0 - 5)` into an `Exn<Nat>` ran to completion and
+            # handed `-5` to a clause that had assumed non-negativity, and a
+            # `@Nat`-typed consumer's Tier-1-PROVED `ensures` then failed at
+            # run time.  The three arms mirror the verifier's
+            # `_obligate_binding_triple` one-for-one, refined FIRST for the
+            # same reason it is: the refinement's own predicate carries the
+            # base's implicit range (`_refinement_guard_parts` conjoins it),
+            # so the sign guards would be redundant under it, and running
+            # them instead of it would check `>= 0` where the boundary
+            # invariant is `> 0`.
+            refined_payload: ast.TypeExpr | None = None
+            if is_exn_throw and cell is not None:
+                refined_payload = self._refined_exn_payload_type(cell, call)
+                if refined_payload is not None:
+                    instructions = self._emit_exn_payload_refine_guard(
+                        instructions, refined_payload, cell, call, env)
+            if refined_payload is None and (is_state_put or is_exn_throw):
                 if base == "Nat" and self._narrows_into_nat(call.args[0]):
                     instructions = self._emit_nat_bind_guard(instructions)
                 elif base == "Int" and self._result_is_nat(call.args[0]):

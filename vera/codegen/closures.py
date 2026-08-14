@@ -390,6 +390,14 @@ class ClosureLiftingMixin:
         # int-literal → i32.const coercion inside closure bodies too.
         ctx.set_fn_byte_params(self._fn_byte_params)
         ctx.set_alias_env(self._alias_env)
+        # No `set_refinement_guard_emitter` here (#1268), deliberately: this
+        # context is built with no `effect_op_cells`, so a `throw` in a
+        # closure body reaches no cell and is not a write boundary the guard
+        # could key on — it does not compile at all today (`call target
+        # 'throw' not registered in this module`, a closure skip).  Threading
+        # the op registries in is what would make the boundary real, and the
+        # emitter's absence then fails CLOSED at a loud skip rather than
+        # emitting an unguarded payload the verifier records as guarded.
         # #814/#774: a qualified call inside a closure body must resolve the
         # same way it does in a top-level body — to the module's function
         # (`mod$…` for a shadowed fn) and, for a shadowed imported generic, to

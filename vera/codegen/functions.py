@@ -6,6 +6,7 @@ parameter allocation, body translation, and function assembly.
 
 from __future__ import annotations
 
+import functools
 from typing import TYPE_CHECKING, cast
 
 from vera import ast
@@ -415,9 +416,13 @@ class FunctionCompilationMixin:
                         # width: `throw(5)` into `Exn<{ @Byte | … }>` put an
                         # `i64.const` under an i32 tag and the module failed
                         # WASM validation (#1269).
+                        # The payload's TYPE EXPRESSION rides along (#1268):
+                        # the throw call site guards a refined payload by
+                        # lowering its predicate, which neither name carries.
                         exn_cell = CellNames(
                             family=self._family_name_te(eff.type_args[0]),
                             base=self._family_base_te(eff.type_args[0]),
+                            type_expr=eff.type_args[0],
                         )
                         effect_ops["throw"] = (
                             f"$exn_{mangle_type_name(exn_cell.family)}",
@@ -514,6 +519,14 @@ class FunctionCompilationMixin:
         # return types.  One value, so the alias bodies and their parameter
         # lists cannot be handed over half-updated (#1184 / #1208).
         ctx.set_alias_env(self._alias_env)
+        # #1268: the §2.6.5 predicate lowering, bound to THIS context, for
+        # the boundaries the context discovers mid-expression (a `throw`
+        # payload).  Installed here rather than passed per call so the two
+        # halves of a guard — representation and lowering — cannot be paired
+        # with different contexts.
+        ctx.set_refinement_guard_emitter(
+            functools.partial(self._emit_boundary_refinement_guard, ctx),
+        )
         ctx.set_closure_id_start(self._next_closure_id)
         ctx.set_closure_sigs(self._closure_sigs)
         # #814 §8.5.3: module-qualified call target table, so a ``m::f`` call

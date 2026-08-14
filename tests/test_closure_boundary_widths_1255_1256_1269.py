@@ -757,11 +757,31 @@ class TestTheThrowPayloadIsAByteWriteBoundary:
         Pinning both halves is what makes this a WIDTH-agreement test rather
         than "it runs" — a fix that widened the TAG to i64 would also run,
         and would put a Byte cell at eight bytes everywhere else.
+
+        The value half no longer reads as adjacency.  #1268 made the payload
+        a guarded write boundary as well as a sized one, so a REFINED payload
+        routes through a guard local between the literal and the `throw`;
+        asserting `i32.const 5\\n    throw` would then be a test of where the
+        guard is, not of how wide the value is.  What the width claim needs
+        is that the value the `throw` consumes is i32 by whichever route it
+        arrives — so the pushed operand is resolved: a literal directly, or
+        the guard local, whose DECLARED width is the thing checked.
         """
         wat = _compile_ok(_THROW_REFINED_BYTE).wat
         tags = re.findall(r"\(tag \$exn_\S+ \(param ([^)]*)\)\)", wat)
         assert tags == ["i32"], tags
-        assert "i32.const 5\n    throw $exn_" in wat, _fn_body(wat, "boom")
+        body = _fn_body(wat, "boom")
+        assert "i32.const 5" in body, body
+        assert "i64.const 5" not in body, body
+        lines = [ln.strip() for ln in body.strip().splitlines()]
+        throw_at = next(i for i, ln in enumerate(lines)
+                        if ln.startswith("throw $exn_"))
+        pushed = lines[throw_at - 1]
+        if pushed.startswith("local.get "):
+            idx = pushed.split()[1]
+            assert f"(local $l{idx} i32)" in body, body
+        else:
+            assert pushed == "i32.const 5", body
 
 
 # =====================================================================

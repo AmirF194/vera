@@ -428,6 +428,26 @@ class WasmContext(
         # swapped independently and fall out of step (the #1184 mispairing).
         # Seeded empty; codegen calls `set_alias_env` before translation.
         self._alias_env: AliasEnv = EMPTY_ALIAS_ENV
+        # #1268: lower a refinement predicate to a boundary guard over a
+        # value already in a local.  Injected by codegen via
+        # `set_refinement_guard_emitter`, because the two halves of a §2.6.5
+        # guard live on opposite sides of this seam: the REPRESENTATION half
+        # — which local, at what width, in what order relative to the value
+        # on the stack — is this context's, while lowering it needs the string
+        # pool's trap message, the `$vera.contract_fail` import flag and the
+        # E617/E618 diagnostics, all of which are the generator's.  The same
+        # injection shape as `set_adt_eq_derivable`.  `None` until installed:
+        # a context translating a `throw` without it FAILS CLOSED (a loud
+        # skip), never silently unguarded — see
+        # `_emit_exn_payload_refine_guard`.  A lifted-closure context is
+        # deliberately left at `None`: it carries no `effect_op_cells`, so no
+        # `throw` there is a write boundary this could guard (it does not
+        # compile at all today), and the closed failure is what a future
+        # thread-through would meet rather than a silently unguarded payload.
+        self._refinement_guard_emitter: (
+            Callable[[ast.TypeExpr, int, str, WasmSlotEnv], list[str] | None]
+            | None
+        ) = None
         # Closure signature registry: sig_key -> (type_name, param/result WAT)
         self._closure_sigs: dict[str, str] = {}
         # Flags for resource requirements detected during translation
@@ -628,6 +648,26 @@ class WasmContext(
         travel as one value that cannot be half-updated.
         """
         self._alias_env = env
+
+    def set_refinement_guard_emitter(
+        self,
+        emitter: Callable[
+            [ast.TypeExpr, int, str, WasmSlotEnv], list[str] | None
+        ],
+    ) -> None:
+        """Install the §2.6.5 refinement-predicate guard lowering (#1268).
+
+        *emitter* takes ``(type_expr, value_local, message, env)`` and returns
+        the WAT that traps via ``$vera.contract_fail`` when the value in
+        *value_local* violates *type_expr*'s predicate — or ``None`` when the
+        type is unrefined, or refined over a base codegen emits no guard for
+        (an erased ``@Unit``, a nested refinement).  Codegen binds it to
+        ``CodeGenerator._emit_boundary_refinement_guard`` for THIS context, so
+        the trap message interns into the shared string pool and the
+        contract-fail import flag is raised on the generator that assembles
+        the module.
+        """
+        self._refinement_guard_emitter = emitter
 
     def set_closure_id_start(self, start: int) -> None:
         """Set the starting closure ID for this context."""

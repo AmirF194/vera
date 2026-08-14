@@ -1,0 +1,59 @@
+-- Conformance: the Exn<E> payload is a guarded write boundary (Chapter 2,
+-- Section 2.6.5; Chapter 7, Section 7.4).  Tests: `throw`'s payload takes
+-- the boundary's runtime guards at the throw itself — the refinement
+-- predicate for a refined payload, the `>= 0` sign check for a `@Nat` one
+-- (#1268) — so a legal payload passes them and reaches the handler clause
+-- that binds it at the declared type.  Both throws are proved at Tier 1
+-- from their preconditions, which is exactly the case §2.6.5 calls defense
+-- in depth: the guards are emitted and never reached.  Their violating
+-- twins trap, which no conformance level can express, so those live in
+-- tests/test_exn_throw_payload_1268.py.
+type Pos = { @Int | @Int.0 > 0 };
+
+private fn refined_thrower(@Int -> @Int)
+  requires(@Int.0 > 0)
+  ensures(true)
+  effects(<Exn<Pos>>)
+{
+  throw(@Int.0)
+}
+
+private fn nat_thrower(@Int -> @Int)
+  requires(@Int.0 >= 0)
+  ensures(true)
+  effects(<Exn<Nat>>)
+{
+  throw(@Int.0)
+}
+
+private fn refined_caught(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 7)
+  effects(pure)
+{
+  handle[Exn<Pos>] {
+    throw(@Pos) -> { @Pos.0 }
+  } in {
+    refined_thrower(7)
+  }
+}
+
+private fn nat_caught(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 5)
+  effects(pure)
+{
+  handle[Exn<Nat>] {
+    throw(@Nat) -> { nat_to_int(@Nat.0) }
+  } in {
+    nat_thrower(5)
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 0)
+  effects(pure)
+{
+  refined_caught(()) - 7 + (nat_caught(()) - 5)
+}

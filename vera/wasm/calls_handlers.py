@@ -7,11 +7,11 @@ and effect handlers (State<T>, Exn<E>).
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import Callable, ClassVar
 
 from dataclasses import fields, is_dataclass
 
-from vera import ast
+from vera import ast, naming
 from vera.monomorphize import mangle_type_name
 from vera.slots import effect_op_result_names, type_expr_slot_name
 from vera.skip import STATE_CLAUSE_INLINE_DEPTH_CAP, CodegenSkip
@@ -67,6 +67,10 @@ class CallsHandlersMixin:
     _pushed_cell_families: list[str]
     _addressable_from: int
     _clause_inline_depth: int
+    _refinement_guard_emitter: (
+        Callable[[ast.TypeExpr, int, str, WasmSlotEnv], list[str] | None]
+        | None
+    )
 
     # -----------------------------------------------------------------
     # Ability operation dispatch: show and hash (§9.8)
@@ -2215,6 +2219,113 @@ class CallsHandlersMixin:
         return (self._tail_resume_arg(body) is not None
                 and total_count(body) == 1)
 
+    def _refined_exn_payload_type(
+        self, cell: CellNames, call: ast.FnCall,
+    ) -> ast.TypeExpr | None:
+        """This ``throw``'s payload type when it is a REFINEMENT, else None
+        (#1268).
+
+        The refined-first branch selector at the throw write boundary, asked
+        BEFORE a guard local is allocated so an unrefined payload's WAT stays
+        byte-identical to the pre-#1268 output.  It is the same
+        :mod:`vera.naming` derivation :meth:`_refinement_guard_parts`
+        resolves through — the naming layer answers "is this a refinement,
+        and over what binder", and codegen layers its representation
+        decisions on top — so this cannot select an arm the emitter then
+        disagrees with.
+
+        A ``throw`` cell with no payload type expression fails CLOSED.  Both
+        producers (the declared-effect row in ``codegen/functions.py`` and
+        the ``handle[Exn<E>]`` body below) thread it; a producer that forgot
+        to would otherwise emit no guard silently while the verifier went on
+        recording one — the exact false-``guarded`` claim this issue was.
+        """
+        if cell.type_expr is None:
+            raise CodegenSkip(  # pragma: no cover — defensive
+                call,
+                f"Exn<{cell.family}> payload carries no type expression, so "
+                "its refinement predicate cannot be guarded at the throw",
+            )
+        if naming.refinement_binder_parts(
+                cell.type_expr, self._alias_env) is None:
+            return None
+        return cell.type_expr
+
+    def _emit_exn_payload_refine_guard(
+        self, value: list[str], payload_te: ast.TypeExpr, cell: CellNames,
+        call: ast.FnCall, env: WasmSlotEnv,
+    ) -> list[str]:
+        """Wrap *value* with the §2.6.5 predicate guard for a refined
+        ``Exn<E>`` payload (#1268) — the refined twin of the sign guards
+        ``_emit_nat_bind_guard`` / ``_emit_int_widen_guard`` give the
+        unrefined payload at the same call site.
+
+        ``throw(v)`` narrows *v* into the payload slot exactly as a call
+        argument narrows into a refined formal, but the payload crosses no
+        function boundary, so none of §2.6.5's composing boundary guards
+        covers it: pre-fix, ``throw(0 - 5)`` into an ``Exn<{ @Int | @Int.0 >
+        0 }>`` ran to completion and handed ``-5`` to a clause that had
+        assumed the predicate.  This is that boundary's own guard — save the
+        value, test the predicate over it, push it back — so it traps through
+        the same ``$vera.contract_fail`` channel a refined parameter does.
+
+        Emitted UNGATED for every refined payload, matching the closure
+        return guard rather than the sign guards' narrowing test: a value
+        already typed at the refinement satisfies its own predicate, so the
+        guard costs a dead check at worst, while a missing one is a false
+        ``guarded`` claim in the obligation stream.  The verifier's mirror is
+        ``_refined_boundary_codegen_guardable``, which downgrades exactly the
+        shapes the emitter answers ``None`` for (an erased ``@Unit`` base, a
+        nested refinement), so obligation and guard stay in lock-step.
+
+        Called only with the *payload_te* :meth:`_refined_exn_payload_type`
+        returned, which is the same expression ``cell.type_expr`` holds.
+        """
+        emitter = self._refinement_guard_emitter
+        if emitter is None:
+            raise CodegenSkip(  # pragma: no cover — defensive
+                call,
+                "no refinement-guard emitter is installed on this "
+                f"translation context, so the refined Exn<{cell.family}> "
+                "payload cannot be guarded at the throw",
+            )
+        # The payload's SOURCE spelling, not `cell.family`: a refined
+        # family renders its own predicate (#1218), so naming the cell that
+        # way printed the predicate twice in one two-line message, once as
+        # the "type" and again as the thing that failed.
+        head = (
+            f"Refinement violation in "
+            f"throw({ast.format_type_expr(payload_te)})\n"
+            "  payload"
+        )
+        if self._is_pair_type_name(cell.base):
+            # A `String`-based payload is (ptr, len) in two CONSECUTIVE
+            # locals, checked over the ptr — the same shape the lifted
+            # closure's i32_pair return guard uses.
+            ptr_local = self.alloc_local("i32")
+            len_local = self.alloc_local("i32")
+            guard = emitter(payload_te, ptr_local, head, env)
+            if guard is None:
+                return value
+            return [
+                *value,
+                f"local.set {len_local}",
+                f"local.set {ptr_local}",
+                *guard,
+                f"local.get {ptr_local}",
+                f"local.get {len_local}",
+            ]
+        value_local = self.alloc_local(self._type_name_to_wasm(cell.base))
+        guard = emitter(payload_te, value_local, head, env)
+        if guard is None:
+            return value
+        return [
+            *value,
+            f"local.set {value_local}",
+            *guard,
+            f"local.get {value_local}",
+        ]
+
     def _translate_handle_exn(
         self, expr: ast.HandleExpr, env: WasmSlotEnv,
     ) -> list[str] | None:
@@ -2324,7 +2435,12 @@ class CallsHandlersMixin:
         self._effect_ops = {**saved_ops, "throw": (tag_name, False)}
         self._effect_op_cells = {
             **saved_cells,
-            "throw": CellNames(family=family, base=family_base),
+            # `type_arg` rides along for the same reason the two names do
+            # (#1268): a `throw` in this body guards a refined payload by
+            # lowering the predicate, which only the type expression carries.
+            "throw": CellNames(
+                family=family, base=family_base, type_expr=type_arg,
+            ),
         }
 
         # Compile body

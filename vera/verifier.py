@@ -4389,20 +4389,29 @@ class ContractVerifier:
         site: str,
         nat_guarded: bool,
         widen_guarded: bool,
+        refined_guarded: bool = False,
     ) -> None:
         """The refined-first / @Nat / widen binding-obligation triple for a
         single value flowing into a typed slot (#1203 — shared by the
-        handler state-init, state-update, get-resume, and State-put sites;
-        the older call-argument and constructor-field copies carry
-        site-specific side-table subtleties and stay inline).  The refined
-        arm is ALWAYS unguarded: no handler boundary emits a
-        refined-predicate guard, so it discloses E506 honestly."""
+        handler state-init, state-update, get-resume, State-put, and
+        `throw`-payload sites; the older call-argument and constructor-field
+        copies carry site-specific side-table subtleties and stay inline).
+
+        *refined_guarded* defaults to False because most of those sites emit
+        sign guards only — a handler write boundary lowers no refinement
+        predicate, so its refined arm discloses E506 honestly.  The `throw`
+        payload is the exception (#1268): codegen lowers the predicate there,
+        so that site passes True and the arm records a guarded Tier-3.  The
+        flag is only ever an upper bound — `_check_refined_binding_obligation`
+        intersects it with `_refined_boundary_codegen_guardable`, so a shape
+        codegen emits no guard for stays unguarded whatever a caller claims.
+        """
         refined = self._refined_binding_target(value, formal)
         if (refined is not None
                 and self._narrows_into_refined(value, refined)):
             self._check_refined_binding_obligation(
                 decl, value, refined, smt, slot_env, assumptions,
-                site=site, guarded=False,
+                site=site, guarded=refined_guarded,
             )
         elif (self._nat_binding_target(value, formal)
                 and self._narrows_into_nat(value)):
@@ -4850,18 +4859,19 @@ class ContractVerifier:
                 # keys the guard off the dispatch target's cell type), which
                 # is why the test is the op's PARENT EFFECT and not its name
                 # — a user effect's `put` is no more guarded than its
-                # `emit`.  Everything else is the #754 unguarded class and
-                # discloses E504/E531: a user-effect op of any name (its
-                # handler does not compile today, E602), and `throw`, which
-                # lowers straight to `throw $exn_<family>` with the payload
-                # on the stack and no guard anywhere on that path (measured
-                # by run, #1268).  The refined branch is ALWAYS unguarded —
-                # no handler or throw boundary emits a refined-predicate
-                # guard (only sign-bit pairs) — so it discloses E506
-                # honestly.  A `resume` value is obligated from the
-                # HandleExpr arm instead, where the clause's effect identity
-                # is known; `resume` resolves to no operation here, so the
-                # two cannot both fire.
+                # `emit`.  `Exn`'s `throw` joined `State` at the guarded end
+                # in #1268: its payload now takes the same sign guards at the
+                # op-call site plus the §2.6.5 predicate guard for a REFINED
+                # payload, so it is the one op whose refined arm is guarded
+                # too (`refined_guarded` below).  Everything else is still
+                # the #754 unguarded class and discloses E504/E506/E531: a
+                # user-effect op of any name, whose dispatch carries only a
+                # target (`_effect_ops`) and so reaches no cell a guard could
+                # be keyed on.  A `resume` value is obligated from the
+                # HandleExpr arm
+                # instead, where the clause's effect identity is known;
+                # `resume` resolves to no operation here, so the two cannot
+                # both fire.
                 op = None
                 for eff_name in reversed(self._walk_handled_effects):
                     info = self.env.lookup_effect(eff_name)
@@ -4871,14 +4881,20 @@ class ContractVerifier:
                 if op is None:
                     op = self.env.lookup_effect_op(expr.name)
                 if op is not None:
-                    op_guarded = op.parent_effect == "State"
-                    op_site = ("State-op argument" if op_guarded
+                    op_guarded = op.parent_effect in ("State", "Exn")
+                    op_site = ("State-op argument"
+                               if op.parent_effect == "State"
                                else "effect-operation argument")
                     for arg in expr.args:
                         self._obligate_binding_triple(
                             decl, arg, None, smt, slot_env, assumptions,
                             site=op_site,
                             nat_guarded=op_guarded, widen_guarded=op_guarded,
+                            # #1268: only the `throw` payload boundary lowers
+                            # a refinement predicate.  The State write
+                            # boundaries emit sign guards alone, so their
+                            # refined arm stays honestly unguarded.
+                            refined_guarded=op.parent_effect == "Exn",
                         )
             if param_types is not None:
                 # A generic function whose `TypeVar` formal is fixed to @Nat
@@ -5044,6 +5060,27 @@ class ContractVerifier:
             op = self.env.lookup_effect_op(expr.name, qualifier=expr.qualifier)
             param_types = getattr(op, "param_types", None)
             if param_types is not None:
+                # Guardedness is the BARE arm's rule, on the same key (#1268).
+                # The QUALIFIED spelling is the same operation at the same
+                # boundary — codegen's `State.put` / `Exn.throw` arms
+                # synthesize a bare node and delegate to the very dispatcher
+                # that emits the guards — so the two spellings must record
+                # identical statuses or the obligation stream says the
+                # boundary moved when only the syntax did.  This arm still
+                # said "codegen does NOT yet guard effect-op arguments",
+                # stale since #1203 gave `State`'s write boundaries their
+                # guards and false again since #1268 gave `throw`'s payload
+                # the sign pair AND the predicate guard: `Exn.throw(v)` was
+                # guarded at run time and disclosed E504/E506 as if it were
+                # not.  The qualifier NAMES the effect, so `op.parent_effect`
+                # is exactly the bare arm's resolved answer with no
+                # innermost-handler search needed.  Everything else stays the
+                # #754 unguarded class (`IO.sleep`'s `@Nat` formal, a
+                # user-declared effect's op) and discloses honestly.
+                op_effect = getattr(op, "parent_effect", None)
+                op_guarded = op_effect in ("State", "Exn")
+                op_site = ("State-op argument" if op_effect == "State"
+                           else "effect-operation argument")
                 # A concretely-@Nat formal obligates directly (#552); a
                 # generic (TypeVar) formal — `E<T>.wait` instantiated as
                 # `E<Nat>` — is resolved via the checker's recorded
@@ -5058,18 +5095,18 @@ class ContractVerifier:
                             and self._narrows_into_refined(arg, refined_target)):
                         self._check_refined_binding_obligation(
                             decl, arg, refined_target, smt, slot_env,
-                            assumptions, site="effect-operation argument",
-                            guarded=False,
+                            assumptions, site=op_site,
+                            # Only the `throw` payload boundary lowers a
+                            # refinement predicate (#1268); the State write
+                            # boundaries emit sign guards alone, so their
+                            # refined arm stays honestly unguarded.
+                            guarded=op_effect == "Exn",
                         )
                     elif (self._nat_binding_target(arg, formal)
                             and self._narrows_into_nat(arg)):
                         self._check_nat_binding_obligation(
                             decl, arg, smt, slot_env, assumptions,
-                            site="effect-operation argument",
-                            # codegen does NOT yet guard effect-op arguments
-                            # (#754), so an untranslatable narrowing here is
-                            # unguarded regardless of formal concreteness.
-                            guarded=False,
+                            site=op_site, guarded=op_guarded,
                         )
             for arg in expr.args:
                 self._walk_for_nat_binding_obligations(
@@ -6421,12 +6458,13 @@ class ContractVerifier:
                 "Codegen runtime-guards every concrete @Int "
                 "coercion site (return, let, call-argument, constructor field, "
                 "tuple component, array element, heterogeneous arm, closure "
-                "argument/return/capture) but not this one — an "
-                "effect-operation argument (a user-declared effect's "
-                "operation, or an Exn `throw` payload), a tuple-destructure "
-                "component, or a generic-instantiated @Int field with no "
-                "per-field mono metadata — so here the widening is neither "
-                "statically proven nor runtime-checked."
+                "argument/return/capture) but not this one — a "
+                "USER-declared effect operation's argument (the built-in "
+                "`State` write boundaries and the `Exn` `throw` payload ARE "
+                "guarded), a tuple-destructure component, or a "
+                "generic-instantiated @Int field with no per-field mono "
+                "metadata — so here the widening is neither statically "
+                "proven nor runtime-checked."
             ),
             spec_ref='Chapter 11, Section 11.2.1 "Nat as i64"',
             error_code="E531",
@@ -7756,11 +7794,11 @@ class ContractVerifier:
                 "Codegen runtime-guards "
                 "the concrete @Nat binding sites (let, destructure, match, "
                 "sub-pattern, concrete field) and all call-arguments (generic "
-                "ones on the monomorphised callee) but not this one — an "
-                "effect-operation argument (a user-declared effect's "
-                "operation, or an Exn `throw` payload), or a "
-                "generic-instantiated constructor field with no per-field "
-                "mono metadata — so here "
+                "ones on the monomorphised callee) but not this one — a "
+                "USER-declared effect operation's argument (the built-in "
+                "`State` write boundaries and the `Exn` `throw` payload ARE "
+                "guarded), or a generic-instantiated constructor field with "
+                "no per-field mono metadata — so here "
                 "the narrowing is neither statically proven nor "
                 "runtime-checked."
             ),
@@ -9096,11 +9134,13 @@ class ContractVerifier:
         conditions (``vera/codegen/contracts.py``); KEEP IN SYNC (#1036).
 
         Codegen bails (emits NO guard) when (a) the base is the erased
-        ``@Unit`` (no local to check — the ``_is_unit_refinement`` case), or
-        (b) the base carries a NON-PLAIN type argument — a nested refinement
-        or fn type, e.g. ``Array<{ @Int | ... }>`` — whose binder slot name
-        cannot be spelt.  A ``guarded=True`` Tier-3 for either was an
-        unfulfilled runtime-guard promise: an empty array flowed through a
+        ``@Unit`` (no local to check — the ``_is_unit_refinement`` case),
+        (b) the base is itself a REFINEMENT, which codegen refuses outright
+        rather than emitting a partial guard, or (c) the base carries a
+        NON-PLAIN type argument — a nested refinement or fn type, e.g.
+        ``Array<{ @Int | ... }>`` — whose binder slot name cannot be spelt.
+        A ``guarded=True`` Tier-3 for any of them was an unfulfilled
+        runtime-guard promise: an empty array flowed through a
         NonEmpty-refined closure boundary silently while the obligation
         stream claimed a runtime check (PR #1034 adversarial review).  Plain
         named args (``Array<Int>``, nested ``Array<Array<Int>>`` via the
@@ -9111,6 +9151,18 @@ class ContractVerifier:
             # Representation-keyed, not name-keyed: a `Future<Unit>` base
             # erases exactly like bare `@Unit` (#841), so neither has a
             # local for the guard to check (PR #1034 full review).
+            return False
+        if isinstance(ty.base, RefinedType):
+            # Refinement OVER a refinement (`type Tiny = { @Pos | @Pos.0 < 10 }`
+            # where `Pos = { @Int | @Int.0 > 0 }`).  `_refinement_guard_parts`
+            # answers None for this shape — it records a loud E618 and emits
+            # nothing, because the outer guard alone would silently drop the
+            # inner membership predicate.  This mirror claimed True anyway, so
+            # `vera verify` exited 0 recording a Tier-3 that "will be checked
+            # at run time" for a program `vera compile` then REFUSES: a
+            # promise about a runtime that cannot be reached at all.  The
+            # honest answer is unguarded (the obligation discloses E506) and
+            # E618 still refuses at compile.
             return False
         if isinstance(ty.base, AdtType):
             return all(

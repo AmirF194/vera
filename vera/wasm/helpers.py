@@ -98,10 +98,21 @@ class CellNames:
     the family — the seam #1233's round-5 review found re-mangling an
     already-mangled name at — and it is gone: one canonical family is
     threaded to both consumers.
+
+    *type_expr* is the cell type as it was WRITTEN, carried for the one
+    question neither name can answer: a refined cell's PREDICATE (#1268).
+    ``family`` renders it and ``base`` strips it, but the #1268 payload guard
+    has to LOWER it, so the guard reads the type expression its producer
+    already held rather than parsing a predicate back out of a mangled family
+    — the second-derivation trap #1218/#1233 closed everywhere else.  Excluded
+    from equality (``compare=False``): a cell's identity is its family, and a
+    ``TypeExpr`` carries source spans, so comparing it would make two cells of
+    one family differ by where each was written.
     """
 
     family: str
     base: str
+    type_expr: ast.TypeExpr | None = field(default=None, compare=False)
 
 
 # =====================================================================
