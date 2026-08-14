@@ -69,17 +69,21 @@ def builtin_effect_names() -> frozenset[str]:
     return _registry_names()
 
 
-# Identifiers the grammar reserves in *expression* position, so a call to a
-# same-named function can never parse (E153).  A function under one of them is
-# a declarable trap: it declares cleanly and no bare call site can reach it.
-# The reservation refuses the mistake at its source rather than letting it
-# surface later as a call-site error, the same one-canonical-form rule as E151
-# (built-in functions) and E152 (built-in effects).
+# Identifiers unavailable as function names (E153).  For pieces 1 and 2 the
+# grammar claims the spelling in *expression* position, so a function under one
+# of those names is a declarable trap: it declares cleanly and no bare call site
+# can reach it.  The reservation refuses the mistake at its source rather than
+# letting it surface later as a call-site error, the same one-canonical-form
+# rule as E151 (built-in functions) and E152 (built-in effects).
 #
-# The set is assembled from four named pieces so a future addition joins the
-# right one deliberately.  Piece 3 is the exception to the paragraph above: its
-# name *is* reachable from expression position, and is reserved because that
-# reachability collides with a binding the checker injects.
+# The set is assembled from five named pieces so a future addition joins the
+# right one deliberately, and each piece carries its own rationale because they
+# are reserved for genuinely different reasons.  Pieces 3 and 5 are the
+# exceptions to the paragraph above — both ARE reachable from expression
+# position.  Piece 3 is reserved because that reachability collides with a
+# binding the checker injects; piece 5 because spec §1.4 reserves the
+# identifier and a keyword must not acquire a second meaning by position.
+# Only pieces 1 and 2 may claim unreachability in a diagnostic.
 
 # 1. The two contract state forms (#1181).  ``old_expr`` and ``new_expr`` in
 # ``vera/grammar.lark`` claim ``"old" "("`` and ``"new" "("``, and each demands
@@ -92,12 +96,17 @@ _STATE_FORM_FN_NAMES = frozenset({"old", "new"})
 # expression position: a bare ``match(3)`` does not parse at all (``[E005]``),
 # and ``assert(3)`` / ``assume(3)`` are read as the statement forms and collide
 # (``[E121]`` + ``[E172]``/``[E173]``).  Membership is decided by what the
-# *lexer* does with the name, and it splits the rest of spec §1.4's keyword
-# list two ways.  ``with``, ``effect``, ``data``, ``type`` and their kind are
-# refused at parse: the contextual lexer does not admit them as a function
-# name, so no declaration reaches this checker at all.  ``resume`` is refused
-# by neither — it is not a keyword token anywhere — and is reserved below on
-# its own grounds, by the checker rather than the parser.
+# *lexer* does with the name — these are the keywords a call site genuinely
+# cannot reach, which is what their rationale below claims.  ``resume`` is a
+# keyword token nowhere and is reserved by piece 3; every OTHER spec §1.4
+# keyword is reachable and is reserved by piece 5.
+#
+# This set was once described as covering the whole keyword list, on the
+# premise that ``with`` / ``effect`` / ``data`` / ``type`` and their kind were
+# "refused at parse: the contextual lexer does not admit them as a function
+# name".  The tree refuted that premise (#1296): all 21 such names declared,
+# type checked, verified, compiled and RAN.  They are now reserved by piece 5,
+# which argues from the specification rather than from reachability.
 _KEYWORD_FN_NAMES = frozenset({
     "assert", "assume", "forall", "exists", "match",
     "if", "let", "fn", "true", "false", "handle",
@@ -131,6 +140,83 @@ _HANDLER_OPERATOR_FN_NAMES = frozenset({"resume"})
 # justification — rather than being dropped from the keyword list above.
 _HOST_INVOKED_FN_NAMES = frozenset({"handle"})
 
+
+@functools.lru_cache(maxsize=1)
+def grammar_keyword_names() -> frozenset[str]:
+    """Every keyword ``vera/grammar.lark`` claims as a bare string literal.
+
+    Read from the grammar file itself (:data:`vera.parser._GRAMMAR_PATH`, the
+    same one the parser is built from), never a hand-list, so a keyword added
+    to the grammar is reserved the moment it is added.  This is the shape
+    :func:`builtin_effect_names` already uses for E152, adopted here for the
+    same reason: the hand-list this replaces had silently fallen 21 names
+    behind the grammar (#1296), and no gate could see the drift.
+
+    Filtered to identifiers the lexer could actually produce — ``LOWER_IDENT``
+    is ``/[a-z][A-Za-z0-9_]*/``, so the wildcard pattern ``"_"`` is excluded
+    as it can never be a function name.  Line comments are stripped first so a
+    keyword mentioned only in prose is not picked up.
+    """
+    from vera.parser import _GRAMMAR_PATH
+
+    src = re.sub(r"//[^\n]*", "", _GRAMMAR_PATH.read_text(encoding="utf-8"))
+    return frozenset(
+        lit for lit in re.findall(r'"([A-Za-z_][A-Za-z0-9_]*)"', src)
+        if re.fullmatch(r"[a-z][A-Za-z0-9_]*", lit)
+    )
+
+
+# 5. The *contextual* keywords: every remaining name the grammar claims (#1296).
+# Unlike pieces 1-3 these are not traps.  Lark's contextual lexer admits each
+# as a name wherever a name is expected and reads it as the keyword only while
+# the keyword's own construct is being parsed, so `private fn with(@Int ->
+# @Int)` declares, type checks, verifies, compiles, runs, and answers a bare
+# `with(1)` — and stays working inside a contract clause, inside an
+# `if`/`then`/`else`, in a function carrying a `where { }` block, and after a
+# `let`.  Nothing about the program breaks.
+#
+# What breaks is the specification.  Spec §1.4 says these identifiers MUST NOT
+# be used as function names and nothing held the MUST, so the spec and the
+# implementation disagreed about which programs are legal — a model trusting
+# §1.4 and a model trusting the compiler derive different programs from the
+# same source of truth, and no tool contradicted either.  DESIGN principle 1
+# ("checkability over correctness") makes that a defect whatever the program
+# does at runtime; principle 6 ("fewer valid programs") chooses enforcement
+# over narrowing §1.4; principle 3 supplies the precedent, E152 rejecting even
+# a FAITHFUL re-declaration of a built-in effect because a second textual
+# spelling is itself the problem.
+#
+# Derived rather than listed, so the drift cannot recur.  Four of the names
+# this reserves — `ability`, `effects`, `op`, `result` — are grammar keywords
+# spec §1.4 never listed, found by the derivation rather than by the issue.
+# A future grammar keyword lands here by default, which is the safe branch: its
+# rationale argues from the reservation, which is true of every reserved
+# keyword, rather than from unreachability, which is what proved false.
+_CONTEXTUAL_KEYWORD_FN_NAMES = (
+    grammar_keyword_names()
+    - _STATE_FORM_FN_NAMES
+    - _KEYWORD_FN_NAMES
+    - _HANDLER_OPERATOR_FN_NAMES
+    - _HOST_INVOKED_FN_NAMES
+)
+
+# A concrete rename for each, because the generic `<name>_fn` template produces
+# `in_fn` / `type_fn` / `pure_fn` — advice no author would take, where DESIGN
+# principle 1 asks for "an instruction, not a status report".  A name absent
+# here falls back to the template, so a future grammar keyword still gets a
+# usable fix; none of these collides with a built-in (E151) or another
+# reserved name, which `test_fix_suggests_a_usable_replacement` pins.
+_CONTEXTUAL_RENAME_HINTS = {
+    "then": "then_branch", "else": "else_branch", "data": "payload",
+    "type": "type_of", "module": "module_name", "import": "import_path",
+    "public": "is_public", "private": "is_private",
+    "requires": "precondition", "ensures": "postcondition",
+    "invariant": "invariant_of", "decreases": "measure",
+    "effect": "effect_of", "with": "combined_with", "in": "contains",
+    "where": "matching", "pure": "is_pure", "ability": "ability_of",
+    "effects": "effect_row", "op": "operation", "result": "result_of",
+}
+
 # One route did reach a reserved name before it was reserved: a module-qualified
 # ``mod::old(...)`` / ``mod::match(...)`` parses through the module-call rule
 # rather than any reserved rule, so a module export under one of these names was
@@ -138,7 +224,8 @@ _HOST_INVOKED_FN_NAMES = frozenset({"handle"})
 # route deliberately — a name that is a trap in every unqualified position is
 # reserved outright rather than left half-usable.
 _RESERVED_FN_NAMES = (
-    (_STATE_FORM_FN_NAMES | _KEYWORD_FN_NAMES | _HANDLER_OPERATOR_FN_NAMES)
+    (_STATE_FORM_FN_NAMES | _KEYWORD_FN_NAMES | _HANDLER_OPERATOR_FN_NAMES
+     | _CONTEXTUAL_KEYWORD_FN_NAMES)
     - _HOST_INVOKED_FN_NAMES
 )
 
@@ -459,19 +546,22 @@ class RegistrationMixin:
 
     def _check_reserved_fn_name(self, decl: ast.FnDecl) -> None:
         """Emit E153 if ``decl`` — or a nested where-helper — is named after a
-        contract state form (#1181), a grammar keyword (#1187), or the
-        handler-clause resumption operator.
+        contract state form (#1181), an unreachable grammar keyword (#1187),
+        the handler-clause resumption operator, or a contextual grammar
+        keyword (#1296).
 
         Recurses into ``where_fns``: a helper is called in expression position
         exactly like a top-level function, so a helper named ``old`` or
-        ``match`` is unreachable for the same reason, one scope deeper, and a
-        helper named ``resume`` collides with the same injected binding.
+        ``match`` is unreachable for the same reason, one scope deeper, a
+        helper named ``resume`` collides with the same injected binding, and a
+        helper named ``with`` is the same second spelling one scope in.
 
         The rationale branches on which piece of :data:`_RESERVED_FN_NAMES`
-        the name came from — the three are reserved for different reasons, and
-        telling a reader that ``match`` is a "contract state form", or that
-        ``resume`` is a keyword no call site can reach, would be false.  The
-        fix is the same on every branch: rename.
+        the name came from — the four are reserved for different reasons, and
+        telling a reader that ``match`` is a "contract state form", that
+        ``resume`` is a keyword no call site can reach, or that ``with`` is
+        unreachable when their own program just called it, would each be
+        false.  The fix is the same on every branch: rename.
 
         The rejected declaration is still registered, unlike E151's.  There is
         no canonical built-in for the name to shadow here — nothing can resolve
@@ -523,6 +613,33 @@ class RegistrationMixin:
                     f"'{n}d' or '{n}_at' are ordinary function names. "
                     f"Resuming inside a handler clause is unaffected: that "
                     f"'{n}' is bound by the handler, not declared."
+                )
+            elif n in _CONTEXTUAL_KEYWORD_FN_NAMES:
+                hint = _CONTEXTUAL_RENAME_HINTS.get(n, f"{n}_fn")
+                rationale = (
+                    f"'{n}' is a keyword of the language: the grammar claims "
+                    f"the spelling for its own construct, and Chapter 1, "
+                    f"Section 1.4 reserves the identifier. Unlike the other "
+                    f"reserved names this one is reachable — the contextual "
+                    f"lexer admits '{n}' as a name where a name is expected, "
+                    f"so the declaration parses and a call resolves to it. "
+                    f"That is what makes it worth refusing rather than "
+                    f"tolerating: the same spelling would name a language "
+                    f"construct in one place and this function in another, "
+                    f"and a reader would have to decide which by position. "
+                    f"Vera provides exactly one way to express each "
+                    f"construct, so a keyword names that construct and "
+                    f"nothing else."
+                )
+                fix = (
+                    f"Rename the function to an identifier that is not a "
+                    f"keyword — '{hint}', or better a name describing what "
+                    f"it computes — and update its call sites. The "
+                    f"reservation is on the whole identifier, so a longer "
+                    f"name that merely contains '{n}' (such as "
+                    f"'{n}_value') is an ordinary function name. 'handle' is "
+                    f"the one keyword still available, because 'vera serve' "
+                    f"invokes it from the host rather than from Vera source."
                 )
             else:
                 rationale = (

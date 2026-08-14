@@ -1353,11 +1353,21 @@ class TestReservedFnName:
 
     * ``old``, ``new`` — declaration accepted, call rejected (E030 / E031).
       Reserved here, as ``_STATE_FORM_FN_NAMES``.
-    * ``throw``, ``with``, ``in``, ``effect``, ``op``, ``data``, ``type``,
-      ``import``, ``public``, ``private``, ``requires``, ``ensures``,
-      ``effects``, ``decreases``, ``where``, ``then``, ``else``, ``pure``,
-      ``invariant`` — declaration *and* call both accepted.  Not reserved;
-      nothing is wrong with them.
+    * ``with``, ``in``, ``effect``, ``op``, ``data``, ``type``, ``import``,
+      ``public``, ``private``, ``requires``, ``ensures``, ``effects``,
+      ``decreases``, ``where``, ``then``, ``else``, ``pure``, ``invariant``,
+      ``module``, ``ability``, ``result`` — declaration *and* call both
+      accepted, and this row long read "Not reserved; nothing is wrong with
+      them".  Something is: spec §1.4 reserves them and nothing held the
+      MUST, so the specification and the implementation disagreed about
+      which programs are legal (#1296).  Being callable is what removed the
+      *unreachability* argument, not the reservation.  They are reserved as
+      ``_CONTEXTUAL_KEYWORD_FN_NAMES`` — derived from ``grammar.lark`` rather
+      than listed, which is how ``ability``/``effects``/``op``/``result``
+      joined despite §1.4 never naming them — and
+      :class:`TestReservedContextualKeywordFnName` owns that piece.
+      (``throw`` was on this row and is not a keyword in the grammar at all,
+      so it stays an ordinary function name.)
     * ``resume`` — declaration and call both accepted here too, which is why
       this probe row once read "nothing is wrong with it".  Something is: the
       accepted declaration collides with the resumption binding every handler
@@ -2102,6 +2112,304 @@ public fn main(@Unit -> @Int)
         assert "resume" not in _KEYWORD_FN_NAMES
         assert "resume" not in _STATE_FORM_FN_NAMES
         assert "resume" in _RESERVED_FN_NAMES
+
+
+# =====================================================================
+# Reserved CONTEXTUAL keyword function names (E153) — #1296
+# =====================================================================
+
+class TestReservedContextualKeywordFnName:
+    """A ``fn`` named after a *contextual* grammar keyword is rejected
+    (E153, #1296).
+
+    The fourth piece of :data:`_RESERVED_FN_NAMES`, and the one whose
+    members are **not** declarable traps.  Every name here declares, type
+    checks, verifies, compiles, runs, and round-trips ``vera fmt``; a
+    bare call reaches it and returns its value.  Lark's contextual lexer
+    admits the spelling as ``LOWER_IDENT`` wherever a name is expected and
+    reads it as the keyword only where the keyword's own construct is being
+    parsed, so nothing collides.
+
+    **Probe record** (run against the pre-#1296 tree, ``private fn
+    <name>(@Int -> @Int)`` declared and called from ``main``; 21 names ×
+    six positions plus four interaction shapes):
+
+    * All 21 — declaration accepted, bare call accepted, ``vera verify``
+      proves the contracts, ``vera run`` returns the computed value, and
+      ``vera fmt --check`` is clean.  Still accepted when called from
+      inside a contract clause, from an ``if``/``then``/``else`` branch,
+      from a function that itself carries a ``where { }`` block, and after
+      a ``let``.  No positional ambiguity: unlike ``resume`` these do not
+      shadow an injected binding, and unlike ``match`` they parse at a call
+      site.
+    * ``data`` / ``type`` / constructor positions — refused ``[E005]`` for
+      every name, but by the *case* rail rather than by any reservation:
+      the grammar binds every type-namespace name as ``UPPER_IDENT`` and
+      every keyword is lowercase, so spec §1.4's "type names" half is
+      vacuous by construction and only the function-name half can be
+      violated.  Pinned by ``test_type_namespace_half_is_vacuous``.
+
+    So the reservation cannot rest on unreachability — that claim is false
+    for all 21 — and this branch must never reuse the #1187 wording.  It
+    rests on spec §1.4 reserving the identifier, DESIGN principle 1
+    (an unenforced MUST is a spec/implementation divergence, whatever the
+    program does at runtime) and principle 6 (fewer valid programs).
+    ``test_rationale_makes_no_unreachability_claim`` is the pin.
+
+    **Derived, not hand-listed.**  The set comes from ``vera/grammar.lark``
+    itself, the shape :func:`builtin_effect_names` already uses for E152, so
+    a keyword added to the grammar is gated the moment it is added.  Four of
+    the 21 — ``ability``, ``effects``, ``op`` and ``result`` — are grammar
+    keywords spec §1.4 never listed, and were found by the derivation rather
+    than by the issue.  ``test_reserved_set_is_derived_from_the_grammar``
+    pins the derivation against the grammar file.
+    """
+
+    #: The names this branch newly reserves (all 21; ``handle`` excluded as
+    #: the host-invoked carve-out, and the #1187/#1181 pieces excluded as
+    #: they keep their own rationales).
+    CONTEXTUAL = (
+        # The seventeen spec §1.4 lists and nothing enforced (#1296).
+        "then", "else", "data", "type", "module", "import", "public",
+        "private", "requires", "ensures", "invariant", "decreases",
+        "effect", "with", "in", "where", "pure",
+        # Four the grammar reserves that spec §1.4 never listed.
+        "ability", "effects", "op", "result",
+    )
+
+    #: Wording from the #1187 keyword branch that is FALSE for these names.
+    FALSE_CLAIMS = (
+        "no unqualified call site can reach",
+        "does not parse as a call",
+        "could never be called",
+        "always lexed as the keyword",
+        "dead code",
+    )
+
+    @staticmethod
+    def _codes(errs: list[Diagnostic]) -> list[str]:
+        return [e.error_code for e in errs]
+
+    def test_reserved_set_is_derived_from_the_grammar(self) -> None:
+        """The reservation is computed from ``grammar.lark``, not hand-listed.
+
+        Reads the grammar file independently of the checker and asserts that
+        every identifier-shaped string literal it claims — minus the
+        host-invoked carve-out — is reserved.  This is the mutation-catching
+        pin: replacing the derivation with a hand-list and dropping any one
+        keyword fails here, which is exactly how #1296 arose (a hand-list
+        that had silently fallen 21 names behind the grammar).
+
+        ``_`` is excluded because the wildcard pattern is not a valid
+        ``LOWER_IDENT`` and so can never be a function name.
+        """
+        import re
+
+        from vera.checker.registration import (
+            _HOST_INVOKED_FN_NAMES,
+            _RESERVED_FN_NAMES,
+        )
+        from vera.parser import _GRAMMAR_PATH
+
+        src = re.sub(r"//[^\n]*", "", _GRAMMAR_PATH.read_text(encoding="utf-8"))
+        literals = {
+            lit for lit in re.findall(r'"([A-Za-z_][A-Za-z0-9_]*)"', src)
+            if re.fullmatch(r"[a-z][A-Za-z0-9_]*", lit)
+        }
+        # The grammar really does claim these, so the pin has teeth.
+        assert {"with", "where", "op", "result"} <= literals, sorted(literals)
+        missing = (literals - _HOST_INVOKED_FN_NAMES) - _RESERVED_FN_NAMES
+        assert missing == set(), sorted(missing)
+
+    def test_contextual_tuple_matches_checker_set(self) -> None:
+        """``CONTEXTUAL`` mirrors the checker's contextual piece exactly.
+
+        The sibling of ``test_keyword_tuple_matches_checker_set``: a name
+        entering the derived set without a per-name cell here fails this pin
+        instead of silently escaping coverage.
+        """
+        from vera.checker.registration import _CONTEXTUAL_KEYWORD_FN_NAMES
+
+        assert set(self.CONTEXTUAL) == _CONTEXTUAL_KEYWORD_FN_NAMES
+
+    @pytest.mark.parametrize("name", CONTEXTUAL)
+    def test_contextual_keyword_fn_name_is_E153(self, name: str) -> None:
+        """Each contextual keyword is refused at the declaration site,
+        fully tagged per spec §0.5.1."""
+        errs = _errors(f"""
+public fn {name}(@Int -> @Int)
+  requires(true) ensures(@Int.result >= 0) effects(pure)
+{{ 5 }}
+""")
+        assert "E153" in self._codes(errs), (name, self._codes(errs))
+        diag = next(e for e in errs if e.error_code == "E153")
+        assert name in diag.description, diag.description
+        assert "reserved" in diag.description.lower(), diag.description
+        assert diag.rationale and diag.fix and diag.spec_ref
+        assert "Chapter 5" in diag.spec_ref, diag.spec_ref
+        assert "rename" in diag.fix.lower(), diag.fix
+
+    @pytest.mark.parametrize("name", CONTEXTUAL)
+    def test_private_contextual_keyword_fn_name_is_E153(
+        self, name: str,
+    ) -> None:
+        """Visibility-independent, as every other branch is."""
+        errs = _errors(f"""
+private fn {name}(@Int -> @Int)
+  requires(true) ensures(@Int.result >= 0) effects(pure)
+{{ 5 }}
+""")
+        assert "E153" in self._codes(errs), (name, self._codes(errs))
+
+    @pytest.mark.parametrize("name", CONTEXTUAL)
+    def test_where_helper_contextual_keyword_is_E153(self, name: str) -> None:
+        """The where-helper recursion covers this branch too.
+
+        The pre-fix sweep found the helper position mirroring the top-level
+        one for all 21 (declared, called, ran), so the gate must reach it
+        identically or the reservation is half-applied.
+        """
+        errs = _errors(f"""
+public fn caller(@Int -> @Int)
+  requires(true) ensures(@Int.result >= 0) effects(pure)
+{{ @Int.0 }}
+where {{
+  fn {name}(@Int -> @Int)
+    requires(true) ensures(true) effects(pure)
+  {{ @Int.0 }}
+}}
+""")
+        assert "E153" in self._codes(errs), (name, self._codes(errs))
+
+    @pytest.mark.parametrize("name", CONTEXTUAL)
+    def test_rationale_makes_no_unreachability_claim(self, name: str) -> None:
+        """CRITICAL: the branch must not ship the #1187 wording.
+
+        Every phrase in ``FALSE_CLAIMS`` is true of ``match`` and false of
+        these names — each one is callable, and the pre-fix probe ran them.
+        A diagnostic asserting otherwise would tell the reader a falsehood
+        about their own program, which the diagnostic-fields contract
+        (spec §0.5.1, #955) does not waive for any field.
+        """
+        diag = next(
+            e for e in _errors(f"""
+public fn {name}(@Int -> @Int)
+  requires(true) ensures(true) effects(pure)
+{{ 5 }}
+""") if e.error_code == "E153"
+        )
+        text = f"{diag.rationale} {diag.fix}".lower()
+        for claim in self.FALSE_CLAIMS:
+            assert claim not in text, (name, claim, diag.rationale)
+        # It must still say WHY: the identifier is reserved by the spec.
+        assert "reserved" in text, (name, diag.rationale)
+        # And it must not borrow either sibling branch's explanation.
+        assert "state form" not in diag.rationale.lower(), diag.rationale
+        assert "resumes a suspended" not in diag.rationale.lower(), (
+            diag.rationale
+        )
+
+    @pytest.mark.parametrize("name", CONTEXTUAL)
+    def test_fix_suggests_a_usable_replacement(self, name: str) -> None:
+        """The fix names a concrete replacement that is not itself reserved.
+
+        DESIGN principle 1 asks for "an instruction, not a status report".
+        A bare ``{name}_fn`` template produces ``in_fn`` / ``type_fn`` /
+        ``pure_fn``, which is advice no author would take, so the branch
+        carries a per-name suggestion where the generic suffix misleads.
+        Pinned by property — the suggested identifier must be a legal Vera
+        function name and must not be reserved — rather than by exact
+        wording, so the table can be improved without churning the test.
+        """
+        import re
+
+        from vera.checker.registration import (
+            _builtin_reject_names,
+            _RESERVED_FN_NAMES,
+        )
+
+        diag = next(
+            e for e in _errors(f"""
+public fn {name}(@Int -> @Int)
+  requires(true) ensures(true) effects(pure)
+{{ 5 }}
+""") if e.error_code == "E153"
+        )
+        quoted = re.findall(r"'([a-z][A-Za-z0-9_]*)'", diag.fix)
+        suggestions = [q for q in quoted if q != name]
+        assert suggestions, diag.fix
+        for s in suggestions:
+            # Not reserved (E153 again) and not a built-in (E151 instead) —
+            # advice that trades one error for another is not a fix.
+            assert s not in _RESERVED_FN_NAMES, (name, s, diag.fix)
+            assert s not in _builtin_reject_names(), (name, s, diag.fix)
+
+    def test_handle_stays_legal(self) -> None:
+        """NEGATIVE CONTROL: the carve-out survives a derived set.
+
+        Deriving from the grammar pulls ``handle`` in with every other
+        keyword, so the subtraction is what keeps ``vera serve`` its entry
+        point.  If the derivation ever forgets it, ``examples/http_server
+        .vera`` and ``ch09_http_server`` break together.
+        """
+        errs = _errors("""
+public fn handle(@Request -> @Response)
+  requires(true) ensures(true) effects(<HttpServer>)
+{
+  match @Request.0 {
+    Request(@String, @String, @Map<String, String>, @String) ->
+      Response(200, map_new(), @String.0)
+  }
+}
+""")
+        assert self._codes(errs) == [], self._codes(errs)
+
+    def test_names_merely_containing_a_contextual_keyword_are_allowed(
+        self,
+    ) -> None:
+        """NEGATIVE CONTROL: the reservation is the whole identifier.
+
+        A substring test would reject a large share of ordinary Vera —
+        ``with_it``, ``then_value`` and ``older`` are unremarkable function
+        names, and ``in`` is a substring of a great many words.
+        """
+        for name in (
+            "then_value", "older", "with_it", "invariants", "typed",
+            "public_key", "purity", "wherever", "import_path", "results",
+            "operation", "effective", "ability_of", "indexed", "dataset",
+        ):
+            errs = _errors(f"""
+public fn {name}(@Int -> @Int)
+  requires(true) ensures(@Int.result >= 0) effects(pure)
+{{ 5 }}
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(pure)
+{{ {name}(3) }}
+""")
+            assert self._codes(errs) == [], (name, self._codes(errs))
+
+    def test_type_namespace_half_is_vacuous(self) -> None:
+        """Spec §1.4's "type names" half cannot be violated by construction.
+
+        Every type-namespace binder in the grammar is ``UPPER_IDENT`` and
+        every keyword is lowercase, so ``data with`` / ``type with = Int;``
+        fail at *parse* — and would fail identically for any lowercase name.
+        Pinned so the spec's corrected wording ("function names") stays
+        backed by the grammar, and so a future grammar change admitting a
+        lowercase type name shows up here rather than reopening the hole.
+        """
+        for src in ("private data with {\n  MkX(Int)\n}\n",
+                    "type with = Int;\n",
+                    "private data Holder {\n  with(Int)\n}\n"):
+            with pytest.raises(ParseError):
+                parse_to_ast(src)
+        # Control: an ordinary LOWERCASE name fails the same way, proving the
+        # rejection is the case rail and not the reservation.
+        for src in ("private data helper {\n  MkX(Int)\n}\n",
+                    "type helper = Int;\n"):
+            with pytest.raises(ParseError):
+                parse_to_ast(src)
 
 
 # =====================================================================

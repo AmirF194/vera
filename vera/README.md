@@ -85,7 +85,7 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `  core.py` | 1,165 | | TypeChecker class, orchestration, contracts, constraint validation | |
 | `  resolution.py` | 535 | | AST TypeExpr → semantic Type, inference | |
 | `  modules.py` | 476 | | Cross-module registration (C7b/C7c), plus the per-module body check that makes a module's diagnostics independent of which file `vera check` was given (#1244) and the #1304 refusal of a bare function, data-type or constructor name two imports both supply (E155/E156/E157) | |
-| `  registration.py` | 915 | | Pass 1 forward declarations, ability registration | |
+| `  registration.py` | 1,032 | | Pass 1 forward declarations, ability registration | |
 | `  expressions.py` | 1,485 | | Expression synthesis (bidirectional), operators, statements | |
 | `  eq_ability.py` | 199 | | Eq ability derivation checks | |
 | `  sql.py` | 309 | | SQL literal-provenance resolution + placeholder counting (#309) | `resolve_literal_string()`, `count_placeholders()` |
@@ -590,7 +590,7 @@ The WASM import interface is the portability contract: the compiled `.wasm` bina
 
 ### Browser runtime
 
-`browser/runtime.mjs` is a self-contained JavaScript runtime (~3,877 lines) that provides JavaScript implementations of all Vera host bindings. It works with **any** compiled Vera `.wasm` module — no code generation needed.
+`browser/runtime.mjs` is a self-contained JavaScript runtime (~3,877 lines) that provides JavaScript implementations of all Vera host bindings. It works with any core Vera `.wasm` module — the default and browser targets share one import ABI, so no code generation is needed; the `--target wasi-p2` component is a different artifact format with its own host.
 
 **Dynamic import introspection:** Instead of generating per-program glue code, the runtime uses `WebAssembly.Module.imports(module)` at initialization to discover which host functions the module actually needs, then builds the import object dynamically. State\<T\> types are pattern-matched from `state_get_*`/`state_put_*` import names.
 
@@ -753,7 +753,7 @@ The `ERROR_CODES` dict in `errors.py` maps every code to a short description (16
 
 ## Test Suite
 
-Testing spans a **pytest suite** of 11,670 tests across 174 files — compiler-internals unit tests plus a **conformance suite** (243 programs in `tests/conformance/` validating every language feature against the spec) and **example programs** (42 end-to-end demos). The conformance suite is the definitive specification artifact — most programs target a single feature, though some (slot references, match, contracts) span several, and each serves as a minimal working example.
+Testing spans a **pytest suite** of 11,786 tests across 174 files — compiler-internals unit tests plus a **conformance suite** (244 programs in `tests/conformance/` validating every language feature against the spec) and **example programs** (42 end-to-end demos). The conformance suite is the definitive specification artifact — most programs target a single feature, though some (slot references, match, contracts) span several, and each serves as a minimal working example.
 
 See **[TESTING.md](../TESTING.md)** for the comprehensive testing reference -- test file table, conformance suite details, compiler code coverage, language feature coverage, helper conventions, validation scripts, CI pipeline, and guidelines for adding tests.
 
