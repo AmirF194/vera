@@ -227,6 +227,9 @@ NEUTRALISED_ENV: tuple[str, ...] = (
 # reported as a failure rather than blocking the hook indefinitely.
 TIMEOUT_SECONDS = 300
 
+# The committed on-disk database `sqlitedb.vera` reads.
+DB_FIXTURE = "sqlitedb.sqlite"
+
 
 # ---------------------------------------------------------------------------
 # The coverage rule
@@ -342,11 +345,28 @@ def check_output(name: str, spec: RunSpec, output: str) -> str | None:
     return None
 
 
+def missing_fixture(spec: RunSpec, examples_dir: Path) -> Path | None:
+    """The committed fixture a spec needs but cannot find, if any.
+
+    Checked *before* the run rather than left to fail inside it.
+    `sqlite3` CREATES the database named by a `sqlite:///` URL when it is
+    not there, so handing the example a URL for an absent fixture
+    materialises an empty `examples/sqlitedb.sqlite` as a side effect.
+    The sentinel would still fail the run — right verdict — but the gate
+    would have written into the corpus it is checking, which is the very
+    thing the per-run scratch directory exists to prevent.
+    """
+    if not spec.needs_db_fixture:
+        return None
+    fixture = examples_dir / DB_FIXTURE
+    return None if fixture.is_file() else fixture
+
+
 def spec_env(spec: RunSpec, examples_dir: Path) -> dict[str, str]:
     """The environment a spec adds on top of the inherited one."""
     if not spec.needs_db_fixture:
         return {}
-    fixture = (examples_dir / "sqlitedb.sqlite").resolve()
+    fixture = (examples_dir / DB_FIXTURE).resolve()
     # POSIX form so the URL is portable on Windows, matching
     # `tests/test_db_runtime.py`; `_open_connection` strips the prefix
     # back to the filesystem path.
@@ -386,6 +406,15 @@ def run_corpus(
             failures.append(
                 f"{name}: examples/{name}.vera does not exist, so the "
                 f"RUN_SPECS entry covers nothing"
+            )
+            continue
+
+        absent = missing_fixture(spec, examples_dir)
+        if absent is not None:
+            failures.append(
+                f"{name}: the committed fixture {absent} does not exist, "
+                f"so the run was not started — sqlite3 would have created "
+                f"an empty database there rather than reading one"
             )
             continue
 
@@ -449,19 +478,36 @@ def parse_testing_table(text: str) -> dict[str, str] | None:
     and neither may be reported as a pass.
     """
     lines = text.splitlines()
+
+    # A `#` at column 0 inside a fenced block is a shell comment or a
+    # heading in sample Markdown, not a heading of this document — and
+    # TESTING.md has 32 such lines.  Tracking fences keeps one from
+    # ending the subsection early, which would empty the table and fail
+    # the gate on a document that is perfectly well formed.
+    def _headings(seq: list[str]) -> list[bool]:
+        out, in_fence = [], False
+        for line in seq:
+            if line.lstrip().startswith("```"):
+                in_fence = not in_fence
+                out.append(False)
+                continue
+            out.append(not in_fence and line.startswith("#"))
+        return out
+
+    is_heading = _headings(lines)
     start = None
     for i, line in enumerate(lines):
-        if line.startswith("#") and _TABLE_HEADING in line:
+        if is_heading[i] and _TABLE_HEADING in line:
             start = i
             break
     if start is None:
         return None
 
     rows: dict[str, str] = {}
-    for line in lines[start + 1:]:
-        if line.startswith("#"):  # the next heading ends the subsection
+    for i in range(start + 1, len(lines)):
+        if is_heading[i]:  # the next heading ends the subsection
             break
-        m = _ROW_RE.match(line)
+        m = _ROW_RE.match(lines[i])
         if m:
             rows[m.group(1)] = m.group(2).strip()
     return rows

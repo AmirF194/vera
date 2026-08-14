@@ -30,6 +30,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 _SCRIPT = Path(__file__).parent.parent / "scripts" / "check_examples_run.py"
 _ROOT = Path(__file__).parent.parent
 
@@ -206,8 +208,20 @@ class TestRunSpecsAreWellFormed:
         that fallback is a silent pass waiting to happen: privatise or
         rename `main` and the gate runs some other function at exit 0.
         Every spec names its entry point, so the CLI resolves it by name
-        and exits 1 when it is gone."""
-        assert all(spec.fn for spec in _MOD.RUN_SPECS.values())
+        and exits 1 when it is gone.
+
+        Asserted on the built argv rather than on ``spec.fn`` being
+        truthy: ``fn`` defaults to ``"main"``, so a truthiness check
+        passes for every spec that could ever exist short of a
+        deliberate ``fn=""`` — it restates the default instead of
+        testing the property, which is that ``--fn`` reaches the CLI.
+        """
+        for name, spec in _MOD.RUN_SPECS.items():
+            cmd = _MOD.build_command(
+                "py", _ROOT / "examples" / f"{name}.vera", spec
+            )
+            assert "--fn" in cmd, name
+            assert cmd[cmd.index("--fn") + 1] == spec.fn, name
 
     def test_environment_dependent_specs_carry_an_output_sentinel(
         self,
@@ -254,6 +268,64 @@ class TestBuildCommand:
 
     def test_no_db_fixture_adds_no_env(self) -> None:
         assert _MOD.spec_env(_MOD.RunSpec(), _ROOT / "examples") == {}
+
+
+class TestFixturePrecondition:
+    """A missing fixture must stop the run, not be papered over by it.
+
+    `sqlite3` CREATES the database file named by a `sqlite:///` URL when
+    it is not there.  Handing the example a URL for an absent fixture
+    therefore materialises an empty `examples/sqlitedb.sqlite` as a side
+    effect of the gate — the sentinel still fails the run, so the verdict
+    is right, but the gate has written into the corpus it is checking,
+    which is precisely what the per-run scratch directory exists to
+    prevent.  The fixture is checked before the process starts.
+    """
+
+    def test_present_fixture_is_not_reported(self) -> None:
+        assert _MOD.missing_fixture(
+            _MOD.RunSpec(needs_db_fixture=True), _ROOT / "examples"
+        ) is None
+
+    def test_absent_fixture_is_reported_by_path(self, tmp_path: Path) -> None:
+        missing = _MOD.missing_fixture(
+            _MOD.RunSpec(needs_db_fixture=True), tmp_path
+        )
+        assert missing is not None
+        assert missing.name == "sqlitedb.sqlite"
+
+    def test_specs_that_need_no_fixture_are_not_reported(
+        self, tmp_path: Path
+    ) -> None:
+        assert _MOD.missing_fixture(_MOD.RunSpec(), tmp_path) is None
+
+    def test_absent_fixture_fails_the_gate_and_creates_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        """The proving test, on the real example: the run must fail
+        naming the fixture, and must leave no file behind where the
+        fixture would have been."""
+        d = tmp_path / "examples"
+        d.mkdir()
+        (d / "sqlitedb.vera").write_text(
+            (_ROOT / "examples" / "sqlitedb.vera").read_text(
+                encoding="utf-8"
+            ),
+            encoding="utf-8",
+        )
+        fixture = d / "sqlitedb.sqlite"
+        assert not fixture.exists()
+
+        failures = _MOD.run_corpus(
+            d, {"sqlitedb": _MOD.RunSpec(needs_db_fixture=True)}, tmp_path
+        )
+        assert len(failures) == 1
+        assert "sqlitedb.sqlite" in failures[0]
+        assert not fixture.exists(), (
+            "the gate created the fixture it was checking for — sqlite3 "
+            "materialises an absent database, so the URL must not be "
+            "handed over at all"
+        )
 
 
 class TestHermeticEnvironment:
@@ -530,6 +602,36 @@ public fn main(-> @Unit)
             d, {"degraded": _MOD.RunSpec(expect="graceful arm")}, tmp_path
         ) == []
 
+    def test_a_hanging_example_is_reported_as_a_timeout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The budget exists so a hung program fails the hook instead of
+        blocking it, and until now nothing reached that branch.
+
+        A purpose-built sleeper rather than a real example: `life.vera` is
+        the only long-running one in the corpus and it is skipped, so
+        driving the branch through it would mean un-skipping it.  The
+        budget is monkeypatched down instead of the sleep being made long,
+        so the test costs a second rather than the real budget.
+        """
+        src = """\
+public fn main(-> @Unit)
+  requires(true)
+  ensures(true)
+  effects(<IO>)
+{
+  IO.sleep(30000)
+}
+"""
+        d = _corpus(tmp_path, {"sleeper": src})
+        monkeypatch.setattr(_MOD, "TIMEOUT_SECONDS", 5)
+        failures = _MOD.run_corpus(d, {"sleeper": _MOD.RunSpec()}, tmp_path)
+        assert len(failures) == 1
+        # The timeout wording specifically, not merely *a* failure: a
+        # sleeper that died some other way would also produce one.
+        assert "5s budget" in failures[0]
+        assert "hung rather than terminating" in failures[0]
+
     def test_missing_file_for_a_spec_is_a_failure(
         self, tmp_path: Path
     ) -> None:
@@ -549,6 +651,53 @@ public fn main(-> @Unit)
         # nothing — and only asserting that makes the test able to tell the
         # two apart.
         assert "covers nothing" in failures[0]
+
+
+# ---------------------------------------------------------------------------
+# The report
+# ---------------------------------------------------------------------------
+
+
+class TestErrorBlocks:
+    """Each error kind gets its own header carrying its own count.
+
+    Filing one kind's lines under another's header misreports both — a
+    reader who counts the lines beneath `COVERAGE ERRORS (n)` gets a
+    number the header disagrees with.
+    """
+
+    def test_doc_errors_are_never_filed_under_the_coverage_count(
+        self,
+    ) -> None:
+        """Two error kinds, two labelled blocks, each counting its own.
+        Printing documentation mismatches beneath a `COVERAGE ERRORS (n)`
+        header whose n excludes them misreports both — the reader counts
+        the lines and gets a different number from the one on the header.
+        """
+        blocks = _MOD.error_blocks(
+            coverage_errors=["one coverage problem"],
+            doc_errors=["one doc problem", "another doc problem"],
+            failures=[],
+        )
+        text = "\n".join(blocks)
+        assert "COVERAGE ERRORS (1)" in text
+        assert "DOCUMENTATION MISMATCH (2)" in text
+        assert "one doc problem" in text
+        # Every reported line sits under a header, and every header's count
+        # matches the lines beneath it.
+        counted = {
+            int(m) for m in re.findall(r"\((\d+)\)", text)
+        }
+        assert counted == {1, 2}
+
+    def test_error_blocks_are_empty_when_nothing_is_wrong(self) -> None:
+        assert _MOD.error_blocks([], [], []) == []
+
+    def test_runtime_failures_get_their_own_counted_block(self) -> None:
+        blocks = _MOD.error_blocks([], [], ["boom: exited 1"])
+        text = "\n".join(blocks)
+        assert "RUNTIME FAILURES (1)" in text
+        assert "boom: exited 1" in text
 
 
 # ---------------------------------------------------------------------------
@@ -652,38 +801,47 @@ class TestTestingMdCrossCheck:
         assert len(errors) == 1
         assert "no rows" in errors[0].lower()
 
-    def test_doc_errors_are_never_filed_under_the_coverage_count(
-        self,
-    ) -> None:
-        """Two error kinds, two labelled blocks, each counting its own.
-        Printing documentation mismatches beneath a `COVERAGE ERRORS (n)`
-        header whose n excludes them misreports both — the reader counts
-        the lines and gets a different number from the one on the header.
+    def test_a_fenced_hash_line_does_not_end_the_subsection(self) -> None:
+        """`#` at column 0 inside a fence is a shell comment, not a
+        heading.  TESTING.md carries 32 such lines today, none of them
+        between this heading and its table — so the guard is not fixing
+        a present breakage but removing a trap: adding an ordinary
+        annotated code block above the table would otherwise empty it
+        and fail the gate on a well-formed document.
         """
-        blocks = _MOD.error_blocks(
-            coverage_errors=["one coverage problem"],
-            doc_errors=["one doc problem", "another doc problem"],
-            failures=[],
+        doc = (
+            "### Example execution coverage\n\n"
+            "```bash\n"
+            "# regenerate the table\n"
+            "python scripts/check_examples_run.py\n"
+            "```\n\n"
+            "| Example | Executed by | Harness gate |\n"
+            "|---------|-------------|--------------|\n"
+            "| `a.vera` | prose | runs |\n\n"
+            "## Next section\n"
         )
-        text = "\n".join(blocks)
-        assert "COVERAGE ERRORS (1)" in text
-        assert "DOCUMENTATION MISMATCH (2)" in text
-        assert "one doc problem" in text
-        # Every reported line sits under a header, and every header's count
-        # matches the lines beneath it.
-        counted = {
-            int(m) for m in re.findall(r"\((\d+)\)", text)
-        }
-        assert counted == {1, 2}
+        assert _MOD.parse_testing_table(doc) == {"a": "runs"}
+        assert _MOD.check_testing_md(doc, {"a": _MOD.RunSpec()}, {}) == []
 
-    def test_error_blocks_are_empty_when_nothing_is_wrong(self) -> None:
-        assert _MOD.error_blocks([], [], []) == []
+    def test_an_unfenced_hash_line_still_ends_the_subsection(self) -> None:
+        """The guard must not swallow real headings — the complement,
+        without which fence-awareness could degenerate into never
+        terminating."""
+        doc = (
+            "### Example execution coverage\n\n"
+            "| `a.vera` | prose | runs |\n\n"
+            "## Next section\n\n"
+            "| `ghost.vera` | prose | runs |\n"
+        )
+        assert _MOD.parse_testing_table(doc) == {"a": "runs"}
 
-    def test_runtime_failures_get_their_own_counted_block(self) -> None:
-        blocks = _MOD.error_blocks([], [], ["boom: exited 1"])
-        text = "\n".join(blocks)
-        assert "RUNTIME FAILURES (1)" in text
-        assert "boom: exited 1" in text
+    def test_the_shipped_document_parses_to_every_example(self) -> None:
+        """End to end on the real file: the parse finds one row per
+        example, so neither guard has quietly changed what it reads."""
+        text = (_ROOT / "TESTING.md").read_text(encoding="utf-8")
+        rows = _MOD.parse_testing_table(text)
+        assert rows is not None
+        assert set(rows) == set(_MOD.example_names(_ROOT / "examples"))
 
     def test_table_parse_stops_at_the_next_heading(self) -> None:
         """A row-shaped line in a later section must not be swept in as an
