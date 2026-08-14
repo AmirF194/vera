@@ -217,7 +217,7 @@ Browser bundle: examples/hello_world_browser/
   index.html
 ```
 
-Self-contained — no bundler. Serve with any HTTP server (`python -m http.server`). `IO.print` writes to the page; every other operation the browser target supports works identically to the CLI, apart from `md_parse`, whose two hand-written implementations still disagree on a few shapes the §9.7.3 subset does not pin ([#1301](https://github.com/aallan/vera/issues/1301)). `json_stringify` and `md_render` reach that identity by emitting a canonical form the specification states (§9.7.1, §9.7.3) rather than by the hosts happening to agree, so parity tests check them against that form as well as against each other, on every PR. *Note: `Inference.complete` and every `DB` operation return an error in the browser — a deliberate platform boundary, since the credentials they need would be readable from page source; reach them through a server-side proxy via `Http`.*
+Self-contained — no bundler. Serve with any HTTP server (`python -m http.server`). `IO.print` writes to the page; every other operation the browser target supports works identically to the CLI, apart from `md_parse`, whose two hand-written implementations still disagree on a few shapes the §9.7.3 subset does not pin ([#1301](https://github.com/aallan/vera/issues/1301)). `json_stringify` and `md_render` reach that identity by emitting a canonical form the specification states (§9.7.1, §9.7.3) rather than by the hosts happening to agree, and `json_parse` by accepting the domain §9.7.1 states — RFC 8259-valid text that decodes to finite numbers and strings of Unicode scalar values — rather than whatever its host parser admits; parity tests check all three against that stated form as well as against each other, on every PR. *Note: `Inference.complete` and every `DB` operation return an error in the browser — a deliberate platform boundary, since the credentials they need would be readable from page source; reach them through a server-side proxy via `Http`.*
 
 ### WASI components
 
@@ -281,7 +281,7 @@ For other models: point them at [`SKILL.md`](https://veralang.dev/SKILL.md) via 
 
 ## Status
 
-Vera is under [active development](https://raw.githubusercontent.com/aallan/vera/main/ROADMAP.md). A complete compiler with 164 built-in functions, ten algebraic effects (IO, Http, HttpServer, State, Exceptions, Async, Inference, DB, Random, Diverge), contract-driven testing via [Z3](https://www.microsoft.com/en-us/research/project/z3-3/), and a 14-chapter specification. A 238-program conformance suite and 42 worked examples are validated against the spec on every pull request. All of it is developed openly on [GitHub](https://github.com/aallan/vera) and released under the MIT licence.
+Vera is under [active development](https://raw.githubusercontent.com/aallan/vera/main/ROADMAP.md). A complete compiler with 164 built-in functions, ten algebraic effects (IO, Http, HttpServer, State, Exceptions, Async, Inference, DB, Random, Diverge), contract-driven testing via [Z3](https://www.microsoft.com/en-us/research/project/z3-3/), and a 14-chapter specification. A 239-program conformance suite and 42 worked examples are validated against the spec on every pull request. All of it is developed openly on [GitHub](https://github.com/aallan/vera) and released under the MIT licence.
 
 ## Links
 

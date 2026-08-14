@@ -6,8 +6,7 @@ memory, data sections, and closure infrastructure.
 
 from __future__ import annotations
 
-import os
-
+from vera.envflags import flag_enabled
 from vera.monomorphize import mangle_type_name
 from vera.skip import CodegenInvariantError
 from vera.wasm.helpers import MAX_INLINE_I32_VALUE
@@ -652,9 +651,7 @@ class AssemblyMixin:
         orders of magnitude slower than normal — never enable in
         production.
         """
-        eager = os.environ.get("VERA_EAGER_GC", "").strip().lower() in (
-            "1", "true", "yes", "on",
-        )
+        eager = flag_enabled("VERA_EAGER_GC")
         eager_prefix = (
             "    ;; VERA_EAGER_GC=1 — force GC on every alloc to surface\n"
             "    ;; missing shadow-stack roots (debugging knob, see\n"

@@ -2075,8 +2075,15 @@ The `Json` type is provided by the standard prelude — no explicit `data` decla
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `json_parse(s)` | `(String) → Result<Json, String>` | Parse a JSON string; `Err` on invalid input |
+| `json_parse(s)` | `(String) → Result<Json, String>` | Parse JSON text; `Err` outside the accepted domain below |
 | `json_stringify(j)` | `(Json) → String` | Serialize a Json value to its canonical JSON string |
+
+**`json_parse`'s accepted domain.** Both runtimes accept exactly RFC 8259-valid text that decodes to finite numbers and to strings that are sequences of Unicode scalar values. Text outside that domain MUST produce `Err` at the parse rather than a value, and for the two exclusions below the message MUST be the same on every runtime. The domain is defined here rather than inherited from whatever the host parser happens to accept (DESIGN.md: explicit over implicit) — the two exclusions are precisely where the host parsers disagree:
+
+- **A non-finite number, however it is written.** RFC 8259 has no literal for one, so the JavaScript constants `NaN`, `Infinity` and `-Infinity` are refused wherever a value may appear, nested or at the top level. A *syntactically valid* number whose magnitude overflows the `Float64` a `JNumber` holds is refused too, whether it is written with an exponent (`1e999`) or as plain digits (`1` followed by 309 zeros) — the distinction matters to a host whose parser decodes the two to different types, and not at all to the domain: RFC 8259 §6 sets no limit on a number's range but says an implementation may set one, and Vera's accepted range is the finite `Float64` values, which is exactly what `json_stringify` can write back. The bound is the point at which the nearest `Float64` becomes infinite, so a magnitude above the largest finite double that still *rounds* to it is accepted. Underflow is a different question and is *not* refused either: `1e-999` decodes to `0`, which is finite and in the domain. This is the input-side counterpart of the serialization rule below — a non-finite number has no JSON representation in either direction — and with both entry routes closed, the only way to reach the output-side refusal is to construct a `JNumber` from `nan()` or `infinity()`.
+- **A lone surrogate** — a `\uXXXX` escape in D800–DFFF with no matching partner. The text is grammatically legal, but its decoded value is not a sequence of scalar values, and a Vera `String` is. The alternatives are substituting U+FFFD, which silently yields a value the text did not encode, and admitting strings the rest of the language cannot represent (§0.2.6). A *matched* high-then-low pair is ordinary and is accepted: it denotes one astral scalar value.
+
+Text malformed for any other reason also produces `Err`, but that message is the host parser's own and is not pinned.
 
 **Canonical serialization.** `json_stringify` has exactly one output form, per the one-canonical-form principle (§0.2.3), and every runtime produces it byte for byte (§12.9.3):
 

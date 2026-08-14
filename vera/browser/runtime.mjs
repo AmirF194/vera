@@ -2954,6 +2954,195 @@ function buildImportObject(module, moduleBytes) {
     return parts.join("");
   }
 
+  // ── json_parse's accept domain (spec §9.7.1) ──────────────────
+  //
+  // ``json_parse`` accepts exactly RFC 8259-valid text that decodes to
+  // finite numbers and strings of Unicode scalar values; everything
+  // else is a handled Err, identically on both hosts, at the parse.  The domain is Vera's
+  // own, not whatever the host parser happens to implement — so each
+  // exclusion needs an explicit gate on the side whose parser does not
+  // already enforce it.
+  //
+  //   * the bare JavaScript constants: ``JSON.parse`` refuses them for
+  //     free here, where Python's ``json.loads`` does not — which is
+  //     what the reference host's ``parse_constant`` hook is for.  The
+  //     only work on this side is naming the refusal in the shared
+  //     sentence rather than in ECMAScript's syntax message.
+  //   * a lone-surrogate escape, and a number that overflows to an
+  //     infinity: BOTH parsers accept these texts, so both gates are
+  //     this host's to enforce as much as the reference host's, and
+  //     both are decided on the decoded value by one walk.
+  //
+  // All three sentences are hand-copied from ``vera/wasm/json_serde.py``
+  // (``non_finite_parse_message`` / ``lone_surrogate_message`` /
+  // ``non_finite_number_message``) and held against those originals by
+  // tests/test_browser.py.
+
+  const NON_FINITE_TOKENS = ["-Infinity", "Infinity", "NaN"];
+
+  function nonFiniteParseMessage(name) {
+    return (
+      `json_parse: ${name} is not valid JSON — RFC 8259 has no NaN or ` +
+      `Infinity.  json_parse accepts RFC 8259 text only, not the ` +
+      `JavaScript constants: quote the value as a string, or write null.`
+    );
+  }
+
+  function nonFiniteNumberMessage(name) {
+    return (
+      `json_parse: a number in the text overflows to ${name}, which JSON ` +
+      `cannot represent — RFC 8259 §6 lets an implementation set limits ` +
+      `on the range of numbers it accepts, and Vera's accepted range is ` +
+      `the finite Float64 values.  Keep the magnitude at or below ` +
+      `1.7976931348623157e308, or carry the value as a string.`
+    );
+  }
+
+  function loneSurrogateMessage(codePoint) {
+    const hex = codePoint.toString(16).toUpperCase().padStart(4, "0");
+    return (
+      `json_parse: \\u${hex} decodes to a lone surrogate, which ` +
+      `is not a Unicode scalar value — a Vera string is a sequence of ` +
+      `scalar values, so this text has no representable decoding.  Write ` +
+      `the character as a matched high-then-low surrogate escape pair, or ` +
+      `remove the escape.`
+    );
+  }
+
+  // Replace every bare NaN / Infinity / -Infinity with ``0``, reporting
+  // the first one replaced.  String literals are copied through
+  // untouched, so ``{"k":"NaN"}`` — ordinary JSON — is not a candidate.
+  //
+  // Used ONLY after JSON.parse has already rejected the text, so it
+  // cannot widen the accept domain; it only decides which sentence
+  // explains the refusal.  Naming the FIRST constant in document order
+  // matches the reference host, whose ``parse_constant`` hook is
+  // called left to right and records the first it is handed.
+  // A token only counts where a VALUE may begin: at the start of the
+  // text, or after '[', ',' or ':'.  Whitespace does not move that.
+  // Without the constraint the scan found NaN at offset 1 of "-NaN",
+  // substituted, re-parsed "-0" successfully and reported the shared
+  // sentence — where the reference host, whose parser never reaches the
+  // token at all, gives a plain syntax error.  Note '{' is NOT a
+  // value-start: what may follow it is a key.
+  function stripBareNonFinite(text) {
+    let out = "";
+    let first = null;
+    let i = 0;
+    let atValueStart = true;
+    while (i < text.length) {
+      const c = text[i];
+      if (c === '"') {
+        const start = i;
+        i++;
+        while (i < text.length) {
+          if (text[i] === "\\") { i += 2; continue; }
+          if (text[i] === '"') { i++; break; }
+          i++;
+        }
+        out += text.slice(start, i);
+        atValueStart = false;
+        continue;
+      }
+      // RFC 8259 §2 whitespace: space, tab, LF, CR.
+      if (c === " " || c === "\t" || c === "\n" || c === "\r") {
+        out += c;
+        i++;
+        continue;
+      }
+      if (atValueStart) {
+        const token = NON_FINITE_TOKENS.find((t) => text.startsWith(t, i));
+        if (token !== undefined) {
+          if (first === null) first = token;
+          out += "0";
+          i += token.length;
+          atValueStart = false;
+          continue;
+        }
+      }
+      atValueStart = (c === "[" || c === "," || c === ":");
+      out += c;
+      i++;
+    }
+    return { first, text: out };
+  }
+
+  // The first lone surrogate code unit in a JS string, or null.
+  //
+  // A JS string is UTF-16, so a paired astral character is STORED as
+  // two surrogate code units and is perfectly representable — the pair
+  // has to be consumed whole before anything is judged lone, or every
+  // emoji in every document would be refused.  The reference host's
+  // twin needs no pairing step: ``json.loads`` has already combined a
+  // well-formed escape pair into one astral code point, so a plain
+  // range test is complete there.  Same rule, two representations of
+  // the decoded value.
+  function firstLoneSurrogateInString(s) {
+    for (let i = 0; i < s.length; i++) {
+      const unit = s.charCodeAt(i);
+      if (unit >= 0xd800 && unit <= 0xdbff) {
+        const next = i + 1 < s.length ? s.charCodeAt(i + 1) : 0;
+        if (next >= 0xdc00 && next <= 0xdfff) { i++; continue; }
+        return unit;
+      }
+      if (unit >= 0xdc00 && unit <= 0xdfff) return unit;
+    }
+    return null;
+  }
+
+  // One walk over a parseJsonOrdered tree for both value-level
+  // exclusions — a string holding a lone surrogate, and a number that
+  // is not finite — returning the Err sentence itself, exactly as
+  // ``first_domain_violation`` does on the reference host.  Document
+  // order means, for an object, each key before its own value; one
+  // traversal for both kinds is what makes "whichever comes first names
+  // the refusal" the rule rather than a precedence table the two hosts
+  // could implement differently.  Keys are checked as well as values: a
+  // key crosses the WASM boundary as a string exactly like a value does.
+  //
+  // ``1e999`` is where the number arm earns its place: syntactically
+  // valid RFC 8259 that JSON.parse accepts, decoding to Infinity, which
+  // the bare-constant gate above never sees because the text IS valid
+  // JSON.  Same exclusion, a different entry route, its own sentence.
+  function firstDomainViolation(node) {
+    if (typeof node === "string") {
+      const codePoint = firstLoneSurrogateInString(node);
+      return codePoint === null ? null : loneSurrogateMessage(codePoint);
+    }
+    if (typeof node === "number") {
+      if (Number.isFinite(node)) return null;
+      // NaN is unreachable from here — JSON.parse rejects the bare
+      // constant before this walk runs, and no numeric literal decodes
+      // to one — but it is named rather than folded into the negative
+      // branch, because ``node > 0`` is false for NaN and would report
+      // "-Infinity".  The reference host's twin gets the name from
+      // ``_NON_FINITE_NAMES``, which covers all three; a host that
+      // answers differently on a case neither can reach today is a
+      // divergence waiting for the day one of them can.
+      const name = Number.isNaN(node)
+        ? "NaN"
+        : (node > 0 ? "Infinity" : "-Infinity");
+      return nonFiniteNumberMessage(name);
+    }
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        const found = firstDomainViolation(item);
+        if (found !== null) return found;
+      }
+      return null;
+    }
+    if (node instanceof Map) {
+      for (const [key, item] of node) {
+        const codePoint = firstLoneSurrogateInString(String(key));
+        if (codePoint !== null) return loneSurrogateMessage(codePoint);
+        const found = firstDomainViolation(item);
+        if (found !== null) return found;
+      }
+      return null;
+    }
+    return null;
+  }
+
   if (needed.has("json_parse")) {
     imports.vera.json_parse = (ptr, len) => {
       const text = readString(ptr, len);
@@ -2962,12 +3151,40 @@ function buildImportObject(module, moduleBytes) {
       try {
         JSON.parse(text);
       } catch (e) {
+        // #1306: if the ONLY thing wrong with the text is a bare
+        // JavaScript constant, both hosts say so in one sentence.  The
+        // stripped text is handed back to JSON.parse rather than
+        // trusted: a token that merely looks like one (``Infinity_x``)
+        // leaves the document malformed, so it falls through to the
+        // host parser's own syntax message, which is what every other
+        // malformed input has always reported.
+        const probe = stripBareNonFinite(text);
+        if (probe.first !== null) {
+          let strippedParses = true;
+          try { JSON.parse(probe.text); } catch { strippedParses = false; }
+          if (strippedParses) {
+            return allocResultErrString(nonFiniteParseMessage(probe.first));
+          }
+        }
         return allocResultErrString(e.message || String(e));
       }
       // #1293: JSON.parse decided whether the text is JSON; its result
       // is discarded because it cannot carry key order.  The tree the
       // ADT is built from comes from the order-preserving re-scan.
       const parsed = parseJsonOrdered(text);
+      // The value-level half of the domain, checked on the decoded
+      // VALUE and before anything crosses into WASM memory.  A lone
+      // surrogate (#1308) has no UTF-8 encoding and no Vera string can
+      // hold one: past this point writeJson reaches allocString, whose
+      // TextEncoder silently substituted U+FFFD — a different value
+      // than the text encoded, with nothing to tell the caller.  A
+      // number that overflowed to an infinity (#1306) would reach
+      // json_stringify's refusal instead, one call too late and on a
+      // value the domain says never gets in.
+      const violation = firstDomainViolation(parsed);
+      if (violation !== null) {
+        return allocResultErrString(violation);
+      }
       // #708 (PR #707): wrap in gcGuard and push jsonPtr
       // before allocResultOkI32's alloc can fire GC.  writeJson
       // has its own internal guard that pops on return — by the

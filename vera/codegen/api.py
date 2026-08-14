@@ -51,12 +51,14 @@ from vera.runtime.math import register_math
 from vera.runtime.md import register_md
 from vera.runtime.random import register_random
 from vera.runtime.regex import register_regex
+from vera.envflags import flag_enabled
 from vera.runtime.set import register_set
 from vera.runtime.state import register_state
 from vera.runtime.traps import (
     WasmTrapError as WasmTrapError,  # re-export: part of execute()'s contract
 )
 from vera.runtime.traps import (
+    _classify_host_error,
     _classify_trap,
     _resolve_trap_frames,
 )
@@ -1307,6 +1309,32 @@ def execute(
         #     was relabelled "Runtime contract violation").
         # WasmTrapError is a RuntimeError subclass, so existing
         # ``except RuntimeError`` blocks remain backward-compatible.
+        # #1302 — the conversion is keyed on the BOUNDARY, not on the
+        # exception's type.  The guarded region is the guest invocation
+        # plus the executor teardown in its ``finally``, so anything
+        # arriving here is a wasmtime trap, a host callback that raised
+        # (wasmtime's trampoline re-raises those unchanged), or a
+        # failure tearing the worker pool down.  Every compiler phase
+        # has already finished, so none of it can be a compiler bug
+        # reaching the user as a Vera error.
+        #
+        # The teardown is inside the boundary deliberately.  Moving it
+        # out while keeping #841's "runs on every exit path" contract
+        # means attaching the ``finally`` to THIS try instead, which
+        # inverts the order: the handler below would read
+        # ``output_buf`` before the pool is joined, losing whatever an
+        # in-flight worker writes during ``shutdown(wait=True)``.
+        # Leaving it inside costs little — ``shutdown`` does not
+        # surface worker exceptions (those stay on their futures), so a
+        # failure there is a genuine host-side failure during execution
+        # and ``host_error`` is the right shape for it.  Keying on the type
+        # name instead meant a ``ValueError`` from a host binding — a
+        # deliberate refusal like ``json_stringify``'s on a non-finite
+        # number — skipped the branch entirely and escaped as a raw
+        # Python traceback, dropping the captured streams on the way
+        # out.  ``host_print``'s invariant ("a user-level program must
+        # never produce a Python traceback regardless of what it does")
+        # holds for every host import, not just the decoding ones.
         exc_name = type(exc).__name__
         if exc_name in ("Trap", "WasmtimeError"):
             # #516 Stage 3 (#547) — _classify_trap now returns
@@ -1317,22 +1345,36 @@ def execute(
             kind, message, fix = _classify_trap(
                 exc, last_violation, last_overflow,
             )
-            # #516 Stage 2 — resolve trap frames against the source map.
-            # Pre-Stage-2 the user got a hex-offset wasmtime backtrace
-            # in the exception message and nothing else; now they get
-            # a structured list of (file, line) pairs they can act on.
-            frames = _resolve_trap_frames(
-                exc, result.fn_source_map, result.prelude_fn_names,
-            )
-            raise WasmTrapError(
-                message,
-                stdout=output_buf.getvalue(),
-                stderr=stderr_buf.getvalue() if stderr_buf is not None else "",
-                kind=kind,
-                frames=frames,
-                fix=fix,
-            ) from exc
-        raise
+        else:
+            # Diagnostic escape hatch (ENVIRONMENT.md,
+            # ``VERA_DEBUG_HOST_ERRORS``).  The conversion keeps the
+            # sentence and drops the Python frames, which is right for
+            # someone running a Vera program and wrong for someone
+            # debugging the host binding itself — the frames survive on
+            # ``__cause__``, which serves a library caller and not a
+            # person reading a terminal.  Setting the variable re-raises
+            # the original untouched.  Same truthiness rule as
+            # ``VERA_EAGER_GC``, the other ``VERA_*`` diagnostic knob.
+            if flag_enabled("VERA_DEBUG_HOST_ERRORS"):
+                raise
+            kind, message, fix = _classify_host_error(exc)
+        # #516 Stage 2 — resolve trap frames against the source map.
+        # Pre-Stage-2 the user got a hex-offset wasmtime backtrace
+        # in the exception message and nothing else; now they get
+        # a structured list of (file, line) pairs they can act on.
+        # A host-callback exception usually carries no frames at all,
+        # which resolves to the empty list the field already allows.
+        frames = _resolve_trap_frames(
+            exc, result.fn_source_map, result.prelude_fn_names,
+        )
+        raise WasmTrapError(
+            message,
+            stdout=output_buf.getvalue(),
+            stderr=stderr_buf.getvalue() if stderr_buf is not None else "",
+            kind=kind,
+            frames=frames,
+            fix=fix,
+        ) from exc
 
     # Extract return value
     value: int | float | str | None

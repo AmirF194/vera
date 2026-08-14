@@ -936,6 +936,13 @@ decimal_to_float(@Decimal.0)                        -- returns Float64 (potentia
 
 The `Json` type has six constructors: `JNull`, `JBool(Bool)`, `JNumber(Float64)`, `JString(String)`, `JArray(Array<Json>)`, `JObject(Map<String, Json>)`. It is provided by the standard prelude — no `data` declaration needed.
 
+**What `json_parse` accepts.** Exactly RFC 8259-valid text that decodes to finite numbers and strings of Unicode scalar values (spec §9.7.1). Anything else is `Err`, at the parse, with the same message on the CLI and in the browser — Vera defines this domain rather than inheriting whichever one the host parser implements. Two consequences are worth knowing before you write the `Err` arm:
+
+- A **non-finite number** never parses, however it is written. The constants `NaN`, `Infinity` and `-Infinity` are not JSON at all; a number that merely *overflows*, like `1e999`, is syntactically fine and still refused, because what it decodes to is an infinity. Underflow is different — `1e-999` gives you `0` and parses. If a producer you do not control emits any of these, fix the producer or pre-process the text; there is no flag to admit them.
+- A **lone surrogate** escape (`\ud800` with no matching partner) never parses either: its decoded value is not a Unicode scalar, and a Vera `String` is. A *matched* pair is ordinary — `"\ud83d\ude00"` parses fine and gives you the astral character.
+
+Everything else that fails is a plain syntax error, and that message is the host parser's own.
+
 <!-- vera:skip-parse category="FRAGMENT" reason="JSON parse/stringify/get examples, bare calls" -->
 ```vera
 json_parse("{\"name\":\"Vera\"}")               -- returns Result<Json, String>
@@ -2454,7 +2461,7 @@ public fn main(@Unit -> @Unit)
 
 ## Conformance Suite
 
-The `tests/conformance/` directory contains 238 small programs — most self-contained, with the Chapter 8 module-system programs and a few cross-module Chapter 7 and 9 programs importing companion `_lib.vera` / `_mid.vera` modules — that validate every language feature against the spec — often one program per feature, though some features (slot references, match, contracts) span several. These are the best minimal working examples of Vera syntax and semantics.
+The `tests/conformance/` directory contains 239 small programs — most self-contained, with the Chapter 8 module-system programs and a few cross-module Chapter 7 and 9 programs importing companion `_lib.vera` / `_mid.vera` modules — that validate every language feature against the spec — often one program per feature, though some features (slot references, match, contracts) span several. These are the best minimal working examples of Vera syntax and semantics.
 
 Each program is organized by spec chapter (`ch01_int_literals.vera`, `ch04_match_basic.vera`, `ch07_state_handler.vera`, etc.) and the `manifest.json` file maps features to programs. When you need to see how a specific construct works, check the conformance program before reading the spec.
 
@@ -2495,7 +2502,7 @@ Current reference-implementation bugs that an agent writing Vera code is likely 
 |---|---|---|---|
 | Rare conformance-gate flake | `ch05_closure_nat_return` trapped once in a full conformance run and never again (~960 clean attempts) — suspected runtime/GC timing interaction, not a compiler defect. | If CI reds on this program with `Reached unreachable` in `main`, re-run and report on the issue with wasmtime version + load conditions — do not chase the compiler. | [#996](https://github.com/aallan/vera/issues/996) |
 
-When a Vera program type-checks cleanly, compiles without errors, and then produces a runtime trap you can't explain, runtime trap diagnostics are now Vera-native end-to-end: each trap carries a `kind` label (`divide_by_zero` / `out_of_bounds` / `stack_exhausted` / `unreachable` / `overflow` / `contract_violation` / `unknown`), a per-kind `Fix:` paragraph naming the canonical remediation, and a source backtrace pointing at the offending Vera function and line — not just `wasm trap: <reason>`.  Tail-recursive iteration runs in constant WASM stack space for both non-allocating ([#517](https://github.com/aallan/vera/issues/517), v0.0.126) and allocating ([#549](https://github.com/aallan/vera/issues/549), v0.0.154) tail calls — the latter prepends a `$gc_sp` restore before each `return_call` to keep the shadow stack bounded across iterations.
+When a Vera program type-checks cleanly, compiles without errors, and then produces a runtime trap you can't explain, runtime trap diagnostics are now Vera-native end-to-end: each trap carries a `kind` label (`divide_by_zero` / `out_of_bounds` / `stack_exhausted` / `unreachable` / `overflow` / `contract_violation` / `host_error` / `unknown`), a per-kind `Fix:` paragraph naming the canonical remediation, and a source backtrace pointing at the offending Vera function and line — not just `wasm trap: <reason>`.  Tail-recursive iteration runs in constant WASM stack space for both non-allocating ([#517](https://github.com/aallan/vera/issues/517), v0.0.126) and allocating ([#549](https://github.com/aallan/vera/issues/549), v0.0.154) tail calls — the latter prepends a `$gc_sp` restore before each `return_call` to keep the shadow stack bounded across iterations.
 
 ## Specification Reference
 
