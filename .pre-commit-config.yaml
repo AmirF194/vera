@@ -181,6 +181,20 @@ repos:
         pass_filenames: false
         files: '(examples/.*\.vera$|tests/conformance/.*\.vera$|vera/.*\.py$|vera/grammar\.lark$|vera/prelude\.py$|scripts/check_e602_clean\.py$)'
 
+      # The examples RUN.  check_examples.py checks + verifies them and
+      # the e602 gate above compiles them; none of that executes one, so
+      # an example could trap at run time and stay green.  The gate runs
+      # every example it can drive and requires the rest to carry a
+      # documented skip property, so a new example cannot be added
+      # without classifying it.  Also cross-checks TESTING.md's
+      # execution-model table against the script's own classification.
+      - id: examples-run
+        name: examples run trap-free
+        entry: .venv/bin/python scripts/check_examples_run.py
+        language: system
+        pass_filenames: false
+        files: '(examples/.*\.vera$|examples/sqlitedb\.sqlite$|vera/.*\.py$|vera/grammar\.lark$|TESTING\.md$|scripts/check_examples_run\.py$)'
+
       - id: doc-counts
         name: doc counts
         entry: .venv/bin/python scripts/check_doc_counts.py
