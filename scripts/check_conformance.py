@@ -46,16 +46,20 @@ def main() -> int:
         level = entry["level"]
         level_n = _LEVEL_ORDER.get(level, 0)
 
-        # Negative test: the program must FAIL at its level with a specific
-        # error code (e.g. ch08_circular_import → E011).  Only `check`-level
-        # negatives are supported (the diagnostic fires during check); assert
-        # `ok == false` and the expected code is present, then skip the
-        # positive pipeline for this entry.
+        # Negative test: the program must FAIL with a specific error code
+        # (e.g. ch08_circular_import → E011).  `expected_error_stage` names
+        # the pipeline stage the diagnostic fires at — "check" (the default)
+        # or "compile".  A COMPILE-stage negative additionally asserts that
+        # `check` is clean, which is the whole point of the class it exists
+        # to pin: a program the checker accepts and codegen must refuse
+        # (#1277's E621).  Either way the positive pipeline is skipped.
         expected_error = entry.get("expected_error")
         if expected_error is not None:
-            # The diagnostic fires during check, so a negative entry must be
-            # declared at level "check".  Fail fast on a mislabelled entry so a
-            # verify/run negative can't silently skip its declared stage.
+            stage = entry.get("expected_error_stage", "check")
+            # A negative's positive obligation stops at check, so it is
+            # declared at level "check" whichever stage it fails at.  Fail
+            # fast on a mislabelled entry so a verify/run negative can't
+            # silently skip its declared stage.
             if level != "check":
                 failed.append((
                     entry_id, "manifest",
@@ -63,12 +67,28 @@ def main() -> int:
                     f"got level={level!r}",
                 ))
                 continue
-            result = _vera("check", "--json", path)
+            if stage not in ("check", "compile"):
+                failed.append((
+                    entry_id, "manifest",
+                    f"expected_error_stage must be 'check' or 'compile'; "
+                    f"got {stage!r}",
+                ))
+                continue
+            if stage == "compile":
+                pre = _vera("check", path)
+                if "OK:" not in pre.stdout:
+                    failed.append((
+                        entry_id, "check (compile-stage negative)",
+                        "a compile-stage negative must type-check cleanly:\n"
+                        + pre.stdout + pre.stderr,
+                    ))
+                    continue
+            result = _vera(stage, "--json", path)
             try:
                 payload = json.loads(result.stdout)
             except json.JSONDecodeError:
                 failed.append((
-                    entry_id, "check (negative)",
+                    entry_id, f"{stage} (negative)",
                     "expected JSON diagnostics, got:\n"
                     + result.stdout + result.stderr,
                 ))
@@ -76,7 +96,7 @@ def main() -> int:
             codes = [d.get("error_code") for d in payload.get("diagnostics", [])]
             if payload.get("ok") is not False or expected_error not in codes:
                 failed.append((
-                    entry_id, "check (negative)",
+                    entry_id, f"{stage} (negative)",
                     f"expected failure with {expected_error}; "
                     f"got ok={payload.get('ok')} codes={codes}",
                 ))

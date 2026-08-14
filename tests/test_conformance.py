@@ -65,26 +65,45 @@ class TestConformance:
 
     def test_check(self, entry: dict) -> None:
         """Programs at level check/verify/run must type-check cleanly — or,
-        for a negative entry (``expected_error``), must FAIL check with that
-        error code (e.g. ch08_circular_import → E011)."""
+        for a negative entry (``expected_error``), must FAIL at the stage
+        ``expected_error_stage`` names with that error code
+        (ch08_circular_import → E011 at check;
+        ch08_module_prelude_adt_contention_rejected → E621 at compile).
+
+        A COMPILE-stage negative also asserts that check is clean, because
+        "the checker accepts it and codegen must refuse it" is exactly the
+        property that class of diagnostic exists for — a negative that
+        started failing at check would otherwise still pass."""
         if not _at_least(entry, "check"):
             pytest.skip("parse-only")
         path = str(CONFORMANCE_DIR / entry["file"])
         expected_error = entry.get("expected_error")
         if expected_error is not None:
-            # The diagnostic fires during check, so a negative entry must be
-            # declared at level "check"; a verify/run negative would otherwise
-            # silently skip its declared stage.  Fail fast on a mislabel.
+            # A negative's positive obligation stops at check, so it is
+            # declared at level "check" whichever stage it fails at; a
+            # verify/run negative would otherwise silently skip its declared
+            # stage.  Fail fast on a mislabel.
             assert entry["level"] == "check", (
                 f"expected_error is only valid at level 'check'; "
                 f"{entry['id']} is level {entry['level']!r}"
             )
-            result = _vera("check", "--json", path)
+            stage = entry.get("expected_error_stage", "check")
+            assert stage in ("check", "compile"), (
+                f"{entry['id']}: expected_error_stage must be 'check' or "
+                f"'compile'; got {stage!r}"
+            )
+            if stage == "compile":
+                pre = _vera("check", path)
+                assert "OK:" in pre.stdout, (
+                    f"{entry['id']} is a compile-stage negative, so it must "
+                    f"type-check cleanly:\n{pre.stdout}\n{pre.stderr}"
+                )
+            result = _vera(stage, "--json", path)
             payload = json.loads(result.stdout)
             codes = [d.get("error_code")
                      for d in payload.get("diagnostics", [])]
             assert payload.get("ok") is False and expected_error in codes, (
-                f"Expected {entry['id']} to fail check with "
+                f"Expected {entry['id']} to fail {stage} with "
                 f"{expected_error}; got ok={payload.get('ok')} "
                 f"codes={codes}\n{result.stdout}"
             )
