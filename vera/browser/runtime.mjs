@@ -2643,14 +2643,22 @@ function buildImportObject(module, moduleBytes) {
     if (typeof value === "object") {
       // JObject(Map<String, Json>) — tag=5, i32 wrapper ptr at offset 4 (#573)
       //
+      // #1293: the entry source is a ``Map`` for anything
+      // ``parseJsonOrdered`` built, and iterating one yields insertion
+      // order.  ``Object.entries`` is kept for a plain object reaching
+      // here from somewhere else, but it is NOT order-preserving —
+      // array-index keys come out first, ascending — so nothing on the
+      // json_parse path may hand this branch one.
+      //
       // #708: each recursive ``writeJson(v)`` call returns a heap
       // ptr stored in the JS-side Map ``m`` only.  Between
       // returning ep and ``m.set(k, ep)``, the result is in a JS
       // local — invisible to the conservative scan.  Push each ep
       // before storing in m, then push wrapperPtr before the
       // final 8-byte alloc.
+      const entries = value instanceof Map ? value : Object.entries(value);
       const m = new Map();
-      for (const [k, v] of Object.entries(value)) {
+      for (const [k, v] of entries) {
         const ep = writeJson(v);
         // PR #707 review: no matching pop here — unlike the JArray
         // branch above, ``m`` is a JS Map (not WASM memory), so
@@ -2676,7 +2684,21 @@ function buildImportObject(module, moduleBytes) {
     return writeJson(String(value));
   }
 
-  // Read a Json ADT from WASM memory back to a JS value.
+  // Read a Json ADT from WASM memory back to a JS value.  A JObject
+  // decodes to a ``Map``, never to an ordinary object, because an
+  // ordinary object cannot carry two things the Json ADT does (#1293):
+  //
+  //   * Key order.  ES OrdinaryOwnPropertyKeys lists array-index keys
+  //     first, in ascending numeric order, so ``{"2":1,"1":2}`` comes
+  //     back out as ``{"1":2,"2":1}`` — and insertion order is what the
+  //     canonical form of spec §9.7.1 is, matching the reference host,
+  //     whose ``dict`` preserves it for free.
+  //   * A key literally named ``__proto__``.  ``obj["__proto__"] = v``
+  //     runs Object.prototype's setter and creates no own property at
+  //     all, so the field disappears from the output entirely.
+  //
+  // Both are silent, so the Map is not a stylistic preference: it is
+  // the only JS shape that round-trips the ADT.
   function readJson(ptr) {
     const tag = readI32(ptr);
     if (tag === 0) return null;
@@ -2695,11 +2717,14 @@ function buildImportObject(module, moduleBytes) {
     if (tag === 5) {
       // #706: the i32 at +4 is a Map wrapper whose bucket IS the map
       // (bucket-as-truth).  Decode the Map<String, Json> directly; the
-      // values are i32 Json heap pointers.
+      // values are i32 Json heap pointers.  ``decodeMap`` walks the
+      // bucket in slot order and already returns a JS ``Map``, so
+      // rebuilding the values in place is all that is needed — and
+      // keeps the bucket's order, which is the ADT's order.
       const wrapperPtr = readI32(ptr + 4);
-      const result = {};
+      const result = new Map();
       for (const [k, v] of decodeMap(wrapperPtr, 's', 'b')) {
-        result[String(k)] = readJson(Number(v));
+        result.set(String(k), readJson(Number(v)));
       }
       return result;
     }
@@ -2707,17 +2732,192 @@ function buildImportObject(module, moduleBytes) {
     return null;
   }
 
+  // Re-read JSON text into a tree whose objects are ``Map``s (#1293).
+  //
+  // ``JSON.parse`` cannot produce one: its objects are ordinary, so by
+  // the time any code sees the result the key order of spec §9.7.1 is
+  // already gone (array-index keys hoisted to the front, ascending) and
+  // a ``__proto__`` key has become a prototype write.  The caller runs
+  // ``JSON.parse`` first and only reaches this scanner on text that
+  // parse ACCEPTED, which is what keeps the two implementations from
+  // disagreeing about what valid JSON is: the accept/reject decision
+  // and its Err message stay ECMAScript's, and so does every *leaf*
+  // value — each string and number is handed back to ``JSON.parse`` on
+  // its own slice rather than decoded a second way.  This scanner only
+  // finds token boundaries and builds containers, so a throw from it is
+  // an internal bug, not bad input.
+  function parseJsonOrdered(text) {
+    let i = 0;
+    const fail = (what) => {
+      throw new Error(
+        `json_parse: ${what} at offset ${i}, in text JSON.parse accepted ` +
+        `— the order-preserving re-scan disagrees with JSON.parse`
+      );
+    };
+    const skipWs = () => {
+      while (i < text.length) {
+        const c = text.charCodeAt(i);
+        // RFC 8259 §2 whitespace: space, tab, LF, CR.
+        if (c === 0x20 || c === 0x09 || c === 0x0a || c === 0x0d) i++;
+        else break;
+      }
+    };
+    const scanString = () => {
+      const start = i;
+      i++;                                   // opening quote
+      for (;;) {
+        if (i >= text.length) fail("unterminated string");
+        const c = text[i];
+        if (c === "\\") { i += 2; continue; }
+        i++;
+        if (c === '"') break;
+      }
+      return JSON.parse(text.slice(start, i));
+    };
+    const scanNumber = () => {
+      const start = i;
+      while (i < text.length && "+-0123456789.eE".includes(text[i])) i++;
+      if (i === start) fail("expected a value");
+      return JSON.parse(text.slice(start, i));
+    };
+    const scanValue = () => {
+      skipWs();
+      if (i >= text.length) fail("unexpected end of input");
+      const c = text[i];
+      if (c === "{") {
+        i++;
+        // A Map, so the order below is the document's.  A repeated key
+        // keeps its FIRST position and its LAST value, which is what a
+        // Python dict does on the reference host — and what JSON.parse
+        // does here, so the two agree on the duplicate case too.
+        const out = new Map();
+        skipWs();
+        if (text[i] === "}") { i++; return out; }
+        for (;;) {
+          skipWs();
+          if (text[i] !== '"') fail("expected a key");
+          const k = scanString();
+          skipWs();
+          if (text[i] !== ":") fail("expected ':'");
+          i++;
+          out.set(k, scanValue());
+          skipWs();
+          if (text[i] === ",") { i++; continue; }
+          if (text[i] === "}") { i++; return out; }
+          fail("expected ',' or '}'");
+        }
+      }
+      if (c === "[") {
+        i++;
+        const out = [];
+        skipWs();
+        if (text[i] === "]") { i++; return out; }
+        for (;;) {
+          out.push(scanValue());
+          skipWs();
+          if (text[i] === ",") { i++; continue; }
+          if (text[i] === "]") { i++; return out; }
+          fail("expected ',' or ']'");
+        }
+      }
+      if (c === '"') return scanString();
+      if (text.startsWith("true", i)) { i += 4; return true; }
+      if (text.startsWith("false", i)) { i += 5; return false; }
+      if (text.startsWith("null", i)) { i += 4; return null; }
+      return scanNumber();
+    };
+    const value = scanValue();
+    skipWs();
+    if (i !== text.length) fail("trailing text");
+    return value;
+  }
+
+  // Serialize a value ``readJson`` produced into canonical JSON text
+  // (spec §9.7.1) — the JS twin of ``dumps_canonical`` in
+  // ``vera/wasm/json_serde.py``, kept structurally parallel to it.
+  //
+  // ``JSON.stringify`` cannot do this job any more: it does not know
+  // about ``Map``, and its ordinary-object enumeration is where the key
+  // order was being lost.  Leaf rendering is still ECMAScript's —
+  // strings through ``JSON.stringify``, finite numbers through
+  // ``String``, which IS the Number::toString that JSON.stringify would
+  // have used — so the canonical form is unchanged for every value that
+  // was already coming out right.
+  //
+  // Anything outside ``readJson``'s range raises rather than being
+  // coerced, matching ``dumps_canonical``'s TypeError: a value that is
+  // not a Json value means the ADT walk went wrong, and a
+  // plausible-looking string would hide it.
+  function stringifyCanonical(value) {
+    const parts = [];
+    const emit = (node) => {
+      if (node === null) { parts.push("null"); return; }
+      if (node === true) { parts.push("true"); return; }
+      if (node === false) { parts.push("false"); return; }
+      if (typeof node === "number") {
+        // RFC 8259 has no NaN and no Infinity, so there is no right
+        // value to return for one — only a right way to fail.  Bare
+        // JSON.stringify writes "null", swapping a value the format
+        // cannot carry for a different, perfectly valid one that no
+        // later consumer can distinguish from a genuine null.  The
+        // reference runtime has always refused; this refuses with the
+        // same sentence (#1293).
+        if (!Number.isFinite(node)) {
+          throw new Error(
+            `json_stringify: ${String(node)} is not representable in JSON ` +
+            `— RFC 8259 has no NaN or Infinity.  Guard with float_is_nan ` +
+            `/ float_is_infinite before serialising.`
+          );
+        }
+        parts.push(String(node));
+        return;
+      }
+      if (typeof node === "string") { parts.push(JSON.stringify(node)); return; }
+      if (Array.isArray(node)) {
+        parts.push("[");
+        node.forEach((item, idx) => {
+          if (idx) parts.push(",");
+          emit(item);
+        });
+        parts.push("]");
+        return;
+      }
+      if (node instanceof Map) {
+        parts.push("{");
+        let first = true;
+        for (const [k, v] of node) {
+          if (!first) parts.push(",");
+          first = false;
+          parts.push(JSON.stringify(String(k)));
+          parts.push(":");
+          emit(v);
+        }
+        parts.push("}");
+        return;
+      }
+      throw new Error(
+        `json_stringify: readJson produced ${typeof node}, which is not a ` +
+        `Json value; the ADT walk is wrong`
+      );
+    };
+    emit(value);
+    return parts.join("");
+  }
+
   if (needed.has("json_parse")) {
     imports.vera.json_parse = (ptr, len) => {
       const text = readString(ptr, len);
       // Same failure-domain split as hostMdParse: only JSON.parse
       // errors become Err(String); gcGuard-walk failures trap loudly.
-      let parsed;
       try {
-        parsed = JSON.parse(text);
+        JSON.parse(text);
       } catch (e) {
         return allocResultErrString(e.message || String(e));
       }
+      // #1293: JSON.parse decided whether the text is JSON; its result
+      // is discarded because it cannot carry key order.  The tree the
+      // ADT is built from comes from the order-preserving re-scan.
+      const parsed = parseJsonOrdered(text);
       // #708 (PR #707): wrap in gcGuard and push jsonPtr
       // before allocResultOkI32's alloc can fire GC.  writeJson
       // has its own internal guard that pops on return — by the
@@ -2732,41 +2932,12 @@ function buildImportObject(module, moduleBytes) {
 
   if (needed.has("json_stringify")) {
     imports.vera.json_stringify = (ptr) => {
-      const value = readJson(ptr);
-      // #1293: RFC 8259 has no NaN and no Infinity, so there is no
-      // right value to return for one — only a right way to fail.
-      // Bare JSON.stringify writes "null", swapping a value the format
-      // cannot carry for a different, perfectly valid one that no later
-      // consumer can distinguish from a genuine null.  The reference
-      // runtime has always refused; the replacer makes this host refuse
-      // with the same sentence.  The compact form JSON.stringify
-      // already emits IS the canonical form (spec §9.7.1), so nothing
-      // else about the call changes.
-      const text = JSON.stringify(value, (_key, v) => {
-        if (typeof v === "number" && !Number.isFinite(v)) {
-          throw new Error(
-            `json_stringify: ${String(v)} is not representable in JSON — ` +
-            `RFC 8259 has no NaN or Infinity.  Guard with float_is_nan / ` +
-            `float_is_infinite before serialising.`
-          );
-        }
-        return v;
-      });
-      // JSON.stringify returns undefined for values with no JSON form
-      // (bare undefined, symbols, functions).  readJson cannot produce
-      // one, so this is unreachable — but it used to fall back to
-      // "null", which is the same silent substitution #1293 removed one
-      // layer up, and an unreachable branch is exactly where a silent
-      // wrong answer survives unnoticed.  Raise instead, matching
-      // dumps_canonical's TypeError for a value outside read_json's
-      // domain: whatever produced it, the ADT walk is wrong.
-      if (text === undefined) {
-        throw new Error(
-          "json_stringify: readJson produced a value with no JSON " +
-          "representation; the ADT walk is wrong"
-        );
-      }
-      return allocString(text);
+      // #1293: the canonical form of spec §9.7.1, emitted by a walk
+      // that mirrors the reference host's ``dumps_canonical`` — compact
+      // separators, insertion-ordered keys, ECMAScript number
+      // rendering, and a refusal on a non-finite number rather than the
+      // silent ``null`` bare JSON.stringify would substitute.
+      return allocString(stringifyCanonical(readJson(ptr)));
     };
   }
 

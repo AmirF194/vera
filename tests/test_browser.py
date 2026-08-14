@@ -3626,6 +3626,115 @@ class TestBrowserJsonStringifyParity349:
         assert _parity_stdout(src, tmp_path, f"jsonidem_{case_id}") == expected
 
 
+# (id, JSON input as written in Vera source, expected canonical output).
+# Every row is a *key* the canonical form must carry through the browser
+# host's JS intermediates unchanged.  None of them can be spelled with an
+# alphabetically-ordered object, which is all the rest of the JSON
+# battery uses — so none of them was covered.
+_JSON_KEY_ORDER_CASES = [
+    # Two array-index keys, written in descending order.
+    ("descending_index", '{\\"2\\":1,\\"1\\":2}', '{"2":1,"1":2}'),
+    # Numeric, not lexicographic: "10" before "9", with a non-index key
+    # after both so the two orderings cannot coincide.
+    ("numeric_vs_lexical", '{\\"10\\":1,\\"9\\":1,\\"a\\":1}',
+     '{"10":1,"9":1,"a":1}'),
+    # An index key inserted *after* a non-index one — the shape that
+    # moves to the front rather than merely swapping with a neighbour.
+    ("index_after_name", '{\\"b\\":1,\\"3\\":2,\\"a\\":3}',
+     '{"b":1,"3":2,"a":3}'),
+    ("nested_in_object", '{\\"x\\":{\\"2\\":1,\\"1\\":2}}',
+     '{"x":{"2":1,"1":2}}'),
+    ("nested_in_array", '[{\\"2\\":1,\\"1\\":2}]', '[{"2":1,"1":2}]'),
+    # ``__proto__`` is not an ordering case: assigning it to an ordinary
+    # JS object runs Object.prototype's setter and creates no own
+    # property at all, so the whole field vanishes from the output.
+    ("proto_key", '{\\"__proto__\\":{\\"a\\":1}}', '{"__proto__":{"a":1}}'),
+    # A duplicate key keeps the LAST value at the FIRST position, which
+    # is what a Python dict and a JS Map both do — pinned so the fix
+    # cannot quietly move the survivor to the end.
+    ("duplicate_key", '{\\"b\\":1,\\"a\\":1,\\"b\\":2}', '{"b":2,"a":1}'),
+]
+
+
+class TestBrowserJsonKeyOrderParity1293:
+    """Object key order survives the browser host's JS intermediates.
+
+    Canonical (§9.7.1) key order is insertion order — what both hosts'
+    underlying ``Map<String, Json>`` bucket already holds, and what
+    ``dumps_canonical`` documents itself as preserving.  The browser host
+    used to reach that bucket through *ordinary JS objects* on both sides
+    of the WASM boundary: ``JSON.parse`` returns one, ``writeJson``
+    enumerated it with ``Object.entries``, and ``readJson`` rebuilt one
+    key by key.  An ordinary object cannot carry insertion order —
+    ES OrdinaryOwnPropertyKeys lists array-index keys first, in ascending
+    numeric order — nor a key named ``__proto__``, whose assignment hits
+    ``Object.prototype``'s setter instead of creating an own property.
+
+    Both losses are silent and neither is visible to an object with
+    alphabetically-ordered, non-numeric keys, which is the only shape
+    the rest of the JSON battery uses.  So the hole sat inside exactly
+    the property #1293 claims to have fixed.
+    """
+
+    @pytest.mark.parametrize(
+        ("case_id", "json_text", "expected"),
+        _JSON_KEY_ORDER_CASES,
+        ids=[c[0] for c in _JSON_KEY_ORDER_CASES],
+    )
+    def test_key_order_round_trip(
+        self, case_id: str, json_text: str, expected: str, tmp_path: Path,
+    ) -> None:
+        src = _json_round_trip_src(json_text)
+        assert _parity_stdout(src, tmp_path, f"jsonkey_{case_id}") == expected
+
+    @pytest.mark.parametrize(
+        ("case_id", "json_text", "expected"),
+        _JSON_KEY_ORDER_CASES,
+        ids=[c[0] for c in _JSON_KEY_ORDER_CASES],
+    )
+    def test_key_order_is_idempotent(
+        self, case_id: str, json_text: str, expected: str, tmp_path: Path,
+    ) -> None:
+        """Three passes, not one.
+
+        A host that reorders on every pass and a host that reorders once
+        into a fixed point are both wrong, but only the first is caught
+        by a single round trip when the input happens to already be in
+        the host's preferred order.
+        """
+        src = _json_round_trip_src(json_text, times=3)
+        assert (
+            _parity_stdout(src, tmp_path, f"jsonkeyidem_{case_id}") == expected
+        )
+
+    def test_constructed_object_keeps_its_build_order(
+        self, tmp_path: Path,
+    ) -> None:
+        """A ``JObject`` the program *built* rather than parsed.
+
+        A round trip cannot tell "both sides were fixed" from "neither
+        was": two compensating reorderings cancel, and the parse side's
+        ascending-index order happens to be a fixed point of the
+        stringify side's.  This case has no parse side at all — the map
+        is built by ``map_insert`` in Vera, so the bucket order is the
+        program's, and only ``readJson`` plus the serialiser stand
+        between it and the output.
+        """
+        src = """
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  let @Map<String, Json> = map_insert(map_insert(map_insert(
+    map_new(), "b", JNumber(1.0)), "3", JNumber(2.0)), "a", JNumber(3.0));
+  IO.print(json_stringify(JObject(@Map<String, Json>.0)))
+}
+"""
+        assert (
+            _parity_stdout(src, tmp_path, "jsonbuiltorder")
+            == '{"b":1,"3":2,"a":3}'
+        )
+
+
 class TestBrowserJsonStringifyNonFinite1293:
     """A non-finite ``JNumber`` refuses to serialise on BOTH hosts (#1293).
 
@@ -3729,9 +3838,22 @@ class TestCanonicalNumberFormatMatchesEcmascript1293:
         ])
 
         expected = self._ecmascript_strings(values, tmp_path)
+        # A short Node reply would otherwise truncate the comparison
+        # silently: a bare ``zip`` stops at the shorter input, so a
+        # harness that returned the first ten strings and died would
+        # read as ten passes rather than one failure.  Both the length
+        # assertion and ``strict=True`` are here because they catch it
+        # at different points — the assertion names the shortfall, and
+        # ``strict`` also guards a future refactor that builds the two
+        # lists separately.
+        assert len(expected) == len(values), (
+            f"Node returned {len(expected)} strings for {len(values)} "
+            f"doubles; the differential would have compared only the "
+            f"common prefix"
+        )
         mismatches = [
             (v, format_json_number(v), want)
-            for v, want in zip(values, expected)
+            for v, want in zip(values, expected, strict=True)
             if format_json_number(v) != want
         ]
         assert not mismatches, (
