@@ -763,7 +763,7 @@ The eager-GC lane is implemented via a `pytest.mark.parametrize("eager_gc", [Fal
 **Default behaviour**: stress tests are skipped from the per-PR pytest run via `addopts = "-m 'not stress'"` in `pyproject.toml`.  Local invocation:
 
 ```bash
-pytest -m stress                    # all 16 parametrised test instances (9 logical tests × eager-GC lane)
+pytest -m stress                    # all 26 marker-carrying instances: test_stress.py's 16 (9 logical tests × eager-GC lane) + TestHostHandleReclamation573's 10
 pytest tests/test_stress.py -m stress -v   # full stress suite, verbose
 pytest tests/test_stress.py::test_array_map_over_10k_int_array -m stress -v   # both modes of one test
 pytest "tests/test_stress.py::test_array_map_over_10k_int_array[eager_gc]" -m stress -v   # one mode only
