@@ -2155,7 +2155,26 @@ Decimal is an opaque built-in type implemented via host imports, following the s
 | `decimal_to_string(d)` | `(Decimal) → String` | String representation |
 | `decimal_to_float(d)` | `(Decimal) → Float64` | Potentially lossy conversion to float |
 
-**`decimal_from_string` grammar:** both runtimes accept exactly the language `[+-]? ( digits ( "." digits? )? | "." digits ) ( ("e" | "E") [+-]? digits )?` where `digits` is one or more ASCII `0`–`9`, applied after ignoring surrounding whitespace — the six code points `is_whitespace` names (`0x09`, `0x0A`, `0x0B`, `0x0C`, `0x0D`, `0x20`) and no others, stated here because the two host libraries' own trim functions disagree about the rest in both directions, and the exponent token (when present) MUST satisfy `|exp| <= 999999` — the default context's exponent floor, cited by the `decimal_round` fallback below and chosen to keep operand magnitudes bounded and the exponent-token check exact. Only finite decimals are accepted: special values (`NaN`, `sNaN`, `Infinity`), digit-group underscores (`1_000`), non-ASCII digits, and out-of-range exponent tokens are all rejected with `None`, even where a host decimal library would accept them. The accepted domain is defined by this grammar rather than inherited from whatever the host library parses (DESIGN.md: explicit over implicit) — the Python host pre-validates with this grammar before constructing a `decimal.Decimal`, and the browser runtime's parser recognises the same language, checking the exponent token as a string before any numeric conversion (an unbounded token would otherwise round silently above 2^53). This `|exp| <= 999999` bound constrains **input literals** only; exact arithmetic on accepted operands can grow the exponent past it — `decimal_mul(decimal_from_string("1e999999"), decimal_from_string("1e999999"))` yields `1E+1999998` — and such results are computed and rendered identically in both runtimes (the Python host runs the binary operations in a context whose exponent range is widened to the library maximum, `±10^18`, so a finite result never overflows and matches the browser's unbounded engine).
+**`decimal_from_string` grammar:** both runtimes accept exactly the language `[+-]? ( digits ( "." digits? )? | "." digits ) ( ("e" | "E") [+-]? digits )?` where `digits` is one or more ASCII `0`–`9`, applied after ignoring surrounding whitespace — the six code points `is_whitespace` names (`0x09`, `0x0A`, `0x0B`, `0x0C`, `0x0D`, `0x20`) and no others, stated here because the two host libraries' own trim functions disagree about the rest in both directions, and the exponent token (when present) MUST satisfy `|exp| <= 999999` — the default context's exponent floor, cited by the `decimal_round` fallback below and chosen to keep operand magnitudes bounded and the exponent-token check exact. Only finite decimals are accepted: special values (`NaN`, `sNaN`, `Infinity`), digit-group underscores (`1_000`), non-ASCII digits, and out-of-range exponent tokens are all rejected with `None`, even where a host decimal library would accept them. The accepted domain is defined by this grammar rather than inherited from whatever the host library parses (DESIGN.md: explicit over implicit) — the Python host pre-validates with this grammar before constructing a `decimal.Decimal`, and the browser runtime's parser recognises the same language, checking the exponent token as a string before any numeric conversion (an unbounded token would otherwise round silently above 2^53). This `|exp| <= 999999` bound constrains **input literals** only; exact arithmetic on accepted operands can grow the exponent past it, as squaring the largest accepted literal shows, and such results are computed and rendered identically in both runtimes (the Python host runs the binary operations in a context whose exponent range is widened to the library maximum, `±10^18`, so a finite result never overflows and matches the browser's unbounded engine).
+
+```
+-- The |exp| <= 999999 bound constrains input LITERALS.  Exact
+-- arithmetic on accepted operands can carry the exponent past it.
+public fn square_of_the_largest_literal(@Unit -> @String)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  match decimal_from_string("1e999999") {
+    Some(@Decimal) -> decimal_to_string(decimal_mul(@Decimal.0, @Decimal.0)),
+    None -> "unreachable: 1e999999 is inside the grammar"
+  }
+}
+```
+
+Returns `1E+1999998` on both runtimes. `decimal_from_string` yields an
+`Option<Decimal>`, so the operand is unwrapped before it reaches
+`decimal_mul`, which takes two `Decimal`\ s.
 
 **Arithmetic:**
 
