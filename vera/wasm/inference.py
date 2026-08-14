@@ -966,9 +966,12 @@ class InferenceMixin:
         #                       else from `_infer_fncall_vera_type`
         #   ArrayLit          → "Array"
         #   IndexExpr         → element type
-        #   IfExpr            → from then-branch
+        #   IfExpr            → from the first branch that yields a name
+        #                       (#1286 — the Vera-level twin of #1276's
+        #                       WAT join; a diverging `then` names nothing)
         #   Block             → from trailing expr (defensive add #597)
-        #   MatchExpr         → from first arm body (defensive add #597)
+        #   MatchExpr         → from the first arm body that yields a name
+        #                       (defensive add #597; #1286 join)
         #   HandleExpr        → from body (defensive add #597)
         #   AssertExpr        → "Unit" (defensive add #597)
         #   AssumeExpr        → "Unit" (defensive add #597)
@@ -1057,9 +1060,22 @@ class InferenceMixin:
             elem = self._infer_index_element_type(expr)
             return elem
         if isinstance(expr, ast.IfExpr):
-            if expr.then_branch.expr is not None:
-                return self._infer_vera_type(expr.then_branch.expr)
-            return None  # pragma: no cover
+            # #1286: the FIRST branch that yields a name, not the `then`
+            # branch alone — the Vera-level twin of the #1276 WAT join
+            # (`_infer_expr_wasm_type` / `_infer_block_result_type`).  A
+            # `then` whose every path throws names no type, and answering
+            # `None` for the whole `if` on that basis lost the type the
+            # completing branch carries: as an array-literal element the
+            # literal was dropped with the loud [E602] skip, and as a
+            # generic argument the instantiation fell to the phantom-var
+            # default (`idg$Bool` for an `Int` argument) and the module
+            # failed to load — both from check- and verify-green source.
+            # Branches that DO complete must agree on their type (the
+            # checker enforces that), so the first answer is the answer.
+            then_vt = self._infer_vera_type(expr.then_branch.expr)
+            if then_vt is not None:
+                return then_vt
+            return self._infer_vera_type(expr.else_branch.expr)
         # Defensive adds (#597) — these compound expressions could
         # flow in here from generic-arg inference paths, but today
         # most callers preprocess first.  Returning the right Vera
@@ -1069,8 +1085,12 @@ class InferenceMixin:
         if isinstance(expr, ast.Block):
             return self._infer_vera_type(expr.expr)
         if isinstance(expr, ast.MatchExpr):
-            if expr.arms:
-                return self._infer_vera_type(expr.arms[0].body)
+            # #1286: the first arm that yields a name — see the `IfExpr`
+            # arm above, same shape and same two symptoms.
+            for arm in expr.arms:
+                arm_vt = self._infer_vera_type(arm.body)
+                if arm_vt is not None:
+                    return arm_vt
             return None
         # HandleExpr.body is non-Optional Block; its .expr is also
         # non-Optional (vera/ast.py:481, 470).

@@ -2534,8 +2534,31 @@ class Monomorphizer:
             return self._infer_vera_type_name(
                 expr.operand, ctor_to_adt, generic_decls)
         if isinstance(expr, ast.IfExpr):
-            return self._infer_vera_type_name(
+            # #1286: the first branch that yields a name, mirroring the
+            # WASM call-rewrite twin (`InferenceMixin._infer_vera_type`,
+            # vera/wasm/inference.py) arm for arm.  The two consultors must
+            # land on the SAME name or the discovered clone dangles at the
+            # call the rewrite emits (E602) — so the join lands on both
+            # sides together, exactly as the #1276 WAT deciders did.
+            then_vt = self._infer_vera_type_name(
                 expr.then_branch.expr, ctor_to_adt, generic_decls)
+            if then_vt is not None:
+                return then_vt
+            return self._infer_vera_type_name(
+                expr.else_branch.expr, ctor_to_adt, generic_decls)
+        if isinstance(expr, ast.MatchExpr):
+            # #1286: discovery had NO `MatchExpr` arm at all, so a `match`
+            # argument answered `None` and the instantiation fell to the
+            # phantom-var default while the rewrite named it from arm 0 —
+            # a dangling `idg$Int` that dropped the caller (E602) on
+            # check-green source, even with every arm completing.  The join
+            # closes the gap and the desync in one arm.
+            for arm in expr.arms:
+                arm_vt = self._infer_vera_type_name(
+                    arm.body, ctor_to_adt, generic_decls)
+                if arm_vt is not None:
+                    return arm_vt
+            return None
         if isinstance(expr, ast.StringLit):
             return "String"
         if isinstance(expr, ast.InterpolatedString):

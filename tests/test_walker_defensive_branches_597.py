@@ -250,7 +250,14 @@ class TestInferVeraTypeDefensiveBranches:
     """Block / MatchExpr / HandleExpr → trailing-expr type;
     AssertExpr / AssumeExpr → "Unit"; AnonFn / QualifiedCall /
     ModuleCall → None (path/qualifier fields can't be threaded
-    through the bare-name FnCall dispatcher)."""
+    through the bare-name FnCall dispatcher).
+
+    Since #1286 the `MatchExpr` arm joins over the arms rather than
+    reading `arms[0]` — it answers from the first arm that YIELDS a
+    name, an arm that only throws naming none.  The single-arm cases
+    below are unaffected by that distinction; the join itself is pinned
+    in `test_infer_vera_type_join_1286.py`.
+    """
 
     def test_block_returns_trailing_expr_type(self) -> None:
         ctx = _make_ctx()
