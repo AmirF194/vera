@@ -658,8 +658,25 @@ public fn main(-> @Unit)
 # ---------------------------------------------------------------------------
 
 
+def _sole_index(blocks: list[str], needle: str) -> int:
+    """The index of the one line containing *needle*.
+
+    Position, not presence: `in "\\n".join(blocks)` answers "is this text
+    somewhere in the report", which stays true however the lines are
+    ordered.  What the report promises is that each error sits *beneath
+    its own header*, and only an index can say that.
+    """
+    matches = [i for i, line in enumerate(blocks) if needle in line]
+    assert len(matches) == 1, (
+        f"expected exactly one line containing {needle!r}, got "
+        f"{len(matches)}: {blocks!r}"
+    )
+    return matches[0]
+
+
 class TestErrorBlocks:
-    """Each error kind gets its own header carrying its own count.
+    """Each error kind gets its own header carrying its own count, with
+    its own errors underneath it.
 
     Filing one kind's lines under another's header misreports both — a
     reader who counts the lines beneath `COVERAGE ERRORS (n)` gets a
@@ -673,20 +690,34 @@ class TestErrorBlocks:
         Printing documentation mismatches beneath a `COVERAGE ERRORS (n)`
         header whose n excludes them misreports both — the reader counts
         the lines and gets a different number from the one on the header.
+
+        Asserted positionally.  Presence plus counts is satisfied by a
+        report that emits both headers first and then every error line —
+        each string is there, each count is right, and every error is
+        attributed to the wrong header.  That is the shape this test
+        exists to reject, so the ordering is what it checks.
         """
         blocks = _MOD.error_blocks(
             coverage_errors=["one coverage problem"],
             doc_errors=["one doc problem", "another doc problem"],
             failures=[],
         )
-        text = "\n".join(blocks)
-        assert "COVERAGE ERRORS (1)" in text
-        assert "DOCUMENTATION MISMATCH (2)" in text
-        assert "one doc problem" in text
-        # Every reported line sits under a header, and every header's count
-        # matches the lines beneath it.
+        cov_header = _sole_index(blocks, "COVERAGE ERRORS (1)")
+        cov_error = _sole_index(blocks, "one coverage problem")
+        doc_header = _sole_index(blocks, "DOCUMENTATION MISMATCH (2)")
+        doc_first = _sole_index(blocks, "one doc problem")
+        doc_second = _sole_index(blocks, "another doc problem")
+
+        # The coverage error sits under the coverage header, and both doc
+        # errors under the documentation one — so no error can be read as
+        # belonging to a header that did not count it.
+        assert cov_header < cov_error < doc_header
+        assert doc_header < doc_first
+        assert doc_header < doc_second
+
+        # And every header's count still matches the lines beneath it.
         counted = {
-            int(m) for m in re.findall(r"\((\d+)\)", text)
+            int(m) for m in re.findall(r"\((\d+)\)", "\n".join(blocks))
         }
         assert counted == {1, 2}
 
@@ -695,9 +726,10 @@ class TestErrorBlocks:
 
     def test_runtime_failures_get_their_own_counted_block(self) -> None:
         blocks = _MOD.error_blocks([], [], ["boom: exited 1"])
-        text = "\n".join(blocks)
-        assert "RUNTIME FAILURES (1)" in text
-        assert "boom: exited 1" in text
+        assert (
+            _sole_index(blocks, "RUNTIME FAILURES (1)")
+            < _sole_index(blocks, "boom: exited 1")
+        )
 
 
 # ---------------------------------------------------------------------------
