@@ -51,13 +51,14 @@ the discovery side.  All three are one gap: the two consultors must stay
 structurally parallel, arm for arm, which is this fix's core claim.
 
 One shape found by the same sweep is NOT closed here and is deliberately left
-loud: an `IndexExpr` argument (`idg(@Array<Int>.0[1])`) dangles the same way,
-but the rewrite's arm delegates to `_infer_index_element_type`, which resolves
-chained indexing, aliases and `Future` payloads against codegen tables the
-monomorphizer does not have.  A partial mirror would answer differently from the
-rewrite for those cases — trading a shape where both consultors say "unknown"
-for one where they disagree, which is the worse failure — so it wants its own
-change rather than a line here.
+loud, tracked as #1327: an `IndexExpr` argument (`idg(@Array<Int>.0[1])`)
+dangles the same way, but the rewrite's arm delegates to
+`_infer_index_element_type`, which resolves chained indexing, aliases and
+`Future` payloads against codegen tables the monomorphizer does not have.  A
+partial mirror would answer differently from the rewrite for those cases —
+trading a shape where both consultors say "unknown" for one where they
+disagree, which is the worse failure — so it wants its own change rather than a
+line here.
 """
 
 from __future__ import annotations
