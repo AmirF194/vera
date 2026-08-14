@@ -891,6 +891,128 @@ private fn f(@String -> @Future<Result<String, String>>)
 """)
         assert not any(w.error_code == "W002" for w in warnings), warnings
 
+    # --- #1284: the commutativity walk resolves declarations first ----
+    #
+    # `_collect_expr_effects` asked `lookup_effect_op` BEFORE
+    # `_lookup_function_scoped`, the one op-first consumer left in the file.
+    # A user function named after a built-in operation therefore contributed
+    # the OPERATION's parent effect to the commutativity analysis instead of
+    # its own declared row — wrong in both directions, and each pair below
+    # carries the rename control that isolates the name as the cause.
+
+    def test_async_over_pure_user_get_does_not_warn(self) -> None:
+        """A PURE user `fn get`, in a program with no State anywhere.
+
+        pre_fix: `[W002] async argument performs State effects` — the walk
+        found the built-in `State.get` and reported a cell the program does
+        not have.  The rename control below is byte-identical but for the
+        name, so the warning was a property of the spelling alone.
+        """
+        warnings = _warnings("""
+private fn get(@Int -> @Int)
+  requires(true) ensures(@Int.result == @Int.0 + 1) effects(pure)
+{ @Int.0 + 1 }
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @Future<Int> = async(get(3));
+  await(@Future<Int>.0)
+}
+""")
+        assert not any(w.error_code == "W002" for w in warnings), [
+            w.description for w in warnings
+        ]
+
+    def test_async_over_pure_helper_under_another_name_does_not_warn(
+        self,
+    ) -> None:
+        """The rename control: `gett` was clean before the fix and after."""
+        warnings = _warnings("""
+private fn gett(@Int -> @Int)
+  requires(true) ensures(@Int.result == @Int.0 + 1) effects(pure)
+{ @Int.0 + 1 }
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(<Async>)
+{
+  let @Future<Int> = async(gett(3));
+  await(@Future<Int>.0)
+}
+""")
+        assert not any(w.error_code == "W002" for w in warnings), warnings
+
+    def test_async_over_effectful_user_get_still_warns(self) -> None:
+        """The other direction: a user `fn get` performing IO, under a row
+        naming `Http` first.
+
+        pre_fix: NO warning at all.  Op-first resolution bound the name to
+        `Http.get`, which IS in the commutative whitelist, so the walk
+        concluded the argument commutes and withheld the warning the
+        program is owed — the silent direction, and the reason this pair
+        needs the rename control below rather than the value alone.
+        """
+        warnings = _warnings("""
+private fn get(@Int -> @Int)
+  requires(true) ensures(true) effects(<IO>)
+{
+  IO.print("side effect");
+  @Int.0 + 1
+}
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(<Http, IO, Async>)
+{
+  let @Future<Int> = async(get(3));
+  await(@Future<Int>.0)
+}
+""")
+        w002 = [w for w in warnings if w.error_code == "W002"]
+        assert w002, f"expected W002, got: {[w.error_code for w in warnings]}"
+        assert "IO" in w002[0].description, w002[0].description
+
+    def test_async_over_effectful_helper_under_another_name_warns(
+        self,
+    ) -> None:
+        """The rename control for the withheld direction: `fetch` warned
+        before the fix, so the difference is the name and nothing else."""
+        warnings = _warnings("""
+private fn fetch(@Int -> @Int)
+  requires(true) ensures(true) effects(<IO>)
+{
+  IO.print("side effect");
+  @Int.0 + 1
+}
+
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(<Http, IO, Async>)
+{
+  let @Future<Int> = async(fetch(3));
+  await(@Future<Int>.0)
+}
+""")
+        w002 = [w for w in warnings if w.error_code == "W002"]
+        assert w002, f"expected W002, got: {[w.error_code for w in warnings]}"
+        assert "IO" in w002[0].description, w002[0].description
+
+    def test_async_over_a_real_state_op_still_warns(self) -> None:
+        """The control that keeps the fix from degenerating into "never
+        report State": an UNSHADOWED bare `get(())` under a `State<Int>` row
+        is the operation, and still warns.  Without this, deleting the
+        op lookup entirely would pass every case above.
+        """
+        warnings = _warnings("""
+public fn main(@Unit -> @Int)
+  requires(true) ensures(true) effects(<State<Int>, Async>)
+{
+  let @Future<Int> = async(get(()));
+  await(@Future<Int>.0)
+}
+""")
+        w002 = [w for w in warnings if w.error_code == "W002"]
+        assert w002, f"expected W002, got: {[w.error_code for w in warnings]}"
+        assert "State" in w002[0].description, w002[0].description
+
 
 # =====================================================================
 # Coverage: control.py — handler type-checking

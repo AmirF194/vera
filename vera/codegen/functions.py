@@ -310,12 +310,18 @@ class FunctionCompilationMixin:
         effect_op_result_wt: dict[str, str | None] = {}
         effect_op_result_vera: dict[str, str | None] = {}
         effect_op_cells: dict[str, CellNames] = {}
+        # #1285: cell family -> getter import, for `new(State<T>)`.
+        state_getters: dict[str, str] = {}
         # #1207: the op → Vera result-type table, from the ONE derivation
         # mono discovery also reads.  Source-order-first-wins and the
         # unnameable-argument skip live in the shared builder, so the two
-        # consultors cannot drift; the `_fn_sigs` shadow guard below is
-        # this site's own (an op the row declares but a user function
-        # already owns is not injected here, and discovery mirrors that).
+        # consultors cannot drift.  Shadowing is NOT filtered into these
+        # registries (#1284): they record which cell each op name reaches,
+        # and whether a given call site IS the op is asked at that site,
+        # through `_bare_call_denotes_op`.  Withholding the entry here
+        # answered both questions with one table and made the second answer
+        # unavailable — `State.get(())` in a function that also declares
+        # `fn get` compiled to `call $vera.get` and failed to link.
         row_op_results = (
             effect_op_result_names(decl.effect.effects)
             if isinstance(decl.effect, ast.EffectSet) else {}
@@ -355,8 +361,17 @@ class FunctionCompilationMixin:
                             base=self._family_base_te(eff.type_args[0]),
                         )
                         mangled = mangle_type_name(cell.family)
-                        # Only map if no user-defined function shadows the op
-                        if "get" not in self._fn_sigs and "get" not in effect_ops:
+                        # #1285: the family-keyed getter, recorded for EVERY
+                        # State in the row rather than only the first.  A
+                        # `new(State<T>)` in a postcondition names its family
+                        # the way `old(State<T>)` does, so it reads this
+                        # table; the name-keyed `effect_ops["get"]` beside it
+                        # stays source-order-first-wins, which is the right
+                        # rule for a bare `get(())` that names no family and
+                        # the wrong one for a contract that does.
+                        state_getters.setdefault(
+                            cell.family, f"$vera.state_get_{mangled}")
+                        if "get" not in effect_ops:
                             effect_ops["get"] = (
                                 f"$vera.state_get_{mangled}", False
                             )
@@ -376,7 +391,7 @@ class FunctionCompilationMixin:
                             effect_op_result_vera["get"] = row_op_results.get(
                                 "get")
                             effect_op_cells["get"] = cell
-                        if "put" not in self._fn_sigs and "put" not in effect_ops:
+                        if "put" not in effect_ops:
                             effect_ops["put"] = (
                                 f"$vera.state_put_{mangled}", True
                             )
@@ -384,8 +399,7 @@ class FunctionCompilationMixin:
                 elif (isinstance(eff, ast.EffectRef) and eff.name == "Exn"
                         and eff.type_args and len(eff.type_args) == 1):
                     type_name = type_expr_slot_name(eff.type_args[0])
-                    if (type_name and "throw" not in self._fn_sigs
-                            and "throw" not in effect_ops):
+                    if type_name and "throw" not in effect_ops:
                         # The tag name resolves like the State import
                         # family (matching `_check_exn_type`, #1205/#1209).
                         # IDENTITY names the tag; REPRESENTATION rides
@@ -420,6 +434,7 @@ class FunctionCompilationMixin:
             effect_op_result_wt=effect_op_result_wt,
             effect_op_result_vera=effect_op_result_vera,
             effect_op_cells=effect_op_cells,
+            state_getters=state_getters,
             ctor_layouts=ctor_layouts,
             adt_type_names=adt_type_names,
             generic_fn_info=getattr(self, "_generic_fn_info", None),

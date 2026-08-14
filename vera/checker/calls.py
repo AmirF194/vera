@@ -8,6 +8,7 @@ orchestration.
 from __future__ import annotations
 
 from vera import ast
+from vera.slots import bare_call_denotes_user_fn
 from vera.checker.sql import (
     count_placeholders,
     resolve_array_len,
@@ -131,9 +132,22 @@ class CallsMixin:
         # last-wins registry, so a diamond of same-named helpers with
         # DIFFERENT signatures checks each parent against its OWN helper
         # (the flat lookup falsely E121'd a valid program).
-        fn_info = self._lookup_function_scoped(name)
-        if fn_info:
-            return self._check_fn_call_with_info(fn_info, args, node)
+        #
+        # #1284: user-fn-FIRST is not an implementation detail of this
+        # function, it is the language's bare-call ownership rule (spec
+        # §7.4: a bare op resolves only for a name no declaration occupies),
+        # and codegen has to lower every such call site the way this
+        # resolution read it.  Asking through the shared predicate is what
+        # makes the checker's answer and codegen's the same rule over two
+        # tables rather than two rules that happened to agree: the two
+        # codegen legs used to disagree, and a `fn get` called under a
+        # `handle[State<T>]` lowered to the host cell intrinsic — a silently
+        # wrong value, a module WASM validation rejected, or a spurious
+        # [E602] naming a State operation the user never wrote.
+        if bare_call_denotes_user_fn(name, self._user_fn_names):
+            fn_info = self._lookup_function_scoped(name)
+            if fn_info is not None:
+                return self._check_fn_call_with_info(fn_info, args, node)
 
         # Maybe it's an effect operation
         op_info = self.env.lookup_effect_op(name)
@@ -698,21 +712,41 @@ class CallsMixin:
                 # from this mixin; conservatively non-commutative.
                 acc.add(f"<{node.qualifier}.{node.name}>")
         elif isinstance(node, ast.FnCall):
-            op_info = self.env.lookup_effect_op(node.name)
+            # #991: resolve lexically like the call checker above, so a
+            # same-named helper in a sibling tree can't contribute the
+            # WRONG effect row to the commutativity analysis.
+            #
+            # #1284: and DECLARATIONS FIRST, which is the rest of what "like
+            # the call checker above" means — this walk asked
+            # `lookup_effect_op` first, so a user function named after a
+            # built-in operation contributed the OPERATION's parent effect
+            # instead of its own declared row.  Wrong in both directions and
+            # both measured: a PURE `fn get` in a program containing no
+            # State at all drew `[W002] async argument performs State
+            # effects`, and a `fn get` performing IO under a row naming
+            # `Http` first drew NO warning, because `Http` is inside the
+            # commutative whitelist and the operation is what the walk
+            # thought it had found.  Same predicate as the resolution at the
+            # top of this file, so the analysis reasons about the row the
+            # checker actually bound.
+            fn_info = (
+                self._lookup_function_scoped(node.name)
+                if bare_call_denotes_user_fn(node.name, self._user_fn_names)
+                else None
+            )
+            op_info = (
+                self.env.lookup_effect_op(node.name)
+                if fn_info is None else None
+            )
             if op_info is not None:
                 acc.add(op_info.parent_effect)
-            else:
-                # #991: resolve lexically like the call checker above, so a
-                # same-named helper in a sibling tree can't contribute the
-                # WRONG effect row to the commutativity analysis.
-                fn_info = self._lookup_function_scoped(node.name)
-                if fn_info is None:
-                    acc.add(f"<{node.name}>")
-                elif isinstance(fn_info.effect, ConcreteEffectRow):
-                    for ei in fn_info.effect.effects:
-                        acc.add(ei.name)
-                elif not isinstance(fn_info.effect, PureEffectRow):
-                    acc.add(f"<{node.name}>")
+            elif fn_info is None:
+                acc.add(f"<{node.name}>")
+            elif isinstance(fn_info.effect, ConcreteEffectRow):
+                for ei in fn_info.effect.effects:
+                    acc.add(ei.name)
+            elif not isinstance(fn_info.effect, PureEffectRow):
+                acc.add(f"<{node.name}>")
         for field in _dc.fields(node):
             value = getattr(node, field.name)
             if isinstance(value, ast.Node):

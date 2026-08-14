@@ -43,7 +43,11 @@ from typing import Any, cast
 
 from vera import ast, naming
 from vera.naming import EMPTY_ALIAS_ENV, AliasEnv
-from vera.slots import effect_op_result_names, fn_slot_scope
+from vera.slots import (
+    bare_call_denotes_user_fn,
+    effect_op_result_names,
+    fn_slot_scope,
+)
 from vera.types import PRIMITIVES, REMOVED_ALIASES
 
 # Identifier tokens inside a rendered type name (`Map<String, Int>` →
@@ -1347,15 +1351,18 @@ class MonoContext:
       loses the user-fn parameterized-return recovery, degrading to the prior
       (bare-name) behaviour rather than erroring.
     * ``fn_names`` — every function name this consumer's own table owns, used
-      for ONE decision: whether a declared effect row's ``get``/``put`` is an
-      effect operation here at all (#1207).  Codegen keeps an op out of
-      ``_effect_ops`` when ``_fn_sigs`` already owns the name, so a program
-      declaring its own ``get`` resolves that call through the ordinary
-      function path; discovery has to make the same call or the two consultors
-      desync again in the shadowed direction.  Optional (defaults empty): a
-      consumer that doesn't populate it treats no name as shadowed, which is
-      exactly the handler-expression rule (an op inside a ``handle`` body owns
-      its name unconditionally, matching ``_translate_handle_state``).
+      for ONE decision: whether a bare ``get``/``put`` CALL SITE is an effect
+      operation here at all (#1207, #1284).  This is discovery's leg of
+      :func:`~vera.slots.bare_call_denotes_user_fn`, the predicate codegen
+      asks at its own dispatch through ``_bare_call_denotes_op`` and the
+      checker asks when it resolves the name; discovery has to make the same
+      call or the two consultors desync in the shadowed direction.  It is
+      asked at the LOOKUP, never at the two registry installs — the declared
+      row and the handler expression both record their ops unfiltered,
+      exactly as codegen's two injection sites do.  Optional (defaults
+      empty): a consumer that doesn't populate it treats no name as
+      shadowed, which is the answer for a program that declares no function
+      of an op's name — every program until one does.
     """
 
     generic_decls: dict[str, ast.FnDecl]
@@ -1607,14 +1614,16 @@ class Monomorphizer:
         return cached
 
     def _row_op_result_types(self, fn: ast.FnDecl) -> dict[str, str]:
-        """The effect-op result registry a function's declared row installs."""
+        """The effect-op result registry a function's declared row installs.
+
+        Unfiltered by shadowing (#1284), matching both the handler-expression
+        merge below and codegen's two injection sites: the table says what
+        each op name results in, and whether a given call site is that
+        operation is asked at the site, in ``_infer_vera_type_name``.
+        """
         if not isinstance(fn.effect, ast.EffectSet):
             return {}
-        return {
-            op: name
-            for op, name in effect_op_result_names(fn.effect.effects).items()
-            if op not in self.ctx.fn_names
-        }
+        return dict(effect_op_result_names(fn.effect.effects))
 
     def _collect_calls_in_node_scoped(
         self,
@@ -2154,7 +2163,20 @@ class Monomorphizer:
         # instantiation to the phantom default while the rewrite named the
         # cell's type: the clone discovery emitted dangled at the call the
         # rewrite emitted (loud E602, caller dropped with E620).
-        if isinstance(expr, ast.FnCall) and expr.name in self._op_result_types:
+        # #1284: and only when this call site IS the operation.  The registry
+        # is populated unfiltered — it records what each op name results in,
+        # which is a fact about the row and the handler, not about the
+        # program's declarations — so the shadow question is asked here, at
+        # the site, exactly as codegen's `_infer_vera_type` asks it through
+        # `_bare_call_denotes_op`.  Filtering at the two installation sites
+        # instead is what desynced them: the declared-row install filtered and
+        # the handler-expression merge did not, so a user `fn get` called
+        # under a `handle[State<T>]` named the CELL's clone here and the
+        # user function's return type there.
+        if (isinstance(expr, ast.FnCall)
+                and not bare_call_denotes_user_fn(
+                    expr.name, self.ctx.fn_names)
+                and expr.name in self._op_result_types):
             return self._op_result_types[expr.name]
         if isinstance(expr, ast.FnCall) and generic_decls:
             return self._infer_fncall_vera_type(

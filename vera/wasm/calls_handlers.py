@@ -60,6 +60,7 @@ class CallsHandlersMixin:
     _effect_op_result_wt: dict[str, str | None]
     _effect_op_result_vera: dict[str, str | None]
     _effect_op_cells: dict[str, CellNames]
+    _state_getters: dict[str, str]
     _state_clause_ops: dict[str, StateClauseEntry]
     _state_clause_family_base: str | None
     _in_state_clause: bool
@@ -1597,13 +1598,28 @@ class CallsHandlersMixin:
         # WAT type) to type a `get(())` array-literal element.  #1207: from
         # the shared derivation, which mono discovery pushes for the same
         # `handle` expression — one table, so the clone discovery emits is
-        # the clone the rewrite below calls.  No shadow guard here, matching
-        # the unconditional `_effect_ops` overwrite above: inside a handler
-        # body the op owns the name.
+        # the clone the rewrite below calls.
+        #
+        # No shadow guard at ANY of these four replacements, matching the
+        # declared-row site (#1284): they record which cell this handler's
+        # op names reach, which is true whatever the program's declarations
+        # are called, and every consumer that has to know whether a given
+        # bare call IS the op asks `_bare_call_denotes_op` at the call site.
+        # "Inside a handler body the op owns the name" is what this used to
+        # say, and it is not the language's rule — the checker resolves a
+        # bare `get` to a user declaration of that name anywhere it is in
+        # scope, handler body included.
         self._effect_op_result_vera = {
             **saved_result_vera,
             **effect_op_result_names([expr.effect]),
         }
+        # No `_state_getters` (#1285) replacement rides along here, and that
+        # is deliberate: the family-keyed getter table exists for
+        # `new(State<T>)`, which is legal only in an `ensures` clause, and a
+        # contract is compiled outside the handled body this restores around
+        # — so a handler-scoped entry would be unreachable.  The declared
+        # effect row, registered in `codegen/functions.py`, is the whole
+        # population.
         # #976 option C: register the clauses so each get/put CALL SITE in
         # the body inlines its clause body (intrinsic-hybrid semantics)
         # instead of the bare host-cell call.  Start from an EMPTY registry:
@@ -2441,7 +2457,9 @@ class CallsHandlersMixin:
             # the declaration's own effect row — which is what makes the
             # rethrow shape divergent rather than a call to some `throw`.
             self._expr_always_throws(
-                clause.body, throw_installed="throw" in self._effect_ops,
+                clause.body,
+                throw_installed=(self._bare_call_denotes_op("throw")
+                                 and "throw" in self._effect_ops),
             )
             for clause in expr.clauses
         )
@@ -2459,9 +2477,10 @@ class CallsHandlersMixin:
         ``throw_installed`` says whether a bare ``throw`` at this point IS the
         effect operation.  Inside a ``handle[Exn<E>]``'s handled body it always
         is — the injection at the translation site is unconditional — while
-        elsewhere the enclosing ``_effect_ops`` decides, so a program that
-        declares its own ``fn throw`` is read the same way the lowering reads
-        it.
+        elsewhere the enclosing ``_effect_ops`` decides, filtered by the
+        bare-call ownership predicate (#1284) exactly as the lowering filters
+        it, so a program that declares its own ``fn throw`` is read the same
+        way the lowering reads it.
         """
         if isinstance(expr, ast.Block):
             return self._expr_always_throws(
