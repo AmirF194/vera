@@ -260,6 +260,96 @@ public fn main(@Unit -> @Int)
             ast.NamedType(name=name, type_args=None)) == expected
 
 
+class TestReturnTypeIsStringBranchOrder:
+    """The THIRD consumer of the same pre-alias-branch disease (CR #1323).
+
+    ``_return_type_is_string`` decides whether ``execute()`` decodes a
+    function's (ptr, len) return as UTF-8 for display, and it tested the
+    ``Future<T>`` strip before the alias table — where ``Future`` is an ADT
+    name, not one of ``vera.types.PRIMITIVES``, so the checker resolves an
+    alias of that name first.  Under ``type Future<T> = Array<T>;`` a
+    ``@Future<String>`` return therefore took the transparent-wrapper strip,
+    recursed onto ``String``, and was classified a string return — while the
+    width derivation (fixed for #1309) resolves the alias and lowers it as
+    an ``Array<String>``.  ``vera run`` decoded the array's backing bytes as
+    text and printed two NULs where the fresh-name control printed the
+    pointer.  Expressible, and measured identically at the branch point, so
+    it is pre-existing rather than introduced by the #1309 reorder.
+
+    ``String`` stays ahead of the alias branch because it IS a primitive —
+    the same single exception the width derivation keeps.
+    """
+
+    _ALIASED = """\
+type Future<T> = Array<T>;
+
+public fn main(@Unit -> @Future<String>)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  ["ab", "cd"]
+}
+"""
+
+    _CONTROL = _ALIASED.replace("Future", "Zz")
+
+    def test_a_future_named_alias_to_array_is_not_a_string_return(self) -> None:
+        assert "main" not in _compile_ok(self._ALIASED).fn_string_returns
+
+    def test_the_fresh_name_control_agrees(self) -> None:
+        """The differential: the same program under a name that is not an
+        ADT's was always classified correctly, so the alias TARGET is not
+        what decides this — the name is."""
+        assert "main" not in _compile_ok(self._CONTROL).fn_string_returns
+
+    def test_a_future_named_alias_to_string_is_still_a_string_return(self) -> None:
+        """Over-correction control: resolving the alias must not lose a
+        genuine string return that reaches one THROUGH the shadowed name."""
+        source = """\
+type Future<T> = Array<T>;
+
+public fn main(@Unit -> @String)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  "hi"
+}
+"""
+        assert "main" in _compile_ok(source).fn_string_returns
+
+    def test_the_genuine_transparent_future_still_decodes(self) -> None:
+        """The #841 / #1047 behaviour the Future branch exists for, with no
+        alias shadowing the name — it must survive the reorder."""
+        source = """\
+public fn mk(@Unit -> @Future<String>)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  async("hi")
+}
+"""
+        assert "mk" in _compile_ok(source).fn_string_returns
+
+    def test_an_alias_to_a_transparent_future_still_decodes(self) -> None:
+        """PR #1041's shape: the alias branch must keep substituting its own
+        parameters, which is what it was moved above, not past."""
+        source = """\
+type Deferred<T> = Future<T>;
+
+public fn mk(@Unit -> @Deferred<String>)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  async("hi")
+}
+"""
+        assert "mk" in _compile_ok(source).fn_string_returns
+
+
 class TestAliasOverAdtNameWidthBattery:
     """The differential: EVERY built-in ADT name x EVERY representation.
 

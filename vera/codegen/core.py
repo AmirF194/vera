@@ -2578,10 +2578,38 @@ class CodeGenerator(
         ``str`` for display.  Distinguishes ``String`` from ``Array<T>``
         — both share the i32_pair WAT shape but only ``String`` has
         UTF-8 bytes at memory[ptr:ptr+len].
+
+        The BRANCH ORDER is the checker's, for the same reason
+        ``_type_expr_to_wasm_type``'s is (#1309, and this is the THIRD
+        consumer of that disease): ``String`` is a ``vera.types.PRIMITIVES``
+        member and so precedes the alias table, while ``Future`` is an ADT
+        name and so must follow it.  Tested the other way round, ``type
+        Future<T> = Array<T>;`` made a ``@Future<String>`` return take the
+        transparent-wrapper strip and be classified a string, while the
+        width derivation resolved the alias and lowered an ``Array<String>``
+        — so ``vera run`` decoded the array's backing bytes as UTF-8 and
+        printed two NULs where the same program under a non-ADT alias name
+        printed the pointer.
         """
         if isinstance(te, ast.NamedType):
             if te.name == "String":
                 return True
+            # Type aliases — substitute a parameterised alias's own type
+            # params with the concrete `te.type_args` BEFORE recursing
+            # (mirrors `_type_expr_to_wasm_type`'s #635 block below), so
+            # `type Deferred<T> = Future<T>` used as `Deferred<String>`
+            # resolves to String instead of recursing on the bare `T` and
+            # displaying the raw pointer (PR #1041 review).  Ahead of the
+            # `Future` strip below, which names an ADT rather than a
+            # primitive and which an alias of that name therefore shadows.
+            if te.name in self._type_aliases:
+                alias = self._type_aliases[te.name]
+                alias_params = self._type_alias_params.get(te.name)
+                if (alias_params and te.type_args
+                        and len(alias_params) == len(te.type_args)):
+                    local_subst = dict(zip(alias_params, te.type_args))
+                    alias = substitute_type_vars(alias, local_subst)
+                return self._return_type_is_string(alias)
             # Future<T> is representation-transparent (#841 / #1047): a bare
             # `Future<String>` return has the same (ptr, len) pair shape as a
             # plain String, so `execute()` must decode it for display too.
@@ -2592,20 +2620,6 @@ class CodeGenerator(
             if (te.name == "Future" and te.type_args
                     and len(te.type_args) == 1):
                 return self._return_type_is_string(te.type_args[0])
-            # Type aliases — substitute a parameterised alias's own type
-            # params with the concrete `te.type_args` BEFORE recursing
-            # (mirrors `_type_expr_to_wasm_type`'s #635 block below), so
-            # `type Deferred<T> = Future<T>` used as `Deferred<String>`
-            # resolves to String instead of recursing on the bare `T` and
-            # displaying the raw pointer (PR #1041 review).
-            if te.name in self._type_aliases:
-                alias = self._type_aliases[te.name]
-                alias_params = self._type_alias_params.get(te.name)
-                if (alias_params and te.type_args
-                        and len(alias_params) == len(te.type_args)):
-                    local_subst = dict(zip(alias_params, te.type_args))
-                    alias = substitute_type_vars(alias, local_subst)
-                return self._return_type_is_string(alias)
         if isinstance(te, ast.RefinementType):
             return self._return_type_is_string(te.base_type)
         return False
