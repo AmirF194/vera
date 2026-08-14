@@ -69,7 +69,7 @@ CI sets this for the browser-parity job; local runs typically don't need it.  Se
 
 ## `VERA_EAGER_GC`
 
-A diagnostic knob for hunting GC-rooting bugs in the WASM codegen.  Set to `1`, `true`, or `yes` at **compile time** to make the emitted `$alloc` function call `$gc_collect` on every allocation, regardless of memory pressure:
+A diagnostic knob for hunting GC-rooting bugs in the WASM codegen.  Set to `1`, `true`, `yes` or `on` (case-insensitive, surrounding whitespace ignored) at **compile time** to make the emitted `$alloc` function call `$gc_collect` on every allocation, regardless of memory pressure:
 
 ```bash
 VERA_EAGER_GC=1 vera run program.vera
@@ -85,7 +85,7 @@ This was the diagnostic that cracked [#593](https://github.com/aallan/vera/issue
 
 ## `VERA_DEBUG_HOST_ERRORS`
 
-A diagnostic knob for debugging the host bindings themselves.  Set to `1`, `true`, or `yes` (case-insensitive, surrounding whitespace ignored — the same spellings [`VERA_EAGER_GC`](#vera_eager_gc) accepts) to make `execute()` re-raise a host callback's original Python exception instead of converting it to a `WasmTrapError`:
+A diagnostic knob for debugging the host bindings themselves.  Set to `1`, `true`, `yes` or `on` — the same spellings [`VERA_EAGER_GC`](#vera_eager_gc) accepts, because both read the one predicate in `vera/envflags.py` — to make `execute()` re-raise a host callback's original Python exception instead of converting it to a `WasmTrapError`:
 
 ```bash
 VERA_DEBUG_HOST_ERRORS=1 vera run program.vera

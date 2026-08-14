@@ -2974,8 +2974,8 @@ function buildImportObject(module, moduleBytes) {
   //     both are decided on the decoded value by one walk.
   //
   // All three sentences are hand-copied from ``vera/wasm/json_serde.py``
-  // (``_non_finite_parse_message`` / ``_lone_surrogate_message`` /
-  // ``_non_finite_number_message``) and held against those originals by
+  // (``non_finite_parse_message`` / ``lone_surrogate_message`` /
+  // ``non_finite_number_message``) and held against those originals by
   // tests/test_browser.py.
 
   const NON_FINITE_TOKENS = ["-Infinity", "Infinity", "NaN"];

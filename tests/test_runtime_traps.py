@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Callable
 import pytest
 
 from vera.cli import cmd_run
+from vera.codegen.api import CompileResult
 from vera.runtime.traps import (
     WasmTrapError,
     _classify_host_error,
@@ -3030,7 +3031,7 @@ class TestHostErrorDebugKnob1302:
 
     _SRC = TestHostCallbackErrorSurface1302._SRC
 
-    def _compile(self, tmp_path: Path) -> object:
+    def _compile(self, tmp_path: Path) -> CompileResult:
         from vera.codegen import compile as codegen_compile
         from vera.parser import parse_file
         from vera.transform import transform
@@ -3052,7 +3053,7 @@ class TestHostErrorDebugKnob1302:
         monkeypatch.setenv("VERA_DEBUG_HOST_ERRORS", "1")
         result = self._compile(tmp_path)
         with pytest.raises(ValueError) as excinfo:
-            execute(result)  # type: ignore[arg-type]
+            execute(result)
         assert not isinstance(excinfo.value, WasmTrapError)
         assert "json_stringify: NaN is not representable" in str(excinfo.value)
 
@@ -3070,14 +3071,14 @@ class TestHostErrorDebugKnob1302:
         monkeypatch.delenv("VERA_DEBUG_HOST_ERRORS", raising=False)
         result = self._compile(tmp_path)
         with pytest.raises(WasmTrapError) as excinfo:
-            execute(result)  # type: ignore[arg-type]
+            execute(result)
         assert excinfo.value.kind == "host_error"
 
     @pytest.mark.parametrize(
         ("value", "enabled"),
         [("1", True), ("true", True), ("TRUE", True), ("yes", True),
-         (" 1 ", True), ("0", False), ("", False), ("no", False),
-         ("false", False)],
+         ("on", True), ("ON", True), (" 1 ", True), ("0", False),
+         ("", False), ("no", False), ("false", False), ("off", False)],
     )
     def test_the_knob_accepts_the_same_spellings_as_vera_eager_gc(
         self, value: str, enabled: bool, tmp_path: Path,
@@ -3085,9 +3086,17 @@ class TestHostErrorDebugKnob1302:
     ) -> None:
         """One truthiness rule across the ``VERA_*`` diagnostic knobs.
 
-        ``VERA_EAGER_GC`` accepts ``1`` / ``true`` / ``yes``
-        case-insensitively after stripping; a second knob reading its
-        value differently is a trap for anyone who learned the first.
+        Both knobs now read ``vera.envflags.flag_enabled``, so this
+        measures the shared implementation rather than a second copy of
+        the rule.  Unifying them found that they had already drifted:
+        ``VERA_EAGER_GC`` accepted ``on`` and this one did not, and
+        neither ENVIRONMENT.md section said so.  The shared set is their
+        union — widening the narrower knob is safe, where narrowing the
+        wider one would quietly stop honouring ``VERA_EAGER_GC=on``.
+
+        ``off`` is in the table as a negative: it looks like a spelling
+        of the flag and means not-set, which is the reading a user gets
+        wrong in the direction that matters.
         """
         from vera.codegen import execute
 
@@ -3095,7 +3104,7 @@ class TestHostErrorDebugKnob1302:
         result = self._compile(tmp_path)
         expected: type[BaseException] = ValueError if enabled else WasmTrapError
         with pytest.raises(expected):
-            execute(result)  # type: ignore[arg-type]
+            execute(result)
 
     def test_the_cli_prints_a_traceback_under_the_knob(
         self, tmp_path: Path, capsys: CaptureFixture[str],
@@ -3113,6 +3122,96 @@ class TestHostErrorDebugKnob1302:
         path.write_text(self._SRC, encoding="utf-8")
         with pytest.raises(ValueError):
             cmd_run(str(path))
+
+
+class TestHostCallbackBaseExceptionBoundary1302:
+    """The two exceptions the #1302 conversion must NOT swallow.
+
+    ``execute()`` now converts everything escaping the guest invocation,
+    which is the point — but its handler is ``except Exception``, and
+    two ``BaseException`` subclasses deliberately sit outside it.
+    ``SystemExit`` is a request to end the process rather than a failed
+    operation, and
+    ``KeyboardInterrupt`` has its own handler that maps Ctrl-C to exit
+    130 with the captured output intact (#595 / #599).  Converting
+    either into a ``host_error`` would turn a control-flow signal into a
+    diagnostic.
+
+    Nothing in the current code catches them, so both tests pass today.
+    They are here for the edit that would break them: widening the
+    handler to ``except BaseException`` — the obvious "make it really
+    catch everything" change, and one that reads as an improvement right
+    up until Ctrl-C stops working.  The existing Ctrl-C suite drives
+    ``IO.sleep``, whose binding has its own interrupt path; these drive a
+    binding on the ordinary host-callback route, which is the one the
+    conversion sits on.
+
+    Both raise from inside a real host callback rather than from a
+    synthetic harness, by monkeypatching the function ``register_json``
+    imports per call, so the exception travels the true path: through
+    wasmtime's trampoline and out of ``func(store, *call_args)``.
+    """
+
+    _SRC = TestHostCallbackErrorSurface1302._SRC
+
+    def _compile(self, tmp_path: Path) -> CompileResult:
+        from vera.codegen import compile as codegen_compile
+        from vera.parser import parse_file
+        from vera.transform import transform
+
+        path = tmp_path / "baseexc.vera"
+        path.write_text(self._SRC, encoding="utf-8")
+        result = codegen_compile(
+            transform(parse_file(str(path))),
+            source=self._SRC,
+            file=str(path),
+        )
+        assert result.ok
+        return result
+
+    def test_system_exit_from_a_host_callback_is_not_converted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """It exits per ``SystemExit``, not as ``kind="host_error"``."""
+        import vera.wasm.json_serde as json_serde
+        from vera.codegen import execute
+
+        def _exit(_value: object) -> str:
+            raise SystemExit(3)
+
+        monkeypatch.setattr(json_serde, "dumps_canonical", _exit)
+        result = self._compile(tmp_path)
+
+        with pytest.raises(SystemExit) as excinfo:
+            execute(result)
+        assert not isinstance(excinfo.value, WasmTrapError)
+        assert excinfo.value.code == 3
+
+    def test_keyboard_interrupt_from_a_host_callback_still_exits_130(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Ctrl-C keeps its own handler, on the host-callback route too.
+
+        The pre-existing ``TestHostSleepKeyboardInterrupt`` cases go
+        through ``IO.sleep`` and friends; this one goes through the same
+        callback route the #1302 conversion guards, so a widened handler
+        that stole ``KeyboardInterrupt`` would be caught here even if the
+        sleep path were left alone.
+        """
+        import vera.wasm.json_serde as json_serde
+        from vera.codegen import execute
+
+        def _interrupt(_value: object) -> str:
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(json_serde, "dumps_canonical", _interrupt)
+        result = self._compile(tmp_path)
+
+        exec_result = execute(result)
+        assert exec_result.exit_code == 130
+        # #522's contract holds through the interrupt: what the program
+        # printed before Ctrl-C is still returned.
+        assert exec_result.stdout == "before"
 
 
 class TestClassifyHostError1302:

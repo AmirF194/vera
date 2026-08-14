@@ -42,10 +42,18 @@ import sys
 import pytest
 
 from tests.codegen_helpers import _run_io
+from tests.json_domain_helpers import (
+    ERR_PREFIX,
+    INT_ROUNDS_TO_INFINITY,
+    MAX_FINITE_AS_INT,
+    accept_domain_src,
+    err,
+    ok,
+)
 from vera.wasm.json_serde import (
-    _lone_surrogate_message,
-    _non_finite_number_message,
-    _non_finite_parse_message,
+    lone_surrogate_message,
+    non_finite_number_message,
+    non_finite_parse_message,
     first_domain_violation,
 )
 
@@ -54,39 +62,15 @@ from vera.wasm.json_serde import (
 # ---------------------------------------------------------------------------
 
 
-def _vera_lit(raw: str) -> str:
-    """Escape ``raw`` for embedding in a Vera string literal.
-
-    The battery's inputs are JSON documents full of quotes and
-    backslashes, and one backslash either way changes which bytes
-    ``json_parse`` receives — a surrogate escape and a literal
-    backslash-u sequence differ by exactly that.  Hand-escaping at
-    fifteen call sites is where a test silently stops testing what it
-    claims; converting once at the boundary keeps every case honest.
-    """
-    return raw.replace("\\", "\\\\").replace('"', '\\"')
-
-
-_PROBE = """
-public fn main(@Unit -> @Unit)
-  requires(true) ensures(true) effects(<IO>)
-{{
-  match json_parse("{text}") {{
-    Ok(@Json) -> IO.print(string_concat("OK:", json_stringify(@Json.0))),
-    Err(@String) -> IO.print(string_concat("ERR:", @String.0))
-  }}
-}}
-"""
-
-
 def _parse_probe(raw_json: str) -> str:
-    """Run ``json_parse(raw_json)`` and report the arm taken.
+    """Run ``json_parse(raw_json)`` on the REFERENCE host and report the arm.
 
-    Returns ``"OK:<canonical text>"`` or ``"ERR:<message>"`` — the same
-    observation the browser battery makes, so the two files compare
-    like with like.
+    The program, the escaping and the output protocol all come from
+    ``tests/json_domain_helpers``, so this battery and the cross-host one
+    in ``tests/test_browser.py`` cannot drift into sending ``json_parse``
+    different bytes while claiming to cover the same case.
     """
-    return _run_io(_PROBE.format(text=_vera_lit(raw_json)))
+    return _run_io(accept_domain_src(raw_json))
 
 
 # The four probe inputs from #1306's table, plus the two-constant case
@@ -184,7 +168,7 @@ class TestNonFiniteParseRefusal1306:
     def test_refused_with_the_shared_sentence(
         self, case_id: str, raw_json: str, name: str,
     ) -> None:
-        assert _parse_probe(raw_json) == "ERR:" + _non_finite_parse_message(name)
+        assert _parse_probe(raw_json) == err(non_finite_parse_message(name))
 
     def test_message_names_the_constant_and_the_remedy(self) -> None:
         """Guards the guard: the sentence has to carry both halves.
@@ -194,7 +178,7 @@ class TestNonFiniteParseRefusal1306:
         the user nothing — the assertions above compare the production
         sentence with itself, so the *content* needs its own check.
         """
-        msg = _non_finite_parse_message("NaN")
+        msg = non_finite_parse_message("NaN")
         assert "NaN" in msg
         assert "RFC 8259" in msg
         assert "json_parse:" in msg
@@ -209,7 +193,7 @@ class TestNonFiniteParseRefusal1306:
     def test_valid_documents_are_unaffected(
         self, case_id: str, raw_json: str, expected: str,
     ) -> None:
-        assert _parse_probe(raw_json) == "OK:" + expected
+        assert _parse_probe(raw_json) == ok(expected)
 
     def test_malformed_text_keeps_the_host_parser_message(self) -> None:
         """The refinement must not swallow ordinary syntax errors.
@@ -220,8 +204,8 @@ class TestNonFiniteParseRefusal1306:
         host-native) behaviour for syntax errors.
         """
         out = _parse_probe("{not json")
-        assert out.startswith("ERR:")
-        assert _non_finite_parse_message("NaN") not in out
+        assert out.startswith(ERR_PREFIX)
+        assert non_finite_parse_message("NaN") not in out
         assert "json_parse:" not in out
 
     @pytest.mark.parametrize(
@@ -266,7 +250,7 @@ class TestNonFiniteParseRefusal1306:
         identically.
         """
         out = _parse_probe(raw_json)
-        assert out.startswith("ERR:")
+        assert out.startswith(ERR_PREFIX)
         assert "json_parse:" not in out
 
     def test_a_non_finite_constant_outranks_a_lone_surrogate(self) -> None:
@@ -279,8 +263,8 @@ class TestNonFiniteParseRefusal1306:
         surrogate scan never runs either) — see the parity twin in
         ``tests/test_browser.py``.
         """
-        assert _parse_probe('["\\ud800",NaN]') == (
-            "ERR:" + _non_finite_parse_message("NaN")
+        assert _parse_probe('["\\ud800",NaN]') == err(
+            non_finite_parse_message("NaN"),
         )
 
 
@@ -335,9 +319,7 @@ class TestNonFiniteNumberOverflowRefusal1306:
     def test_overflow_is_refused_with_the_shared_sentence(
         self, case_id: str, raw_json: str, name: str,
     ) -> None:
-        assert _parse_probe(raw_json) == "ERR:" + _non_finite_number_message(
-            name,
-        )
+        assert _parse_probe(raw_json) == err(non_finite_number_message(name))
 
     @pytest.mark.parametrize(
         ("case_id", "raw_json", "expected"),
@@ -353,7 +335,7 @@ class TestNonFiniteNumberOverflowRefusal1306:
         refusal keyed on "large" rather than on "not finite" would take
         it, and take every legitimate scientific document with it.
         """
-        assert _parse_probe(raw_json) == "OK:" + expected
+        assert _parse_probe(raw_json) == ok(expected)
 
     def test_underflow_decodes_to_zero_rather_than_being_refused(
         self,
@@ -366,9 +348,9 @@ class TestNonFiniteNumberOverflowRefusal1306:
         carry, so the domain admits it.  Pinned explicitly because
         "symmetry with overflow" is the plausible wrong answer.
         """
-        assert _parse_probe("1e-999") == "OK:0"
-        assert _parse_probe("[1e-999,1e999]") == (
-            "ERR:" + _non_finite_number_message("Infinity")
+        assert _parse_probe("1e-999") == ok("0")
+        assert _parse_probe("[1e-999,1e999]") == err(
+            non_finite_number_message("Infinity"),
         )
 
     def test_a_constant_outranks_an_overflow(self) -> None:
@@ -379,7 +361,7 @@ class TestNonFiniteNumberOverflowRefusal1306:
         parses the text at all.  Pinned in both orders so the answer
         cannot depend on which appears first.
         """
-        expected = "ERR:" + _non_finite_parse_message("NaN")
+        expected = err(non_finite_parse_message("NaN"))
         assert _parse_probe("[NaN,1e999]") == expected
         assert _parse_probe("[1e999,NaN]") == expected
 
@@ -394,11 +376,11 @@ class TestNonFiniteNumberOverflowRefusal1306:
         precedence table and that the two hosts cannot implement
         differently.
         """
-        assert _parse_probe('["a\\ud800b",1e999]') == (
-            "ERR:" + _lone_surrogate_message(0xD800)
+        assert _parse_probe('["a\\ud800b",1e999]') == err(
+            lone_surrogate_message(0xD800),
         )
-        assert _parse_probe('[1e999,"a\\ud800b"]') == (
-            "ERR:" + _non_finite_number_message("Infinity")
+        assert _parse_probe('[1e999,"a\\ud800b"]') == err(
+            non_finite_number_message("Infinity"),
         )
 
 
@@ -417,8 +399,6 @@ class TestNonFiniteNumberOverflowRefusal1306:
 # accept it.  A comparison against ``int(sys.float_info.max)`` would
 # refuse it on the reference host alone, trading this divergence for its
 # mirror image.
-_INT_ROUNDS_TO_INFINITY = 2**1024 - 2**970
-_MAX_FINITE_AS_INT = int(sys.float_info.max)
 
 _INT_OVERFLOW_CASES = [
     ("digits_309", "1" + "0" * 309, "Infinity"),
@@ -431,22 +411,22 @@ _INT_OVERFLOW_CASES = [
     ("in_array", "[1" + "0" * 309 + "]", "Infinity"),
     ("in_object", '{"a":1' + "0" * 309 + "}", "Infinity"),
     ("nested", "[[1" + "0" * 309 + "]]", "Infinity"),
-    ("exact_rounding_boundary", str(_INT_ROUNDS_TO_INFINITY), "Infinity"),
-    ("negative_exact_boundary", "-" + str(_INT_ROUNDS_TO_INFINITY),
+    ("exact_rounding_boundary", str(INT_ROUNDS_TO_INFINITY), "Infinity"),
+    ("negative_exact_boundary", "-" + str(INT_ROUNDS_TO_INFINITY),
      "-Infinity"),
 ]
 
 _INT_ACCEPTED_CASES = [
     ("digits_308", "1" + "0" * 308, "1e+308"),
     ("negative_digits_308", "-1" + "0" * 308, "-1e+308"),
-    ("boundary_minus_one", str(_INT_ROUNDS_TO_INFINITY - 1),
+    ("boundary_minus_one", str(INT_ROUNDS_TO_INFINITY - 1),
      "1.7976931348623157e+308"),
-    ("max_finite_as_int", str(_MAX_FINITE_AS_INT),
+    ("max_finite_as_int", str(MAX_FINITE_AS_INT),
      "1.7976931348623157e+308"),
     # The control that separates the rounding boundary from
     # ``sys.float_info.max``: this integer is LARGER than the largest
     # finite double and still rounds to it.
-    ("max_finite_as_int_plus_one", str(_MAX_FINITE_AS_INT + 1),
+    ("max_finite_as_int_plus_one", str(MAX_FINITE_AS_INT + 1),
      "1.7976931348623157e+308"),
     ("ordinary_integer", "42", "42"),
     ("negative_ordinary_integer", "-42", "-42"),
@@ -481,9 +461,7 @@ class TestIntegerOverflowRefusal1306:
     def test_integer_overflow_is_refused_with_the_shared_sentence(
         self, case_id: str, raw_json: str, name: str,
     ) -> None:
-        assert _parse_probe(raw_json) == "ERR:" + _non_finite_number_message(
-            name,
-        )
+        assert _parse_probe(raw_json) == err(non_finite_number_message(name))
 
     @pytest.mark.parametrize(
         ("case_id", "raw_json", "expected"),
@@ -493,7 +471,7 @@ class TestIntegerOverflowRefusal1306:
     def test_integers_that_round_into_range_still_parse(
         self, case_id: str, raw_json: str, expected: str,
     ) -> None:
-        assert _parse_probe(raw_json) == "OK:" + expected
+        assert _parse_probe(raw_json) == ok(expected)
 
     def test_the_bound_is_the_rounding_boundary_not_the_largest_double(
         self,
@@ -507,15 +485,15 @@ class TestIntegerOverflowRefusal1306:
         sign flipped, and invisible to a battery whose only large case
         is a round number of zeros.
         """
-        assert _MAX_FINITE_AS_INT < _INT_ROUNDS_TO_INFINITY
-        assert first_domain_violation(_MAX_FINITE_AS_INT) is None
-        assert first_domain_violation(_MAX_FINITE_AS_INT + 1) is None
-        assert first_domain_violation(_INT_ROUNDS_TO_INFINITY - 1) is None
-        assert first_domain_violation(_INT_ROUNDS_TO_INFINITY) == (
-            _non_finite_number_message("Infinity")
+        assert MAX_FINITE_AS_INT < INT_ROUNDS_TO_INFINITY
+        assert first_domain_violation(MAX_FINITE_AS_INT) is None
+        assert first_domain_violation(MAX_FINITE_AS_INT + 1) is None
+        assert first_domain_violation(INT_ROUNDS_TO_INFINITY - 1) is None
+        assert first_domain_violation(INT_ROUNDS_TO_INFINITY) == (
+            non_finite_number_message("Infinity")
         )
-        assert first_domain_violation(-_INT_ROUNDS_TO_INFINITY) == (
-            _non_finite_number_message("-Infinity")
+        assert first_domain_violation(-INT_ROUNDS_TO_INFINITY) == (
+            non_finite_number_message("-Infinity")
         )
 
     def test_the_bound_agrees_with_python_s_own_float_conversion(
@@ -529,9 +507,9 @@ class TestIntegerOverflowRefusal1306:
         The oracle is ``float()`` itself: below the bound it succeeds,
         at and above it raises.
         """
-        assert float(_INT_ROUNDS_TO_INFINITY - 1) == sys.float_info.max
+        assert float(INT_ROUNDS_TO_INFINITY - 1) == sys.float_info.max
         with pytest.raises(OverflowError):
-            float(_INT_ROUNDS_TO_INFINITY)
+            float(INT_ROUNDS_TO_INFINITY)
 
     def test_a_huge_integer_is_refused_rather_than_raising(self) -> None:
         """The 400-digit case, stated as its own property.
@@ -542,15 +520,15 @@ class TestIntegerOverflowRefusal1306:
         it is.  Asserting the ``Err`` value directly says what must
         happen.
         """
-        assert _parse_probe("1" + "0" * 400) == (
-            "ERR:" + _non_finite_number_message("Infinity")
+        assert _parse_probe("1" + "0" * 400) == err(
+            non_finite_number_message("Infinity"),
         )
 
     def test_a_bool_is_still_not_a_number(self) -> None:
         """``bool`` subclasses ``int``; the int arm must not claim it."""
         assert first_domain_violation(True) is None
         assert first_domain_violation([True, False]) is None
-        assert _parse_probe("[true,false]") == "OK:[true,false]"
+        assert _parse_probe("[true,false]") == ok("[true,false]")
 
 
 # ---------------------------------------------------------------------------
@@ -576,9 +554,7 @@ class TestLoneSurrogateParseRefusal1308:
     def test_refused_with_the_shared_sentence(
         self, case_id: str, raw_json: str, code_point: int,
     ) -> None:
-        assert _parse_probe(raw_json) == "ERR:" + _lone_surrogate_message(
-            code_point,
-        )
+        assert _parse_probe(raw_json) == err(lone_surrogate_message(code_point))
 
     @pytest.mark.parametrize(
         ("case_id", "raw_json", "expected"),
@@ -595,11 +571,11 @@ class TestLoneSurrogateParseRefusal1308:
         break every astral character in every document — so these run
         beside the refusals rather than in a separate file.
         """
-        assert _parse_probe(raw_json) == "OK:" + expected
+        assert _parse_probe(raw_json) == ok(expected)
 
     def test_message_names_the_code_point_and_the_remedy(self) -> None:
         """Guards the guard — same reasoning as the #1306 twin."""
-        msg = _lone_surrogate_message(0xD800)
+        msg = lone_surrogate_message(0xD800)
         assert "\\uD800" in msg
         assert "surrogate" in msg
         assert "json_parse:" in msg
@@ -613,9 +589,9 @@ class TestLoneSurrogateParseRefusal1308:
         message and the parity battery can compare across hosts without
         a casing rule.
         """
-        assert _lone_surrogate_message(0xD800) == _lone_surrogate_message(0xD800)
-        assert "\\uD800" in _lone_surrogate_message(0xD800)
-        assert "\\uDFFF" in _lone_surrogate_message(0xDFFF)
+        assert lone_surrogate_message(0xD800) == lone_surrogate_message(0xD800)
+        assert "\\uD800" in lone_surrogate_message(0xD800)
+        assert "\\uDFFF" in lone_surrogate_message(0xDFFF)
 
 
 class TestFirstDomainViolationScan:
@@ -642,7 +618,7 @@ class TestFirstDomainViolationScan:
 
     def test_finds_a_lone_surrogate_in_a_value(self) -> None:
         assert first_domain_violation({"k": "a\ud800b"}) == (
-            _lone_surrogate_message(0xD800)
+            lone_surrogate_message(0xD800)
         )
 
     def test_finds_a_lone_surrogate_in_a_key(self) -> None:
@@ -652,18 +628,18 @@ class TestFirstDomainViolationScan:
         and the key route is what #1308's own reproduction used.
         """
         assert first_domain_violation({"a\ud800b": 1.0}) == (
-            _lone_surrogate_message(0xD800)
+            lone_surrogate_message(0xD800)
         )
 
     def test_finds_a_non_finite_number(self) -> None:
         assert first_domain_violation(float("inf")) == (
-            _non_finite_number_message("Infinity")
+            non_finite_number_message("Infinity")
         )
         assert first_domain_violation(float("-inf")) == (
-            _non_finite_number_message("-Infinity")
+            non_finite_number_message("-Infinity")
         )
         assert first_domain_violation({"a": [1.0, float("inf")]}) == (
-            _non_finite_number_message("Infinity")
+            non_finite_number_message("Infinity")
         )
 
     def test_nan_is_covered_though_no_json_text_decodes_to_one(self) -> None:
@@ -675,7 +651,7 @@ class TestFirstDomainViolationScan:
         an unreachable branch is where a wrong answer survives.
         """
         assert first_domain_violation(float("nan")) == (
-            _non_finite_number_message("NaN")
+            non_finite_number_message("NaN")
         )
 
     def test_an_integer_in_range_is_not_a_violation(self) -> None:
@@ -695,7 +671,7 @@ class TestFirstDomainViolationScan:
         assert first_domain_violation(10**300) is None
         assert first_domain_violation([1, 2, 3]) is None
         assert first_domain_violation(10**400) == (
-            _non_finite_number_message("Infinity")
+            non_finite_number_message("Infinity")
         )
 
     def test_a_bool_is_not_read_as_a_number(self) -> None:
@@ -704,26 +680,26 @@ class TestFirstDomainViolationScan:
 
     def test_key_is_checked_before_its_own_value(self) -> None:
         assert first_domain_violation({"\ud800": "\udc00"}) == (
-            _lone_surrogate_message(0xD800)
+            lone_surrogate_message(0xD800)
         )
 
     def test_earlier_entry_wins_over_later(self) -> None:
         assert first_domain_violation({"a": "\udc00", "b": "\ud800"}) == (
-            _lone_surrogate_message(0xDC00)
+            lone_surrogate_message(0xDC00)
         )
 
     def test_array_order_is_document_order(self) -> None:
         assert first_domain_violation(["ok", "\udfff", "\ud800"]) == (
-            _lone_surrogate_message(0xDFFF)
+            lone_surrogate_message(0xDFFF)
         )
 
     def test_the_two_kinds_share_one_document_order(self) -> None:
         """Whichever comes first names the refusal — no precedence table."""
         assert first_domain_violation(["\ud800", float("inf")]) == (
-            _lone_surrogate_message(0xD800)
+            lone_surrogate_message(0xD800)
         )
         assert first_domain_violation([float("inf"), "\ud800"]) == (
-            _non_finite_number_message("Infinity")
+            non_finite_number_message("Infinity")
         )
 
     def test_boundary_code_points(self) -> None:
@@ -735,8 +711,8 @@ class TestFirstDomainViolationScan:
         assert first_domain_violation("\ud7ff") is None
         assert first_domain_violation("\ue000") is None
         assert first_domain_violation("\ud800") == (
-            _lone_surrogate_message(0xD800)
+            lone_surrogate_message(0xD800)
         )
         assert first_domain_violation("\udfff") == (
-            _lone_surrogate_message(0xDFFF)
+            lone_surrogate_message(0xDFFF)
         )

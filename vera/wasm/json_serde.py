@@ -19,9 +19,9 @@ Text direction (Python → JSON text):
 
 Accept domain (spec §9.7.1, #1306 / #1308):
   first_domain_violation(value) → str | None
-  _non_finite_parse_message(name) → str
-  _non_finite_number_message(name) → str
-  _lone_surrogate_message(code_point) → str
+  non_finite_parse_message(name) → str
+  non_finite_number_message(name) → str
+  lone_surrogate_message(code_point) → str
 
 The domain gates sit in front of the write direction rather than inside
 it: `vera/runtime/json.py` consults them on the value `json.loads`
@@ -103,7 +103,7 @@ _TAG_JOBJECT = 5
 # different things about the same input.
 
 
-def _non_finite_parse_message(name: str) -> str:
+def non_finite_parse_message(name: str) -> str:
     """The single sentence both runtimes return for a bare ``NaN``.
 
     ``name`` is the constant as it appears in the text — ``"NaN"``,
@@ -118,7 +118,7 @@ def _non_finite_parse_message(name: str) -> str:
     )
 
 
-def _lone_surrogate_message(code_point: int) -> str:
+def lone_surrogate_message(code_point: int) -> str:
     """The single sentence both runtimes return for a lone surrogate.
 
     The code point is rendered in the canonical ``\\uXXXX`` escape form
@@ -154,10 +154,10 @@ def _first_lone_surrogate_in_str(text: str) -> int | None:
             return code_point
     return None
 
-def _non_finite_number_message(name: str) -> str:
+def non_finite_number_message(name: str) -> str:
     """The single sentence both runtimes return for an overflowing number.
 
-    The sibling of :func:`_non_finite_parse_message`: the same exclusion
+    The sibling of :func:`non_finite_parse_message`: the same exclusion
     — no accepted text decodes to a non-finite number — reached by a
     different syntax.  ``1e999`` breaks no RFC 8259 rule, so this one
     cites the permission the refusal rests on rather than a prohibition.
@@ -239,10 +239,10 @@ def first_domain_violation(value: Any) -> str | None:
         code_point = _first_lone_surrogate_in_str(value)
         if code_point is None:
             return None
-        return _lone_surrogate_message(code_point)
+        return lone_surrogate_message(code_point)
     if isinstance(value, float):
         if value != value or value in (float("inf"), float("-inf")):
-            return _non_finite_number_message(_NON_FINITE_NAMES[repr(value)])
+            return non_finite_number_message(_NON_FINITE_NAMES[repr(value)])
         return None
     if isinstance(value, int) and not isinstance(value, bool):
         # ``bool`` subclasses ``int``; a boolean is a JSON boolean and
@@ -250,9 +250,9 @@ def first_domain_violation(value: Any) -> str | None:
         # arithmetic all the way down, so a 400-digit literal is refused
         # rather than raising on its way to being measured.
         if value >= _INT_ROUNDS_TO_INFINITY:
-            return _non_finite_number_message("Infinity")
+            return non_finite_number_message("Infinity")
         if value <= -_INT_ROUNDS_TO_INFINITY:
-            return _non_finite_number_message("-Infinity")
+            return non_finite_number_message("-Infinity")
         return None
     if isinstance(value, list):
         for item in value:
@@ -265,7 +265,7 @@ def first_domain_violation(value: Any) -> str | None:
             if isinstance(key, str):
                 code_point = _first_lone_surrogate_in_str(key)
                 if code_point is not None:
-                    return _lone_surrogate_message(code_point)
+                    return lone_surrogate_message(code_point)
             found = first_domain_violation(item)
             if found is not None:
                 return found

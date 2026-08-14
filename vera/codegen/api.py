@@ -51,6 +51,7 @@ from vera.runtime.math import register_math
 from vera.runtime.md import register_md
 from vera.runtime.random import register_random
 from vera.runtime.regex import register_regex
+from vera.envflags import flag_enabled
 from vera.runtime.set import register_set
 from vera.runtime.state import register_state
 from vera.runtime.traps import (
@@ -1310,10 +1311,23 @@ def execute(
         # ``except RuntimeError`` blocks remain backward-compatible.
         # #1302 — the conversion is keyed on the BOUNDARY, not on the
         # exception's type.  The guarded region is the guest invocation
-        # and nothing else, so anything arriving here is either a
-        # wasmtime trap or a host callback that raised: wasmtime's
-        # trampoline re-raises a host-import exception unchanged, and
-        # every compiler phase has already finished.  Keying on the type
+        # plus the executor teardown in its ``finally``, so anything
+        # arriving here is a wasmtime trap, a host callback that raised
+        # (wasmtime's trampoline re-raises those unchanged), or a
+        # failure tearing the worker pool down.  Every compiler phase
+        # has already finished, so none of it can be a compiler bug
+        # reaching the user as a Vera error.
+        #
+        # The teardown is inside the boundary deliberately.  Moving it
+        # out while keeping #841's "runs on every exit path" contract
+        # means attaching the ``finally`` to THIS try instead, which
+        # inverts the order: the handler below would read
+        # ``output_buf`` before the pool is joined, losing whatever an
+        # in-flight worker writes during ``shutdown(wait=True)``.
+        # Leaving it inside costs little — ``shutdown`` does not
+        # surface worker exceptions (those stay on their futures), so a
+        # failure there is a genuine host-side failure during execution
+        # and ``host_error`` is the right shape for it.  Keying on the type
         # name instead meant a ``ValueError`` from a host binding — a
         # deliberate refusal like ``json_stringify``'s on a non-finite
         # number — skipped the branch entirely and escaped as a raw
@@ -1341,9 +1355,7 @@ def execute(
             # person reading a terminal.  Setting the variable re-raises
             # the original untouched.  Same truthiness rule as
             # ``VERA_EAGER_GC``, the other ``VERA_*`` diagnostic knob.
-            if os.environ.get("VERA_DEBUG_HOST_ERRORS", "").strip().lower() in (
-                "1", "true", "yes",
-            ):
+            if flag_enabled("VERA_DEBUG_HOST_ERRORS"):
                 raise
             kind, message, fix = _classify_host_error(exc)
         # #516 Stage 2 — resolve trap frames against the source map.

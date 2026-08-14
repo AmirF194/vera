@@ -30,7 +30,7 @@ def register_json(linker: wasmtime.Linker, ops_used: set[str]) -> None:
     import json as _json
 
     from vera.wasm.json_serde import (
-        _non_finite_parse_message,
+        non_finite_parse_message,
         dumps_canonical,
         first_domain_violation,
         read_json,
@@ -81,7 +81,7 @@ def register_json(linker: wasmtime.Linker, ops_used: set[str]) -> None:
                 return _alloc_result_err_string(caller, str(exc))
             if seen_constant:
                 return _alloc_result_err_string(
-                    caller, _non_finite_parse_message(seen_constant[0]),
+                    caller, non_finite_parse_message(seen_constant[0]),
                 )
             # The two value-level exclusions, in one document-order
             # walk.  A lone surrogate is not a Unicode scalar value, so

@@ -20,7 +20,6 @@ import random
 import shutil
 import struct
 import subprocess
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -32,11 +31,19 @@ from vera.checker import typecheck
 from vera.parser import parse_file
 from vera.resolver import ModuleResolver
 from vera.transform import transform
+from tests.json_domain_helpers import (
+    ERR_PREFIX,
+    INT_ROUNDS_TO_INFINITY,
+    MAX_FINITE_AS_INT,
+    accept_domain_src,
+    err,
+    ok,
+)
 from vera.wasm.json_serde import (
-    _lone_surrogate_message,
+    lone_surrogate_message,
     _non_finite_message,
-    _non_finite_number_message,
-    _non_finite_parse_message,
+    non_finite_number_message,
+    non_finite_parse_message,
     format_json_number,
 )
 
@@ -3925,38 +3932,6 @@ public fn main(@Unit -> @Unit)
         assert expected in browser, browser
 
 
-def _vera_lit(raw: str) -> str:
-    """Escape ``raw`` for embedding in a Vera string literal.
-
-    The accept-domain battery's inputs are JSON documents full of quotes
-    and backslashes, and one backslash either way changes which bytes
-    ``json_parse`` receives — a surrogate escape and a literal
-    backslash-u sequence differ by exactly that.  Converting once at the
-    boundary is what keeps fifteen call sites honest about their input.
-    """
-    return raw.replace("\\", "\\\\").replace('"', '\\"')
-
-
-def _accept_domain_src(raw_json: str) -> str:
-    """A ``main`` that reports which arm ``json_parse(raw_json)`` took.
-
-    Prints ``OK:<canonical text>`` or ``ERR:<message>``, so one
-    byte-identical stdout across the two runtimes covers the arm AND the
-    message in a single assertion.  The reference-host twin of this
-    probe is in ``tests/test_json_accept_domain_1306_1308.py``.
-    """
-    return f"""
-public fn main(@Unit -> @Unit)
-  requires(true) ensures(true) effects(<IO>)
-{{
-  match json_parse("{_vera_lit(raw_json)}") {{
-    Ok(@Json) -> IO.print(string_concat("OK:", json_stringify(@Json.0))),
-    Err(@String) -> IO.print(string_concat("ERR:", @String.0))
-  }}
-}}
-"""
-
-
 # The four probe inputs from #1306's table, plus the container and
 # multi-constant shapes that pin how far the refusal reaches and which
 # constant names it.
@@ -4054,8 +4029,6 @@ _JSON_HOST_NATIVE_ERROR_CASES = [
 # such split and produced an ``Infinity`` here all along.  The bound is
 # the double ROUNDING boundary — an integer above ``sys.float_info.max``
 # but below the midpoint to 2**1024 rounds down and is accepted by both.
-_INT_ROUNDS_TO_INFINITY = 2**1024 - 2**970
-_MAX_FINITE_AS_INT = int(sys.float_info.max)
 
 _JSON_INT_OVERFLOW_CASES = [
     ("digits_309", "1" + "0" * 309, "Infinity"),
@@ -4063,15 +4036,15 @@ _JSON_INT_OVERFLOW_CASES = [
     ("negative_309", "-1" + "0" * 309, "-Infinity"),
     ("in_array", "[1" + "0" * 309 + "]", "Infinity"),
     ("in_object", '{"a":1' + "0" * 309 + "}", "Infinity"),
-    ("exact_rounding_boundary", str(_INT_ROUNDS_TO_INFINITY), "Infinity"),
+    ("exact_rounding_boundary", str(INT_ROUNDS_TO_INFINITY), "Infinity"),
 ]
 
 _JSON_INT_ACCEPTED_CASES = [
     ("digits_308", "1" + "0" * 308, "1e+308"),
     ("negative_digits_308", "-1" + "0" * 308, "-1e+308"),
-    ("boundary_minus_one", str(_INT_ROUNDS_TO_INFINITY - 1),
+    ("boundary_minus_one", str(INT_ROUNDS_TO_INFINITY - 1),
      "1.7976931348623157e+308"),
-    ("max_finite_as_int_plus_one", str(_MAX_FINITE_AS_INT + 1),
+    ("max_finite_as_int_plus_one", str(MAX_FINITE_AS_INT + 1),
      "1.7976931348623157e+308"),
     ("ordinary_integer", "42", "42"),
 ]
@@ -4118,9 +4091,9 @@ class TestBrowserJsonAcceptDomainParity1306_1308:
         self, case_id: str, raw_json: str, name: str, tmp_path: Path,
     ) -> None:
         out = _parity_stdout(
-            _accept_domain_src(raw_json), tmp_path, f"jsonnfp_{case_id}",
+            accept_domain_src(raw_json), tmp_path, f"jsonnfp_{case_id}",
         )
-        assert out == "ERR:" + _non_finite_parse_message(name)
+        assert out == err(non_finite_parse_message(name))
 
     @pytest.mark.parametrize(
         ("case_id", "raw_json", "code_point"),
@@ -4131,9 +4104,9 @@ class TestBrowserJsonAcceptDomainParity1306_1308:
         self, case_id: str, raw_json: str, code_point: int, tmp_path: Path,
     ) -> None:
         out = _parity_stdout(
-            _accept_domain_src(raw_json), tmp_path, f"jsonls_{case_id}",
+            accept_domain_src(raw_json), tmp_path, f"jsonls_{case_id}",
         )
-        assert out == "ERR:" + _lone_surrogate_message(code_point)
+        assert out == err(lone_surrogate_message(code_point))
 
     @pytest.mark.parametrize(
         ("case_id", "raw_json", "expected"),
@@ -4152,9 +4125,9 @@ class TestBrowserJsonAcceptDomainParity1306_1308:
         the refusals fire.
         """
         out = _parity_stdout(
-            _accept_domain_src(raw_json), tmp_path, f"jsonok_{case_id}",
+            accept_domain_src(raw_json), tmp_path, f"jsonok_{case_id}",
         )
-        assert out == "OK:" + expected
+        assert out == ok(expected)
 
     @pytest.mark.parametrize(
         ("case_id", "raw_json", "name"),
@@ -4173,9 +4146,9 @@ class TestBrowserJsonAcceptDomainParity1306_1308:
         program died at ``json_stringify`` instead.
         """
         out = _parity_stdout(
-            _accept_domain_src(raw_json), tmp_path, f"jsonovf_{case_id}",
+            accept_domain_src(raw_json), tmp_path, f"jsonovf_{case_id}",
         )
-        assert out == "ERR:" + _non_finite_number_message(name)
+        assert out == err(non_finite_number_message(name))
 
     @pytest.mark.parametrize(
         ("case_id", "raw_json", "expected"),
@@ -4194,9 +4167,9 @@ class TestBrowserJsonAcceptDomainParity1306_1308:
         would take it.
         """
         out = _parity_stdout(
-            _accept_domain_src(raw_json), tmp_path, f"jsonfin_{case_id}",
+            accept_domain_src(raw_json), tmp_path, f"jsonfin_{case_id}",
         )
-        assert out == "OK:" + expected
+        assert out == ok(expected)
 
     @pytest.mark.parametrize(
         ("case_id", "raw_json", "name"),
@@ -4217,9 +4190,9 @@ class TestBrowserJsonAcceptDomainParity1306_1308:
         sentence rather than dying with a CPython one.
         """
         out = _parity_stdout(
-            _accept_domain_src(raw_json), tmp_path, f"jsonint_{case_id}",
+            accept_domain_src(raw_json), tmp_path, f"jsonint_{case_id}",
         )
-        assert out == "ERR:" + _non_finite_number_message(name)
+        assert out == err(non_finite_number_message(name))
 
     @pytest.mark.parametrize(
         ("case_id", "raw_json", "expected"),
@@ -4238,9 +4211,9 @@ class TestBrowserJsonAcceptDomainParity1306_1308:
         battery whose only large case is a round number of zeros.
         """
         out = _parity_stdout(
-            _accept_domain_src(raw_json), tmp_path, f"jsonintok_{case_id}",
+            accept_domain_src(raw_json), tmp_path, f"jsonintok_{case_id}",
         )
-        assert out == "OK:" + expected
+        assert out == ok(expected)
 
     @pytest.mark.parametrize(
         ("case_id", "raw_json"),
@@ -4262,10 +4235,10 @@ class TestBrowserJsonAcceptDomainParity1306_1308:
         ``-0`` and report a refusal the reference host never makes.
         """
         native, browser = _both_stdouts(
-            _accept_domain_src(raw_json), tmp_path, f"jsonsyn_{case_id}",
+            accept_domain_src(raw_json), tmp_path, f"jsonsyn_{case_id}",
         )
-        assert native.startswith("ERR:")
-        assert browser.startswith("ERR:")
+        assert native.startswith(ERR_PREFIX)
+        assert browser.startswith(ERR_PREFIX)
         assert "json_parse:" not in native, native
         assert "json_parse:" not in browser, browser
 
@@ -4280,9 +4253,9 @@ class TestBrowserJsonAcceptDomainParity1306_1308:
         Both arrive at the non-finite sentence, but only a test says so.
         """
         out = _parity_stdout(
-            _accept_domain_src('["\\ud800",NaN]'), tmp_path, "jsonprec",
+            accept_domain_src('["\\ud800",NaN]'), tmp_path, "jsonprec",
         )
-        assert out == "ERR:" + _non_finite_parse_message("NaN")
+        assert out == err(non_finite_parse_message("NaN"))
 
     def test_the_two_walk_refusals_share_one_document_order(
         self, tmp_path: Path,
@@ -4296,11 +4269,11 @@ class TestBrowserJsonAcceptDomainParity1306_1308:
         here.
         """
         assert _parity_stdout(
-            _accept_domain_src('["a\\ud800b",1e999]'), tmp_path, "jsonwalk1",
-        ) == "ERR:" + _lone_surrogate_message(0xD800)
+            accept_domain_src('["a\\ud800b",1e999]'), tmp_path, "jsonwalk1",
+        ) == err(lone_surrogate_message(0xD800))
         assert _parity_stdout(
-            _accept_domain_src('[1e999,"a\\ud800b"]'), tmp_path, "jsonwalk2",
-        ) == "ERR:" + _non_finite_number_message("Infinity")
+            accept_domain_src('[1e999,"a\\ud800b"]'), tmp_path, "jsonwalk2",
+        ) == err(non_finite_number_message("Infinity"))
 
 
 class TestCanonicalNumberFormatMatchesEcmascript1293:
