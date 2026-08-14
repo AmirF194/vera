@@ -599,6 +599,17 @@ class CallsMixin:
                 if refined_payload is not None:
                     instructions = self._emit_exn_payload_refine_guard(
                         instructions, refined_payload, cell, call, env)
+                    # #820 INTERSECTION (PR #1325 review): the predicate does
+                    # not imply fit-in-i64, so a refinement OVER `@Int` keeps
+                    # the widening guard BESIDE its predicate guard rather
+                    # than replacing it.  Without this, adding a refinement
+                    # weakened the boundary: `Exn<Int>` fed a @Nat of u64.MAX
+                    # trapped, `Exn<{ @Int | true }>` returned -1.  The
+                    # verifier's `_obligate_binding_triple` records the pair
+                    # in the same shape, so obligation and guard still match
+                    # one-for-one.
+                    if base == "Int" and self._result_is_nat(call.args[0]):
+                        instructions = self._emit_int_widen_guard(instructions)
             if refined_payload is None and (is_state_put or is_exn_throw):
                 if base == "Nat" and self._narrows_into_nat(call.args[0]):
                     instructions = self._emit_nat_bind_guard(instructions)

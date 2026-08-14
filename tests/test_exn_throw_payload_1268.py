@@ -742,6 +742,99 @@ public fn main(@Nat -> @Int)
         assert guard.search(body), body
 
 
+class TestARefinementDoesNotDisableTheWideningGuard:
+    """A refinement OVER `@Int` rides BESIDE the widening obligation.
+
+    The #820 intersection, which the shared triple was missing at this
+    boundary (PR #1325 review).  The three arms are an `elif` chain, so a
+    refined formal claimed the value and the widening check never ran — and
+    codegen mirrored it exactly, which is why this was not a
+    verifier-versus-codegen desync but something worse in one respect: both
+    sides agreed to skip a check the UNREFINED spelling performs.
+
+    A refinement predicate does not imply fit-in-i64.  `@Nat` is u64 and
+    `@Int` is i64, so a `@Nat` above i64.MAX reinterprets to a negative
+    `@Int` — and `{ @Int | true }` is satisfied by that negative, as `< 100`
+    would be.  Adding a refinement therefore WEAKENED the boundary: measured
+    before the fix, `Exn<Int>` fed u64.MAX trapped on the widening guard
+    while `Exn<{ @Int | true }>` fed the same value returned -1.
+    """
+
+    _REFINED = """
+type AnyInt = { @Int | true };
+
+private fn boom(@Nat -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<Exn<AnyInt>>)
+{
+  throw(@Nat.0)
+}
+
+public fn main(@Nat -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[Exn<AnyInt>] {
+    throw(@AnyInt) -> { @AnyInt.0 }
+  } in {
+    boom(@Nat.0)
+  }
+}
+"""
+
+    #: The same program with the refinement removed — the spelling whose
+    #: protection the refined one has to match.
+    _BARE = _REFINED.replace(
+        "type AnyInt = { @Int | true };\n\n", "").replace("AnyInt", "Int")
+
+    #: u64.MAX in an i64 slot reads back as -1.
+    _U64_MAX = 18446744073709551615
+
+    def test_both_obligations_are_recorded(self) -> None:
+        """`refine_bind` AND `nat_to_int_coerce`, not one or the other.
+
+        Different kinds describing different facts about one value, so this
+        is a pair rather than a double-record: the predicate is about which
+        inhabitants are legal, the coercion about whether the value survives
+        the u64-to-i64 reinterpretation at all.
+        """
+        kinds = [o.kind for o in _verify(self._REFINED).obligations
+                 if o.kind in ("refine_bind", "nat_to_int_coerce")]
+        assert kinds == ["refine_bind", "nat_to_int_coerce"], kinds
+
+    def test_both_guards_are_emitted(self) -> None:
+        """...and codegen emits both, so neither obligation is a promise
+        the module does not keep."""
+        body = wat_fn_body(_compile_ok(self._REFINED).wat, "boom")
+        assert "contract_fail" in body, body
+        assert re.search(
+            r"i64\.const 0\s+i64\.lt_s\s+if\s+unreachable", body, re.S,
+        ), body
+
+    def test_the_refinement_does_not_weaken_the_boundary(self) -> None:
+        """The behavioural pin, as a DIFFERENTIAL against the bare spelling.
+
+        Asserting "the refined one traps" alone would be satisfied by a
+        boundary that traps on everything; asserting it agrees with the bare
+        spelling is the property that was broken — refined returned -1 where
+        bare trapped.
+        """
+        with pytest.raises(WasmTrapError):
+            execute(_compile_ok(self._BARE), fn_name="main",
+                    args=[self._U64_MAX])
+        with pytest.raises(WasmTrapError):
+            execute(_compile_ok(self._REFINED), fn_name="main",
+                    args=[self._U64_MAX])
+
+    def test_a_value_that_fits_still_passes(self) -> None:
+        """The over-refusal control: the guard is dead for an in-range value,
+        on both spellings."""
+        assert _run(self._REFINED, "main", [5]) == 5
+        assert _run(self._BARE, "main", [5]) == 5
+
+
 class TestAProvedContractSurvivesTheThrowPayload:
     """The soundness differential: verify says PROVED, so run must agree.
 

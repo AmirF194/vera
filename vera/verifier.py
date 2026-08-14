@@ -4413,6 +4413,25 @@ class ContractVerifier:
                 decl, value, refined, smt, slot_env, assumptions,
                 site=site, guarded=refined_guarded,
             )
+            # #820 INTERSECTION, at this boundary too (PR #1325 review).  A
+            # refinement OVER @Int does not imply fit-in-i64 — `< 100` is
+            # SATISFIED by a reinterpreted negative — so the widen obligation
+            # is not subsumed by the refined one and rides ALONGSIDE it
+            # rather than being skipped by the chain below.  Measured before
+            # the fix: `Exn<Int>` fed a @Nat of u64.MAX TRAPPED on the widen
+            # guard, while `Exn<{ @Int | true }>` fed the same value returned
+            # -1 — adding a refinement silently disabled the protection the
+            # bare spelling had.  Not a double-record: the arms below are
+            # `elif`, so a value that reaches this branch reaches neither,
+            # and the two obligations are different kinds (`refine_bind` and
+            # `nat_to_int_coerce`) describing different facts about one
+            # value.
+            if (self._int_widening_target(value, formal)
+                    and self._result_is_nat(value)):
+                self._check_int_widening_obligation(
+                    decl, value, smt, slot_env, list(assumptions),
+                    site=site, guarded=widen_guarded,
+                )
         elif (self._nat_binding_target(value, formal)
                 and self._narrows_into_nat(value)):
             self._check_nat_binding_obligation(
