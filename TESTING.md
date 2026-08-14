@@ -259,7 +259,7 @@ Almost all programs are at the `run` level — they compile and execute, produci
 
 ### Skipped tests
 
-`pytest tests/ -v` skips 102 conformance-stage tests across the two categories below (the suite's remaining skips are platform- or tool-gated and documented beside the tests that declare them):
+`pytest tests/ -v` skips 102 conformance-stage tests, and every one of them is the level rule: a program declared at `check` skips its `verify` and `run` stages, one declared at `verify` skips its `run` — 41 × 2 + 20, which is what the suite reports.  The two tables below split those 102 by why the program sits at its level, not by how it skipped: 98 are pinned there by the feature under test, and 4 by an environment CI does not have.  Each skip is listed once; the tables do not overlap.  (The suite's remaining skips are platform- or tool-gated and documented beside the tests that declare them.)
 
 **Level-limited skips** — the conformance framework only runs tests up to the declared level; stages beyond that level are automatically skipped. These are expected and correct.
 
