@@ -1230,7 +1230,9 @@ def cmd_run(
                 # Always present for shape stability (same reasoning
                 # as `trap_kind` and `frames`); empty string for the
                 # kinds that don't admit a generic suggestion
-                # (`contract_violation`, `unknown`).  Mirrors the
+                # (`contract_violation` and `host_error`, whose
+                # descriptions already carry the remediation;
+                # `unknown`).  Mirrors the
                 # `fix` field on compile-time `Diagnostic` objects.
                 "fix": exc.fix,
             }
@@ -1328,9 +1330,11 @@ def cmd_run(
                     )
         # #516 Stage 3 (#547) — append the per-kind Fix paragraph
         # after the backtrace.  Empty string for kinds that don't
-        # admit a generic suggestion (`contract_violation`, where
-        # the description already explains what failed; `unknown`,
-        # where by definition we don't know what to suggest), so
+        # admit a generic suggestion (`contract_violation` and
+        # `host_error`, where the description already explains what
+        # failed; `unknown`, where by definition we don't know what
+        # to suggest — the three empty entries in
+        # `_TRAP_FIX_PARAGRAPHS`), so
         # we suppress the block entirely in those cases — printing
         # an empty "Fix:" header would just be noise.
         #

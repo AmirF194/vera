@@ -1202,7 +1202,7 @@
     "id": "ch07_state_clause_transform",
     "file": "ch07_state_clause_transform.vera",
     "chapter": 7,
-    "title": "State clause bodies execute \u2014 intrinsic-hybrid semantics (#976)",
+    "title": "State clause bodies execute — intrinsic-hybrid semantics (#976)",
     "level": "run",
     "spec_ref": "Section 7.5.2",
     "features": [
@@ -1261,9 +1261,9 @@
     "id": "ch07_exn_string",
     "file": "ch07_exn_string.vera",
     "chapter": 7,
-    "title": "Exn<String> effect handler \u2014 String payload",
+    "title": "Exn<String> effect handler — String payload",
     "level": "run",
-    "spec_ref": "Section 7.4 Exn<E> handler \u2014 String payload",
+    "spec_ref": "Section 7.4 Exn<E> handler — String payload",
     "features": [
       "exn_handler",
       "string_exception"
@@ -1696,7 +1696,7 @@
     "id": "ch08_transitive_module_import_base",
     "file": "ch08_transitive_module_import_base.vera",
     "chapter": 8,
-    "title": "Transitive import chain \u2014 base module",
+    "title": "Transitive import chain — base module",
     "level": "check",
     "spec_ref": "Section 8.6.4",
     "features": [
@@ -1708,7 +1708,7 @@
     "id": "ch08_transitive_module_import_mid",
     "file": "ch08_transitive_module_import_mid.vera",
     "chapter": 8,
-    "title": "Transitive import chain \u2014 middle module",
+    "title": "Transitive import chain — middle module",
     "level": "verify",
     "spec_ref": "Section 8.6.4",
     "features": [
@@ -3459,6 +3459,20 @@
       "string",
       "array",
       "json_keys"
+    ]
+  },
+  {
+    "id": "ch07_exn_payload_guard",
+    "file": "ch07_exn_payload_guard.vera",
+    "chapter": 7,
+    "title": "The Exn<E> payload is a runtime-guarded write boundary (#1268)",
+    "level": "run",
+    "spec_ref": "Section 2.6.5",
+    "features": [
+      "exn_effect",
+      "refinement_type",
+      "nat_narrowing",
+      "runtime_guard"
     ]
   }
 ]
