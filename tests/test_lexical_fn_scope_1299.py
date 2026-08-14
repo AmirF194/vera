@@ -46,8 +46,9 @@ from __future__ import annotations
 
 import os
 import traceback
+from collections.abc import Callable
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import pytest
 
@@ -778,7 +779,7 @@ class TestTableInvariants:
             seen.append((set(out), set(gen._fn_sigs)))
             return out
 
-        CodeGenerator._scoped_fn_names = recording  # type: ignore[method-assign]
+        CodeGenerator._scoped_fn_names = recording  # type: ignore[method-assign,assignment]
         try:
             build_multi_module(
                 tmp_path,
@@ -819,7 +820,7 @@ class TestTableInvariants:
             )
             return out
 
-        CodeGenerator._scoped_fn_names = recording  # type: ignore[method-assign]
+        CodeGenerator._scoped_fn_names = recording  # type: ignore[method-assign,assignment]
         try:
             build_multi_module(
                 tmp_path,
@@ -881,7 +882,7 @@ class TestTableInvariants:
             seen.append((set(out), set(gen._fn_sigs)))
             return out
 
-        CodeGenerator._scoped_fn_names = recording  # type: ignore[method-assign]
+        CodeGenerator._scoped_fn_names = recording  # type: ignore[method-assign,assignment]
         try:
             build_multi_module(
                 tmp_path, {"main.vera": _generic_where("get")},
@@ -924,7 +925,9 @@ class TestTableInvariants:
         seen: list[tuple[str, frozenset[str], frozenset[str]]] = []
         original = CodeGenerator._compile_fn_tracked
 
-        def recording(gen: CodeGenerator, decl, **kw):  # type: ignore[no-untyped-def]
+        def recording(
+            gen: CodeGenerator, decl: ast.FnDecl, **kw: Any
+        ) -> str | None:
             seen.append((
                 decl.name,
                 frozenset(
@@ -934,7 +937,7 @@ class TestTableInvariants:
             ))
             return original(gen, decl, **kw)
 
-        CodeGenerator._compile_fn_tracked = recording  # type: ignore[method-assign]
+        CodeGenerator._compile_fn_tracked = recording  # type: ignore[method-assign,assignment]
         try:
             build_multi_module(
                 tmp_path,
@@ -1351,11 +1354,11 @@ where {
         seen: list[bool] = []
         original = Monomorphizer._collect_calls_in_node_scoped
 
-        def recording(inner, fn, *a):  # type: ignore[no-untyped-def]
+        def recording(inner: Monomorphizer, fn: ast.FnDecl, *a: Any) -> None:
             seen.append(inner._bare_call_is_user_fn("get"))
             return original(inner, fn, *a)
 
-        Monomorphizer._collect_calls_in_node_scoped = recording  # type: ignore[method-assign]
+        Monomorphizer._collect_calls_in_node_scoped = recording  # type: ignore[method-assign,assignment]
         try:
             with mono.namespace_scope(None):
                 assert not mono._bare_call_is_user_fn("get")
@@ -1516,8 +1519,13 @@ class TestNestedHelperFamilyLeaf:
             )
         }
 
-        def wrap(original):  # type: ignore[no-untyped-def]
-            def probe(inner, *a, **kw):  # type: ignore[no-untyped-def]
+        # `Callable[..., Any]`, not a precise signature: `probe` stands in
+        # for three DIFFERENT methods whose parameters it never inspects, so
+        # the honest type is "forwards whatever it was given".  A ParamSpec
+        # would say the same thing at more cost, and nothing in this repo
+        # uses one.
+        def wrap(original: Callable[..., Any]) -> Callable[..., Any]:
+            def probe(inner: Monomorphizer, *a: Any, **kw: Any) -> Any:
                 if (inner.ctx.namespace_fn_names is not None
                         and inner._scope_fn_names is None):
                     site = "?"
