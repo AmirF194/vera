@@ -679,7 +679,7 @@ What the gate asserts is *runs green*, deliberately not *prints what it used to*
 | `url_encoding.vera` | browser parity (stdout) | runs |
 | `url_parsing.vera` | browser parity (stdout) | runs |
 
-Twelve examples in that table were executed by nothing at all before the gate, and one — `file_io.vera` — was executed only under the browser runtime, where the file IO it demonstrates is a deliberate `Err` stub.
+Seventeen of those examples were executed by nothing at all before the gate. It runs eleven of them; the remaining six are the ones a property excludes. A twelfth example joins them natively — `file_io.vera`, which ran only under the browser runtime, where the file IO it demonstrates is a deliberate `Err` stub.
 
 Each skip cites a property, and the gate prints the property and its reason on every run:
 
