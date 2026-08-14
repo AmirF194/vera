@@ -1230,7 +1230,9 @@ def cmd_run(
                 # Always present for shape stability (same reasoning
                 # as `trap_kind` and `frames`); empty string for the
                 # kinds that don't admit a generic suggestion
-                # (`contract_violation`, `unknown`).  Mirrors the
+                # (`contract_violation` and `host_error`, whose
+                # descriptions already carry the remediation;
+                # `unknown`).  Mirrors the
                 # `fix` field on compile-time `Diagnostic` objects.
                 "fix": exc.fix,
             }
