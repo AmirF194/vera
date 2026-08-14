@@ -44,6 +44,17 @@ _DECIMAL_STRING_RE = re.compile(
 )
 _DECIMAL_EXP_TOKEN_MAX = 999999
 
+# The whitespace §9.7.2 says the grammar is applied "after ignoring
+# surrounding whitespace", stated explicitly rather than inherited from
+# ``str.strip`` (#1303 review).  Bare ``strip()`` takes Python's whole
+# Unicode notion — U+001C..U+001F, U+0085, U+00A0, the Unicode space
+# separators — while the browser's ``String.prototype.trim`` takes a
+# DIFFERENT set that includes U+FEFF and excludes the first two groups,
+# so the accepted domain diverged in both directions.  This is the set
+# ``is_whitespace`` already states (spec §9.7.x), which is the one the
+# language has: tab, LF, VT, FF, CR, space.
+_ASCII_WS = "\t\n\v\f\r "
+
 # Binary arithmetic runs in a context whose exponent range is widened to
 # the library maximum (``MAX_EMAX`` / ``MIN_EMIN`` ~= ±1e18) while keeping
 # the default precision (28 significant digits) and rounding
@@ -115,7 +126,7 @@ def register_decimal(
         def host_decimal_from_string(
             caller: wasmtime.Caller, ptr: int, length: int,
         ) -> int:
-            s = _read_wasm_string(caller, ptr, length).strip()
+            s = _read_wasm_string(caller, ptr, length).strip(_ASCII_WS)
             # Pre-validate against the spec §9.7.2 grammar so the
             # accepted domain matches the browser runtime exactly
             # (PyDecimal alone would also accept NaN / Infinity /

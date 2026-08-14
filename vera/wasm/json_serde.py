@@ -13,6 +13,15 @@ Read direction (WASM → Python):
   read_json(caller, ptr, read_i32, read_f64, read_string,
             decode_jobject) → Any
 
+Text direction (Python → JSON text):
+  dumps_canonical(value) → str
+  format_json_number(value) → str
+
+The text direction is the last mile of the read direction and lives here
+for that reason: ``json_stringify`` is ``read_json`` followed by
+``dumps_canonical``.  Its output form is canonical and shared with the
+browser runtime — see the section comment above ``format_json_number``.
+
 Json ADT layouts (from prelude injection → registration.py):
   JNull                        tag=0  ()               total=8
   JBool(Bool)                  tag=1  (4, i32)         total=8
@@ -263,3 +272,149 @@ def read_json(
         stacklevel=2,
     )
     return None  # Unknown tag — should not happen
+
+
+# =====================================================================
+# Canonical serialization (#1293)
+# =====================================================================
+#
+# ``json_stringify`` has exactly one output form, stated in spec §9.7.1
+# and produced identically by both runtimes (§12.9.3).  It is the
+# compact form: ``,`` and ``:`` with no padding, and numbers rendered by
+# ECMAScript's Number::toString.
+#
+# The reference host used to reach for ``json.dumps``, which cannot
+# produce that form: its separators are configurable but its float
+# rendering is ``repr``, hard-wired inside ``json.encoder``.  ``repr``
+# and Number::toString disagree on four independent boundaries — the
+# fractional part of an integral value, the threshold for switching to
+# exponential notation at each end of the range, and the spelling of the
+# exponent itself — so matching the canonical form means rendering
+# numbers here rather than delegating.
+#
+# String escaping is *not* reimplemented: ``json.dumps(s,
+# ensure_ascii=False)`` and ``JSON.stringify(s)`` already agree byte for
+# byte over the escape table, so the one function that is right is the
+# one that gets called.
+
+_NON_FINITE_NAMES = {"nan": "NaN", "inf": "Infinity", "-inf": "-Infinity"}
+
+
+def _non_finite_message(name: str) -> str:
+    """The single sentence both runtimes raise for a non-finite number.
+
+    Kept identical to the string in ``vera/browser/runtime.mjs`` so a
+    caller reading either host's failure learns the same thing.
+    """
+    return (
+        f"json_stringify: {name} is not representable in JSON — RFC 8259 "
+        f"has no NaN or Infinity.  Guard with float_is_nan / "
+        f"float_is_infinite before serialising."
+    )
+
+
+def _shortest_digits(value: float) -> tuple[str, int]:
+    """Decompose a positive, finite float into ``(digits, n)`` such that
+    ``value == int(digits) * 10 ** (n - len(digits))``.
+
+    ``digits`` carries no leading or trailing zeros, which makes it the
+    ``s`` of ECMA-262 §6.1.6.1.20 and ``n`` the position of the decimal
+    point relative to its first digit.  ``repr`` already yields the
+    shortest decimal that reads back as the same double, so the digits
+    are taken from it unchanged and only their *placement* is recomputed.
+    """
+    mantissa, _, exponent = repr(value).partition("e")
+    exp = int(exponent) if exponent else 0
+    int_part, _, frac_part = mantissa.partition(".")
+    digits = int(int_part + frac_part)
+    e10 = exp - len(frac_part)
+    while digits >= 10 and digits % 10 == 0:
+        digits //= 10
+        e10 += 1
+    text = str(digits)
+    return text, e10 + len(text)
+
+
+def format_json_number(value: float) -> str:
+    """Render a JSON number in the canonical form (spec §9.7.1).
+
+    This is ECMA-262 §6.1.6.1.20 Number::toString with radix 10, which
+    is what ``JSON.stringify`` uses for numbers.  Non-finite values have
+    no JSON representation and raise instead of being coerced.
+    """
+    if value != value or value in (float("inf"), float("-inf")):
+        raise ValueError(_non_finite_message(
+            _NON_FINITE_NAMES[repr(value)],
+        ))
+    if value == 0.0:
+        return "0"  # covers -0.0: ECMAScript renders both zeros as "0"
+    if value < 0.0:
+        return "-" + format_json_number(-value)
+
+    digits, n = _shortest_digits(value)
+    k = len(digits)
+    if k <= n <= 21:
+        # Integral, and short enough to write out: pad with zeros.
+        return digits + "0" * (n - k)
+    if 0 < n <= 21:
+        # Decimal point falls inside the digits.
+        return digits[:n] + "." + digits[n:]
+    if -6 < n <= 0:
+        # Leading zeros, down to but not past 10^-6.
+        return "0." + "0" * (-n) + digits
+    # Exponential.  The exponent is written with an explicit sign and no
+    # zero padding, where ``repr`` writes "1e-07".
+    exp = n - 1
+    mantissa = digits if k == 1 else digits[0] + "." + digits[1:]
+    return f"{mantissa}e{'+' if exp >= 0 else '-'}{abs(exp)}"
+
+
+def dumps_canonical(value: Any) -> str:
+    """Serialize a value read by :func:`read_json` to canonical JSON text.
+
+    The accepted domain is exactly what :func:`read_json` returns —
+    ``None``, ``bool``, ``float``, ``str``, ``list``, ``dict`` — and
+    anything else raises rather than being coerced, because a value
+    outside that set means the ADT walk went wrong and a plausible-looking
+    string would hide it.  Object keys keep insertion order, which is
+    what both hosts' underlying maps preserve.
+    """
+    import json as _json
+
+    parts: list[str] = []
+
+    def emit(node: Any) -> None:
+        if node is None:
+            parts.append("null")
+        elif node is True:
+            parts.append("true")
+        elif node is False:
+            parts.append("false")
+        elif isinstance(node, float):
+            parts.append(format_json_number(node))
+        elif isinstance(node, str):
+            parts.append(_json.dumps(node, ensure_ascii=False))
+        elif isinstance(node, list):
+            parts.append("[")
+            for i, item in enumerate(node):
+                if i:
+                    parts.append(",")
+                emit(item)
+            parts.append("]")
+        elif isinstance(node, dict):
+            parts.append("{")
+            for i, (key, item) in enumerate(node.items()):
+                if i:
+                    parts.append(",")
+                parts.append(_json.dumps(str(key), ensure_ascii=False))
+                parts.append(":")
+                emit(item)
+            parts.append("}")
+        else:
+            raise TypeError(
+                f"json_stringify: read_json produced {type(node).__name__}, "
+                f"which is not a Json value; the ADT walk is wrong"
+            )
+
+    emit(value)
+    return "".join(parts)

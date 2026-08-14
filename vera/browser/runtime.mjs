@@ -46,7 +46,17 @@ let cliArgs = [];      // Command-line arguments for IO.args
 let envVars = {};      // Environment variables for IO.get_env
 let exitCode = null;   // Set by IO.exit
 
-const decoder = new TextDecoder('utf-8');
+// ``ignoreBOM: true`` means "do not treat a leading U+FEFF specially",
+// which is the opposite of what the name suggests and the only setting
+// that reads a Vera string back unchanged (#1303 review).  The default
+// (false) REMOVES a BOM at the start of the buffer, so every string
+// whose first character was U+FEFF lost it crossing into the host:
+// `IO.print` dropped it, `json_parse` silently accepted a
+// BOM-prefixed document the reference host refuses, and
+// `decimal_from_string` accepted a BOM-padded decimal.  These bytes are
+// a string payload, not a document with an encoding signature — the
+// reference host's ``safe_utf8_decode`` never strips one.
+const decoder = new TextDecoder('utf-8', { ignoreBOM: true });
 const encoder = new TextEncoder();
 
 // ---------------------------------------------------------------------------
@@ -509,12 +519,27 @@ function parseInlines(text) {
   const n = text.length;
 
   while (i < n) {
-    // Code span
+    // Code span: a run of N backticks closes on the next run of N,
+    // mirroring _parse_inlines in vera/markdown.py.  This scanned for
+    // the next *single* backtick, so ``x`` opened an empty span at the
+    // first tick and dropped the content out of the span entirely.
+    // With no closing run the scan falls through to the plain-text
+    // accumulator below, as it did before.
     if (text[i] === '`') {
-      let end = text.indexOf('`', i + 1);
-      if (end !== -1) {
-        result.push(new MdCode(text.slice(i + 1, end)));
-        i = end + 1;
+      let runEnd = i;
+      while (runEnd < n && text[runEnd] === '`') runEnd++;
+      const runLen = runEnd - i;
+      const closeIdx = text.indexOf('`'.repeat(runLen), runEnd);
+      if (closeIdx !== -1) {
+        let content = text.slice(runEnd, closeIdx);
+        // Undo the renderer's padding: exactly one leading and one
+        // trailing space, and only when both are present.
+        if (content.length >= 2 && content.startsWith(' ')
+            && content.endsWith(' ')) {
+          content = content.slice(1, -1);
+        }
+        result.push(new MdCode(content));
+        i = closeIdx + runLen;
         continue;
       }
     }
@@ -588,6 +613,21 @@ function parseInlines(text) {
 
 // -- Block parser --
 
+/**
+ * Does this line open a block-level construct?  Mirrors
+ * `_is_block_start` in vera/markdown.py, regex for regex.  It is the
+ * predicate that bounds a blockquote's lazy continuation: an unmarked
+ * line belongs to the open quote unless it starts a block of its own.
+ */
+function isBlockStart(line) {
+  return /^#{1,6}\s/.test(line)              // ATX heading
+    || /^(`{3,}|~{3,})/.test(line)           // fence
+    || /^(?:---+|\*{3,}|_{3,})\s*$/.test(line)  // thematic break
+    || /^>/.test(line)                       // block quote
+    || /^[-*+]\s/.test(line)                 // unordered item
+    || /^\d+[.)]\s/.test(line);              // ordered item
+}
+
 function parseBlocks(text) {
   const lines = text.split('\n');
   const blocks = [];
@@ -639,11 +679,26 @@ function parseBlocks(text) {
       continue;
     }
 
-    // Block quote: > ...
-    if (line.startsWith('> ') || line === '>') {
+    // Block quote: '>' optionally followed by ONE whitespace character,
+    // mirroring _BLOCKQUOTE_LINE = ^>\s? in vera/markdown.py.  The old
+    // predicate demanded the space, so `>no space` fell through to the
+    // paragraph branch and parsed as literal text where the reference
+    // read a quote.
+    if (/^>/.test(line)) {
       const quoteLines = [];
-      while (i < lines.length && (lines[i].startsWith('> ') || lines[i] === '>')) {
-        quoteLines.push(lines[i].startsWith('> ') ? lines[i].slice(2) : '');
+      while (i < lines.length) {
+        const marked = lines[i].match(/^>\s?(.*)$/);
+        if (marked) {
+          quoteLines.push(marked[1]);
+        } else if (lines[i].trim() !== '' && !isBlockStart(lines[i])) {
+          // Lazy continuation (markdown.py's `elif` in the same loop):
+          // an unmarked, non-blank line that opens no block of its own
+          // continues the quote's paragraph.  Without this branch the
+          // line escaped the quote entirely.
+          quoteLines.push(lines[i]);
+        } else {
+          break;
+        }
         i++;
       }
       const inner = parseBlocks(quoteLines.join('\n'));
@@ -706,7 +761,9 @@ function parseBlocks(text) {
     while (i < lines.length && lines[i].trim() !== '' &&
            !lines[i].match(/^#{1,6}\s/) &&
            !lines[i].match(/^(`{3,}|~{3,})/) &&
-           !lines[i].startsWith('> ') &&
+           // '^>' , not "starts with '> '": a paragraph ends at any
+           // quote marker, spaced or not (mirrors _BLOCKQUOTE_LINE).
+           !/^>/.test(lines[i]) &&
            !/^[-*]\s/.test(lines[i]) &&
            !/^\d+\.\s/.test(lines[i]) &&
            !/^(\*{3,}|-{3,}|_{3,})\s*$/.test(lines[i])) {
@@ -714,7 +771,13 @@ function parseBlocks(text) {
       i++;
     }
     if (paraLines.length > 0) {
-      blocks.push(new MdParagraph(parseInlines(paraLines.join('\n'))));
+      // #1294: joined with a space, not a newline.  Spec §9.7.3 excludes
+      // hard and soft line breaks from the ADT — "collapsed into
+      // paragraph text" — so a paragraph's internal breaks have to go
+      // somewhere at parse time or they survive into MdText, where no
+      // renderer can tell them from text the author wrote.  This is what
+      // `" ".join(para_lines)` does in vera/markdown.py.
+      blocks.push(new MdParagraph(parseInlines(paraLines.join(' '))));
     }
   }
   return blocks;
@@ -737,7 +800,30 @@ function parseMarkdown(text) {
 function renderInline(node) {
   switch (node.tag) {
     case 'MdText': return node.text;
-    case 'MdCode': return '`' + node.text + '`';
+    case 'MdCode': {
+      // One backtick longer than the content's longest run, padded only
+      // when the content starts or ends with one — mirrors
+      // _render_code_span.  A fixed two-backtick fence terminates on
+      // the content's own `` and loses the rest.
+      let longest = 0;
+      let run = 0;
+      for (const ch of node.text) {
+        run = ch === '`' ? run + 1 : 0;
+        if (run > longest) longest = run;
+      }
+      const fence = '`'.repeat(longest + 1);
+      // #1303 review: also pad when the content itself starts AND ends
+      // with a space.  parseInlines strips one such pair whenever the
+      // fenced text is two characters or longer, so without a pad the
+      // strip eats the content's own spaces and `MdCode(' x ')` comes
+      // back as `MdCode('x')` — and `MdCode(' `x` ')` rendered to the
+      // same bytes as `MdCode('`x`')`.  Mirrors _render_code_span.
+      const stripsOwnSpaces = node.text.length >= 2
+        && node.text.startsWith(' ') && node.text.endsWith(' ');
+      const pad = (node.text.startsWith('`') || node.text.endsWith('`')
+        || stripsOwnSpaces) ? ' ' : '';
+      return fence + pad + node.text + pad + fence;
+    }
     case 'MdEmph': return '*' + node.children.map(renderInline).join('') + '*';
     case 'MdStrong': return '**' + node.children.map(renderInline).join('') + '**';
     case 'MdLink': return '[' + node.children.map(renderInline).join('') + '](' + node.url + ')';
@@ -746,44 +832,104 @@ function renderInline(node) {
   }
 }
 
-function renderBlock(node, indent = '') {
+/**
+ * Render a block to an array of LINES, mirroring `_render_block` in
+ * vera/markdown.py.
+ *
+ * #1294: the previous version returned one string and threaded a prefix
+ * down as an `indent` argument, which a container could only apply to
+ * the *first* line of each child — a fenced block inside a blockquote
+ * lost the `> ` on its body, and re-rendering that output moved the
+ * body out of the quote.  Lines are the unit a container prefixes, so
+ * they are the unit this returns: every caller re-applies its own
+ * prefix to every line it receives, which is what makes the render a
+ * fixed point.
+ */
+function renderBlockLines(node) {
   switch (node.tag) {
     case 'MdParagraph':
-      return indent + node.children.map(renderInline).join('') + '\n';
+      return [node.children.map(renderInline).join('')];
     case 'MdHeading':
-      return indent + '#'.repeat(node.level) + ' ' + node.children.map(renderInline).join('') + '\n';
+      return ['#'.repeat(node.level) + ' ' + node.children.map(renderInline).join('')];
     case 'MdCodeBlock':
-      return indent + '```' + node.lang + '\n' + node.code + '\n' + indent + '```\n';
-    case 'MdBlockQuote':
-      return node.children.map(c => renderBlock(c, indent + '> ')).join('');
+      return ['```' + node.lang, ...node.code.split('\n'), '```'];
+    case 'MdBlockQuote': {
+      // An empty quote still occupies a line; rendering it as nothing
+      // makes the block vanish on re-parse (mirrors _render_block).
+      if (node.children.length === 0) return ['>'];
+      const out = [];
+      node.children.forEach((child, i) => {
+        const childLines = renderBlockLines(child);
+        // A child that renders nothing must not leave a bare '>'
+        // standing for it (#1303 review; mirrors _render_block).
+        if (childLines.length === 0) return;
+        // A bare '>' between children, mirroring _render_block: without
+        // it a quote holding two paragraphs re-parses as one.
+        if (i > 0 && out.length > 0) out.push('>');
+        for (const line of childLines) {
+          out.push(line ? '> ' + line : '>');
+        }
+      });
+      return out;
+    }
     case 'MdList': {
-      return node.items.map((item, idx) => {
-        const prefix = node.ordered ? `${idx + 1}. ` : '- ';
-        return item.map((b, bi) => (bi === 0 ? indent + prefix : indent + '  ') + renderBlock(b).trimStart()).join('');
-      }).join('');
+      const out = [];
+      node.items.forEach((item, idx) => {
+        const marker = node.ordered ? `${idx + 1}.` : '-';
+        const indent = ' '.repeat(marker.length + 1);
+        const itemLines = [];
+        for (const child of item) itemLines.push(...renderBlockLines(child));
+        if (itemLines.length === 0) {
+          // #1303 review: an item with no blocks is a value the PARSER
+          // produces — '- ' reads back as one empty item — so dropping
+          // it deleted the item and renumbered every ordered item after
+          // it.  The marker plus its space is what reads back; a bare
+          // '-' is a paragraph, since both item patterns require the
+          // whitespace.  Mirrors _render_block.
+          out.push(marker + ' ');
+          return;
+        }
+        itemLines.forEach((line, j) => {
+          out.push(j === 0 ? marker + ' ' + line : indent + line);
+        });
+      });
+      return out;
     }
     case 'MdThematicBreak':
-      return indent + '---\n';
+      return ['---'];
     case 'MdTable': {
-      if (node.rows.length === 0) return '';
-      const header = '| ' + node.rows[0].map(cells => cells.map(renderInline).join('')).join(' | ') + ' |\n';
-      const sep = '| ' + node.rows[0].map(() => '---').join(' | ') + ' |\n';
-      const body = node.rows.slice(1).map(row =>
-        '| ' + row.map(cells => cells.map(renderInline).join('')).join(' | ') + ' |\n'
-      ).join('');
-      return indent + header + indent + sep + body;
+      if (node.rows.length === 0) return [];
+      const cell = cells => cells.map(renderInline).join('');
+      const out = ['| ' + node.rows[0].map(cell).join(' | ') + ' |'];
+      out.push('| ' + node.rows[0].map(() => '---').join(' | ') + ' |');
+      for (const row of node.rows.slice(1)) {
+        out.push('| ' + row.map(cell).join(' | ') + ' |');
+      }
+      return out;
     }
-    case 'MdDocument':
-      return node.children.map(c => renderBlock(c, indent)).join('\n');
+    case 'MdDocument': {
+      const out = [];
+      for (const child of node.children) {
+        const childLines = renderBlockLines(child);
+        // #1303 review: a child that renders to NOTHING — an MdList
+        // with no items, an MdTable with no rows — must not drag a
+        // separator in with it, or the blank line survives as a stray
+        // the next parse cannot attribute to anything and the render
+        // stops being a fixed point.  Mirrors _render_block.
+        if (childLines.length === 0) continue;
+        if (out.length > 0) out.push('');
+        out.push(...childLines);
+      }
+      return out;
+    }
     default:
-      return '';
+      return [];
   }
 }
 
 function renderMarkdown(doc) {
   // Match Python's "\n".join(lines) — no trailing newline.
-  const raw = renderBlock(doc);
-  return raw.endsWith('\n') ? raw.slice(0, -1) : raw;
+  return renderBlockLines(doc).join('\n');
 }
 
 // -- Query helpers --
@@ -2064,6 +2210,17 @@ function buildImportObject(module, moduleBytes) {
   const DEC_PREC = 28n;
   const DEC_RE = /^([+-]?)(\d*)(?:\.(\d*))?(?:[eE]([+-]?\d+))?$/;
 
+  // The whitespace §9.7.2 states, rather than whatever the host's own
+  // trim happens to take (#1303 review).  ``String.prototype.trim``
+  // strips U+FEFF and every Unicode space separator but NOT
+  // U+001C..U+001F or U+0085, while the reference host's ``str.strip``
+  // does the opposite on both counts — so the accepted domain diverged
+  // in both directions.  This is the set ``is_whitespace`` already
+  // states: tab, LF, VT, FF, CR, space.  Mirrors _ASCII_WS in
+  // vera/runtime/decimal.py.
+  const DEC_WS = /^[\t\n\v\f\r ]+|[\t\n\v\f\r ]+$/g;
+  const decStripWs = (str) => str.replace(DEC_WS, "");
+
   function decNumDigits(n) {
     return n === 0n ? 1 : n.toString().length;
   }
@@ -2071,7 +2228,7 @@ function buildImportObject(module, moduleBytes) {
   // Parse a (canonical or user) decimal string to the value model.
   // Returns null on malformed input.
   function decParse(str) {
-    const m = str.trim().match(DEC_RE);
+    const m = decStripWs(str).match(DEC_RE);
     if (!m) return null;
     const intPart = m[2] || "";
     const fracPart = m[3] || "";
@@ -2097,7 +2254,7 @@ function buildImportObject(module, moduleBytes) {
   // of -1000000 (a 999999 token plus a long fraction), and decimalGet
   // must keep round-tripping those.
   function decExpTokenInRange(str) {
-    const m = str.trim().match(DEC_RE);
+    const m = decStripWs(str).match(DEC_RE);
     if (!m || m[4] === undefined) return true;
     const digits = m[4].replace(/^[+-]/, "").replace(/^0+(?=\d)/, "");
     return digits.length <= 6;  // 6 digits: at most 999999
@@ -2536,14 +2693,22 @@ function buildImportObject(module, moduleBytes) {
     if (typeof value === "object") {
       // JObject(Map<String, Json>) — tag=5, i32 wrapper ptr at offset 4 (#573)
       //
+      // #1293: the entry source is a ``Map`` for anything
+      // ``parseJsonOrdered`` built, and iterating one yields insertion
+      // order.  ``Object.entries`` is kept for a plain object reaching
+      // here from somewhere else, but it is NOT order-preserving —
+      // array-index keys come out first, ascending — so nothing on the
+      // json_parse path may hand this branch one.
+      //
       // #708: each recursive ``writeJson(v)`` call returns a heap
       // ptr stored in the JS-side Map ``m`` only.  Between
       // returning ep and ``m.set(k, ep)``, the result is in a JS
       // local — invisible to the conservative scan.  Push each ep
       // before storing in m, then push wrapperPtr before the
       // final 8-byte alloc.
+      const entries = value instanceof Map ? value : Object.entries(value);
       const m = new Map();
-      for (const [k, v] of Object.entries(value)) {
+      for (const [k, v] of entries) {
         const ep = writeJson(v);
         // PR #707 review: no matching pop here — unlike the JArray
         // branch above, ``m`` is a JS Map (not WASM memory), so
@@ -2569,7 +2734,21 @@ function buildImportObject(module, moduleBytes) {
     return writeJson(String(value));
   }
 
-  // Read a Json ADT from WASM memory back to a JS value.
+  // Read a Json ADT from WASM memory back to a JS value.  A JObject
+  // decodes to a ``Map``, never to an ordinary object, because an
+  // ordinary object cannot carry two things the Json ADT does (#1293):
+  //
+  //   * Key order.  ES OrdinaryOwnPropertyKeys lists array-index keys
+  //     first, in ascending numeric order, so ``{"2":1,"1":2}`` comes
+  //     back out as ``{"1":2,"2":1}`` — and insertion order is what the
+  //     canonical form of spec §9.7.1 is, matching the reference host,
+  //     whose ``dict`` preserves it for free.
+  //   * A key literally named ``__proto__``.  ``obj["__proto__"] = v``
+  //     runs Object.prototype's setter and creates no own property at
+  //     all, so the field disappears from the output entirely.
+  //
+  // Both are silent, so the Map is not a stylistic preference: it is
+  // the only JS shape that round-trips the ADT.
   function readJson(ptr) {
     const tag = readI32(ptr);
     if (tag === 0) return null;
@@ -2588,11 +2767,14 @@ function buildImportObject(module, moduleBytes) {
     if (tag === 5) {
       // #706: the i32 at +4 is a Map wrapper whose bucket IS the map
       // (bucket-as-truth).  Decode the Map<String, Json> directly; the
-      // values are i32 Json heap pointers.
+      // values are i32 Json heap pointers.  ``decodeMap`` walks the
+      // bucket in slot order and already returns a JS ``Map``, so
+      // rebuilding the values in place is all that is needed — and
+      // keeps the bucket's order, which is the ADT's order.
       const wrapperPtr = readI32(ptr + 4);
-      const result = {};
+      const result = new Map();
       for (const [k, v] of decodeMap(wrapperPtr, 's', 'b')) {
-        result[String(k)] = readJson(Number(v));
+        result.set(String(k), readJson(Number(v)));
       }
       return result;
     }
@@ -2600,17 +2782,192 @@ function buildImportObject(module, moduleBytes) {
     return null;
   }
 
+  // Re-read JSON text into a tree whose objects are ``Map``s (#1293).
+  //
+  // ``JSON.parse`` cannot produce one: its objects are ordinary, so by
+  // the time any code sees the result the key order of spec §9.7.1 is
+  // already gone (array-index keys hoisted to the front, ascending) and
+  // a ``__proto__`` key has become a prototype write.  The caller runs
+  // ``JSON.parse`` first and only reaches this scanner on text that
+  // parse ACCEPTED, which is what keeps the two implementations from
+  // disagreeing about what valid JSON is: the accept/reject decision
+  // and its Err message stay ECMAScript's, and so does every *leaf*
+  // value — each string and number is handed back to ``JSON.parse`` on
+  // its own slice rather than decoded a second way.  This scanner only
+  // finds token boundaries and builds containers, so a throw from it is
+  // an internal bug, not bad input.
+  function parseJsonOrdered(text) {
+    let i = 0;
+    const fail = (what) => {
+      throw new Error(
+        `json_parse: ${what} at offset ${i}, in text JSON.parse accepted ` +
+        `— the order-preserving re-scan disagrees with JSON.parse`
+      );
+    };
+    const skipWs = () => {
+      while (i < text.length) {
+        const c = text.charCodeAt(i);
+        // RFC 8259 §2 whitespace: space, tab, LF, CR.
+        if (c === 0x20 || c === 0x09 || c === 0x0a || c === 0x0d) i++;
+        else break;
+      }
+    };
+    const scanString = () => {
+      const start = i;
+      i++;                                   // opening quote
+      for (;;) {
+        if (i >= text.length) fail("unterminated string");
+        const c = text[i];
+        if (c === "\\") { i += 2; continue; }
+        i++;
+        if (c === '"') break;
+      }
+      return JSON.parse(text.slice(start, i));
+    };
+    const scanNumber = () => {
+      const start = i;
+      while (i < text.length && "+-0123456789.eE".includes(text[i])) i++;
+      if (i === start) fail("expected a value");
+      return JSON.parse(text.slice(start, i));
+    };
+    const scanValue = () => {
+      skipWs();
+      if (i >= text.length) fail("unexpected end of input");
+      const c = text[i];
+      if (c === "{") {
+        i++;
+        // A Map, so the order below is the document's.  A repeated key
+        // keeps its FIRST position and its LAST value, which is what a
+        // Python dict does on the reference host — and what JSON.parse
+        // does here, so the two agree on the duplicate case too.
+        const out = new Map();
+        skipWs();
+        if (text[i] === "}") { i++; return out; }
+        for (;;) {
+          skipWs();
+          if (text[i] !== '"') fail("expected a key");
+          const k = scanString();
+          skipWs();
+          if (text[i] !== ":") fail("expected ':'");
+          i++;
+          out.set(k, scanValue());
+          skipWs();
+          if (text[i] === ",") { i++; continue; }
+          if (text[i] === "}") { i++; return out; }
+          fail("expected ',' or '}'");
+        }
+      }
+      if (c === "[") {
+        i++;
+        const out = [];
+        skipWs();
+        if (text[i] === "]") { i++; return out; }
+        for (;;) {
+          out.push(scanValue());
+          skipWs();
+          if (text[i] === ",") { i++; continue; }
+          if (text[i] === "]") { i++; return out; }
+          fail("expected ',' or ']'");
+        }
+      }
+      if (c === '"') return scanString();
+      if (text.startsWith("true", i)) { i += 4; return true; }
+      if (text.startsWith("false", i)) { i += 5; return false; }
+      if (text.startsWith("null", i)) { i += 4; return null; }
+      return scanNumber();
+    };
+    const value = scanValue();
+    skipWs();
+    if (i !== text.length) fail("trailing text");
+    return value;
+  }
+
+  // Serialize a value ``readJson`` produced into canonical JSON text
+  // (spec §9.7.1) — the JS twin of ``dumps_canonical`` in
+  // ``vera/wasm/json_serde.py``, kept structurally parallel to it.
+  //
+  // ``JSON.stringify`` cannot do this job any more: it does not know
+  // about ``Map``, and its ordinary-object enumeration is where the key
+  // order was being lost.  Leaf rendering is still ECMAScript's —
+  // strings through ``JSON.stringify``, finite numbers through
+  // ``String``, which IS the Number::toString that JSON.stringify would
+  // have used — so the canonical form is unchanged for every value that
+  // was already coming out right.
+  //
+  // Anything outside ``readJson``'s range raises rather than being
+  // coerced, matching ``dumps_canonical``'s TypeError: a value that is
+  // not a Json value means the ADT walk went wrong, and a
+  // plausible-looking string would hide it.
+  function stringifyCanonical(value) {
+    const parts = [];
+    const emit = (node) => {
+      if (node === null) { parts.push("null"); return; }
+      if (node === true) { parts.push("true"); return; }
+      if (node === false) { parts.push("false"); return; }
+      if (typeof node === "number") {
+        // RFC 8259 has no NaN and no Infinity, so there is no right
+        // value to return for one — only a right way to fail.  Bare
+        // JSON.stringify writes "null", swapping a value the format
+        // cannot carry for a different, perfectly valid one that no
+        // later consumer can distinguish from a genuine null.  The
+        // reference runtime has always refused; this refuses with the
+        // same sentence (#1293).
+        if (!Number.isFinite(node)) {
+          throw new Error(
+            `json_stringify: ${String(node)} is not representable in JSON ` +
+            `— RFC 8259 has no NaN or Infinity.  Guard with float_is_nan ` +
+            `/ float_is_infinite before serialising.`
+          );
+        }
+        parts.push(String(node));
+        return;
+      }
+      if (typeof node === "string") { parts.push(JSON.stringify(node)); return; }
+      if (Array.isArray(node)) {
+        parts.push("[");
+        node.forEach((item, idx) => {
+          if (idx) parts.push(",");
+          emit(item);
+        });
+        parts.push("]");
+        return;
+      }
+      if (node instanceof Map) {
+        parts.push("{");
+        let first = true;
+        for (const [k, v] of node) {
+          if (!first) parts.push(",");
+          first = false;
+          parts.push(JSON.stringify(String(k)));
+          parts.push(":");
+          emit(v);
+        }
+        parts.push("}");
+        return;
+      }
+      throw new Error(
+        `json_stringify: readJson produced ${typeof node}, which is not a ` +
+        `Json value; the ADT walk is wrong`
+      );
+    };
+    emit(value);
+    return parts.join("");
+  }
+
   if (needed.has("json_parse")) {
     imports.vera.json_parse = (ptr, len) => {
       const text = readString(ptr, len);
       // Same failure-domain split as hostMdParse: only JSON.parse
       // errors become Err(String); gcGuard-walk failures trap loudly.
-      let parsed;
       try {
-        parsed = JSON.parse(text);
+        JSON.parse(text);
       } catch (e) {
         return allocResultErrString(e.message || String(e));
       }
+      // #1293: JSON.parse decided whether the text is JSON; its result
+      // is discarded because it cannot carry key order.  The tree the
+      // ADT is built from comes from the order-preserving re-scan.
+      const parsed = parseJsonOrdered(text);
       // #708 (PR #707): wrap in gcGuard and push jsonPtr
       // before allocResultOkI32's alloc can fire GC.  writeJson
       // has its own internal guard that pops on return — by the
@@ -2625,12 +2982,12 @@ function buildImportObject(module, moduleBytes) {
 
   if (needed.has("json_stringify")) {
     imports.vera.json_stringify = (ptr) => {
-      const value = readJson(ptr);
-      const text = JSON.stringify(value);
-      // JSON.stringify can return undefined for unsupported values
-      // (e.g. bare undefined, symbols, functions).  Fall back to "null"
-      // to match the JSON spec and avoid allocString crashing.
-      return allocString(text !== undefined ? text : "null");
+      // #1293: the canonical form of spec §9.7.1, emitted by a walk
+      // that mirrors the reference host's ``dumps_canonical`` — compact
+      // separators, insertion-ordered keys, ECMAScript number
+      // rendering, and a refusal on a non-finite number rather than the
+      // silent ``null`` bare JSON.stringify would substitute.
+      return allocString(stringifyCanonical(readJson(ptr)));
     };
   }
 

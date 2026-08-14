@@ -498,10 +498,20 @@ def _render_block(block: MdBlock) -> list[str]:
     """Render a single block to lines of Markdown."""
     if isinstance(block, MdDocument):
         result: list[str] = []
-        for i, child in enumerate(block.children):
-            if i > 0:
+        for child in block.children:
+            child_lines = _render_block(child)
+            # #1303 review: a child that renders to NOTHING — an
+            # `MdList` with no items, an `MdTable` with no rows — must
+            # not drag a separator in with it.  Counting it made the
+            # separator a stray blank line the next parse cannot
+            # attribute to anything, so `MdDocument([MdList([]), p])`
+            # rendered "\nafter" and re-rendered "after": not a fixed
+            # point, which is the property §9.7.3 asks of the render.
+            if not child_lines:
+                continue
+            if result:
                 result.append("")
-            result.extend(_render_block(child))
+            result.extend(child_lines)
         return result
 
     if isinstance(block, MdParagraph):
@@ -518,9 +528,29 @@ def _render_block(block: MdBlock) -> list[str]:
         return lines
 
     if isinstance(block, MdBlockQuote):
+        if not block.children:
+            # A quote with nothing in it still occupies a line.  Render
+            # it as no lines at all and the block vanishes on re-parse,
+            # leaving the document's separator as a stray blank line —
+            # `---\n>` renders `---\n` and comes back as just `---`.
+            return [">"]
         result = []
-        for child in block.children:
+        for i, child in enumerate(block.children):
+            # #1294 review: a bare ``>`` between children, exactly as
+            # MdDocument puts a blank line between its own.  Without it
+            # a quote holding two paragraphs renders as two adjacent
+            # quoted lines, which re-parses as ONE paragraph — the
+            # structure is gone and no later pass can tell.  The
+            # separator is unconditional rather than emitted only where
+            # the next block would otherwise merge: one construct, one
+            # textual representation (§0.2.3).
             child_lines = _render_block(child)
+            # Same zero-line guard as MdDocument: a child that renders
+            # nothing must not leave a bare `>` standing for it.
+            if not child_lines:
+                continue
+            if i > 0 and result:
+                result.append(">")
             for line in child_lines:
                 result.append(f"> {line}" if line else ">")
         return result
@@ -532,6 +562,17 @@ def _render_block(block: MdBlock) -> list[str]:
             item_lines: list[str] = []
             for child in item:
                 item_lines.extend(_render_block(child))
+            if not item_lines:
+                # #1303 review: an item with no blocks is a value the
+                # PARSER produces — `- ` reads back as `MdList([()])` —
+                # so the renderer owed it a form.  Dropping it deleted
+                # the item outright, and in a multi-item list silently
+                # renumbered everything after it.  The marker plus its
+                # space is what the parser reads back: a bare `-` is a
+                # paragraph, because both item patterns require the
+                # whitespace.
+                result.append(f"{marker} ")
+                continue
             for j, line in enumerate(item_lines):
                 if j == 0:
                     result.append(f"{marker} {line}")
@@ -563,6 +604,46 @@ def _render_block(block: MdBlock) -> list[str]:
     return []
 
 
+def _render_code_span(code: str) -> str:
+    """Fence a code span so it reads back as itself.
+
+    The fence is one backtick longer than the longest run *inside* the
+    content, because `_parse_inlines` closes a span on the first run of
+    equal length — a fixed two-backtick fence therefore terminates on
+    the content's own ``` `` ``` and loses the rest.
+
+    Padding spaces are added in exactly the two cases where the parser
+    would otherwise not read the content back.  `_parse_inlines` strips
+    one leading and one trailing space iff the fenced text is at least
+    two characters long and both ends are spaces, so the renderer pads
+    when:
+
+    * the content starts or ends with a backtick — the pad is what keeps
+      the fence and the content from merging into one longer run; and
+    * the content itself starts and ends with a space (#1303 review) —
+      without a pad the parser's unconditional strip eats the content's
+      own spaces, so ``MdCode(" x ")`` came back as ``MdCode("x")``.
+      With it the strip removes the pad instead and the content
+      survives, which also separates ``MdCode(" `x` ")`` from
+      ``MdCode("`x`")``: both used to render to the same bytes.
+    """
+    longest = 0
+    run = 0
+    for ch in code:
+        run = run + 1 if ch == "`" else 0
+        longest = max(longest, run)
+    fence = "`" * (longest + 1)
+    strips_own_spaces = (
+        len(code) >= 2 and code[0] == " " and code[-1] == " "
+    )
+    pad = (
+        " "
+        if code.startswith("`") or code.endswith("`") or strips_own_spaces
+        else ""
+    )
+    return f"{fence}{pad}{code}{pad}{fence}"
+
+
 def _render_inlines(inlines: tuple[MdInline, ...]) -> str:
     """Render inline content to a string."""
     parts: list[str] = []
@@ -570,11 +651,7 @@ def _render_inlines(inlines: tuple[MdInline, ...]) -> str:
         if isinstance(inline, MdText):
             parts.append(inline.text)
         elif isinstance(inline, MdCode):
-            # Use backtick wrapping that avoids conflicts
-            if "`" in inline.code:
-                parts.append(f"`` {inline.code} ``")
-            else:
-                parts.append(f"`{inline.code}`")
+            parts.append(_render_code_span(inline.code))
         elif isinstance(inline, MdEmph):
             parts.append(f"*{_render_inlines(inline.children)}*")
         elif isinstance(inline, MdStrong):

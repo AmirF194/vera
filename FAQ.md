@@ -170,9 +170,9 @@ vera compile --target browser examples/hello_world.vera
 #   index.html
 ```
 
-Serve it with any HTTP server and open `index.html` — no build step, no bundler, no dependencies. The JavaScript runtime provides browser-appropriate implementations of all Vera host bindings: `IO.print` writes to the page, `IO.read_line` uses `prompt()`, and all other operations (State, contracts, Markdown) work identically to the wasmtime runtime, with two documented exceptions: `json_stringify` ([#1293](https://github.com/aallan/vera/issues/1293)) and `md_render` ([#1294](https://github.com/aallan/vera/issues/1294)) still differ between the two hosts.
+Serve it with any HTTP server and open `index.html` — no build step, no bundler, no dependencies. The JavaScript runtime provides browser-appropriate implementations of the host bindings the browser target supports — the ones a page can host, which leaves a filesystem, an accept loop, a database and a model provider outside it by construction (spec §12.9.3 lists each and why): `IO.print` writes to the page, `IO.read_line` uses `prompt()`, and State, contracts, JSON serialization and Markdown rendering work identically to the wasmtime runtime. `json_stringify` and `md_render` reach that identity by emitting a canonical form the specification states — §9.7.1 and §9.7.3 — rather than by the two hosts happening to agree, which is what the parity suite checks them against. The two *parsers* are where the runtimes still differ, and each difference is tracked. `json_parse` disagrees on inputs outside RFC 8259: the reference host accepts `NaN` and the infinities where the browser refuses them ([#1306](https://github.com/aallan/vera/issues/1306)), and a `\uD800` escape becomes U+FFFD in the browser where the reference host fails outright ([#1308](https://github.com/aallan/vera/issues/1308)) — well-formed JSON parses the same on both. `md_parse` differs more widely: the two hand-written parsers disagree across nine measured classes of input the §9.7.3 subset leaves open, the largest by a wide margin being how a paragraph's plain-text runs are grouped — invisible to `md_render`, since the runs concatenate to the same text — and the rest render-visible, from how emphasis markers are scanned to block markers such as a `+` bullet or a list nested more than two deep. That one is tracked as [#1301](https://github.com/aallan/vera/issues/1301).
 
-Two effects are refused outright rather than merely differing. `Inference` and `DB` return an explanatory `Err` from every operation in the browser, because the API key or database credential they would need is readable from page source and network traffic in client-side JavaScript. Reach them through a server-side endpoint and call it with `Http`, which does run in the browser — it is backed by `XMLHttpRequest`, not a stub. That refusal is a deliberate platform boundary, not a divergence awaiting a fix like the two above; spec §9.5.5 states it for `Inference`.
+Two effects are refused outright rather than merely differing. `Inference` and `DB` return an explanatory `Err` from every operation in the browser, because the API key or database credential they would need is readable from page source and network traffic in client-side JavaScript. Reach them through a server-side endpoint and call it with `Http`, which does run in the browser — it is backed by `XMLHttpRequest`, not a stub. That refusal is a deliberate platform boundary; spec §9.5.5 states it for `Inference`.
 
 The runtime also works in Node.js:
 
@@ -180,7 +180,7 @@ The runtime also works in Node.js:
 node --experimental-wasm-exnref vera/browser/harness.mjs module.wasm
 ```
 
-Mandatory parity tests enforce that on every PR — except for the two divergences above, where each runtime's exact output is pinned separately so a fix goes red rather than passing unnoticed.
+Mandatory parity tests enforce that on every PR. For the two operations that carry a canonical form, each case asserts the expected string as well as cross-host equality, since two hosts agreeing on a wrong answer would satisfy equality on its own; for the two parsers it covers the inputs the implementations do agree on — every well-formed JSON document, and the Markdown shapes outside [#1301](https://github.com/aallan/vera/issues/1301)'s nine classes — so a regression on one of those goes red.
 
 
 ## How does contract-driven testing work?
@@ -279,7 +279,7 @@ The reference compiler is under active development. The current release includes
 
 - A seven-stage pipeline: parse, transform, resolve, typecheck, verify, compile, execute
 - A 14-chapter formal specification
-- 10,537 tests, including a 216-program conformance suite
+- 10,803 tests, including a 216-program conformance suite
 - 42 working example programs
 - 164 built-in functions covering strings, arrays, math, parsing, and data types
 - Four built-in abilities (Eq, Ord, Hash, Show) with constrained generics and ADT auto-derivation

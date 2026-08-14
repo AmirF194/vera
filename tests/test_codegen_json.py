@@ -4,12 +4,14 @@ Split from tests/test_codegen.py (#419). Shared helpers live in tests/codegen_he
 """
 from __future__ import annotations
 
+import pytest
 
 from tests.codegen_helpers import (
     _compile_ok,
     _run,
     _run_io,
 )
+from vera.wasm.json_serde import dumps_canonical, format_json_number
 
 
 class TestJsonCollection:
@@ -186,13 +188,20 @@ public fn main(-> @Int)
         assert _run(source) == 4
 
     def test_json_stringify_number(self) -> None:
-        """json_stringify(JNumber(42.0)) returns '42.0' (length 4)."""
+        """json_stringify(JNumber(42.0)) returns '42' — the canonical
+        form carries no fractional part on an integral value (#1293).
+
+        Asserted as the text rather than as ``string_length``: the old
+        length-4 assertion could not tell ``42.0`` from ``null``, and
+        the whole point of the canonical form is *which* four (or two)
+        characters come out.
+        """
         source = """
-public fn main(-> @Int)
-  requires(true) ensures(true) effects(pure)
-{ string_length(json_stringify(JNumber(42.0))) }
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{ IO.print(json_stringify(JNumber(42.0))) }
 """
-        assert _run(source) == 4
+        assert _run_io(source) == "42"
 
     def test_json_get_present(self) -> None:
         """json_get on JObject with present key returns Some."""
@@ -333,40 +342,45 @@ public fn main(-> @Int)
         assert _run(source) == 1
 
     def test_json_stringify_object(self) -> None:
-        """json_stringify(JObject(...)) round-trips through read_json."""
+        """json_stringify(JObject(...)) round-trips through read_json.
+
+        The exact text, not ``> 0``: a length-or-presence assertion
+        survives every separator and number-format change the canonical
+        form (#1293) is *about*, so it could not tell ``{"k":1}`` from
+        ``{"k": 1.0}`` — the two strings the two runtimes used to
+        disagree on.
+        """
         source = '''
-public fn main(-> @Int)
-  requires(true) ensures(true) effects(pure)
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
 {
   let @Json = JObject(map_insert(map_new(), "k", JNumber(1.0)));
-  string_length(json_stringify(@Json.0))
+  IO.print(json_stringify(@Json.0))
 }
 '''
-        result = _run(source)
-        assert result > 0
+        assert _run_io(source) == '{"k":1}'
 
     def test_json_stringify_array(self) -> None:
-        """json_stringify(JArray([...])) exercises read_json array path."""
+        """json_stringify(JArray([...])) exercises read_json array path,
+        and pins the element separator (#1293)."""
         source = """
-public fn main(-> @Int)
-  requires(true) ensures(true) effects(pure)
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
 {
   let @Json = JArray([JNull, JBool(true), JNumber(2.0)]);
-  string_length(json_stringify(@Json.0))
+  IO.print(json_stringify(@Json.0))
 }
 """
-        result = _run(source)
-        assert result > 0
+        assert _run_io(source) == "[null,true,2]"
 
     def test_json_stringify_string(self) -> None:
         """json_stringify(JString(...)) exercises read_json string path."""
         source = '''
-public fn main(-> @Int)
-  requires(true) ensures(true) effects(pure)
-{ string_length(json_stringify(JString("hello"))) }
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{ IO.print(json_stringify(JString("hello"))) }
 '''
-        result = _run(source)
-        assert result > 0
+        assert _run_io(source) == '"hello"'
 
     def test_json_stringify_bool_false(self) -> None:
         """json_stringify(JBool(false)) returns 'false' (5 chars)."""
@@ -982,3 +996,117 @@ public fn test(@String -> @Result<Json, String>)
             "json_parse IS a host import and its import table entry "
             "must be present when the function is referenced."
         )
+
+
+class TestCanonicalNumberFormat:
+    """``format_json_number`` — the canonical JSON number form (#1293).
+
+    ECMA-262 §6.1.6.1.20 Number::toString, which is what
+    ``JSON.stringify`` uses and what spec §9.7.1 now pins for both
+    runtimes.  Each case below is a *boundary* of that algorithm rather
+    than a sample, and every one of them is a place ``repr(float)``
+    disagrees — which is why ``json.dumps`` cannot produce this form no
+    matter how its separators are configured.
+    """
+
+    @pytest.mark.parametrize(("value", "expected"), [
+        # Integral values lose the fractional part repr insists on.
+        (0.0, "0"),
+        (-0.0, "0"),
+        (1.0, "1"),
+        (-1.0, "-1"),
+        (100.0, "100"),
+        (2.0, "2"),
+        # Non-integral values are untouched by that rule.
+        (3.5, "3.5"),
+        (-0.5, "-0.5"),
+        (0.1, "0.1"),
+        (12345.6789, "12345.6789"),
+        # Upper boundary: plain digits below 10^21, exponent from 10^21.
+        (1e15, "1000000000000000"),
+        (1e16, "10000000000000000"),
+        (1e20, "100000000000000000000"),
+        (1e21, "1e+21"),
+        (1e30, "1e+30"),
+        (123456789012345680.0, "123456789012345680"),
+        # Lower boundary: plain digits to 10^-6, exponent below it.
+        (1e-6, "0.000001"),
+        (1e-7, "1e-7"),
+        (1.5e-5, "0.000015"),
+        (1e-300, "1e-300"),
+        # Exponent spelling: signed, unpadded, mantissa point after the
+        # first digit only when there is more than one digit.
+        (1.25e-9, "1.25e-9"),
+        (5e-324, "5e-324"),
+        (1.7976931348623157e308, "1.7976931348623157e+308"),
+        (-1e21, "-1e+21"),
+    ])
+    def test_boundary(self, value: float, expected: str) -> None:
+        assert format_json_number(value) == expected
+
+    @pytest.mark.parametrize("value", [
+        float("nan"), float("inf"), float("-inf"),
+    ])
+    def test_non_finite_raises(self, value: float) -> None:
+        """No coercion to ``null``: the value has no JSON form, so the
+        call fails and says so."""
+        with pytest.raises(ValueError, match="not representable in JSON"):
+            format_json_number(value)
+
+    @pytest.mark.parametrize("value", [
+        0.0, 1.0, -1.0, 3.5, 1e15, 1e16, 1e21, 1e-6, 1e-7,
+        1.25e-9, 5e-324, 1.7976931348623157e308, 0.1, 12345.6789,
+    ])
+    def test_reparses_to_the_same_double(self, value: float) -> None:
+        """The rendering is lossless.
+
+        Shortening ``1.0`` to ``1`` is only safe if the shorter text
+        still reads back as the identical double — otherwise the
+        canonical form would be a lossy one.  ``repr``-derived digits
+        make that true by construction; this checks the *placement*
+        logic did not drop one.
+        """
+        assert float(format_json_number(value)) == value
+
+
+class TestCanonicalDumps:
+    """``dumps_canonical`` — the whole-document canonical form (#1293)."""
+
+    @pytest.mark.parametrize(("value", "expected"), [
+        (None, "null"),
+        (True, "true"),
+        (False, "false"),
+        (1.0, "1"),
+        ("hi", '"hi"'),
+        ([], "[]"),
+        ({}, "{}"),
+        ([1.0, 2.0], "[1,2]"),
+        ({"b": 1.0, "a": 2.0}, '{"b":1,"a":2}'),
+        ({"a": [1.0, {"c": None}]}, '{"a":[1,{"c":null}]}'),
+        # Separators carry no padding — the other #1293 axis.
+        ([1.5, 2.25], "[1.5,2.25]"),
+        # Non-ASCII text is emitted literally, matching JSON.stringify.
+        ("café", '"café"'),
+        ("tab\there", '"tab\\there"'),
+    ])
+    def test_shape(self, value: object, expected: str) -> None:
+        assert dumps_canonical(value) == expected
+
+    def test_object_keys_keep_insertion_order(self) -> None:
+        """Both hosts' maps preserve insertion order, so the canonical
+        form does too — sorting here would diverge from the browser."""
+        assert dumps_canonical({"z": 1.0, "a": 2.0, "m": 3.0}) == (
+            '{"z":1,"a":2,"m":3}'
+        )
+
+    def test_rejects_values_outside_read_json_domain(self) -> None:
+        """A type ``read_json`` cannot produce means the ADT walk went
+        wrong; a plausible-looking string would hide that."""
+        with pytest.raises(TypeError, match="not a Json value"):
+            dumps_canonical({1, 2})
+
+    def test_non_finite_inside_a_document_raises(self) -> None:
+        """The refusal is not just for a bare number — it survives the
+        recursive walk, so a NaN buried in an object still fails."""
+        with pytest.raises(ValueError, match="not representable in JSON"):
+            dumps_canonical({"a": [1.0, float("nan")]})

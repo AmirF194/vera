@@ -1,4 +1,4 @@
-"""JSON effect host bindings (JSON effect §9.7.5).
+"""JSON host bindings (Json built-in type, spec §9.7.1).
 
 Extracted verbatim from `execute()` in `vera/codegen/api.py` (#421);
 the host callbacks call the module-level heap helpers in
@@ -29,7 +29,7 @@ def register_json(linker: wasmtime.Linker, ops_used: set[str]) -> None:
     """Register the requested JSON host functions on `linker`."""
     import json as _json
 
-    from vera.wasm.json_serde import read_json, write_json
+    from vera.wasm.json_serde import dumps_canonical, read_json, write_json
 
     if "json_parse" in ops_used:
         def host_json_parse(
@@ -73,16 +73,13 @@ def register_json(linker: wasmtime.Linker, ops_used: set[str]) -> None:
                 caller, ptr, _read_i32, _read_f64,
                 _read_wasm_string, _decode_jobject,
             )
-            # Note: json.dumps rejects NaN/Infinity by default
-            # (raises ValueError).  This matches the JSON spec
-            # (RFC 8259) which forbids these values.  The JS
-            # runtime's JSON.stringify outputs "null" for them
-            # instead.  Both behaviours are acceptable: Vera's
-            # JNumber wraps Float64, so users should guard against
-            # NaN/Infinity before serialising.
-            text = _json.dumps(
-                value, ensure_ascii=False, allow_nan=False,
-            )
+            # #1293: one canonical output form, shared with
+            # ``vera/browser/runtime.mjs`` and stated in spec §9.7.1.
+            # ``dumps_canonical`` also refuses NaN and Infinity, which
+            # RFC 8259 cannot represent — the browser used to emit
+            # ``null`` for them, silently substituting a different and
+            # perfectly valid JSON value.
+            text = dumps_canonical(value)
             return _alloc_string(caller, text)
 
         linker.define_func(
