@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import functools
 import re
+from types import MappingProxyType
+from typing import Mapping
 
 from vera import ast
 
@@ -780,7 +782,7 @@ def _parse_source(source: str) -> ast.Program:
 # =====================================================================
 
 @functools.lru_cache(maxsize=1)
-def prelude_data_decls() -> dict[str, ast.DataDecl]:
+def prelude_data_decls() -> Mapping[str, ast.DataDecl]:
     """The prelude's own ``data`` declarations, by name (#1277).
 
     Derived by PARSING the same source blocks :func:`inject_prelude`
@@ -792,13 +794,19 @@ def prelude_data_decls() -> dict[str, ast.DataDecl]:
     ADT-membership floor) and codegen's Pass-1.2 contention rail, which
     compares a module's declaration of one of these names against the
     prelude's own with :func:`data_decl_shape`.
+
+    READ-ONLY, because the cache hands every caller the same object: a
+    plain dict would let one consumer's mutation reach the other and
+    every later compile in the process, and the AST nodes inside it are
+    the ones the rail compares against.  The proxy makes the shared
+    identity safe rather than merely undocumented.
     """
     parsed = _parse_source("\n".join(_PRELUDE_DATA_SOURCES))
-    return {
+    return MappingProxyType({
         tld.decl.name: tld.decl
         for tld in parsed.declarations
         if isinstance(tld.decl, ast.DataDecl)
-    }
+    })
 
 
 def prelude_adt_names() -> frozenset[str]:

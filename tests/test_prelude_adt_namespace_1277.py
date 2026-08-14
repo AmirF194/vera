@@ -43,7 +43,7 @@ from pathlib import Path
 
 import pytest
 
-from vera import naming
+from vera import ast, naming
 from vera.checker.core import TypeChecker
 from vera.codegen.core import CodeGenerator
 from vera.errors import ERROR_CODES
@@ -582,11 +582,18 @@ _DECL_BODY = {
 }
 
 
-def _two_module_cell(
+def _two_module_gen(
     tmp_path: Path, decl_a: str, decl_b: str, *,
     a_first: bool, uses_ordering: bool = True,
-) -> tuple[list[str], list[str]]:
-    """(codes, exports) for two modules that each declare one name."""
+) -> CodeGenerator:
+    """Compile two modules that each declare one name; hand back the generator.
+
+    *a_first* decides which module the ENTRY imports first, so the two
+    parametrizations really are two different programs.  That is the whole
+    point of the cases below — the defect they pin was order-dependent, and
+    a fixture with a fixed import order would run the same program twice
+    and claim to have covered both.
+    """
     def lib(fn: str, decl: str) -> str:
         return f"""{decl}
 
@@ -624,11 +631,22 @@ public fn main(@Unit -> @Int)
   {fn1}(1) + {fn2}(2)
 }}
 """
-    gen = _compile(tmp_path, {
+    return _compile(tmp_path, {
         "alib.vera": lib("afn", decl_a),
         "blib.vera": lib("bfn", decl_b),
         "main.vera": entry,
     })
+
+
+def _two_module_cell(
+    tmp_path: Path, decl_a: str, decl_b: str, *,
+    a_first: bool, uses_ordering: bool = True,
+) -> tuple[list[str], list[str]]:
+    """(codes, exports) for two modules that each declare one name."""
+    gen = _two_module_gen(
+        tmp_path, decl_a, decl_b,
+        a_first=a_first, uses_ordering=uses_ordering,
+    )
     result = gen._result  # type: ignore[attr-defined]
     return (
         sorted({d.error_code for d in result.diagnostics if d.error_code}),
@@ -668,48 +686,32 @@ def test_a_second_module_declaration_is_examined_too(
 def test_two_differing_module_declarations_are_both_reported(
     tmp_path: Path, a_first: bool,
 ) -> None:
-    """Each differing declaration is its own problem, and gets its own report."""
-    gen = _compile(tmp_path, {
-        "alib.vera": f"""{_ORD_DIFFER}
+    """Each differing declaration is its own problem, and gets its own report.
 
-public fn afn(@Int -> @Int)
-  requires(true)
-  ensures(true)
-  effects(pure)
-{{
-  {_DECL_BODY[_ORD_DIFFER]}
-}}
-""",
-        "blib.vera": f"""{_ORD_DIFFER2}
-
-public fn bfn(@Int -> @Int)
-  requires(true)
-  ensures(true)
-  effects(pure)
-{{
-  {_DECL_BODY[_ORD_DIFFER2]}
-}}
-""",
-        "main.vera": """import alib(afn);
-import blib(bfn);
-
-public fn main(@Unit -> @Int)
-  requires(true)
-  ensures(true)
-  effects(pure)
-{
-  afn(1) + bfn(2)
-}
-""",
-    })
+    Both parametrizations are genuinely different programs — the entry's
+    import order follows *a_first* — because the rule under test is that
+    the rail examines every declarer rather than whichever came first.
+    The report ORDER is asserted against the import order too: it is the
+    one observable that distinguishes the two ids, so without it a fixture
+    that lost its order-sensitivity again would still pass both.
+    """
+    gen = _two_module_gen(
+        tmp_path, _ORD_DIFFER, _ORD_DIFFER2,
+        a_first=a_first, uses_ordering=False,
+    )
     result = gen._result  # type: ignore[attr-defined]
     e621 = [d for d in result.diagnostics if d.error_code == "E621"]
     assert len(e621) == 2, [
         (d.error_code, d.location.file) for d in result.diagnostics]
-    assert {Path(d.location.file).name for d in e621} == {
-        "alib.vera", "blib.vera"}, [d.location.file for d in e621]
+    reported = [Path(d.location.file).name for d in e621]
+    assert set(reported) == {"alib.vera", "blib.vera"}, reported
+    expected = ["alib.vera", "blib.vera"] if a_first else [
+        "blib.vera", "alib.vera"]
+    assert reported == expected, (
+        f"reported {reported}; the rail walks the declarers in resolution "
+        f"order, which follows the entry's import order"
+    )
     assert sorted(result.exports) == []
-    del a_first  # the assertion is order-independent by construction
 
 
 @pytest.mark.parametrize("a_first", [True, False], ids=["alib1st", "blib1st"])
@@ -792,7 +794,7 @@ public fn everything(@Json, @HtmlNode, @Request -> @Response)
     inject_prelude(program)
     injected = frozenset(
         tld.decl.name for tld in program.declarations
-        if type(tld.decl).__name__ == "DataDecl"
+        if isinstance(tld.decl, ast.DataDecl)
     )
     assert injected == prelude_adt_names(), (
         sorted(injected ^ prelude_adt_names()))

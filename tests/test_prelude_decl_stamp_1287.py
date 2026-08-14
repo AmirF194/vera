@@ -89,7 +89,15 @@ public fn main(@Unit -> @Int)
 
 
 def _compiled(tmp_path: Path, main_src: str) -> CodeGenerator:
-    """Compile *main_src* against ``mlib`` and hand back the generator."""
+    """Compile *main_src* against ``mlib`` and hand back the generator.
+
+    The compile RESULT is asserted clean before the generator is handed
+    back.  Every claim below is about the bookkeeping of a program the
+    compiler accepts, and discarding the result would let these cases go
+    on passing over a program codegen had started refusing — a shadowing
+    `type Option = Int` is legal under §8.4.1 today, and the whole point
+    of the fixture is that it stays that way.
+    """
     tmp_path.mkdir(parents=True, exist_ok=True)
     (tmp_path / "mlib.vera").write_text(_MLIB, encoding="utf-8")
     main_path = tmp_path / "main.vera"
@@ -100,7 +108,11 @@ def _compiled(tmp_path: Path, main_src: str) -> CodeGenerator:
         source=main_path.read_text(encoding="utf-8"), file=str(main_path),
     )
     gen._resolved_modules = mods
-    gen.compile_program(program)
+    result = gen.compile_program(program)
+    errors = [d for d in result.diagnostics if d.severity == "error"]
+    assert errors == [], [
+        (d.error_code, d.description) for d in errors]
+    assert result.exports == ["main"], result.exports
     return gen
 
 
