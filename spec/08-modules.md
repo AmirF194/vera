@@ -391,9 +391,11 @@ This is Pass 0 of the three-pass type-checking architecture (see Chapter 5).
 After module registration, the main type environment contains:
 
 - All built-in types and functions.
-- All imported `public` functions (with their full signatures and contracts), except a bare function name two imports both supply — that name is refused (§8.5.2.2) and enters no namespace, so a bare call to it resolves to nothing rather than to whichever supplier was injected first.
-- All imported `public` data types (with their constructors).
+- All imported `public` functions (with their full signatures and contracts).
+- All imported `public` data types, with their constructors.
 - All locally declared types and functions (from Pass 1).
+
+A name two imports both supply is the exception, in every one of those namespaces: it is refused (§8.5.2.2) and enters none of them, so a use of it resolves to nothing rather than to whichever supplier was injected first. That holds for a clashing function name (`E155`), a clashing data type name (`E156`) and a clashing constructor name (`E157`) independently — a type excluded for a clash takes its constructors with it, and a constructor name two differently-named types supply is excluded on its own while both types remain.
 
 Local declarations always take priority over imported declarations due to the `setdefault` injection order: imports are injected first, then local registration overwrites any collisions.
 

@@ -40,7 +40,11 @@ from pathlib import Path
 import pytest
 
 import vera
-from tests.module_fixture_helpers import build_multi_module, module_value
+from tests.module_fixture_helpers import (
+    build_multi_module,
+    build_multi_module_past_check,
+    module_value,
+)
 
 INT_ANSWER = 111
 LOCAL_ANSWER = 222
@@ -139,6 +143,46 @@ def _write(tmp_path: Path, files: dict[str, str]) -> Path:
     return tmp_path / "main.vera"
 
 
+def _run_check_json(
+    argv: list[str], *, seed: str,
+) -> subprocess.CompletedProcess[str]:
+    """One ``vera check --json`` subprocess; the raw result, unparsed."""
+    return subprocess.run(
+        argv,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env={**os.environ, "PYTHONHASHSEED": seed,
+             "PYTHONPATH": str(_VERA_ROOT)},
+        check=False,
+    )
+
+
+def _parse_check_json(
+    result: subprocess.CompletedProcess[str], *, seed: str,
+) -> dict:
+    """The subprocess's stdout as JSON, or a failure that says why.
+
+    ``check=False`` plus a bare ``json.loads`` would turn a crashed CLI into a
+    ``JSONDecodeError`` about column 1 of an empty document, with the exit
+    code and the whole traceback on stderr discarded — and a crash that
+    happens under SOME hash seeds is precisely what this file exists to
+    catch, so the one failure mode the suite must describe well is the one it
+    described worst.  The seed, the exit code and both streams travel with
+    the failure instead.
+    """
+    try:
+        payload: dict = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise AssertionError(
+            f"vera check --json produced no parseable JSON under "
+            f"PYTHONHASHSEED={seed} (exit code {result.returncode}): {exc}\n"
+            f"--- stdout ---\n{result.stdout or '<empty>'}\n"
+            f"--- stderr ---\n{result.stderr or '<empty>'}"
+        ) from exc
+    return payload
+
+
 def _check_json(main_path: Path, *, seed: str) -> dict:
     """``vera check --json`` in a fresh interpreter under *seed*.
 
@@ -147,17 +191,11 @@ def _check_json(main_path: Path, *, seed: str) -> dict:
     flap rode is not reachable from inside one process, so an in-process loop
     would measure one seed many times and call it determinism.
     """
-    result = subprocess.run(
+    result = _run_check_json(
         [sys.executable, "-m", "vera.cli", "check", "--json", str(main_path)],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        env={**os.environ, "PYTHONHASHSEED": seed,
-             "PYTHONPATH": str(_VERA_ROOT)},
-        check=False,
+        seed=seed,
     )
-    payload: dict = json.loads(result.stdout)
-    return payload
+    return _parse_check_json(result, seed=seed)
 
 
 def _codes(payload: dict) -> list[str]:
@@ -284,6 +322,29 @@ _ADT_FILES: dict[str, dict[str, str]] = {
 }
 
 
+def test_an_unparseable_check_reports_its_stderr_and_exit_code() -> None:
+    """The helper's own failure path, exercised (#1304 review).
+
+    Pointed at a command that exits nonzero with empty stdout and a known
+    marker on stderr — the shape a seed-specific CLI crash takes.  Before
+    this, that arrived as a bare ``JSONDecodeError`` about an empty document
+    with the traceback thrown away, which is the least useful possible
+    report of the one failure the determinism cells exist to find.
+    """
+    marker = "vera-cli-crashed-under-this-seed"
+    result = _run_check_json(
+        [sys.executable, "-c",
+         f"import sys; sys.stderr.write({marker!r}); sys.exit(3)"],
+        seed="0",
+    )
+    with pytest.raises(AssertionError) as caught:
+        _parse_check_json(result, seed="0")
+    message = str(caught.value)
+    assert marker in message, message
+    assert "exit code 3" in message, message
+    assert "PYTHONHASHSEED=0" in message, message
+
+
 class TestTheDataSideFlapShapes:
     """The same defect in the TYPE and CONSTRUCTOR namespaces (#1304).
 
@@ -384,7 +445,32 @@ class TestTheDataSideFlapShapes:
         assert "Rename" in fix
         assert "does not resolve it" in fix
 
-    @pytest.mark.parametrize("remedy", ["selective", "local"])
+    def test_a_shared_constructor_is_backstopped_by_E610(
+        self, tmp_path: Path,
+    ) -> None:
+        """The E610 axis, pinned at both layers (#1317 evidence).
+
+        Two DIFFERENTLY-named types sharing one constructor: the checker
+        refuses `Sq` (E157) and codegen's constructor rail refuses the pair
+        (E610), so the sibling of the E609 cell above is measured rather
+        than assumed.  It is the shape that shows the collision is not about
+        the type name — `Alpha` and `Beta` never clash — which is why the
+        two codes are separate on both sides.
+        """
+        files = {
+            "liba.vera": _ADT_A.replace("data Shape", "data Alpha"),
+            "libb.vera": _ADT_B.replace("data Shape", "data Beta"),
+            "midc.vera": _ADT_MID,
+            "main.vera": _ADT_MAIN,
+        }
+        check_errors, _result, cg_errors = build_multi_module_past_check(
+            tmp_path, files,
+        )
+        assert [c for c, _ in check_errors if c == "E157"], check_errors
+        assert not [c for c, _ in check_errors if c == "E156"], check_errors
+        assert [c for c, _ in cg_errors if c == "E610"], cg_errors
+
+    @pytest.mark.parametrize("remedy", ["selective", "local", "private"])
     def test_the_function_remedies_do_not_clear_a_data_clash(
         self, tmp_path: Path, remedy: str,
     ) -> None:
@@ -397,7 +483,9 @@ class TestTheDataSideFlapShapes:
         the signal to revisit the data-side fix text.
         """
         files = dict(_ADT_FILES["ab"])
-        if remedy == "selective":
+        if remedy == "private":
+            files["libb.vera"] = _ADT_B.replace("public data", "private data")
+        elif remedy == "selective":
             files["libb.vera"] = _ADT_B + """
 public fn helper(@Unit -> @Int)
   requires(true)
