@@ -741,6 +741,179 @@ def test_two_modules_declaring_a_NON_prelude_name_stay_e609(
     assert exports == []
 
 
+# A restatement of the prelude's `UrlParts` spelled through the module's own
+# alias.  Structurally the prelude's type; syntactically nothing like it.
+_ALIAS_RESTATE = """
+type Payload = String;
+
+private data UrlParts {
+  UrlParts(Payload, Payload, Payload, Payload, Payload)
+}
+
+public fn probe(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  match UrlParts("a", "b", "c", "d", "e") {
+    UrlParts(@String, @String, @String, @String, @String) -> @Int.0
+  }
+}
+"""
+
+# The reverse: a module alias named after something the PRELUDE's own
+# declaration spells, hiding a layout that does not fit behind identical
+# syntax.  `Array<Json>` here is the module's `Int`.
+_ALIAS_HIDDEN_MISMATCH = """
+type Array<T> = Int;
+
+private data Json {
+  JNull,
+  JBool(Bool),
+  JNumber(Float64),
+  JString(String),
+  JArray(Array<Json>),
+  JObject(Map<String, Json>)
+}
+
+public fn probe(@Int -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  match JNull {
+    JNull -> @Int.0,
+    JBool(@Bool) -> 1,
+    JNumber(@Float64) -> 2,
+    JString(@String) -> 3,
+    JArray(@Array<Json>) -> 4,
+    JObject(@Map<String, Json>) -> 5
+  }
+}
+"""
+
+_MAIN_USES_URLPARTS = """import alib(probe);
+
+public fn consume(@UrlParts -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  match @UrlParts.0 {
+    UrlParts(@String, @String, @String, @String, @String) ->
+      string_length(@String.0)
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(7)
+}
+"""
+
+_MAIN_USES_PRELUDE_JSON_VIA_ALIB = """import alib(probe);
+
+public fn depth(@Json -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  json_array_length(@Json.0)
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  probe(7)
+}
+"""
+
+
+def test_an_alias_spelled_restatement_is_still_a_restatement(
+    tmp_path: Path,
+) -> None:
+    """A module may write the prelude's type through its own alias.
+
+    `type Payload = String;` and a `UrlParts` whose five fields are
+    `Payload` describes exactly the prelude's layout, so it shares the one
+    slot and must compile — but the two declarations have nothing in
+    common syntactically, and a shape key over raw spellings refused it
+    (measured: E621 on a `vera check`-green program §8.4.1 permits).  The
+    module's declaration is canonicalized through the MODULE's own alias
+    maps, which §8.4.1 makes the only ones that may answer for it.
+    """
+    gen = _compile(tmp_path, {
+        "alib.vera": _ALIAS_RESTATE,
+        "main.vera": _MAIN_USES_URLPARTS,
+    })
+    result = gen._result  # type: ignore[attr-defined]
+    codes = sorted({d.error_code for d in result.diagnostics if d.error_code})
+    assert codes == [], codes
+    assert sorted(result.exports) == ["consume", "main"], result.exports
+
+
+def test_an_alias_cannot_hide_a_layout_that_does_not_fit(
+    tmp_path: Path,
+) -> None:
+    """The other direction, and the reason only ONE side is resolved.
+
+    `type Array<T> = Int;` makes the module's `JArray(Array<Json>)` an
+    `Int` field while the prelude's is a real array.  The two spellings
+    are identical, so a raw-syntax key called them the same layout and
+    the program compiled with the module's `Json` in the slot and the
+    entry's `json_array_length` reading it — no diagnostic at all
+    (measured: `ok: true`, `exports == ['depth', 'main']`).  Resolving
+    the module's side alone separates them; resolving the PRELUDE's side
+    through the same maps would collapse them again, which is what makes
+    this the control for that mutation.
+    """
+    gen = _compile(tmp_path, {
+        "alib.vera": _ALIAS_HIDDEN_MISMATCH,
+        "main.vera": _MAIN_USES_PRELUDE_JSON_VIA_ALIB,
+    })
+    result = gen._result  # type: ignore[attr-defined]
+    codes = sorted({d.error_code for d in result.diagnostics if d.error_code})
+    assert codes == ["E621"], codes
+    assert result.exports == []
+
+
+def test_the_shape_key_resolves_only_the_namespace_it_is_given() -> None:
+    """`data_decl_shape`'s alias argument, at the unit level.
+
+    Two direct properties, because the rail depends on both: an alias
+    substitution makes a differently-spelled declaration key EQUAL to the
+    prelude's, and a type PARAMETER of the same name as an alias shadows
+    it (`_resolve_named`'s branch order) rather than being substituted.
+    """
+    from vera.parser import parse_to_ast
+    from vera.prelude import data_decl_shape, prelude_data_decls
+
+    prelude = prelude_data_decls()
+    decl = parse_to_ast(
+        "private data UrlParts {\n"
+        "  UrlParts(Payload, Payload, Payload, Payload, Payload)\n}"
+    ).declarations[0].decl
+    aliases = {"Payload": parse_to_ast(
+        "type Payload = String;").declarations[0].decl.type_expr}
+    assert data_decl_shape(decl) != data_decl_shape(prelude["UrlParts"])
+    assert data_decl_shape(decl, aliases, {}) == (
+        data_decl_shape(prelude["UrlParts"]))
+
+    # `T` is the declaration's own parameter, so an alias named `T` must
+    # not reach it — the shape stays positional (`#0`), not `Int`.
+    generic = parse_to_ast(
+        "private data Option<T> { None, Some(T) }").declarations[0].decl
+    shadow = {"T": parse_to_ast(
+        "type T = Int;").declarations[0].decl.type_expr}
+    assert data_decl_shape(generic, shadow, {}) == (
+        data_decl_shape(prelude["Option"]))
+
+
 def test_the_shape_key_ignores_parameter_names_and_not_tag_order() -> None:
     """`data_decl_shape` models the layout: positions, not spellings.
 

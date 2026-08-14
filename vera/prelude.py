@@ -22,6 +22,7 @@ from types import MappingProxyType
 from typing import Mapping
 
 from vera import ast
+from vera.monomorphize import canonicalize_type_aliases
 
 
 # #851 — synthetic origin filename for prelude-injected declarations.
@@ -832,7 +833,11 @@ def prelude_adt_names() -> frozenset[str]:
     return frozenset(prelude_data_decls())
 
 
-def data_decl_shape(decl: ast.DataDecl) -> tuple[object, ...]:
+def data_decl_shape(
+    decl: ast.DataDecl,
+    aliases: Mapping[str, ast.TypeExpr] | None = None,
+    alias_params: Mapping[str, tuple[str, ...]] | None = None,
+) -> tuple[object, ...]:
     """*decl*'s LAYOUT identity — what two declarations must share (#1277).
 
     Two ``data`` declarations of one name can occupy codegen's single
@@ -854,17 +859,44 @@ def data_decl_shape(decl: ast.DataDecl) -> tuple[object, ...]:
     own fields are all named types, so the coarse arm is never on both
     sides of a comparison.  Different is the safe direction: it refuses
     a compile rather than sharing a layout that may not fit.
+
+    *aliases* / *alias_params* canonicalize the field types first, and
+    belong to the namespace THIS declaration was written in — a module's
+    own alias maps for a module's declaration (§8.4.1 makes an alias
+    module-local, so no other namespace's may answer here; #1111/#1253).
+    Passing them for one side only is deliberate: a module that spells a
+    restatement through its own alias (`type Payload = String;`) means
+    the prelude's type and must not be refused, while resolving the
+    PRELUDE's spelling through a module's aliases would let a module
+    alias named after something the prelude spells — `type Array<T> =
+    Int;` against the prelude's `JArray(Array<Json>)` — collapse two
+    incompatible layouts into one key.  The prelude's declaration
+    resolves through nothing, because the prelude is its own namespace.
+
+    A type PARAMETER shadows an alias of the same name (`_resolve_named`'s
+    branch order), so the declaration's own parameters are withheld from
+    the map before substitution.
     """
     slots = {
         name: f"#{i}" for i, name in enumerate(decl.type_params or ())
     }
+    if aliases:
+        visible = {k: v for k, v in aliases.items() if k not in slots}
+        params = {
+            k: v for k, v in (alias_params or {}).items() if k not in slots
+        }
+        def key(te: ast.TypeExpr) -> str:
+            return _type_shape_key(
+                canonicalize_type_aliases(te, dict(visible), dict(params)),
+                slots,
+            )
+    else:
+        def key(te: ast.TypeExpr) -> str:
+            return _type_shape_key(te, slots)
     return (
         len(decl.type_params or ()),
         tuple(
-            (ctor.name, tuple(
-                _type_shape_key(field, slots)
-                for field in (ctor.fields or ())
-            ))
+            (ctor.name, tuple(key(field) for field in (ctor.fields or ())))
             for ctor in decl.constructors
         ),
     )

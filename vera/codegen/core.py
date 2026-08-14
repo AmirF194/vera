@@ -1535,8 +1535,21 @@ class CodeGenerator(
         module_decl = self._find_module_data_decl(owner, prelude_decl.name)
         if module_decl is None:  # pragma: no cover — defensive
             return True
+        # The module's declaration is canonicalized through the MODULE's own
+        # alias maps — §8.4.1 makes an alias module-local, so those are the
+        # only ones that may answer for it (#1111) — and the prelude's
+        # through nothing.  One side only, in that direction: a restatement
+        # spelled through a module alias is still a restatement, while
+        # resolving the prelude's spelling through a module's aliases would
+        # let `type Array<T> = Int;` collapse the prelude's `Array<Json>`
+        # onto the module's `Int` and share a layout that does not fit.
         return (
-            data_decl_shape(module_decl) != data_decl_shape(prelude_decl)
+            data_decl_shape(
+                module_decl,
+                self._module_type_aliases.get(owner, {}),
+                self._module_type_alias_params.get(owner, {}),
+            )
+            != data_decl_shape(prelude_decl)
         )
 
     def _emit_prelude_adt_contention_error(

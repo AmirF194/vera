@@ -206,6 +206,19 @@ def test_the_prelude_stamp_is_idempotent_by_name() -> None:
     gen._stamp_decl_order("Nimbus", prelude=True)
     assert gen._prelude_decl_order["Nimbus"] == first + 1
 
+    # The ALREADY-STAMPED branch, which is the one the fix turns on: a name
+    # the main file stamped first must still get its own prelude index,
+    # while `_decl_order` keeps the main file's.  Exercised directly rather
+    # than only through the `_SHADOWING` compile, so the branch is pinned
+    # even if that program stops reaching it.
+    gen._stamp_decl_order("Cirrus")                    # main-file stamp
+    main_index = gen._decl_order["Cirrus"]
+    assert main_index >= 0, main_index
+    gen._stamp_decl_order("Cirrus", prelude=True)      # prelude stamp after
+    assert gen._decl_order["Cirrus"] == main_index, "the shadow lost its slot"
+    assert gen._prelude_decl_order["Cirrus"] == first + 2, (
+        "the prelude block skipped a name the main file had declared")
+
 
 def test_the_main_file_declaration_still_wins_its_own_namespace(
     tmp_path: Path,
