@@ -180,7 +180,7 @@ The runtime also works in Node.js:
 node --experimental-wasm-exnref vera/browser/harness.mjs module.wasm
 ```
 
-Mandatory parity tests enforce that on every PR — except for the two divergences above, where each runtime's exact output is pinned separately so a fix goes red rather than passing unnoticed.
+Mandatory parity tests enforce that on every PR. For the two operations that carry a canonical form, each case asserts the expected string as well as cross-host equality, since two hosts agreeing on a wrong answer would satisfy equality on its own; for `md_parse` the suite covers the shapes the two implementations do agree on, so a regression on one of those goes red.
 
 
 ## How does contract-driven testing work?
