@@ -2936,6 +2936,23 @@
     ]
   },
   {
+    "id": "ch02_generic_arg_branch_join",
+    "file": "ch02_generic_arg_branch_join.vera",
+    "chapter": 2,
+    "title": "Generic instantiation carried by a later branch",
+    "level": "run",
+    "spec_ref": "Section 2.5",
+    "features": [
+      "generics",
+      "forall",
+      "monomorphization",
+      "if_expression",
+      "match",
+      "array_literal",
+      "exn_effect"
+    ]
+  },
+  {
     "id": "ch03_slot_alias_type_argument",
     "file": "ch03_slot_alias_type_argument.vera",
     "chapter": 3,

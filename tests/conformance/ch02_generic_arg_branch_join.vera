@@ -1,0 +1,31 @@
+-- Conformance: a generic instantiation carried by a LATER branch (Chapter 2)
+-- Tests: monomorphization discovers the type argument through a conditional
+-- whose FIRST branch diverges — the `then` branch and the first `match` arm
+-- both `throw`, so they name no type, and the instantiation is the one the
+-- completing branch carries.  The array literal in the same position pins the
+-- element-layout consultor, which reads the first element the same way.
+-- Reading one branch named nothing, and the clone fell to the phantom-var
+-- default while the call passed the real type (#1286 — the Vera-level sibling
+-- of #1276's WAT result-type join).
+private forall<T> fn idg(@T -> @T)
+  requires(true)
+  ensures(@T.result == @T.0)
+  effects(pure)
+{
+  @T.0
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 52)
+  effects(pure)
+{
+  handle[Exn<Bool>] {
+    throw(@Bool) -> { 0 }
+  } in {
+    let @Int = idg(if false then { throw(true) } else { 42 });
+    let @Int = idg(match Some(3) { None -> throw(true), Some(@Int) -> @Int.0 });
+    let @Array<Int> = [if false then { throw(true) } else { 46 }, 7];
+    @Int.1 + @Int.0 + @Array<Int>.0[1]
+  }
+}

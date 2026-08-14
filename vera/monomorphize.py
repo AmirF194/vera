@@ -2534,8 +2534,53 @@ class Monomorphizer:
             return self._infer_vera_type_name(
                 expr.operand, ctor_to_adt, generic_decls)
         if isinstance(expr, ast.IfExpr):
-            return self._infer_vera_type_name(
+            # #1286: the first branch that yields a name, mirroring the
+            # WASM call-rewrite twin (`InferenceMixin._infer_vera_type`,
+            # vera/wasm/inference.py) arm for arm.  The two consultors must
+            # land on the SAME name or the discovered clone dangles at the
+            # call the rewrite emits (E602) — so the join lands on both
+            # sides together, exactly as the #1276 WAT deciders did.
+            then_vt = self._infer_vera_type_name(
                 expr.then_branch.expr, ctor_to_adt, generic_decls)
+            if then_vt is not None:
+                return then_vt
+            return self._infer_vera_type_name(
+                expr.else_branch.expr, ctor_to_adt, generic_decls)
+        if isinstance(expr, ast.Block):
+            # #1286 (PR review): a `Block` names its TRAILING expression's
+            # type, exactly as the rewrite twin's `Block` arm does.  This is
+            # not a defensive add — the transformer leaves a braced match arm
+            # body AS a `Block` (`Some(@Int) -> { let @Int = …; @Int.0 }`),
+            # and a braced `if` branch whose tail is itself braced likewise.
+            # Without the arm, discovery answered `None` for every
+            # block-bodied arm while the rewrite — which HAS the arm — named
+            # the concrete clone: `idg$Int` emitted at the call and never
+            # registered, so a check-green `main` was dropped (E602).  Same
+            # divergence the `MatchExpr` arm below closes, one shape over.
+            return self._infer_vera_type_name(
+                expr.expr, ctor_to_adt, generic_decls)
+        if isinstance(expr, ast.MatchExpr):
+            # #1286: discovery had NO `MatchExpr` arm at all, so a `match`
+            # argument answered `None` and the instantiation fell to the
+            # phantom-var default while the rewrite named it from arm 0 —
+            # a dangling `idg$Int` that dropped the caller (E602) on
+            # check-green source, even with every arm completing.  The join
+            # closes the gap and the desync in one arm.
+            for arm in expr.arms:
+                arm_vt = self._infer_vera_type_name(
+                    arm.body, ctor_to_adt, generic_decls)
+                if arm_vt is not None:
+                    return arm_vt
+            return None
+        if isinstance(expr, ast.HandleExpr):
+            # #1286 (PR review sweep): the third shape of the one gap — a
+            # `handle` in argument position is named from its body's trailing
+            # expression by the rewrite twin and by nothing here, so it
+            # dangled exactly like the block-bodied arm above.  Measured, not
+            # inferred: `idg(handle[Exn<Bool>] { … } in { 42 })` is
+            # check-green and drops `main` at E602 without this arm.
+            return self._infer_vera_type_name(
+                expr.body.expr, ctor_to_adt, generic_decls)
         if isinstance(expr, ast.StringLit):
             return "String"
         if isinstance(expr, ast.InterpolatedString):
