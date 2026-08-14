@@ -38,6 +38,19 @@ it — ``tests/test_db_runtime.py::TestDbOnDiskExample229`` pins
 score line against a mocked provider, and ``tests/test_browser.py`` pins
 21 examples against the browser runtime.  A gate that re-pinned stdout
 would duplicate those and go red on every cosmetic edit to an example.
+
+But *green* is two signals, not one, for the reason
+`scripts/check_examples.py` gives where it asserts an exit code and an
+``OK:`` sentinel together: either alone can be satisfied by the wrong
+thing, and here both failures were measured rather than imagined.  A
+`main` that is privatised or renamed sends `vera run` to its first-export
+fallback, which runs a different function and exits 0 — so every spec
+names its entry point and the CLI resolves it by name.  An example that
+reaches outside the process answers a missing resource by printing a
+message and completing normally — so the three that do carry an
+``expect`` substring only their success path prints, which is what makes
+deleting `examples/sqlitedb.sqlite` fail the gate instead of passing on
+the graceful in-memory arm.  Both signals, per run, always.
 """
 
 from __future__ import annotations
@@ -57,12 +70,21 @@ from typing import NamedTuple
 
 
 class RunSpec(NamedTuple):
-    """How to invoke one example under `vera run`.
+    """How to invoke one example under `vera run`, and what its success
+    looks like.
 
-    ``fn`` is ``None`` for a program with `main`.  For a no-main example
-    `vera run` falls back to the *first export*, which is generally an
-    arbitrary function that needs arguments, so those must pin an entry
-    point explicitly.
+    ``fn`` is always named, never left implicit.  With no ``--fn``,
+    `vera run` falls back to the *first export*, and that fallback is a
+    silent pass waiting to happen: privatise or rename `main` and the
+    gate runs some other function, at exit 0.  Naming the entry point
+    makes the CLI resolve it and exit 1 when it is gone.
+
+    ``expect`` is a substring the success path prints.  It is set only
+    for the examples that reach outside the process and answer a failure
+    by printing a message and completing normally — for those, exit code
+    alone cannot tell the success path from the graceful one.  It is
+    deliberately not a full stdout pin; that belongs in the dedicated
+    tests.
 
     A ``NamedTuple`` rather than a frozen dataclass so the module can be
     loaded by the bare ``spec_from_file_location`` / ``exec_module``
@@ -71,9 +93,17 @@ class RunSpec(NamedTuple):
     recipe leaves unregistered.
     """
 
-    fn: str | None = None
+    fn: str = "main"
     args: tuple[str, ...] = ()
     needs_db_fixture: bool = False
+    expect: str | None = None
+
+
+# The line `vera run` prints when it cannot use the entry point it was
+# given and falls back to the first export.  Every spec names its entry
+# point, so this note appearing at all means the resolution did not
+# happen and some other function ran in its place.
+FALLBACK_NOTE = "no 'main' declared"
 
 
 # Every skip property, with the reason it excludes harness execution.
@@ -115,10 +145,15 @@ RUN_SPECS: dict[str, RunSpec] = {
     "base64": RunSpec(),
     "closures": RunSpec(fn="test_closure"),
     "collections": RunSpec(),
-    "database": RunSpec(),
+    # Reaches a real (in-memory) database and prints its error on the Err
+    # arm before completing normally, so exit 0 alone does not mean the
+    # round trip happened.
+    "database": RunSpec(expect="database round-trip succeeded"),
     "effect_handler": RunSpec(),
     "factorial": RunSpec(fn="factorial", args=("10",)),
-    "file_io": RunSpec(),
+    # Writes then reads back a file; a failed write prints the error and
+    # completes normally, so the sentinel is what proves the round trip.
+    "file_io": RunSpec(expect="Hello from Vera!"),
     "fizzbuzz": RunSpec(),
     "gc_pressure": RunSpec(),
     "generics": RunSpec(fn="test_generics"),
@@ -141,8 +176,13 @@ RUN_SPECS: dict[str, RunSpec] = {
     # The committed on-disk fixture, threaded the way
     # `tests/test_db_runtime.py::TestDbOnDiskExample229` threads it — without
     # it the example takes its graceful in-memory `Err` arm and the on-disk
-    # read, which is the whole point of the example, never executes.
-    "sqlitedb": RunSpec(needs_db_fixture=True),
+    # read, which is the whole point of the example, never executes.  That
+    # arm exits 0, so the sentinel is what makes deleting the fixture fail
+    # the gate rather than pass it.
+    "sqlitedb": RunSpec(
+        needs_db_fixture=True,
+        expect="read 4 cities from the on-disk database:",
+    ),
     "string_ops": RunSpec(),
     "string_utilities": RunSpec(fn="padded_id"),
     "url_encoding": RunSpec(),
@@ -264,13 +304,42 @@ def check_coverage(
 
 
 def build_command(python: str, vera_file: Path, spec: RunSpec) -> list[str]:
-    """The `vera run` argv for one example."""
-    cmd = [python, "-m", "vera.cli", "run", str(vera_file)]
-    if spec.fn is not None:
-        cmd += ["--fn", spec.fn]
+    """The `vera run` argv for one example.
+
+    ``--fn`` is always passed — see ``RunSpec`` for why the implicit
+    first-export fallback is not safe to rely on.
+    """
+    cmd = [python, "-m", "vera.cli", "run", str(vera_file), "--fn", spec.fn]
     if spec.args:
         cmd += ["--", *spec.args]
     return cmd
+
+
+def check_output(name: str, spec: RunSpec, output: str) -> str | None:
+    """The second signal, beside the exit code: a failure line, or None.
+
+    `scripts/check_examples.py` established the discipline — assert the
+    exit code AND an output signal, because either alone can be satisfied
+    by the wrong thing.  Two measured cases motivate it here, and both
+    exit 0: a `main` that stops being callable, where `vera run` falls
+    back to an arbitrary export, and an external fixture that vanishes,
+    where the example takes its graceful arm.
+    """
+    if FALLBACK_NOTE in output:
+        return (
+            f"{name}: `vera run` could not use the entry point "
+            f"{spec.fn!r} and fell back to the first export — some other "
+            f"function ran, at exit 0.  Usually the entry point was "
+            f"renamed or made private."
+        )
+    if spec.expect is not None and spec.expect not in output:
+        return (
+            f"{name}: exited 0 but its output does not contain "
+            f"{spec.expect!r} — the program completed down a graceful "
+            f"failure arm rather than its success path.  Check whether "
+            f"the fixture or resource it needs is still there."
+        )
+    return None
 
 
 def spec_env(spec: RunSpec, examples_dir: Path) -> dict[str, str]:
@@ -329,9 +398,11 @@ def run_corpus(
                 text=True,
                 encoding="utf-8",
                 cwd=str(workdir),
-                # Nothing may consume the invoking terminal's stdin: an
-                # example that read it would hang the hook, and the ones
-                # that do are skipped for exactly that reason.
+                # Nothing reads the invoking terminal's stdin: an example
+                # that tried would otherwise consume the user's keystrokes
+                # mid-hook.  DEVNULL is an immediate EOF, not a hang —
+                # which is why terminal-dependence rather than hanging is
+                # the reason the two stdin examples are skipped.
                 stdin=subprocess.DEVNULL,
                 env=build_env(spec, examples_dir),
                 timeout=TIMEOUT_SECONDS,
@@ -351,6 +422,13 @@ def run_corpus(
                 f"{name}: `vera run` exited {result.returncode}: "
                 f"{detail[:300]}"
             )
+            continue
+
+        # Exit code clean — now the second signal.  Both streams: the
+        # fallback note goes to stderr, the sentinels to stdout.
+        message = check_output(name, spec, result.stdout + result.stderr)
+        if message is not None:
+            failures.append(message)
     return failures
 
 
@@ -436,6 +514,52 @@ def check_testing_md(
 
 
 # ---------------------------------------------------------------------------
+# Reporting
+# ---------------------------------------------------------------------------
+
+
+def _block(title: str, errors: list[str], footer: str = "") -> list[str]:
+    if not errors:
+        return []
+    lines = [f"{title} ({len(errors)}):"]
+    lines += [f"  {e}" for e in errors]
+    if footer:
+        lines += ["", footer]
+    return lines
+
+
+def error_blocks(
+    coverage_errors: list[str],
+    doc_errors: list[str],
+    failures: list[str],
+) -> list[str]:
+    """The stderr report, as labelled blocks.
+
+    Each kind gets its own header carrying its own count.  Filing one
+    kind's lines under another's header misreports both — a reader who
+    counts the lines beneath `COVERAGE ERRORS (n)` gets a number the
+    header disagrees with.
+    """
+    return [
+        *_block("COVERAGE ERRORS", coverage_errors),
+        *_block(
+            "DOCUMENTATION MISMATCH", doc_errors,
+            "TESTING.md's execution-model table is the documented form of "
+            "the classification in this script.  Update the table to "
+            "match, so the model stays readable without reading the "
+            "source.",
+        ),
+        *_block(
+            "RUNTIME FAILURES", failures,
+            "An example that no longer runs is a bug in the compiler or "
+            "in the example, not something to suppress: SKIPS is for "
+            "programs the harness structurally cannot drive, not for ones "
+            "that are broken.",
+        ),
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -458,13 +582,8 @@ def main() -> int:
     # The coverage rule gates the run: with the tables out of sync with
     # disk, a green run would be reporting on the wrong set of programs.
     if coverage_errors:
-        print(
-            f"COVERAGE ERRORS ({len(coverage_errors)}):", file=sys.stderr
-        )
-        for e in coverage_errors:
-            print(f"  {e}", file=sys.stderr)
-        for e in doc_errors:
-            print(f"  {e}", file=sys.stderr)
+        for line in error_blocks(coverage_errors, doc_errors, []):
+            print(line, file=sys.stderr)
         return 1
 
     with tempfile.TemporaryDirectory(prefix="vera-examples-run-") as td:
@@ -480,37 +599,11 @@ def main() -> int:
             print(f"  skip [{prop}]: {', '.join(skipped)}")
             print(f"    {SKIP_PROPERTIES[prop]}")
 
-    if doc_errors:
-        print(
-            f"\nDOCUMENTATION MISMATCH ({len(doc_errors)}):", file=sys.stderr
-        )
-        for e in doc_errors:
-            print(f"  {e}", file=sys.stderr)
-        print(
-            "\nTESTING.md's execution-model table is the documented form "
-            "of the classification in this script.  Update the table to "
-            "match, so the model stays readable without reading the "
-            "source.",
-            file=sys.stderr,
-        )
-
-    if failures:
-        print(
-            f"\nRUNTIME FAILURES ({len(failures)} example(s) that pass "
-            f"check, verify and compile but do not run):",
-            file=sys.stderr,
-        )
-        for f in failures:
-            print(f"  {f}", file=sys.stderr)
-        print(
-            "\nAn example that no longer runs is a bug in the compiler or "
-            "in the example, not something to suppress: SKIPS is for "
-            "programs the harness structurally cannot drive, not for ones "
-            "that are broken.",
-            file=sys.stderr,
-        )
-
-    if doc_errors or failures:
+    blocks = error_blocks([], doc_errors, failures)
+    if blocks:
+        print("", file=sys.stderr)
+        for line in blocks:
+            print(line, file=sys.stderr)
         return 1
 
     print("\nAll runnable examples execute trap-free.")

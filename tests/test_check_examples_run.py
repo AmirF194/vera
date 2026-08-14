@@ -26,6 +26,7 @@ only ever return ``[]`` cannot masquerade as green.
 from __future__ import annotations
 
 import importlib.util
+import re
 from pathlib import Path
 from typing import Any
 
@@ -117,7 +118,13 @@ class TestCoverageRule:
 
     def test_stale_run_spec_is_an_error(self) -> None:
         """A RUN_SPECS key whose file was deleted or renamed is an error —
-        otherwise the entry silently stops covering anything."""
+        otherwise the entry silently stops covering anything.
+
+        The message must name the table it came from: both stale branches
+        report the same example-name shape, so asserting the name alone
+        passes whichever fired and cannot tell a stale run spec from a
+        stale skip.
+        """
         errors = _MOD.check_coverage(
             ["known"],
             {"known": _MOD.RunSpec(), "deleted": _MOD.RunSpec()},
@@ -125,6 +132,8 @@ class TestCoverageRule:
         )
         assert len(errors) == 1
         assert "deleted" in errors[0]
+        assert "RUN_SPECS" in errors[0]
+        assert "SKIPS" not in errors[0]
 
     def test_stale_skip_is_an_error(self) -> None:
         """The same for a skip: a suppression outliving its example would
@@ -134,6 +143,8 @@ class TestCoverageRule:
         )
         assert len(errors) == 1
         assert "gone" in errors[0]
+        assert "SKIPS" in errors[0]
+        assert "RUN_SPECS" not in errors[0]
 
     def test_example_in_both_tables_is_an_error(self) -> None:
         """Ambiguous classification: which one wins is not a question the
@@ -183,8 +194,6 @@ class TestRunSpecsAreWellFormed:
     def test_every_named_fn_is_public_in_its_example(self) -> None:
         bad = []
         for name, spec in _MOD.RUN_SPECS.items():
-            if spec.fn is None:
-                continue
             src = (_ROOT / "examples" / f"{name}.vera").read_text(
                 encoding="utf-8"
             )
@@ -192,19 +201,25 @@ class TestRunSpecsAreWellFormed:
                 bad.append(f"{name}: no `public fn {spec.fn}`")
         assert bad == []
 
-    def test_examples_without_main_carry_an_explicit_entry_point(self) -> None:
-        """`vera run` with no `--fn` falls back to the first export, which
-        for a no-main example is an arbitrary function that usually needs
-        arguments.  Every runnable no-main example must therefore pin its
-        entry point."""
-        bad = []
-        for name, spec in _MOD.RUN_SPECS.items():
-            src = (_ROOT / "examples" / f"{name}.vera").read_text(
-                encoding="utf-8"
-            )
-            if "public fn main(" not in src and spec.fn is None:
-                bad.append(name)
-        assert bad == []
+    def test_no_spec_relies_on_the_first_export_fallback(self) -> None:
+        """`vera run` with no `--fn` falls back to the *first export*, and
+        that fallback is a silent pass waiting to happen: privatise or
+        rename `main` and the gate runs some other function at exit 0.
+        Every spec names its entry point, so the CLI resolves it by name
+        and exits 1 when it is gone."""
+        assert all(spec.fn for spec in _MOD.RUN_SPECS.values())
+
+    def test_environment_dependent_specs_carry_an_output_sentinel(
+        self,
+    ) -> None:
+        """Three examples reach outside the process — a committed SQLite
+        fixture, an in-memory database, the filesystem — and each answers a
+        failure by printing a message and completing normally.  Exit code
+        alone cannot tell their success path from their graceful one, so
+        each must pin a substring only the success path prints."""
+        for name in ("sqlitedb", "database", "file_io"):
+            spec = _MOD.RUN_SPECS[name]
+            assert spec.expect, f"{name} has no expected-output sentinel"
 
     def test_every_skip_property_is_documented(self) -> None:
         for name, prop in _MOD.SKIPS.items():
@@ -217,10 +232,12 @@ class TestRunSpecsAreWellFormed:
 
 
 class TestBuildCommand:
-    def test_main_entry_point_passes_no_fn_flag(self) -> None:
+    def test_default_spec_names_main_explicitly(self) -> None:
+        """No spec leaves the entry point implicit — see
+        `test_no_spec_relies_on_the_first_export_fallback`."""
         cmd = _MOD.build_command("py", Path("/x/a.vera"), _MOD.RunSpec())
-        assert "--fn" not in cmd
         assert cmd[:4] == ["py", "-m", "vera.cli", "run"]
+        assert cmd[-2:] == ["--fn", "main"]
 
     def test_named_entry_point_and_args(self) -> None:
         cmd = _MOD.build_command(
@@ -284,6 +301,76 @@ class TestHermeticEnvironment:
             assert name in blob, name
 
 
+class TestOutputSignals:
+    """Exit code is not enough, and the sibling gate already says so.
+
+    `scripts/check_examples.py` asserts the exit code *and* an output
+    sentinel, because either alone can be satisfied by the wrong thing.
+    Here the two measured cases are a `main` that stops being callable —
+    where `vera run` falls back to an arbitrary export and exits 0 — and
+    an external fixture that vanishes, where the example takes its
+    graceful arm and exits 0.
+    """
+
+    def test_clean_output_passes(self) -> None:
+        assert _MOD.check_output("a", _MOD.RunSpec(), "all good") is None
+
+    def test_fallback_note_is_a_failure_at_exit_zero(self) -> None:
+        """`vera run` prints this note when it cannot use the named entry
+        point and picks the first export instead.  Every spec names its
+        entry point, so seeing the note means the resolution did not
+        happen — a run of some other function reported as a pass."""
+        msg = _MOD.check_output(
+            "a", _MOD.RunSpec(),
+            "Note: no 'main' declared — running public function 'other'.\n7",
+        )
+        assert msg is not None
+        assert "a" in msg
+        assert "first export" in msg
+
+    def test_missing_sentinel_is_a_failure(self) -> None:
+        msg = _MOD.check_output(
+            "sqlitedb", _MOD.RunSpec(expect="read 4 cities"),
+            "no cities table — run with VERA_DB_URL=...",
+        )
+        assert msg is not None
+        assert "read 4 cities" in msg
+
+    def test_present_sentinel_passes(self) -> None:
+        assert _MOD.check_output(
+            "sqlitedb", _MOD.RunSpec(expect="read 4 cities"),
+            "read 4 cities from the on-disk database:\nLondon | UK",
+        ) is None
+
+    def test_no_sentinel_means_no_output_assertion(self) -> None:
+        """Specs without an `expect` are asserted on exit code alone — the
+        gate does not re-pin stdout that the dedicated tests own."""
+        assert _MOD.check_output("a", _MOD.RunSpec(), "anything at all") is None
+
+    def test_the_runner_hands_both_streams_to_the_output_check(self) -> None:
+        """A structural pin, because the behaviour it protects is currently
+        unreachable and that is exactly why it needs one.
+
+        `vera run` writes the fallback note to **stderr** and emits nothing
+        there on a clean exit, so with `--fn` always passed there is no
+        program that can make the note appear at exit 0 — no end-to-end
+        fixture can distinguish a runner that reads both streams from one
+        that reads only stdout.  The guard is a tripwire for the day
+        `--fn` stops being honoured, and a tripwire wired to the wrong
+        stream is no tripwire at all.  Pinning the call shape keeps it
+        armed; the same technique `tests/test_verifier_refinements.py`
+        uses for its Tier-3 disclosure sites.
+        """
+        import inspect
+
+        src = inspect.getsource(_MOD.run_corpus)
+        call = re.search(r"check_output\(([^)]*)\)", src)
+        assert call is not None, "run_corpus no longer calls check_output"
+        args = call.group(1)
+        assert "result.stdout" in args, args
+        assert "result.stderr" in args, args
+
+
 # ---------------------------------------------------------------------------
 # The runner
 # ---------------------------------------------------------------------------
@@ -320,9 +407,10 @@ class TestRunnerGoesRedOnRuntimeFailure:
     def test_named_entry_point_is_actually_invoked(
         self, tmp_path: Path
     ) -> None:
-        """A runner that ignored ``spec.fn`` would call the first export and
-        pass.  Here the first export is clean and the named one traps, so
-        only a runner that honours the spec goes red."""
+        """A runner that ignored ``spec.fn`` would run the same thing for
+        both specs below.  One entry point is clean and the other traps, so
+        only a runner that honours the spec can be green for one and red for
+        the other."""
         src = """\
 public fn first(-> @Int)
   requires(true)
@@ -342,11 +430,26 @@ public fn second(-> @Int)
 }
 """
         d = _corpus(tmp_path, {"pick": src})
-        assert _MOD.run_corpus(d, {"pick": _MOD.RunSpec()}, tmp_path) == []
+        assert _MOD.run_corpus(
+            d, {"pick": _MOD.RunSpec(fn="first")}, tmp_path
+        ) == []
         failures = _MOD.run_corpus(
             d, {"pick": _MOD.RunSpec(fn="second")}, tmp_path
         )
         assert len(failures) == 1
+
+    def test_a_renamed_entry_point_fails_rather_than_falling_back(
+        self, tmp_path: Path
+    ) -> None:
+        """The other half of the privatised-main case: a spec naming an
+        entry point the example no longer has must exit 1 on the name,
+        never quietly run whatever export happens to be first."""
+        d = _corpus(tmp_path, {"pick": _CLEAN_SRC})
+        failures = _MOD.run_corpus(
+            d, {"pick": _MOD.RunSpec(fn="renamed_away")}, tmp_path
+        )
+        assert len(failures) == 1
+        assert "renamed_away" in failures[0]
 
     def test_runner_does_not_write_into_the_corpus(
         self, tmp_path: Path
@@ -372,6 +475,60 @@ public fn main(-> @Unit)
         before = sorted(p.name for p in d.iterdir())
         assert _MOD.run_corpus(d, {"writer": _MOD.RunSpec()}, tmp_path) == []
         assert sorted(p.name for p in d.iterdir()) == before
+
+    def test_privatised_main_fails_the_gate(self, tmp_path: Path) -> None:
+        """The measured silent pass: with `main` no longer callable,
+        `vera run` picks the first export and exits 0.  Reproduced here
+        with a second export that succeeds, so exit code alone cannot
+        distinguish it — only naming the entry point, or catching the
+        fallback note, goes red."""
+        src = """\
+private fn main(-> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  1
+}
+
+public fn other(-> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  2
+}
+"""
+        d = _corpus(tmp_path, {"hidden": src})
+        failures = _MOD.run_corpus(d, {"hidden": _MOD.RunSpec()}, tmp_path)
+        assert len(failures) == 1
+        assert "hidden" in failures[0]
+
+    def test_absent_sentinel_fails_the_gate_at_exit_zero(
+        self, tmp_path: Path
+    ) -> None:
+        """The fixture-vanished shape: the program completes normally and
+        exits 0 down its graceful arm, printing something other than what
+        the success path prints."""
+        src = """\
+public fn main(-> @Unit)
+  requires(true)
+  ensures(true)
+  effects(<IO>)
+{
+  IO.print("took the graceful arm")
+}
+"""
+        d = _corpus(tmp_path, {"degraded": src})
+        spec = _MOD.RunSpec(expect="read 4 cities")
+        failures = _MOD.run_corpus(d, {"degraded": spec}, tmp_path)
+        assert len(failures) == 1
+        assert "read 4 cities" in failures[0]
+        # And the same program passes once its own output is the sentinel,
+        # so the check is reading the output rather than always failing.
+        assert _MOD.run_corpus(
+            d, {"degraded": _MOD.RunSpec(expect="graceful arm")}, tmp_path
+        ) == []
 
     def test_missing_file_for_a_spec_is_a_failure(
         self, tmp_path: Path
@@ -494,6 +651,39 @@ class TestTestingMdCrossCheck:
         errors = _MOD.check_testing_md(doc, {"a": _MOD.RunSpec()}, {})
         assert len(errors) == 1
         assert "no rows" in errors[0].lower()
+
+    def test_doc_errors_are_never_filed_under_the_coverage_count(
+        self,
+    ) -> None:
+        """Two error kinds, two labelled blocks, each counting its own.
+        Printing documentation mismatches beneath a `COVERAGE ERRORS (n)`
+        header whose n excludes them misreports both — the reader counts
+        the lines and gets a different number from the one on the header.
+        """
+        blocks = _MOD.error_blocks(
+            coverage_errors=["one coverage problem"],
+            doc_errors=["one doc problem", "another doc problem"],
+            failures=[],
+        )
+        text = "\n".join(blocks)
+        assert "COVERAGE ERRORS (1)" in text
+        assert "DOCUMENTATION MISMATCH (2)" in text
+        assert "one doc problem" in text
+        # Every reported line sits under a header, and every header's count
+        # matches the lines beneath it.
+        counted = {
+            int(m) for m in re.findall(r"\((\d+)\)", text)
+        }
+        assert counted == {1, 2}
+
+    def test_error_blocks_are_empty_when_nothing_is_wrong(self) -> None:
+        assert _MOD.error_blocks([], [], []) == []
+
+    def test_runtime_failures_get_their_own_counted_block(self) -> None:
+        blocks = _MOD.error_blocks([], [], ["boom: exited 1"])
+        text = "\n".join(blocks)
+        assert "RUNTIME FAILURES (1)" in text
+        assert "boom: exited 1" in text
 
     def test_table_parse_stops_at_the_next_heading(self) -> None:
         """A row-shaped line in a later section must not be swept in as an
