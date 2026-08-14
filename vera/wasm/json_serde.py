@@ -154,6 +154,7 @@ def _first_lone_surrogate_in_str(text: str) -> int | None:
             return code_point
     return None
 
+
 def non_finite_number_message(name: str) -> str:
     """The single sentence both runtimes return for an overflowing number.
 

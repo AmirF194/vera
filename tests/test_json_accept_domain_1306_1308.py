@@ -581,15 +581,17 @@ class TestLoneSurrogateParseRefusal1308:
         assert "json_parse:" in msg
         assert "pair" in msg
 
-    def test_message_normalises_the_hex_casing(self) -> None:
-        """One sentence per code point, whatever the input looked like.
+    def test_message_renders_the_code_point_in_uppercase_hex(self) -> None:
+        """The rendering is uppercase whatever the caller passes.
 
-        The escape can be written ``\\ud800`` or ``\\uD800``; the
-        refusal names the code point, so both spellings produce the same
-        message and the parity battery can compare across hosts without
-        a casing rule.
+        That the two *input* spellings ``\\ud800`` and ``\\uD800``
+        reach the same sentence is carried end to end by the
+        ``value_lower`` / ``value_upper`` pairs in
+        ``_LONE_SURROGATE_CASES``, which parse real text through
+        ``json_parse``; this function takes a code point, so it cannot
+        observe the input spelling at all and only the rendering is
+        left to pin.
         """
-        assert lone_surrogate_message(0xD800) == lone_surrogate_message(0xD800)
         assert "\\uD800" in lone_surrogate_message(0xD800)
         assert "\\uDFFF" in lone_surrogate_message(0xDFFF)
 
