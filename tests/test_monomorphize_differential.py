@@ -35,7 +35,9 @@ from pathlib import Path
 import pytest
 
 from vera.codegen.core import CodeGenerator
+from vera.monomorphize import Monomorphizer
 from vera.parser import parse_file
+from vera.resolver import ModuleResolver
 from vera.transform import transform
 from vera.verifier import ContractVerifier
 
@@ -407,6 +409,90 @@ def _verifier_discovered(
     return {(name, ct) for name, cts in result.items() for ct in cts}
 
 
+
+
+def _discovery_scopes(
+    program: object, source: str, path: str, modules: list[object] | None = None,
+) -> tuple[dict[str, set[frozenset[str]]], dict[str, set[frozenset[str]]]]:
+    """``(codegen, verifier)`` per-declaration discovery scopes (#1299).
+
+    Records, for every declaration each side's instantiation-discovery walk
+    enters, the set of bare names that walk resolves against.  That set is the
+    input to the ownership predicate discovery asks to decide whether a bare
+    ``get`` is an effect operation — so if the two sides compute it
+    differently they can name different clones from the same source, which is
+    the shape a coverage-only differential cannot see (both sides can be
+    wrong together and still be equal).
+    """
+    # name -> the SET of distinct NAMESPACE scopes that declaration was walked
+    # under.  Two refinements, each for a difference that is real but not the
+    # one under test:
+    #
+    # * a SET, not a single value — two modules' same-named generics reach
+    #   the walk under one pre-rename clone name (`gen$Bool`), so keeping
+    #   only the first would compare `mid1`'s scope on one side against
+    #   `base`'s on the other and call an ordering artefact a divergence;
+    # * the walked declaration's own `where` helpers are subtracted, because
+    #   codegen walks a clone both before and after `_hoist_clone_where_fns`
+    #   strips them while the verifier walks it once.  Those two scopes
+    #   differ by exactly the helper names, and both are right for what they
+    #   walk.  The helper accumulation is pinned on its own by
+    #   ``TestDiscoveryWalkContract``; what is compared here is the part that
+    #   comes from the namespace tables and the namespace SELECTION.
+    captured: dict[str, set[frozenset[str]]] = {}
+    original = Monomorphizer._collect_calls_in_node_scoped
+
+    def recording(inner, fn, *a):  # type: ignore[no-untyped-def]
+        if inner._scope_fn_names is not None:
+            own_helpers = {wfn.name for wfn in (fn.where_fns or ())}
+            captured.setdefault(fn.name, set()).add(
+                frozenset(inner._scope_fn_names) - own_helpers,
+            )
+        return original(inner, fn, *a)
+
+    Monomorphizer._collect_calls_in_node_scoped = recording  # type: ignore[method-assign]
+    try:
+        gen = CodeGenerator(
+            source=source, file=path, resolved_modules=modules or [],
+        )
+        gen.compile_program(program)  # type: ignore[arg-type]
+        codegen_scopes = dict(captured)
+
+        captured.clear()
+        verifier = ContractVerifier(
+            source=source, file=path, resolved_modules=modules or [],
+        )
+        verifier.register_program(program)  # type: ignore[arg-type]
+        verifier_scopes = dict(captured)
+    finally:
+        Monomorphizer._collect_calls_in_node_scoped = original  # type: ignore[method-assign]
+    return codegen_scopes, verifier_scopes
+
+
+def _assert_scopes_agree(
+    label: str,
+    codegen_scopes: dict[str, set[frozenset[str]]],
+    verifier_scopes: dict[str, set[frozenset[str]]],
+) -> None:
+    """Both sides resolved every shared declaration against the same names."""
+    shared = sorted(set(codegen_scopes) & set(verifier_scopes))
+    assert shared, (
+        f"[{label}] neither side entered a discovery scope for any shared "
+        f"declaration — the comparison would pass vacuously "
+        f"(codegen={sorted(codegen_scopes)}, verifier={sorted(verifier_scopes)})"
+    )
+    for name in shared:
+        cg, ver = codegen_scopes[name], verifier_scopes[name]
+        if cg == ver:
+            continue
+        cg_only = sorted(sorted(s) for s in cg - ver)
+        ver_only = sorted(sorted(s) for s in ver - cg)
+        raise AssertionError(
+            f"[{label}] discovery scopes disagree at the first divergent "
+            f"declaration {name!r}:\n"
+            f"  codegen-only scopes  = {cg_only}\n"
+            f"  verifier-only scopes = {ver_only}"
+        )
 
 
 def _cross_module_sets(
@@ -1787,3 +1873,319 @@ def test_mono_emission_order_is_deterministic(tmp_path: Path) -> None:
         f"`vera compile --wat` not byte-stable across PYTHONHASHSEED: "
         f"{len(outputs)} distinct outputs"
     )
+
+
+def test_invisible_import_does_not_name_a_clone_on_either_side() -> None:
+    """`#1299`: an INVISIBLE module declaration must name no clone, on either
+    side.
+
+    Discovery's ``MonoContext.fn_names`` is the consumer's flat registry — it
+    has to hold every symbol the guard rail resolves against, including an
+    imported module's ``private fn get``.  Read flat, it claimed a bare
+    ``get(())`` the checker had resolved to the ``State<Int>`` operation, and
+    the argument's type was taken from that invisible declaration: both sides
+    discovered ``idg<Bool>`` where the cell says ``idg<Int>``.
+
+    Both sides moved together, which is the point of asserting it HERE rather
+    than only on the runtime value.  Codegen and the verifier were WRONG
+    SYMMETRICALLY before the fix, so an equality-only differential passed; had
+    only one side been narrowed, the equality below would now fail and the
+    other side would be verifying a clone nobody emits — a false Tier-1 with
+    no runtime symptom at all.  The membership assertion is what distinguishes
+    "both right" from "both wrong".
+    """
+    mod = _resolved_module(("lib_inv",), (
+        "private fn get(@Unit -> @Bool)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ true }\n"
+        "public fn touch(@Unit -> @Bool)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ get(()) }\n"
+    ))
+    main_src = (
+        "import lib_inv(touch);\n"
+        "private forall<T> fn idg(@T -> @T)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ @T.0 }\n"
+        "public fn main(@Unit -> @Int)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{\n"
+        "  handle[State<Int>](@Int = 42007) {\n"
+        "    get(@Unit) -> { resume(@Int.0) },\n"
+        "    put(@Int) -> { resume(()) }\n"
+        "  } in {\n"
+        "    idg(get(()))\n"
+        "  }\n"
+        "}\n"
+    )
+    codegen_set, verifier_set = _cross_module_sets(main_src, [mod])
+
+    assert ("idg", ("Int",)) in codegen_set, (
+        f"the cell's type must name the clone — the checker resolved the "
+        f"operation, so `idg<Int>` is the instantiation; got "
+        f"{sorted(codegen_set)}"
+    )
+    assert ("idg", ("Bool",)) not in codegen_set, (
+        f"an invisible module declaration named the clone: {sorted(codegen_set)}"
+    )
+    assert verifier_set == codegen_set, (
+        f"verifier ({sorted(verifier_set)}) must discover exactly codegen's "
+        f"emitted set ({sorted(codegen_set)}) — narrowing one side's discovery "
+        f"scope and not the other leaves a clone verified that nobody emits"
+    )
+
+
+# --- #1299: the two sides' discovery SCOPES, not just their results ---------
+
+# Programs chosen so the comparison covers every input to the scope: the
+# PRELUDE (injected into the entry namespace at a different pass on each
+# side), CROSS-MODULE imports, the same-named-generic DIAMOND, and
+# WHERE-nesting under a generic parent.
+_SCOPE_REPO_CORPUS = [
+    "tests/conformance/ch04_pipe_module_call.vera",
+    "tests/conformance/ch08_cross_module_generic.vera",
+    "tests/conformance/ch08_module_generic_diamond.vera",
+    "tests/conformance/ch07_invisible_import_op_name.vera",
+    "tests/conformance/ch09_generic_where_helper.vera",
+]
+
+
+@pytest.mark.parametrize("rel", _SCOPE_REPO_CORPUS)
+def test_discovery_scopes_agree_between_the_two_sides(rel: str) -> None:
+    """Codegen and the verifier narrow discovery to the SAME names (#1299).
+
+    The coverage differentials above compare what each side DISCOVERS.  This
+    compares what each side discovers it FROM, and the distinction is the
+    point: two sides reading different scopes can agree on every clone for
+    every program in the corpus and still disagree on the first program where
+    a name is both a declaration and an operation — because being wrong
+    together is invisible to an equality of results.
+
+    Three inputs had to be made to agree for this to hold, and each was a
+    real divergence measured on 22 of the 22 module-using conformance
+    programs: the PRELUDE (the verifier builds its tables after
+    ``inject_prelude`` and codegen before, so the entry namespace differed by
+    the five combinators), and the per-declaration namespace of a CLONE (the
+    two sides key their origin registries differently, so the same clone was
+    walked in the entry's namespace on one side and its module's on the
+    other).
+    """
+    path = _REPO_ROOT / rel
+    source = path.read_text(encoding="utf-8")
+    program = transform(parse_file(str(path)))
+    resolved = ModuleResolver(_root=path.parent).resolve_imports(
+        program, path,
+    )
+    cg, ver = _discovery_scopes(
+        program, source, str(path), list(resolved),
+    )
+    _assert_scopes_agree(rel, cg, ver)
+
+
+# Module shapes whose clones are reached by the SHADOWED-generic worklist and
+# the nested-helper chase — walks the repo corpus above never enters, and each
+# with its own namespace-selection site on both sides.
+_SCOPE_MODULE_CASES: dict[str, tuple[str, str, tuple[str, ...]]] = {
+    # A shadowed module generic whose body reaches a normal (unshadowed) one:
+    # codegen's `_chase_normal_transitive` / the verifier's
+    # `_chase_normal_from_clone`, rooted at the shadowed clone.
+    "shadowed_reaching_normal": (
+        "sh",
+        "public forall<T> fn plain(@T -> @Int)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ 1 }\n"
+        "public forall<T> fn gen(@T -> @Int)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ plain(@T.0) }\n",
+        # The local shadow is NON-generic on purpose.  It still makes the
+        # module's `gen` qualified-only — `importer_occupied_bare_names`
+        # counts every top-level name, generic or not — which is what routes
+        # the clone through the shadowed worklist and its normal-closure
+        # chase.  A generic shadow would ALSO mint a clone under the same
+        # pre-rename name `gen$Int`, and the two sides' scope sets would then
+        # differ for a reason that has nothing to do with which namespace
+        # either picked.
+        (
+            "import sh;\n\n"
+            "private fn gen(@Int -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ 9 }\n\n"
+            "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ sh::gen(5) + gen(1) }\n"
+        ),
+    ),
+    # A `forall` where-helper under a PRIVATE module generic: the nested-helper
+    # clone walk, whose namespace comes from the recorded lexical CHAIN.
+    "nested_helper_under_private_generic": (
+        "nh",
+        # `ginner` calls a module-PRIVATE function and a top-level generic:
+        # the first makes the helper clone's scope observable (`onlyhere` is
+        # in the module's namespace and in no other), the second drives
+        # #1223's `pending_top` so the helper-clone walk actually runs.
+        "private fn onlyhere(@Unit -> @Int)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ 4 }\n"
+        "public forall<T> fn topgen(@T -> @Int)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ 5 }\n"
+        "private forall<T> fn priv_outer(@T -> @Int)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ ginner(@T.0) }\n"
+        "where {\n"
+        "  forall<U> fn ginner(@U -> @Int)\n"
+        "    requires(true) ensures(true) effects(pure)\n"
+        "  { onlyhere(()) + topgen(true) }\n"
+        "}\n"
+        "public forall<T> fn pub_entry(@T -> @Int)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ priv_outer(@T.0) }\n",
+        (
+            "import nh(pub_entry);\n"
+            "public fn main(@Unit -> @Int)\n"
+            "  requires(true) ensures(true) effects(pure)\n"
+            "{ pub_entry(7) }\n"
+        ),
+    ),
+}
+
+
+@pytest.mark.parametrize("label", sorted(_SCOPE_MODULE_CASES))
+def test_discovery_scopes_agree_on_module_clone_walks(label: str) -> None:
+    """The same equality, over the clone walks the repo corpus never reaches.
+
+    Both sides chase clones from THREE further places — the shadowed-generic
+    worklist's normal-closure chase, and the nested generic-under-generic
+    helper clone — and each picks the namespace by its own route: codegen
+    from ``_mono_clone_origins`` keyed by clone name, the verifier from
+    ``_origin_module_for_generic`` keyed by the base chain.  A shadowed clone
+    reaches those walks under its PRE-rename name, which is in neither
+    registry, so both sides take the path from the caller instead.
+    """
+    mod_name, mod_src, main_src = _SCOPE_MODULE_CASES[label]
+    mod = _resolved_module((mod_name,), mod_src)
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".vera", delete=False, encoding="utf-8",
+    ) as f:
+        f.write(main_src)
+        mp = f.name
+    try:
+        program = transform(parse_file(mp))
+        cg, ver = _discovery_scopes(program, main_src, mp, [mod])
+    finally:
+        os.unlink(mp)
+    _assert_scopes_agree(label, cg, ver)
+
+
+def test_nested_helper_clone_walks_in_its_chains_module() -> None:
+    """The verifier's nested-helper clone walk enters the CHAIN's namespace.
+
+    Asserted directly rather than through the equality above, because that
+    comparison is keyed by declaration NAME and the two sides name this one
+    clone differently by design: codegen hoists it per instantiation
+    (``mod$nh$priv_outer$Int$where$ginner$Int``) while the verifier keeps the
+    mangled bare name (``ginner$Int``).  Not a scope divergence — a naming
+    scheme difference — so the equality cell cannot see this site, and it
+    gets its own discriminator: ``onlyhere`` is module-PRIVATE, so it is in
+    the walk's scope only if the walk entered ``nh``'s namespace.
+    """
+    mod_name, mod_src, main_src = _SCOPE_MODULE_CASES[
+        "nested_helper_under_private_generic"
+    ]
+    mod = _resolved_module((mod_name,), mod_src)
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".vera", delete=False, encoding="utf-8",
+    ) as f:
+        f.write(main_src)
+        mp = f.name
+    try:
+        program = transform(parse_file(mp))
+        _cg, ver = _discovery_scopes(program, main_src, mp, [mod])
+    finally:
+        os.unlink(mp)
+
+    assert "ginner$Int" in ver, (
+        f"the nested helper's clone was never walked in a discovery scope — "
+        f"the assertion below would be vacuous; keys were {sorted(ver)}"
+    )
+    for scope in ver["ginner$Int"]:
+        assert "onlyhere" in scope, (
+            f"the nested helper's clone was walked in the wrong namespace: "
+            f"its module's private `onlyhere` is not in scope {sorted(scope)}"
+        )
+
+
+def test_codegen_helper_family_leaf_walks_in_its_parents_module() -> None:
+    """Codegen's twin of the assertion above, on the helper-family LEAF.
+
+    ``collect_generic_helper_instances`` is the one walk both sides drive
+    directly, and codegen hoists the clone it produces under a per-clone name
+    (``mod$nh$priv_outer$Int$where$ginner$Int``) where the verifier keeps the
+    mangled bare one — so the two are never a shared key and the equality
+    cell cannot compare them.  Each side therefore gets a direct
+    discriminator: ``onlyhere`` is module-private, in scope only if the leaf
+    entered ``nh``'s namespace rather than the entry program's.
+    """
+    mod_name, mod_src, main_src = _SCOPE_MODULE_CASES[
+        "nested_helper_under_private_generic"
+    ]
+    mod = _resolved_module((mod_name,), mod_src)
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".vera", delete=False, encoding="utf-8",
+    ) as f:
+        f.write(main_src)
+        mp = f.name
+    try:
+        program = transform(parse_file(mp))
+        cg, _ver = _discovery_scopes(program, main_src, mp, [mod])
+    finally:
+        os.unlink(mp)
+
+    walked = [n for n in cg if n.startswith("mod$nh$") and "$where$" in n]
+    assert walked, (
+        f"codegen walked no hoisted helper clone — the assertion would be "
+        f"vacuous; keys were {sorted(cg)}"
+    )
+    for name in walked:
+        for scope in cg[name]:
+            assert "onlyhere" in scope, (
+                f"{name} was walked in the wrong namespace: its module's "
+                f"private `onlyhere` is not in scope {sorted(scope)}"
+            )
+
+
+def test_discovery_scope_includes_the_prelude() -> None:
+    """A prelude combinator is a declaration every namespace can name.
+
+    Its dispatch-side sibling (``test_prelude_names_stay_in_every_scope``)
+    makes the same assertion about ``_scoped_fns``; without this one the
+    discovery half could drop the prelude and nothing would notice, because
+    no prelude name is spelled like an effect operation *yet*.
+    """
+    src = (
+        "private forall<T> fn idg(@T -> @T)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ @T.0 }\n\n"
+        "public fn main(@Unit -> @Int)\n"
+        "  requires(true) ensures(true) effects(pure)\n"
+        "{ idg(7) }\n"
+    )
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".vera", delete=False, encoding="utf-8",
+    ) as f:
+        f.write(src)
+        mp = f.name
+    try:
+        program = transform(parse_file(mp))
+        cg, ver = _discovery_scopes(program, src, mp)
+    finally:
+        os.unlink(mp)
+
+    assert cg and ver, "no declaration was walked in a discovery scope"
+    for label, scopes in (("codegen", cg), ("verifier", ver)):
+        for scope in scopes["main"]:
+            assert "option_map" in scope, (
+                f"{label} dropped the prelude from the discovery scope: "
+                f"{sorted(scope)}"
+            )
+    _assert_scopes_agree("prelude", cg, ver)

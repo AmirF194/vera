@@ -136,6 +136,14 @@ class MonomorphizationMixin:
             # rewrite does.  `_fn_sigs` — not `fn_ret_types` above, which
             # drops any name whose return WAT type has no Vera collapse.
             fn_names=frozenset(self._fn_sigs),
+            # #1299: and the visibility tables that narrow it per walked
+            # declaration.  `fn_names` above is the flat registry — the guard
+            # rail needs every emitted symbol in it, including a module's
+            # private helpers — so on its own it claimed a bare `get` the
+            # entry program's body meant as the operation, and discovery
+            # named a clone from the invisible declaration's return type
+            # while the rewrite named one from the cell's.
+            namespace_fn_names=getattr(self, "_namespace_tables", None),
             # #1274 (F1): every (module, name) the Pass-0 classification made
             # qualified-only, so a rerouted `deep::gen(...)` is not mistaken for
             # an instantiation of the importer's own `gen`.
@@ -251,21 +259,25 @@ class MonomorphizationMixin:
         # generic's contract lied.  These decls carry their where-helpers both
         # nested and as separate entries; `instances` is a set, so the overlap
         # costs nothing.
-        seed_decls: list[ast.FnDecl] = [
-            tld.decl for tld in program.declarations
+        # #1299: each declaration is walked in ITS OWN namespace, so a bare
+        # call is discovered against the names that body can actually see.
+        # The entry program's declarations answer to `None`; an imported body
+        # arrives already paired with its module path, which was previously
+        # discarded here.
+        seed_decls: list[tuple[tuple[str, ...] | None, ast.FnDecl]] = [
+            (None, tld.decl) for tld in program.declarations
             if isinstance(tld.decl, ast.FnDecl)
         ]
-        seed_decls.extend(
-            fdecl for _mp, fdecl in getattr(self, "_imported_fn_decls", [])
-        )
-        for decl in seed_decls:
+        seed_decls.extend(getattr(self, "_imported_fn_decls", []))
+        for mod_path, decl in seed_decls:
             if not decl.forall_vars:
-                mono.collect_calls_in_node(
-                    decl, generic_decls, ctor_to_adt, instances,
-                )
-                self._collect_eq_full_type_names(
-                    decl, mono, generic_decls, ctor_to_adt,
-                )
+                with mono.namespace_scope(mod_path):
+                    mono.collect_calls_in_node(
+                        decl, generic_decls, ctor_to_adt, instances,
+                    )
+                    self._collect_eq_full_type_names(
+                        decl, mono, generic_decls, ctor_to_adt,
+                    )
 
         # Generate monomorphized FnDecls with transitive closure.
         # After generating the first round, scan the monomorphized bodies
@@ -359,9 +371,15 @@ class MonomorphizationMixin:
                 name: set() for name in generic_decls
             }
             for body in hoisted:
-                mono.collect_calls_in_node(
-                    body, generic_decls, ctor_to_adt, found,
-                )
+                # #1299: a clone belongs to the module its base was declared
+                # in, which `_mono_clone_origins` records (`None` for a local
+                # one — the entry namespace).
+                with mono.namespace_scope(
+                    self._mono_clone_origins.get(body.name),
+                ):
+                    mono.collect_calls_in_node(
+                        body, generic_decls, ctor_to_adt, found,
+                    )
             for t_name, t_types in found.items():
                 for t_ct in sorted(t_types):  # deterministic (see the seed)
                     if (t_name, t_ct) not in seen:
@@ -425,9 +443,12 @@ class MonomorphizationMixin:
             transitive: dict[str, set[tuple[str, ...]]] = {
                 name: set() for name in generic_decls
             }
-            mono.collect_calls_in_node(
-                mono_fn, generic_decls, ctor_to_adt, transitive,
-            )
+            with mono.namespace_scope(
+                self._mono_clone_origins.get(mono_fn.name),
+            ):
+                mono.collect_calls_in_node(
+                    mono_fn, generic_decls, ctor_to_adt, transitive,
+                )
             for t_name, t_types in transitive.items():
                 for t_ct in sorted(t_types):  # deterministic order (see seed)
                     if (t_name, t_ct) not in seen:
@@ -559,9 +580,18 @@ class MonomorphizationMixin:
         emitted: set[tuple[str, tuple[str, ...]]] = set()
         scan: list[ast.FnDecl] = list(bodies)
         while scan:
-            found = mono.collect_generic_helper_instances(
-                by_name, scan, ctor_to_adt,
-            )
+            # #1299: the helper family's bodies are the PARENT clone's code,
+            # so their bare names resolve in the parent's namespace — the
+            # same `origin` the alias env below is built from.  This leaf is
+            # the discovery walk BOTH sides drive directly; left unscoped it
+            # fell back to the flat table on both at once, so the two agreed
+            # while both typed a bare `get(())` from an invisible module
+            # declaration.  Agreeing wrongly is invisible to a differential,
+            # which is why this one is pinned against the CHECKER's answer.
+            with mono.namespace_scope(origin):
+                found = mono.collect_generic_helper_instances(
+                    by_name, scan, ctor_to_adt,
+                )
             scan = []
             for gen_name, concretes in found.items():
                 gen = by_name[gen_name]
@@ -829,6 +859,7 @@ class MonomorphizationMixin:
             # back onto this shadowed worklist.
             self._chase_normal_transitive(
                 clone, generic_decls, ctor_to_adt, mono, mono_decls, seen,
+                root_namespace=path,
             )
             trans_shadow: dict[str, set[tuple[str, ...]]] = {
                 name: set() for name in decls_by_name
@@ -836,7 +867,9 @@ class MonomorphizationMixin:
             # #1274 (F1): this scan is keyed on THIS module's own generics, so a
             # `path::sibling(...)` here is the entry meant — see
             # `Monomorphizer.shadowed_module_scope`.
-            with mono.shadowed_module_scope(path):
+            # #1299: and its bare names resolve in that module's namespace too
+            # — this clone's body is that module's code.
+            with mono.shadowed_module_scope(path), mono.namespace_scope(path):
                 mono.collect_calls_in_node(
                     clone, decls_by_name, ctor_to_adt, trans_shadow,
                 )
@@ -887,6 +920,7 @@ class MonomorphizationMixin:
         mono: Monomorphizer,
         mono_decls: list[ast.FnDecl],
         seen: set[tuple[str, tuple[str, ...]]],
+        root_namespace: tuple[str, ...] | None = None,
     ) -> None:
         """Emit the transitive closure of normal (unshadowed) clones reachable
         from a clone body scanned during shadowed emission.
@@ -897,16 +931,27 @@ class MonomorphizationMixin:
         emitted — an ``unknown func`` at run.  This re-runs the normal path's
         body-scan worklist rooted at ``root_fn`` (itself already emitted),
         feeding the shared ``seen`` set so nothing is emitted twice.
+
+        *root_namespace* (#1299) is the module ``root_fn`` belongs to.  It is
+        passed rather than looked up because a shadowed clone reaches here
+        under its PRE-rename name (``gen$Bool``, not
+        ``mod$lib$gen$Bool``), which is in no origin registry — and the
+        caller has the path in hand.  Clones reached transitively from it get
+        their own base's origin, which they are registered under.
         """
-        stack: list[ast.FnDecl] = [root_fn]
+        stack: list[tuple[ast.FnDecl, tuple[str, ...] | None]] = [
+            (root_fn, root_namespace),
+        ]
         while stack:
-            fn = stack.pop()
+            fn, namespace = stack.pop()
             transitive: dict[str, set[tuple[str, ...]]] = {
                 name: set() for name in generic_decls
             }
-            mono.collect_calls_in_node(
-                fn, generic_decls, ctor_to_adt, transitive,
-            )
+            # #1299: each clone in ITS base's namespace (see the sibling scan).
+            with mono.namespace_scope(namespace):
+                mono.collect_calls_in_node(
+                    fn, generic_decls, ctor_to_adt, transitive,
+                )
             for t_name, t_types in transitive.items():
                 for t_ct in sorted(t_types):
                     if (t_name, t_ct) in seen:
@@ -928,7 +973,9 @@ class MonomorphizationMixin:
                     # concrete-free `_emitted_instances` key matching the verifier.
                     self._clone_base_chain[t_fn.name] = t_name
                     self._emitted_instances.add((t_name, t_ct))
-                    stack.append(t_fn)
+                    stack.append(
+                        (t_fn, self._mono_clone_origins.get(t_fn.name)),
+                    )
 
     @staticmethod
     def _mono_shadowed_name(

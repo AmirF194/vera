@@ -71,9 +71,10 @@ def bare_call_denotes_user_fn(
       commutativity walk, so the row it reasons about is the row the
       resolution above bound;
     * ``_translate_call`` in :mod:`vera.wasm.calls` — the bare dispatch, over
-      codegen's flat ``_fn_sigs`` mirror (``_known_fns``): a user-owned name
-      skips the clause-inline registry, the host-cell intrinsics, and the
-      #1233 addressability gate, and lowers as the ordinary call it is;
+      codegen's ``_scoped_fns`` (``_fn_sigs`` narrowed to the compiling
+      declaration's lexical scope, #1299): a user-owned name skips the
+      clause-inline registry, the host-cell intrinsics, and the #1233
+      addressability gate, and lowers as the ordinary call it is;
     * the three bare-``FnCall`` inference sites in :mod:`vera.wasm.inference`
       and :mod:`vera.wasm.context`, so a shadowed name is typed from the
       function table rather than from the operation's result registry;
@@ -83,7 +84,10 @@ def bare_call_denotes_user_fn(
       owns the name;
     * :class:`~vera.monomorphize.Monomorphizer`'s discovery walk, over
       ``MonoContext.fn_names``, so the clone it discovers for a ``get(())``
-      in a value position is the clone the rewrite emits.
+      in a value position is the clone the rewrite emits.  That table is
+      program-wide rather than per-scope, so a name it must not claim is
+      kept OUT of it instead: a qualified-only module generic contributes
+      no bare ``_fn_sigs`` entry at all (#1281).
 
     What this deliberately does NOT gate is the op REGISTRIES themselves.
     "Whose name is this?" and "which cell does the operation reach?" are two
@@ -94,33 +98,33 @@ def bare_call_denotes_user_fn(
     reaching their cell in a program that also declares ``fn get``.
 
     *user_fn_names* is a membership view, not a fixed set, so each consumer
-    supplies the table it actually resolves against — the checker a lexical
-    scope walk, codegen its flat signature keys.  One rule over two tables
-    is one answer only where the tables agree, and they do not everywhere:
-    codegen's ``_fn_sigs`` keys a name the call site cannot SEE under its
-    BARE name, so this predicate answers "user-owned" where the checker
-    resolved the operation.  Three routes are demonstrated — a ``private fn
-    get`` in an imported module, a public one a selective import excludes,
-    and a ``where`` helper of a ``forall<T>`` parent — and all three are one
-    defect, tracked as #1299.  It is a property of the TABLE rather than of
-    the rule, and the fix belongs to ``_known_fns``, which has to carry the
-    names visible in the compiling declaration's LEXICAL scope.
+    supplies the table it actually resolves against.  One rule over two
+    tables is one answer only where both tables are SCOPES, and codegen's
+    was not: it passed a flat mirror of every symbol the whole compilation
+    absorbed, which keys a name the call site cannot SEE under its bare
+    name, so this predicate answered "user-owned" where the checker had
+    resolved the operation (#1299).  Codegen now passes ``_scoped_fns`` —
+    ``_fn_sigs`` narrowed to the compiling declaration's lexical scope by
+    ``CodeGenerator._scoped_fn_names`` — while the flat registry stays
+    behind ``_known_fns`` for the guard rail, which asks the different and
+    genuinely flat question "does this resolved target have a symbol?".
 
-    The ``where``-helper route is the one worth spelling out, because the
-    other two make it tempting to assume helpers are safe.  Under a
-    NON-generic parent they are: #1015 and the non-generic hoist move the
-    helper out of the bare namespace before registration (a local one is
-    ``holder$where$get``) and rewrite its holder's call sites with it, so it
-    shadows the name in its own body and nowhere else — the checker's
-    lexical answer exactly.  Under a GENERIC parent the helper keeps a bare
-    ``_fn_sigs`` key beside its clone-qualified one (measured: ``helper``
-    and ``id`` in ``tests/conformance/ch09_generic_where_helper.vera``), so
-    a sibling's bare ``get(())`` under a ``State`` row is claimed by a
-    helper it cannot see.  That route is always LOUD rather than silently
-    wrong, and for a reason worth keeping: the bare key exists in the
-    signature table while no bare SYMBOL is emitted — the helper is only
-    ever ``holder$Bool$where$get`` — so the call lands on ``unknown func:
-    failed to find name $get`` at WAT assembly, with no E-code.
+    Four routes reached that divergence, and the narrowing closes them
+    together because they were one defect: an imported module's ``private
+    fn get``, a public one a selective import excludes, a ``where`` helper
+    of a ``forall<T>`` parent, and — through the INTRINSIC gate rather than
+    the op one — the ability operation ``show``, which E151 does not
+    reserve.  The ``where``-helper route is the one worth spelling out,
+    because the other three make it tempting to think module scope is
+    enough.  Under a NON-generic parent a helper is safe: #1015 and the
+    non-generic hoist move it out of the bare namespace before registration
+    (a local one is ``holder$where$get``) and rewrite its holder's call
+    sites with it, so it shadows the name in its own body and nowhere else.
+    Under a GENERIC parent it keeps a bare ``_fn_sigs`` key beside its
+    clone-qualified one (measured: ``helper`` and ``id`` in
+    ``tests/conformance/ch09_generic_where_helper.vera``) — and it IS in
+    the module, so only the LEXICAL rule excludes it from a sibling's
+    scope while leaving it in its own parent's.
     """
     return name in user_fn_names
 

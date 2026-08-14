@@ -757,6 +757,112 @@ def module_qualified_generic_targets(
     return targets
 
 
+@dataclass(frozen=True)
+class NamespaceFnNames:
+    """Which bare function names each namespace can NAME (#1299/#1281).
+
+    ``by_namespace`` maps a module path — ``None`` for the entry program — to
+    the bare SOURCE function names a body compiled in that namespace may
+    resolve a bare call to: its own top-level declarations, whatever their
+    visibility, plus the PUBLIC declarations its OWN import list admits.
+    That is the checker's view of every module, and imports are read per
+    namespace and never inherited, so a module reached only transitively
+    from the entry program contributes nothing to the entry's set (spec
+    §8.6.4) while still holding everything its own imports allow.
+
+    ``ambiguous`` is the bare names some namespace could resolve to more than
+    one dependency's declaration, with no declaration of its own to settle it
+    — the shape spec §8.5 leaves undefined (#1304).
+
+    One derivation because there are three consumers and they must not
+    disagree: codegen narrows its per-declaration ownership table with it
+    (``_scoped_fn_names``), codegen's E608 rail reads the ambiguity half, and
+    the verifier narrows discovery with it.  Two walks over the same imports
+    could differ about a filter or a visibility, and the two sides of the
+    #732 differential would then discover different clones.
+    """
+
+    by_namespace: Mapping[tuple[str, ...] | None, frozenset[str]]
+    ambiguous: frozenset[str]
+
+    def visible(self, path: tuple[str, ...] | None) -> frozenset[str]:
+        """The names *path*'s namespace can NAME; empty for an unknown path."""
+        return self.by_namespace.get(path, frozenset())
+
+
+def namespace_fn_names(
+    entry: ast.Program,
+    modules: Iterable[tuple[tuple[str, ...], ast.Program]],
+    prelude: Iterable[str] = (),
+) -> NamespaceFnNames:
+    """Build the per-namespace visibility tables (see :class:`NamespaceFnNames`).
+
+    Reads each program's declarations as written.  The Pass-0 transforms (the
+    #991 hoist, the #1014 qualification) only ADD ``$``-qualified top-level
+    declarations, and ``$`` cannot occur in a Vera identifier
+    (``LOWER_IDENT``), so no bare source name enters or leaves either set —
+    which is what lets codegen call this on its post-transform programs and
+    the verifier on its pre-transform ones and still get the same answer.
+
+    *prelude* is the injected combinators' names.  They belong to EVERY
+    namespace — a module's body may call ``option_map`` exactly as the entry
+    program may — and they are supplied separately rather than read off the
+    entry program because the two consumers inject them at different passes:
+    the verifier's discovery copy is post-``inject_prelude`` while codegen's
+    tables are built at Pass 0.5, before the prelude is registered.  Passing
+    them makes the result independent of WHEN it is called, which is the
+    property the two sides need and the one
+    ``test_discovery_scopes_agree_between_the_two_sides`` checks.  They also
+    join the "declared here" set for the ambiguity test, so a program whose
+    entry declarations already contain them (the verifier's) and one whose do
+    not (codegen's) still answer identically.
+    """
+    public_fns: dict[tuple[str, ...], frozenset[str]] = {}
+    module_list = list(modules)
+    prelude_names = frozenset(prelude)
+    for path, prog in module_list:
+        public_fns[path] = frozenset(
+            tld.decl.name for tld in prog.declarations
+            if isinstance(tld.decl, ast.FnDecl)
+            and (tld.visibility or "private") == "public"
+        )
+
+    ambiguous: set[str] = set()
+
+    def visible(prog: ast.Program) -> frozenset[str]:
+        own = {
+            tld.decl.name for tld in prog.declarations
+            if isinstance(tld.decl, ast.FnDecl)
+        } | prelude_names
+        names = set(own)
+        # Which dependency each importable name came from.  A name this
+        # namespace declares ITSELF is never ambiguous however many
+        # dependencies also export it — the local declaration owns every bare
+        # call here (spec §8.5.2).
+        sources: dict[str, set[tuple[str, ...]]] = {}
+        for imp in prog.imports:
+            dep = tuple(imp.path)
+            exported = public_fns.get(dep)
+            if exported is None:
+                continue
+            for name in exported:
+                if imp.names is None or name in imp.names:
+                    names.add(name)
+                    sources.setdefault(name, set()).add(dep)
+        ambiguous.update(
+            name for name, deps in sources.items()
+            if len(deps) > 1 and name not in own
+        )
+        return frozenset(names)
+
+    by_namespace: dict[tuple[str, ...] | None, frozenset[str]] = {
+        None: visible(entry),
+    }
+    for path, prog in module_list:
+        by_namespace[path] = visible(prog)
+    return NamespaceFnNames(by_namespace, frozenset(ambiguous))
+
+
 def public_generic_names(module_program: ast.Program) -> set[str]:
     """The module's PUBLIC top-level generic names — what a dependent can name
     at all, before that dependent's own import filter narrows it."""
@@ -1380,6 +1486,17 @@ class MonoContext:
     alias_env: AliasEnv = EMPTY_ALIAS_ENV
     # #1207: the consumer's own function-name table (see the docstring).
     fn_names: frozenset[str] = frozenset()
+    # #1299: the per-namespace visibility tables ``fn_names`` is NARROWED by
+    # while a declaration is being walked.  ``fn_names`` is flat — every
+    # symbol the consumer registered, including a module's private helpers —
+    # so on its own it answers "user-owned" for a name the walked body cannot
+    # see, and discovery then names a clone from that invisible declaration's
+    # return type while the WASM rewrite names one from the operation's.  The
+    # narrowing is entered per declaration by :meth:`namespace_scope`, which
+    # each consumer wraps its seed walk in.  Defaulted ``None``: a consumer
+    # that has not been threaded, or a walk entered outside any scope, keeps
+    # the flat answer — never an EMPTY one, which would claim no name at all.
+    namespace_fn_names: NamespaceFnNames | None = None
     # #1274 (F1): ``(module path, name)`` pairs whose generic is QUALIFIED-ONLY
     # — reached under ``mod$<path>$name``, never under the bare name.  A
     # ``ModuleCall`` to one of these must NOT be discovered as an instantiation
@@ -1432,6 +1549,60 @@ class Monomorphizer:
         # keyed on, or ``None`` outside such a scan.  Walk state, like the two
         # above it — see `shadowed_module_scope`.
         self._shadowed_scan_path: tuple[str, ...] | None = None
+        # #1299: the bare names visible where the walk currently is — the
+        # namespace's own (see `namespace_scope`) plus the `where` helpers of
+        # every enclosing function, accumulated by `collect_calls_in_node`
+        # exactly as `_scope_type_vars` is.  ``None`` means no scope was
+        # entered, and `_bare_call_is_user_fn` then answers from the flat
+        # `ctx.fn_names` alone — the pre-#1299 behaviour.
+        self._scope_fn_names: frozenset[str] | None = None
+
+    @contextlib.contextmanager
+    def namespace_scope(
+        self, path: tuple[str, ...] | None,
+    ) -> Iterator[None]:
+        """Walk declarations that resolve bare names in *path*'s namespace.
+
+        Inside this scope :meth:`_bare_call_is_user_fn` narrows the consumer's
+        flat ``fn_names`` to what that namespace can actually NAME, so an
+        imported module's private declaration stops claiming a bare ``get``
+        the entry program's body meant as the ``State`` operation (#1299).
+
+        A no-op when the consumer supplied no visibility tables: the walk then
+        keeps answering from the flat table, which is what every consumer did
+        before this existed.  ``path=None`` is the entry program's namespace,
+        which is a real answer rather than an absence — a body there sees the
+        entry's own declarations and its direct imports' public, in-filter
+        names, and nothing else.
+        """
+        if self.ctx.namespace_fn_names is None:
+            yield
+            return
+        saved = self._scope_fn_names
+        self._scope_fn_names = self.ctx.namespace_fn_names.visible(path)
+        try:
+            yield
+        finally:
+            self._scope_fn_names = saved
+
+    def _bare_call_is_user_fn(self, name: str) -> bool:
+        """Discovery's leg of :func:`~vera.slots.bare_call_denotes_user_fn`.
+
+        The consumer's own table AND the lexical scope the walk is in — a
+        narrowing, never a widening, so a consumer that entered no scope (or
+        supplied no tables) gets exactly the flat answer it got before.
+
+        Every ``$``-bearing name is admitted whatever the scope says, on the
+        same reasoning as codegen's ``_scoped_fn_names``: ``$`` is outside
+        ``LOWER_IDENT``, so a mangled name is never what a bare source call
+        spells, and a clone name reaching here after a rewrite must keep
+        answering as the declaration it was minted from.
+        """
+        if not bare_call_denotes_user_fn(name, self.ctx.fn_names):
+            return False
+        if self._scope_fn_names is None or "$" in name:
+            return True
+        return name in self._scope_fn_names
 
     @contextlib.contextmanager
     def shadowed_module_scope(
@@ -1512,6 +1683,25 @@ class Monomorphizer:
         # so the set accumulates down the nesting exactly as the binders do.
         saved_vars = self._scope_type_vars
         self._scope_type_vars = saved_vars | frozenset(fn.forall_vars or ())
+        # #1299: and this function's own `where` helpers join the visible-name
+        # scope for the same subtree, for the same reason the binders do — a
+        # helper is in its parent's scope and in its siblings', and in nobody
+        # else's.  Only inside a `namespace_scope`: outside one the walk keeps
+        # the flat answer, and starting to accumulate would silently turn that
+        # into an almost-empty scope.
+        #
+        # The walked function's OWN name is deliberately NOT added.  A
+        # top-level one is already in its namespace's set, and a helper or a
+        # clone is `$`-qualified and admitted by that rule — so adding it
+        # changes no answer, and it made the scope carry the enclosing
+        # CLONE's name, which differs between the two sides for one helper
+        # walked under two instantiations.  Textually divergent, semantically
+        # identical, and the differential could not tell those apart.
+        saved_names = self._scope_fn_names
+        if saved_names is not None:
+            self._scope_fn_names = saved_names | {
+                wfn.name for wfn in (fn.where_fns or ())
+            }
         try:
             self._collect_calls_in_node_scoped(
                 fn, generic_decls, ctor_to_adt, instances,
@@ -1519,6 +1709,7 @@ class Monomorphizer:
         finally:
             self._op_result_types = saved_ops
             self._scope_type_vars = saved_vars
+            self._scope_fn_names = saved_names
 
     def _binds_a_type_var(
         self,
@@ -2173,9 +2364,14 @@ class Monomorphizer:
         # the handler-expression merge did not, so a user `fn get` called
         # under a `handle[State<T>]` named the CELL's clone here and the
         # user function's return type there.
+        # #1299: over the LEXICAL scope the walk is in, not the flat table.
+        # An imported module's `private fn get` is in `ctx.fn_names` — the
+        # guard rail needs its symbol — and claimed this call site, so
+        # discovery named a clone from that declaration's return type
+        # (`idg$Bool`) while the WASM rewrite named one from the cell's
+        # (`idg$Int`): check-green source that failed to load.
         if (isinstance(expr, ast.FnCall)
-                and not bare_call_denotes_user_fn(
-                    expr.name, self.ctx.fn_names)
+                and not self._bare_call_is_user_fn(expr.name)
                 and expr.name in self._op_result_types):
             return self._op_result_types[expr.name]
         if isinstance(expr, ast.FnCall) and generic_decls:

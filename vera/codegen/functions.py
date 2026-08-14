@@ -238,11 +238,17 @@ class FunctionCompilationMixin:
         module_tables: (
             tuple[SpanTypeTable | None, SpanTypeTable | None] | None
         ) = None,
+        where_scope: frozenset[str] = frozenset(),
     ) -> str | None:
         """Compile a single function to WAT.
 
         Returns the WAT function string, or None if not compilable
         (with a warning diagnostic).
+
+        *where_scope* (#1299) is the ``where``-helper names lexically in
+        scope in *decl*'s body; with the namespace this compile is running
+        under it decides which bare names the emitted body may treat as
+        denoting a user declaration.  See ``_scoped_fn_names``.
 
         *imported* is True when *decl* is an imported module body compiled into
         this flat WASM module (Pass 2.5 / 2.6).  The checker's resolved- /
@@ -442,6 +448,10 @@ class FunctionCompilationMixin:
                 self, "_generic_constrained_vars", None),
             ctor_to_adt=ctor_to_adt,
             known_fns=set(self._fn_sigs.keys()),
+            # #1299: the ownership predicate's table is the LEXICAL one —
+            # `known_fns` above stays flat for the guard rail, which asks
+            # whether a resolved target has a symbol, not whose name it is.
+            scoped_fns=self._scoped_fn_names(where_scope, decl.name),
             ctor_adt_tp_indices=getattr(self, "_ctor_adt_tp_indices", None),
             adt_tp_counts=getattr(self, "_adt_tp_counts", None),
             adt_tp_param_names=getattr(self, "_adt_tp_param_names", None),

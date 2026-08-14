@@ -13,7 +13,11 @@ from vera.monomorphize import (
     resolve_fn_type_alias,
     substitute_type_vars,
 )
-from vera.slots import family_fallback_name, type_expr_slot_name
+from vera.slots import (
+    bare_call_denotes_user_fn,
+    family_fallback_name,
+    type_expr_slot_name,
+)
 from vera.wasm.helpers import _element_wasm_type, state_type_arg
 
 # `substitute_type_vars` was relocated to `vera.monomorphize` (the codegen-free
@@ -1341,8 +1345,19 @@ class InferenceMixin:
         the clone-naming path must consult THIS method instead.  Returns
         ``None`` for builtins, generics, and fns with no NamedType return, so
         the caller falls back to ``_infer_vera_type``.
+
+        Gated on the #1284 ownership predicate over the LEXICAL scope
+        (#1299).  ``_fn_ret_type_exprs`` is flat — it holds every declaration
+        the compilation absorbed, including an imported module's private one
+        — and this override BEATS ``_infer_vera_type``, so an invisible
+        ``fn get(@Unit -> @Bool)`` named the clone ``idg$Bool`` at a call site
+        where the general inference had correctly answered the ``State<Int>``
+        cell's ``Int``.  A name no visible declaration owns contributes no
+        declared return: the caller falls back, and reaches the operation.
         """
         if call.name in self._generic_fn_info:
+            return None
+        if not bare_call_denotes_user_fn(call.name, self._scoped_fns):
             return None
         return declared_return_clone_key(
             self._fn_ret_type_exprs.get(call.name))

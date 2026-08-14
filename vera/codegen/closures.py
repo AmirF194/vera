@@ -175,6 +175,12 @@ class ClosureLiftingMixin:
                 lifted_wat = self._compile_lifted_closure(
                     closure_id, anon_fn, captures,
                     collect_pending=inner_pending,
+                    # #1299: a closure body is lexically INSIDE the function
+                    # being compiled, so it resolves bare names in that
+                    # function's scope.  Carried from the parent context
+                    # rather than rebuilt: the lift has no declaration to
+                    # derive it from, and a rebuilt copy could drift.
+                    scoped_fns=ctx._scoped_fns,
                 )
             except CodegenInvariantError:
                 # #657: a closure-body invariant (codegen bug) aborts the
@@ -290,6 +296,7 @@ class ClosureLiftingMixin:
             list[tuple[ast.AnonFn, list[tuple[str, int, str]], int]]
             | None
         ) = None,
+        scoped_fns: set[str] | None = None,
     ) -> str | None:
         """Compile an anonymous function to a module-level WASM function.
 
@@ -328,6 +335,11 @@ class ClosureLiftingMixin:
             generic_fn_info=getattr(self, "_generic_fn_info", None),
             ctor_to_adt=ctor_to_adt,
             known_fns=set(self._fn_sigs.keys()),
+            # #1299: the enclosing function's lexical scope, threaded from
+            # its context by `_lift_pending_closures`.  ``None`` (a caller
+            # that lifts outside a function compile) falls back to the flat
+            # registry inside `WasmContext`, which is the pre-#1299 answer.
+            scoped_fns=scoped_fns,
             ctor_adt_tp_indices=getattr(self, "_ctor_adt_tp_indices", None),
             adt_tp_counts=getattr(self, "_adt_tp_counts", None),
             adt_tp_param_names=getattr(self, "_adt_tp_param_names", None),

@@ -17,6 +17,7 @@ from vera.monomorphize import (
     importer_occupied_bare_names,
     module_qualified_generic_names,
     module_qualified_generic_targets,
+    namespace_fn_names,
     public_generic_names,
 )
 
@@ -263,6 +264,19 @@ class CrossModuleMixin:
                 mod.program,
             )
 
+        # #1281: every module's top-level generic names, whatever their
+        # visibility.  The collision rail below needs to know that BOTH sides
+        # of a name clash are generics before the ownership classification
+        # can say anything about them — a non-generic is emitted under the
+        # bare `$name` in Pass 2.5 and collides for real.
+        generics_by_path: dict[tuple[str, ...], frozenset[str]] = {
+            mod.path: frozenset(
+                tld.decl.name for tld in mod.program.declarations
+                if isinstance(tld.decl, ast.FnDecl) and tld.decl.forall_vars
+            )
+            for mod in self._resolved_modules
+        }
+
         # Provenance tracking for collision detection
         fn_provenance: dict[str, tuple[str, ...]] = {}
         adt_provenance: dict[str, tuple[str, ...]] = {}
@@ -348,7 +362,10 @@ class CrossModuleMixin:
                 # Collision detection: same name from different module
                 if fn_name in fn_provenance:
                     prev_path = fn_provenance[fn_name]
-                    if prev_path != mod.path:
+                    if prev_path != mod.path and not self._generics_cannot_collide(
+                        fn_name, prev_path, mod.path,
+                        generics_by_path, qualified_by_path,
+                    ):
                         self._emit_collision_error(
                             program, fn_name, "Function",
                             prev_path, mod.path, "E608",
@@ -357,16 +374,31 @@ class CrossModuleMixin:
                 else:
                     fn_provenance[fn_name] = mod.path
 
-                # For bare-call injection: only public + in import filter
                 is_public = vis_map.get(fn_name) == "public"
                 in_filter = (
                     name_filter is None or fn_name in name_filter
                 )
-                if is_public and in_filter:
+                # Every module function — public or private, in filter or not
+                # — is registered, so the guard rail sees the symbols Pass
+                # 2.5/2.6 emit.  #1281: except a QUALIFIED-ONLY generic,
+                # which emits nothing under its bare name.  Its clones are
+                # `mod$<path>$name$…`, so the bare key names no symbol; what
+                # it would do is hand a per-NAME consumer — the #1207
+                # `MonoContext.fn_names` shadow guard, the return-type
+                # registries derived from these keys — whichever module
+                # happened to register first.
+                #
+                # DEFENCE IN DEPTH, not the thing that closes that: #1299's
+                # scope narrowing reaches the same consultors through the
+                # call site, and reverting this line and its
+                # `_fn_ret_type_exprs` twin leaves every suite and the whole
+                # conformance corpus green.  It is kept because four
+                # consumers read these tables per NAME and only their current
+                # internals stop each from picking one, and it is pinned
+                # structurally — on this registry — in
+                # tests/test_module_generic_collision_1281.py.
+                if fn_name not in module_own_qualified:
                     self._fn_sigs.setdefault(fn_name, sig)
-                # All module functions (including private helpers) get
-                # registered so the guard rail sees them as known
-                self._fn_sigs.setdefault(fn_name, sig)
                 # #890: track importer visibility.  A direct import contributes
                 # its public, in-filter names to the importer's namespace; a
                 # transitive-only module contributes nothing visible here even
@@ -409,7 +441,23 @@ class CrossModuleMixin:
                 canonical_ret = canonicalize_type_aliases(
                     ret_te, temp._type_aliases, temp._type_alias_params,
                 )
-                self._fn_ret_type_exprs.setdefault(fn_name, canonical_ret)
+                # #1281: the bare key is withheld from a QUALIFIED-ONLY
+                # generic here for the same reason as in `_fn_sigs` above,
+                # and with the same standing — DEFENCE IN DEPTH.  The
+                # invisible-declaration shape this registry can produce (the
+                # rewrite naming `idg$Bool` from a module generic's declared
+                # return where discovery named the cell's `idg$Int`, dropping
+                # the caller with [E602]) is closed by #1299's gate on
+                # `_declared_return_clone_name`, which asks the ownership
+                # predicate before reading this table at all.  Reverting this
+                # line changes no suite and no conformance program; it is
+                # kept and pinned structurally, in its own cell, separate
+                # from the `_fn_sigs` one so a mutation to either cannot hide
+                # behind the other.  The per-owner
+                # `_module_fn_ret_type_exprs` key below is unaffected; a
+                # `m::f` spelling still classifies by its resolved target.
+                if fn_name not in module_own_qualified:
+                    self._fn_ret_type_exprs.setdefault(fn_name, canonical_ret)
                 # #841 (PR #842 review round 2): also key by (module
                 # path, name) so a module-qualified await classifies by
                 # the RESOLVED target's return type.  The bare-name
@@ -784,6 +832,115 @@ class CrossModuleMixin:
         self._namespace_declared_adts = frozenset(main_own).union(
             *declared_adts.values()) if declared_adts else frozenset(main_own)
         return members
+
+    def _generics_cannot_collide(
+        self,
+        name: str,
+        path_a: tuple[str, ...],
+        path_b: tuple[str, ...],
+        generics_by_path: dict[tuple[str, ...], frozenset[str]],
+        qualified_by_path: dict[tuple[str, ...], set[str]],
+    ) -> bool:
+        """May two modules' same-named declarations share the namespace? (#1281)
+
+        E608 exists because the flat compilation strategy emits every
+        imported function under one WASM name.  A GENERIC emits nothing under
+        its bare name — only clones — and since #1274 the clone namespace is
+        chosen per OWNER: one that owns the importer's bare name mangles to
+        ``gen$Bool``, and one that does not (private, outside the filter,
+        shadowed by a local, or reached only transitively) mangles to
+        ``mod$<path>$gen$Bool``.  Two generics in different owner namespaces
+        overwrite nothing, and the rail refused them anyway.
+
+        Three conditions, and all three are load-bearing:
+
+        * **both declarations are top-level generics.**  A non-generic is
+          emitted under the bare ``$name`` in Pass 2.5 whatever its
+          visibility, so two of them collide for real.
+        * **at most one owns the bare name.**  Two directly-imported,
+          in-filter, public, unshadowed generics both mangle to ``gen$Bool``
+          — the collision the rail is actually for.
+        * **no namespace can name both.**  A module importing two
+          dependencies that each export ``gen``, and declaring none itself,
+          resolves its own bare ``gen`` to one of them — and the language has
+          not said which.  Spec §8.5 covers local-shadows-import and
+          prescribes selective import for a two-import clash; it defines no
+          order between the two.  Nor does the implementation: the CHECKER's
+          pick is not an order at all but a set-iteration artefact, and the
+          identical program accepts on one run and reports ``body has type
+          Bool`` on the next (measured 4/4 over eight runs; stable under a
+          fixed ``PYTHONHASHSEED`` and varying with the seed, and identical
+          whichever textual order the two imports are written in).  Codegen's
+          ``module_qualified_generic_targets`` loop, by contrast, IS
+          positional — last import wins.  Compiling the shape would therefore
+          pick a body by coin-flip, and the two generics are qualified-only
+          from the entry's point of view, so the ownership classification
+          alone would relax it.  The loud refusal stays until the rule is
+          decided (#1304), which is what §8.5's design note already tells the
+          author to do (name the import).
+
+        The ambiguity set comes from :meth:`_collect_namespace_fn_names`, the
+        same walk that decides which names each namespace can see for #1299 —
+        one derivation of one visibility rule, so the rail cannot relax
+        somewhere the scope says it must not.
+        """
+        if not (
+            name in generics_by_path.get(path_a, frozenset())
+            and name in generics_by_path.get(path_b, frozenset())
+        ):
+            return False
+        if name in self._ambiguous_imported_fn_names:
+            return False
+        owners = sum(
+            name not in qualified_by_path.get(path, set())
+            for path in (path_a, path_b)
+        )
+        return owners <= 1
+
+    def _collect_namespace_fn_names(self, program: ast.Program) -> None:
+        """Which FUNCTION names each namespace can name (#1299).
+
+        The function-side twin of :meth:`_build_adt_membership`, and the same
+        rule: a namespace holds its OWN top-level declarations, whatever
+        their visibility, plus what it IMPORTS — public only, and only the
+        names an explicit import list mentions.  That is the checker's view
+        of every module, rebuilt from the declarations codegen already holds,
+        so an unimported (or private) sibling's function is as opaque on this
+        side as it is on the checker's.  Imports are read PER namespace and
+        never inherited, so a module reached only transitively from the entry
+        program contributes nothing to the entry's set (spec §8.6.4) while
+        still holding everything ITS own import list allows.
+
+        Three consumers read the result, which is why the derivation is the
+        SHARED :func:`~vera.monomorphize.namespace_fn_names` rather than a
+        local walk: :meth:`~CodeGenerator._scoped_fn_names` narrows the flat
+        ``_fn_sigs`` registry with it before the #1284 ownership predicate
+        reads it, #1281's collision rail reads the ambiguity half, and the
+        VERIFIER narrows its discovery with the same tables (#1299).  Two
+        walks over the same imports could disagree about a filter or a
+        visibility, and the two sides of the #732 differential would then
+        discover different clones.
+
+        Called TWICE, and both times deliberately.  The first call is before
+        ``_register_modules`` — which returns early for a single-file
+        program, and whose E608 rail needs the ambiguity half in hand — and
+        the second is after the prelude pass, once ``_prelude_fn_names`` is
+        populated, because the prelude's combinators are visible in every
+        namespace and the first call cannot know them yet.  The derivation is
+        pure, so the second call simply replaces the first's answer; the
+        ambiguity half is identical either way (a prelude name is imported
+        from nowhere).  Route three of #1299 (a ``forall<T>`` parent's
+        ``where`` helper) involves no imports at all, so the entry program
+        needs its set whether or not any module exists.
+        """
+        tables = namespace_fn_names(
+            program,
+            [(mod.path, mod.program) for mod in self._resolved_modules],
+            prelude=self._prelude_fn_names,
+        )
+        self._namespace_tables = tables
+        self._namespace_fn_names = dict(tables.by_namespace)
+        self._ambiguous_imported_fn_names = tables.ambiguous
 
     @staticmethod
     def _collect_local_fn_names(program: ast.Program) -> set[str]:

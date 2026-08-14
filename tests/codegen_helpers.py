@@ -64,6 +64,33 @@ def wat_calls(wat: str, symbol: str) -> bool:
     ) is not None
 
 
+def wat_fn_body(wat: str, name: str) -> str:
+    """The emitted ``(func $name …)`` block, alone.
+
+    :func:`wat_calls` over a whole module answers "does ANY body call this?",
+    which is the wrong question whenever the property under test is
+    per-function — a scope rule, most obviously (#1299): a module's own body
+    may legitimately call its private ``$get`` in the same WAT where the
+    importer's body must not.  A module-wide assertion cannot separate those
+    two, and reads as if it had.
+
+    Raises rather than returning ``""`` for an absent function: an empty
+    string makes every ``not wat_calls(...)`` assertion pass vacuously, which
+    is precisely the failure this helper exists to prevent.
+    """
+    match = re.search(
+        rf"(?m)^\s*\(func \${re.escape(name)}{_WAT_NAME_TAIL}", wat,
+    )
+    if match is None:
+        raise AssertionError(
+            f"no `(func ${name} …)` in the emitted WAT — the function was "
+            f"never emitted, so an assertion about its body would be vacuous"
+        )
+    rest = wat[match.end():]
+    nxt = re.search(r"(?m)^\s*\(func \$", rest)
+    return wat[match.start():match.end() + (nxt.start() if nxt else len(rest))]
+
+
 def exceptions_engine() -> wasmtime.Engine:
     """A wasmtime engine configured the way ``execute()`` configures its own.
 

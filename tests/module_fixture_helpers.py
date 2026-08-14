@@ -38,15 +38,34 @@ POSIX-form paths via ``Path.as_posix()``.
 
 One of the consolidated copies did not unlink at all, and leaked one
 temp file per fixture it built.
+
+Beside the two ``ResolvedModule`` builders sits the WHOLE-PIPELINE pair
+:func:`build_multi_module` and :func:`module_value` (#1299): write a set
+of ``.vera`` files into a directory, resolve / check / verify / compile
+the entry exactly as ``vera run`` does, and then execute an export.  They
+exist because a cross-module namespace bug is only visible as a
+DIFFERENTIAL — the verify verdict beside the runtime value, asserted in
+one place — and a test that stops at ``compile`` cannot see the half of
+the defect that lands at run.  Both #1274's and #1299's matrices drive
+them, so the two issues' cells can never be built against subtly
+different pipelines.
 """
 from __future__ import annotations
 
 import tempfile
 from pathlib import Path
 
+import wasmtime
+
+from vera.checker import typecheck_with_artifacts
+from vera.codegen import compile as codegen_compile
+from vera.codegen import execute
+from vera.codegen.api import CompileResult
 from vera.parser import parse_file, parse_to_ast
-from vera.resolver import ResolvedModule
+from vera.resolver import ModuleResolver, ResolvedModule
+from vera.runtime.traps import WasmTrapError
 from vera.transform import transform
+from vera.verifier import verify
 
 
 def resolved_module(path: tuple[str, ...], source: str) -> ResolvedModule:
@@ -105,3 +124,76 @@ def fake_resolved_module(
         program=parse_to_ast(source),
         source=source,
     )
+
+
+def build_multi_module(
+    tmp_path: Path, files: dict[str, str],
+    main_name: str = "main.vera",
+) -> tuple[list[str], CompileResult, list[str]]:
+    """Resolve + check + verify + compile *main_name* as ``vera run`` does.
+
+    Returns ``(verify_errors, compile_result, codegen_errors)`` — the two
+    diagnostic streams a cross-module namespace defect can land in, kept
+    separate so a caller can assert them independently and, more
+    importantly, assert them TOGETHER with the runtime value from
+    :func:`module_value`.  A clean verify beside a wrong (or absent)
+    answer is exactly the false Tier-1 shape these matrices hunt, and it
+    is invisible to any test that inspects one side alone.
+
+    Type-check errors raise instead of being returned: every caller's
+    fixture is check-green by construction, so a check error means the
+    FIXTURE is broken, not the compiler — and returning it would let a
+    matrix cell pass vacuously with nothing compiled.
+
+    Resolution goes through the real :class:`~vera.resolver.ModuleResolver`
+    rooted at *tmp_path*, so each module's ``direct`` flag is the
+    production one (a transitive-only module is marked as such) rather
+    than a hand-built fixture's default.
+    """
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    for name, src in files.items():
+        (tmp_path / name).write_text(src, encoding="utf-8")
+    main_path = tmp_path / main_name
+    source = files[main_name]
+    program = parse_to_ast(source)
+    resolver = ModuleResolver(_root=tmp_path)
+    resolved = resolver.resolve_imports(program, main_path)
+    diags, arts = typecheck_with_artifacts(
+        program, source, file=str(main_path), resolved_modules=resolved,
+        collect_module_artifacts=True,
+    )
+    check_errors = [d.description for d in diags if d.severity == "error"]
+    assert not check_errors, f"typecheck errors: {check_errors}"
+    vres = verify(program, source, file=str(main_path),
+                  resolved_modules=resolved)
+    verify_errors = [
+        d.description for d in vres.diagnostics if d.severity == "error"
+    ]
+    result = codegen_compile(
+        program, source=source, file=str(main_path), resolved_modules=resolved,
+        expr_semantic_types=arts.expr_semantic_types,
+        expr_target_types=arts.expr_target_types,
+        module_artifacts=arts.module_artifacts,
+    )
+    cg_errors = [
+        d.description for d in result.diagnostics if d.severity == "error"
+    ]
+    return verify_errors, result, cg_errors
+
+
+def module_value(
+    result: CompileResult, fn: str = "main",
+) -> tuple[str, object]:
+    """``("ok", value)`` or ``("trap", message)`` for one export.
+
+    A namespace defect surfaces in BOTH shapes — a wrong-but-loadable
+    value where the colliding cells happen to share a WAT type, and a
+    load failure where they do not — so the two are returned as one
+    tagged pair rather than one being raised past the assertion.  A cell
+    that only ever asserts "no trap" would go green on the silent-wrong
+    answer, which is the more dangerous half.
+    """
+    try:
+        return "ok", execute(result, fn_name=fn).value
+    except (WasmTrapError, wasmtime.WasmtimeError, wasmtime.Trap) as exc:
+        return "trap", str(exc)
