@@ -21,7 +21,10 @@ Conventions:
 // Whitespace and comments (skipped)
 WS: /\s+/
 LINE_COMMENT: /--[^\n]*/
-BLOCK_COMMENT: /\{-[\s\S]*?-\}/
+// Block comments nest (Section 1.3), so they are not a regular language and
+// have no regex form.  The reference implementation removes them in
+// vera/lexical.py, by counting depth, before the parser sees the text.
+BLOCK_COMMENT: "{-" (BLOCK_COMMENT | /[\s\S]/)* "-}"
 ANNOTATION_COMMENT: /\/\*[^*]*\*+([^/*][^*]*\*+)*\//
 
 // Keywords
@@ -94,6 +97,7 @@ SEMICOLON: ";"
 DOUBLE_COLON: "::"
 BAR: "|"
 UNDERSCORE: "_"
+HOLE: "?"
 
 // Literals
 INT_LIT: /0|[1-9][0-9]*/
@@ -182,7 +186,6 @@ pure_effect: PURE
 effect_set: LT effect_list GT
 
 effect_list: effect_ref (COMMA effect_ref)*
-           | UPPER_IDENT  // effect variable
 
 effect_ref: UPPER_IDENT type_args?
           | UPPER_IDENT DOT UPPER_IDENT type_args?  // qualified effect
@@ -281,6 +284,7 @@ primary_expr: INT_LIT
             | TRUE
             | FALSE
             | LPAREN RPAREN                 // unit literal
+            | HOLE                          // typed hole ? (Section 4.17)
             | slot_ref                      // @T.n
             | result_ref                    // @T.result
             | fn_call                       // function/constructor application
@@ -303,9 +307,9 @@ primary_expr: INT_LIT
 ### 10.3.9 Slot References
 
 ```ebnf
-slot_ref: AT type_expr DOT INT_LIT
+slot_ref: AT UPPER_IDENT type_args? DOT INT_LIT
 
-result_ref: AT type_expr DOT RESULT
+result_ref: AT UPPER_IDENT type_args? DOT RESULT
 ```
 
 ### 10.3.10 Function Calls and Constructors

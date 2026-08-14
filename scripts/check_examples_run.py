@@ -47,10 +47,19 @@ thing, and here both failures were measured rather than imagined.  A
 fallback, which runs a different function and exits 0 — so every spec
 names its entry point and the CLI resolves it by name.  An example that
 reaches outside the process answers a missing resource by printing a
-message and completing normally — so the three that do carry an
+message and completing normally — so the ones that do carry an
 ``expect`` substring only their success path prints, which is what makes
 deleting `examples/sqlitedb.sqlite` fail the gate instead of passing on
 the graceful in-memory arm.  Both signals, per run, always.
+
+*Which* examples those are is derived rather than listed.
+``check_sentinel_coverage`` reads each program's own declarations — the
+`DB` effect in a function's effect row, the `IO.read_file` /
+`IO.write_file` operations at a call site — and requires that set to
+equal the set of specs carrying an ``expect``, in both directions.  A
+list of filenames would be a snapshot of today's corpus that says
+nothing about the next database or filesystem example, which is the only
+case the rule exists for.
 """
 
 from __future__ import annotations
@@ -85,6 +94,12 @@ class RunSpec(NamedTuple):
     alone cannot tell the success path from the graceful one.  It is
     deliberately not a full stdout pin; that belongs in the dedicated
     tests.
+
+    Which examples those are is not left to judgement:
+    ``check_sentinel_coverage`` derives the set from the resources each
+    program declares and holds it equal to the specs carrying an
+    ``expect``, so a missing sentinel and a spurious one are both
+    errors.
 
     A ``NamedTuple`` rather than a frozen dataclass so the module can be
     loaded by the bare ``spec_from_file_location`` / ``exec_module``
@@ -298,6 +313,221 @@ def check_coverage(
                 f"documented property so the report can state the reason."
             )
 
+    return errors
+
+
+# ---------------------------------------------------------------------------
+# The derived sentinel rule
+# ---------------------------------------------------------------------------
+
+
+# The external resources an example can reach, as registry NAMES.  Which
+# examples must pin a sentinel follows from these by reading what each
+# program declares, so one added tomorrow is covered by being written
+# rather than by being remembered here — the case a list of filenames
+# cannot cover, since it is a snapshot of the corpus it was written
+# against.
+#
+# Both halves are needed because the effect row alone does not
+# discriminate.  `FileIO` and `Time` are not effects in Vera: file and
+# clock operations live under `IO`, so `file_io.vera` declares exactly
+# the bare `<IO>` that `hello_world.vera` does and only the operation it
+# calls tells the two apart.  Measured over the corpus, `DB` appears in
+# `database.vera` and `sqlitedb.vera` alone, and `IO.read_file` /
+# `IO.write_file` in `file_io.vera` alone.
+RESOURCE_EFFECTS: tuple[str, ...] = ("DB",)
+RESOURCE_OPS: tuple[tuple[str, str], ...] = (
+    ("IO", "read_file"),
+    ("IO", "write_file"),
+)
+
+
+def resource_vocabulary() -> str:
+    """The declared resource names, for the messages that cite them."""
+    return ", ".join(
+        [*RESOURCE_EFFECTS, *(f"{e}.{op}" for e, op in RESOURCE_OPS)]
+    )
+
+
+def resource_registry_errors() -> list[str]:
+    """Every declared resource name, checked against the live registry.
+
+    A name the compiler no longer has would match no example, and with
+    nothing left requiring a sentinel the rule switches itself off while
+    still reporting success.  Renaming the `DB` effect, or moving
+    `read_file` out of `IO`, must therefore fail here rather than
+    quietly empty the derivation — the same reason an empty corpus is an
+    error in ``check_coverage``.
+
+    The `vera` import is lazy, as `check_doc_counts.check_homepage_facts`
+    does for the same registry: loading this module for its
+    classification tables should not drag in the compiler.
+    """
+    from vera.introspect import builtin_effect_names, effects_payload
+
+    live_effects = builtin_effect_names()
+    live_ops = {
+        str(item["name"]): {str(op) for op in item.get("ops", ())}
+        for item in effects_payload()["items"]
+        if item.get("kind") == "effect"
+    }
+
+    errors: list[str] = []
+    for name in RESOURCE_EFFECTS:
+        if name not in live_effects:
+            errors.append(
+                f"RESOURCE_EFFECTS names {name!r}, which the effect "
+                f"registry does not have — could not find it among "
+                f"{sorted(live_effects)}.  Re-point it at the current "
+                f"name, so a renamed effect fails this gate instead of "
+                f"silently matching no example."
+            )
+    for effect, op in RESOURCE_OPS:
+        if effect not in live_ops:
+            errors.append(
+                f"RESOURCE_OPS names {effect}.{op}, but the effect "
+                f"registry has no {effect!r} — could not find it among "
+                f"{sorted(live_ops)}.  An operation is only meaningful "
+                f"under an effect that exists."
+            )
+        elif op not in live_ops[effect]:
+            errors.append(
+                f"RESOURCE_OPS names {effect}.{op}, which {effect} does "
+                f"not have — could not find {op!r} among "
+                f"{sorted(live_ops[effect])}.  Re-point it at the "
+                f"current operation, so a renamed one fails this gate "
+                f"instead of silently matching no example."
+            )
+    return errors
+
+
+def resource_signals(path: Path) -> frozenset[str]:
+    """The external-resource signals one example declares.
+
+    Two sources, since neither alone discriminates: the resource effects
+    named in a function's effect row, and the resource operations the
+    source calls.  Read off the parsed program rather than the text, so
+    a comment naming `<DB>` is prose and not a declaration —
+    `examples/sqlitedb.vera`'s first line is exactly such a comment, and
+    a text scan would agree with the parse there by luck while
+    disagreeing on the first example whose header describes what it
+    deliberately does not do.
+
+    Whatever the parse raises propagates; ``check_sentinel_coverage``
+    turns it into an error line, because an example whose signals are
+    *unknown* must not be spelled the same as one that has none.
+    """
+    from vera import ast
+    from vera.obligations.cache import walk_nodes
+    from vera.parser import parse_to_ast
+
+    program = parse_to_ast(path.read_text(encoding="utf-8"), file=str(path))
+    effects = set(RESOURCE_EFFECTS)
+    ops = set(RESOURCE_OPS)
+
+    signals: set[str] = set()
+    for node in walk_nodes(program):
+        if isinstance(node, ast.FnDecl):
+            # `walk_nodes` is a generic dataclass-field walk, so a
+            # `where` helper's row is reached alongside the outer one.
+            row = node.effect
+            if isinstance(row, ast.EffectSet):
+                for ref in row.effects:
+                    # Unqualified refs only: `Mod.DB` names a user
+                    # effect in another module, not the built-in the
+                    # registry check validated.
+                    if isinstance(ref, ast.EffectRef) and ref.name in effects:
+                        signals.add(ref.name)
+        elif isinstance(node, ast.QualifiedCall):
+            if (node.qualifier, node.name) in ops:
+                signals.add(f"{node.qualifier}.{node.name}")
+    return frozenset(signals)
+
+
+def check_sentinel_coverage(
+    examples_dir: Path,
+    run_specs: dict[str, RunSpec],
+) -> list[str]:
+    """The examples that declare an external resource are exactly the
+    specs that carry an ``expect``.
+
+    Both directions are errors.  A resource-touching example with no
+    sentinel passes on its graceful arm the day its fixture vanishes,
+    which is the failure the sentinels exist to catch; a sentinel on an
+    example with no resource re-pins stdout that the dedicated output
+    tests own, and goes red on a cosmetic edit.
+
+    An empty derived set is an error rather than a vacuous pass: with
+    nothing required the two sides agree however broken the derivation
+    is, which is the same failure mode ``check_coverage`` rules out for
+    a glob that stops matching.
+    """
+    errors = resource_registry_errors()
+    if errors:
+        # Without a valid vocabulary the derivation below is
+        # meaningless — it would match nothing and then report every
+        # sentinel in the tables as spurious.
+        return errors
+
+    signals_by_name: dict[str, frozenset[str]] = {}
+    for name in sorted(run_specs):
+        path = examples_dir / f"{name}.vera"
+        if not path.is_file():
+            # `check_coverage` and `run_corpus` both report this, each
+            # naming the table the key came from; a third copy would
+            # only repeat them.  It cannot hide the rule either — with
+            # the files gone the derivation is empty, which is the
+            # error below.
+            continue
+        try:
+            signals = resource_signals(path)
+        except Exception as exc:  # noqa: BLE001 — unknown signals are reported, never read as none
+            errors.append(
+                f"{name}.vera could not be parsed, so what it reaches "
+                f"outside the process is unknown — read as 'declares no "
+                f"resource' it would drop out of this rule silently, "
+                f"and be diagnosed as carrying a sentinel for nothing: "
+                f"{exc}"
+            )
+            continue
+        if signals:
+            signals_by_name[name] = signals
+
+    if errors:
+        return errors
+
+    if not signals_by_name:
+        return [
+            f"no example in RUN_SPECS declares any of "
+            f"[{resource_vocabulary()}] — the derivation matched "
+            f"nothing, so the sentinel rule is no longer gated.  This "
+            f"is an error rather than a pass: with the required set "
+            f"empty both sides of the rule agree however broken the "
+            f"derivation is, and every gate run reports success over "
+            f"zero examples."
+        ]
+
+    pinned = {name for name, spec in run_specs.items() if spec.expect}
+    for name in sorted(set(signals_by_name) - pinned):
+        errors.append(
+            f"{name}.vera reaches outside the process "
+            f"({', '.join(sorted(signals_by_name[name]))}) but its "
+            f"RUN_SPECS entry sets no `expect` — a program like this "
+            f"answers a missing resource by printing a message and "
+            f"completing normally, so exit code alone cannot tell its "
+            f"success path from that arm.  Pin a substring only the "
+            f"success path prints."
+        )
+    for name in sorted(pinned - set(signals_by_name)):
+        errors.append(
+            f"{name}.vera declares no external resource "
+            f"([{resource_vocabulary()}]) but its RUN_SPECS entry pins "
+            f"the sentinel {run_specs[name].expect!r} — `expect` is for "
+            f"programs that answer a missing resource by completing "
+            f"normally.  On any other example it re-pins stdout that "
+            f"the dedicated output tests own, and goes red on a "
+            f"cosmetic edit."
+        )
     return errors
 
 
@@ -576,6 +806,7 @@ def _block(title: str, errors: list[str], footer: str = "") -> list[str]:
 
 def error_blocks(
     coverage_errors: list[str],
+    sentinel_errors: list[str],
     doc_errors: list[str],
     failures: list[str],
 ) -> list[str]:
@@ -588,6 +819,13 @@ def error_blocks(
     """
     return [
         *_block("COVERAGE ERRORS", coverage_errors),
+        *_block(
+            "SENTINEL COVERAGE", sentinel_errors,
+            "Which examples must pin a success sentinel is derived from "
+            "the resources each program declares, not from a list of "
+            "names.  Fix the spec — or, if an example genuinely stopped "
+            "reaching outside the process, drop its `expect`.",
+        ),
         *_block(
             "DOCUMENTATION MISMATCH", doc_errors,
             "TESTING.md's execution-model table is the documented form of "
@@ -628,9 +866,14 @@ def main() -> int:
     # The coverage rule gates the run: with the tables out of sync with
     # disk, a green run would be reporting on the wrong set of programs.
     if coverage_errors:
-        for line in error_blocks(coverage_errors, doc_errors, []):
+        for line in error_blocks(coverage_errors, [], doc_errors, []):
             print(line, file=sys.stderr)
         return 1
+
+    # Derived from the examples themselves, so it runs only once the
+    # tables and disk agree: a spec whose file is missing is already
+    # reported above, and would otherwise be reported twice.
+    sentinel_errors = check_sentinel_coverage(examples_dir, RUN_SPECS)
 
     with tempfile.TemporaryDirectory(prefix="vera-examples-run-") as td:
         failures = run_corpus(examples_dir, RUN_SPECS, Path(td))
@@ -645,7 +888,18 @@ def main() -> int:
             print(f"  skip [{prop}]: {', '.join(skipped)}")
             print(f"    {SKIP_PROPERTIES[prop]}")
 
-    blocks = error_blocks([], doc_errors, failures)
+    # With the rule holding, the specs carrying an `expect` ARE the
+    # derived set, so printing them names it — a reader of a gate run
+    # sees which examples the sentinel rule covers without opening this
+    # file, as the skip properties above already do for the skips.
+    if not sentinel_errors:
+        pinned = sorted(n for n, s in RUN_SPECS.items() if s.expect)
+        print(
+            f"  sentinel required [{resource_vocabulary()}]: "
+            f"{', '.join(pinned)}"
+        )
+
+    blocks = error_blocks([], sentinel_errors, doc_errors, failures)
     if blocks:
         print("", file=sys.stderr)
         for line in blocks:
