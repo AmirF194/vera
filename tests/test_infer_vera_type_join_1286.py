@@ -36,6 +36,28 @@ function, the unit of repair.
 The join property under test is order-invariance: which branch is written first
 must not change the answer.  Every witness below therefore comes with its
 arm-swapped twin, and the pair must agree.
+
+The PR review round found the same divergence one shape over, and the sweep it
+prompted found a third.  Discovery had no `Block` arm, and the transformer
+leaves a braced match-arm body AS a `Block` — so `Some(@Int) -> { let … }` named
+nothing there while the rewrite, which HAS the arm, named the concrete clone.
+It reaches a wrong answer only when no later arm yields either (a plain
+`None -> 0` sibling recovers the type by luck of agreement), which is why the
+witness pairs the block-bodied arm with a throwing one.  The braced-`if` variant
+needs the branch TAIL to be a block in its own right, a `let` inside the branch
+being a statement rather than a nested block.  The third shape is a `handle` in
+argument position, likewise named from its body by the rewrite and by nothing on
+the discovery side.  All three are one gap: the two consultors must stay
+structurally parallel, arm for arm, which is this fix's core claim.
+
+One shape found by the same sweep is NOT closed here and is deliberately left
+loud: an `IndexExpr` argument (`idg(@Array<Int>.0[1])`) dangles the same way,
+but the rewrite's arm delegates to `_infer_index_element_type`, which resolves
+chained indexing, aliases and `Future` payloads against codegen tables the
+monomorphizer does not have.  A partial mirror would answer differently from the
+rewrite for those cases — trading a shape where both consultors say "unknown"
+for one where they disagree, which is the worse failure — so it wants its own
+change rather than a line here.
 """
 
 from __future__ import annotations
@@ -45,6 +67,7 @@ import tempfile
 
 import pytest
 
+from tests.codegen_helpers import wat_calls, wat_fn_names
 from vera.checker import typecheck_with_artifacts
 from vera.codegen import compile as codegen_compile
 from vera.codegen import execute
@@ -209,6 +232,69 @@ public fn main(@Unit -> @Int)
 }
 """
 
+# The BLOCK family (PR review).  The transformer leaves a braced match-arm body
+# as an `ast.Block`, and the rewrite consultor has a `Block` arm while discovery
+# did not — so a block-bodied arm named nothing on the discovery side and the
+# concrete name on the rewrite side.  It only reaches a wrong ANSWER when no
+# later arm yields either: with a plain `None -> 0` beside it, the join fell
+# through to that arm and recovered the same type by luck.  So the throwing
+# sibling is what makes the block-bodied arm the only one that can answer.
+_GENERIC_MATCH_BLOCK_ARM = _GENERIC_PRELUDE + """\
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[Exn<Bool>] {
+    throw(@Bool) -> {
+      0
+    }
+  } in {
+    idg(match Some(3) { %s })
+  }
+}
+"""
+
+# The `if` spelling of the Block gap: a branch whose TAIL is itself braced.  The
+# `if` arms read `branch.expr`, which is already the trailing expression — a
+# `let` inside the branch is a statement, not a nested block — so this needs the
+# tail to be a block in its own right before the gap is reachable.
+_GENERIC_IF_NESTED_BLOCK = _GENERIC_PRELUDE + """\
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[Exn<Bool>] {
+    throw(@Bool) -> {
+      0
+    }
+  } in {
+    idg(if %s then { %s } else { %s })
+  }
+}
+"""
+
+# The third shape found by the same sweep: a `handle` in argument position.  The
+# rewrite names it from its body's trailing expression and discovery named it
+# from nothing.  There are no branches to exchange, so this one is a presence
+# cell rather than a swapped pair.
+_GENERIC_HANDLE_ARG = _GENERIC_PRELUDE + """\
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  idg(handle[Exn<Bool>] {
+    throw(@Bool) -> {
+      0
+    }
+  } in {
+    42
+  })
+}
+"""
+
 # `%s` fillers.  For `if`, the condition selects the branch statically written
 # first; the swapped twin negates it and exchanges the branch bodies, so the
 # THROWING branch moves from `then` to `else`.  For `match`, the arms are
@@ -216,6 +302,10 @@ public fn main(@Unit -> @Int)
 # same value.
 _IF_DIVERGENT_FIRST = "false"
 _IF_COMPLETING_FIRST = "true"
+
+_BLOCK_ARM = "Some(@Int) -> { let @Int = @Int.0 + 1; @Int.0 }"
+_THROW_ARM = "None -> throw(true)"
+_BLOCK_TAIL = "{ let @Int = 41 + 1; @Int.0 }"
 
 _MATCH_DIVERGENT_FIRST = "None -> throw(true), Some(@Int) -> @Int.0"
 _MATCH_COMPLETING_FIRST = "Some(@Int) -> @Int.0, None -> throw(true)"
@@ -271,6 +361,20 @@ _WITNESSES: list[tuple[str, str, str, object]] = [
         3,
     ),
     (
+        "generic_arg_match_block_arm",
+        _GENERIC_MATCH_BLOCK_ARM % f"{_THROW_ARM}, {_BLOCK_ARM}",
+        _GENERIC_MATCH_BLOCK_ARM % f"{_BLOCK_ARM}, {_THROW_ARM}",
+        4,
+    ),
+    (
+        "generic_arg_if_nested_block",
+        _GENERIC_IF_NESTED_BLOCK % (
+            _IF_DIVERGENT_FIRST, "throw(true)", _BLOCK_TAIL),
+        _GENERIC_IF_NESTED_BLOCK % (
+            _IF_COMPLETING_FIRST, _BLOCK_TAIL, "throw(true)"),
+        42,
+    ),
+    (
         "generic_arg_match_total",
         _GENERIC_MATCH_TOTAL % _MATCH_TOTAL_DIVERGENT_FIRST,
         _GENERIC_MATCH_TOTAL % _MATCH_TOTAL_COMPLETING_FIRST,
@@ -296,6 +400,20 @@ def _compile(source: str) -> CompileResult:
     Monomorphization consumes the checker's artifacts, so the plain
     parse-and-compile shortcut would not exercise the clone-naming path these
     witnesses turn on.
+
+    Why not the shared `_check_ok` / `_verify_ok` (PR review): both return
+    `None` — they assert and discard — while every assertion here reads an
+    artefact of the compile (`result.exports`, `result.wat`, the executed
+    value), so they cannot serve without changing their return types across the
+    whole checker and verifier suite.  `codegen_helpers._compile` returns a
+    `CompileResult` but reaches it by `parse_file` + `transform` + `compile`
+    with no typecheck, so it supplies none of the artifacts monomorphization
+    reads — using it would quietly weaken the test rather than share code.  A
+    local full-pipeline `_compile` is the established shape for exactly this:
+    21 test files define one, `test_handle_exn_divergent_result_1276.py` (this
+    issue's direct sibling) and `test_composite_postcondition_eq_912.py` among
+    them.  The WAT assertions DO use the shared boundary-safe helpers, which is
+    the part of the suggestion that applies.
     """
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".vera", delete=False, encoding="utf-8",
@@ -388,6 +506,18 @@ def test_no_codegen_skip_note_on_the_array_witness() -> None:
     assert not skips, f"array literal skipped despite a typed branch: {skips}"
 
 
+def test_a_handle_expression_in_argument_position_names_its_body() -> None:
+    """The third shape of the one gap (PR review sweep).
+
+    `handle` reached the discovery consultor with no arm of its own while the
+    rewrite named it from the body's trailing expression — so `idg$Int` was
+    emitted at the call and never registered, and this check-green program
+    lost `main` exactly as the block-bodied arm did.  No branches to exchange,
+    so the pairing convention does not apply here.
+    """
+    assert _run(_GENERIC_HANDLE_ARG) == 42
+
+
 @pytest.mark.parametrize(
     ("label", "source"),
     [
@@ -400,6 +530,18 @@ def test_no_codegen_skip_note_on_the_array_witness() -> None:
             _GENERIC_MATCH_TOTAL % _MATCH_TOTAL_DIVERGENT_FIRST,
             id="match_total",
         ),
+        pytest.param(
+            "match_block_arm",
+            _GENERIC_MATCH_BLOCK_ARM % f"{_THROW_ARM}, {_BLOCK_ARM}",
+            id="match_block_arm",
+        ),
+        pytest.param(
+            "if_nested_block",
+            _GENERIC_IF_NESTED_BLOCK % (
+                _IF_DIVERGENT_FIRST, "throw(true)", _BLOCK_TAIL),
+            id="if_nested_block",
+        ),
+        pytest.param("handle_arg", _GENERIC_HANDLE_ARG, id="handle_arg"),
     ],
 )
 def test_the_clone_is_named_for_the_real_instantiation(
@@ -412,10 +554,23 @@ def test_the_clone_is_named_for_the_real_instantiation(
     the argument binds nothing — and it is an i32 clone reached with an i64
     argument.  Asserting its absence is what distinguishes "the type was
     inferred" from "the default happened to work".
+
+    Membership is tested against `wat_fn_names` / `wat_calls` rather than
+    `"$idg$Int" in wat` (PR review): a substring test is a PREFIX test, so it
+    would also accept a longer mangled symbol — `$idg$IntAlias` satisfies a
+    check for `$idg$Int`, and a clone impersonating another clone is precisely
+    the failure this assertion exists to catch.  Both helpers anchor on a
+    symbol boundary, and `wat_fn_names` prints what WAS emitted on failure.
     """
     wat = _compile(source).wat
-    assert "$idg$Int" in wat, f"{label}: no Int clone in the module:\n{wat}"
-    assert "$idg$Bool" not in wat, (
+    emitted = wat_fn_names(wat)
+    assert "idg$Int" in emitted, (
+        f"{label}: no Int clone in the module; emitted: {emitted}"
+    )
+    assert "idg$Bool" not in emitted, (
         f"{label}: the phantom-var default was instantiated instead of the "
-        f"argument's real type:\n{wat}"
+        f"argument's real type; emitted: {emitted}"
+    )
+    assert wat_calls(wat, "idg$Int"), (
+        f"{label}: the Int clone is defined but not the call target:\n{wat}"
     )
