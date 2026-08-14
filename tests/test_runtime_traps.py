@@ -36,7 +36,11 @@ from typing import TYPE_CHECKING, Callable
 import pytest
 
 from vera.cli import cmd_run
-from vera.runtime.traps import WasmTrapError, _classify_trap
+from vera.runtime.traps import (
+    WasmTrapError,
+    _classify_host_error,
+    _classify_trap,
+)
 
 if TYPE_CHECKING:
     from _pytest.capture import CaptureFixture
@@ -1578,6 +1582,7 @@ public fn main(@Unit -> @Int)
         expected_kinds = {
             "contract_violation",
             "divide_by_zero",
+            "host_error",
             "out_of_bounds",
             "stack_exhausted",
             "unreachable",
@@ -2875,3 +2880,277 @@ class TestReadWasmStringBoundsCheck1145:
             assert fix
         else:  # pragma: no cover - the guard must fire
             pytest.fail("expected an out-of-bounds WasmtimeError")
+
+
+class TestHostCallbackErrorSurface1302:
+    """A host callback's exception is a Vera error, not a traceback (#1302).
+
+    ``execute()`` used to convert an escaping exception into
+    ``WasmTrapError`` only when its type name was ``Trap`` or
+    ``WasmtimeError``.  A host import that raises an ordinary Python
+    exception — ``json_stringify`` refusing a non-finite ``JNumber``
+    (#1293) is the case that surfaced it — is re-raised through
+    wasmtime's trampoline and arrives at that handler as, say, a
+    ``ValueError``, so the branch was skipped entirely: no
+    classification, no source-map resolution, and the buffered
+    stdout/stderr dropped on the way out.  The CLI's catch-all then let
+    the exception escape as a raw interpreter traceback.
+
+    The invariant that broke is written down in ``vera/codegen/api.py``,
+    on ``host_print``: *"A user-level program must never produce a
+    Python traceback regardless of what it does."*  The refusal itself
+    is correct and is an instruction (DESIGN principle 1); only its
+    presentation was wrong.
+
+    The gap is generic — any host callback raising a non-``Trap``
+    exception took the same path — so the classification is by
+    *boundary*, not by exception type: everything escaping the guest
+    invocation is either a wasmtime trap or a host-callback failure, and
+    both now reach the user in the same shape.
+    """
+
+    # `json_stringify` of a NaN built in Vera, not parsed.  #1306 closed
+    # BOTH parse routes into this refusal — the bare constants and a
+    # number that overflows to an infinity — so a constructed `JNumber`
+    # is the one remaining way a user program reaches it, which is also
+    # exactly the program #1302 measured.  The classifier's reach is not
+    # limited to this route: it converts anything escaping the guest
+    # invocation, and the unit tests below drive it directly.
+    _SRC = """
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  IO.print("before");
+  IO.print(json_stringify(JNumber(nan())))
+}
+"""
+
+    def _write(self, tmp_path: Path) -> Path:
+        path = tmp_path / "hosterr.vera"
+        path.write_text(self._SRC, encoding="utf-8")
+        return path
+
+    def test_execute_raises_a_classified_wasm_trap_error(
+        self, tmp_path: Path,
+    ) -> None:
+        """``execute()`` converts it, rather than letting it escape."""
+        from vera.codegen import compile as codegen_compile, execute
+        from vera.parser import parse_file
+        from vera.transform import transform
+
+        path = self._write(tmp_path)
+        source = path.read_text(encoding="utf-8")
+        result = codegen_compile(
+            transform(parse_file(str(path))), source=source, file=str(path),
+        )
+        assert result.ok
+
+        with pytest.raises(WasmTrapError) as excinfo:
+            execute(result)
+
+        exc = excinfo.value
+        assert exc.kind == "host_error"
+        # The host's own sentence survives verbatim — it is the
+        # instruction the user needs, and #1293 wrote it deliberately.
+        assert "json_stringify: NaN is not representable in JSON" in str(exc)
+        # #522: output written before the failure is carried, not
+        # dropped.  This is the field the pre-fix path discarded.
+        assert exc.stdout == "before"
+        # The original exception stays reachable for anyone debugging
+        # the host binding itself.
+        assert isinstance(exc.__cause__, ValueError)
+
+    def test_text_mode_prints_a_vera_error_not_a_traceback(
+        self, tmp_path: Path, capsys: CaptureFixture[str],
+    ) -> None:
+        """The CLI's standard error shape, and nothing from CPython.
+
+        Asserting only "the sentence appears" would still pass on the
+        pre-fix output, where the sentence was the traceback's last
+        line.  The absence assertions are the ones that fail before the
+        fix.
+        """
+        rc = cmd_run(str(self._write(tmp_path)))
+
+        assert rc == 1
+        captured = capsys.readouterr()
+        assert "before" in captured.out
+        assert "Error: json_stringify: NaN is not representable" in captured.err
+        assert "Traceback (most recent call last)" not in captured.err
+        assert 'File "' not in captured.err
+        assert "wasmtime" not in captured.err
+        # The whole diagnostic, in the shape a contract violation uses.
+        assert len(captured.err.splitlines()) < 10, captured.err
+
+    def test_json_mode_emits_a_parseable_envelope(
+        self, tmp_path: Path, capsys: CaptureFixture[str],
+    ) -> None:
+        """JSON mode produced NO envelope at all before the fix.
+
+        The traceback went to stderr and stdout stayed empty, so a
+        ``--json`` consumer got nothing parseable — worse than the text
+        mode, where at least the tee'd program output survived.
+        """
+        rc = cmd_run(str(self._write(tmp_path)), as_json=True)
+
+        assert rc == 1
+        captured = capsys.readouterr()
+        envelope = json.loads(captured.out)
+        assert envelope["ok"] is False
+        diag = envelope["diagnostics"][0]
+        assert diag["trap_kind"] == "host_error"
+        assert "json_stringify: NaN is not representable" in diag["description"]
+        # Shape stability: the fields every trap diagnostic carries.
+        assert diag["fix"] == ""
+        assert isinstance(diag["frames"], list)
+        # #522 again, through the envelope this time.
+        assert envelope["stdout"] == "before"
+        # JSON-mode invariant: nothing may leak to stderr.
+        assert captured.err == ""
+
+
+class TestHostErrorDebugKnob1302:
+    """``VERA_DEBUG_HOST_ERRORS`` re-raises the original exception (#1302).
+
+    Converting every host-callback exception into a `WasmTrapError` is
+    right for a user running a Vera program and wrong for someone
+    debugging the host binding itself: the description keeps the
+    sentence, but the Python frames that say *where in the binding* it
+    came from are gone from the CLI's output.  They are still on
+    `__cause__`, which helps a library caller and not a person reading a
+    terminal.
+
+    The knob restores the raw traceback, and follows the
+    ``VERA_EAGER_GC`` precedent — a documented diagnostic switch in
+    ENVIRONMENT.md, not a supported mode.  The two tests are a pair on
+    purpose: one proves the knob does something, the other proves its
+    absence is what produces the one-liner, so neither can pass by the
+    behaviour being unconditional.
+    """
+
+    _SRC = TestHostCallbackErrorSurface1302._SRC
+
+    def _compile(self, tmp_path: Path) -> object:
+        from vera.codegen import compile as codegen_compile
+        from vera.parser import parse_file
+        from vera.transform import transform
+
+        path = tmp_path / "knob.vera"
+        path.write_text(self._SRC, encoding="utf-8")
+        source = path.read_text(encoding="utf-8")
+        result = codegen_compile(
+            transform(parse_file(str(path))), source=source, file=str(path),
+        )
+        assert result.ok
+        return result
+
+    def test_the_knob_re_raises_the_original_exception(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from vera.codegen import execute
+
+        monkeypatch.setenv("VERA_DEBUG_HOST_ERRORS", "1")
+        result = self._compile(tmp_path)
+        with pytest.raises(ValueError) as excinfo:
+            execute(result)  # type: ignore[arg-type]
+        assert not isinstance(excinfo.value, WasmTrapError)
+        assert "json_stringify: NaN is not representable" in str(excinfo.value)
+
+    def test_without_the_knob_the_conversion_still_happens(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The other half of the pair.
+
+        Without this, a knob that was read as always-on — or a
+        conversion accidentally deleted — would look identical to a
+        working knob from the test above alone.
+        """
+        from vera.codegen import execute
+
+        monkeypatch.delenv("VERA_DEBUG_HOST_ERRORS", raising=False)
+        result = self._compile(tmp_path)
+        with pytest.raises(WasmTrapError) as excinfo:
+            execute(result)  # type: ignore[arg-type]
+        assert excinfo.value.kind == "host_error"
+
+    @pytest.mark.parametrize(
+        ("value", "enabled"),
+        [("1", True), ("true", True), ("TRUE", True), ("yes", True),
+         (" 1 ", True), ("0", False), ("", False), ("no", False),
+         ("false", False)],
+    )
+    def test_the_knob_accepts_the_same_spellings_as_vera_eager_gc(
+        self, value: str, enabled: bool, tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """One truthiness rule across the ``VERA_*`` diagnostic knobs.
+
+        ``VERA_EAGER_GC`` accepts ``1`` / ``true`` / ``yes``
+        case-insensitively after stripping; a second knob reading its
+        value differently is a trap for anyone who learned the first.
+        """
+        from vera.codegen import execute
+
+        monkeypatch.setenv("VERA_DEBUG_HOST_ERRORS", value)
+        result = self._compile(tmp_path)
+        expected: type[BaseException] = ValueError if enabled else WasmTrapError
+        with pytest.raises(expected):
+            execute(result)  # type: ignore[arg-type]
+
+    def test_the_cli_prints_a_traceback_under_the_knob(
+        self, tmp_path: Path, capsys: CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """End to end: the knob is what a person debugging would set.
+
+        The exception escapes ``cmd_run``'s ``WasmTrapError`` handler and
+        the interpreter prints its own traceback, which is the point —
+        so this asserts the raise reaches the caller rather than
+        capturing stderr the CLI never writes.
+        """
+        monkeypatch.setenv("VERA_DEBUG_HOST_ERRORS", "1")
+        path = tmp_path / "knob_cli.vera"
+        path.write_text(self._SRC, encoding="utf-8")
+        with pytest.raises(ValueError):
+            cmd_run(str(path))
+
+
+class TestClassifyHostError1302:
+    """Unit tests for the host-callback classifier (#1302)."""
+
+    def test_uses_the_exception_message_as_the_description(self) -> None:
+        kind, description, fix = _classify_host_error(
+            ValueError("json_stringify: NaN is not representable in JSON"),
+        )
+        assert kind == "host_error"
+        assert description == (
+            "json_stringify: NaN is not representable in JSON"
+        )
+        # Same rule as ``contract_violation``: the message already is
+        # the instruction, so a canned paragraph under it is noise.
+        assert fix == ""
+
+    def test_falls_back_to_the_exception_type_when_there_is_no_message(
+        self,
+    ) -> None:
+        """An empty ``str(exc)`` must not produce an empty description.
+
+        ``raise RuntimeError()`` inside a binding would otherwise render
+        as ``Error: `` — a line that tells the user nothing at all.
+        """
+        _kind, description, _fix = _classify_host_error(RuntimeError())
+        assert description == "RuntimeError"
+
+    def test_does_not_consult_the_contract_violation_channel(self) -> None:
+        """Host errors are classified on their own, not via ``_classify_trap``.
+
+        ``_classify_trap`` lets a populated ``last_violation`` win over
+        everything else.  Routing host errors through it would let a
+        stale contract message replace the host's sentence, which is the
+        one piece of information the user actually needs here.
+        """
+        kind, description, _fix = _classify_host_error(
+            ValueError("the host's own sentence"),
+        )
+        assert kind == "host_error"
+        assert description == "the host's own sentence"

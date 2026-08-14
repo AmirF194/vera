@@ -102,6 +102,12 @@ class WasmTrapError(RuntimeError):
         * ``unreachable`` — ``unreachable`` instruction executed (the
           WASM panic primitive — typically a non-exhaustive match).
         * ``overflow`` — integer overflow trap.
+        * ``host_error`` — a host import (an effect operation
+          implemented outside WASM) raised rather than trapping; the
+          message is the host binding's own (#1302).  Everything
+          escaping the guest invocation carries one of these kinds:
+          the conversion is keyed on the boundary, not on the
+          exception's type.
         * ``unknown`` — could not classify; raw wasmtime message in
           ``str()``.
 
@@ -398,8 +404,43 @@ _TRAP_FIX_PARAGRAPHS: dict[str, str] = {
         "variant via a helper function."
     ),
     "contract_violation": "",
+    "host_error": "",
     "unknown": "",
 }
+
+
+def _classify_host_error(exc: BaseException) -> tuple[str, str, str]:
+    """Classify a host-callback exception into ``(kind, description, fix)``.
+
+    The companion to :func:`_classify_trap` for the other half of what
+    can escape a guest invocation.  A host import that raises an
+    ordinary Python exception — ``json_stringify`` refusing a non-finite
+    ``JNumber``, say — is re-raised through wasmtime's trampoline and
+    arrives at ``execute()``'s handler as that exception, not as a
+    ``Trap``.  Before #1302 it fell past the conversion entirely and
+    reached the user as a raw interpreter traceback.
+
+    The description is the exception's own message: a host binding that
+    refuses something states why and what to do about it (DESIGN
+    principle 1), so there is nothing to add and everything to lose by
+    paraphrasing.  An exception with no message would render as an empty
+    line, so the type name stands in.
+
+    The Fix paragraph is empty for the same reason it is empty for
+    ``contract_violation``: the description already carries the specific
+    instruction, and a canned paragraph beneath it would be noise.
+
+    Unlike :func:`_classify_trap` this does not consult the
+    ``last_violation`` channel.  That channel exists because a WASM trap
+    reason is less specific than the contract message the host recorded
+    just before it; here the host's message IS the specific one, and
+    letting a stale violation win would replace it.
+    """
+    return (
+        "host_error",
+        str(exc) or type(exc).__name__,
+        _TRAP_FIX_PARAGRAPHS["host_error"],
+    )
 
 
 def _classify_trap(

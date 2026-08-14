@@ -76,6 +76,12 @@ private fn current_temp(@Json -> @Option<Float64>)
 }
 
 -- Parse the weather response and return the current temperature in Celsius.
+--
+-- json_parse accepts exactly RFC 8259-valid text whose decoded strings are
+-- Unicode scalar sequences (spec 9.7.1), and the same texts on every host.
+-- So the Err arm below is where malformed text lands, and also where the
+-- JavaScript constants (NaN, Infinity, -Infinity) and a lone-surrogate
+-- escape land -- all at the parse, never at a later call.
 private fn parse_current_temp(@String -> @Result<Float64, String>)
   requires(true)
   ensures(true)

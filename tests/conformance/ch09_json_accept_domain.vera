@@ -1,0 +1,226 @@
+-- Conformance: json_parse's accepted domain (Chapter 9)
+-- Tests: json_parse rejects the JavaScript non-finite constants (bare and
+--        nested in a container), a number that overflows to an infinity,
+--        an integer literal too large for a Float64, and lone-surrogate
+--        escapes (value and key positions) at the parse;
+--        a matched surrogate pair, "NaN" as an ordinary string value, the
+--        largest finite double and an underflow to 0 still parse
+--        (#1306, #1308)
+-- ================================================================
+-- test_json_parse_nan_rejected
+-- json_parse("NaN") — the bare non-finite constant — takes the Err arm.
+-- RFC 8259 has no literal for a non-finite number, so no accepted text
+-- contains one.
+-- ================================================================
+public fn test_json_parse_nan_rejected(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 1)
+  effects(pure)
+{
+  match json_parse("NaN") {
+    Ok(_) -> 0,
+    Err(_) -> 1
+  }
+}
+
+-- ================================================================
+-- test_json_parse_infinity_in_array_rejected
+-- json_parse("[Infinity]") — a non-finite constant nested inside a
+-- container — takes the Err arm too; the refusal is not top-level-only.
+-- ================================================================
+public fn test_json_parse_infinity_in_array_rejected(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 1)
+  effects(pure)
+{
+  match json_parse("[Infinity]") {
+    Ok(_) -> 0,
+    Err(_) -> 1
+  }
+}
+
+-- ================================================================
+-- test_json_parse_lone_surrogate_value_rejected
+-- json_parse of an object whose VALUE contains a lone-surrogate escape
+-- (\ud800 with no low-surrogate partner) takes the Err arm: the text is
+-- grammatically legal RFC 8259 but its decoded value is not a sequence
+-- of Unicode scalar values.
+-- ================================================================
+public fn test_json_parse_lone_surrogate_value_rejected(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 1)
+  effects(pure)
+{
+  match json_parse("{\"k\":\"a\\ud800b\"}") {
+    Ok(_) -> 0,
+    Err(_) -> 1
+  }
+}
+
+-- ================================================================
+-- test_json_parse_lone_surrogate_key_rejected
+-- json_parse of an object whose KEY contains a lone-surrogate escape
+-- takes the Err arm too — the refusal applies to keys as well as values.
+-- ================================================================
+public fn test_json_parse_lone_surrogate_key_rejected(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 1)
+  effects(pure)
+{
+  match json_parse("{\"a\\ud800b\":1}") {
+    Ok(_) -> 0,
+    Err(_) -> 1
+  }
+}
+
+-- ================================================================
+-- test_json_parse_paired_surrogate_accepted
+-- Control: a MATCHED high/low surrogate pair denotes one ordinary
+-- astral scalar value and must still parse — the boundary the
+-- lone-surrogate refusal must not overshoot. Takes the Ok arm;
+-- json_type of the result is "object" (length 6).
+-- ================================================================
+public fn test_json_parse_paired_surrogate_accepted(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 6)
+  effects(pure)
+{
+  match json_parse("{\"k\":\"a\\ud83d\\ude00b\"}") {
+    Ok(@Json) -> string_length(json_type(@Json.0)),
+    Err(_) -> 0
+  }
+}
+
+-- ================================================================
+-- test_json_parse_nan_as_string_value_accepted
+-- Control: "NaN" spelled as an ordinary JSON string VALUE is unaffected
+-- by the non-finite-constant refusal, which only fires for the bare
+-- token. Takes the Ok arm; json_type of the result is "object"
+-- (length 6).
+-- ================================================================
+public fn test_json_parse_nan_as_string_value_accepted(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 6)
+  effects(pure)
+{
+  match json_parse("{\"k\":\"NaN\"}") {
+    Ok(@Json) -> string_length(json_type(@Json.0)),
+    Err(_) -> 0
+  }
+}
+
+-- ================================================================
+-- test_json_parse_overflow_rejected
+-- json_parse("1e999") — a syntactically valid RFC 8259 number whose
+-- magnitude overflows Float64 — takes the Err arm. RFC 8259 section 6
+-- sets no range limit but lets an implementation set one; Vera's is the
+-- finite Float64 values, the second entry route to a non-finite number.
+-- ================================================================
+public fn test_json_parse_overflow_rejected(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 1)
+  effects(pure)
+{
+  match json_parse("1e999") {
+    Ok(_) -> 0,
+    Err(_) -> 1
+  }
+}
+
+-- ================================================================
+-- test_json_parse_largest_finite_accepted
+-- Control: the largest finite double still parses — the boundary the
+-- overflow refusal must not overshoot. Takes the Ok arm; json_type of
+-- the result is "number" (length 6).
+-- ================================================================
+public fn test_json_parse_largest_finite_accepted(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 6)
+  effects(pure)
+{
+  match json_parse("1.7976931348623157e308") {
+    Ok(@Json) -> string_length(json_type(@Json.0)),
+    Err(_) -> 0
+  }
+}
+
+-- ================================================================
+-- test_json_parse_underflow_accepted
+-- Control: underflow is not overflow. "1e-999" decodes to 0, which is
+-- finite and in the domain. Takes the Ok arm; json_type is "number"
+-- (length 6).
+-- ================================================================
+public fn test_json_parse_underflow_accepted(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 6)
+  effects(pure)
+{
+  match json_parse("1e-999") {
+    Ok(@Json) -> string_length(json_type(@Json.0)),
+    Err(_) -> 0
+  }
+}
+
+-- ================================================================
+-- test_json_parse_integer_overflow_rejected
+-- json_parse of an INTEGER literal too large for a Float64 takes the Err
+-- arm. A digit string with no fraction and no exponent decodes to a
+-- Python int on the reference host, which a float-only range check never
+-- examined -- and which then had to become an f64 at the WASM boundary.
+-- ================================================================
+public fn test_json_parse_integer_overflow_rejected(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 1)
+  effects(pure)
+{
+  match json_parse("1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000") {
+    Ok(_) -> 0,
+    Err(_) -> 1
+  }
+}
+
+-- ================================================================
+-- test_json_parse_integer_in_range_accepted
+-- Control: one digit fewer rounds into range and still parses -- the
+-- boundary the integer refusal must not overshoot. Takes the Ok arm;
+-- json_type of the result is "number" (length 6).
+-- ================================================================
+public fn test_json_parse_integer_in_range_accepted(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 6)
+  effects(pure)
+{
+  match json_parse("100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000") {
+    Ok(@Json) -> string_length(json_type(@Json.0)),
+    Err(_) -> 0
+  }
+}
+
+-- ================================================================
+-- main — run all tests and return 0 on success
+-- Expected sum:
+--   test_json_parse_nan_rejected                   = 1
+--   test_json_parse_infinity_in_array_rejected     = 1
+--   test_json_parse_lone_surrogate_value_rejected  = 1
+--   test_json_parse_lone_surrogate_key_rejected    = 1
+--   test_json_parse_paired_surrogate_accepted      = 6
+--   test_json_parse_nan_as_string_value_accepted   = 6
+--   test_json_parse_overflow_rejected              = 1
+--   test_json_parse_largest_finite_accepted        = 6
+--   test_json_parse_underflow_accepted             = 6
+--   test_json_parse_integer_overflow_rejected      = 1
+--   test_json_parse_integer_in_range_accepted      = 6
+-- Total: 1+1+1+1+6+6+1+6+6+1+6 = 36
+-- ================================================================
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Int = test_json_parse_nan_rejected(()) + test_json_parse_infinity_in_array_rejected(()) + test_json_parse_lone_surrogate_value_rejected(()) + test_json_parse_lone_surrogate_key_rejected(()) + test_json_parse_paired_surrogate_accepted(()) + test_json_parse_nan_as_string_value_accepted(()) + test_json_parse_overflow_rejected(()) + test_json_parse_largest_finite_accepted(()) + test_json_parse_underflow_accepted(()) + test_json_parse_integer_overflow_rejected(()) + test_json_parse_integer_in_range_accepted(());
+  if @Int.0 == 36 then {
+    0
+  } else {
+    1
+  }
+}

@@ -17,6 +17,19 @@ Text direction (Python → JSON text):
   dumps_canonical(value) → str
   format_json_number(value) → str
 
+Accept domain (spec §9.7.1, #1306 / #1308):
+  first_domain_violation(value) → str | None
+  _non_finite_parse_message(name) → str
+  _non_finite_number_message(name) → str
+  _lone_surrogate_message(code_point) → str
+
+The domain gates sit in front of the write direction rather than inside
+it: `vera/runtime/json.py` consults them on the value `json.loads`
+returned, before `write_json` marshals anything, and
+`vera/browser/runtime.mjs` carries the twin of each.  See the section
+comment below for what the domain is and why it is stated rather than
+inherited.
+
 The text direction is the last mile of the read direction and lives here
 for that reason: ``json_stringify`` is ``read_json`` followed by
 ``dumps_canonical``.  Its output form is canonical and shared with the
@@ -60,6 +73,204 @@ _TAG_JNUMBER = 2
 _TAG_JSTRING = 3
 _TAG_JARRAY = 4
 _TAG_JOBJECT = 5
+
+
+# ---------------------------------------------------------------------------
+# json_parse's accept domain (spec §9.7.1)
+# ---------------------------------------------------------------------------
+#
+# ``json_parse`` accepts exactly RFC 8259-valid text that decodes to
+# finite numbers and strings of Unicode scalar values; everything else
+# is a handled ``Err``,
+# identically on both hosts, at the parse.  The domain is Vera's own — it
+# is not inherited from whichever parser a host happens to call, which is
+# why each of the two exclusions below needs an explicit gate on at least
+# one side:
+#
+#   * the JavaScript constants ``NaN`` / ``Infinity`` / ``-Infinity``,
+#     which RFC 8259 has no literals for.  Python's ``json.loads`` admits
+#     them through ``parse_constant``; ``JSON.parse`` refuses them
+#     (#1306).
+#   * a lone surrogate, which is not a Unicode scalar value and has no
+#     UTF-8 encoding, so no Vera string can hold one.  Both host parsers
+#     decode the escape happily and the refusal used to fall out of the
+#     memory boundary — as a crash on one host and a silent U+FFFD
+#     substitution on the other (#1308).
+#
+# Each refusal has ONE sentence, built here and hand-copied into
+# ``vera/browser/runtime.mjs``; ``tests/test_browser.py`` holds the copy
+# against this original so the two hosts cannot drift into saying
+# different things about the same input.
+
+
+def _non_finite_parse_message(name: str) -> str:
+    """The single sentence both runtimes return for a bare ``NaN``.
+
+    ``name`` is the constant as it appears in the text — ``"NaN"``,
+    ``"Infinity"`` or ``"-Infinity"`` — which is what Python's
+    ``parse_constant`` hook is handed and what the browser's twin scan
+    finds.
+    """
+    return (
+        f"json_parse: {name} is not valid JSON — RFC 8259 has no NaN or "
+        f"Infinity.  json_parse accepts RFC 8259 text only, not the "
+        f"JavaScript constants: quote the value as a string, or write null."
+    )
+
+
+def _lone_surrogate_message(code_point: int) -> str:
+    """The single sentence both runtimes return for a lone surrogate.
+
+    The code point is rendered in the canonical ``\\uXXXX`` escape form
+    with uppercase hex, so the message does not depend on how the input
+    spelled its escape.
+    """
+    return (
+        f"json_parse: \\u{code_point:04X} decodes to a lone surrogate, which "
+        f"is not a Unicode scalar value — a Vera string is a sequence of "
+        f"scalar values, so this text has no representable decoding.  Write "
+        f"the character as a matched high-then-low surrogate escape pair, or "
+        f"remove the escape."
+    )
+
+
+def _first_lone_surrogate_in_str(text: str) -> int | None:
+    """The first surrogate code point in ``text``, or ``None``.
+
+    Every surrogate reaching this function is lone: ``json.loads``
+    combines a well-formed ``\\uD83D\\uDE00`` escape pair into the single
+    astral code point it denotes, so anything left in D800–DFFF failed to
+    pair during decoding.  A plain range test is therefore complete here.
+
+    The browser's twin cannot be this simple.  JS strings are UTF-16, so
+    a paired astral character is still *stored* as two surrogate code
+    units and the scan there has to consume pairs before judging what is
+    lone — same rule ("no code point outside the scalar values"), applied
+    to a different representation of the decoded value.
+    """
+    for ch in text:
+        code_point = ord(ch)
+        if 0xD800 <= code_point <= 0xDFFF:
+            return code_point
+    return None
+
+def _non_finite_number_message(name: str) -> str:
+    """The single sentence both runtimes return for an overflowing number.
+
+    The sibling of :func:`_non_finite_parse_message`: the same exclusion
+    — no accepted text decodes to a non-finite number — reached by a
+    different syntax.  ``1e999`` breaks no RFC 8259 rule, so this one
+    cites the permission the refusal rests on rather than a prohibition.
+    """
+    return (
+        f"json_parse: a number in the text overflows to {name}, which JSON "
+        f"cannot represent — RFC 8259 §6 lets an implementation set limits "
+        f"on the range of numbers it accepts, and Vera's accepted range is "
+        f"the finite Float64 values.  Keep the magnitude at or below "
+        f"1.7976931348623157e308, or carry the value as a string."
+    )
+
+
+# The smallest magnitude whose nearest double is an infinity.
+#
+# ``json.loads`` returns a Python ``int`` for a digit string with no
+# fraction and no exponent, and an ``int`` of any size is finite — but it
+# still has to become an f64 at the WASM boundary, where ``float()``
+# raises rather than saturating.  So the integer arm needs its own range
+# check, and the check has to be pure integer arithmetic: implementing it
+# as ``float(value)`` would BE the overflow it is looking for.
+#
+# The bound is the double ROUNDING boundary, not ``sys.float_info.max``.
+# The largest finite double is ``2**1024 - 2**971``; the next value the
+# format could name is ``2**1024``; the midpoint between them is
+# ``2**1024 - 2**970``, and ties-to-even sends that midpoint upward to
+# the infinity.  Everything strictly below rounds DOWN to the largest
+# finite double and is perfectly representable — including integers
+# larger than ``sys.float_info.max`` itself, which ``JSON.parse`` accepts
+# and a bound of ``int(sys.float_info.max)`` would wrongly refuse here
+# alone.  ``TestIntegerOverflowRefusal1306`` pins the derivation against
+# ``float()`` as its oracle, and the band between the two candidate
+# bounds as a control.
+_INT_ROUNDS_TO_INFINITY = 2**1024 - 2**970
+
+
+def first_domain_violation(value: Any) -> str | None:
+    """The ``Err`` message for the first out-of-domain value, or ``None``.
+
+    One walk over the decoded tree for both value-level exclusions of
+    spec §9.7.1 — a string holding a lone surrogate, and a number that
+    is not finite.  Both are properties of the decoded VALUE rather than
+    of the text, so both are found here rather than at the parse gate,
+    and finding them in one traversal is what makes "whichever comes
+    first names the refusal" the rule, instead of a precedence table the
+    two hosts could implement differently.
+
+    Document order means, for an object, each key before its own value.
+    Keys are checked as well as values: a key crosses the WASM boundary
+    as a string exactly like a value does, and the key position is the
+    one #1308's own reproduction used.
+
+    Returning the sentence rather than the offending code point or float
+    keeps the violation-to-message mapping in one place — a caller
+    cannot pair a found violation with the wrong message — and gives the
+    browser's twin the same kind of thing to return.
+
+    Non-finite numbers reach the domain two ways.  ``1e999`` is a
+    syntactically valid RFC 8259 number that overflows on decoding, and
+    is caught here.  The bare constants ``NaN`` / ``Infinity`` are
+    refused earlier, at the parse gate, because there the *text* is not
+    RFC 8259 and each host's own parser decides that.  One exclusion,
+    two entry routes, two sentences — the one that fires says which
+    route the text took.
+
+    Both ``float`` and ``int`` are range-checked, and the ``int`` arm is
+    not redundant.  ``json.loads`` yields an ``int`` for a digit string
+    with no fraction and no exponent, and it is true that a Python
+    ``int`` cannot be infinite however many digits it has — but that is
+    not the question.  The value must still become an f64 at the WASM
+    boundary, and ``float()`` raises there for a magnitude past the
+    rounding boundary, so an int-shaped ``1`` followed by 309 zeros
+    reached ``write_json`` and killed the host where the browser — which
+    has no int/float split and sees an ``Infinity`` either way — had
+    returned the shared sentence all along.  ``bool`` subclasses ``int``
+    and is excluded explicitly: a JSON boolean is not a number.
+    """
+    if isinstance(value, str):
+        code_point = _first_lone_surrogate_in_str(value)
+        if code_point is None:
+            return None
+        return _lone_surrogate_message(code_point)
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            return _non_finite_number_message(_NON_FINITE_NAMES[repr(value)])
+        return None
+    if isinstance(value, int) and not isinstance(value, bool):
+        # ``bool`` subclasses ``int``; a boolean is a JSON boolean and
+        # is never range-checked.  The comparisons below stay in integer
+        # arithmetic all the way down, so a 400-digit literal is refused
+        # rather than raising on its way to being measured.
+        if value >= _INT_ROUNDS_TO_INFINITY:
+            return _non_finite_number_message("Infinity")
+        if value <= -_INT_ROUNDS_TO_INFINITY:
+            return _non_finite_number_message("-Infinity")
+        return None
+    if isinstance(value, list):
+        for item in value:
+            found = first_domain_violation(item)
+            if found is not None:
+                return found
+        return None
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if isinstance(key, str):
+                code_point = _first_lone_surrogate_in_str(key)
+                if code_point is not None:
+                    return _lone_surrogate_message(code_point)
+            found = first_domain_violation(item)
+            if found is not None:
+                return found
+        return None
+    return None
 
 
 def write_json(

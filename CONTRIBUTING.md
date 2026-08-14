@@ -147,7 +147,7 @@ pytest --cov=vera         # with coverage
 VERA_JS_COVERAGE=1 pytest tests/test_browser.py -v  # JS coverage
 ```
 
-PRs touching `vera/browser/runtime.mjs` have JavaScript coverage tracked by Codecov (via V8's built-in coverage). See [TESTING.md](TESTING.md) for the full testing reference -- coverage data, test helpers, and guidelines for adding tests.  See [ENVIRONMENT.md](ENVIRONMENT.md) for all `VERA_*` environment variables (provider keys, runtime knobs, and debug flags like `VERA_EAGER_GC` for hunting GC-rooting bugs).
+PRs touching `vera/browser/runtime.mjs` have JavaScript coverage tracked by Codecov (via V8's built-in coverage). See [TESTING.md](TESTING.md) for the full testing reference -- coverage data, test helpers, and guidelines for adding tests.  See [ENVIRONMENT.md](ENVIRONMENT.md) for all `VERA_*` environment variables (provider keys, runtime knobs, and debug flags like `VERA_EAGER_GC` for hunting GC-rooting bugs and `VERA_DEBUG_HOST_ERRORS` for host-binding ones).
 
 **Doc-count gate**: any PR that adds tests will trip `scripts/check_doc_counts.py` if it doesn't also update the test counts in `TESTING.md` (per-file rows + overall total), `ROADMAP.md` (the "Where we are" line), and `README.md` (project-status line).  Run the script locally to see exactly which numbers need updating:
 

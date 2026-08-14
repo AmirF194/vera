@@ -20,6 +20,7 @@ import random
 import shutil
 import struct
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +32,13 @@ from vera.checker import typecheck
 from vera.parser import parse_file
 from vera.resolver import ModuleResolver
 from vera.transform import transform
-from vera.wasm.json_serde import _non_finite_message, format_json_number
+from vera.wasm.json_serde import (
+    _lone_surrogate_message,
+    _non_finite_message,
+    _non_finite_number_message,
+    _non_finite_parse_message,
+    format_json_number,
+)
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -228,12 +235,15 @@ def _both_failures(src: str, tmp_path: Path, name: str) -> tuple[str, str]:
     src_path.write_text(src, encoding="utf-8")
     wasm_path, result = _compile_file(src_path, tmp_path)
 
-    # ``execute`` discards its stdout buffer when the exception is not a
-    # wasmtime trap, so the buffer cannot answer "did it print anything
-    # first?".  ``tee_stdout`` mirrors every ``IO.print`` to
-    # ``sys.stdout`` as it happens, which survives the unwind — so
-    # redirecting it gives the native side the same observation the Node
-    # harness gives for free.
+    # ``tee_stdout`` mirrors every ``IO.print`` to ``sys.stdout`` as it
+    # happens, so redirecting it gives the native side the same
+    # observation the Node harness gives for free: what reached the
+    # terminal, in real time, before the call failed.  Since #1302
+    # ``execute`` also carries the buffer on ``WasmTrapError.stdout`` for
+    # a host-callback failure — it used to discard it — but the tee is
+    # what this helper wants, because it answers "did anything actually
+    # get written?" for BOTH failure shapes without the helper having to
+    # know which one it caught.
     native_tee = io.StringIO()
     try:
         with contextlib.redirect_stdout(native_tee):
@@ -3913,6 +3923,384 @@ public fn main(@Unit -> @Unit)
         # wrap the host message in a frame of their own.
         assert expected in native, native
         assert expected in browser, browser
+
+
+def _vera_lit(raw: str) -> str:
+    """Escape ``raw`` for embedding in a Vera string literal.
+
+    The accept-domain battery's inputs are JSON documents full of quotes
+    and backslashes, and one backslash either way changes which bytes
+    ``json_parse`` receives — a surrogate escape and a literal
+    backslash-u sequence differ by exactly that.  Converting once at the
+    boundary is what keeps fifteen call sites honest about their input.
+    """
+    return raw.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _accept_domain_src(raw_json: str) -> str:
+    """A ``main`` that reports which arm ``json_parse(raw_json)`` took.
+
+    Prints ``OK:<canonical text>`` or ``ERR:<message>``, so one
+    byte-identical stdout across the two runtimes covers the arm AND the
+    message in a single assertion.  The reference-host twin of this
+    probe is in ``tests/test_json_accept_domain_1306_1308.py``.
+    """
+    return f"""
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{{
+  match json_parse("{_vera_lit(raw_json)}") {{
+    Ok(@Json) -> IO.print(string_concat("OK:", json_stringify(@Json.0))),
+    Err(@String) -> IO.print(string_concat("ERR:", @String.0))
+  }}
+}}
+"""
+
+
+# The four probe inputs from #1306's table, plus the container and
+# multi-constant shapes that pin how far the refusal reaches and which
+# constant names it.
+_JSON_NON_FINITE_CASES = [
+    ("bare_nan", "NaN", "NaN"),
+    ("bare_infinity", "Infinity", "Infinity"),
+    ("bare_negative_infinity", "-Infinity", "-Infinity"),
+    ("nan_in_array", "[NaN]", "NaN"),
+    ("infinity_in_object", '{"a":Infinity}', "Infinity"),
+    ("negative_infinity_in_object", '{"a":-Infinity}', "-Infinity"),
+    ("first_of_two_wins", "[NaN,Infinity]", "NaN"),
+]
+
+# Positions × escape casings for #1308: keys as well as values, nested
+# anywhere, either spelling of the hex digits.
+_JSON_LONE_SURROGATE_CASES = [
+    ("value_lower", '{"k":"a\\ud800b"}', 0xD800),
+    ("value_upper", '{"k":"a\\uD800b"}', 0xD800),
+    ("value_low_surrogate", '{"k":"a\\udc00b"}', 0xDC00),
+    ("key", '{"a\\ud800b":1}', 0xD800),
+    ("key_upper", '{"a\\uD800b":1}', 0xD800),
+    ("array_element", '["a\\ud800b"]', 0xD800),
+    ("nested_object", '{"o":{"k":"a\\ud800b"}}', 0xD800),
+    ("nested_array_in_object", '{"o":[1,"a\\ud800b"]}', 0xD800),
+    ("top_level_string", '"a\\ud800b"', 0xD800),
+    ("high_then_ascii_escape", '{"k":"\\ud800\\u0041"}', 0xD800),
+    ("high_then_high", '{"k":"\\ud800\\ud800"}', 0xD800),
+    ("low_then_valid_pair", '{"k":"\\udc00\\ud83d\\ude00"}', 0xDC00),
+]
+
+# The boundary the #1308 refusal must not overshoot, and the documents
+# neither refusal may touch.
+_JSON_ACCEPTED_CASES = [
+    ("paired_surrogate_value", '{"k":"a\\ud83d\\ude00b"}', '{"k":"a\U0001F600b"}'),
+    ("paired_surrogate_upper", '{"k":"a\\uD83D\\uDE00b"}', '{"k":"a\U0001F600b"}'),
+    ("paired_surrogate_key", '{"a\\ud83d\\ude00b":1}', '{"a\U0001F600b":1}'),
+    ("two_pairs", '["\\ud83d\\ude00\\ud83d\\ude80"]', '["\U0001F600\U0001F680"]'),
+    ("pair_at_end", '{"k":"ab\\ud83d\\ude00"}', '{"k":"ab\U0001F600"}'),
+    ("literal_astral", '{"k":"\U0001F600"}', '{"k":"\U0001F600"}'),
+    ("nan_as_string_value", '{"k":"NaN"}', '{"k":"NaN"}'),
+    ("infinity_as_string_value", '{"k":"Infinity"}', '{"k":"Infinity"}'),
+    ("nan_as_key", '{"NaN":1}', '{"NaN":1}'),
+    ("negative_number", "-1.5", "-1.5"),
+    ("object_and_array", '{"a":1,"b":[true,null]}', '{"a":1,"b":[true,null]}'),
+    ("escaped_backslash_u", '{"k":"\\\\ud800"}', '{"k":"\\\\ud800"}'),
+]
+
+
+# A syntactically valid number that overflows Float64 — the second entry
+# route to a non-finite JNumber, and the one the constant refusal alone
+# left open on BOTH hosts.
+_JSON_OVERFLOW_CASES = [
+    ("bare", "1e999", "Infinity"),
+    ("bare_negative", "-1e999", "-Infinity"),
+    ("in_array", "[1e999]", "Infinity"),
+    ("in_object", '{"a":1e309}', "Infinity"),
+    ("capital_exponent", "1E999", "Infinity"),
+    ("doubly_nested", "[[1e999]]", "Infinity"),
+    ("negative_in_object", '{"a":-1e999}', "-Infinity"),
+]
+
+# Finite boundary controls, underflow among them: 1e-999 decodes to 0,
+# which is finite and in the domain.
+_JSON_FINITE_BOUNDARY_CASES = [
+    ("max_float", "1e308", "1e+308"),
+    ("negative_max_float", "-1e308", "-1e+308"),
+    ("largest_representable", "1.7976931348623157e308",
+     "1.7976931348623157e+308"),
+    ("underflow_to_zero", "1e-999", "0"),
+    ("underflow_in_array", "[1e-999]", "[0]"),
+]
+
+# Text that is malformed for a reason the domain has nothing to say
+# about.  Each must keep its host-native syntax message on both hosts —
+# these are where a scan that matched a constant token anywhere, rather
+# than only where a value may begin, would manufacture a shared sentence
+# on one host and not the other.
+_JSON_HOST_NATIVE_ERROR_CASES = [
+    ("malformed", "{not json"),
+    ("constant_lookalike", "[Infinity_x]"),
+    ("nan_lookalike", "[NaNx]"),
+    ("constant_as_bare_key", "{Infinity:1}"),
+    ("signed_nan", "-NaN"),
+    ("signed_nan_in_array", "[-NaN]"),
+    ("plus_infinity", "+Infinity"),
+    ("lowercase_infinity", "infinity"),
+    ("lowercase_nan", "nan"),
+    ("constant_suffix", "-Infinityx"),
+]
+
+
+# The integer arm of the overflow route.  ``json.loads`` yields a Python
+# ``int`` for a digit string with no fraction or exponent, so these never
+# reach a float range check on the reference host; ``JSON.parse`` has no
+# such split and produced an ``Infinity`` here all along.  The bound is
+# the double ROUNDING boundary — an integer above ``sys.float_info.max``
+# but below the midpoint to 2**1024 rounds down and is accepted by both.
+_INT_ROUNDS_TO_INFINITY = 2**1024 - 2**970
+_MAX_FINITE_AS_INT = int(sys.float_info.max)
+
+_JSON_INT_OVERFLOW_CASES = [
+    ("digits_309", "1" + "0" * 309, "Infinity"),
+    ("digits_400", "1" + "0" * 400, "Infinity"),
+    ("negative_309", "-1" + "0" * 309, "-Infinity"),
+    ("in_array", "[1" + "0" * 309 + "]", "Infinity"),
+    ("in_object", '{"a":1' + "0" * 309 + "}", "Infinity"),
+    ("exact_rounding_boundary", str(_INT_ROUNDS_TO_INFINITY), "Infinity"),
+]
+
+_JSON_INT_ACCEPTED_CASES = [
+    ("digits_308", "1" + "0" * 308, "1e+308"),
+    ("negative_digits_308", "-1" + "0" * 308, "-1e+308"),
+    ("boundary_minus_one", str(_INT_ROUNDS_TO_INFINITY - 1),
+     "1.7976931348623157e+308"),
+    ("max_finite_as_int_plus_one", str(_MAX_FINITE_AS_INT + 1),
+     "1.7976931348623157e+308"),
+    ("ordinary_integer", "42", "42"),
+]
+
+
+class TestBrowserJsonAcceptDomainParity1306_1308:
+    """``json_parse`` accepts the same texts on both hosts (#1306, #1308).
+
+    Three exclusions, and only one of them was a disagreement BETWEEN
+    the hosts.  For the JavaScript constants the reference host was the
+    lax one — Python's ``json.loads`` admits ``NaN`` / ``Infinity`` /
+    ``-Infinity`` through its default ``parse_constant``, so the text
+    parsed and the refusal landed at ``json_stringify`` instead, a
+    *different call* from the browser's (#1306).
+
+    The other two diverged from the stated domain on BOTH hosts at once,
+    which is the harder shape to notice because a parity suite sees
+    nothing wrong.  A lone-surrogate escape was accepted by both parsers
+    and the memory boundary decided what happened next — ``TextEncoder``
+    substituted U+FFFD in the browser, ``.encode()`` raised in the
+    reference host (#1308).  A number that overflows (``1e999``) is
+    accepted by both parsers as well, decoding to an infinite
+    ``JNumber`` on each, and then dying at ``json_stringify`` on each
+    (#1306 again, by a second entry route).
+
+    Vera's own domain now settles all three, at one refusal point:
+    ``json_parse`` accepts exactly RFC 8259-valid text that decodes to
+    finite numbers and strings of Unicode scalar values.
+
+    Every case runs the SAME ``.wasm`` under both runtimes and compares
+    the full stdout, so the assertion covers the arm taken *and* the
+    message — and the expected message is imported from the reference
+    implementation, holding ``runtime.mjs``'s hand-copied duplicate
+    against the original rather than against a fragment loose enough for
+    both to satisfy while saying different things.
+    """
+
+    @pytest.mark.parametrize(
+        ("case_id", "raw_json", "name"),
+        _JSON_NON_FINITE_CASES,
+        ids=[c[0] for c in _JSON_NON_FINITE_CASES],
+    )
+    def test_non_finite_constants_refused_identically(
+        self, case_id: str, raw_json: str, name: str, tmp_path: Path,
+    ) -> None:
+        out = _parity_stdout(
+            _accept_domain_src(raw_json), tmp_path, f"jsonnfp_{case_id}",
+        )
+        assert out == "ERR:" + _non_finite_parse_message(name)
+
+    @pytest.mark.parametrize(
+        ("case_id", "raw_json", "code_point"),
+        _JSON_LONE_SURROGATE_CASES,
+        ids=[c[0] for c in _JSON_LONE_SURROGATE_CASES],
+    )
+    def test_lone_surrogates_refused_identically(
+        self, case_id: str, raw_json: str, code_point: int, tmp_path: Path,
+    ) -> None:
+        out = _parity_stdout(
+            _accept_domain_src(raw_json), tmp_path, f"jsonls_{case_id}",
+        )
+        assert out == "ERR:" + _lone_surrogate_message(code_point)
+
+    @pytest.mark.parametrize(
+        ("case_id", "raw_json", "expected"),
+        _JSON_ACCEPTED_CASES,
+        ids=[c[0] for c in _JSON_ACCEPTED_CASES],
+    )
+    def test_accepted_documents_are_unchanged(
+        self, case_id: str, raw_json: str, expected: str, tmp_path: Path,
+    ) -> None:
+        """Controls, run beside the refusals rather than in another file.
+
+        A paired surrogate escape is the ordinary way to write an astral
+        character, and ``"NaN"`` as a string value is ordinary JSON — a
+        refusal that reached either of them would break real documents,
+        and would still look like a pass to a battery that only asserted
+        the refusals fire.
+        """
+        out = _parity_stdout(
+            _accept_domain_src(raw_json), tmp_path, f"jsonok_{case_id}",
+        )
+        assert out == "OK:" + expected
+
+    @pytest.mark.parametrize(
+        ("case_id", "raw_json", "name"),
+        _JSON_OVERFLOW_CASES,
+        ids=[c[0] for c in _JSON_OVERFLOW_CASES],
+    )
+    def test_overflow_to_infinity_refused_identically(
+        self, case_id: str, raw_json: str, name: str, tmp_path: Path,
+    ) -> None:
+        """The route the constant refusal left open, on both hosts.
+
+        ``1e999`` is grammatically valid RFC 8259 that ``json.loads``
+        and ``JSON.parse`` both accept, decoding to an infinite number
+        on each — so before this the domain's "no non-finite value gets
+        in" claim was false in the same way on both hosts, and the
+        program died at ``json_stringify`` instead.
+        """
+        out = _parity_stdout(
+            _accept_domain_src(raw_json), tmp_path, f"jsonovf_{case_id}",
+        )
+        assert out == "ERR:" + _non_finite_number_message(name)
+
+    @pytest.mark.parametrize(
+        ("case_id", "raw_json", "expected"),
+        _JSON_FINITE_BOUNDARY_CASES,
+        ids=[c[0] for c in _JSON_FINITE_BOUNDARY_CASES],
+    )
+    def test_finite_numbers_at_the_boundary_are_unchanged(
+        self, case_id: str, raw_json: str, expected: str, tmp_path: Path,
+    ) -> None:
+        """Including underflow, which is a different question.
+
+        ``1e-999`` names a value neither host can represent either, but
+        what it decodes to is ``0`` — finite, and in the domain.  A
+        refusal generalised from "the text names an unrepresentable
+        magnitude" rather than from "the decoded number is not finite"
+        would take it.
+        """
+        out = _parity_stdout(
+            _accept_domain_src(raw_json), tmp_path, f"jsonfin_{case_id}",
+        )
+        assert out == "OK:" + expected
+
+    @pytest.mark.parametrize(
+        ("case_id", "raw_json", "name"),
+        _JSON_INT_OVERFLOW_CASES,
+        ids=[c[0] for c in _JSON_INT_OVERFLOW_CASES],
+    )
+    def test_integer_overflow_refused_identically(
+        self, case_id: str, raw_json: str, name: str, tmp_path: Path,
+    ) -> None:
+        """The route only the reference host had a hole in.
+
+        A digit string with no fraction and no exponent decodes to a
+        Python ``int``, which a float-only range check never examined —
+        and then had to become an f64 at the WASM boundary, where the
+        conversion raised.  ``JSON.parse`` produces a double either way,
+        so the browser side of this parity assertion was already right;
+        what it pins is that the reference host now says the same
+        sentence rather than dying with a CPython one.
+        """
+        out = _parity_stdout(
+            _accept_domain_src(raw_json), tmp_path, f"jsonint_{case_id}",
+        )
+        assert out == "ERR:" + _non_finite_number_message(name)
+
+    @pytest.mark.parametrize(
+        ("case_id", "raw_json", "expected"),
+        _JSON_INT_ACCEPTED_CASES,
+        ids=[c[0] for c in _JSON_INT_ACCEPTED_CASES],
+    )
+    def test_integers_that_round_into_range_are_unchanged(
+        self, case_id: str, raw_json: str, expected: str, tmp_path: Path,
+    ) -> None:
+        """The boundary pair, and the band between the two candidate bounds.
+
+        ``max_finite_as_int_plus_one`` is larger than the largest finite
+        double and still rounds to it, so both hosts accept it.  A
+        reference-host bound of ``sys.float_info.max`` would refuse it
+        and trade one divergence for its mirror image — invisible to any
+        battery whose only large case is a round number of zeros.
+        """
+        out = _parity_stdout(
+            _accept_domain_src(raw_json), tmp_path, f"jsonintok_{case_id}",
+        )
+        assert out == "OK:" + expected
+
+    @pytest.mark.parametrize(
+        ("case_id", "raw_json"),
+        _JSON_HOST_NATIVE_ERROR_CASES,
+        ids=[c[0] for c in _JSON_HOST_NATIVE_ERROR_CASES],
+    )
+    def test_malformed_text_keeps_its_host_native_message(
+        self, case_id: str, raw_json: str, tmp_path: Path,
+    ) -> None:
+        """Only the domain refusals are shared sentences.
+
+        Syntax errors keep their host-native message — Python ``json``
+        on one side, ECMAScript ``JSON`` on the other — the long-standing
+        convention ``TestBrowserHostErrorPaths349`` documents.  The
+        browser reaches its shared sentence by asking whether stripping
+        the bare constants makes the text parse, and it only considers a
+        token where a value may begin; ``-NaN`` is the case that needs
+        both rules, since the substitution alone would turn it into
+        ``-0`` and report a refusal the reference host never makes.
+        """
+        native, browser = _both_stdouts(
+            _accept_domain_src(raw_json), tmp_path, f"jsonsyn_{case_id}",
+        )
+        assert native.startswith("ERR:")
+        assert browser.startswith("ERR:")
+        assert "json_parse:" not in native, native
+        assert "json_parse:" not in browser, browser
+
+    def test_a_non_finite_constant_outranks_a_lone_surrogate(
+        self, tmp_path: Path,
+    ) -> None:
+        """Precedence, pinned, because the two hosts reach it differently.
+
+        The reference host never gets to the surrogate scan — the
+        constant makes ``json.loads`` itself raise.  The browser never
+        gets to ``parseJsonOrdered`` — ``JSON.parse`` refused the text.
+        Both arrive at the non-finite sentence, but only a test says so.
+        """
+        out = _parity_stdout(
+            _accept_domain_src('["\\ud800",NaN]'), tmp_path, "jsonprec",
+        )
+        assert out == "ERR:" + _non_finite_parse_message("NaN")
+
+    def test_the_two_walk_refusals_share_one_document_order(
+        self, tmp_path: Path,
+    ) -> None:
+        """Overflow and lone surrogate are found by ONE walk, both hosts.
+
+        Both are properties of the decoded value, so both are found by
+        the same document-order traversal and whichever comes first
+        names the refusal.  Two hosts each with its own precedence rule
+        would agree on every single-violation document and diverge only
+        here.
+        """
+        assert _parity_stdout(
+            _accept_domain_src('["a\\ud800b",1e999]'), tmp_path, "jsonwalk1",
+        ) == "ERR:" + _lone_surrogate_message(0xD800)
+        assert _parity_stdout(
+            _accept_domain_src('[1e999,"a\\ud800b"]'), tmp_path, "jsonwalk2",
+        ) == "ERR:" + _non_finite_number_message("Infinity")
 
 
 class TestCanonicalNumberFormatMatchesEcmascript1293:

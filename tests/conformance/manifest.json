@@ -1895,6 +1895,24 @@
     ]
   },
   {
+    "id": "ch09_json_accept_domain",
+    "file": "ch09_json_accept_domain.vera",
+    "chapter": 9,
+    "title": "json_parse's accepted domain (#1306, #1308)",
+    "level": "run",
+    "spec_ref": "Section 9.7.1",
+    "features": [
+      "json_parse",
+      "json_accept_domain",
+      "non_finite_constant_rejected",
+      "non_finite_overflow_rejected",
+      "integer_overflow_rejected",
+      "lone_surrogate_rejected",
+      "surrogate_pair_accepted",
+      "finite_boundary_accepted"
+    ]
+  },
+  {
     "id": "ch09_json_accessors",
     "file": "ch09_json_accessors.vera",
     "chapter": 9,

@@ -15,6 +15,7 @@ Vera reads a small set of `VERA_*` environment variables.  This document is the 
 | [`VERA_DB_URL`](#vera_db_url) | Database connection for the `DB` effect | runtime | optional (defaults to `sqlite::memory:`) |
 | [`VERA_JS_COVERAGE`](#vera_js_coverage) | Opt-in V8 coverage during browser-parity tests | dev / CI | optional |
 | [`VERA_EAGER_GC`](#vera_eager_gc) | Force `$gc_collect` on every allocation — debugging knob for GC-rooting bugs | compile-time (dev) | optional |
+| [`VERA_DEBUG_HOST_ERRORS`](#vera_debug_host_errors) | Re-raise a host callback's original exception instead of converting it — debugging knob for host-binding bugs | runtime (dev) | optional |
 
 ## Inference provider keys
 
@@ -81,6 +82,20 @@ Read by `vera/codegen/assembly.py::AssemblyMixin._emit_alloc`; affects the WAT t
 This was the diagnostic that cracked [#593](https://github.com/aallan/vera/issues/593): the rebuilt minimum reproducer crashed at generation 0 under `VERA_EAGER_GC=1` rather than around generation 20 without it, and the much smaller stack trace pinpointed the missing return-value root in `_compile_lifted_closure`.
 
 **Cost.**  Programs run orders of magnitude slower with `$gc_collect` on every allocation — never enable it in production or in normal test runs.  It's a debugging knob, not a release-build option.  Tests that exercise this knob live in `tests/test_codegen_closures.py::TestClosureReturnShadowPushBalance`.
+
+## `VERA_DEBUG_HOST_ERRORS`
+
+A diagnostic knob for debugging the host bindings themselves.  Set to `1`, `true`, or `yes` (case-insensitive, surrounding whitespace ignored — the same spellings [`VERA_EAGER_GC`](#vera_eager_gc) accepts) to make `execute()` re-raise a host callback's original Python exception instead of converting it to a `WasmTrapError`:
+
+```bash
+VERA_DEBUG_HOST_ERRORS=1 vera run program.vera
+```
+
+Read by `vera/codegen/api.py::execute`; affects how a failure is *presented*, never whether one happens.
+
+**When to use it.**  [#1302](https://github.com/aallan/vera/issues/1302) made every exception escaping the guest invocation arrive as a classified Vera error — a one-line `Error:` with the host's own sentence, the captured `stdout`, and a source backtrace — because a user-level program must never produce a Python traceback regardless of what it does.  That is right for someone running a Vera program and unhelpful for someone who suspects the *binding* is wrong: the sentence survives, the Python frames that say where in the binding it came from do not.  They remain on the exception's `__cause__`, which serves a library caller and not a person reading a terminal.  This knob puts the frames back.
+
+**Cost.**  None at runtime — the variable is read only on the failure path, and only after a host callback has already raised.  It is still a debugging knob rather than a mode, and it disables more than a message.  With it set, a program that would have exited with a clean Vera diagnostic exits with an interpreter traceback instead, so nothing that parses `vera run` output should be run under it — and `vera serve` reverts to its pre-[#1302](https://github.com/aallan/vera/issues/1302) behaviour, where the raw exception bypasses the `WasmTrapError` handler that answers the request, leaving the connection unanswered rather than returning a 500.  The knob turns off the stronger invariant, not just the prettier output.  Tests that exercise this knob live in `tests/test_runtime_traps.py::TestHostErrorDebugKnob1302`.
 
 ## Adding a new environment variable
 
