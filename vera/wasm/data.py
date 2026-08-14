@@ -420,6 +420,15 @@ class DataMixin:
 
         Evaluates the scrutinee once, saves to a local, then emits a
         chained if-else cascade for each arm.
+
+        A PAIR-represented scrutinee (``String`` / ``Array<T>``, #1305) takes
+        TWO consecutive i32 locals — the same (ptr, len) convention parameters
+        and constructor fields already use, with the env holding the pointer
+        half and the length at ``ptr + 1``.  ``alloc_local("i32_pair")`` would
+        otherwise write the internal pseudo-type verbatim into the locals
+        declaration (``(local $l1 i32_pair)``), which is not a WAT value type,
+        so the whole module failed to assemble — on programs as ordinary as
+        ``match @String.0 { @String -> string_length(@String.0) }``.
         """
         # Translate scrutinee
         scr_instrs = self.translate_expr(expr.scrutinee, env)
@@ -441,9 +450,53 @@ class DataMixin:
             raise CodegenSkip(expr, "match expression has no arms")
 
         # Save scrutinee to a local
-        scr_local = self.alloc_local(scr_wasm_type)
         instructions: list[str] = list(scr_instrs)
-        instructions.append(f"local.set {scr_local}")
+        if scr_wasm_type == "i32_pair":
+            # A WHITELIST, deliberately: exactly two pattern kinds have a
+            # lowering over a pair, and every other kind must be refused
+            # here rather than reach an emitter that will read one of the
+            # two words as something it is not.  A blacklist naming the
+            # constructor kinds was the first cut of this guard and was
+            # strictly worse than the bug it was added beside — a pair has
+            # no comparable scalar word either, so `true ->` and `1 ->`
+            # fell through into the arm-condition emitter and compiled the
+            # scrutinee's heap POINTER as the condition: `match @String.0 {
+            # true -> 100, _ -> 200 }` went from a loud WAT failure to a
+            # check-green program that exits 0 and prints 100, and the
+            # integer twin shipped a `.wasm` that died at instantiation
+            # with no diagnostic at all.  Enumerating what IS lowerable
+            # cannot fail that way when a pattern kind is added.
+            for arm in expr.arms:
+                if not isinstance(
+                    arm.pattern,
+                    (ast.WildcardPattern, ast.BindingPattern),
+                ):
+                    raise CodegenSkip(
+                        arm.pattern,
+                        "pattern over a scrutinee whose representation is a "
+                        "(ptr, len) pair — only a wildcard or a binding "
+                        "pattern lowers over one, since a pair carries "
+                        "neither a constructor tag nor a comparable scalar "
+                        "word",
+                    )
+            ptr_local = self.alloc_local("i32")
+            len_local = self.alloc_local("i32")  # consecutive: ptr + 1
+            instructions.append(f"local.set {len_local}")
+            instructions.append(f"local.set {ptr_local}")
+            # Root the pointer half, following the #705 discipline the
+            # pair-field extraction below and `_destructure_let` already
+            # apply to a pointer that lives only in a WASM local.  This is
+            # defensive depth, not a fix for an observed reclamation: with
+            # both pushes deleted the whole suite, the GC rooting and
+            # reclamation suites, and four allocate-inside-the-arm probes
+            # under VERA_EAGER_GC=1 all stay green.  The length is not a
+            # pointer and is deliberately not rooted.
+            self.needs_alloc = True
+            instructions.extend(gc_shadow_push(ptr_local))
+            scr_local = ptr_local
+        else:
+            scr_local = self.alloc_local(scr_wasm_type)
+            instructions.append(f"local.set {scr_local}")
 
         # Infer result type of the match
         result_type = self._infer_match_result_type(expr)
@@ -807,6 +860,25 @@ class DataMixin:
                     pattern,
                     "binding pattern type has no slot name",
                 )
+            if scr_wasm_type == "i32_pair":
+                # #1305: a pair scrutinee lives in two consecutive locals
+                # (``scr_local`` = ptr, ``scr_local + 1`` = len), so the
+                # binding takes two of its own.  Copying only the pointer
+                # would bind a length-free String and read garbage.  The
+                # push below is the same defensive rooting as the
+                # scrutinee's — pinned as EMISSION by a WAT differential,
+                # because no probe distinguishes it behaviourally.
+                ptr_local = self.alloc_local("i32")
+                len_local = self.alloc_local("i32")  # consecutive: ptr + 1
+                instrs = [
+                    f"local.get {scr_local}",
+                    f"local.set {ptr_local}",
+                    f"local.get {scr_local + 1}",
+                    f"local.set {len_local}",
+                ]
+                self.needs_alloc = True
+                instrs.extend(gc_shadow_push(ptr_local))
+                return (instrs, env.push(type_name, ptr_local))
             local_idx = self.alloc_local(scr_wasm_type)
             bind_val = [f"local.get {scr_local}"]
             # #747: runtime-guard a top-level `match <Int> { @Nat -> ... }`

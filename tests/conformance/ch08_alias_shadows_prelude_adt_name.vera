@@ -1,0 +1,39 @@
+-- Conformance: a type alias shadowing a prelude ADT name (Chapter 8)
+-- Tests: alias-over-ADT resolution reaching the emitted WASM width
+-- Spec 8.4.1: the prelude's data types are ordinary public declarations a
+-- program names, and shadows, like any other.  The alias target's width is
+-- what the slot emits, not the shadowed ADT's pointer width (#1309).
+-- `Option` aliases a scalar (i64 where the ADT pointer is i32) and `Result`
+-- aliases a pair (two words where the ADT pointer is one), so a resolution
+-- that took the ADT branch traps on the first and silently drops the length
+-- word on the second.  Both asserts are Tier-3 runtime checks, so either
+-- wrong width trips one of them.
+type Option = Int;
+
+type Result = String;
+
+private fn twice(@Option -> @Int)
+  requires(true)
+  ensures(@Int.result == @Option.0 + @Option.0)
+  effects(pure)
+{
+  @Option.0 + @Option.0
+}
+
+private fn doubled_length(@Result -> @Int)
+  requires(true)
+  ensures(@Int.result >= 0)
+  effects(pure)
+{
+  string_length(string_concat(@Result.0, @Result.0))
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 42)
+  effects(pure)
+{
+  assert(doubled_length("ab") == 4);
+  assert(twice(21) == 42);
+  42
+}
