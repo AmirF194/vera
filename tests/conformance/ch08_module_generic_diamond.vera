@@ -1,0 +1,18 @@
+-- Conformance: two modules' same-named generics in one program (Chapter 8, #1281)
+-- Tests: a diamond where `mid1` declares a private `forall<T> fn gen` and
+-- `mid2` bare-calls the public `gen` of the shared `base` both import.  After
+-- #1274 the two are in different clone namespaces (`mod$…$mid1$gen$Bool` and
+-- `mod$…$base$gen$Bool`) and nothing is emitted under a generic's bare name at
+-- all, so the flat-namespace overwrite [E608] guards cannot occur — the rail
+-- now reads that ownership classification instead of the bare name alone.
+-- Each door must answer its OWN module's generic: 555 + 111 == 666.
+import ch08_module_generic_diamond_mid1(door1);
+import ch08_module_generic_diamond_mid2(door2);
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 666)
+  effects(pure)
+{
+  door1(true) + door2(true)
+}

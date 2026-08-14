@@ -31,6 +31,7 @@ from vera.monomorphize import (
     importer_occupied_bare_names,
     module_qualified_generic_names,
     module_qualified_generic_targets,
+    namespace_fn_names,
     public_generic_names,
     qualify_nested_generic_decls,
     reroute_module_qualified_generic_calls,
@@ -334,6 +335,12 @@ class ContractVerifier:
         # discovery key `_instances` / `generic_decls` use.  A key absent from
         # here is a main-file generic.
         self._generic_origins: dict[str, tuple[str, ...]] = {}
+        # #1299: the names `inject_prelude` added to the discovery copy.  Fed
+        # to the shared `namespace_fn_names` derivation so the tables carry
+        # the prelude for EVERY namespace, and so this side's answer does not
+        # depend on the discovery copy already holding those declarations
+        # while codegen's program does not.
+        self._disc_prelude_fn_names: frozenset[str] = frozenset()
         # See the class-level defaults: the DEFINING module's env (#1208) and
         # source + file (#1220) while an imported generic's clone is verified,
         # `None` otherwise.
@@ -1689,6 +1696,23 @@ class ContractVerifier:
             fn_ret_type_exprs=fn_ret_type_exprs,
             # #1207: see the `fn_names` comment above.
             fn_names=frozenset(fn_names),
+            # #1299: the per-namespace visibility tables that narrow it while
+            # a declaration is walked, from the SAME shared derivation codegen
+            # drives.  The two must narrow IDENTICALLY, and
+            # `test_discovery_scopes_agree_between_the_two_sides` compares
+            # them per declaration rather than leaving it to this comment —
+            # they were measurably different in two ways before it existed.
+            # Read from the PRE-transform module ASTs, which changes no
+            # answer: the Pass-0 transforms only add `$`-qualified
+            # declarations, and `$` cannot occur in a Vera identifier.  The
+            # prelude is passed separately for the same reason: this program
+            # is post-injection and codegen's is not, so reading it off the
+            # declarations would make the answer depend on the caller.
+            namespace_fn_names=namespace_fn_names(
+                disc_program,
+                [(mod.path, mod.program) for mod in self._resolved_modules],
+                prelude=self._disc_prelude_fn_names,
+            ),
         )
 
     @staticmethod
@@ -1907,7 +1931,20 @@ class ContractVerifier:
         # injection, mirroring codegen's ordering (qualify at Pass 0, prelude
         # injected later), so prelude decls are unqualified on both sides.
         disc = qualify_nested_generic_decls(disc)
+        # #1299: the names the prelude adds, as a set.  They belong to every
+        # namespace, so `namespace_fn_names` takes them separately rather
+        # than reading them off this program — codegen's tables are built
+        # before its own injection, and the shared derivation has to answer
+        # the same whichever side calls it.
+        _pre_prelude_fns = {
+            tld.decl.name for tld in disc.declarations
+            if isinstance(tld.decl, ast.FnDecl)
+        }
         inject_prelude(disc)
+        self._disc_prelude_fn_names = frozenset(
+            tld.decl.name for tld in disc.declarations
+            if isinstance(tld.decl, ast.FnDecl)
+        ) - _pre_prelude_fns
 
         generic_decls: dict[str, ast.FnDecl] = {}
         for tld in disc.declarations:
@@ -2021,6 +2058,7 @@ class ContractVerifier:
 
         def collect_calls_in_fn(
             fn: ast.FnDecl, into: dict[str, set[tuple[str, ...]]],
+            namespace: tuple[str, ...] | None = None,
         ) -> None:
             # Delegate to the SHARED node-level walk (body + contract clauses +
             # `where` helpers).  Both this discovery and codegen's Pass 1.5 drive
@@ -2029,7 +2067,13 @@ class ContractVerifier:
             # a contract predicate (`ensures(is_valid(@T.result))`) or a
             # where-helper body is found by both, or by neither, never just one
             # (PR #767 review).
-            mono.collect_calls_in_node(fn, generic_decls, ctor_to_adt, into)
+            # #1299: in *namespace*'s scope, so a bare call is discovered
+            # against the names that body can see — codegen's Pass 1.5 enters
+            # the identical scope for the identical declaration.
+            with mono.namespace_scope(namespace):
+                mono.collect_calls_in_node(
+                    fn, generic_decls, ctor_to_adt, into,
+                )
 
         # Seed from non-generic bodies — the main program AND every resolved
         # module (its qualified copy), so an imported ``compute``'s body call to
@@ -2039,11 +2083,26 @@ class ContractVerifier:
         seed: dict[str, set[tuple[str, ...]]] = {
             name: set() for name in generic_decls
         }
-        for seed_program in (disc, *qualified_module_programs):
+        # #1299: paired with the namespace each program's bodies resolve in —
+        # `None` for the entry program, the module's own path for a module's
+        # qualified copy.  `qualified_module_programs` is built parallel to
+        # `_resolved_modules` just above, so the pairing is positional and the
+        # `strict=True` zip keeps it that way.
+        seed_namespaces: list[tuple[tuple[str, ...] | None, ast.Program]] = [
+            (None, disc),
+            *(
+                (mod.path, qmod)
+                for mod, qmod in zip(
+                    self._resolved_modules, qualified_module_programs,
+                    strict=True,
+                )
+            ),
+        ]
+        for namespace, seed_program in seed_namespaces:
             for tld in seed_program.declarations:
                 decl = tld.decl
                 if isinstance(decl, ast.FnDecl) and not decl.forall_vars:
-                    collect_calls_in_fn(decl, seed)
+                    collect_calls_in_fn(decl, seed, namespace)
 
         # #1002: nested generic-under-generic helpers keyed by their
         # concrete-FREE lexical chain (``parent$where$outer$where$ginner``) — the
@@ -2084,10 +2143,16 @@ class ContractVerifier:
             # every such instantiation while codegen emitted it — a false
             # Tier-1 the moment codegen's own rescan landed.
             scan: list[ast.FnDecl] = [clone]
+            # #1299: the helper family resolves bare names in the module the
+            # CHAIN is declared in — the same key `env` above was resolved
+            # from.  Codegen's `_instantiate_hoisted_generics` enters the
+            # identical scope around the identical leaf.
+            helper_ns = self._origin_module_for_generic(base_chain)
             while scan:
-                found = mono.collect_generic_helper_instances(
-                    helpers, scan, ctor_to_adt,
-                )
+                with mono.namespace_scope(helper_ns):
+                    found = mono.collect_generic_helper_instances(
+                        helpers, scan, ctor_to_adt,
+                    )
                 scan = []
                 for h_name, h_cts in found.items():
                     chain_key = f"{base_chain}$where${h_name}"
@@ -2107,7 +2172,13 @@ class ContractVerifier:
                         top: dict[str, set[tuple[str, ...]]] = {
                             name: set() for name in generic_decls
                         }
-                        collect_calls_in_fn(h_clone, top)
+                        # #1299: a nested helper's clone belongs to the
+                        # module its CHAIN is recorded under, the same key
+                        # `env` above was resolved from.
+                        collect_calls_in_fn(
+                            h_clone, top,
+                            self._origin_module_for_generic(chain_key),
+                        )
                         for t_name, t_cts in top.items():
                             pending_top.extend(
                                 (t_name, t_ct) for t_ct in t_cts
@@ -2136,7 +2207,13 @@ class ContractVerifier:
             transitive: dict[str, set[tuple[str, ...]]] = {
                 name: set() for name in generic_decls
             }
-            collect_calls_in_fn(mono_fn, transitive)
+            # #1299: this clone's body is its BASE's module's code, so its
+            # bare names resolve there — the mirror of codegen's
+            # `_drain_generic_worklist` scope.  `fn_name` is already the base
+            # key, so it goes to `_origin_module_for_generic` whole.
+            collect_calls_in_fn(
+                mono_fn, transitive, self._origin_module_for_generic(fn_name),
+            )
             for t_name, t_types in transitive.items():
                 for t_ct in t_types:
                     if (t_name, t_ct) not in discovered:
@@ -2333,6 +2410,7 @@ class ContractVerifier:
             # Unshadowed transitive generics → chase full closure into `result`.
             self._chase_normal_from_clone(
                 clone, generic_decls, ctor_to_adt, mono, normal_seen, result,
+                root_namespace=spath,
             )
             # Same-module shadowed siblings → queue back.
             sib_decls = shadowed[spath]
@@ -2340,7 +2418,12 @@ class ContractVerifier:
                 name: set() for name in sib_decls
             }
             # #1274 (F1): mirrors codegen's scope around the identical scan.
-            with mono.shadowed_module_scope(spath):
+            # #1299: and its namespace scope — this clone's body is that
+            # module's code, so its bare names resolve there.
+            with (
+                mono.shadowed_module_scope(spath),
+                mono.namespace_scope(spath),
+            ):
                 mono.collect_calls_in_node(
                     clone, sib_decls, ctor_to_adt, trans_shadow,
                 )
@@ -2358,28 +2441,46 @@ class ContractVerifier:
         mono: Monomorphizer,
         normal_seen: set[tuple[str, tuple[str, ...]]],
         result: dict[str, set[tuple[str, ...]]],
+        root_namespace: tuple[str, ...] | None = None,
     ) -> None:
         """Add the transitive closure of unshadowed clones reachable from a
         shadowed clone body into ``result`` (verifier mirror of codegen's
-        ``_chase_normal_transitive``)."""
-        stack: list[ast.FnDecl] = [root_fn]
+        ``_chase_normal_transitive``).
+
+        *root_namespace* (#1299) is the module ``root_fn`` belongs to, passed
+        rather than looked up for the reason codegen's twin gives: a shadowed
+        clone arrives under its PRE-rename name, which is in no origin
+        registry.  Clones reached transitively use their own base's origin,
+        resolved through :meth:`_origin_module_for_generic` — that walk
+        exists because a base can be a lexical CHAIN whose origin is recorded
+        against an ANCESTOR (``mod$ng$outer$where$mid``), and a raw
+        dictionary lookup misses exactly those (the miss #1208 round 2 found
+        on the naming side).
+        """
+        stack: list[tuple[ast.FnDecl, tuple[str, ...] | None]] = [
+            (root_fn, root_namespace),
+        ]
         while stack:
-            fn = stack.pop()
+            fn, namespace = stack.pop()
             transitive: dict[str, set[tuple[str, ...]]] = {
                 name: set() for name in generic_decls
             }
-            mono.collect_calls_in_node(
-                fn, generic_decls, ctor_to_adt, transitive,
-            )
+            with mono.namespace_scope(namespace):
+                mono.collect_calls_in_node(
+                    fn, generic_decls, ctor_to_adt, transitive,
+                )
             for t_name, t_types in transitive.items():
                 for t_ct in t_types:
                     if (t_name, t_ct) in normal_seen:
                         continue
                     normal_seen.add((t_name, t_ct))
                     result.setdefault(t_name, set()).add(t_ct)
-                    stack.append(mono.monomorphize_fn(
-                        generic_decls[t_name], t_ct,
-                        self._alias_env_for_generic(t_name),  # #1208
+                    stack.append((
+                        mono.monomorphize_fn(
+                            generic_decls[t_name], t_ct,
+                            self._alias_env_for_generic(t_name),  # #1208
+                        ),
+                        self._origin_module_for_generic(t_name),
                     ))
 
     @property

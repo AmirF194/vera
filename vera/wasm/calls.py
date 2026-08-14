@@ -53,8 +53,10 @@ class CallsMixin:
         # not mistakenly compiled as the array-length built-in.  Same
         # ownership rule the effect-op dispatch below applies, over the
         # same table (#1284); spelled through the shared predicate so a
-        # change to the rule reaches both.
-        if not bare_call_denotes_user_fn(call.name, self._known_fns):
+        # change to the rule reaches both.  The table is the LEXICAL one
+        # (#1299) — an intrinsic must not be displaced by a declaration
+        # this call site cannot see, any more than an operation must.
+        if not bare_call_denotes_user_fn(call.name, self._scoped_fns):
             if call.name == "array_length" and len(call.args) == 1:
                 return self._translate_array_length(call.args[0], env)
             if call.name == "string_length" and len(call.args) == 1:

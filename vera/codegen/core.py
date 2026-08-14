@@ -27,7 +27,11 @@ from vera import ast, naming
 from vera.codegen.api import CompileResult
 from vera.codegen.memory import ConstructorLayout
 from vera.errors import Diagnostic, SourceLocation
-from vera.monomorphize import canonicalize_type_aliases, qualify_nested_generic_decls
+from vera.monomorphize import (
+    NamespaceFnNames,
+    canonicalize_type_aliases,
+    qualify_nested_generic_decls,
+)
 from vera.naming import EMPTY_ALIAS_ENV, AliasEnv
 from vera.prelude import PRELUDE_FILE, mentioned_fn_names
 from vera.slots import family_fallback_name
@@ -590,6 +594,34 @@ class CodeGenerator(
         # transitive symbol from a *main-program* body fails loudly at compile
         # instead of silently resolving to the emitted-for-a-sibling body.
         self._transitive_only_names: set[str] = set()
+        # #1299: namespace path (``None`` = the main program) → the bare
+        # SOURCE function names a body compiled in that namespace can NAME.
+        # Codegen absorbs every module into one flat WASM namespace, so
+        # `_fn_sigs` cannot answer "whose declaration is this bare `get`?" —
+        # it holds a module's private helpers, the public ones an import
+        # filter excluded, and every transitive module's declarations, none
+        # of which the checker resolved against.  This map is what
+        # `_scoped_fn_names` narrows `_fn_sigs` down to before the #1284
+        # ownership predicate reads it.  Computed once in
+        # `_collect_namespace_fn_names`, after the Pass-0 transforms.
+        self._namespace_fn_names: dict[
+            tuple[str, ...] | None, frozenset[str]
+        ] = {}
+        # The same tables as the shared value `MonoContext` carries, so Pass
+        # 1.5's discovery narrows against exactly what `_scoped_fn_names`
+        # narrows against (#1299).
+        self._namespace_tables: NamespaceFnNames | None = None
+        # #1281: bare names some namespace could resolve to more than one
+        # module's declaration — a module importing two dependencies that
+        # each export `gen`, and declaring no `gen` of its own.  Spec §8.5
+        # defines no order between two imports (it prescribes naming the one
+        # you want), and neither does the checker: its pick is a
+        # set-iteration artefact that flips between runs of the identical
+        # program (#1304).  The E608 relaxation therefore fires only for
+        # names OUTSIDE this set, so the shape keeps its loud refusal instead
+        # of compiling to whichever body that coin-flip favoured.  Filled
+        # beside `_namespace_fn_names`, from the same walk.
+        self._ambiguous_imported_fn_names: frozenset[str] = frozenset()
         # #774: imported PUBLIC generic (`forall`) FnDecls the importer must
         # monomorphize itself — cross-module generic monomorphization.  The
         # importer discovers instantiations from ITS OWN call sites and emits
@@ -916,6 +948,7 @@ class CodeGenerator(
         module_tables: (
             tuple[SpanTypeTable | None, SpanTypeTable | None] | None
         ) = None,
+        where_scope: frozenset[str] = frozenset(),
     ) -> str | None:
         """`_compile_fn` plus the #1100 skip/closure bookkeeping.
 
@@ -926,6 +959,14 @@ class CodeGenerator(
         that explains each drop, and (b) which lifted closures belong
         to which parent (a parent holds only a table index, so the
         construction edge is invisible to a WAT-text scan).
+
+        *where_scope* (#1299) is the ``where``-helper names lexically in
+        scope in *decl*'s body — the direct helpers of every enclosing
+        function, plus *decl*'s own.  It cannot be recovered from *decl*: a
+        helper node carries no parent link, and the ancestors' helpers are
+        exactly what the checker's ``_lookup_function_scoped`` walks.  The
+        default is right for a top-level declaration with no helpers, which
+        is every caller that omits it.
         """
         diags_before = len(self.diagnostics)
         closures_before = len(self._closure_fns_wat)
@@ -936,6 +977,7 @@ class CodeGenerator(
             fn_wat = self._compile_fn(
                 decl, export=export, module_renames=module_renames,
                 imported=imported, module_tables=module_tables,
+                where_scope=where_scope,
             )
         if fn_wat is None:
             # The LAST codegen diagnostic emitted during this compile is
@@ -1488,6 +1530,16 @@ class CodeGenerator(
 
         program = self._hoist_nongeneric_where_helpers(program)
 
+        # #1299 / #1281: record which function names each namespace can NAME
+        # — and which of those are ambiguous — before anything registers or
+        # compiles against the flat registry.  Not folded into
+        # `_register_modules`: that returns early when the program imports
+        # nothing, and the entry program still needs its own set (a
+        # `forall<T>` parent's `where` helper puts an out-of-scope bare name
+        # in `_fn_sigs` with no module in sight).  Ordered BEFORE it because
+        # the E608 rail inside reads the ambiguity half.
+        self._collect_namespace_fn_names(program)
+
         # Pass 0.5: register imported module declarations (C7e)
         self._register_modules(program)
 
@@ -1580,6 +1632,15 @@ class CodeGenerator(
                         self._type_alias_params[decl.name] = decl.type_params
         # #1208: prelude aliases and ADTs are now in the flat maps too.
         self._sync_alias_env()
+
+        # #1299: and so are the prelude's FUNCTIONS, which belong to every
+        # namespace.  Rebuild the visibility tables now that
+        # `_prelude_fn_names` is populated — Pass 0.5's call could not know
+        # them, and the verifier builds ITS tables from a post-injection
+        # program, so leaving them out here made the two sides' discovery
+        # scopes differ by exactly the five combinators on every
+        # module-using program.
+        self._collect_namespace_fn_names(program)
 
         # #305: Pass-1 signatures for USER fns whose params/return
         # reference prelude ADTs (Request/Response/Json/HtmlNode) were
@@ -1749,7 +1810,12 @@ class CodeGenerator(
             decl = tld.decl
             if isinstance(decl, ast.FnDecl):
                 is_public = tld.visibility == "public"
-                fn_wat = self._compile_fn_tracked(decl, export=is_public)
+                fn_wat = self._compile_fn_tracked(
+                    decl, export=is_public,
+                    where_scope=frozenset(
+                        w.name for w in decl.where_fns or ()
+                    ),
+                )
                 if fn_wat is not None:
                     functions_wat.append(fn_wat)
                     if is_public:
@@ -1765,8 +1831,13 @@ class CodeGenerator(
                     # (`unknown func` at WAT assembly).  The generic path
                     # already flattens nested helpers via
                     # `monomorphize._hoist_where_fns_under`.
-                    for wfn in self._flatten_where_fns(decl):
-                        wfn_wat = self._compile_fn_tracked(wfn, export=False)
+                    # #1299: paired with the scope each helper's own body
+                    # resolves in — its ancestors' direct helpers plus its
+                    # own, which is what the checker walks.
+                    for wfn, wscope in self._where_fn_scopes(decl):
+                        wfn_wat = self._compile_fn_tracked(
+                            wfn, export=False, where_scope=wscope,
+                        )
                         if wfn_wat is not None:
                             # PR #1013 review: a fully-concrete (T-unused)
                             # generic helper TEMPLATE compiles — unlike a
@@ -1852,6 +1923,16 @@ class CodeGenerator(
                         self._module_artifacts.get(origin)
                         if origin is not None else None
                     ),
+                    # #1299: no `where_scope` — a clone reaching here has
+                    # none to give.  `_hoist_clone_where_fns` strips
+                    # `where_fns` off every clone and re-queues the helpers as
+                    # standalone mono decls under clone-qualified names
+                    # (`holder$Bool$where$get`), rewriting the clone's own
+                    # calls with them, so the bare helper name is gone from
+                    # the body before this loop sees it.  Pinned as an
+                    # invariant rather than defended with a dead argument:
+                    # test_lexical_fn_scope_1299 asserts no mono decl arrives
+                    # carrying helpers, and goes red if that ever changes.
                 )
             if fn_wat is not None:
                 functions_wat.append(fn_wat)
@@ -1891,6 +1972,15 @@ class CodeGenerator(
                     # #987: thread THIS module's own span-keyed tables so the
                     # imported body's @Nat -> @Int widening guard fires.
                     module_tables=self._module_artifacts.get(path),
+                    # #1299: no `where_scope`.  This body resolves bare names
+                    # in ITS module's namespace, which the alias scope above
+                    # already selects, and it brings no bare helper name of
+                    # its own: `_register_modules` runs the #991 hoist and the
+                    # #1014 qualification over every module AST, so an
+                    # imported declaration arriving here carries only
+                    # `$`-qualified helpers — admitted unconditionally.  The
+                    # door invariant in test_lexical_fn_scope_1299 holds every
+                    # emission site to that, and goes red if one stops.
                 )
             if fn_wat is not None:
                 functions_wat.append(fn_wat)
@@ -1925,6 +2015,9 @@ class CodeGenerator(
                     # THIS module's table still keys them correctly and its
                     # widen guard fires.
                     module_tables=self._module_artifacts.get(path),
+                    # #1299: the ``mod$…`` rename moves the body into no other
+                    # namespace, and adds no helper — same reasoning, and the
+                    # same door invariant, as the Pass-2.5 emission above.
                 )
             if fn_wat is not None:
                 functions_wat.append(fn_wat)
@@ -2527,6 +2620,93 @@ class CodeGenerator(
         return dataclasses.replace(
             rewritten, where_fns=new_where or None,
         )
+
+    def _scoped_fn_names(
+        self, where_scope: frozenset[str], own_name: str,
+    ) -> set[str]:
+        """The registered names a bare call in this body may DENOTE (#1299).
+
+        ``_fn_sigs`` narrowed to the compiling declaration's lexical scope:
+        its namespace's own declarations, visible imports and the prelude
+        (:meth:`_collect_namespace_fn_names`, selected by the module scope
+        ``_module_alias_scope`` currently has installed), the ``where``
+        helpers in scope, and the declaration itself for recursion.
+        This is what codegen hands
+        :func:`~vera.slots.bare_call_denotes_user_fn`; the flat registry
+        stays behind ``_known_fns`` for the guard rail, which asks a
+        different question ("is there a symbol here?") that IS flat.
+
+        A strict SUBSET of ``_fn_sigs`` by construction — the comprehension
+        iterates the registry — so this can only ever withdraw a name the
+        pre-#1299 table wrongly claimed, never introduce one with no
+        signature behind it.  ``tests/test_lexical_fn_scope_1299.py`` pins
+        that as a property rather than leaving it to the reading.
+
+        Every ``$``-bearing key is admitted unconditionally.  ``$`` cannot
+        occur in a Vera identifier (``LOWER_IDENT``), so a mangled name is
+        never what a bare source call spells; what admitting it DOES is keep
+        a mono clone (``pick$Int``), a rerouted module body (``mod$lib$f``),
+        and a hoisted helper (``outer$where$h``) answering "user-owned" at
+        the sites that see a call name the rewrite already resolved.
+
+        This implements the SPEC's rule — §7.4 resolves a bare operation only
+        for a name no declaration in the call site's scope occupies, and §5
+        makes a ``where`` helper local to its parent — rather than reproducing
+        what the checker currently computes.  The two coincide everywhere
+        except one shape: ``register_fn`` recurses helpers into the flat
+        ``TypeEnv``, so the checker also resolves a bare call in a SIBLING
+        top-level function to another function's helper, which this set does
+        not (#1307).  Where that shape's helper is named after an operation
+        the two now disagree in the checker's direction, and closing it is a
+        checker change with its own new rejections.
+        """
+        lexical = set(
+            self._namespace_fn_names.get(self._active_module_path, ())
+        )
+        lexical |= where_scope
+        lexical.add(own_name)
+        return {
+            name for name in self._fn_sigs
+            if "$" in name or name in lexical
+        }
+
+    @staticmethod
+    def _where_fn_scopes(
+        decl: ast.FnDecl,
+    ) -> list[tuple[ast.FnDecl, frozenset[str]]]:
+        """:meth:`_flatten_where_fns`, each helper paired with ITS scope.
+
+        The scope of a helper is the direct ``where`` names of every
+        enclosing function up to and including itself — spec §5's helper
+        locality, which the checker's ``_lookup_function_scoped`` frame-stack
+        walk also implements, so a grandchild helper is NOT in its
+        grandparent's scope and a sibling is.  ("Also", not "exactly": the
+        checker's env fallback additionally reaches helpers from OUTSIDE the
+        frame stack entirely, which is #1307 and not this walk's rule.)
+
+        Same traversal, same skip, same order as :meth:`_flatten_where_fns`;
+        the two are asserted to enumerate identically rather than kept in
+        step by inspection, because a helper this one missed would compile
+        against the wrong scope silently.
+        """
+        out: list[tuple[ast.FnDecl, frozenset[str]]] = []
+        seen: set[int] = set()
+        here = frozenset(w.name for w in decl.where_fns or ())
+        stack: list[tuple[ast.FnDecl, frozenset[str]]] = [
+            (w, here) for w in reversed(decl.where_fns or ())
+        ]
+        while stack:
+            wfn, inherited = stack.pop()
+            if id(wfn) in seen:
+                continue
+            seen.add(id(wfn))
+            scope = inherited | {w.name for w in wfn.where_fns or ()}
+            out.append((wfn, scope))
+            if not wfn.forall_vars:
+                stack.extend(
+                    (w, scope) for w in reversed(wfn.where_fns or ())
+                )
+        return out
 
     @staticmethod
     def _flatten_where_fns(decl: ast.FnDecl) -> list[ast.FnDecl]:

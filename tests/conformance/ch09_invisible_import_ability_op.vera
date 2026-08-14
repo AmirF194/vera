@@ -1,0 +1,28 @@
+-- Conformance: the ability operation `show` beside an invisible same-named
+-- import (Chapter 9, #1299)
+-- Tests: the INTRINSIC gate of `_translate_call`, which reads the same
+-- bare-call ownership table the effect-op dispatch does.  `show(42)` here is
+-- the ability operation (spec §9.8) — the imported module's `show` is private,
+-- so it is in no scope at this call site — and its result is the String "42",
+-- whose length is 2.  Codegen used to read a flat mirror of every absorbed
+-- symbol, skip the ability dispatch, and lower a call to the module's @Int
+-- function instead; `string_length` then received an i64 and the module failed
+-- to load.  The module's own `touch` is the control in the same program: its
+-- `show` IS in its scope, so it keeps reaching it.  2 + 7007 == 7009.
+import ch09_invisible_import_ability_op_lib(touch);
+
+public fn shown_length(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 2)
+  effects(pure)
+{
+  string_length(show(42))
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 7009)
+  effects(pure)
+{
+  shown_length(()) + touch(())
+}

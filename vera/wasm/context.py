@@ -99,6 +99,7 @@ class WasmContext(
         generic_constrained_vars: dict[str, frozenset[str]] | None = None,
         ctor_to_adt: dict[str, str] | None = None,
         known_fns: set[str] | None = None,
+        scoped_fns: set[str] | None = None,
         ctor_adt_tp_indices: dict[str, tuple[int | None, ...]] | None = None,
         adt_tp_counts: dict[str, int] | None = None,
         adt_tp_param_names: dict[str, tuple[str, ...]] | None = None,
@@ -221,13 +222,25 @@ class WasmContext(
         )
         # Constructor name → ADT name reverse mapping
         self._ctor_to_adt: dict[str, str] = ctor_to_adt or {}
-        # Known locally-defined function names (for cross-module guard rail,
-        # and — #1284 — codegen's leg of the bare-call ownership predicate:
-        # this is the flat mirror of `_fn_sigs` the checker's lexical scope
-        # is compared against).  Empty when a context is built without one,
-        # which answers "no name is shadowed" — the pre-#1284 behaviour, and
-        # the safe default for a context that compiles no user declarations.
+        # Every WASM symbol this compilation registered — the REGISTRATION
+        # question, and only that: `_translate_call`'s guard rail asks whether
+        # a RESOLVED call target (already mono-mangled, already `mod$…`
+        # rerouted) has an implementation to land on.  Flat by nature; a
+        # symbol emitted for some other namespace is still a symbol.
         self._known_fns: set[str] = known_fns or set()
+        # The names visible in the compiling declaration's LEXICAL scope —
+        # #1284's ownership question, which is a different one (#1299).
+        # Splitting them is the fix: one table answers "does this symbol
+        # exist?", the other "whose declaration does this bare name denote
+        # HERE?", and answering the second with the first is what let an
+        # invisible import claim a call site's `get`.  Defaults to
+        # ``known_fns`` so a context built without one keeps the flat
+        # answer rather than silently owning NO name — an empty scope would
+        # route every bare call to the op registries, which is the opposite
+        # error and a far louder one.
+        self._scoped_fns: set[str] = (
+            self._known_fns if scoped_fns is None else scoped_fns
+        )
         # Per-field ADT type-param indices for sparse constructors (e.g. Err → (1,))
         self._ctor_adt_tp_indices: dict[str, tuple[int | None, ...]] = (
             ctor_adt_tp_indices or {}
@@ -669,24 +682,30 @@ class WasmContext(
         """Is a BARE call to *name* here the effect operation? (#1284)
 
         Codegen's leg of :func:`~vera.slots.bare_call_denotes_user_fn`, over
-        the flat ``_fn_sigs`` mirror.  Every bare-call site that consults an
-        op registry asks this first, so a name the checker resolved to a user
-        declaration is lowered as the ordinary call the checker typed: the
-        clause-inline dispatch, the host-cell intrinsics, the #1233
-        addressability gate, the three result-type inference sites, and
-        ``_handler_always_throws``'s ``throw_installed`` question, which is
-        the same one for ``Exn``'s operation.
+        ``_scoped_fns`` — the names visible in the compiling declaration's
+        LEXICAL scope, which is the table the checker resolves against.
+        Every bare-call site that consults an op registry asks this first,
+        so a name the checker resolved to a user declaration is lowered as
+        the ordinary call the checker typed: the clause-inline dispatch, the
+        host-cell intrinsics, the #1233 addressability gate, the three
+        result-type inference sites, and ``_handler_always_throws``'s
+        ``throw_installed`` question, which is the same one for ``Exn``'s
+        operation.
 
         Not for the QUALIFIED spelling: ``State.get(())`` names the effect,
         so no declaration can shadow it and the registries answer directly.
 
-        The ``_fn_sigs`` mirror is not scope-accurate — it keys a name the
-        call site cannot see under its bare name (an invisible import, or a
-        ``where`` helper of a ``forall<T>`` parent), so this can answer
-        "user-owned" where the checker resolved the operation (#1299).  The
-        rule is right and the table is wrong; the fix is that table's.
+        NOT ``_known_fns`` (#1299).  That set is the registration table the
+        guard rail reads, and it is flat by construction — every symbol the
+        whole compilation absorbed, including a module's ``private fn get``,
+        a public one a selective import excludes, and the bare key a
+        ``forall<T>`` parent's ``where`` helper keeps beside its
+        clone-qualified one.  Asked over it, this predicate answered
+        "user-owned" at a site where the checker had resolved the operation:
+        check-green source ran the invisible declaration's body where the
+        widths agreed, and failed to load where they did not.
         """
-        return not bare_call_denotes_user_fn(name, self._known_fns)
+        return not bare_call_denotes_user_fn(name, self._scoped_fns)
 
     def alloc_param(self) -> int:
         """Allocate a parameter slot (already in WASM signature).

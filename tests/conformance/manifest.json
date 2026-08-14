@@ -2834,6 +2834,62 @@
     ]
   },
   {
+    "id": "ch09_invisible_import_ability_op_lib",
+    "file": "ch09_invisible_import_ability_op_lib.vera",
+    "chapter": 9,
+    "title": "Module with a private helper named after an ability op",
+    "level": "verify",
+    "spec_ref": "Section 9.8",
+    "features": [
+      "cross_module",
+      "visibility",
+      "ability_operation"
+    ]
+  },
+  {
+    "id": "ch09_invisible_import_ability_op",
+    "file": "ch09_invisible_import_ability_op.vera",
+    "chapter": 9,
+    "title": "Ability op beside an invisible same-named import",
+    "level": "run",
+    "spec_ref": "Section 9.8",
+    "features": [
+      "cross_module",
+      "visibility",
+      "ability_operation",
+      "bare_call"
+    ]
+  },
+  {
+    "id": "ch09_nested_helper_family_op_name_lib",
+    "file": "ch09_nested_helper_family_op_name_lib.vera",
+    "chapter": 9,
+    "title": "Module with a private op-named helper, for the family shape",
+    "level": "verify",
+    "spec_ref": "Section 7.4",
+    "features": [
+      "cross_module",
+      "visibility",
+      "effect_operation"
+    ]
+  },
+  {
+    "id": "ch09_nested_helper_family_op_name",
+    "file": "ch09_nested_helper_family_op_name.vera",
+    "chapter": 9,
+    "title": "Generic where-family resolving a bare op name",
+    "level": "run",
+    "spec_ref": "Section 7.4",
+    "features": [
+      "cross_module",
+      "visibility",
+      "effect_operation",
+      "nested_generic",
+      "monomorphization",
+      "bare_call"
+    ]
+  },
+  {
     "id": "ch02_alias_cycle_rejected",
     "file": "ch02_alias_cycle_rejected.vera",
     "chapter": 2,
@@ -3057,6 +3113,34 @@
     ]
   },
   {
+    "id": "ch07_invisible_import_op_name_lib",
+    "file": "ch07_invisible_import_op_name_lib.vera",
+    "chapter": 7,
+    "title": "Module with a private helper named like an effect op",
+    "level": "verify",
+    "spec_ref": "Section 7.4",
+    "features": [
+      "cross_module",
+      "visibility",
+      "effect_operation"
+    ]
+  },
+  {
+    "id": "ch07_invisible_import_op_name",
+    "file": "ch07_invisible_import_op_name.vera",
+    "chapter": 7,
+    "title": "Bare effect op beside an invisible same-named import",
+    "level": "run",
+    "spec_ref": "Section 7.4",
+    "features": [
+      "cross_module",
+      "visibility",
+      "effect_operation",
+      "state_effect",
+      "bare_call"
+    ]
+  },
+  {
     "id": "ch08_state_alias_per_module_lib",
     "file": "ch08_state_alias_per_module_lib.vera",
     "chapter": 8,
@@ -3110,6 +3194,60 @@
       "type_alias",
       "state_effect",
       "cell_family"
+    ]
+  },
+  {
+    "id": "ch08_module_generic_diamond_base",
+    "file": "ch08_module_generic_diamond_base.vera",
+    "chapter": 8,
+    "title": "Shared base of the same-named-generic diamond",
+    "level": "check",
+    "spec_ref": "Section 11.16",
+    "features": [
+      "cross_module_generic",
+      "generic_function"
+    ]
+  },
+  {
+    "id": "ch08_module_generic_diamond_mid1",
+    "file": "ch08_module_generic_diamond_mid1.vera",
+    "chapter": 8,
+    "title": "Private generic shadowing an imported same-named one",
+    "level": "verify",
+    "spec_ref": "Section 8.5.2",
+    "features": [
+      "cross_module_generic",
+      "generic_function",
+      "visibility",
+      "shadowing"
+    ]
+  },
+  {
+    "id": "ch08_module_generic_diamond_mid2",
+    "file": "ch08_module_generic_diamond_mid2.vera",
+    "chapter": 8,
+    "title": "Bare call to a dependency's public generic",
+    "level": "verify",
+    "spec_ref": "Section 11.16",
+    "features": [
+      "cross_module_generic",
+      "generic_function",
+      "bare_call"
+    ]
+  },
+  {
+    "id": "ch08_module_generic_diamond",
+    "file": "ch08_module_generic_diamond.vera",
+    "chapter": 8,
+    "title": "Two modules' same-named generics in one program",
+    "level": "run",
+    "spec_ref": "Section 11.16",
+    "features": [
+      "cross_module_generic",
+      "monomorphization",
+      "visibility",
+      "transitive_import",
+      "bare_call"
     ]
   }
 ]

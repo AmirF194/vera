@@ -939,9 +939,21 @@ class TypeChecker(
         What :func:`~vera.slots.bare_call_denotes_user_fn` consults on this
         side: a name is the user's declaration here exactly when
         :meth:`_lookup_function_scoped` resolves it, so the ownership
-        predicate reads the LEXICAL scope this checker resolves against —
-        not a flattened copy of it that could answer differently.  Codegen
-        passes its own flat ``_fn_sigs`` mirror to the same predicate.
+        predicate reads whatever this checker actually resolves against
+        rather than a separate copy that could answer differently.  Codegen
+        passes ``_scoped_fns`` — its registry narrowed to the compiling
+        declaration's lexical scope (#1299).
+
+        The two are not yet the same scope, and the residue is on THIS side:
+        ``register_fn`` recurses ``where`` helpers into the flat
+        ``TypeEnv``, and the lookup above falls back to it, so a bare call in
+        a SIBLING top-level function resolves to another function's helper —
+        which spec §5 makes local to its parent.  Codegen refuses that
+        program (the helper is emitted as ``parent$where$name``, so the bare
+        call has no target) and, where the helper's name is an operation's,
+        lowers the operation the spec prescribes while the checker reports
+        against the helper's signature.  Tracked as #1307; the fix is a
+        checker change with its own new rejections, not a table change here.
         """
         return _ScopedFnNames(self._lookup_function_scoped)
 
