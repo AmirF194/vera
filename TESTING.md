@@ -6,7 +6,7 @@ This is the single source of truth for Vera's testing infrastructure, coverage d
 
 | Metric | Value |
 |--------|-------|
-| **Tests** | 11,075 across 168 files (~155,000 lines of test code; 10,896 passed + 26 stress, 153 skipped) |
+| **Tests** | 11,134 across 169 files (~155,000 lines of test code; 10,955 passed + 26 stress, 153 skipped) |
 | **Compiler code coverage** | 95% Python, 87% JavaScript (CI minimum: 80%) |
 | **Conformance programs** | 229 programs across 9 spec chapters, validating every language feature |
 | **Example programs** | 42, all validated through `vera check` + `vera verify` |
@@ -215,6 +215,7 @@ python scripts/check_wheel_availability.py           # pre-flight: every runtime
 | `test_release.py` | 47 | 566 | Release policy and registry verification (#481): strict project-name and version parsing/comparison, version-bump/TestPyPI/recovery planning, exact confirmation and immutable-tag guards, first-parent version-introduction discovery, package-change recovery refusal, non-empty CHANGELOG extraction, one-wheel/one-sdist SHA-256 manifests, malformed registry-response handling, missing/filename/hash propagation retries, exact filename/hash verification, and CLI dispatch/GitHub-output wiring.  An autouse fixture scrubs hook-exported `GIT_*` variables so the tmp-repo git calls (fixture helpers and `release.py`'s own) never resolve to the developer's repository when the suite runs inside a pre-commit hook. |
 | `test_check_doc_counts.py` | 54 | 665 | `check_doc_counts.py`'s pure per-document checks: KNOWN_ISSUES refactoring line counts (±10% tolerance band incl. the exact-boundary case, drift detection, empty-file citation, hyphenated paths, missing file/section/rows, the #419 empty-section sentinel + its cannot-mask-a-malformed-table dual), HISTORY version-row format (issue-link limit, ` — ` separator rejection, dateless-row and prose exemption, line-number reporting), the TESTING.md tests breakdown (parts summing to the collected total, a self-consistent-but-stale row, and the reworded-row error), and vera/README.md's Test Suite counts (all four checked independently — mutation-validated by dropping each citation in turn — plus the reworded-paragraph error, a thousands-separator case pinning that every one of the four counts is read comma-tolerantly, and the two section-anchoring cases — a reworded paragraph with decoy counts in a later section, and a renamed heading, both of which must fail loud rather than match across the section boundary).  The reworded case is a test in its own right for both new checks: a pattern that matches nothing must be an error, or rewording the sentence silently switches the gate off.  Also the release count (README's status line and HISTORY's total against each other and against `git tag`: the matching case, the one-ahead release cut that `release.yml` has not tagged yet, that +1 being the ONLY slack once the version is tagged, the two-behind drift that actually shipped, per-document reporting, and a tagless checkout standing the oracle down without standing down the cross-check), plus the tag reader itself against real repositories built in `tmp_path` — release tags read, `nightly`/`-rc1` not counted as releases, and both no-evidence answers (`None` rather than `[]`, since an empty list would read as zero releases and make every documented count wrong) for a tagless checkout and a directory that is not a repository at all.  CONTRIBUTING.md's pre-commit hook count is checked the same way, reworded-sentence case included; and the CI-pipeline lint row against `ci.yml`'s lint job — a matching row, a step present in CI but absent from the row (the drift that shipped), a row entry CI no longer runs, the same set in a different order, a reworded row and a renamed job (both errors, not skips), that only the lint job is read rather than the whole workflow, and the shipped pair both clean and red with one entry dropped |
 | `test_grammar_alignment.py` | 44 | 309 | `check_grammar_alignment.py` gate ([#683](https://github.com/aallan/vera/issues/683)): both extractors (Lark headers with the `?`/`!`/`_` markers stripped, template parameters and rule priorities tolerated, and `-> alias` names deliberately not collected; spec headers from ```ebnf fences only), the allowlist arithmetic in all three directions — unwaived drift, a spent entry both files now have, and an entry whose premise broke — one case per waiver proving the fact it rests on is actually checked, the name-deleted-from-both-files case that must not read as agreement, a mutation restoring the spec's old `assert_stmt` name, non-vacuous extraction, and the false positive the issue itself rested on: `qualified_call` and `module_call` are spec headers Lark expresses as aliases, and must never be reported as drift. Three pin the premise checks against ways they used to pass vacuously: an alias surviving only inside a `//` comment must not hold its waiver up, an alias that moved to another rule must fail the waiver naming `fn_call`, and a spent waiver whose premise also broke must yield one instruction rather than two opposite ones |
+| `test_check_examples_run.py` | 59 | 885 | `check_examples_run.py`, the harness gate that RUNS the examples.  Five separable parts, each in both directions.  **The coverage rule** — the shipped tables cover the shipped corpus exactly, and an unclassified example, a stale `RUN_SPECS` or `SKIPS` key whose file is gone, a name in both tables, and a skip citing an undocumented property are each an error; the empty corpus is an error too, since a glob that stops matching would otherwise report success over zero programs.  Plus the specs' own well-formedness: every named entry point is `public` in its example, every no-main example pins one (or `vera run` would fall back to an arbitrary first export), and no skip property is unused.  **The runner** — a seeded `tmp_path` corpus proves it goes red on a program that type-checks and compiles but traps at run time, green on one that does not, and reports only the broken member of a mixed pair; a fixture whose first export is clean and whose named one traps proves `spec.fn` is actually honoured rather than ignored; a writer program proves each run gets a scratch working directory, so a gate run leaves nothing beside the examples.  **The TESTING.md cross-check** — missing row, extra row, rename (reported naming both sides), wrong disposition and wrong skip property are errors, the parse stops at the next heading so a row-shaped line in a later section is not swept in, and both a reworded heading and a heading whose table has vanished fail loud rather than finding nothing to compare.  **The output signal** -- the second half of the two-signal discipline `check_examples.py` established: the fallback note that `vera run` prints when it cannot use the named entry point is a failure even at exit 0, an absent `expect` sentinel is a failure even at exit 0, and a spec without one asserts nothing about output; end to end, a privatised `main` and a program that completed down a graceful arm each go red, and the same program passes once its own output is the sentinel, so the check reads the output rather than always failing.  The three environment-dependent specs are required to carry a sentinel, and the runner's use of BOTH streams is pinned structurally -- `vera run` writes the note to stderr and nothing there on a clean exit, so no fixture can distinguish reading both streams from reading stdout alone, and a tripwire wired to the wrong stream is no tripwire.  Also the hermetic-environment property: an ambient `VERA_DB_URL` or provider key is stripped so a gate run cannot be pointed at a real database or turned into a billed API call, a fixture spec puts its own URL back, and every neutralised name is checked to be one `vera/runtime/` actually reads |
 | `test_check_editor_grammars.py` | 20 | 249 | `check_editor_grammars.py` gate ([#1156](https://github.com/aallan/vera/issues/1156)): the registry read (every effect in, every ability out, and the four names the grammars actually drifted on present so the set checked is non-vacuous), the word-boundary presence test across all three grammar formats (JSON, plist XML, Vim keyword list) including the prefix pair `Http`/`HttpServer` in both directions, the deliberate comment-mention false pass, a metacharacter pair that only passes when the name is matched literally (`A.B` present, `A0B` not), and the empty registry; the gate's primary path end to end — a listed grammar with an effect stripped out, and a listed README with one stripped out of its prose bullet, each red against an otherwise-clean mirrored tree; the completeness guard — a grammar discovered under `editors/` but absent from `GRAMMARS` fails that same tree, over three discovery routes (`.el` outside a syntax directory, a tree-sitter `.scm` query set, a `.tmLanguage.json` filed anywhere but `syntaxes/`); and the registry's provenance, run as a subprocess against a throwaway checkout whose `vera` package names an effect the grammars do not, which is the only way to see that the list comes from the tree being checked rather than from site-packages.  The shipped grammars and READMEs are currently clean |
 | `test_check_explicit_encoding.py` | 54 | 254 | `check_explicit_encoding.py` gate (#645): flags text-mode `open()` / `read_text()` / `write_text()` **and** `subprocess.run/Popen/check_output(..., text=True)` captures missing an `encoding="utf-8"` literal (rejects non-literal / non-UTF-8 values), skips binary/bytes-mode calls, honours the `# encoding-exempt` opt-out, and asserts the shipped repo is clean |
 | `test_check_limitations_sync.py` | 6 | 108 | `check_limitations_sync.py` section extraction: table-rows-only issue harvesting, prose-link exemption, bounding at the next second-level heading, `None` for absent or sub-level headings so renamed sections fail loudly; plus the #852 fail-loud rule: an UNKNOWN issue state under `--check-states` (gh missing / auth failure / timeout) is an error, never a silent pass |
@@ -610,9 +611,89 @@ use `_assert_call_indirect_iff_table` for the biconditional.
 
 ## Round-Trip Testing
 
-Every one of the 42 example programs in `examples/` is tested through **every pipeline stage** via parametrised tests: parsing, AST transformation, type checking, contract verification, WASM compilation, and execution. If you add a new `.vera` example, it is automatically included in the round-trip suite.
+Every one of the 42 example programs in `examples/` is carried through the front of the pipeline by parametrised tests that glob the directory, so a new `.vera` example joins them the moment it lands: parsing (`test_parser.py`), AST transformation (`test_ast.py`), type checking (`test_checker_functions.py`), contract verification (`test_verifier_contracts.py`), and canonical form (`test_formatter.py`).
+
+The back of the pipeline — compilation and execution — is not covered by a directory glob, and is described in full below.
 
 The formatter has **idempotency tests**: `format(format(x)) == format(x)` for all tested programs.
+
+### Example execution coverage
+
+An example that parses, type-checks, verifies and compiles can still trap the instant it runs. Six layers cover `examples/`, and only the last three execute anything:
+
+| Layer | Mechanism | Reach |
+|-------|-----------|-------|
+| Check + verify | `scripts/check_examples.py` | all 42 |
+| Canonical form, parse, transform, check, verify | the directory-globbing parametrised tests above | all 42 |
+| Compilation to WASM | `scripts/check_e602_clean.py` — it exists to police `[E602]`/`[E604]` silent skips, but it compiles every example with `--json` and treats an `ok: false` envelope as a hard failure, so full compile coverage is real though incidental to the script's name | all 42 |
+| Execution under both runtimes | `tests/test_browser.py`, from two explicit lists — `EXAMPLES_WITH_MAIN` (10, compared on stdout) and `FUNCTION_CALL_EXAMPLES` (11 distinct examples, compared on return value) | 21 |
+| Execution with pinned output | dedicated tests, each asserting a specific value or rendering (see the table) | 12 |
+| Execution asserted trap-free | `scripts/check_examples_run.py` — the harness gate | 34 |
+
+The gate is what makes the set closed. It enumerates `examples/*.vera` from disk and requires every name to be either run or matched to a documented skip property, so **an unclassified example fails the gate** and adding an example forces the author to classify it. The table below is cross-checked against the script's own tables on every run: a row that disagrees, a missing row, or a renamed example is an error, on the same principle as `check_doc_counts.py` — the codebase is the oracle and the documentation must match it.
+
+What the gate asserts is *runs green*, deliberately not *prints what it used to*: output pinning stays in the dedicated tests, which is why `sqlitedb.vera`'s rendered city table and `inference_json.vera`'s score line are pinned there and only trap-freedom here.
+
+Trap-freedom is two signals, not one — the discipline `check_examples.py` already applies, for the same reason. An exit code alone accepts two measured failures. Every spec names its entry point rather than relying on `vera run`'s first-export fallback, because a `main` that is privatised or renamed otherwise runs *some other function* at exit 0. And the three examples that reach outside the process — `sqlitedb.vera` for its committed fixture, `database.vera` for an in-memory database, `file_io.vera` for the filesystem — answer a failure by printing a message and completing normally, so each pins a substring only its success path prints. Deleting `examples/sqlitedb.sqlite` fails the gate on that sentinel rather than passing on the graceful in-memory arm.
+
+| Example | Executed by | Harness gate |
+|---------|-------------|--------------|
+| `absolute_value.vera` | browser parity (return value); `test_codegen_infrastructure.py` pins three results | runs |
+| `array_utilities.vera` | nothing, before the gate | runs |
+| `async_futures.vera` | browser parity (stdout) | runs |
+| `async_http_fanout.vera` | nothing | skip: network |
+| `base64.vera` | browser parity (stdout) | runs |
+| `closures.vera` | browser parity (return value); `test_codegen_closures.py` pins 15 and 105 | runs |
+| `collections.vera` | nothing, before the gate | runs |
+| `database.vera` | nothing, before the gate | runs |
+| `effect_handler.vera` | browser parity (stdout + State round-trips); `test_codegen_effects.py` pins six results | runs |
+| `factorial.vera` | browser parity (return value); `test_codegen_infrastructure.py` pins 120 | runs |
+| `file_io.vera` | browser runtime only, where file IO is a documented `Err` stub; never run natively before the gate | runs |
+| `fizzbuzz.vera` | nothing, before the gate | runs |
+| `gc_pressure.vera` | browser parity (stdout) | runs |
+| `generics.vera` | browser parity (return value); `test_codegen_monomorphize.py` compiles it without running it | runs |
+| `hello_world.vera` | browser parity (stdout); `test_codegen_strings.py` pins the greeting | runs |
+| `html.vera` | nothing, before the gate | runs |
+| `http.vera` | nothing | skip: network |
+| `http_server.vera` | `test_wasi_target.py` serves the emitted component under stock `wasmtime serve` and pins three request round-trips | skip: non-scalar-entry |
+| `increment.vera` | browser parity (return value + State); `test_codegen_effects.py` | runs |
+| `inference.vera` | nothing | skip: api-key |
+| `inference_json.vera` | `test_codegen_host_effects.py` pins five score renderings and the bad-response arm against a mocked provider | skip: api-key |
+| `io_operations.vera` | nothing | skip: stdin |
+| `json.vera` | nothing, before the gate | runs |
+| `life.vera` | nothing | skip: long-running |
+| `list_ops.vera` | browser parity (return value); `test_codegen_monomorphize.py` pins 60 | runs |
+| `markdown.vera` | browser parity (stdout) | runs |
+| `maximum_syntax.vera` | nothing, before the gate | runs |
+| `modules.vera` | nothing, before the gate | runs |
+| `mutual_recursion.vera` | browser parity (return value); `test_codegen_infrastructure.py` pins three results | runs |
+| `nested_closures.vera` | nothing, before the gate | runs |
+| `pattern_matching.vera` | browser parity (return value) | runs |
+| `quantifiers.vera` | browser parity (return value) | runs |
+| `read_char.vera` | nothing | skip: stdin |
+| `refinement_types.vera` | browser parity (return value) | runs |
+| `regex.vera` | browser parity (stdout) | runs |
+| `safe_divide.vera` | browser parity (return value + precondition failure); `test_codegen_infrastructure.py` pins the result and the trap | runs |
+| `scoreboard.vera` | nothing, before the gate | runs |
+| `sqlitedb.vera` | `test_db_runtime.py` pins the rendered city table against the committed fixture | runs |
+| `string_ops.vera` | browser parity (stdout) | runs |
+| `string_utilities.vera` | nothing, before the gate | runs |
+| `url_encoding.vera` | browser parity (stdout) | runs |
+| `url_parsing.vera` | browser parity (stdout) | runs |
+
+Seventeen of those examples were executed by nothing at all before the gate. It runs eleven of them; the remaining six are the ones a property excludes. A twelfth example joins them natively — `file_io.vera`, which ran only under the browser runtime, where the file IO it demonstrates is a deliberate `Err` stub.
+
+Each skip cites a property, and the gate prints the property and its reason on every run:
+
+| Property | Examples | Why the harness cannot run it |
+|----------|----------|-------------------------------|
+| `network` | `async_http_fanout.vera`, `http.vera` | live outbound HTTP, so a run would depend on network reachability and a third party's uptime |
+| `api-key` | `inference.vera`, `inference_json.vera` | with a provider key configured the gate would issue a real, billed request; without one it would only exercise the not-configured arm |
+| `stdin` | `io_operations.vera`, `read_char.vera` | reads interactive input, so what runs is a property of the invoking terminal |
+| `non-scalar-entry` | `http_server.vera` | no `main`, and `handle` takes a `Request` ADT that `vera run` cannot build from CLI arguments |
+| `long-running` | `life.vera` | its only public entry point animates 300 generations at 100 ms a frame |
+
+Skipping is for programs the harness structurally cannot drive. An example that *can* be driven and fails is a bug in the compiler or in the example, not a candidate for the skip table.
 
 ## Stress Tests
 
@@ -862,7 +943,7 @@ When extending the compiler, add tests following the existing patterns:
 
 ## Validation Scripts
 
-Twenty-eight scripts in `scripts/` validate cross-cutting concerns beyond unit tests (one of them — `build_site.py` — generates rather than checks; the doc-block gates share the fence-annotation reader `scripts/doc_annotations.py`, a helper module rather than a gate):
+Twenty-nine scripts in `scripts/` validate cross-cutting concerns beyond unit tests (one of them — `build_site.py` — generates rather than checks; the doc-block gates share the fence-annotation reader `scripts/doc_annotations.py`, a helper module rather than a gate):
 
 | Script | What it validates |
 |--------|-------------------|
@@ -887,6 +968,7 @@ Twenty-eight scripts in `scripts/` validate cross-cutting concerns beyond unit t
 | `check_diagnostic_fields.py` | Every diagnostic in `vera/` carries rationale + spec_ref, and errors also a `fix` (warnings exempt); every present spec_ref resolves to a real spec section; every literal `error_code` is registered in `ERROR_CODES` (#828); `# diag-fields-exempt: <reason>` waives missing/unresolvable fields only — never a wrong-but-resolving spec_ref or an unregistered error_code (#682, #955) |
 | `check_explicit_encoding.py` | Every text-mode `open()` / `read_text()` / `write_text()`, `subprocess.run/Popen/check_output` text capture, and text-mode `tempfile.NamedTemporaryFile` under `vera/`, `scripts/` and `tests/` passes an explicit `encoding="utf-8"`; `# encoding-exempt: <reason>` opts a deliberate non-UTF-8 site out (#645) |
 | `check_e602_clean.py` | No unexpected E602/E604 silent-skip sites outside the explicit allowlist |
+| `check_examples_run.py` | Every `examples/*.vera` either runs trap-free under the native runtime or carries a documented skip property.  Two signals, as in `check_examples.py`: the exit code, and an output signal — every spec names its entry point (so a privatised or renamed `main` exits 1 instead of silently running another export) and the three environment-dependent examples pin a success sentinel (so a vanished fixture fails rather than passing on a graceful arm).  An unclassified example is an error, and TESTING.md's execution-coverage table must match the script's own classification |
 | `check_doc_builtin_shadowing.py` | No documentation example defines a function named after an opaque verifier-modelled built-in (would fail `vera check` with E151); the `spec/09` signature reference is exempt ([#819](https://github.com/aallan/vera/issues/819)) |
 | `check_grammar_alignment.py` | Every rule header in `spec/10-grammar.md`'s EBNF has a same-named rule in `vera/grammar.lark`, and the reverse.  Names only — rule bodies are not compared ([#683](https://github.com/aallan/vera/issues/683)) |
 | `check_editor_grammars.py` | Every editor grammar under `editors/` (vscode, TextMate, Vim), and the two extension READMEs that repeat the list in prose, carries every built-in effect name from the live registry — read from the checked-out tree, not from whatever `vera` is importable.  Word-boundary presence: absence is conclusive, presence is optimistic — the observed failure is omission.  A completeness guard fails any grammar discovered under `editors/` that the checked list doesn't name ([#1156](https://github.com/aallan/vera/issues/1156)) |
@@ -960,7 +1042,7 @@ Per `spec/00-introduction.md` §0.5.8: fields MAY be added (consumers MUST toler
 
 ## Pre-commit Hooks
 
-The repository configures 35 hooks across two stages: 33 run at the commit stage (after `pre-commit install`), and 2 (`check-changelog-updated`, `uv-lock-check`) run at the push stage (after `pre-commit install --hook-type pre-push`). Many commit-stage hooks use per-hook `files:` / `types:` filters and only fire when matching files are staged — a docs-only commit triggers a small subset, a compiler-level commit triggers most. Full list:
+The repository configures 36 hooks across two stages: 34 run at the commit stage (after `pre-commit install`), and 2 (`check-changelog-updated`, `uv-lock-check`) run at the push stage (after `pre-commit install --hook-type pre-push`). Many commit-stage hooks use per-hook `files:` / `types:` filters and only fire when matching files are staged — a docs-only commit triggers a small subset, a compiler-level commit triggers most. Full list:
 
 | Hook | What it does |
 |------|-------------|
@@ -989,6 +1071,7 @@ The repository configures 35 hooks across two stages: 33 run at the commit stage
 | `check_grammar_alignment.py` | Spec EBNF and Lark grammar agree on every rule name ([#683](https://github.com/aallan/vera/issues/683)) |
 | `check_editor_grammars.py` | Every editor grammar under `editors/`, and the two extension READMEs, carry every built-in effect name from the live registry ([#1156](https://github.com/aallan/vera/issues/1156)) |
 | `check_e602_clean.py` | No unexpected `[E602]` (body unsupported) / `[E604]` (param unsupported) silent skips outside the explicit allowlist (Layer 1 of [#626](https://github.com/aallan/vera/issues/626)) |
+| `check_examples_run.py` | Every example runs trap-free (exit code plus an output signal) or carries a documented skip property, and TESTING.md's execution-coverage table matches |
 | `check_doc_counts.py` | Counts in docs match live codebase |
 | `check_walker_coverage.py` | Every walker function covers every `Expr` subclass via dispatch or checklist comment (#597) |
 | `check_diagnostic_fields.py` | Every diagnostic in `vera/` carries rationale + spec_ref, and errors also a `fix` (warnings exempt); every present spec_ref resolves to a real spec section; every literal `error_code` is registered in `ERROR_CODES` (#828); `# diag-fields-exempt: <reason>` waives missing/unresolvable fields only — never a wrong-but-resolving spec_ref or an unregistered error_code (#682, #955) |
@@ -1015,7 +1098,7 @@ GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the
 | **test** | Python 3.11, 3.12, 3.13 × ubuntu-latest, macos-15, macos-26, windows-latest, plus advisory ubuntu-24.04-arm × 3.12 (13 combos) | `pytest -v` passes on all combinations |
 | **test** (coverage) | Python 3.12 x Ubuntu only | `pytest --cov=vera --cov-fail-under=80` |
 | **typecheck** | Python 3.12 x Ubuntu | `mypy vera/` clean in strict mode |
-| **lint** | Python 3.12 x Ubuntu | `check_changelog_updated.py`, `check_conformance.py`, `check_examples.py`, `check_corpus_canonical.py`, `check_examples_readme.py`, `check_version_sync.py`, `check_spec_examples.py`, `check_grammar_alignment.py`, `check_readme_examples.py`, `check_skill_examples.py`, `check_faq_examples.py`, `check_debruijn_examples.py`, `check_pypi_readme_examples.py`, `check_html_examples.py`, `check_doc_builtin_shadowing.py`, `check_e602_clean.py`, `check_editor_grammars.py`, `check_diagnostic_fields.py`, `check_explicit_encoding.py`, `check_site_assets.py`, `check_licenses.py`, `check_doc_counts.py`, `check_limitations_sync.py`, `ruff check .`, `ruff check --select S vera/` (security rules), `uv lock --check` |
+| **lint** | Python 3.12 x Ubuntu | `check_changelog_updated.py`, `check_conformance.py`, `check_examples.py`, `check_corpus_canonical.py`, `check_examples_readme.py`, `check_version_sync.py`, `check_spec_examples.py`, `check_grammar_alignment.py`, `check_readme_examples.py`, `check_skill_examples.py`, `check_faq_examples.py`, `check_debruijn_examples.py`, `check_pypi_readme_examples.py`, `check_html_examples.py`, `check_doc_builtin_shadowing.py`, `check_e602_clean.py`, `check_examples_run.py`, `check_editor_grammars.py`, `check_diagnostic_fields.py`, `check_explicit_encoding.py`, `check_site_assets.py`, `check_licenses.py`, `check_doc_counts.py`, `check_limitations_sync.py`, `ruff check .`, `ruff check --select S vera/` (security rules), `uv lock --check` |
 | **security** | Ubuntu | [Gitleaks](https://github.com/gitleaks/gitleaks-action) secret scanning on full history |
 | **dependency-audit** | Python 3.12 x Ubuntu | `pip-audit --skip-editable` — checks all installed packages against the OSV vulnerability database (skips the local editable `vera` package) |
 | **wheel-preflight** | Python 3.12 x Ubuntu | `python scripts/check_wheel_availability.py` — verifies every runtime dep has prebuilt wheels for every (platform, python-version) tuple documented in README §Supported platforms; structural backstop for #691-class install regressions |
