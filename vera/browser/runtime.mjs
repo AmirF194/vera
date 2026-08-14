@@ -46,7 +46,17 @@ let cliArgs = [];      // Command-line arguments for IO.args
 let envVars = {};      // Environment variables for IO.get_env
 let exitCode = null;   // Set by IO.exit
 
-const decoder = new TextDecoder('utf-8');
+// ``ignoreBOM: true`` means "do not treat a leading U+FEFF specially",
+// which is the opposite of what the name suggests and the only setting
+// that reads a Vera string back unchanged (#1303 review).  The default
+// (false) REMOVES a BOM at the start of the buffer, so every string
+// whose first character was U+FEFF lost it crossing into the host:
+// `IO.print` dropped it, `json_parse` silently accepted a
+// BOM-prefixed document the reference host refuses, and
+// `decimal_from_string` accepted a BOM-padded decimal.  These bytes are
+// a string payload, not a document with an encoding signature — the
+// reference host's ``safe_utf8_decode`` never strips one.
+const decoder = new TextDecoder('utf-8', { ignoreBOM: true });
 const encoder = new TextEncoder();
 
 // ---------------------------------------------------------------------------
@@ -2200,6 +2210,17 @@ function buildImportObject(module, moduleBytes) {
   const DEC_PREC = 28n;
   const DEC_RE = /^([+-]?)(\d*)(?:\.(\d*))?(?:[eE]([+-]?\d+))?$/;
 
+  // The whitespace §9.7.2 states, rather than whatever the host's own
+  // trim happens to take (#1303 review).  ``String.prototype.trim``
+  // strips U+FEFF and every Unicode space separator but NOT
+  // U+001C..U+001F or U+0085, while the reference host's ``str.strip``
+  // does the opposite on both counts — so the accepted domain diverged
+  // in both directions.  This is the set ``is_whitespace`` already
+  // states: tab, LF, VT, FF, CR, space.  Mirrors _ASCII_WS in
+  // vera/runtime/decimal.py.
+  const DEC_WS = /^[\t\n\v\f\r ]+|[\t\n\v\f\r ]+$/g;
+  const decStripWs = (str) => str.replace(DEC_WS, "");
+
   function decNumDigits(n) {
     return n === 0n ? 1 : n.toString().length;
   }
@@ -2207,7 +2228,7 @@ function buildImportObject(module, moduleBytes) {
   // Parse a (canonical or user) decimal string to the value model.
   // Returns null on malformed input.
   function decParse(str) {
-    const m = str.trim().match(DEC_RE);
+    const m = decStripWs(str).match(DEC_RE);
     if (!m) return null;
     const intPart = m[2] || "";
     const fracPart = m[3] || "";
@@ -2233,7 +2254,7 @@ function buildImportObject(module, moduleBytes) {
   // of -1000000 (a 999999 token plus a long fraction), and decimalGet
   // must keep round-tripping those.
   function decExpTokenInRange(str) {
-    const m = str.trim().match(DEC_RE);
+    const m = decStripWs(str).match(DEC_RE);
     if (!m || m[4] === undefined) return true;
     const digits = m[4].replace(/^[+-]/, "").replace(/^0+(?=\d)/, "");
     return digits.length <= 6;  // 6 digits: at most 999999

@@ -2675,6 +2675,134 @@ public fn main(@Unit -> @Unit)
         assert self._eager_gc_node(src, monkeypatch, tmp_path) == "60"
 
 
+# (id, code point, label).  Every character either runtime's built-in
+# trim treats as whitespace, plus the six §9.7.2 now names.  The two
+# host libraries disagree about this set in BOTH directions, which is
+# why the rule has to be written down rather than inherited: Python's
+# ``str.strip`` takes U+001C–U+001F and U+0085, JavaScript's ``trim``
+# does not; ``trim`` takes U+FEFF, ``strip`` does not.
+_DECIMAL_WS_CASES = [
+    # The set §9.7.2 states — the same one `is_whitespace` uses.
+    ("tab", 0x09, True), ("lf", 0x0A, True), ("vt", 0x0B, True),
+    ("ff", 0x0C, True), ("cr", 0x0D, True), ("space", 0x20, True),
+    # Python-only: the four information separators and NEL.
+    ("fs", 0x1C, False), ("gs", 0x1D, False), ("rs", 0x1E, False),
+    ("us", 0x1F, False), ("nel", 0x85, False),
+    # Accepted by both built-ins, in neither runtime's stated set.
+    ("nbsp", 0xA0, False), ("ogham", 0x1680, False),
+    ("en_quad", 0x2000, False), ("line_sep", 0x2028, False),
+    ("para_sep", 0x2029, False), ("narrow_nbsp", 0x202F, False),
+    ("mmsp", 0x205F, False), ("ideographic", 0x3000, False),
+    # JavaScript-only: the byte-order mark.
+    ("bom", 0xFEFF, False),
+]
+
+
+class TestBrowserDecimalWhitespaceSet856:
+    """`decimal_from_string` ignores ONE stated whitespace set (#1303
+    review).
+
+    §9.7.2 says the grammar is "applied after ignoring surrounding
+    whitespace" and that the accepted domain is defined by the grammar
+    "rather than inherited from whatever the host library parses" — but
+    the whitespace half was inherited, from ``str.strip`` on one host
+    and ``String.prototype.trim`` on the other.  Those two sets differ
+    in both directions, so six code points parted the runtimes: a
+    decimal wrapped in U+0085 was ``Some`` natively and ``None`` in the
+    browser, and one wrapped in U+FEFF was the other way round.
+
+    The set is now the one the language already states for
+    `is_whitespace` (§9.7.x): tab, LF, VT, FF, CR, space.  Nothing else
+    is trimmed on either runtime, so a decimal padded with a no-break
+    space is refused by both rather than accepted by both for reasons
+    neither specification names.
+    """
+
+    _SRC = """
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{{
+  match decimal_from_string("{lit}") {{
+    Some(@Decimal) -> IO.print("ACCEPT"),
+    None -> IO.print("REFUSE")
+  }}
+}}
+"""
+
+    @pytest.mark.parametrize(
+        ("case_id", "code_point", "trimmed"),
+        _DECIMAL_WS_CASES,
+        ids=[c[0] for c in _DECIMAL_WS_CASES],
+    )
+    @pytest.mark.parametrize("where", ["leading", "trailing"])
+    def test_whitespace_acceptance_agrees(
+        self, where: str, case_id: str, code_point: int, trimmed: bool,
+        tmp_path: Path,
+    ) -> None:
+        esc = f"\\u{{{code_point:04X}}}"
+        lit = esc + "1.5" if where == "leading" else "1.5" + esc
+        expected = "ACCEPT" if trimmed else "REFUSE"
+        out = _parity_stdout(
+            self._SRC.format(lit=lit), tmp_path, f"decws_{where}_{case_id}",
+        )
+        assert out == expected
+
+
+class TestBrowserLeadingBomParity1303:
+    """A leading U+FEFF survives the trip into the browser host.
+
+    ``new TextDecoder('utf-8')`` defaults to ``ignoreBOM: false``, whose
+    meaning is the reverse of its name: it REMOVES a byte-order mark at
+    the start of the buffer.  Every Vera string reaching a host binding
+    goes through that decoder, so any string whose first character was
+    U+FEFF arrived one character shorter than it left — while the
+    reference host's ``safe_utf8_decode`` passes it straight through.
+
+    Found from the `decimal_from_string` whitespace work, where it was
+    the one code point still diverging after both hosts agreed on a
+    trim set; the cause turned out to have nothing to do with trimming
+    and to reach much further than `Decimal`.  The cases below are the
+    three families that showed it, each asserted for cross-host
+    equality *and* against the expected string, since two hosts both
+    dropping the mark would satisfy equality alone.
+    """
+
+    @pytest.mark.parametrize(("case_id", "body", "expected"), [
+        # The mark is the first character of the buffer — the only
+        # position the default decoder strips.
+        ("print", 'IO.print("\\u{FEFF}x")', "﻿x"),
+        # Control: not first, so it was never at risk.  Pinned so a
+        # future "fix" that strips U+FEFF everywhere goes red.
+        ("print_trailing", 'IO.print("x\\u{FEFF}")', "x﻿"),
+        # A BOM-prefixed document is not JSON; both hosts must refuse.
+        (
+            "json_parse",
+            'match json_parse("\\u{FEFF}{}") { Ok(@Json) -> IO.print("OK"),'
+            ' Err(@String) -> IO.print("ERR") }',
+            "ERR",
+        ),
+        # Markdown keeps it as text rather than losing it.
+        (
+            "md_parse",
+            'match md_parse("\\u{FEFF}hi") {'
+            ' Ok(@MdBlock) -> IO.print(md_render(@MdBlock.0)),'
+            ' Err(@String) -> IO.print("ERR") }',
+            "﻿hi",
+        ),
+    ])
+    def test_leading_bom_is_not_swallowed(
+        self, case_id: str, body: str, expected: str, tmp_path: Path,
+    ) -> None:
+        src = f"""
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{{
+  {body}
+}}
+"""
+        assert _parity_stdout(src, tmp_path, f"bom_{case_id}") == expected
+
+
 class TestBrowserDecimalExact856:
     """Browser↔native Decimal parity (#856).
 
