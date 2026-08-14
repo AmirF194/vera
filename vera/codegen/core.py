@@ -2615,6 +2615,30 @@ class CodeGenerator(
 
         Returns None for Unit, "unsupported" for non-compilable types,
         "i32_pair" for types represented as (i32, i32) pairs (String, Array).
+
+        The BRANCH ORDER is the checker's, not a convenience ordering
+        (#1309): ``vera.naming._resolve_named`` resolves a named type as
+        type parameter (shadowing everything) -> primitive -> alias
+        (arity-checked) -> declared ADT -> ``Decimal`` -> removed alias ->
+        opaque ADT, the built-in containers being ABSORBED by that last
+        branch rather than sitting after it.  A WIDTH derived in any other
+        order disagrees with the type the program was checked and verified
+        against.  This function has no type-parameter step of its own —
+        monomorphization substitutes concrete arguments before it runs — so
+        what it must reproduce is the primitive-then-alias-then-ADT spine.
+        Spec §8.4.1 permits an alias to take a
+        name the prelude already uses, so ``type Option = Int;`` is a legal
+        shadow whose parameter must emit i64; codegen used to test
+        ``_adt_layouts`` (and ``Array`` / ``Map`` / ``Set`` / ``Decimal``,
+        none of which are ``vera.types.PRIMITIVES``) first and emitted the ADT
+        pointer's i32 instead.  Loud where the widths differ and the target is
+        a scalar — the module fails WASM validation with ``expected i64, found
+        i32`` — and SILENT where the target is a pair: the single i32 drops the
+        length word, the module validates, and ``string_concat`` over a
+        shadow-aliased ``String`` returned junk bytes at exit 0.  Only the
+        PRIMITIVES ahead of the alias branch may stay ahead of it, because that
+        is where the checker puts them: ``type Bool = Int;`` leaves ``@Bool`` a
+        Bool on both sides.
         """
         if isinstance(te, ast.NamedType):
             name = te.name
@@ -2626,22 +2650,10 @@ class CodeGenerator(
                 return "i32"
             if name == "Unit":
                 return None
-            if name in ("String", "Array"):
+            if name == "String":
                 return "i32_pair"
-            if name in ("Map", "Set", "Decimal"):
-                return "i32"  # opaque host handle
-            # Future<T> is transparent — same representation as T
-            # (#841: a fused Future<Result<String, String>> is a
-            # wrapper pointer, which is repr-compatible with the
-            # Result pointer; value-typed futures are their value).
-            # Pre-#841 there was no case here, so a function
-            # *returning* a Future was E605-skipped.
-            if name == "Future" and te.type_args and len(te.type_args) == 1:
-                return self._type_expr_to_wasm_type(te.type_args[0])
-            # ADT types compile to i32 (heap pointer)
-            if name in self._adt_layouts:
-                return "i32"
-            # Type aliases — recurse to resolve the underlying type.
+            # Type aliases — recurse to resolve the underlying type.  Ahead of
+            # every non-primitive branch below, per the checker's order (#1309).
             # When the alias is parameterised (`type Box<T> =
             # Array<T>`), substitute the alias's own type params with
             # the concrete `te.type_args` *before* recursing, so type
@@ -2658,6 +2670,21 @@ class CodeGenerator(
                     local_subst = dict(zip(alias_params, te.type_args))
                     alias = substitute_type_vars(alias, local_subst)
                 return self._type_expr_to_wasm_type(alias)
+            if name == "Array":
+                return "i32_pair"
+            if name in ("Map", "Set", "Decimal"):
+                return "i32"  # opaque host handle
+            # Future<T> is transparent — same representation as T
+            # (#841: a fused Future<Result<String, String>> is a
+            # wrapper pointer, which is repr-compatible with the
+            # Result pointer; value-typed futures are their value).
+            # Pre-#841 there was no case here, so a function
+            # *returning* a Future was E605-skipped.
+            if name == "Future" and te.type_args and len(te.type_args) == 1:
+                return self._type_expr_to_wasm_type(te.type_args[0])
+            # ADT types compile to i32 (heap pointer)
+            if name in self._adt_layouts:
+                return "i32"
             return "unsupported"
         if isinstance(te, ast.RefinementType):
             return self._type_expr_to_wasm_type(te.base_type)
