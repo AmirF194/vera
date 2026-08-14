@@ -810,6 +810,7 @@ def prelude_data_decls() -> Mapping[str, ast.DataDecl]:
     })
 
 
+@functools.lru_cache(maxsize=1)
 def prelude_adt_names() -> frozenset[str]:
     """Every ADT name the prelude can provide (#1277).
 
@@ -829,6 +830,10 @@ def prelude_adt_names() -> frozenset[str]:
     themselves — see ``_adt_members_in_scope`` for why naming an
     undemanded ADT here is inert (a property of today's consumer, not of
     the set) and why the contended case is refused rather than resolved.
+    Cached like :func:`prelude_data_decls` beneath it, and for the same
+    reason: the blocks are constants, so the answer is too.  Its consumer
+    is ``_adt_members_in_scope``, which runs once per namespace, and
+    rebuilding an identical frozenset per namespace bought nothing.
     """
     return frozenset(prelude_data_decls())
 

@@ -3407,7 +3407,7 @@
     "title": "The same data refusal with the imports written the other way",
     "level": "check",
     "spec_ref": "Section 8.5.2.2",
-    "expected_error": "E157",
+    "expected_error": "E156",
     "features": [
       "ambiguous_import",
       "adt",
