@@ -11,6 +11,7 @@ from vera.markdown import (
     MdBlockQuote,
     MdCode,
     MdCodeBlock,
+    MdDocument,
     MdEmph,
     MdHeading,
     MdImage,
@@ -407,6 +408,119 @@ class TestRoundTrip:
         line = render_markdown(doc)
         assert line == "```a``b```"
         assert parse_markdown(line).children[0] == MdCodeBlock("a``b```", "")
+
+    @pytest.mark.parametrize(("code", "rendered"), [
+        # The pad is what the parser's strip removes, so the content's
+        # own spaces survive it.
+        (" x ", "`  x  `"),
+        ("  ", "`    `"),
+        ("  x  ", "`   x   `"),
+        # A single space is below the parser's two-character threshold,
+        # so it is not stripped and must not be padded either.
+        (" ", "` `"),
+        # Backtick padding and space padding are the same one space, not
+        # two: the content starts with a space, so the space rule fires
+        # and the backtick rule has nothing left to add.
+        (" `x` ", "``  `x`  ``"),
+        (" ` ", "``  `  ``"),
+        # Only one end is a space — the parser strips nothing, so
+        # neither does the renderer pad.
+        (" a", "` a`"),
+        ("a ", "`a `"),
+    ])
+    def test_code_span_pads_content_that_would_be_stripped(
+        self, code: str, rendered: str,
+    ) -> None:
+        """A span whose content starts *and* ends with a space.
+
+        ``_parse_inlines`` strips one leading and one trailing space
+        whenever the fenced text is two characters or longer and both
+        ends are spaces.  Without a matching pad on the way out that
+        strip eats the content: ``MdCode(" x ")`` rendered ``` ` x ` ```
+        and read back as ``MdCode("x")``.  It also collapsed two
+        distinct values onto one rendering — ``MdCode(" `x` ")`` and
+        ``MdCode("`x`")`` both produced ``` `` `x` `` ``` — so the loss
+        was not even recoverable by guessing.
+
+        Only reachable from a *constructed* value, which is why the
+        round-trip corpus never caught it: the parser strips the spaces
+        on the way in, so no parse produces the shape that breaks.
+        """
+        doc = MdParagraph((MdCode(code),))
+        assert render_markdown(doc) == rendered
+
+        embedded = MdParagraph((MdText("x "), MdCode(code)))
+        line = render_markdown(embedded)
+        assert line == "x " + rendered
+        assert parse_markdown(line).children[0] == embedded
+
+    def test_code_span_padding_distinguishes_two_values(self) -> None:
+        """The two values that used to share a rendering now differ.
+
+        A parametrized check of each value against its own expected
+        string would pass even if both strings were equal; asserting
+        they differ is the property that was actually broken.
+        """
+        spaced = render_markdown(MdParagraph((MdCode(" `x` "),)))
+        bare = render_markdown(MdParagraph((MdCode("`x`"),)))
+        assert spaced != bare
+
+    @pytest.mark.parametrize(("doc", "rendered"), [
+        # An item with no blocks: marker plus the space the item
+        # patterns require.  A bare "-" is a paragraph.
+        (MdList(False, ((),)), "- "),
+        (MdList(False, ((), (MdParagraph((MdText("b"),)),))), "- \n- b"),
+        (MdList(False, ((MdParagraph((MdText("a"),)),), ())), "- a\n- "),
+        # The ordered case is the one that corrupts silently: dropping
+        # the empty item renumbers every item after it.
+        (
+            MdList(True, (
+                (MdParagraph((MdText("a"),)),), (),
+                (MdParagraph((MdText("c"),)),),
+            )),
+            "1. a\n2. \n3. c",
+        ),
+    ])
+    def test_empty_list_item_keeps_its_place(
+        self, doc: MdList, rendered: str,
+    ) -> None:
+        """An item with no blocks is a value the *parser* produces.
+
+        ``- `` reads back as ``MdList(False, ((),))``, so the renderer
+        owes it a form; dropping it deleted the item outright.  The
+        round trip is asserted as ADT equality, not just as bytes,
+        because a renderer that emitted a placeholder the parser read as
+        *something else* would satisfy the weaker form.
+        """
+        assert render_markdown(doc) == rendered
+        assert parse_markdown(rendered).children[0] == doc
+
+    @pytest.mark.parametrize(("children", "rendered"), [
+        ((MdList(False, ()), MdParagraph((MdText("after"),))), "after"),
+        ((MdParagraph((MdText("before"),)), MdList(False, ())), "before"),
+        (
+            (MdParagraph((MdText("a"),)), MdTable(()),
+             MdParagraph((MdText("b"),))),
+            "a\n\nb",
+        ),
+    ])
+    def test_a_child_that_renders_nothing_takes_no_separator(
+        self, children: tuple, rendered: str,
+    ) -> None:
+        """A zero-line child must not drag a blank line in with it.
+
+        A list with no items and a table with no rows render to nothing.
+        Counting them anyway left the document separator standing for an
+        absent block — ``MdDocument([MdList([]), p])`` rendered
+        ``"\\nafter"`` — which the next parse cannot attribute to
+        anything, so the render was not a fixed point.  That is the
+        property asserted here, since the leading blank line is
+        invisible in a bare equality against an expected string.
+        """
+        doc = MdDocument(children)
+        once = render_markdown(doc)
+        assert once == rendered
+        assert render_markdown(parse_markdown(once)) == once
 
     def test_blockquote_children_are_separated(self) -> None:
         """A blockquote separates its children with a bare ``>``.

@@ -115,7 +115,7 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | ` ├ markdown.py` | 651 | | WASM memory marshalling for MdInline/MdBlock ADTs | |
 | ` ├ json_serde.py` | 420 | | WASM memory marshalling for Json ADT | |
 | ` └ html_serde.py` | 261 | | WASM memory marshalling for HtmlNode ADT | |
-| `markdown.py` | 651 | Compile | Python Markdown parser/renderer (§9.7.3 subset) | `parse_markdown()`, `render_markdown()`, `has_heading()`, `has_code_block()`, `extract_code_blocks()` |
+| `markdown.py` | 728 | Compile | Python Markdown parser/renderer (§9.7.3 subset) | `parse_markdown()`, `render_markdown()`, `has_heading()`, `has_code_block()`, `extract_code_blocks()` |
 | `obligations/` | 725 | Verify | Reified proof obligations + warm incremental session (#222 A/B) | `ProofObligation`, `VerificationSession` |
 | `  core.py` | 198 | | ProofObligation record: identity (content_key) + discharge outcome | |
 | `  cache.py` | 219 | | Invalidation keys (structural/callee/context hashes), DischargeCache | |
@@ -752,7 +752,7 @@ The `ERROR_CODES` dict in `errors.py` maps every code to a short description (15
 
 ## Test Suite
 
-Testing spans a **pytest suite** of 10,729 tests across 164 files — compiler-internals unit tests plus a **conformance suite** (216 programs in `tests/conformance/` validating every language feature against the spec) and **example programs** (42 end-to-end demos). The conformance suite is the definitive specification artifact — most programs target a single feature, though some (slot references, match, contracts) span several, and each serves as a minimal working example.
+Testing spans a **pytest suite** of 10,759 tests across 164 files — compiler-internals unit tests plus a **conformance suite** (216 programs in `tests/conformance/` validating every language feature against the spec) and **example programs** (42 end-to-end demos). The conformance suite is the definitive specification artifact — most programs target a single feature, though some (slot references, match, contracts) span several, and each serves as a minimal working example.
 
 See **[TESTING.md](../TESTING.md)** for the comprehensive testing reference -- test file table, conformance suite details, compiler code coverage, language feature coverage, helper conventions, validation scripts, CI pipeline, and guidelines for adding tests.
 

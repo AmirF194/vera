@@ -4068,10 +4068,11 @@ class TestBrowserMarkdownNesting349:
     ``md_render`` used to diverge on exactly this input (#1294), so the
     rendered prefix was asserted browser-side only.  It now agrees, and
     the whole string is compared across the two runtimes.  The three
-    parse-side fields are still compared separately as well: they were
-    the control that scoped #1294 to the renderer, and keeping them
-    named means a future renderer regression cannot be mistaken for a
-    parser one.
+    parse-side fields are still checked separately as well — each host's
+    against the expected values, since the whole-string equality already
+    makes the two sides the same text: they were the control that scoped
+    #1294 to the renderer, and keeping them named means a future
+    renderer regression cannot be mistaken for a parser one.
     """
 
     # A blockquote wrapping an h2 and a fenced block, so the recursive
@@ -4101,14 +4102,18 @@ public fn main(@Unit -> @Unit)
         rendered, has_h2, has_py, n_blocks = browser.rsplit("|", 3)
         # The parse-side fields kept as a named control: they are what
         # scoped #1294 to the renderer, so a future divergence can still
-        # be told apart from a parser one.
-        assert native.rsplit("|", 3)[1:] == [has_h2, has_py, n_blocks]
+        # be told apart from a parser one.  Each host is held against
+        # the EXPECTED values, not against the other one (#1303 review):
+        # the equality above already makes the two strings identical, so
+        # a second cross-host comparison of fields sliced out of them
+        # asserts nothing at all.
+        expected_fields = ["true", "true", "1"]
+        assert native.rsplit("|", 3)[1:] == expected_fields
+        assert [has_h2, has_py, n_blocks] == expected_fields
         # Continuation lines survived the per-item loop in both list kinds
         # *and* stayed inside their item, which is the renderer's half.
         assert "- first continued" in rendered
         assert "1. one also one" in rendered
-        # Recursive descents found the h2 and the fence inside the quote.
-        assert (has_h2, has_py, n_blocks) == ("true", "true", "1")
 
 
 _MD_ROUND_TRIP_PRELUDE = r"""
@@ -4376,6 +4381,128 @@ public fn main(@Unit -> @Unit)
 }}
 """
         assert _parity_stdout(src, tmp_path, f"md_span_{case_id}") == expected
+
+    @pytest.mark.parametrize(("case_id", "code", "rendered"), [
+        ("both_ends", " x ", "`  x  `"),
+        ("all_spaces", "  ", "`    `"),
+        ("wider", "  x  ", "`   x   `"),
+        # One space is below the parser's two-character strip threshold,
+        # so it is neither stripped nor padded.
+        ("single_space", " ", "` `"),
+        # Space padding and backtick padding are one space, not two.
+        ("spaced_backticks", " `x` ", "``  `x`  ``"),
+        # Only one end is a space — nothing is stripped, nothing padded.
+        ("leading_only", " a", "` a`"),
+        ("trailing_only", "a ", "`a `"),
+    ])
+    def test_code_span_pads_space_bounded_content(
+        self, case_id: str, code: str, rendered: str, tmp_path: Path,
+    ) -> None:
+        """A span whose content starts *and* ends with a space (#1303
+        review).
+
+        Both parsers strip one such pair unconditionally, so without a
+        matching pad on the way out the content's own spaces are eaten:
+        ``MdCode(" x ")`` rendered ``` ` x ` ``` and read back as
+        ``MdCode("x")``.  Constructed, because the shape is unreachable
+        by parsing — the strip removes it on the way in — which is why
+        the round-trip corpus never produced it on either host.
+        """
+        src = f"""
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{{
+  IO.print(md_render(MdDocument([MdParagraph([MdCode("{code}")])])))
+}}
+"""
+        assert _parity_stdout(src, tmp_path, f"md_sp_{case_id}") == rendered
+
+    def test_code_span_padding_keeps_two_values_apart(
+        self, tmp_path: Path,
+    ) -> None:
+        """``MdCode(" `x` ")`` and ``MdCode("`x`")`` used to render to
+        the same bytes on both hosts, so the loss was not recoverable
+        even by guessing.  Asserted as a *difference*, which a pair of
+        per-value expected strings would not catch if both were equal.
+        """
+        src = """
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  IO.print(string_concat(
+    md_render(MdDocument([MdParagraph([MdCode(" `x` ")])])),
+    string_concat("|",
+      md_render(MdDocument([MdParagraph([MdCode("`x`")])])))))
+}
+"""
+        out = _parity_stdout(src, tmp_path, "md_sp_distinct")
+        spaced, bare = out.split("|")
+        assert spaced != bare
+        assert (spaced, bare) == ("``  `x`  ``", "`` `x` ``")
+
+    @pytest.mark.parametrize(("case_id", "expr", "rendered"), [
+        ("only_item", "MdList(false, [[]])", "- "),
+        (
+            "empty_then_full",
+            'MdList(false, [[], [MdParagraph([MdText("b")])]])',
+            "- \n- b",
+        ),
+        # The ordered case corrupts silently: dropping the empty item
+        # renumbers every item after it.
+        (
+            "ordered_middle",
+            'MdList(true, [[MdParagraph([MdText("a")])], [], '
+            '[MdParagraph([MdText("c")])]])',
+            "1. a\n2. \n3. c",
+        ),
+    ])
+    def test_empty_list_item_keeps_its_place(
+        self, case_id: str, expr: str, rendered: str, tmp_path: Path,
+    ) -> None:
+        """An item with no blocks is a value the *parser* produces —
+        ``- `` reads back as one empty item — so the renderer owes it a
+        form (#1303 review).  Both hosts dropped it, which deleted the
+        item and, in an ordered list, renumbered the rest.
+        """
+        src = f"""
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{{
+  IO.print(md_render(MdDocument([{expr}])))
+}}
+"""
+        assert _parity_stdout(src, tmp_path, f"md_ei_{case_id}") == rendered
+
+    @pytest.mark.parametrize(("case_id", "expr", "rendered"), [
+        ("list_then_para",
+         'MdList(false, []), MdParagraph([MdText("after")])', "after"),
+        ("para_then_list",
+         'MdParagraph([MdText("before")]), MdList(false, [])', "before"),
+        ("table_between",
+         'MdParagraph([MdText("a")]), MdTable([]), '
+         'MdParagraph([MdText("b")])', "a\n\nb"),
+    ])
+    def test_zero_line_child_takes_no_separator(
+        self, case_id: str, expr: str, rendered: str, tmp_path: Path,
+    ) -> None:
+        """A list with no items and a table with no rows render to
+        nothing, and must not drag the document separator in with them
+        (#1303 review).
+
+        Counting them left a blank line standing for an absent block,
+        which the next parse cannot attribute to anything — so the
+        render stopped being a fixed point.  The expected strings here
+        have no leading or interior stray blank line, which is what the
+        assertion is really about.
+        """
+        src = f"""
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{{
+  IO.print(md_render(MdDocument([{expr}])))
+}}
+"""
+        assert _parity_stdout(src, tmp_path, f"md_zl_{case_id}") == rendered
 
     def test_empty_blockquote_still_occupies_a_line(
         self, tmp_path: Path,

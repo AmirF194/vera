@@ -802,8 +802,16 @@ function renderInline(node) {
         if (run > longest) longest = run;
       }
       const fence = '`'.repeat(longest + 1);
-      const pad = (node.text.startsWith('`') || node.text.endsWith('`'))
-        ? ' ' : '';
+      // #1303 review: also pad when the content itself starts AND ends
+      // with a space.  parseInlines strips one such pair whenever the
+      // fenced text is two characters or longer, so without a pad the
+      // strip eats the content's own spaces and `MdCode(' x ')` comes
+      // back as `MdCode('x')` — and `MdCode(' `x` ')` rendered to the
+      // same bytes as `MdCode('`x`')`.  Mirrors _render_code_span.
+      const stripsOwnSpaces = node.text.length >= 2
+        && node.text.startsWith(' ') && node.text.endsWith(' ');
+      const pad = (node.text.startsWith('`') || node.text.endsWith('`')
+        || stripsOwnSpaces) ? ' ' : '';
       return fence + pad + node.text + pad + fence;
     }
     case 'MdEmph': return '*' + node.children.map(renderInline).join('') + '*';
@@ -841,10 +849,14 @@ function renderBlockLines(node) {
       if (node.children.length === 0) return ['>'];
       const out = [];
       node.children.forEach((child, i) => {
+        const childLines = renderBlockLines(child);
+        // A child that renders nothing must not leave a bare '>'
+        // standing for it (#1303 review; mirrors _render_block).
+        if (childLines.length === 0) return;
         // A bare '>' between children, mirroring _render_block: without
         // it a quote holding two paragraphs re-parses as one.
-        if (i > 0) out.push('>');
-        for (const line of renderBlockLines(child)) {
+        if (i > 0 && out.length > 0) out.push('>');
+        for (const line of childLines) {
           out.push(line ? '> ' + line : '>');
         }
       });
@@ -857,6 +869,16 @@ function renderBlockLines(node) {
         const indent = ' '.repeat(marker.length + 1);
         const itemLines = [];
         for (const child of item) itemLines.push(...renderBlockLines(child));
+        if (itemLines.length === 0) {
+          // #1303 review: an item with no blocks is a value the PARSER
+          // produces — '- ' reads back as one empty item — so dropping
+          // it deleted the item and renumbered every ordered item after
+          // it.  The marker plus its space is what reads back; a bare
+          // '-' is a paragraph, since both item patterns require the
+          // whitespace.  Mirrors _render_block.
+          out.push(marker + ' ');
+          return;
+        }
         itemLines.forEach((line, j) => {
           out.push(j === 0 ? marker + ' ' + line : indent + line);
         });
@@ -877,10 +899,17 @@ function renderBlockLines(node) {
     }
     case 'MdDocument': {
       const out = [];
-      node.children.forEach((child, i) => {
-        if (i > 0) out.push('');
-        out.push(...renderBlockLines(child));
-      });
+      for (const child of node.children) {
+        const childLines = renderBlockLines(child);
+        // #1303 review: a child that renders to NOTHING — an MdList
+        // with no items, an MdTable with no rows — must not drag a
+        // separator in with it, or the blank line survives as a stray
+        // the next parse cannot attribute to anything and the render
+        // stops being a fixed point.  Mirrors _render_block.
+        if (childLines.length === 0) continue;
+        if (out.length > 0) out.push('');
+        out.push(...childLines);
+      }
       return out;
     }
     default:
