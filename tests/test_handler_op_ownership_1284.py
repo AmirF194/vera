@@ -31,7 +31,7 @@ from __future__ import annotations
 import pytest
 
 from tests.checker_helpers import _check_ok, _errors
-from tests.codegen_helpers import _compile, _run
+from tests.codegen_helpers import _compile, _run, wat_calls
 from tests.verifier_helpers import _verify_ok
 
 
@@ -61,15 +61,37 @@ private fn put(@Nat -> @Nat)
 
 # --- the resolution rule, stated at the checker ------------------------
 
-def test_checker_resolves_bare_get_to_the_user_declaration() -> None:
-    """E201 against the USER signature — the derivation this fix threads.
+# A TWO-argument user `get`, for the resolution pin alone.  The built-in
+# State `get(@Unit)` is arity ONE, so the two candidates disagree about the
+# NUMBER as well as about the code and the noun — see the assertions below.
+_USER_GET_ARITY_2 = """
+private fn get(@Nat, @Nat -> @Nat)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  @Nat.0 + @Nat.1
+}
+"""
 
-    ``get`` under a ``handle[State<Int>]`` whose own ``get`` clause takes
-    ``@Unit``: passing two arguments reports the *user* function's arity
-    (1), so the checker has resolved the call to the declaration, not to
-    the op.  This is the fact the two codegen sites must agree with.
+
+def test_checker_resolves_bare_get_to_the_user_declaration() -> None:
+    """The derivation this fix threads, pinned on three discriminators.
+
+    An over-applied ``get`` under a ``handle[State<Int>]``.  The two
+    candidate resolutions report DIFFERENT diagnostics, and all three ways
+    they differ are asserted, because any one alone is weak:
+
+    * the CODE — the function path is ``E201``, the operation path
+      ``E203`` (measured: ``get(1, 2, 3)`` under ``effects(<State<Int>>)``
+      with no user declaration reports ``E203``);
+    * the NOUN — "Function 'get'" against "Effect operation 'get'";
+    * the ARITY — 2 against the built-in ``get(@Unit)``'s 1, which is why
+      this fixture takes two parameters where the rest of the file's takes
+      one.  With a one-argument user ``get`` both candidates report
+      "expects 1 argument" and the number distinguishes nothing.
     """
-    errs = _errors(_USER_GET + """
+    errs = _errors(_USER_GET_ARITY_2 + """
 public fn main(@Unit -> @Int)
   requires(true)
   ensures(true)
@@ -79,15 +101,14 @@ public fn main(@Unit -> @Int)
     get(@Unit) -> { resume(@Int.0) },
     put(@Int) -> { resume(()) }
   } in {
-    nat_to_int(get(3, 4))
+    nat_to_int(get(3, 4, 5))
   }
 }
 """)
     assert len(errs) == 1, [d.description for d in errs]
-    assert errs[0].error_code == "E201"
-    # The user's arity, not the op's — `get(@Unit)` is arity 1 too, so the
-    # message body is what distinguishes them.
-    assert "expects 1 argument" in errs[0].description
+    assert errs[0].error_code == "E201", errs[0].description
+    assert "Function 'get'" in errs[0].description, errs[0].description
+    assert "expects 2 argument" in errs[0].description, errs[0].description
 
 
 # --- shape 1: handled body, scalar result (silently wrong value) -------
@@ -119,8 +140,8 @@ def test_handled_body_user_get_emits_the_user_call() -> None:
     """The dispatch target, not just the value: `call $get`, no intrinsic."""
     result = _compile(_HANDLED_BODY)
     assert result.wat is not None
-    assert "call $get" in result.wat
-    assert "call $vera.state_get_Int" not in result.wat
+    assert wat_calls(result.wat, "get")
+    assert not wat_calls(result.wat, "vera.state_get_Int")
 
 
 # --- shape 2: handled body, Bool result (module fails validation) ------
@@ -202,7 +223,7 @@ def test_same_family_nesting_compiles_and_calls_the_user_fn() -> None:
     assert not [d for d in result.diagnostics if d.error_code == "E602"], (
         [d.description for d in result.diagnostics]
     )
-    assert "call $get" in result.wat
+    assert wat_calls(result.wat, "get")
     assert _run(_NEST_SAME_FAMILY) == 4
 
 
@@ -236,7 +257,7 @@ def test_different_family_nesting_loads_and_calls_the_user_fn() -> None:
     _check_ok(_NEST_DIFF_FAMILY)
     result = _compile(_NEST_DIFF_FAMILY)
     assert result.wat is not None
-    assert "call $get" in result.wat
+    assert wat_calls(result.wat, "get")
     assert _run(_NEST_DIFF_FAMILY) == 4
 
 
@@ -265,7 +286,7 @@ def test_user_put_is_not_hijacked_by_the_handler() -> None:
     _check_ok(_USER_PUT_BODY)
     result = _compile(_USER_PUT_BODY)
     assert result.wat is not None
-    assert "call $put" in result.wat
+    assert wat_calls(result.wat, "put")
     assert _run(_USER_PUT_BODY) == 6
 
 
@@ -332,8 +353,8 @@ def test_unshadowed_bare_ops_still_route_to_the_intrinsics() -> None:
     the name, `get`/`put` are the handler's ops exactly as before."""
     result = _compile(_UNSHADOWED)
     assert result.wat is not None
-    assert "call $vera.state_get_Int" in result.wat
-    assert "call $vera.state_put_Int" in result.wat
+    assert wat_calls(result.wat, "vera.state_get_Int")
+    assert wat_calls(result.wat, "vera.state_put_Int")
     assert _run(_UNSHADOWED) == 7
 
 
@@ -394,5 +415,5 @@ def test_checker_and_codegen_agree_on_every_shadowed_shape(
     _check_ok(source)
     result = _compile(source)
     assert "main" in result.exports, pre_fix
-    assert f"call ${shadowed}" in result.wat, pre_fix
+    assert wat_calls(result.wat, shadowed), pre_fix
     assert _run(source) == expected, pre_fix

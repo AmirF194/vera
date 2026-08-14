@@ -33,6 +33,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.codegen_helpers import wat_calls
 from vera.codegen.api import WasmTrapError
 
 from collections.abc import Iterator
@@ -2761,7 +2762,7 @@ public fn go(@Int -> @Int)
                 expr_semantic_types=arts.expr_semantic_types,
             )
             assert result.ok, [d.description for d in result.diagnostics]
-            assert "call $vera.state_put_Int" in result.wat
+            assert wat_calls(result.wat, "vera.state_put_Int")
             # The user's own `put` is still emitted and still callable — it
             # is simply not what the qualified site denotes.
             assert "(func $put " in result.wat

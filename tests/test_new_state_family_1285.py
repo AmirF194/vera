@@ -31,7 +31,7 @@ from __future__ import annotations
 import pytest
 
 from tests.checker_helpers import _check_ok
-from tests.codegen_helpers import _compile, _run
+from tests.codegen_helpers import _compile, _run, wat_calls
 from tests.verifier_helpers import _verify_ok
 
 
@@ -78,7 +78,7 @@ def test_new_emits_the_named_familys_getter() -> None:
     """The dispatch target itself, so a case that happened to agree on
     values still fails when the wrong import is called."""
     result = _compile(_BOOL_SECOND)
-    assert "call $vera.state_get_Bool" in result.wat
+    assert wat_calls(result.wat, "vera.state_get_Bool")
 
 
 # --- the same defect where BOTH cells are i64 (loads, wrong answer) ----
@@ -126,7 +126,7 @@ def test_new_same_width_cells_read_the_named_one() -> None:
     _verify_ok(_NAT_SECOND)
     assert _run(_NAT_SECOND) == 7
     result = _compile(_NAT_SECOND)
-    assert "call $vera.state_get_Nat" in result.wat
+    assert wat_calls(result.wat, "vera.state_get_Nat")
 
 
 # --- old() and new() on the two sides of one clause -------------------
@@ -202,7 +202,7 @@ def test_single_state_new_is_unchanged() -> None:
     _verify_ok(_SINGLE)
     assert _run(_SINGLE) == 7
     result = _compile(_SINGLE)
-    assert "call $vera.state_get_Int" in result.wat
+    assert wat_calls(result.wat, "vera.state_get_Int")
 
 
 _SINGLE_ALIAS = """
@@ -314,5 +314,10 @@ def test_a_false_postcondition_still_traps() -> None:
     from vera.codegen.api import WasmTrapError
 
     _check_ok(_REFUTED)
-    with pytest.raises(WasmTrapError):
+    with pytest.raises(WasmTrapError) as excinfo:
         _run(_REFUTED)
+    # The KIND, not merely that something trapped: an `unreachable` from a
+    # GC guard or a narrowing check would satisfy a bare `raises` and prove
+    # nothing about the postcondition, which is the one thing this test
+    # exists to establish.
+    assert excinfo.value.kind == "contract_violation", excinfo.value.kind
