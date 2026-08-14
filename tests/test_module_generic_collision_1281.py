@@ -39,6 +39,7 @@ from typing import ClassVar
 
 import pytest
 
+from tests.codegen_helpers import wat_fn_names
 from tests.module_fixture_helpers import build_multi_module, module_value
 
 BASE_ANSWER = 111
@@ -92,15 +93,24 @@ public fn door2(@Bool -> @Int)
 {{ gen(@Bool.0) }}
 """
 
+# The join is WEIGHTED, not a sum.  `door1 + door2` is commutative, so the
+# two doors could swap answers — precisely the defect this file is about —
+# and the total would be unchanged: measured, a fixture with the two
+# libraries' answers exchanged still produced 666.  Scaling one contribution
+# past the other's magnitude makes the pair recoverable from the total, so
+# each door's answer is pinned individually by one assertion.
+DIAMOND_SCALE = 1000
+DIAMOND_TOTAL = MID1_ANSWER * DIAMOND_SCALE + BASE_ANSWER
+
 _DIAMOND_MAIN = f"""\
 import mid1(door1);
 import mid2(door2);
 
 public fn main(@Unit -> @Int)
   requires(true)
-  ensures(@Int.result == {MID1_ANSWER + BASE_ANSWER})
+  ensures(@Int.result == {DIAMOND_TOTAL})
   effects(pure)
-{{ door1(true) + door2(true) }}
+{{ door1(true) * {DIAMOND_SCALE} + door2(true) }}
 """
 
 
@@ -122,8 +132,19 @@ public fn main(@Unit -> @Int)
 """
 
 
-def _errors(diags: list[str], code: str) -> list[str]:
-    return [d for d in diags if code in d or "defined in both" in d]
+def _errors(
+    diags: list[tuple[str, str]], code: str,
+) -> list[tuple[str, str]]:
+    """The diagnostics carrying *code*, matched on the CODE.
+
+    Matched on ``Diagnostic.error_code``, never on the description: the
+    description never contains the code, so a substring filter fell through
+    to the "defined in both imported module" wording — which E609 (data
+    types) and E610 (constructors) share verbatim, because they are the same
+    ``_emit_collision_error`` call with a different ``kind``.  Every positive
+    assertion below wants E608 specifically.
+    """
+    return [(c, d) for c, d in diags if c == code]
 
 
 def _answer(
@@ -136,6 +157,30 @@ def _answer(
     kind, payload = module_value(result, fn)
     assert kind == "ok", f"module did not load/run: {payload}"
     return payload
+
+
+def test_the_collision_filter_matches_on_the_code_not_the_wording() -> None:
+    """``_errors`` distinguishes E608 from its same-worded siblings.
+
+    ``_emit_collision_error`` produces E608 (functions), E609 (data types)
+    and E610 (constructors) from ONE format string, so all three read
+    "… is defined in both imported module …".  A description-substring
+    filter therefore matched any of them, and every positive assertion in
+    this file would have been satisfied by an ADT collision.
+    """
+    diags = [
+        ("E609", "Data type 'gen' is defined in both imported module "
+                 "'a' and 'b'."),
+        ("E610", "Constructor 'Gen' is defined in both imported module "
+                 "'a' and 'b'."),
+    ]
+    assert _errors(diags, "E608") == []
+    assert _errors([*diags, ("E608", "Function 'gen' is defined in both "
+                                     "imported module 'a' and 'b'.")],
+                   "E608") == [
+        ("E608", "Function 'gen' is defined in both imported module "
+                 "'a' and 'b'."),
+    ]
 
 
 class TestStandaloneOracles:
@@ -179,14 +224,17 @@ class TestDiamond:
     def test_compiles_and_each_door_runs_its_own_generic(
         self, tmp_path: Path,
     ) -> None:
-        assert _answer(tmp_path, dict(self._FILES)) == (
-            MID1_ANSWER + BASE_ANSWER
-        )
+        # Weighted, so the two doors' answers are separable from the total —
+        # a plain sum is satisfied by them swapping, which is the defect.
+        assert _answer(tmp_path, dict(self._FILES)) == DIAMOND_TOTAL
 
     def test_no_collision_diagnostic(self, tmp_path: Path) -> None:
         _, result, _ = build_multi_module(tmp_path, dict(self._FILES))
+        # Every diagnostic, not just the errors: an E608 demoted to a warning
+        # would still be the rail firing on a pair it must not refuse.
         collisions = _errors(
-            [d.description for d in result.diagnostics], "E608",
+            [(d.error_code, d.description) for d in result.diagnostics],
+            "E608",
         )
         assert not collisions, f"E608 still refuses the pair: {collisions}"
 
@@ -196,12 +244,17 @@ class TestDiamond:
         """The classification's claim, read off the emitted module: nothing
         is emitted under a bare ``gen``, and each owner has its own clone."""
         _, result, _ = build_multi_module(tmp_path, dict(self._FILES))
+        emitted = wat_fn_names(result.wat)
+        # Absence, so the unbounded prefix is the conservative direction: ANY
+        # `gen$…` in the entry's bare clone namespace is the failure.
         assert "(func $gen$" not in result.wat, (
-            "a generic was emitted in the ENTRY's bare clone namespace, "
-            "where neither owner belongs"
+            f"a generic was emitted in the ENTRY's bare clone namespace, "
+            f"where neither owner belongs; emitted: {emitted}"
         )
-        assert "(func $mod$mid1$gen$Bool" in result.wat
-        assert "(func $mod$base$gen$Bool" in result.wat
+        # Presence, so matched EXACTLY — `"(func $mod$mid1$gen$Bool" in wat`
+        # is a prefix test a longer mangled clone would satisfy.
+        assert "mod$mid1$gen$Bool" in emitted, emitted
+        assert "mod$base$gen$Bool" in emitted, emitted
 
 
 class TestTwoTransitiveImporters:
@@ -231,15 +284,19 @@ public forall<T> fn gen(@T -> @Int)
         .replace("door2", "doorb")
         .replace(f"== {BASE_ANSWER}", f"== {DEEPB_ANSWER}")
     )
+    # Weighted for the same reason as the diamond above: the two importers
+    # exchanging dependencies is exactly the failure, and a sum cannot see it.
+    _TOTAL = BASE_ANSWER * DIAMOND_SCALE + DEEPB_ANSWER
+
     _MAIN = f"""\
 import mida(doora);
 import midb(doorb);
 
 public fn main(@Unit -> @Int)
   requires(true)
-  ensures(@Int.result == {BASE_ANSWER + DEEPB_ANSWER})
+  ensures(@Int.result == {_TOTAL})
   effects(pure)
-{{ doora(true) + doorb(true) }}
+{{ doora(true) * {DIAMOND_SCALE} + doorb(true) }}
 """
 
     def test_each_importer_reaches_its_own_dependency(
@@ -249,7 +306,7 @@ public fn main(@Unit -> @Int)
             "deepa.vera": self._DEEPA, "deepb.vera": self._DEEPB,
             "mida.vera": self._MIDA, "midb.vera": self._MIDB,
             "main.vera": self._MAIN,
-        }) == BASE_ANSWER + DEEPB_ANSWER
+        }) == self._TOTAL
 
 
 class TestQualifiedOnlyGenericsAreKeyedPerOwner:
@@ -681,6 +738,10 @@ public fn main(@Unit -> @Int)
     ) -> None:
         """Non-generics are untouched: each really is emitted under the bare
         ``$name`` in Pass 2.5, whatever its visibility."""
+        # `{{n}}` stays doubled — it is the literal `{n}` placeholder the
+        # `.replace` below fills in.  The BODY braces were doubled too, which
+        # emitted `{{ 1 }}`: a block nested in a block, accepted only
+        # incidentally by the parser and unlike every other fixture here.
         lib = f"""\
 module lib{{n}};
 
@@ -688,13 +749,13 @@ module lib{{n}};
   requires(true)
   ensures(true)
   effects(pure)
-{{{{ 1 }}}}
+{{ 1 }}
 
 public fn door{{n}}(@Unit -> @Int)
   requires(true)
   ensures(true)
   effects(pure)
-{{{{ plain(()) }}}}
+{{ plain(()) }}
 """
         main = """\
 import lib1(door1);

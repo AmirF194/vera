@@ -51,7 +51,7 @@ from typing import ClassVar
 
 import pytest
 
-from tests.codegen_helpers import wat_calls, wat_fn_body
+from tests.codegen_helpers import wat_calls, wat_fn_body, wat_fn_names
 from tests.module_fixture_helpers import build_multi_module, module_value
 from vera import ast
 from vera.codegen.core import CodeGenerator
@@ -67,6 +67,13 @@ from vera.wasm.context import WasmContext
 CELL = 42007
 LIB = 7007
 LOCAL = 555
+
+# Where one program's answer is the join of TWO measured values, the join is
+# weighted rather than summed.  `a + b` is commutative, so it is satisfied by
+# the two contributions swapping — which is the defect class these files
+# exist to catch, not an unrelated one.  Scaling one past the other's
+# magnitude keeps the pair recoverable from the total.
+JOIN_SCALE = 1000
 
 
 # ---------------------------------------------------------------------
@@ -341,7 +348,7 @@ public fn main(@Unit -> @Int)
   requires(true)
   ensures(true)
   effects(pure)
-{{ holder(true) + sibling(()) }}
+{{ holder(true) * {JOIN_SCALE} + sibling(()) }}
 """
 
 
@@ -380,7 +387,7 @@ class TestGenericWhereHelperRoute:
         )
         assert not cg_errors, f"codegen errors: {cg_errors}"
         assert wat_calls(result.wat, "holder$Bool$where$get")
-        assert module_value(result) == ("ok", LIB + CELL)
+        assert module_value(result) == ("ok", LIB * JOIN_SCALE + CELL)
 
 
 # ---------------------------------------------------------------------
@@ -1106,10 +1113,11 @@ where {{
                  "import lib(touch);\n\n", "touch(())")},
         )
         assert not cg_errors, f"codegen errors: {cg_errors}"
-        assert "(func $holder " not in result.wat, (
-            "an imported generic template was emitted under its bare name — "
-            "the Pass-2.5 door would then need the scope the mono door does "
-            "not"
+        emitted = wat_fn_names(result.wat)
+        assert "holder" not in emitted, (
+            f"an imported generic template was emitted under its bare name — "
+            f"the Pass-2.5 door would then need the scope the mono door does "
+            f"not; emitted: {emitted}"
         )
         clone = wat_fn_body(result.wat, "mod$lib$holder$Bool")
         assert wat_calls(clone, "mod$lib$holder$Bool$where$get")
@@ -1208,7 +1216,7 @@ public fn main(@Unit -> @Int)
   requires(true)
   ensures(true)
   effects(pure)
-{{ lib::touch(()) + touch(()) }}
+{{ lib::touch(()) * {JOIN_SCALE} + touch(()) }}
 """
 
     def test_qualified_call_still_reaches_the_shadowed_module_body(
@@ -1218,7 +1226,7 @@ public fn main(@Unit -> @Int)
             tmp_path,
             {"lib.vera": self._SHADOWED_LIB,
              "main.vera": self._QUALIFIED_MAIN},
-        ) == LIB + LOCAL
+        ) == LIB * JOIN_SCALE + LOCAL
 
 
 class TestDiscoveryScopeIsPerNamespace:
@@ -1458,11 +1466,14 @@ class TestNestedHelperFamilyLeaf:
             tmp_path, dict(self._FILES),
         )
         assert not cg_errors, f"codegen errors: {cg_errors}"
-        assert "(func $outer$Int$where$gsib$Int" in result.wat, (
-            f"the helper family was instantiated at the wrong type; emitted "
-            f"symbols: "
-            f"{sorted(n for n in result.wat.split() if n.startswith('$outer'))}"
+        emitted = wat_fn_names(result.wat)
+        assert "outer$Int$where$gsib$Int" in emitted, (
+            f"the helper family was instantiated at the wrong type; "
+            f"emitted symbols: {emitted}"
         )
+        # Left as an unbounded substring on purpose: this asserts ABSENCE, so
+        # matching any symbol that merely contains the wrong instantiation is
+        # the conservative direction.
         assert "$where$gsib$Bool" not in result.wat, (
             "a clone was named from the invisible module declaration's "
             "return type"

@@ -91,6 +91,25 @@ def wat_fn_body(wat: str, name: str) -> str:
     return wat[match.start():match.end() + (nxt.start() if nxt else len(rest))]
 
 
+def wat_fn_names(wat: str) -> list[str]:
+    """Every function symbol the module DEFINES, sorted.
+
+    Membership against this list is exact, where ``"(func $f" in wat`` is a
+    prefix test that a longer mangled symbol satisfies — ``$gsib$Int`` is
+    matched by a check for ``$gsib``, and ``$gen$Bool`` by one for ``$gen``,
+    which is precisely how a monomorphized clone impersonates another.  It
+    also makes a failure message useful: the assertion can print what WAS
+    emitted instead of only what was missing.
+
+    Imports are excluded — ``(import … (func $vera.x …))`` is not a
+    definition, and a test asking "did we emit this?" never means the host's.
+    """
+    return sorted(
+        m.group(1)
+        for m in re.finditer(r"(?m)^\s*\(func \$([^\s()]+)", wat)
+    )
+
+
 def exceptions_engine() -> wasmtime.Engine:
     """A wasmtime engine configured the way ``execute()`` configures its own.
 

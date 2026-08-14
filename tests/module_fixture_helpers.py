@@ -129,7 +129,9 @@ def fake_resolved_module(
 def build_multi_module(
     tmp_path: Path, files: dict[str, str],
     main_name: str = "main.vera",
-) -> tuple[list[str], CompileResult, list[str]]:
+) -> tuple[
+    list[tuple[str, str]], CompileResult, list[tuple[str, str]],
+]:
     """Resolve + check + verify + compile *main_name* as ``vera run`` does.
 
     Returns ``(verify_errors, compile_result, codegen_errors)`` — the two
@@ -140,10 +142,16 @@ def build_multi_module(
     answer is exactly the false Tier-1 shape these matrices hunt, and it
     is invisible to any test that inspects one side alone.
 
-    Type-check errors raise instead of being returned: every caller's
-    fixture is check-green by construction, so a check error means the
-    FIXTURE is broken, not the compiler — and returning it would let a
-    matrix cell pass vacuously with nothing compiled.
+    Each error is an ``(error_code, description)`` pair rather than a bare
+    description, so a caller pinning a specific diagnostic matches on the
+    CODE.  ``_emit_collision_error`` renders E608, E609 and E610 from one
+    format string, so a description-substring match cannot tell a function
+    collision from an ADT one.
+
+    Resolution and type-check errors RAISE instead of being returned: every
+    caller's fixture is well-formed and check-green by construction, so
+    either means the FIXTURE is broken, not the compiler — and returning
+    them would let a matrix cell pass vacuously with nothing assembled.
 
     Resolution goes through the real :class:`~vera.resolver.ModuleResolver`
     rooted at *tmp_path*, so each module's ``direct`` flag is the
@@ -158,6 +166,20 @@ def build_multi_module(
     program = parse_to_ast(source)
     resolver = ModuleResolver(_root=tmp_path)
     resolved = resolver.resolve_imports(program, main_path)
+    # Resolution failures are RECORDED, not raised: `resolve_imports` appends
+    # E011/E012 to `resolver.errors` and returns whatever it did resolve.  An
+    # unresolved module therefore drops out silently, and a cell whose
+    # expected answer is the effect operation — most of the matrix — still
+    # gets that answer and passes while measuring nothing.  Measured: with
+    # `lib.vera` written as `liib.vera`, the private-wildcard cell returns
+    # 42007 and every stage reports zero errors.
+    #
+    # Raised the same way as the type-check errors below, and for the same
+    # reason: no caller expects one, so a resolution error means the FIXTURE
+    # is broken, not the compiler — and returning it would let a cell pass
+    # with nothing assembled.
+    resolve_errors = [d.description for d in resolver.errors]
+    assert not resolve_errors, f"module resolution errors: {resolve_errors}"
     diags, arts = typecheck_with_artifacts(
         program, source, file=str(main_path), resolved_modules=resolved,
         collect_module_artifacts=True,
@@ -167,7 +189,8 @@ def build_multi_module(
     vres = verify(program, source, file=str(main_path),
                   resolved_modules=resolved)
     verify_errors = [
-        d.description for d in vres.diagnostics if d.severity == "error"
+        (d.error_code, d.description)
+        for d in vres.diagnostics if d.severity == "error"
     ]
     result = codegen_compile(
         program, source=source, file=str(main_path), resolved_modules=resolved,
@@ -176,7 +199,8 @@ def build_multi_module(
         module_artifacts=arts.module_artifacts,
     )
     cg_errors = [
-        d.description for d in result.diagnostics if d.severity == "error"
+        (d.error_code, d.description)
+        for d in result.diagnostics if d.severity == "error"
     ]
     return verify_errors, result, cg_errors
 
