@@ -1,0 +1,25 @@
+-- Conformance: a module whose private helper is named like an effect op
+-- (Chapter 7, #1299)
+-- Tests: `get` here is PRIVATE, so no importer can name it — but it is
+-- reachable from this module's own body, so it is compiled into the importer's
+-- flat WASM module all the same.  Its own caller must still reach it.
+module ch07_invisible_import_op_name_lib;
+
+-- `@Nat`, so a clone named from THIS declaration's return type differs from
+-- one named from an `Int` cell — and shares its machine width, so the
+-- divergence lands as a wrong-signedness answer rather than a load failure.
+private fn get(@Unit -> @Nat)
+  requires(true)
+  ensures(@Nat.result == 7007)
+  effects(pure)
+{
+  7007
+}
+
+public fn touch(@Unit -> @Nat)
+  requires(true)
+  ensures(@Nat.result == 7007)
+  effects(pure)
+{
+  get(())
+}

@@ -1,0 +1,23 @@
+-- Conformance: a module whose private helper is named after an ability op
+-- (Chapter 9, #1299)
+-- Tests: `show` and `hash` are the ability operations E151 does NOT reserve
+-- (#908), so a module may declare a function of that name where it may not
+-- declare `array_length`.  This one is private, so no importer can name it —
+-- but its own caller must still reach it.
+module ch09_invisible_import_ability_op_lib;
+
+private fn show(@Int -> @Int)
+  requires(true)
+  ensures(@Int.result == 7007)
+  effects(pure)
+{
+  7007
+}
+
+public fn touch(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 7007)
+  effects(pure)
+{
+  show(1)
+}
