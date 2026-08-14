@@ -5081,33 +5081,38 @@ class ContractVerifier:
                 op_guarded = op_effect in ("State", "Exn")
                 op_site = ("State-op argument" if op_effect == "State"
                            else "effect-operation argument")
-                # A concretely-@Nat formal obligates directly (#552); a
-                # generic (TypeVar) formal — `E<T>.wait` instantiated as
+                # The SHARED triple, not a local copy of two of its three
+                # arms.  A concretely-@Nat formal obligates directly (#552);
+                # a generic (TypeVar) formal — `E<T>.wait` instantiated as
                 # `E<Nat>` — is resolved via the checker's recorded
                 # instantiated target (`_nat_binding_target`, #747), as for
-                # generic constructor fields.
+                # generic constructor fields; and a refined formal obligates
+                # its predicate refined-FIRST (#746), the side-table
+                # recovering a generic formal instantiated to a RefinedType.
+                #
+                # The @Nat -> @Int WIDENING arm is the reason this is a
+                # delegation rather than an inline chain (PR #1325 review).
+                # The hand-written version carried refined + nat and simply
+                # omitted widen, so `State.put(@Nat.0)` / `Exn.throw(@Nat.0)`
+                # into an `@Int` cell recorded NO obligation at all while
+                # codegen emitted the widening guard on both spellings (the
+                # qualified forms synthesize a bare node and delegate to the
+                # dispatcher that emits it) — a guard the obligation stream
+                # never mentioned, which is the same obligation-versus-guard
+                # gap one boundary over that this issue's fix round closed.
+                # Routing through `_obligate_binding_triple` means the three
+                # arms cannot drift apart again by omission.
                 for arg, formal in zip(expr.args, param_types):
-                    # #746: a refined effect-op formal obligates the argument
-                    # against its predicate (refined-first); the side-table also
-                    # recovers a generic formal instantiated to a RefinedType.
-                    refined_target = self._refined_binding_target(arg, formal)
-                    if (refined_target is not None
-                            and self._narrows_into_refined(arg, refined_target)):
-                        self._check_refined_binding_obligation(
-                            decl, arg, refined_target, smt, slot_env,
-                            assumptions, site=op_site,
-                            # Only the `throw` payload boundary lowers a
-                            # refinement predicate (#1268); the State write
-                            # boundaries emit sign guards alone, so their
-                            # refined arm stays honestly unguarded.
-                            guarded=op_effect == "Exn",
-                        )
-                    elif (self._nat_binding_target(arg, formal)
-                            and self._narrows_into_nat(arg)):
-                        self._check_nat_binding_obligation(
-                            decl, arg, smt, slot_env, assumptions,
-                            site=op_site, guarded=op_guarded,
-                        )
+                    self._obligate_binding_triple(
+                        decl, arg, formal, smt, slot_env, assumptions,
+                        site=op_site,
+                        nat_guarded=op_guarded, widen_guarded=op_guarded,
+                        # Only the `throw` payload boundary lowers a
+                        # refinement predicate (#1268); the State write
+                        # boundaries emit sign guards alone, so their
+                        # refined arm stays honestly unguarded.
+                        refined_guarded=op_effect == "Exn",
+                    )
             for arg in expr.args:
                 self._walk_for_nat_binding_obligations(
                     decl, arg, smt, slot_env, assumptions,

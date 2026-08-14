@@ -32,6 +32,8 @@ twin beside it so "guarded" cannot be satisfied by a site that always traps.
 """
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from vera.codegen import execute
@@ -42,6 +44,7 @@ from tests.codegen_helpers import (
     _run,
     _run_refine_trap,
     _run_trap,
+    wat_fn_body,
 )
 from tests.verifier_helpers import _verify, _verify_err
 
@@ -632,6 +635,111 @@ public fn main(@Unit -> @Int)
         assert len(rationales) == 1, [d.error_code for d in result.diagnostics]
         assert "throw` payload ARE" in rationales[0], rationales[0]
         assert "or an Exn `throw` payload)" not in rationales[0], rationales[0]
+
+
+class TestTheQualifiedArmObligatesAllThreeArms:
+    """The qualified arm records the WIDENING too, not just two of three.
+
+    PR #1325 review.  The `QualifiedCall` arm was hand-written as a
+    refined-then-@Nat chain, and simply had no `@Nat` -> `@Int` widening
+    branch — so `State.put(@Nat.0)` / `Exn.throw(@Nat.0)` into an `@Int`
+    cell recorded NO obligation at all, while codegen emitted the widening
+    guard on both spellings (the qualified forms synthesize a bare node and
+    delegate to the dispatcher that emits it).  A guard the obligation
+    stream never mentions is the same disease as a guard it claims and does
+    not emit: `verify --json` is the only place a reader can see either.
+
+    Asserted as a differential over the two spellings of each op rather
+    than as literals, because the two spellings ARE one boundary.
+    """
+
+    def _widen(self, op: str, spelling: str) -> str:
+        """A `@Nat` argument widening into an `@Int` cell / payload."""
+        if op == "throw":
+            return f"""
+private fn boom(@Nat -> @Int)
+  requires(true)
+  ensures(true)
+  effects(<Exn<Int>>)
+{{
+  {spelling}(@Nat.0)
+}}
+
+public fn main(@Nat -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{{
+  handle[Exn<Int>] {{
+    throw(@Int) -> {{ @Int.0 }}
+  }} in {{
+    boom(@Nat.0)
+  }}
+}}
+"""
+        return f"""
+private fn store(@Nat -> @Unit)
+  requires(true)
+  ensures(true)
+  effects(<State<Int>>)
+{{
+  {spelling}(@Nat.0)
+}}
+
+public fn main(@Nat -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{{
+  handle[State<Int>](@Int = 1) {{
+    get(@Unit) -> {{ resume(@Int.0) }},
+    put(@Int) -> {{ resume(()) }}
+  }} in {{
+    store(@Nat.0);
+    0
+  }}
+}}
+"""
+
+    @pytest.mark.parametrize(
+        ("op", "bare", "qualified"),
+        [("throw", "throw", "Exn.throw"), ("put", "put", "State.put")],
+    )
+    def test_both_spellings_record_the_widening(
+        self, op: str, bare: str, qualified: str,
+    ) -> None:
+        """One `nat_to_int_coerce` on each side, at the same status."""
+        def coerce(src: str) -> list[tuple[str, str]]:
+            return [(o.kind, o.status) for o in _verify(src).obligations
+                    if o.kind == "nat_to_int_coerce"]
+
+        b = coerce(self._widen(op, bare))
+        q = coerce(self._widen(op, qualified))
+        assert b == q, (b, q)
+        assert b == [("nat_to_int_coerce", "tier3")], b
+
+    @pytest.mark.parametrize(
+        ("op", "spelling"),
+        [("throw", "throw"), ("throw", "Exn.throw"),
+         ("put", "put"), ("put", "State.put")],
+    )
+    def test_the_guard_the_obligation_promises_is_emitted(
+        self, op: str, spelling: str,
+    ) -> None:
+        """...and codegen really does emit it, on BOTH spellings.
+
+        The obligation above says `tier3` — runtime-guarded — so this is the
+        half that makes that a fact rather than a claim.  Without it the
+        differential is satisfied by two sides agreeing on a promise neither
+        keeps.
+        """
+        result = _compile_ok(self._widen(op, spelling))
+        body = wat_fn_body(result.wat, "boom" if op == "throw" else "store")
+        guard = re.compile(
+            r"local\.tee \d+\s+i64\.const 0\s+i64\.lt_s\s+if\s+unreachable\s+end",
+            re.S,
+        )
+        assert guard.search(body), body
 
 
 class TestAProvedContractSurvivesTheThrowPayload:
