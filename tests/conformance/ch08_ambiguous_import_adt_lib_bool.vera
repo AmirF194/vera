@@ -1,0 +1,10 @@
+-- Conformance: the other dependency exporting that data name (Chapter 8, #1304)
+-- Tests: the same type and constructor names at a DIFFERENT field type, so a
+-- namespace resolving `Sq` to the wrong one is visible as a type error rather
+-- than as a silently swapped layout.
+module ch08_ambiguous_import_adt_lib_bool;
+
+public data Shape {
+  Sq(Bool),
+  Blob
+}

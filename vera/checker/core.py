@@ -438,6 +438,18 @@ class TypeChecker(
         self._resolved_module_paths: set[tuple[str, ...]] = {
             m.path for m in self._resolved_modules if m.direct
         }
+        # #1304: bare names two of THIS program's imports both supply, one
+        # set per declaration namespace.  Set by
+        # ``_reject_ambiguous_imports``, which also reports each one (E155
+        # functions / E156 data types / E157 constructors); the injection
+        # loops skip them, so an ambiguous name denotes nothing here rather
+        # than whichever supplier registered first.  Initialised empty for
+        # the paths that register declarations without running
+        # ``check_program`` (the per-module harvest builds a checker and
+        # calls ``_register_all`` on it directly).
+        self._ambiguous_import_fn_names: frozenset[str] = frozenset()
+        self._ambiguous_import_type_names: frozenset[str] = frozenset()
+        self._ambiguous_import_ctor_names: frozenset[str] = frozenset()
         # C7b: per-module declaration registries (for ModuleCall path).
         self._module_functions: dict[
             tuple[str, ...], dict[str, object]
