@@ -84,7 +84,7 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `checker/` | 7,264 | Type check | Two-pass type checker (mixin package) | `typecheck()` |
 | `  core.py` | 1,165 | | TypeChecker class, orchestration, contracts, constraint validation | |
 | `  resolution.py` | 535 | | AST TypeExpr → semantic Type, inference | |
-| `  modules.py` | 285 | | Cross-module registration (C7b/C7c), plus the per-module body check that makes a module's diagnostics independent of which file `vera check` was given (#1244) | |
+| `  modules.py` | 476 | | Cross-module registration (C7b/C7c), plus the per-module body check that makes a module's diagnostics independent of which file `vera check` was given (#1244) and the #1304 refusal of a bare function, data-type or constructor name two imports both supply (E155/E156/E157) | |
 | `  registration.py` | 915 | | Pass 1 forward declarations, ability registration | |
 | `  expressions.py` | 1,485 | | Expression synthesis (bidirectional), operators, statements | |
 | `  eq_ability.py` | 199 | | Eq ability derivation checks | |
@@ -748,7 +748,7 @@ Every diagnostic has a unique code grouped by compiler phase:
 | E5xx | Verification | `verifier.py` |
 | E6xx | Codegen | `codegen/` |
 
-The `ERROR_CODES` dict in `errors.py` maps every code to a short description (157 entries — 155 `E` codes and the two `W` warning codes). Codes are stable across versions — they can be used for programmatic filtering, suppression, and documentation lookups. Formatted output shows the code in brackets: `[E130] Error at line 5, column 3:`.
+The `ERROR_CODES` dict in `errors.py` maps every code to a short description (160 entries — 158 `E` codes and the two `W` warning codes). Codes are stable across versions — they can be used for programmatic filtering, suppression, and documentation lookups. Formatted output shows the code in brackets: `[E130] Error at line 5, column 3:`.
 
 ## Test Suite
 

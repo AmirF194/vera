@@ -64,7 +64,7 @@ A selective import makes only the named declarations available. Each name in the
 Error: Cannot import 'helper' from module 'vera.math': it is private.
 ```
 
-**Design note.** Vera does not support wildcard exclusion syntax (e.g., `import m hiding(x)`). When a module exports names that conflict with local definitions or other imports, the canonical mechanism is selective import: list exactly the names needed. Wildcard exclusion would be a semantic equivalent of selective import — the same import set expressible two ways — violating the one-canonical-form principle (§0.2.3). When wildcard import causes a name clash, the local definition shadows the import (§8.5.2), and the imported version remains accessible via module-qualified call syntax (§8.5.3).
+**Design note.** Vera does not support wildcard exclusion syntax (e.g., `import m hiding(x)`). When a module exports names that conflict with local definitions or other imports, the canonical mechanism is selective import: list exactly the names needed — advice for the local-definition case (§8.5.2), and a requirement for the two-import case (§8.5.2.2). Wildcard exclusion would be a semantic equivalent of selective import — the same import set expressible two ways — violating the one-canonical-form principle (§0.2.3). When wildcard import causes a name clash, the local definition shadows the import (§8.5.2), and the imported version remains accessible via module-qualified call syntax (§8.5.3).
 
 ### 8.3.3 Grammar
 
@@ -215,6 +215,68 @@ These are properties of the importer, not of the declaration: the same module,
 imported two ways, can have a declaration own the bare name in one program and be
 qualified-only in another.
 
+### 8.5.2.2 Two Imports Supplying One Name
+
+§8.5.2 orders a local declaration against an import. Nothing orders two
+**imports** against each other. When two of a namespace's imports both supply
+the same bare name — each `public`, each admitted by that import's list — and
+the namespace declares nothing of that name itself, the bare name names two
+declarations and the language chooses neither.
+
+A program **MUST NOT** leave a namespace in that position. The rule covers all
+three declaration namespaces, each with its own code:
+
+| Clashing name | Code | Compilation backstop |
+|---------------|------|----------------------|
+| function | **E155** | E608 |
+| data type | **E156** | E609 |
+| constructor | **E157** | E610 |
+
+A constructor is admitted by its parent type's name (§8.5.4), so
+`import m(Shape)` supplies `Sq` without naming it, and two modules exporting
+differently-named types that share a constructor name clash on the constructor
+alone. The three are therefore reported independently.
+
+Each is rejected at check time, in whichever namespace holds the clash: the
+entry program's, or any module's, since a module's bodies resolve in their own
+namespace (§8.5.2.1) and the rule is a property of that namespace rather than of
+the file being compiled. A name the built-in registry or the prelude already
+owns is not a clash — the incumbent holds the bare name and the imports never
+win it, exactly as a local declaration settles one (§8.5.2).
+
+The refusal is a property of the **import list alone**. It does not require any
+body to name the clashing name, and rewriting a call in module-qualified form
+does not lift it — qualification disambiguates a call site, while the clash is
+in the namespace.
+
+For a clashing **function** name, two resolutions, differing in which
+suppliers the namespace can still reach:
+
+- **Selective import** (§8.3.2) — list exactly the names needed, so at most one
+  import supplies the clashing name. The other module's declaration of it is
+  then outside the import list and unreachable from this namespace (§8.5.2.1).
+- **A local declaration** (§8.5.2) — declare the name here. Every bare call is
+  then the local one, so the imports no longer compete, and each import's
+  declaration remains reachable through the module-qualified form (§8.5.3).
+
+For a clashing **data type** or **constructor** name, neither of those applies
+and the resolution is to rename the declaration in one of the two modules. The
+flat compilation strategy refuses two modules' same-named data declarations
+whatever the importing namespace does with them (§11.16), so narrowing an import
+or shadowing the name locally removes the ambiguity without making the program
+compile.
+
+**Design note.** The alternative — defining an order, first import wins or last
+— was rejected. It would make the resolved declaration implicit in import
+sequence, which §0.2.2 excludes, and it would enlarge the valid-program set with
+programs whose meaning depends on that sequence, which §0.2.6 excludes. It would
+also make a *dependency update* a silent semantic change: a library adding an
+export would rebind a downstream namespace's bare call to a different body,
+where refusal reports the change at the importer. Refusal is additionally the
+reversible choice — an order could still be defined later, giving every refused
+program a meaning, whereas retreating from an order to refusal would break
+programs that had come to rely on it.
+
 ### 8.5.3 Module-Qualified Calls
 
 Vera supports module-qualified function calls using `::` to separate the module path from the function name:
@@ -233,7 +295,7 @@ module_call: module_path "::" LOWER_IDENT "(" arg_list? ")"
 
 Module-qualified calls always resolve against the specific module's public declarations. They are not affected by local shadowing -- if the importer defines its own `magnitude`, a module-qualified call `vera.math::magnitude(x)` still calls the module's version.
 
-**Design note.** Vera does not support import aliasing (renaming a declaration at the import site). When two imported modules export identically-named functions, the module-qualified call syntax (`vera.math::magnitude(x)`) provides unambiguous disambiguation without introducing a second name for the same declaration. Aliasing would violate the one-canonical-form principle (§0.2.3): the same function could be referenced by different names in different files, making semantically identical call sites textually distinct.
+**Design note.** Vera does not support import aliasing (renaming a declaration at the import site). Where two reachable declarations share a name, the module-qualified call syntax (`vera.math::magnitude(x)`) names the one wanted without introducing a second name for the same declaration — for a name a local declaration shadows (§8.5.2), and, together with a local declaration or a selective import, for two imports supplying one name (§8.5.2.2). Aliasing would violate the one-canonical-form principle (§0.2.3): the same function could be referenced by different names in different files, making semantically identical call sites textually distinct.
 
 ### 8.5.4 Constructor Resolution
 
@@ -245,7 +307,16 @@ import vera.collections(List);
 -- Nil and Cons are now available
 ```
 
-Constructor names follow the same shadowing rules as function names.
+Constructor names follow the same shadowing rules as function names: a local
+declaration shadows an imported constructor (§8.5.2), and a constructor name two
+imports both supply is refused (§8.5.2.2, **E157**) exactly as a function name
+is. An imported type's constructors are admitted by the type's name, so a
+selective import naming the type admits all of them.
+
+Constructors differ from functions in one respect, and it is a property of
+compilation rather than of resolution: two modules of one program may not
+declare the same `data` name or the same constructor name at all, whatever any
+namespace imports or shadows (§11.16).
 
 ## 8.6 Module Resolution Algorithm
 
@@ -320,7 +391,7 @@ This is Pass 0 of the three-pass type-checking architecture (see Chapter 5).
 After module registration, the main type environment contains:
 
 - All built-in types and functions.
-- All imported `public` functions (with their full signatures and contracts).
+- All imported `public` functions (with their full signatures and contracts), except a bare function name two imports both supply — that name is refused (§8.5.2.2) and enters no namespace, so a bare call to it resolves to nothing rather than to whichever supplier was injected first.
 - All imported `public` data types (with their constructors).
 - All locally declared types and functions (from Pass 1).
 
@@ -525,5 +596,6 @@ The current module system has the following limitations, each tracked as a GitHu
 
 | Limitation | Issue | Notes |
 |-----------|-------|-------|
+| Two modules may not declare the same `data` name | [#1317](https://github.com/aallan/vera/issues/1317) | The flat namespace's collision rails (§11.16) key on the declarations rather than on what any namespace can name, so neither a selective import, a local declaration (§8.5.2), nor `private` resolves the clash — only renaming in a source module does |
 | No re-exports | [#127](https://github.com/aallan/vera/issues/127) | A module cannot re-export declarations imported from other modules |
 | No package system | [#130](https://github.com/aallan/vera/issues/130) | Module resolution is file-system-only; no package manager or registry |

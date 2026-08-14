@@ -888,27 +888,29 @@ class CrossModuleMixin:
           — the collision the rail is actually for.
         * **no namespace can name both.**  A module importing two
           dependencies that each export ``gen``, and declaring none itself,
-          resolves its own bare ``gen`` to one of them — and the language has
-          not said which.  Spec §8.5 covers local-shadows-import and
-          prescribes selective import for a two-import clash; it defines no
-          order between the two.  Nor does the implementation: the CHECKER's
-          pick is not an order at all but a set-iteration artefact, and the
-          identical program accepts on one run and reports ``body has type
-          Bool`` on the next (measured 4/4 over eight runs; stable under a
-          fixed ``PYTHONHASHSEED`` and varying with the seed, and identical
-          whichever textual order the two imports are written in).  Codegen's
-          ``module_qualified_generic_targets`` loop, by contrast, IS
-          positional — last import wins.  Compiling the shape would therefore
-          pick a body by coin-flip, and the two generics are qualified-only
-          from the entry's point of view, so the ownership classification
-          alone would relax it.  The loud refusal stays until the rule is
-          decided (#1304), which is what §8.5's design note already tells the
-          author to do (name the import).
+          would resolve its own bare ``gen`` to one of them — and spec §8.5
+          refuses the name outright rather than saying which (#1304).  The
+          CHECKER is the layer that reports it (E155), because scope is a
+          check-phase question; this condition is the BACKSTOP behind it,
+          and it is deliberately the same predicate rather than a second
+          opinion about the same shape.  It matters that it stays: the two
+          generics are qualified-only from the entry's point of view, so the
+          ownership classification alone would relax the shape, and codegen's
+          ``module_qualified_generic_targets`` loop IS positional (last
+          import wins) — so a program reaching here with the name still
+          ambiguous would be compiled against a body picked by import order.
 
         The ambiguity set comes from :meth:`_collect_namespace_fn_names`, the
-        same walk that decides which names each namespace can see for #1299 —
-        one derivation of one visibility rule, so the rail cannot relax
-        somewhere the scope says it must not.
+        same walk that decides which names each namespace can see for #1299
+        and the one the checker's refusal reads — one derivation of one
+        visibility rule, so the rail cannot relax somewhere the scope says it
+        must not, and the two layers cannot disagree about which shape is
+        ambiguous.
+
+        Reached only through a door that bypasses the checker, now that the
+        checker refuses the shape first: the direct-codegen collision tests
+        in ``tests/test_codegen_modules.py`` and, for this condition
+        specifically, ``build_multi_module_past_check`` in #1281's matrix.
         """
         if not (
             name in generics_by_path.get(path_a, frozenset())

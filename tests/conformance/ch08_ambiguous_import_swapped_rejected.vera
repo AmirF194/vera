@@ -1,0 +1,14 @@
+-- Conformance: the same refusal with the imports written the other way (Chapter 8, #1304)
+-- Tests: [E155] again.  The verdict is a property of the import SET, not of
+-- which import is written first: an order-sensitive rule would accept one of
+-- these two spellings and reject the other.
+import ch08_ambiguous_import_lib_bool;
+import ch08_ambiguous_import_lib_int;
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 111)
+  effects(pure)
+{
+  pick(true)
+}

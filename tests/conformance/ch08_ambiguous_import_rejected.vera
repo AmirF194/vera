@@ -1,0 +1,15 @@
+-- Conformance: two imports supplying one bare name are refused (Chapter 8, #1304)
+-- Tests: [E155].  Both dependencies export `pick` and this program declares no
+-- `pick` of its own, so the bare name names two declarations and the language
+-- defines no order between them.  Spec 8.5 refuses the name here rather than
+-- ordering the imports.
+import ch08_ambiguous_import_lib_int;
+import ch08_ambiguous_import_lib_bool;
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 111)
+  effects(pure)
+{
+  pick(true)
+}

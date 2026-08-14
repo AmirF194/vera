@@ -1202,7 +1202,7 @@
     "id": "ch07_state_clause_transform",
     "file": "ch07_state_clause_transform.vera",
     "chapter": 7,
-    "title": "State clause bodies execute \u2014 intrinsic-hybrid semantics (#976)",
+    "title": "State clause bodies execute — intrinsic-hybrid semantics (#976)",
     "level": "run",
     "spec_ref": "Section 7.5.2",
     "features": [
@@ -1261,9 +1261,9 @@
     "id": "ch07_exn_string",
     "file": "ch07_exn_string.vera",
     "chapter": 7,
-    "title": "Exn<String> effect handler \u2014 String payload",
+    "title": "Exn<String> effect handler — String payload",
     "level": "run",
-    "spec_ref": "Section 7.4 Exn<E> handler \u2014 String payload",
+    "spec_ref": "Section 7.4 Exn<E> handler — String payload",
     "features": [
       "exn_handler",
       "string_exception"
@@ -1696,7 +1696,7 @@
     "id": "ch08_transitive_module_import_base",
     "file": "ch08_transitive_module_import_base.vera",
     "chapter": 8,
-    "title": "Transitive import chain \u2014 base module",
+    "title": "Transitive import chain — base module",
     "level": "check",
     "spec_ref": "Section 8.6.4",
     "features": [
@@ -1708,7 +1708,7 @@
     "id": "ch08_transitive_module_import_mid",
     "file": "ch08_transitive_module_import_mid.vera",
     "chapter": 8,
-    "title": "Transitive import chain \u2014 middle module",
+    "title": "Transitive import chain — middle module",
     "level": "verify",
     "spec_ref": "Section 8.6.4",
     "features": [
@@ -3292,6 +3292,126 @@
       "prelude_shadowing",
       "adt",
       "codegen_error"
+    ]
+  },
+  {
+    "id": "ch08_ambiguous_import_lib_int",
+    "file": "ch08_ambiguous_import_lib_int.vera",
+    "chapter": 8,
+    "title": "Dependency exporting a name a sibling also exports",
+    "level": "check",
+    "spec_ref": "Section 8.5",
+    "features": [
+      "cross_module_generic",
+      "generic_function",
+      "visibility"
+    ]
+  },
+  {
+    "id": "ch08_ambiguous_import_lib_bool",
+    "file": "ch08_ambiguous_import_lib_bool.vera",
+    "chapter": 8,
+    "title": "The sibling dependency exporting that same name",
+    "level": "check",
+    "spec_ref": "Section 8.5",
+    "features": [
+      "cross_module_generic",
+      "generic_function",
+      "visibility"
+    ]
+  },
+  {
+    "id": "ch08_ambiguous_import_rejected",
+    "file": "ch08_ambiguous_import_rejected.vera",
+    "chapter": 8,
+    "title": "Two imports supplying one bare name are refused",
+    "level": "check",
+    "spec_ref": "Section 8.5",
+    "expected_error": "E155",
+    "features": [
+      "ambiguous_import",
+      "bare_call",
+      "resolution_error"
+    ]
+  },
+  {
+    "id": "ch08_ambiguous_import_swapped_rejected",
+    "file": "ch08_ambiguous_import_swapped_rejected.vera",
+    "chapter": 8,
+    "title": "The same refusal with the imports written the other way",
+    "level": "check",
+    "spec_ref": "Section 8.5",
+    "expected_error": "E155",
+    "features": [
+      "ambiguous_import",
+      "bare_call",
+      "resolution_error"
+    ]
+  },
+  {
+    "id": "ch08_ambiguous_import_qualified",
+    "file": "ch08_ambiguous_import_qualified.vera",
+    "chapter": 8,
+    "title": "Local declaration plus module-qualified calls disambiguate",
+    "level": "run",
+    "spec_ref": "Section 8.5.3",
+    "features": [
+      "ambiguous_import",
+      "module_qualified_call",
+      "shadowing",
+      "cross_module_generic"
+    ]
+  },
+  {
+    "id": "ch08_ambiguous_import_adt_lib_int",
+    "file": "ch08_ambiguous_import_adt_lib_int.vera",
+    "chapter": 8,
+    "title": "Dependency exporting a data name a sibling also exports",
+    "level": "check",
+    "spec_ref": "Section 8.5.4",
+    "features": [
+      "adt",
+      "visibility"
+    ]
+  },
+  {
+    "id": "ch08_ambiguous_import_adt_lib_bool",
+    "file": "ch08_ambiguous_import_adt_lib_bool.vera",
+    "chapter": 8,
+    "title": "The sibling dependency exporting that same data name",
+    "level": "check",
+    "spec_ref": "Section 8.5.4",
+    "features": [
+      "adt",
+      "visibility"
+    ]
+  },
+  {
+    "id": "ch08_ambiguous_import_adt_rejected",
+    "file": "ch08_ambiguous_import_adt_rejected.vera",
+    "chapter": 8,
+    "title": "Two imports supplying one bare data name are refused",
+    "level": "check",
+    "spec_ref": "Section 8.5.2.2",
+    "expected_error": "E156",
+    "features": [
+      "ambiguous_import",
+      "adt",
+      "resolution_error"
+    ]
+  },
+  {
+    "id": "ch08_ambiguous_import_adt_swapped_rejected",
+    "file": "ch08_ambiguous_import_adt_swapped_rejected.vera",
+    "chapter": 8,
+    "title": "The same data refusal with the imports written the other way",
+    "level": "check",
+    "spec_ref": "Section 8.5.2.2",
+    "expected_error": "E157",
+    "features": [
+      "ambiguous_import",
+      "adt",
+      "resolution_error"
     ]
   }
 ]

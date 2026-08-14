@@ -1,0 +1,13 @@
+-- Conformance: the other dependency exporting that bare name (Chapter 8, #1304)
+-- Tests: the same name at a DIFFERENT return type, so a namespace resolving
+-- `pick` to the wrong one is visible as a type error rather than as a silently
+-- swapped body.
+module ch08_ambiguous_import_lib_bool;
+
+public forall<T> fn pick(@T -> @Bool)
+  requires(true)
+  ensures(@Bool.result)
+  effects(pure)
+{
+  true
+}

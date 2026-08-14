@@ -1,0 +1,10 @@
+-- Conformance: one of two dependencies exporting the same data name (Chapter 8, #1304)
+-- Tests: a public ADT whose name and constructor a sibling module also exports.
+-- On its own it is an ordinary export; the clash is a property of the namespace
+-- that imports both.
+module ch08_ambiguous_import_adt_lib_int;
+
+public data Shape {
+  Sq(Int),
+  Dot
+}

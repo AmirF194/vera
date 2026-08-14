@@ -770,24 +770,49 @@ class NamespaceFnNames:
     from the entry program contributes nothing to the entry's set (spec
     §8.6.4) while still holding everything its own imports allow.
 
-    ``ambiguous`` is the bare names some namespace could resolve to more than
-    one dependency's declaration, with no declaration of its own to settle it
-    — the shape spec §8.5 leaves undefined (#1304).
+    ``ambiguous_sources`` maps each namespace to the bare names it could
+    resolve to more than one dependency's declaration, with no declaration of
+    its own to settle it, each paired with its supplying module paths in
+    IMPORT order.  Spec §8.5 refuses that name in the namespace that holds
+    the clash (#1304), so the checker reads its own namespace's entry to
+    report at the offending import and to keep the name out of the type
+    environment.  ``ambiguous`` is the union of those names over every
+    namespace, which is what codegen's E608 rail asks — it decides whether a
+    PAIR of modules may share the flat namespace at all, a question no single
+    namespace answers.  Both come off one walk, so the layer that refuses
+    early and the layer that backstops it cannot disagree about which shape
+    is ambiguous.
 
-    One derivation because there are three consumers and they must not
+    One derivation because there are four consumers and they must not
     disagree: codegen narrows its per-declaration ownership table with it
-    (``_scoped_fn_names``), codegen's E608 rail reads the ambiguity half, and
-    the verifier narrows discovery with it.  Two walks over the same imports
-    could differ about a filter or a visibility, and the two sides of the
-    #732 differential would then discover different clones.
+    (``_scoped_fn_names``), codegen's E608 rail reads the ambiguity union,
+    the CHECKER refuses its own namespace's clashes (#1304), and the verifier
+    narrows discovery with it.  Two walks over the same imports could differ
+    about a filter or a visibility, and the two sides of the #732
+    differential would then discover different clones.
     """
 
     by_namespace: Mapping[tuple[str, ...] | None, frozenset[str]]
     ambiguous: frozenset[str]
+    ambiguous_sources: Mapping[
+        tuple[str, ...] | None,
+        Mapping[str, tuple[tuple[str, ...], ...]],
+    ] = field(default_factory=dict)
 
     def visible(self, path: tuple[str, ...] | None) -> frozenset[str]:
         """The names *path*'s namespace can NAME; empty for an unknown path."""
         return self.by_namespace.get(path, frozenset())
+
+    def ambiguous_in(
+        self, path: tuple[str, ...] | None,
+    ) -> Mapping[str, tuple[tuple[str, ...], ...]]:
+        """*path*'s OWN clashing bare names, each to its suppliers (#1304).
+
+        Import order, so a diagnostic can name the import that introduced the
+        clash rather than whichever module a set happened to yield first —
+        the same nondeterminism this refusal exists to remove.
+        """
+        return self.ambiguous_sources.get(path, {})
 
 
 def namespace_fn_names(
@@ -813,9 +838,26 @@ def namespace_fn_names(
     them makes the result independent of WHEN it is called, which is the
     property the two sides need and the one
     ``test_discovery_scopes_agree_between_the_two_sides`` checks.  They also
-    join the "declared here" set for the ambiguity test, so a program whose
-    entry declarations already contain them (the verifier's) and one whose do
-    not (codegen's) still answer identically.
+    join the "declared here" set for the ambiguity test: a name the prelude
+    or the built-in registry already owns is never ambiguous however many
+    dependencies export it, because the importer's injection is a
+    ``setdefault`` and the incumbent wins — measured, with a module exporting
+    its own one-argument ``option_map``, as ``E201`` against the PRELUDE's
+    two-argument signature.
+
+    That makes the two halves of the result behave differently under this
+    argument, and the earlier claim that the ambiguity half is "identical
+    either way" was wrong.  A dependency MAY export a prelude-named
+    declaration — the combinators are overridable, not reserved
+    (:func:`vera.prelude.overridable_builtin_names`) — so two dependencies
+    exporting ``option_map`` are ambiguous under ``prelude=()`` and are not
+    under the populated set.  Codegen calls
+    ``_collect_namespace_fn_names`` twice, before and after its prelude pass,
+    and its E608 rail reads the FIRST (prelude-empty) answer because
+    ``_register_modules`` runs between them; the checker passes its built-in
+    snapshot and so reads the populated one.  The ordering is therefore
+    load-bearing rather than incidental, and is pinned by
+    ``test_the_prelude_argument_changes_the_ambiguity_half``.
     """
     public_fns: dict[tuple[str, ...], frozenset[str]] = {}
     module_list = list(modules)
@@ -827,40 +869,195 @@ def namespace_fn_names(
             and (tld.visibility or "private") == "public"
         )
 
-    ambiguous: set[str] = set()
-
-    def visible(prog: ast.Program) -> frozenset[str]:
+    def visible(
+        prog: ast.Program,
+    ) -> tuple[frozenset[str], dict[str, tuple[tuple[str, ...], ...]]]:
         own = {
             tld.decl.name for tld in prog.declarations
             if isinstance(tld.decl, ast.FnDecl)
         } | prelude_names
         names = set(own)
-        # Which dependency each importable name came from.  A name this
-        # namespace declares ITSELF is never ambiguous however many
+        # Which dependency each importable name came from, in IMPORT order.  A
+        # name this namespace declares ITSELF is never ambiguous however many
         # dependencies also export it — the local declaration owns every bare
         # call here (spec §8.5.2).
-        sources: dict[str, set[tuple[str, ...]]] = {}
+        #
+        # ``sorted`` over the exports, not because this loop's order changes
+        # the ANSWER — each name's supplier list follows the enclosing import
+        # loop either way — but because a set of strings iterates in an order
+        # that varies with the interpreter's hash seed, and #1304 is a defect
+        # that reached the user's diagnostics through exactly that.  Nothing
+        # downstream of a namespace table should be able to notice a run.
+        sources: dict[str, list[tuple[str, ...]]] = {}
         for imp in prog.imports:
             dep = tuple(imp.path)
             exported = public_fns.get(dep)
             if exported is None:
                 continue
-            for name in exported:
+            for name in sorted(exported):
                 if imp.names is None or name in imp.names:
                     names.add(name)
-                    sources.setdefault(name, set()).add(dep)
-        ambiguous.update(
-            name for name, deps in sources.items()
+                    deps = sources.setdefault(name, [])
+                    if dep not in deps:
+                        deps.append(dep)
+        clashes = {
+            name: tuple(deps)
+            for name, deps in sorted(sources.items())
             if len(deps) > 1 and name not in own
-        )
-        return frozenset(names)
+        }
+        return frozenset(names), clashes
 
-    by_namespace: dict[tuple[str, ...] | None, frozenset[str]] = {
-        None: visible(entry),
-    }
+    by_namespace: dict[tuple[str, ...] | None, frozenset[str]] = {}
+    ambiguous_sources: dict[
+        tuple[str, ...] | None, Mapping[str, tuple[tuple[str, ...], ...]],
+    ] = {}
+    for key, prog in [(None, entry), *module_list]:
+        by_namespace[key], ambiguous_sources[key] = visible(prog)
+    return NamespaceFnNames(
+        by_namespace,
+        frozenset(
+            name for clashes in ambiguous_sources.values() for name in clashes
+        ),
+        ambiguous_sources,
+    )
+
+
+@dataclass(frozen=True)
+class NamespaceAdtNames:
+    """Which bare TYPE and CONSTRUCTOR names two imports both supply (#1304).
+
+    The data-side twin of :class:`NamespaceFnNames`'s ambiguity half, and it
+    has to be a second table rather than two more fields on that one because
+    the three namespaces are filtered differently: a selective import names
+    FUNCTIONS and TYPES directly, while a constructor is admitted by its
+    PARENT type's name (spec §8.5.4), so ``import m(Shape)`` supplies ``Sq``
+    without ever mentioning it.
+
+    Both maps are per namespace — ``None`` for the entry program — from the
+    clashing bare name to the module paths supplying it, in IMPORT order.
+    The two are tracked independently because they come apart: two modules
+    exporting differently-named ADTs that happen to share a constructor name
+    clash on the constructor alone, which is the shape codegen separates as
+    E610 from E609.
+
+    Only the CHECKER reads this.  Codegen's E609/E610 rails ask a different
+    question — whether two modules' declarations can share the flat
+    namespace at all — and answer it from declarations rather than from any
+    namespace's imports, so they refuse a superset and stay as they are.
+    """
+
+    ambiguous_types: Mapping[
+        tuple[str, ...] | None, Mapping[str, tuple[tuple[str, ...], ...]],
+    ]
+    ambiguous_ctors: Mapping[
+        tuple[str, ...] | None, Mapping[str, tuple[tuple[str, ...], ...]],
+    ]
+
+    def types_in(
+        self, path: tuple[str, ...] | None,
+    ) -> Mapping[str, tuple[tuple[str, ...], ...]]:
+        """*path*'s clashing bare TYPE names, each to its suppliers."""
+        return self.ambiguous_types.get(path, {})
+
+    def ctors_in(
+        self, path: tuple[str, ...] | None,
+    ) -> Mapping[str, tuple[tuple[str, ...], ...]]:
+        """*path*'s clashing bare CONSTRUCTOR names, each to its suppliers."""
+        return self.ambiguous_ctors.get(path, {})
+
+
+def namespace_adt_names(
+    entry: ast.Program,
+    modules: Iterable[tuple[tuple[str, ...], ast.Program]],
+    owned_types: Iterable[str] = (),
+    owned_ctors: Iterable[str] = (),
+) -> NamespaceAdtNames:
+    """Build the per-namespace data-side clash tables (#1304).
+
+    *owned_types* / *owned_ctors* are the names something OTHER than this
+    program's declarations already owns in every namespace — the built-in and
+    prelude ADTs (``Option``, ``Result``, ``Ordering``, ``UrlParts``) and
+    their constructors.  They join the "declared here" set rather than the
+    supplied one, so a namespace whose two imports both export a ``data
+    Option`` is NOT reported here: the built-in registry occupies that bare
+    name and the imports never win it, exactly as a local declaration would
+    settle the clash (spec §8.5.2).  The checker passes its own built-in
+    snapshot, so this table cannot disagree with the environment the
+    injection loop actually builds — that loop is a ``setdefault`` over a
+    ``TypeEnv`` the built-ins already populated.
+    """
+    public_adts: dict[tuple[str, ...], dict[str, frozenset[str]]] = {}
+    module_list = list(modules)
+    base_types = frozenset(owned_types)
+    base_ctors = frozenset(owned_ctors)
     for path, prog in module_list:
-        by_namespace[path] = visible(prog)
-    return NamespaceFnNames(by_namespace, frozenset(ambiguous))
+        public_adts[path] = {
+            tld.decl.name: frozenset(
+                ctor.name for ctor in tld.decl.constructors
+            )
+            for tld in prog.declarations
+            if isinstance(tld.decl, ast.DataDecl)
+            and (tld.visibility or "private") == "public"
+        }
+
+    def clashes(
+        prog: ast.Program,
+    ) -> tuple[
+        dict[str, tuple[tuple[str, ...], ...]],
+        dict[str, tuple[tuple[str, ...], ...]],
+    ]:
+        own_types = {
+            tld.decl.name for tld in prog.declarations
+            if isinstance(tld.decl, ast.DataDecl)
+        } | base_types
+        own_ctors = {
+            ctor.name for tld in prog.declarations
+            if isinstance(tld.decl, ast.DataDecl)
+            for ctor in tld.decl.constructors
+        } | base_ctors
+        type_sources: dict[str, list[tuple[str, ...]]] = {}
+        ctor_sources: dict[str, list[tuple[str, ...]]] = {}
+        for imp in prog.imports:
+            dep = tuple(imp.path)
+            exported = public_adts.get(dep)
+            if exported is None:
+                continue
+            # ``sorted`` for the same reason as the function twin: a set of
+            # strings iterates in hash-seed order, and #1304 is a defect that
+            # reached the user's diagnostics through exactly that.
+            for adt_name in sorted(exported):
+                if imp.names is not None and adt_name not in imp.names:
+                    continue
+                for bucket, names in (
+                    (type_sources, (adt_name,)),
+                    (ctor_sources, sorted(exported[adt_name])),
+                ):
+                    for name in names:
+                        deps = bucket.setdefault(name, [])
+                        if dep not in deps:
+                            deps.append(dep)
+        return (
+            {
+                name: tuple(deps)
+                for name, deps in sorted(type_sources.items())
+                if len(deps) > 1 and name not in own_types
+            },
+            {
+                name: tuple(deps)
+                for name, deps in sorted(ctor_sources.items())
+                if len(deps) > 1 and name not in own_ctors
+            },
+        )
+
+    types: dict[
+        tuple[str, ...] | None, Mapping[str, tuple[tuple[str, ...], ...]],
+    ] = {}
+    ctors: dict[
+        tuple[str, ...] | None, Mapping[str, tuple[tuple[str, ...], ...]],
+    ] = {}
+    for key, prog in [(None, entry), *module_list]:
+        types[key], ctors[key] = clashes(prog)
+    return NamespaceAdtNames(types, ctors)
 
 
 def public_generic_names(module_program: ast.Program) -> set[str]:

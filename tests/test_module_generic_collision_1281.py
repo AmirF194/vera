@@ -16,14 +16,14 @@ distinct:
 * **both own the bare name** — two directly-imported, in-filter, public
   generics really do mangle to one ``gen$Bool``;
 * **some namespace can name both** — a module importing two dependencies
-  that each export ``gen`` resolves its own bare ``gen`` to one of them, and
-  neither the language nor the implementation has said which.  Spec §8.5
-  covers local-shadows-import and prescribes selective import for a
-  two-import clash; it defines no order between them.  The checker defines
-  none either: its pick is a set-iteration artefact, and the identical
-  program accepts on one run and is rejected on the next — measured below.
-  Compiling that shape would pick a body by coin-flip, so it keeps its loud
-  refusal.  The undecided rule is tracked as issue 1304.
+  that each export ``gen`` would resolve its own bare ``gen`` to one of them,
+  and neither the language nor the implementation had said which.  Spec §8.5
+  now says: the name is refused in that namespace (issue 1304), so the
+  CHECKER rejects the program (E155) and this rail is its backstop.  Both
+  are asserted in the two cells below, through
+  :func:`~tests.module_fixture_helpers.build_multi_module_past_check`,
+  because a rail that no test can reach is one that can rot into a
+  relaxation nobody measures.
 
 Every expected value is the DECLARING module's own answer, taken from the
 standalone oracle — each library compiled alone with its own driver — never
@@ -40,7 +40,11 @@ from typing import ClassVar
 import pytest
 
 from tests.codegen_helpers import wat_fn_names
-from tests.module_fixture_helpers import build_multi_module, module_value
+from tests.module_fixture_helpers import (
+    build_multi_module,
+    build_multi_module_past_check,
+    module_value,
+)
 
 BASE_ANSWER = 111
 MID1_ANSWER = 555
@@ -527,7 +531,14 @@ public forall<T> fn gen(@T -> @Int)
         self, tmp_path: Path,
     ) -> None:
         """Both public, both in filter, both directly imported: both own the
-        entry's bare name, so both clones really do mangle to ``gen$Bool``."""
+        entry's bare name, so both clones really do mangle to ``gen$Bool``.
+
+        Refused TWICE since #1304, and both are asserted.  The entry
+        namespace can name both suppliers, so the checker rejects the
+        program (E155) before codegen sees it; the rail behind that is still
+        driven here, because a rail nothing exercises is one that can rot
+        into a relaxation nobody measures.
+        """
         main = """\
 import liba(gen);
 import libb(gen);
@@ -538,10 +549,13 @@ public fn main(@Unit -> @Int)
   effects(pure)
 { gen(true) }
 """
-        _, result, cg_errors = build_multi_module(
+        check_errors, result, cg_errors = build_multi_module_past_check(
             tmp_path,
             {"liba.vera": self._LIB_A, "libb.vera": self._LIB_B,
              "main.vera": main},
+        )
+        assert _errors(check_errors, "E155"), (
+            f"the checker let two bare-name owners through: {check_errors}"
         )
         assert _errors(cg_errors, "E608"), (
             f"the rail let two bare-name owners through: {cg_errors}"
@@ -552,21 +566,23 @@ public fn main(@Unit -> @Int)
     ) -> None:
         """One module importing two dependencies that each export ``gen``.
 
-        Its own bare ``gen`` names one of them and nothing has said which.
+        Its own bare ``gen`` names one of them and nothing had said which.
         Both generics are qualified-only from the entry's point of view, so
         the ownership classification alone would relax this; the ambiguity
         gate is what keeps it loud.
 
-        The CHECKER's pick is not an order — it is a set-iteration artefact.
-        Over eight runs of one unchanged program the type oracle accepted
-        four times and reported ``body has type Bool`` four times; under a
-        fixed ``PYTHONHASHSEED`` it is stable, and it varies with the seed
-        rather than with which import is written first (the ``a, b`` and
-        ``b, a`` spellings give identical seed-by-seed answers).  Codegen's
-        reroute map IS positional, last-wins.  So relaxing here would compile
-        a body chosen by coin-flip, and would do it from a program the
-        checker itself rejects on half its runs.  Tracked as issue 1304;
-        settling it there is what would let this gate go.
+        This is the shape #1304 was opened on and closed by.  The CHECKER's
+        pick was not an order — it was a set-iteration artefact: over eight
+        runs of one unchanged program the type oracle accepted four times
+        and reported ``body has type Bool`` four times, stable under a fixed
+        ``PYTHONHASHSEED`` and varying with the seed rather than with which
+        import is written first.  Codegen's reroute map IS positional,
+        last-wins.  Spec §8.5 now refuses the shape outright, so there is no
+        pick left to be nondeterministic; the flap is pinned dead in
+        ``tests/test_ambiguous_import_refusal_1304.py``.
+
+        Asserted at both layers for the reason above: the checker refuses
+        the program, and the rail behind it must still be refusing it.
         """
         midc = """\
 module midc;
@@ -589,10 +605,13 @@ public fn main(@Unit -> @Int)
   effects(pure)
 { doorc(true) }
 """
-        _, result, cg_errors = build_multi_module(
+        check_errors, result, cg_errors = build_multi_module_past_check(
             tmp_path,
             {"liba.vera": self._LIB_A, "libb.vera": self._LIB_B,
              "midc.vera": midc, "main.vera": main},
+        )
+        assert _errors(check_errors, "E155"), (
+            f"an ambiguous bare name was let through: {check_errors}"
         )
         assert _errors(cg_errors, "E608"), (
             f"an ambiguous bare name was let through: {cg_errors}"

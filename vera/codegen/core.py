@@ -629,13 +629,14 @@ class CodeGenerator(
         # #1281: bare names some namespace could resolve to more than one
         # module's declaration — a module importing two dependencies that
         # each export `gen`, and declaring no `gen` of its own.  Spec §8.5
-        # defines no order between two imports (it prescribes naming the one
-        # you want), and neither does the checker: its pick is a
-        # set-iteration artefact that flips between runs of the identical
-        # program (#1304).  The E608 relaxation therefore fires only for
-        # names OUTSIDE this set, so the shape keeps its loud refusal instead
-        # of compiling to whichever body that coin-flip favoured.  Filled
-        # beside `_namespace_fn_names`, from the same walk.
+        # refuses that name in the namespace holding the clash rather than
+        # ordering the two imports (#1304), and the CHECKER reports it
+        # (E155), so a program reaching this pass with the name still
+        # ambiguous has bypassed the checker.  The E608 relaxation therefore
+        # fires only for names OUTSIDE this set, and the shape keeps its
+        # refusal here too instead of compiling against whichever body the
+        # positional reroute map favoured.  Filled beside
+        # `_namespace_fn_names`, from the same walk as the checker's.
         self._ambiguous_imported_fn_names: frozenset[str] = frozenset()
         # #774: imported PUBLIC generic (`forall`) FnDecls the importer must
         # monomorphize itself — cross-module generic monomorphization.  The
