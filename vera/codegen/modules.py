@@ -831,6 +831,32 @@ class CrossModuleMixin:
         # register after this pass runs and so cannot be snapshotted here.
         self._namespace_declared_adts = frozenset(main_own).union(
             *declared_adts.values()) if declared_adts else frozenset(main_own)
+        # #1277: which MODULES declare each ADT name, read from the
+        # declarations rather than from `_adt_layouts`, so the Pass-1.2
+        # contention rail can see a module's `data Option` at all.  The
+        # layout harvest above skips a built-in name outright (the temp
+        # generator registers `Option`, `Result`, … for EVERY module,
+        # declared or not, so `_adt_layouts` cannot tell the two apart) and
+        # `_adt_layout_owners` therefore records only the non-built-in half
+        # — which left the rail covering four of the prelude's eight names.
+        #
+        # EVERY declarer, in resolution order, not the first: contention is
+        # a property of each declaration, and a first-wins map made the rail
+        # order-dependent.  A library that restates the prelude's `Ordering`
+        # answered for a sibling that declares a different one, so importing
+        # the restating module first hid the other's contention entirely
+        # (check-green, exit 0, the caller silently dropped) while the
+        # reverse import order caught it.  Ownership of the LAYOUT stays
+        # first-wins in `_adt_layout_owners`, which answers the declaration-
+        # index question — the same separation of two questions that keeps
+        # `_namespace_declared_adts` out of this one.
+        declarers: dict[str, list[tuple[str, ...]]] = {}
+        for mod_path, names in declared_adts.items():
+            for adt_name in sorted(names):
+                declarers.setdefault(adt_name, []).append(mod_path)
+        self._module_adt_declarers = {
+            name: tuple(paths) for name, paths in declarers.items()
+        }
         return members
 
     def _generics_cannot_collide(

@@ -1,0 +1,21 @@
+-- Conformance: an imported module may declare a data type named after one of
+-- the prelude's (Chapter 8, Section 8.4.1).
+-- Tests: `vera.shadowlib` declares `private data Json`, and nothing in this
+-- program demands the prelude's `Json`, so the prelude injects nothing under
+-- that name and the module's own type is the only one -- its constructor
+-- stays reachable from the module's own bodies and the program runs (#1277).
+-- The negative half of the pair is
+-- `ch08_module_prelude_adt_contention_rejected.vera`, which imports this same
+-- module and DOES use the prelude's `Json`: the two declarations then contend
+-- for the one flat layout slot and the compile is refused with E621. Between
+-- them they pin both directions, so silencing the rail turns the negative red
+-- and widening it turns this one red.
+import vera.shadowlib(blob_size);
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 7)
+  effects(pure)
+{
+  blob_size(7)
+}

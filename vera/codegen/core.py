@@ -33,7 +33,12 @@ from vera.monomorphize import (
     qualify_nested_generic_decls,
 )
 from vera.naming import EMPTY_ALIAS_ENV, AliasEnv
-from vera.prelude import PRELUDE_FILE, mentioned_fn_names
+from vera.prelude import (
+    PRELUDE_FILE,
+    data_decl_shape,
+    mentioned_fn_names,
+    prelude_adt_names,
+)
 from vera.slots import family_fallback_name
 from vera.wasm import StringPool
 from vera.wasm.helpers import CellNames
@@ -370,14 +375,24 @@ class CodeGenerator(
         # The builtin ADTs, members of every namespace (they are global
         # infrastructure, owned by no module — the same set `_register_modules`
         # exempts from the E609/E610 collision rails).  A FLOOR, not the whole
-        # infrastructure set: it is snapshotted in Pass 0.5 and the prelude's
-        # own ADTs register in Pass 1.2, so `_adt_members_in_scope` derives the
-        # rest by subtracting what the namespaces declare.
+        # infrastructure set: it is snapshotted in Pass 0.5, and the PRELUDE's
+        # own ADTs register in Pass 1.2, so `_adt_members_in_scope` completes
+        # it with `prelude.prelude_adt_names()` (#1277) and derives whatever
+        # remains by subtracting what the namespaces declare.
         self._builtin_adt_names: frozenset[str] = frozenset()
         # Every ADT name SOME namespace declares — the main program's and each
         # module's own declarations.  Whatever `_adt_layouts` holds beyond this
         # is global infrastructure and belongs to every namespace.
         self._namespace_declared_adts: frozenset[str] = frozenset()
+        # #1277: ADT name → EVERY module that declares it, in resolution
+        # order, read from the declarations rather than from the registered
+        # layouts, so the Pass-1.2 contention rail sees a module's `data
+        # Option` as well as its `data Json` — and sees the second declarer
+        # as well as the first.  Distinct from `_adt_layout_owners`, which
+        # records which namespace's LAYOUT won the flat slot and is read for
+        # declaration ordering: that one is first-wins because a slot has
+        # one winner, while contention is a property of each declaration.
+        self._module_adt_declarers: dict[str, tuple[tuple[str, ...], ...]] = {}
         # The namespace `_module_alias_scope` currently has installed, so
         # `_sync_alias_env` knows whose membership to apply.
         self._active_module_path: tuple[str, ...] | None = None
@@ -1374,20 +1389,40 @@ class CodeGenerator(
         asymmetry between the two sides' notions of "builtin").  Subtracting
         what the namespaces declare cannot go stale with registration order.
 
-        The builtin snapshot is unioned in as well, but it protects only what
-        it contains — the Pass-0.5 built-ins (``Option``, ``Result``,
-        ``Tuple``, …).  It does NOT cover the four demand-injected prelude
-        ADTs above, which is the same Pass-0.5-vs-1.2 asymmetry one layer
-        down: a module declaring ``data Json`` puts ``Json`` into the
-        declared set, subtracting it from infrastructure and hiding the
-        PRELUDE ``Json`` from every namespace but that module's (measured;
-        the entry program's members lose it).  No E609/E610 collision rail
-        fires on such a declaration either, since those rails are keyed on
-        the same Pass-0.5 snapshot.  Inert today for the reason the rest of
-        this membership rule is inert — ``data_types`` changes an answer only
-        for ``Decimal`` and ``REMOVED_ALIASES`` — but it is a real constraint
-        on any future consumer, and closing it means teaching Pass 0.5 which
-        prelude ADTs the program will demand.
+        Subtraction alone is sound only while "declared by a namespace" and
+        "global infrastructure" are DISJOINT, and §8.4.1 makes them overlap
+        on purpose: the prelude's data types are ordinary public
+        declarations a program may name and shadow.  So the floor unioned
+        in has to state the prelude's names positively rather than let them
+        be recovered by elimination (#1277).  Two sets do that, and they
+        answer different questions:
+
+        - ``_builtin_adt_names`` — the Pass-0.5 snapshot of
+          ``_register_builtin_adts`` (``Option``, ``Result``, ``Tuple``, …),
+          which is also the set the E609/E610 collision rails exempt.
+        - :func:`~vera.prelude.prelude_adt_names` — every ADT the PRELUDE
+          can provide, which is the half the snapshot cannot hold: ``Json``,
+          ``HtmlNode``, ``Request`` and ``Response`` register in Pass 1.2,
+          after this membership is computed.  Without it, one file's ``data
+          Json`` removed ``Json`` from every OTHER namespace's members —
+          including the entry program's, which never declared it and
+          legitimately sees the prelude's — while the checker's ``TypeEnv``
+          carries the name in every namespace unconditionally.
+
+        Naming a prelude ADT the program never demanded is inert, so this
+        floor does not condition on demand where the checker does not —
+        but the reason is NOT that an unregistered name is filtered out
+        downstream.  That is true of a name with no layout at all, and
+        false in exactly the case this floor is about: when a module has
+        declared the name, a layout IS registered, and it is the module's.
+        What makes it inert is narrower and is a property of today's only
+        consumer — ``naming._resolve_named`` reads ``data_types`` for the
+        index alone, and the index changes a rendering only for
+        ``Decimal`` and the single ``REMOVED_ALIASES`` entry ``Float``,
+        neither of which the prelude declares.  A future consumer that
+        reads the set for anything else would see the module's layout
+        under the prelude's name — which is why the Pass-1.2 rail refuses
+        that program (E621) rather than leaving the two to disagree.
         """
         if not self._adt_namespace_members:
             return None
@@ -1397,7 +1432,10 @@ class CodeGenerator(
         infrastructure = (
             frozenset(self._adt_layouts) - self._namespace_declared_adts
         )
-        return members | infrastructure | self._builtin_adt_names
+        return (
+            members | infrastructure
+            | self._builtin_adt_names | prelude_adt_names()
+        )
 
     def _adt_decl_index(self, name: str, order: dict[str, int]) -> int:
         """Where *name* sits in the declaration-index space *order* keys (#1227).
@@ -1438,16 +1476,151 @@ class CodeGenerator(
         declarations precede the main file's whatever order codegen happens to
         walk them in — and, being recorded in ``_prelude_decl_order`` too,
         precede every module's as well.
+
+        That second record is written UNCONDITIONALLY (#1287).
+        ``_prelude_decl_order`` is not a namespace: ``_module_alias_scope``
+        builds every module's space as ``{**_prelude_decl_order,
+        **module_own}``, so it is the base layer under all of them, and its
+        contents are a fact about what ``inject_prelude`` laid down.  Keying
+        the write on ``_decl_order`` — the ACTIVE, main-file namespace —
+        let a main-file declaration decide it: ``type Option = Int`` is
+        accepted (§8.4.1 — the prelude's data types are ordinary public
+        declarations a program may shadow; only the ``Vera`` prefix is
+        reserved, E154) and does NOT suppress the prelude's ``data
+        Option<T>``, so the guard fired on the prelude stamp and left
+        ``Option`` out of the block entirely — resolving at
+        ``_BUILTIN_DECL_INDEX`` inside every module namespace, and shifting
+        every later prelude declaration one place earlier because the
+        counter never advanced.  That is exactly the cross-namespace leak
+        ``_decl_order`` and ``_module_decl_order`` were split apart to
+        prevent (PR #1224 review).
+
+        The ACTIVE space still takes the main file's stamp: `setdefault`
+        leaves a name the main file already declared where the main file put
+        it, so the shadow keeps winning its own namespace.
         """
+        if prelude:
+            if name not in self._prelude_decl_order:
+                self._prelude_decl_order[name] = self._prelude_decl_order_next
+                self._prelude_decl_order_next += 1
+            self._decl_order.setdefault(name, self._prelude_decl_order[name])
+            return
         if name in self._decl_order:
             return
-        if prelude:
-            self._decl_order[name] = self._prelude_decl_order_next
-            self._prelude_decl_order[name] = self._prelude_decl_order_next
-            self._prelude_decl_order_next += 1
-        else:
-            self._decl_order[name] = self._decl_order_next
-            self._decl_order_next += 1
+        self._decl_order[name] = self._decl_order_next
+        self._decl_order_next += 1
+
+    def _contends_with_prelude(
+        self, prelude_decl: ast.DataDecl, owner: tuple[str, ...],
+    ) -> bool:
+        """Can *owner*'s declaration of this name share the prelude's layout?
+
+        The flat map holds ONE layout per name, so two declarations of a
+        prelude name are a contention exactly when they describe different
+        layouts (:func:`~vera.prelude.data_decl_shape`).  A module that
+        restates the prelude's own type — same constructors, same order,
+        same field types, type parameters compared positionally — is not a
+        contention: the single registered layout is correct for both, which
+        is why such programs compile and run today and must keep doing so.
+        `examples/vera/collections.vera` is that shape in this repository:
+        it declares `public data Option<T> { None, Some(T) }`, which
+        `examples/modules.vera` imports, so a rail keyed on the name alone
+        refuses a shipped example.
+
+        A module whose declaration this cannot find (the name is declared,
+        but the resolved module's AST no longer holds the node) is treated
+        as contending — the safe direction, since the alternative is
+        sharing a layout that may not fit.
+        """
+        module_decl = self._find_module_data_decl(owner, prelude_decl.name)
+        if module_decl is None:  # pragma: no cover — defensive
+            return True
+        return (
+            data_decl_shape(module_decl) != data_decl_shape(prelude_decl)
+        )
+
+    def _emit_prelude_adt_contention_error(
+        self, name: str, owner: tuple[str, ...],
+    ) -> None:
+        """Report a module ADT that took a demanded prelude ADT's name (#1277).
+
+        Located at the MODULE's declaration, in the module's own file —
+        the declaration the user can act on.  Before this rail the only
+        report was the wreckage: an E602 for an unknown constructor inside
+        the prelude's own combinator, an E620 cascade behind it, every one
+        of them at ``<prelude>`` coordinates and none of them naming
+        ``data {name}`` or the module it is in.
+
+        The sibling of E609/E610 (§11.16): one flat WASM namespace, one
+        layout per name.  Those rails compare two IMPORTED modules and
+        exempt the Pass-0.5 built-in snapshot, which is taken before the
+        prelude's own ADTs register — this is the same collision against
+        the half of global infrastructure that snapshot cannot hold.
+
+        Both branches of the fix are measured, not supposed.  RENAMING is
+        always available.  Matching the prelude's shape works because the
+        one registered layout then serves both declarations — the same
+        condition :meth:`_contends_with_prelude` tests, so the instruction
+        and the rail cannot disagree.  Telling the user to redeclare the
+        type in the ENTRY file would not be true: a differently-shaped
+        entry declaration suppresses the prelude's injection and silently
+        drops the functions that use the module's version instead.
+        """
+        mod = ".".join(owner)
+        decl = self._find_module_data_decl(owner, name)
+        loc = SourceLocation(file=self.file)
+        source_line = ""
+        resolved = next(
+            (m for m in self._resolved_modules if m.path == owner), None)
+        if resolved is not None:
+            loc = SourceLocation(file=str(resolved.file_path))
+            if decl is not None and decl.span:
+                loc.line = decl.span.line
+                loc.column = decl.span.column
+                lines = resolved.source.splitlines()
+                if 1 <= loc.line <= len(lines):
+                    source_line = lines[loc.line - 1]
+        self.diagnostics.append(Diagnostic(
+            description=(
+                f"Imported module '{mod}' declares a data type '{name}' "
+                f"whose shape differs from the prelude's '{name}', and "
+                f"both are compiled into this program."
+            ),
+            location=loc,
+            source_line=source_line,
+            rationale=(
+                "The flat compilation strategy (C7e) gives the whole "
+                "program one ADT namespace, and the prelude's data types "
+                "are compiled into it alongside every imported module's. "
+                "One name carries one constructor layout there, so two "
+                f"differently-shaped declarations of '{name}' cannot both "
+                "be registered: the module's takes the layout, the "
+                "prelude's is dropped, and every function that uses the "
+                "prelude type is dropped behind it."
+            ),
+            fix=(
+                f"Rename '{name}' in module '{mod}' and update that "
+                f"module's uses of it. If the module means the prelude's "
+                f"type, give its declaration the prelude's shape instead "
+                f"— the same constructors, in the same order, with the "
+                f"same field types — and the one layout serves both."
+            ),
+            spec_ref='Chapter 11, Section 11.16 "Cross-Module Compilation"',
+            severity="error",
+            error_code="E621",
+        ))
+
+    def _find_module_data_decl(
+        self, mod_path: tuple[str, ...], name: str,
+    ) -> ast.DataDecl | None:
+        """*mod_path*'s ``data {name}`` declaration, for its span."""
+        for mod in self._resolved_modules:
+            if mod.path != mod_path:
+                continue
+            for tld in mod.program.declarations:
+                if isinstance(tld.decl, ast.DataDecl) and tld.decl.name == name:
+                    return tld.decl
+        return None
 
     def compile_program(self, program: ast.Program) -> CompileResult:
         """Compile a complete Vera program to WebAssembly."""
@@ -1586,6 +1759,11 @@ class CodeGenerator(
         # spans index into it, and `_diag_location` quotes it (under
         # the `<prelude>` origin) for prelude-origin diagnostics.
         self._prelude_source = inject_prelude(program)
+        # #1277: prelude ADTs whose name an IMPORTED module has already
+        # taken in `_adt_layouts`.  One flat layout map, one slot per name,
+        # so the two declarations contend and the module's — registered back
+        # in Pass 0.5 — wins by arriving first.
+        contended: list[tuple[str, tuple[str, ...]]] = []
         for tld in program.declarations:
             if id(tld) in pre_inject_ids:
                 continue
@@ -1596,12 +1774,50 @@ class CodeGenerator(
             # orders aliases and ADTs against each other.
             if isinstance(tld.decl, (ast.TypeAliasDecl, ast.DataDecl)):
                 self._stamp_decl_order(tld.decl.name, prelude=True)
+            if isinstance(tld.decl, ast.DataDecl):
+                # Asked by OBSERVING what `inject_prelude` laid down rather
+                # than by re-deriving its demand predicates in Pass 0.5,
+                # where the E609/E610 rails live: a second copy of "does
+                # this program want Json?" is a second thing to keep in
+                # step, and the identity filter above already says exactly
+                # what was injected.  A main-file shadow suppresses the
+                # injection outright, so it never reaches here — which is
+                # what keeps the §8.4.1 entry-file shadow legal.
+                #
+                # Read off the DECLARATIONS (`_module_adt_declarers`), not
+                # the registered layouts: the harvest skips a built-in name,
+                # so `_adt_layout_owners` sees `data Json` and never `data
+                # Option`, and keying the rail on it covered four of the
+                # prelude's eight names while §8.4.1 and §11.16 claim all
+                # eight.  EVERY declarer is asked, because each declaration
+                # contends on its own — a first-wins lookup let a module
+                # that restates the prelude's type answer for a sibling
+                # that does not, which made the rail order-dependent.
+                for owner in self._module_adt_declarers.get(
+                    tld.decl.name, (),
+                ):
+                    if self._contends_with_prelude(tld.decl, owner):
+                        contended.append((tld.decl.name, owner))
             if isinstance(tld.decl, ast.TypeAliasDecl):
                 self._prelude_type_aliases[tld.decl.name] = tld.decl.type_expr
                 if tld.decl.type_params:
                     self._prelude_type_alias_params[tld.decl.name] = (
                         tld.decl.type_params
                     )
+        # Reported at the declaration that caused it, and refused by the
+        # Pass-1.9 severity gate below — the route E608 / E609 / E610 take,
+        # so there is ONE refusal mechanism rather than a second early
+        # return beside it (measured: an early return here changes neither
+        # the diagnostics nor the empty exports, including on a shape whose
+        # monomorphization runs over the contended type in between).
+        # Without the report, registration proceeds against the module's
+        # layout: the prelude's own combinators fail on its constructors
+        # (an E602 inside `<prelude>`), every user function touching the
+        # type is dropped behind an E620 cascade, and all of it is reported
+        # as WARNINGS — a zero-exit compile of a module with the functions
+        # silently missing.
+        for name, owner in contended:
+            self._emit_prelude_adt_contention_error(name, owner)
         for tld in program.declarations:
             decl = tld.decl
             if isinstance(decl, ast.FnDecl) and decl.name not in existing_fns:

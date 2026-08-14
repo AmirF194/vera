@@ -1,0 +1,41 @@
+-- Conformance: a type alias may reuse a prelude data type's name
+-- (Chapter 8, Section 8.4.1).
+-- Tests: the prelude's data types are ordinary public declarations a program
+-- names and shadows -- the reserved namespace is the `Vera` prefix alone
+-- (E154) -- so `type UrlParts = Int;` is accepted, and only a user `data` of
+-- that name suppresses the prelude's own declaration. Both therefore exist
+-- here: the alias resolves inside the type argument below, and the prelude's
+-- `UrlParts` is still injected, still stamped, and its other declarations are
+-- unaffected -- `Option` is matched as usual.
+-- What this program does NOT pin is #1287 itself. The defect was an internal
+-- one -- the prelude's declaration-index block losing an entry -- and it is
+-- inert at emission, because `AliasEnv.data_types` changes a rendering only
+-- for `Decimal` and `Float`. The emitted WAT is identical either way, so no
+-- run-level program can distinguish it; the unit cells in
+-- `tests/test_prelude_decl_stamp_1287.py` carry that claim. What this pins is
+-- that the shape is accepted, verifies and runs.
+-- The alias is deliberately used in a type-ARGUMENT position rather than as a
+-- slot head: a slot headed by an alias sharing a registered ADT's name is
+-- separately miscompiled (#1309), which is not what this program is about.
+import vera.math(magnitude);
+
+type UrlParts = Int;
+
+public fn total(@Array<UrlParts> -> @Int)
+  requires(true)
+  ensures(@Int.result >= 0)
+  effects(pure)
+{
+  magnitude(array_length(@Array<UrlParts>.0))
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  match array_find([3, 4], fn(@Int -> @Bool) effects(pure) { @Int.0 > 3 }) {
+    Some(@Int) -> total([@Int.0]),
+    None -> 0
+  }
+}
