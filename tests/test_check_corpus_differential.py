@@ -30,9 +30,9 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import io
 import json
 import subprocess
-import sys
 import threading
 from pathlib import Path, PureWindowsPath
 from typing import Any
@@ -719,24 +719,40 @@ class TestUndecodableCompilerOutput:
 
     def test_strict_decoding_is_what_would_have_raised(self) -> None:
         """The reason the kwarg above matters, measured rather than
-        asserted: the same bytes through the same call raise on strict
-        and survive on replace."""
-        program = "import sys; sys.stdout.buffer.write(b'\\x97')"
-        command = [sys.executable, "-c", program]
+        asserted: the same bytes through the same decoder raise on
+        strict and survive on replace.
+
+        Measured through `io.TextIOWrapper`, which is not a stand-in —
+        it is the mechanism.  `subprocess.Popen` wraps each captured
+        pipe in exactly this object with exactly the `encoding` and
+        `errors` it was given, so this reproduces `compile_one`'s
+        decode without a child process.
+
+        Spawning one was the previous shape and it made the cell
+        environment-dependent: what a child puts on a pipe depends on
+        the OS, and the three Windows cells failed here with "DID NOT
+        RAISE".  The decode itself never varied — both calls named
+        `encoding="utf-8"` — but the byte reaching them did.  Note the
+        byte is only undecodable in UTF-8: `b"\\x97".decode("cp1252")`
+        is an em dash, so a decode left to the platform default would
+        not raise on Windows either.  Naming the codec is what makes
+        this deterministic, and it is the same codec the script names.
+        """
+        undecodable = b"\x97"
+
+        def decode(**kwargs: Any) -> str:
+            return io.TextIOWrapper(
+                io.BytesIO(undecodable), encoding="utf-8", **kwargs
+            ).read()
+
         with pytest.raises(UnicodeDecodeError):
-            subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                check=False,
-            )
-        lenient = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-        )
-        assert lenient.returncode == 0
+            decode()
+        assert decode(errors="replace") == "\ufffd"
+
+    def test_the_byte_is_undecodable_in_the_codec_the_script_names(self) -> None:
+        """Non-vacuity: the fixture must be undecodable in UTF-8 and not
+        merely unusual, or the cell above proves nothing about the
+        codec `compile_one` actually passes."""
+        with pytest.raises(UnicodeDecodeError):
+            b"\x97".decode("utf-8")
+        assert b"\x97".decode("cp1252") == "\u2014"
