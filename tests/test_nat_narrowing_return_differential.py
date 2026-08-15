@@ -33,7 +33,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.codegen_helpers import wat_calls
+from tests.codegen_helpers import wat_calls, wat_fn_names
 from vera.codegen.api import WasmTrapError
 
 from collections.abc import Iterator
@@ -2764,8 +2764,12 @@ public fn go(@Int -> @Int)
             assert result.ok, [d.description for d in result.diagnostics]
             assert wat_calls(result.wat, "vera.state_put_Int")
             # The user's own `put` is still emitted and still callable — it
-            # is simply not what the qualified site denotes.
-            assert "(func $put " in result.wat
+            # is simply not what the qualified site denotes.  Exact
+            # membership, not a substring: `"(func $put " in wat` depends on
+            # a space following the symbol and would also accept a longer
+            # mangled name under a different emitter layout.
+            emitted = wat_fn_names(result.wat)
+            assert "put" in emitted, emitted
         assert _run(self._QUAL_USER_SHADOW, "go", 7) == 5
 
 

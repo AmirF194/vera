@@ -355,7 +355,12 @@ class TestAliasOverAdtNameWidthBattery:
 
     For each pair, compile the alias-named program and the identical
     program under a fresh alias name, and compare the emitted ``$twice``
-    signature — the parameter, local and result widths.  A single width
+    body in full — the parameter, local and result widths of the header,
+    and the instructions under it.  The whole body, not the header alone:
+    a header-only comparison reads the parameter and result widths but
+    not the ``(local …)`` declarations, and the module docstring's
+    "byte-identical to a fresh-name control" is a claim about the body
+    (measured: identical in every cell of the battery).  A single width
     that resolves through the ADT branch instead of the alias branch shows
     up here regardless of whether it happens to trap, so the loud cases
     cannot be the only ones anyone notices.
@@ -382,8 +387,8 @@ class TestAliasOverAdtNameWidthBattery:
         assert not aliased_errors, (
             f"type {adt} = {target}; failed to assemble: {aliased_errors}")
 
-        want = wat_fn_body(control.wat, "twice").splitlines()[0]
-        got = wat_fn_body(aliased.wat, "twice").splitlines()[0]
+        want = wat_fn_body(control.wat, "twice")
+        got = wat_fn_body(aliased.wat, "twice")
         assert got == want, (
             f"type {adt} = {target}; emitted {got!r}, "
             f"but the same program under a fresh alias name emitted {want!r}"

@@ -402,7 +402,15 @@ public fn main(@Unit -> @Int)
 
     @staticmethod
     def _diamond_registries(tmp_path: Path) -> tuple[set[str], set[str]]:
-        """``(_fn_sigs keys, _fn_ret_type_exprs keys)`` after the diamond."""
+        """``(_fn_sigs keys, _fn_ret_type_exprs keys)`` after the diamond.
+
+        The checker's artifacts are threaded into the generator, as
+        ``cmd_compile`` threads them: the call was here before them and
+        discarded its result, which read as a pipeline the helper was not
+        actually running.  The two registries below are populated the same
+        way either way — they are built from the declarations — so this is
+        the fixture matching the product, not a changed measurement.
+        """
         from vera.checker import typecheck_with_artifacts
         from vera.codegen.core import CodeGenerator
         from vera.parser import parse_to_ast
@@ -421,11 +429,15 @@ public fn main(@Unit -> @Int)
         resolved = ModuleResolver(_root=tmp_path).resolve_imports(
             program, main_path,
         )
-        typecheck_with_artifacts(
+        _diags, arts = typecheck_with_artifacts(
             program, source, file=str(main_path), resolved_modules=resolved,
+            collect_module_artifacts=True,
         )
         gen = CodeGenerator(
             source=source, file=str(main_path), resolved_modules=resolved,
+            expr_semantic_types=arts.expr_semantic_types,
+            expr_target_types=arts.expr_target_types,
+            module_artifacts=arts.module_artifacts,
         )
         gen.compile_program(program)
         return set(gen._fn_sigs), set(gen._fn_ret_type_exprs)

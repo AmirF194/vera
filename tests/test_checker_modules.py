@@ -2318,8 +2318,12 @@ public fn {name}(@Int -> @Int)
         ``pure_fn``, which is advice no author would take, so the branch
         carries a per-name suggestion where the generic suffix misleads.
         Pinned by property — the suggested identifier must be a legal Vera
-        function name and must not be reserved — rather than by exact
-        wording, so the table can be improved without churning the test.
+        function name, must not be reserved, and must not be that generic
+        template — rather than by exact wording, so the table can be
+        improved without churning the test.  The suggestion is read from
+        the clause that makes it, not swept out of the whole fix text:
+        the sweep's other catches are boilerplate, so it went green for a
+        table entry that had been deleted.
         """
         import re
 
@@ -2335,14 +2339,31 @@ public fn {name}(@Int -> @Int)
 {{ 5 }}
 """) if e.error_code == "E153"
         )
-        quoted = re.findall(r"'([a-z][A-Za-z0-9_]*)'", diag.fix)
-        suggestions = [q for q in quoted if q != name]
-        assert suggestions, diag.fix
-        for s in suggestions:
-            # Not reserved (E153 again) and not a built-in (E151 instead) —
-            # advice that trades one error for another is not a fix.
-            assert s not in _RESERVED_FN_NAMES, (name, s, diag.fix)
-            assert s not in _builtin_reject_names(), (name, s, diag.fix)
+        # ANCHORED to the sentence that makes the suggestion.  A sweep for
+        # every quoted lowercase word in `diag.fix` also collects the
+        # substring example (`'{name}_value'`) and `'handle'` (offered as
+        # the one surviving keyword, not as a replacement), both of which
+        # are boilerplate present whatever the per-name table says — so a
+        # table entry replaced by a prose word, or deleted outright, left
+        # the sweep with two words that pass every check below.
+        m = re.search(
+            r"Rename the function to an identifier that is not a keyword"
+            r" — '([a-z][A-Za-z0-9_]*)'",
+            diag.fix,
+        )
+        assert m is not None, diag.fix
+        suggestion = m.group(1)
+        assert suggestion != name, diag.fix
+        # Not the generic `{name}_fn` template: that is the fallback this
+        # branch's per-name table exists to replace, and `in_fn` / `type_fn`
+        # / `pure_fn` is the advice the docstring above calls unusable.
+        assert suggestion != f"{name}_fn", (name, diag.fix)
+        # Not reserved (E153 again) and not a built-in (E151 instead) —
+        # advice that trades one error for another is not a fix.
+        assert suggestion not in _RESERVED_FN_NAMES, (name, suggestion,
+                                                      diag.fix)
+        assert suggestion not in _builtin_reject_names(), (name, suggestion,
+                                                           diag.fix)
 
     def test_handle_stays_legal(self) -> None:
         """NEGATIVE CONTROL: the carve-out survives a derived set.
@@ -2405,9 +2426,14 @@ public fn main(@Unit -> @Int)
             with pytest.raises(ParseError):
                 parse_to_ast(src)
         # Control: an ordinary LOWERCASE name fails the same way, proving the
-        # rejection is the case rail and not the reservation.
+        # rejection is the case rail and not the reservation.  All THREE
+        # positions are controlled — without the constructor one, nothing
+        # showed that `Holder { with(Int) }` above failed at the case rail
+        # rather than at the function-name reservation, which is the exact
+        # confusion this test exists to rule out.
         for src in ("private data helper {\n  MkX(Int)\n}\n",
-                    "type helper = Int;\n"):
+                    "type helper = Int;\n",
+                    "private data Holder {\n  helper(Int)\n}\n"):
             with pytest.raises(ParseError):
                 parse_to_ast(src)
 

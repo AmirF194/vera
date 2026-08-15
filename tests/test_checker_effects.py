@@ -969,7 +969,17 @@ public fn main(@Unit -> @Int)
 """)
         w002 = [w for w in warnings if w.error_code == "W002"]
         assert w002, f"expected W002, got: {[w.error_code for w in warnings]}"
-        assert "IO" in w002[0].description, w002[0].description
+        # EXACTNESS, not membership: the row attributed to the argument is
+        # the user declaration's own `<IO>` and nothing unioned into it.  A
+        # partial fix that added the shadowed operation's parent effect to
+        # the walk's answer reports the union here.  (`Http` in particular
+        # is invisible in this clause — it is IN the commutative set, so it
+        # is subtracted before the message is built; the whole-description
+        # negative `"Http" not in description` is therefore both untrue,
+        # since every W002 names the set as `(Http)`, and blind to the
+        # union it would be asserting against.)
+        performs = w002[0].description.split(" effects,")[0]
+        assert performs.endswith("performs IO"), w002[0].description
 
     def test_async_over_effectful_helper_under_another_name_warns(
         self,

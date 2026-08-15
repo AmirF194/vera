@@ -2304,7 +2304,7 @@ Four rules carry that property. The first two follow from the ADT having no line
 
 Together these MUST make `md_render` a fixed point: re-parsing and re-rendering its output returns the same bytes. Unlike the round-trip property this one has no exceptions — a block with no text renders to no lines, which re-renders to no lines.
 
-Two code-span shapes are outside that, and are lost identically on every runtime rather than differently, because the subset has no escape syntax to write them another way: a span needing three or more backticks, at the start of a line, where that run is a fenced-code-block opener; and an empty span, whose rendering reads back as literal text.
+Two code-span shapes are outside the **round-trip** property — not the fixed point, which has no exceptions. They are the two that property defers to above, and they are lost identically on every runtime rather than differently, because the subset has no escape syntax to write them another way: a span needing three or more backticks, at the start of a line, where that run is a fenced-code-block opener; and an empty span, whose rendering reads back as literal text.
 
 The rules are visible from a value a program builds, which is where they
 bite: a parser cannot produce an empty list item or a space-bounded code

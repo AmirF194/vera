@@ -955,9 +955,15 @@ class CrossModuleMixin:
         the second is after the prelude pass, once ``_prelude_fn_names`` is
         populated, because the prelude's combinators are visible in every
         namespace and the first call cannot know them yet.  The derivation is
-        pure, so the second call simply replaces the first's answer; the
-        ambiguity half is identical either way (a prelude name is imported
-        from nowhere).  Route three of #1299 (a ``forall<T>`` parent's
+        pure, so the second call simply replaces the first's answer.  The
+        ambiguity half is NOT identical either way: the combinators are
+        overridable rather than reserved, so two dependencies that each
+        export ``option_map`` are ambiguous under the empty prelude and are
+        not under the populated one (:func:`~vera.monomorphize
+        .namespace_fn_names` records the measurement).  The E608 rail below
+        reads the FIRST, prelude-empty answer, because ``_register_modules``
+        runs between the two calls — so the ORDERING is load-bearing and
+        neither call may move.  Route three of #1299 (a ``forall<T>`` parent's
         ``where`` helper) involves no imports at all, so the entry program
         needs its set whether or not any module exists.
         """

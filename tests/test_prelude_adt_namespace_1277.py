@@ -518,6 +518,57 @@ def test_every_cell_is_clean_or_one_e621(
         )
 
 
+#: §8.4.1's two halves of the prelude's data types.  Every program compiles
+#: the first four, so a differently-shaped module declaration of one of them
+#: "always contends"; the other four are injected only when the entry program
+#: uses them, so the module's declaration "stands alone until it does".
+_ALWAYS_COMPILED = ("Option", "Result", "Ordering", "UrlParts")
+_DEMAND_INJECTED = ("Json", "HtmlNode", "Request", "Response")
+
+
+def test_the_two_halves_partition_the_prelude_adts() -> None:
+    """Neither half may drift from `_PRELUDE_ADTS`.
+
+    The cell below reads its expected answer off these lists, so a name
+    added to the battery and to neither list — or to both — would be
+    asserted against nothing, or against two answers.
+    """
+    assert set(_ALWAYS_COMPILED) | set(_DEMAND_INJECTED) == set(_PRELUDE_ADTS)
+    assert not set(_ALWAYS_COMPILED) & set(_DEMAND_INJECTED)
+
+
+@pytest.mark.parametrize("name", _PRELUDE_ADTS)
+def test_the_alone_half_follows_the_injection_split(
+    tmp_path: Path, name: str,
+) -> None:
+    """An entry that never names the type: §8.4.1 decides by which half.
+
+    `test_every_cell_is_clean_or_one_e621` accepts either answer for these
+    eight cells (`set(codes) <= {"E621"}`), deliberately, so that the rail's
+    four-vs-four coverage split cannot return silently.  That looseness is
+    about which names the rail COVERS; it leaves the alone half unpinned in
+    the other direction, and a rail that stopped reporting a differing
+    `Ordering` declaration in an entry that never mentions `Ordering` would
+    keep the whole suite green.  §8.4.1 decides the question: measured
+    E621-with-no-exports for the four every program compiles, and
+    clean-with-`main`-exported for the four injected on demand.
+    """
+    codes, exports = _acceptance_cell(tmp_path, name, demands=False)
+    if name in _ALWAYS_COMPILED:
+        assert codes == ["E621"], (
+            f"{name} is compiled into every program, so a differing module "
+            f"declaration contends whether or not the entry names it; got "
+            f"{codes}"
+        )
+        assert exports == [], f"{name}: refused, yet emitted {exports}"
+    else:
+        assert codes == [], (
+            f"{name} is injected only on demand, so nothing contends when "
+            f"the entry never names it; got {codes}"
+        )
+        assert exports == ["main"], exports
+
+
 @pytest.mark.parametrize("name", _PRELUDE_ADTS)
 def test_a_differing_module_declaration_contends_for_every_name(
     tmp_path: Path, name: str,

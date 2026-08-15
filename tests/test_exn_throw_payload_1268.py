@@ -561,6 +561,13 @@ public fn main(@Float64 -> @Int)
         result = _verify(self._NESTED)
         binds = [o for o in result.obligations if o.kind == "refine_bind"]
         assert [o.status for o in binds] == ["tier3_unguarded"], binds
+        # The count is not the bind's: a `tier3_unguarded` discharges to no
+        # tier and is excluded from `tier3_runtime`.  The 1 is the payload
+        # expression's own `float_to_int` domain obligation, named here so
+        # the summary assertion cannot be read as counting the bind.
+        domain = [o for o in result.obligations
+                  if o.kind == "float_to_int_domain"]
+        assert [o.status for o in domain] == ["tier3"], domain
         assert result.summary.tier3_runtime == 1, result.summary
         compiled = _compile(self._NESTED)
         errors = [d for d in compiled.diagnostics if d.severity == "error"]
