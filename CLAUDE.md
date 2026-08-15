@@ -80,6 +80,8 @@ python scripts/build_site.py          # Regenerate AI-readable site assets (llms
 python scripts/check_site_assets.py   # Verify site assets are up-to-date + docs/index.html ↔ docs/index.md state coherent facts (#1154)
 python scripts/check_version_sync.py  # Verify version consistency
 python scripts/check_doc_counts.py    # Verify documentation counts match codebase
+python scripts/check_doc_counts.py --check-bug-issues # Also check KNOWN_ISSUES' Bugs table against the open `bug` issues (GitHub API; release-PR time, not pre-commit)
+python scripts/check_corpus_differential.py --base-ref origin/main  # Compile the corpus at two revisions; report programs whose WAT moved (burndown instrument, not a hook)
 python scripts/check_licenses.py      # Verify all package licenses are MIT-compatible
 python scripts/check_wheel_availability.py # Verify every runtime dep has wheels for all supported platforms (README §Supported platforms)
 python scripts/check_limitations_sync.py              # Verify limitation tables are in sync

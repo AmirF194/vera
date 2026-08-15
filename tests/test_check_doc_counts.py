@@ -7,7 +7,7 @@ is testable without a pytest collection run:
   line counts must stay within ±10% of the measured file sizes.
 - ``check_history_row_format`` — HISTORY.md version rows carry at most
   one issue link and no " — " separator.
-- ``check_tests_breakdown`` — TESTING.md's passed/stress/skipped parts
+- ``check_tests_breakdown`` — TESTING.md's passed/stress-deselected/skipped parts
   must sum to the collected total.
 - ``check_vera_readme_test_counts`` — the four counts in vera/README.md's
   Test Suite paragraph.
@@ -26,6 +26,7 @@ or rewording switches the gate off.
 from __future__ import annotations
 
 import importlib.util
+import re
 from pathlib import Path
 from typing import Any
 
@@ -207,7 +208,8 @@ def _overview(passed: int, stress: int, skipped: int, total: int) -> str:
         "| Metric | Value |\n"
         "|--------|-------|\n"
         f"| **Tests** | {total:,} across 143 files (~108,000 lines of test"
-        f" code; {passed:,} passed + {stress} stress, {skipped} skipped) |\n"
+        f" code; {passed:,} passed + {stress} stress-deselected,"
+        f" {skipped} skipped) |\n"
     )
 
 
@@ -663,3 +665,323 @@ class TestReleaseTags:
         plain = tmp_path / "plain"
         plain.mkdir()
         assert _MOD.release_tags(plain) is None
+
+
+# ---------------------------------------------------------------------------
+# README's project-status line (#1290 rider): the sentence gated the tests
+# figure and nothing else on it.  The conformance count beside it drifted
+# through two rebases unseen, because `check_readme` returned silently when a
+# pattern matched nothing — four of its five patterns matched nothing at all.
+# ---------------------------------------------------------------------------
+
+_STATUS = (
+    "Vera is in **active development** at v0.1.11: 2,000+ commits, 209 "
+    "releases, 11,134 tests, 95% Python code coverage, 229 conformance "
+    "programs, 42 examples, and a 14-chapter specification.\n"
+)
+
+
+class TestProjectStatusLine:
+    def test_the_shipped_line_is_consistent(self) -> None:
+        assert _MOD.check_project_status(_STATUS, 11134, 229, 42, 14) == []
+
+    def test_every_count_on_the_line_is_gated(self) -> None:
+        """One error per wrong figure, and the conformance one is among them."""
+        errors = _MOD.check_project_status(_STATUS, 1, 2, 3, 4)
+        assert len(errors) == 4
+        assert any("conformance" in e for e in errors)
+        assert any("examples" in e for e in errors)
+        assert any("chapter" in e for e in errors)
+
+    def test_the_conformance_count_alone_is_caught(self) -> None:
+        """The measured drift: tests right, conformance stale beside it."""
+        errors = _MOD.check_project_status(_STATUS, 11134, 230, 42, 14)
+        assert len(errors) == 1
+        assert "229" in errors[0] and "230" in errors[0]
+
+    def test_a_missing_status_line_is_an_error_not_a_skip(self) -> None:
+        # Same true numbers, phrasing the pattern cannot see.  Returning []
+        # here is what let four of the five README gates sit dead.
+        text = "Vera has 11,134 tests and 229 conformance programs.\n"
+        errors = _MOD.check_project_status(text, 11134, 229, 42, 14)
+        assert len(errors) == 1
+        assert "could not find" in errors[0]
+
+    def test_a_count_dropped_from_the_line_is_an_error_not_a_skip(self) -> None:
+        text = _STATUS.replace("229 conformance programs, ", "")
+        errors = _MOD.check_project_status(text, 11134, 229, 42, 14)
+        assert len(errors) == 1
+        assert "could not find" in errors[0]
+
+    def test_the_counts_are_read_from_the_status_line_only(self) -> None:
+        """A decoy elsewhere in the file must not satisfy the gate."""
+        text = "Elsewhere: 999 conformance programs.\n\n" + _STATUS
+        assert _MOD.check_project_status(text, 11134, 229, 42, 14) == []
+
+
+# ---------------------------------------------------------------------------
+# TESTING.md's dual-target row (#1290 rider): a run-level total from the
+# manifest, and a tested/skipped split with three category counts that no
+# oracle read.
+# ---------------------------------------------------------------------------
+
+_DUAL_ROW = (
+    "the **dual-target conformance differential** (all 168 run-level "
+    "conformance programs driven under both targets, byte-identical "
+    "stdout/stderr required — 118 are dual-tested and 50 skip *loudly* "
+    "rather than passing silently: 43 whose compiled WAT imports a host "
+    "family outside `IO`/`Random`, 6 with no public zero-argument `main`, "
+    "and 1 calling a nondeterministic op.)\n"
+)
+
+
+def _split(**overrides: int) -> Any:
+    values = dict(tested=118, skipped=50, families=43, no_main=6, nondeterministic=1)
+    values.update(overrides)
+    return _MOD.DualTargetSplit(**values)
+
+
+class TestDualTargetRow:
+    def test_the_shipped_row_is_consistent(self) -> None:
+        assert _MOD.check_dual_target_row(_DUAL_ROW, 168, _split()) == []
+
+    def test_the_run_level_total_comes_from_the_manifest(self) -> None:
+        errors = _MOD.check_dual_target_row(_DUAL_ROW, 169, _split())
+        assert [e for e in errors if "run-level total" in e]
+
+    def test_each_part_of_the_split_is_gated(self) -> None:
+        errors = _MOD.check_dual_target_row(
+            _DUAL_ROW, 168, _split(tested=117, skipped=51)
+        )
+        assert len(errors) == 2
+
+    def test_each_category_is_gated(self) -> None:
+        errors = _MOD.check_dual_target_row(
+            _DUAL_ROW, 168, _split(families=42, no_main=7, nondeterministic=2)
+        )
+        assert len(errors) == 3
+
+    def test_the_split_must_sum_to_the_run_level_total(self) -> None:
+        """Three consistent-looking numbers that do not add up is drift."""
+        errors = _MOD.check_dual_target_row(
+            _DUAL_ROW.replace("all 168 run-level", "all 200 run-level"),
+            200,
+            _split(),
+        )
+        assert [e for e in errors if "does not add up" in e]
+
+    def test_the_categories_must_sum_to_the_skip_total(self) -> None:
+        row = _DUAL_ROW.replace("and 1 calling", "and 2 calling")
+        errors = _MOD.check_dual_target_row(row, 168, _split(nondeterministic=2))
+        assert [e for e in errors if "do not add up" in e]
+
+    def test_a_reworded_row_is_an_error_not_a_skip(self) -> None:
+        # The same true numbers, phrased so no pattern sees them.
+        text = "The differential drives 168 programmes, skipping 50 of them.\n"
+        errors = _MOD.check_dual_target_row(text, 168, _split())
+        assert [e for e in errors if "could not find" in e]
+
+    def test_one_reworded_figure_is_an_error_not_a_skip(self) -> None:
+        """The row still parses; a single category has been reworded away.
+
+        Every other figure agrees, so a silent skip here leaves the row
+        looking checked while one of its five numbers is unread.
+        """
+        row = _DUAL_ROW.replace("43 whose compiled WAT", "forty-three whose WAT")
+        errors = _MOD.check_dual_target_row(row, 168, _split())
+        assert len(errors) == 1
+        assert "could not find" in errors[0] and "families" in errors[0]
+
+    def test_the_live_split_is_read_from_the_test_run(self) -> None:
+        """Non-vacuity: parsed from real ``-rs`` output, not from the doc."""
+        report = (
+            "SKIPPED [43] tests/test_wasi_target.py:1130: family gate: "
+            "--target wasi-p2 does not support the following host family: map\n"
+            "SKIPPED [6] tests/test_wasi_target.py:1130: family gate: "
+            "--target wasi-p2 requires a public zero-argument `main` entry point\n"
+            "SKIPPED [1] tests/test_wasi_target.py:1124: nondeterministic ops "
+            "['random_int']\n"
+            "118 passed, 50 skipped in 3.15s\n"
+        )
+        assert _MOD.parse_dual_target_report(report) == _split()
+
+    def test_an_unclassified_skip_is_an_error_not_a_skip(self) -> None:
+        report = (
+            "SKIPPED [50] tests/test_wasi_target.py:1130: some new reason\n"
+            "118 passed, 50 skipped in 3.15s\n"
+        )
+        assert _MOD.parse_dual_target_report(report) is None
+
+    def test_an_unclassified_skip_beside_a_correct_total_is_still_an_error(
+        self,
+    ) -> None:
+        """The three documented categories already account for every skip.
+
+        Folding a fourth reason into none of them leaves the arithmetic
+        looking right, so the sum reconciliation alone cannot catch it.
+        """
+        report = (
+            "SKIPPED [43] host family: map\n"
+            "SKIPPED [6] requires a public zero-argument `main`\n"
+            "SKIPPED [1] nondeterministic ops ['random_int']\n"
+            "SKIPPED [3] tests/test_wasi_target.py:9: a brand new reason\n"
+            "118 passed, 50 skipped in 3.15s\n"
+        )
+        assert _MOD.parse_dual_target_report(report) is None
+
+    def test_classified_skips_that_miss_the_summary_total_are_an_error(self) -> None:
+        """Every reason is known and they still do not account for the run.
+
+        The complement of the case above: the unclassified-reason guard is
+        satisfied here, so only the sum reconciliation can catch it.
+        """
+        report = (
+            "SKIPPED [43] host family: map\n"
+            "SKIPPED [6] requires a public zero-argument `main`\n"
+            "SKIPPED [1] nondeterministic ops ['random_int']\n"
+            "118 passed, 55 skipped in 3.15s\n"
+        )
+        assert _MOD.parse_dual_target_report(report) is None
+
+    def test_a_report_with_no_summary_line_is_an_error_not_a_skip(self) -> None:
+        assert _MOD.parse_dual_target_report("nothing to see here\n") is None
+
+    def test_a_summary_omitting_the_skipped_category_is_read(self) -> None:
+        """pytest prints no category with a zero count, so `174 passed in
+        3.1s` is a well-formed summary.  Requiring both groups made it
+        unreadable, and an unreadable report is reported as drift — a
+        false failure (#1329 review)."""
+        split = _MOD.parse_dual_target_report("174 passed in 3.15s\n")
+        assert split == _MOD.DualTargetSplit(174, 0, 0, 0, 0)
+
+    def test_a_summary_omitting_the_passed_category_is_read(self) -> None:
+        """The complement: every run-level programme skipped."""
+        report = (
+            "SKIPPED [52] host family: map\n"
+            "52 skipped in 3.15s\n"
+        )
+        assert _MOD.parse_dual_target_report(report) == _MOD.DualTargetSplit(
+            0, 52, 52, 0, 0
+        )
+
+
+# ---------------------------------------------------------------------------
+# KNOWN_ISSUES' Bugs table (#1290 rider): one row per open `bug` issue.
+#
+# The parity half needs the GitHub API, which a pre-commit hook must not
+# depend on, so it is opt-in: `--check-bug-issues` at release-PR time.  The
+# structural half is pure text and always on.
+# ---------------------------------------------------------------------------
+
+
+def _bugs(*rows: str) -> str:
+    body = "\n".join(rows)
+    return f"# Known Issues\n\n## Bugs\n\n| Bug | Issue |\n|-----|-------|\n{body}\n\n## Limitations\n"
+
+
+def _row(number: int, text: str = "Something is wrong.") -> str:
+    url = f"https://github.com/aallan/vera/issues/{number}"
+    return f"| {text} | [#{number}]({url}) |"
+
+
+class TestBugRows:
+    def test_the_shipped_table_parses(self) -> None:
+        text = (Path(__file__).parent.parent / "KNOWN_ISSUES.md").read_text(
+            encoding="utf-8"
+        )
+        rows = _MOD.bug_rows(text)
+        assert rows is not None
+        # The floor is derived from the file, not a literal: `> 5` would
+        # fail the day the tracker is burned down to five open bugs, which
+        # is a project state rather than a regression — and it would not
+        # catch the parser returning a SHORT list, which is the failure
+        # worth naming (#1329 review).
+        section = re.search(r"^## Bugs[ \t]*$(.*?)(?=^## )", text, re.M | re.S)
+        assert section is not None
+        table = [
+            line
+            for line in section.group(1).splitlines()
+            if line.startswith("|") and not set(line) <= set("|- ")
+        ][1:]  # drop the header row
+        assert table, "the Bugs table is no longer being read"
+        assert len(rows) == len(table)
+        assert len(set(rows)) == len(rows)
+
+    def test_a_row_with_no_issue_link_is_an_error(self) -> None:
+        text = _bugs("| A bug with no tracker. | none |")
+        errors = _MOD.check_bug_rows(text)
+        assert len(errors) == 1 and "not found" in errors[0]
+
+    def test_two_rows_for_one_issue_are_an_error(self) -> None:
+        """One-to-one: two rows citing one issue is a duplicate, not two bugs."""
+        text = _bugs(_row(101), _row(101, "The same bug again."))
+        errors = _MOD.check_bug_rows(text)
+        assert len(errors) == 1 and "twice" in errors[0]
+
+    def test_a_link_whose_number_and_url_disagree_is_an_error(self) -> None:
+        text = _bugs(
+            "| Mislinked. | [#101](https://github.com/aallan/vera/issues/202) |"
+        )
+        errors = _MOD.check_bug_rows(text)
+        assert len(errors) == 1 and "not found" in errors[0]
+
+    def test_a_pull_request_link_is_not_an_issue_link(self) -> None:
+        text = _bugs("| Wrong kind. | [#101](https://github.com/aallan/vera/pull/101) |")
+        errors = _MOD.check_bug_rows(text)
+        assert len(errors) == 1 and "not found" in errors[0]
+
+    def test_a_row_carrying_a_pipe_in_its_prose_still_parses(self) -> None:
+        text = _bugs(_row(101, "The `|>` operator is wrong."))
+        assert _MOD.check_bug_rows(text) == []
+
+    def test_the_no_known_bugs_convention_is_not_an_empty_table(self) -> None:
+        text = "# Known Issues\n\n## Bugs\n\nNo known bugs.\n\n## Limitations\n"
+        assert _MOD.bug_rows(text) == []
+        assert _MOD.check_bug_rows(text) == []
+
+    def test_an_empty_bugs_section_is_an_error_not_a_skip(self) -> None:
+        text = "# Known Issues\n\n## Bugs\n\n## Limitations\n"
+        errors = _MOD.check_bug_rows(text)
+        assert len(errors) == 1 and "not found" in errors[0]
+
+    def test_a_renamed_heading_is_an_error_not_a_skip(self) -> None:
+        text = _bugs(_row(101)).replace("## Bugs", "## Open bugs")
+        errors = _MOD.check_bug_rows(text)
+        assert len(errors) == 1 and "not found" in errors[0]
+
+
+class TestBugIssueParity:
+    def test_a_matching_pair_of_sets_is_clean(self) -> None:
+        assert _MOD.check_bug_issue_parity([101, 102], [102, 101]) == []
+
+    def test_an_open_bug_issue_with_no_row_is_reported(self) -> None:
+        errors = _MOD.check_bug_issue_parity([101], [101, 102])
+        assert len(errors) == 1 and "#102" in errors[0]
+
+    def test_a_row_whose_issue_is_not_an_open_bug_is_reported(self) -> None:
+        errors = _MOD.check_bug_issue_parity([101, 103], [101])
+        assert len(errors) == 1 and "#103" in errors[0]
+
+    def test_no_open_bug_issues_is_an_error_not_a_skip(self) -> None:
+        """An empty fetch is a failed query, not a clean bill of health."""
+        errors = _MOD.check_bug_issue_parity([101], [])
+        assert [e for e in errors if "not found" in e]
+
+    def test_the_parity_check_is_not_wired_into_the_default_run(self) -> None:
+        """A pre-commit hook must not depend on the GitHub API."""
+        source = _SCRIPT.read_text(encoding="utf-8")
+        assert "--check-bug-issues" in source
+        # EVERY call site, not just the last one: `rindex` inspected only
+        # the final occurrence, so an unguarded call added above it would
+        # leave this green while the pre-commit hook made a network call
+        # (#1329 review).
+        calls = [
+            index
+            for index in range(len(source))
+            if source.startswith("check_bug_issue_parity(", index)
+            and not source.startswith("def check_bug_issue_parity(", max(0, index - 4))
+        ]
+        assert calls, "the parity check is no longer called at all"
+        for index in calls:
+            guarded = source[max(0, index - 600) : index]
+            assert "args.check_bug_issues" in guarded

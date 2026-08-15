@@ -79,6 +79,79 @@ public fn main(-> @Int)
 """
 
 
+# A program whose only external-resource signal is its declared effect
+# ROW: `DB` is in ``RESOURCE_EFFECTS``, while `DB.execute` is not in
+# ``RESOURCE_OPS`` — so a derivation that stopped reading effect rows
+# would find nothing here.
+_DB_SRC = """\
+public fn main(-> @Int)
+  requires(true)
+  ensures(true)
+  effects(<DB, IO>)
+{
+  let @Array<Option<String>> = [];
+  match DB.execute("CREATE TABLE t (id INTEGER)", @Array<Option<String>>.0) {
+    Err(@String) -> {
+      IO.print(@String.0);
+      1
+    },
+    Ok(@Int) -> {
+      IO.print("created the table");
+      0
+    }
+  }
+}
+"""
+
+# The mirror image: the only signal is an operation CALL.  `IO` is not in
+# ``RESOURCE_EFFECTS`` — sixteen examples declare a bare `<IO>` and only
+# one touches the filesystem — so a derivation that stopped reading call
+# sites would find nothing here.
+_FILE_SRC = """\
+public fn main(-> @Unit)
+  requires(true)
+  ensures(true)
+  effects(<IO>)
+{
+  match IO.read_file("hello.txt") {
+    Ok(@String) -> IO.print(@String.0),
+    Err(@String) -> IO.print(@String.0)
+  }
+}
+"""
+
+# Both shapes in prose only.  A text scan would call this a database
+# program; the derivation reads the parsed declarations, so it does not.
+_COMMENTED_SRC = """\
+-- Names the <DB> effect and IO.read_file in prose, and uses neither.
+public fn main(-> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  -- effects(<DB>) would go here, and IO.write_file("a", "b") below.
+  1 + 1
+}
+"""
+
+# Not Vera at all — the parse must fail rather than yield "no signals".
+_UNPARSEABLE_SRC = "public fn main(-> @Int) { this is not Vera at all\n"
+
+
+# A module-qualified effect whose tail is `DB`.  `Mod.DB` names a user
+# effect in another module, not the built-in the registry check validated,
+# so the derivation must not credit it (#1329 review).
+_QUALIFIED_DB_SRC = """\
+public fn main(-> @Int)
+  requires(true)
+  ensures(true)
+  effects(<Mod.DB>)
+{
+  0
+}
+"""
+
+
 def _corpus(tmp_path: Path, programs: dict[str, str]) -> Path:
     d = tmp_path / "examples"
     d.mkdir(exist_ok=True)
@@ -226,14 +299,23 @@ class TestRunSpecsAreWellFormed:
     def test_environment_dependent_specs_carry_an_output_sentinel(
         self,
     ) -> None:
-        """Three examples reach outside the process — a committed SQLite
-        fixture, an in-memory database, the filesystem — and each answers a
-        failure by printing a message and completing normally.  Exit code
-        alone cannot tell their success path from their graceful one, so
-        each must pin a substring only the success path prints."""
-        for name in ("sqlitedb", "database", "file_io"):
-            spec = _MOD.RUN_SPECS[name]
-            assert spec.expect, f"{name} has no expected-output sentinel"
+        """An example that reaches outside the process answers a failure by
+        printing a message and completing normally, so exit code alone
+        cannot tell its success path from its graceful one: each must pin a
+        substring only the success path prints.
+
+        WHICH examples those are is derived from the corpus, not listed
+        here.  A literal `("sqlitedb", "database", "file_io")` asserts the
+        sentinels the corpus already has and nothing about the next
+        example of the same kind — the one case the rule exists for.  So
+        the assertion is the two-way equality between the examples that
+        *declare* an external resource and the specs that carry an
+        `expect`, which a new database or filesystem example joins by
+        being written rather than by being remembered.
+        """
+        assert _MOD.check_sentinel_coverage(
+            _ROOT / "examples", _MOD.RUN_SPECS
+        ) == []
 
     def test_every_skip_property_is_documented(self) -> None:
         for name, prop in _MOD.SKIPS.items():
@@ -243,6 +325,299 @@ class TestRunSpecsAreWellFormed:
     def test_no_unused_skip_property(self) -> None:
         """A property nothing cites is dead documentation that would drift."""
         assert set(_MOD.SKIP_PROPERTIES) == set(_MOD.SKIPS.values())
+
+
+# ---------------------------------------------------------------------------
+# The derived sentinel rule
+# ---------------------------------------------------------------------------
+
+
+class TestResourceSignalDerivation:
+    """Which examples must pin a sentinel is read off the examples.
+
+    The declared constants are resource *names* — the `DB` effect, the
+    `IO.read_file` / `IO.write_file` operations — and the example set
+    follows from which programs declare them.  Names rather than
+    filenames is the whole point: a filename list is a snapshot of
+    today's corpus, and the case the rule exists for is tomorrow's
+    example.
+
+    An effect row alone cannot discriminate, which is why the operations
+    are read too: `FileIO` and `Time` are not effects in Vera, so
+    `file_io.vera` declares the same bare `<IO>` that `hello_world.vera`
+    does, and only the `IO.read_file` call tells them apart.
+    """
+
+    def test_declared_resource_names_are_all_live(self) -> None:
+        """Every name in ``RESOURCE_EFFECTS`` / ``RESOURCE_OPS`` still
+        exists in the effect registry the compiler serves."""
+        assert _MOD.resource_registry_errors() == []
+
+    def test_an_effect_row_signal_is_derived(self, tmp_path: Path) -> None:
+        """A `<DB>` in the effect row is a signal.  `DB.execute` is not in
+        ``RESOURCE_OPS``, so this program's whole signal comes from the
+        row — an exact-set assertion, so an implementation that credited
+        the call site instead would not pass."""
+        d = _corpus(tmp_path, {"dbish": _DB_SRC})
+        assert _MOD.resource_signals(d / "dbish.vera") == frozenset({"DB"})
+
+    def test_an_operation_call_signal_is_derived(
+        self, tmp_path: Path
+    ) -> None:
+        """The mirror image: `IO` is not a resource effect, so this
+        program's whole signal comes from the `IO.read_file` call."""
+        d = _corpus(tmp_path, {"filish": _FILE_SRC})
+        assert _MOD.resource_signals(d / "filish.vera") == frozenset(
+            {"IO.read_file"}
+        )
+
+    def test_a_resource_free_example_declares_no_signal(
+        self, tmp_path: Path
+    ) -> None:
+        """The other direction, without which a derivation that returned
+        every name for every program would pass the two above."""
+        d = _corpus(tmp_path, {"pure": _CLEAN_SRC})
+        assert _MOD.resource_signals(d / "pure.vera") == frozenset()
+
+    def test_signals_come_from_the_declarations_not_the_comments(
+        self, tmp_path: Path
+    ) -> None:
+        """The derivation reads the parsed program, so prose naming `<DB>`
+        or `IO.read_file` is not a resource declaration.
+
+        Not hypothetical: `examples/sqlitedb.vera`'s first line is a
+        comment containing `<DB>`, so a text scan would agree with the
+        parse there by luck and disagree on the first example whose
+        header describes what it deliberately does *not* do.
+        """
+        d = _corpus(tmp_path, {"prose": _COMMENTED_SRC})
+        assert _MOD.resource_signals(d / "prose.vera") == frozenset()
+
+    def test_a_pinned_spec_whose_file_is_gone_is_not_mis_diagnosed(
+        self, tmp_path: Path
+    ) -> None:
+        """The derivation never opened it, so it cannot say what it
+        declares.  Building `pinned` from every entry in `run_specs` put
+        this spec into `pinned - signals_by_name`, where it drew the
+        spurious-sentinel wording — "declares no external resource" —
+        for a file that does not exist (#1329 review).
+        """
+        d = _corpus(tmp_path, {"present": _DB_SRC})
+        specs = {
+            "present": _MOD.RunSpec(expect="created the table"),
+            "vanished": _MOD.RunSpec(expect="never printed"),
+        }
+        errors = _MOD.check_sentinel_coverage(d, specs)
+        assert not [e for e in errors if "vanished" in e]
+
+    def test_a_module_qualified_effect_is_not_the_builtin(
+        self, tmp_path: Path
+    ) -> None:
+        """`Mod.DB` is another module's effect, not the registry's `DB`.
+
+        `resource_signals` narrows on `isinstance(ref, ast.EffectRef)`
+        precisely to drop it, and no cell reached that decision: a mutant
+        dropping the narrowing, or one crediting any reference whose tail
+        is `DB`, passed every other case here.  This is the boundary in
+        the direction `_COMMENTED_SRC` does not cover — that one is prose,
+        this one is a real declaration of a different effect (#1329
+        review).
+        """
+        d = _corpus(tmp_path, {"qualified": _QUALIFIED_DB_SRC})
+        assert _MOD.resource_signals(d / "qualified.vera") == frozenset()
+
+    def test_a_renamed_resource_effect_is_an_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A resource effect the registry no longer has must fail loudly.
+
+        Silently, it would match no example — and with nothing left
+        requiring a sentinel the rule switches itself off.  The
+        *registry* diagnosis is asserted, not merely that an error came
+        back: the coinciding-message trap, since the matched-nothing
+        guard also fires on this input and reads as a different fault.
+        """
+        monkeypatch.setattr(_MOD, "RESOURCE_EFFECTS", ("Databayse",))
+        d = _corpus(tmp_path, {"dbish": _DB_SRC})
+        errors = _MOD.check_sentinel_coverage(d, {"dbish": _MOD.RunSpec()})
+        assert len(errors) == 1
+        assert "Databayse" in errors[0]
+        assert "could not find" in errors[0]
+        assert "no longer gated" not in errors[0]
+
+    def test_a_renamed_resource_op_is_an_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The same for an operation: `IO` exists, `read_flie` does not."""
+        monkeypatch.setattr(
+            _MOD, "RESOURCE_OPS", (("IO", "read_flie"),)
+        )
+        d = _corpus(tmp_path, {"filish": _FILE_SRC})
+        errors = _MOD.check_sentinel_coverage(d, {"filish": _MOD.RunSpec()})
+        assert len(errors) == 1
+        assert "read_flie" in errors[0]
+        assert "could not find" in errors[0]
+        assert "no longer gated" not in errors[0]
+
+    def test_a_resource_op_under_an_unknown_effect_is_an_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An operation is only meaningful under an effect that exists, and
+        looking its name up under a missing one must not be read as the
+        operation being absent."""
+        monkeypatch.setattr(
+            _MOD, "RESOURCE_OPS", (("FileIO", "read_file"),)
+        )
+        d = _corpus(tmp_path, {"filish": _FILE_SRC})
+        errors = _MOD.check_sentinel_coverage(d, {"filish": _MOD.RunSpec()})
+        assert len(errors) == 1
+        assert "FileIO" in errors[0]
+        assert "could not find" in errors[0]
+        # The discriminating half.  BOTH branches say "could not find" and
+        # both interpolate `{effect}.{op}`, so the three assertions above
+        # are satisfied by either — including by the operation-missing
+        # branch, which would have raised KeyError on `live_ops[effect]`
+        # to get there.  This pins the branch that avoids it (#1329 review).
+        assert "has no 'FileIO'" in errors[0]
+        assert "read_file" not in errors[0].split("could not find")[1]
+
+
+class TestDerivedSentinelCoverage:
+    """The two-way equality: the examples that declare an external
+    resource are exactly the specs that carry an ``expect``.
+
+    Both directions are errors.  A resource-touching example with no
+    sentinel passes on its graceful arm the day its fixture vanishes,
+    which is the failure the sentinels exist to catch; a sentinel on an
+    example with no resource re-pins stdout the dedicated tests own and
+    goes red on a cosmetic edit.
+    """
+
+    def test_a_new_database_example_needs_a_sentinel(
+        self, tmp_path: Path
+    ) -> None:
+        """The property a hard-coded triple could not have: an example
+        under a name no table has ever heard of is required to pin a
+        sentinel because of what it declares."""
+        d = _corpus(tmp_path, {"brand_new_db": _DB_SRC})
+        errors = _MOD.check_sentinel_coverage(
+            d, {"brand_new_db": _MOD.RunSpec()}
+        )
+        assert len(errors) == 1
+        assert "brand_new_db" in errors[0]
+        assert "expect" in errors[0]
+
+    def test_a_new_filesystem_example_needs_a_sentinel(
+        self, tmp_path: Path
+    ) -> None:
+        """The same through the operation half of the derivation, which
+        the effect row cannot reach: `<IO>` is what sixteen examples
+        declare, and only the `IO.read_file` call marks this one."""
+        d = _corpus(tmp_path, {"brand_new_file": _FILE_SRC})
+        errors = _MOD.check_sentinel_coverage(
+            d, {"brand_new_file": _MOD.RunSpec()}
+        )
+        assert len(errors) == 1
+        assert "brand_new_file" in errors[0]
+        assert "expect" in errors[0]
+
+    def test_a_resource_touching_example_with_a_sentinel_passes(
+        self, tmp_path: Path
+    ) -> None:
+        """The green direction, without which a check that always
+        returned an error would pass the two above."""
+        d = _corpus(tmp_path, {"dbish": _DB_SRC, "filish": _FILE_SRC})
+        assert _MOD.check_sentinel_coverage(
+            d,
+            {
+                "dbish": _MOD.RunSpec(expect="created the table"),
+                "filish": _MOD.RunSpec(expect="Hello from Vera!"),
+            },
+        ) == []
+
+    def test_a_sentinel_on_a_resource_free_example_is_an_error(
+        self, tmp_path: Path
+    ) -> None:
+        """The other direction of the equality.  Without it the rule is
+        one-way and a spec can pin stdout on any example at all — which
+        is the duplication of the dedicated output tests that the gate's
+        design deliberately refuses."""
+        d = _corpus(tmp_path, {"dbish": _DB_SRC, "pure": _CLEAN_SRC})
+        errors = _MOD.check_sentinel_coverage(
+            d,
+            {
+                "dbish": _MOD.RunSpec(expect="created the table"),
+                "pure": _MOD.RunSpec(expect="2"),
+            },
+        )
+        assert len(errors) == 1
+        assert "pure" in errors[0]
+        assert "dbish" not in errors[0]
+
+    def test_an_empty_derived_set_is_an_error_not_a_skip(
+        self, tmp_path: Path
+    ) -> None:
+        """A derivation that matches nothing must fail, not pass.
+
+        The corpus below is resource-free and its specs pin nothing, so
+        both sides of the equality are empty and the equality *holds* —
+        a vacuous green that would also be the verdict if the walk
+        broke, an effect were renamed, or the parse silently returned
+        nothing.  The whole rule would be switched off and every gate
+        run would report success.
+        """
+        d = _corpus(tmp_path, {"pure": _CLEAN_SRC, "also_pure": _CLEAN_SRC})
+        errors = _MOD.check_sentinel_coverage(
+            d, {"pure": _MOD.RunSpec(), "also_pure": _MOD.RunSpec()}
+        )
+        assert len(errors) == 1
+        assert "no longer gated" in errors[0]
+
+    def test_an_unparseable_example_is_an_error_not_an_empty_signal_set(
+        self, tmp_path: Path
+    ) -> None:
+        """A program the parse cannot read has *unknown* signals, and
+        unknown must not be spelled the same as none.
+
+        Read as none, a file that stopped parsing would silently leave
+        the sentinel rule — and the diagnosis a reader got would be the
+        opposite one, that its sentinel covers no resource.
+        """
+        d = _corpus(tmp_path, {"broken": _UNPARSEABLE_SRC, "dbish": _DB_SRC})
+        errors = _MOD.check_sentinel_coverage(
+            d,
+            {
+                "broken": _MOD.RunSpec(),
+                "dbish": _MOD.RunSpec(expect="created the table"),
+            },
+        )
+        assert len(errors) == 1
+        assert "broken" in errors[0]
+        assert "could not be parsed" in errors[0]
+
+    def test_main_computes_the_rule_and_reports_it(self) -> None:
+        """A structural pin on the wiring, the technique
+        `test_the_runner_hands_both_streams_to_the_output_check` uses and
+        for the same reason: reaching `main` end to end means running all
+        34 examples under the native runtime, which no unit test can
+        afford, so nothing else here can distinguish a `main` that
+        computes the sentinel errors from one that drops them on the
+        floor.  That mutant is the most consequential of the lot — the
+        rule would hold in this file and gate nothing in CI — so it gets
+        the tripwire.
+        """
+        import inspect
+
+        src = inspect.getsource(_MOD.main)
+        assert re.search(
+            r"sentinel_errors\s*=\s*check_sentinel_coverage\(", src
+        ), src
+        # And the result reaches the report, rather than being computed
+        # and discarded: passing `[]` in its place would satisfy a
+        # presence check on the name alone.
+        assert re.search(
+            r"error_blocks\(\s*\[\]\s*,\s*sentinel_errors\s*,", src
+        ), src
 
 
 class TestBuildCommand:
@@ -699,6 +1074,7 @@ class TestErrorBlocks:
         """
         blocks = _MOD.error_blocks(
             coverage_errors=["one coverage problem"],
+            sentinel_errors=[],
             doc_errors=["one doc problem", "another doc problem"],
             failures=[],
         )
@@ -722,13 +1098,32 @@ class TestErrorBlocks:
         assert counted == {1, 2}
 
     def test_error_blocks_are_empty_when_nothing_is_wrong(self) -> None:
-        assert _MOD.error_blocks([], [], []) == []
+        assert _MOD.error_blocks([], [], [], []) == []
 
     def test_runtime_failures_get_their_own_counted_block(self) -> None:
-        blocks = _MOD.error_blocks([], [], ["boom: exited 1"])
+        blocks = _MOD.error_blocks([], [], [], ["boom: exited 1"])
         assert (
             _sole_index(blocks, "RUNTIME FAILURES (1)")
             < _sole_index(blocks, "boom: exited 1")
+        )
+
+    def test_sentinel_errors_get_their_own_counted_block(self) -> None:
+        """The derived sentinel rule reports under its own header, for the
+        same reason the other three do: filed under `COVERAGE ERRORS (n)`
+        its lines would be attributed to a count that excludes them.
+
+        Positional, like the doc-error test above — presence plus counts
+        is satisfied by a report that emits every header and then every
+        line.
+        """
+        blocks = _MOD.error_blocks(
+            ["one coverage problem"], ["one sentinel problem"], [], [],
+        )
+        assert (
+            _sole_index(blocks, "COVERAGE ERRORS (1)")
+            < _sole_index(blocks, "one coverage problem")
+            < _sole_index(blocks, "SENTINEL COVERAGE (1)")
+            < _sole_index(blocks, "one sentinel problem")
         )
 
 
