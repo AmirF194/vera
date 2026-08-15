@@ -1000,3 +1000,52 @@ class TestBugIssueParity:
         for index in calls:
             guarded = source[max(0, index - 600) : index]
             assert "args.check_bug_issues" in guarded
+
+
+class TestErrorCodesCount:
+    """vera/README.md's `ERROR_CODES` figures, gated (#1330 review).
+
+    Three numbers in one sentence and none was read by the oracle, so the
+    registry could grow a code on any PR and the sentence would drift
+    silently.
+    """
+
+    _SENTENCE = (
+        "The `ERROR_CODES` dict in `errors.py` maps every code to a short "
+        "description (160 entries — 158 `E` codes and the two `W` warning "
+        "codes)."
+    )
+
+    def _registry(self, e: int = 158, w: int = 2) -> dict[str, object]:
+        codes: dict[str, object] = {f"E{n:03d}": "x" for n in range(e)}
+        codes.update({f"W{n:03d}": "x" for n in range(w)})
+        return codes
+
+    def test_the_shipped_sentence_matches_the_live_registry(self) -> None:
+        from vera.errors import ERROR_CODES
+
+        text = (Path(__file__).parent.parent / "vera/README.md").read_text(
+            encoding="utf-8"
+        )
+        assert _MOD.check_error_codes_count(text, ERROR_CODES) == []
+
+    def test_a_stale_total_is_caught(self) -> None:
+        errors = _MOD.check_error_codes_count(self._SENTENCE, self._registry(159, 2))
+        assert [e for e in errors if "total" in e]
+
+    def test_a_stale_e_count_is_caught(self) -> None:
+        errors = _MOD.check_error_codes_count(
+            self._SENTENCE.replace("158 `E`", "157 `E`"), self._registry()
+        )
+        assert [e for e in errors if "E-code count" in e]
+
+    def test_a_third_warning_code_is_caught(self) -> None:
+        """The sentence says "the two `W` warning codes" in prose, so the
+        only way it can go wrong is the registry gaining a third."""
+        errors = _MOD.check_error_codes_count(self._SENTENCE, self._registry(158, 3))
+        assert [e for e in errors if "two `W` codes" in e]
+
+    def test_a_reworded_sentence_is_an_error_not_a_skip(self) -> None:
+        text = "The ERROR_CODES dict has 160 entries."
+        errors = _MOD.check_error_codes_count(text, self._registry())
+        assert len(errors) == 1 and "could not find" in errors[0]

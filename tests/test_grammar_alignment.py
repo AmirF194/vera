@@ -711,3 +711,43 @@ class TestQuotedLiteralsInBodies:
     def test_an_escaped_quote_inside_a_literal_does_not_end_it(self) -> None:
         rules, _t = _MOD._symbols(r'str_lit: "\"" body "\""', {"str_lit", "body"})
         assert rules == {"str_lit", "body"}
+
+
+class TestUncomparedProductionShape:
+    """The gate's documented boundary, measured (#1330 review).
+
+    `body_drift` compares the symbols a right-hand side refers to, not
+    its alternation, grouping or repetition — stated at the top of
+    `check_grammar_alignment.py` and in TESTING.md's gate row.  A review
+    reported the consequence as a defect: an empty alternative added to
+    `effect_list` references nothing new, so the gate stays silent.
+
+    That is true, and it is the boundary rather than a regression — but
+    it was only ever claimed.  This pins it, so the day someone extends
+    the comparison to shape, this cell fails and the two documents get
+    updated with it instead of keeping a stale limitation.
+    """
+
+    def _with_empty_alternative(self) -> list[str]:
+        out: list[str] = []
+        for line in _spec_lines():
+            out.append(line)
+            if line.startswith("effect_list:"):
+                out.append("           |")
+        return out
+
+    def test_an_empty_alternative_is_not_seen(self) -> None:
+        mutated = self._with_empty_alternative()
+        assert mutated != _spec_lines(), "the injection point is gone"
+        assert _MOD.body_drift(_lark_lines(), mutated) == []
+
+    def test_a_symbol_level_change_to_the_same_rule_still_is(self) -> None:
+        """The control: the gate is silent about SHAPE, not about
+        `effect_list` — a symbol added to the same production is caught."""
+        mutated = [
+            line + "\n           | UPPER_IDENT" if line.startswith("effect_list:")
+            else line
+            for line in _spec_lines()
+        ]
+        assert [p for p in _MOD.body_drift(_lark_lines(), mutated)
+                if p.startswith("effect_list:")]

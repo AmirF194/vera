@@ -12,16 +12,17 @@ Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verificati
 
 ## Where we are
 
-11,953 tests, 244 conformance programs, 42 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
+11,960 tests, 244 conformance programs, 42 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
 
 ## The v0.1.13 burndown
 
-*Fourteen open bugs, driven to zero.*
+*Fifteen open bugs, driven to zero.*
 
 A bug class outranks stage work, so the next release takes the open `bug`-labelled set as its queue.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) carries each row's full account and stays the one place the detail lives; this table is the order of attack.
 
 | Issue | What |
 |---|---|
+| [#1331](https://github.com/aallan/vera/issues/1331) | A user `data` declaration named after a built-in container compiles at the container's width, so a check-green program loses its exports to an E602 refusal. |
 | [#1315](https://github.com/aallan/vera/issues/1315) | The checker accepts a constructor pattern over a container ADT that has no constructors. |
 | [#1320](https://github.com/aallan/vera/issues/1320) | The checker admits literal patterns over scrutinees that can never match them — the general disease behind #1315. |
 | [#1316](https://github.com/aallan/vera/issues/1316) | A main-file `type` alias named after a prelude ADT leaks into the prelude's own bodies. |

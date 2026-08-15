@@ -1166,6 +1166,49 @@ def open_bug_issues(repo: str = "aallan/vera") -> list[int]:
     return numbers
 
 
+_ERROR_CODES_CITATION = re.compile(
+    r"maps every code to a short description \((\d+) entries — (\d+) `E` codes "
+    r"and the two `W` warning codes\)"
+)
+
+
+def check_error_codes_count(readme_text: str, registry: dict[str, object]) -> list[str]:
+    """Check vera/README.md's `ERROR_CODES` figures against the registry.
+
+    Three numbers in one sentence, and none was gated: the total, the `E`
+    count, and the claim that the remainder is exactly the two `W` codes.
+    The registry is the only source for any of them, so the sentence could
+    drift on every code added (#1330 review).
+    """
+    found = _ERROR_CODES_CITATION.search(readme_text)
+    if found is None:
+        return [
+            "vera/README.md: could not find the ERROR_CODES count sentence "
+            "('maps every code to a short description (N entries — N `E` "
+            "codes and the two `W` warning codes)')"
+        ]
+    cited_total, cited_e = (int(g) for g in found.groups())
+    live_e = sum(1 for code in registry if code.startswith("E"))
+    live_w = sum(1 for code in registry if code.startswith("W"))
+    errors: list[str] = []
+    if cited_total != len(registry):
+        errors.append(
+            f"vera/README.md ERROR_CODES total: doc says {cited_total}, "
+            f"live is {len(registry)}"
+        )
+    if cited_e != live_e:
+        errors.append(
+            f"vera/README.md ERROR_CODES E-code count: doc says {cited_e}, "
+            f"live is {live_e}"
+        )
+    if live_w != 2:
+        errors.append(
+            f"vera/README.md says the remainder is two `W` codes; the "
+            f"registry has {live_w}"
+        )
+    return errors
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -1776,6 +1819,9 @@ def main() -> int:
     # 19. Check the cited corpus-program count (#1160 review)
     # ------------------------------------------------------------------
 
+    from vera.errors import ERROR_CODES
+
+    errors.extend(check_error_codes_count(vera_readme_md, ERROR_CODES))
     errors.extend(check_corpus_count(root))
     errors.extend(check_conformance_skip_total(root))
 
