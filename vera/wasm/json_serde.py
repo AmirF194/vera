@@ -74,6 +74,16 @@ _TAG_JSTRING = 3
 _TAG_JARRAY = 4
 _TAG_JOBJECT = 5
 
+# The three non-finite doubles under the names JavaScript spells them with.
+# BOTH sections below read it — the accept domain to name the value it is
+# refusing, canonical serialization to name the one it cannot render — so it
+# sits above them rather than inside either: a private constant in one section
+# consulted from the other is a dependency invisible to a reader working on
+# that half, and the accept domain is separately hand-mirrored into
+# ``vera/browser/runtime.mjs``.  Keyed on ``repr`` deliberately: a NaN is not
+# equal to itself, so a dict keyed on the float VALUE cannot retrieve it.
+_NON_FINITE_NAMES = {"nan": "NaN", "inf": "Infinity", "-inf": "-Infinity"}
+
 
 # ---------------------------------------------------------------------------
 # json_parse's accept domain (spec §9.7.1)
@@ -508,8 +518,9 @@ def read_json(
 # ensure_ascii=False)`` and ``JSON.stringify(s)`` already agree byte for
 # byte over the escape table, so the one function that is right is the
 # one that gets called.
-
-_NON_FINITE_NAMES = {"nan": "NaN", "inf": "Infinity", "-inf": "-Infinity"}
+#
+# ``_NON_FINITE_NAMES`` — read by ``format_json_number`` below — is defined
+# above the accept-domain section, the other half that reads it.
 
 
 def _non_finite_message(name: str) -> str:
