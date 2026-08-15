@@ -142,13 +142,39 @@ def strip_comment(line: str) -> str:
 
 
 def _span_end(line: str, start: int, quote: str) -> int | None:
-    """Index just past the literal or regex opened at ``start``, or ``None``."""
+    """Index just past the literal or regex opened at ``start``, or ``None``.
+
+    Inside a regex, a ``/`` within a ``[…]`` character class is a member
+    and not the closing delimiter.  Ignoring that ended the scan inside
+    the class of the chapter's annotation-comment terminal — which
+    spells it ``[^/*]`` where the Lark grammar escapes it ``[^\\/*]`` —
+    truncating the declaration.  A truncated body is not a bare regex,
+    so ``terminal_patterns`` skipped that terminal altogether: green
+    because nothing was compared, the failure this gate exists to catch
+    (#1329).  A ``]`` in the first position of a class is a member too,
+    which is why the class is not closed until at least one has been
+    consumed.
+    """
     index = start + 1
+    in_class = False
+    class_start = -1
     while index < len(line):
-        if line[index] == "\\":
+        char = line[index]
+        if char == "\\":
             index += 2
             continue
-        if line[index] == quote:
+        if quote == "/" and not in_class and char == "[":
+            in_class = True
+            class_start = index
+            index += 1
+            continue
+        if in_class:
+            first = class_start + (2 if line[class_start + 1 : class_start + 2] == "^" else 1)
+            if char == "]" and index > first:
+                in_class = False
+            index += 1
+            continue
+        if char == quote:
             return index + 1
         index += 1
     return None
@@ -397,6 +423,13 @@ def skipped_terminals(lines: list[str]) -> set[str]:
     for raw in lines:
         stripped = raw.strip()
         if not stripped:
+            # The blank ENDS the group as well as opening a new block.  A
+            # declaration block with no heading of its own would otherwise
+            # inherit whatever the previous block was, silently widening
+            # the waiver past the terminals the marker names (#1329
+            # review).  §10.2 has no blank inside the skipped group today,
+            # so this narrows the rule without moving the current result.
+            in_group = False
             at_block_start = True
             continue
         if stripped.startswith("//"):

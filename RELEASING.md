@@ -96,7 +96,9 @@ The release-prep PR must:
 4. Reconcile `KNOWN_ISSUES.md`'s Bugs table with the tracker, by running
    `python scripts/check_doc_counts.py --check-bug-issues`.  The convention
    is one row per open `bug`-labelled issue, and the check needs the GitHub
-   API, so it is opt-in rather than part of the pre-commit hook: mid-cycle
+   API — it sends `GH_TOKEN` or `GITHUB_TOKEN` when either is set, and is
+   rate limited per IP when neither is, so export one before running it —
+   so it is opt-in rather than part of the pre-commit hook: mid-cycle
    the two legitimately disagree, since a bug filed against an open PR's
    branch has an issue before it has a row.  At release time they should
    agree — that is the point at which the file is the published list.

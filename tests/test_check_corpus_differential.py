@@ -28,10 +28,16 @@ compiler that moved under it.
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import json
-from pathlib import Path
+import subprocess
+import sys
+import threading
+from pathlib import Path, PureWindowsPath
 from typing import Any
+
+import pytest
 
 _SCRIPT = (
     Path(__file__).parent.parent / "scripts" / "check_corpus_differential.py"
@@ -287,8 +293,11 @@ class TestReportAndExitCode:
         run knows how much of it was measured."""
         _MOD.emit(_info(), self._clean(), as_json=False)
         out = capsys.readouterr().out
-        assert "1" in out
-        assert "neither revision" in out
+        # The whole line, not just the digit: `identical WAT: 1` and the
+        # run's SHA both contain a "1", so a bare `"1" in out` stayed green
+        # on a regression that printed `compiled at neither revision: 0`
+        # (#1329 review).
+        assert "compiled at neither revision: 1" in out
 
     def test_an_unreported_program_exits_one(self, capsys: Any) -> None:
         """A truncated run is a failed run, not a clean one — even with
@@ -354,15 +363,29 @@ class TestCompilerCanary:
         ) is None
 
     def test_a_compiler_outside_the_expected_root_is_an_error(self) -> None:
+        root = Path("/scratch/base")
         message = _MOD.canary_error(
-            "/usr/lib/site-packages/vera/__init__.py",
-            Path("/scratch/base"),
-            "base",
+            "/usr/lib/site-packages/vera/__init__.py", root, "base"
         )
         assert message is not None
         assert "base" in message
         assert "/usr/lib/site-packages/vera/__init__.py" in message
-        assert "/scratch/base" in message
+        # The root is asserted by the property "it is this path", not by a
+        # POSIX shape: the message renders it with the host's separators,
+        # and `\scratch\base` is the correct rendering on Windows.
+        assert str(root) in message
+        assert "different checkout" in message
+
+    def test_the_root_in_the_message_is_the_root_it_was_given(self) -> None:
+        """Non-vacuity for the assertion above: `str(root) in message`
+        would also hold if the message quoted some other path that
+        happened to contain it, so a different root must change it."""
+        elsewhere = _MOD.canary_error(
+            "/usr/lib/site-packages/vera/__init__.py", Path("/other/root"), "base"
+        )
+        assert elsewhere is not None
+        assert str(Path("/other/root")) in elsewhere
+        assert str(Path("/scratch/base")) not in elsewhere
 
     def test_an_import_failure_is_an_error_that_says_so(self) -> None:
         """A side that could not import `vera` at all reports no path;
@@ -463,6 +486,30 @@ class TestFailureReason:
         assert "/repo/x.vera" not in reason
         assert "x.vera" in reason
 
+    def test_a_posix_form_path_is_stripped_under_a_windows_renderer(self) -> None:
+        """The diagnostic's spelling of the path need not be the host's.
+
+        Stripping on ``str(path)`` alone is a separator-shaped match: on
+        Windows the same path renders `\\repo\\x.vera`, so a diagnostic
+        carrying the POSIX form goes unstripped and its absolute path
+        pushes the message past the truncation — the silent
+        matches-nothing failure, not a loud one.  ``PureWindowsPath``
+        reproduces that rendering on any host, so this cell fails on
+        macOS too rather than only in the Windows CI cell.
+        """
+        stderr = "[E154] Error at /repo/x.vera, line 9, column 8:\n"
+        reason = _MOD._first_error(stderr, PureWindowsPath("/repo/x.vera"))
+        assert "/repo/x.vera" not in reason
+        assert "x.vera" in reason
+        assert "[E154]" in reason
+
+    def test_a_native_form_path_is_stripped_under_a_windows_renderer(self) -> None:
+        """The complement: the same path as Windows itself would print it."""
+        stderr = "[E154] Error at \\repo\\x.vera, line 9, column 8:\n"
+        reason = _MOD._first_error(stderr, PureWindowsPath("/repo/x.vera"))
+        assert "\\repo\\x.vera" not in reason
+        assert "x.vera" in reason
+
     def test_a_crash_reports_its_exception_not_its_first_line(self) -> None:
         """No diagnostic marker at all — a compiler crash.  The useful
         line is the exception, which is last."""
@@ -496,3 +543,168 @@ class TestNotAPreCommitHook:
             encoding="utf-8"
         )
         assert "check_corpus_differential" not in config
+
+
+class TestParallelCollection:
+    """The `jobs > 1` branch, which no cell reached (#1329 review).
+
+    Every other collection cell runs at the default `jobs=1`, so the
+    sequential branch was covered and the parallel one was not.  The
+    parallel branch pairs keys with results *positionally* — it zips a
+    list built from `files` against `ThreadPoolExecutor.map`'s output —
+    so it is correct only while `map` yields in input order.  If that
+    ever stopped holding, every artifact would be attributed to the
+    wrong program and the run would invent movers out of nothing, which
+    is the one failure this instrument must not have.
+    """
+
+    def test_results_stay_paired_with_their_keys(self) -> None:
+        root = Path("/repo")
+        files = [root / "examples" / f"p{index}.vera" for index in range(24)]
+
+        def fake_compile(path: Path) -> Any:
+            return _ok(f"digest-of-{path.name}")
+
+        results = _MOD.collect(files, root, fake_compile, jobs=4)
+
+        assert len(results) == len(files)
+        for path in files:
+            assert results[f"examples/{path.name}"].digest == f"digest-of-{path.name}"
+
+    def test_the_parallel_branch_is_the_one_being_exercised(self) -> None:
+        """Non-vacuity: `jobs=4` must not quietly fall through to the
+        sequential path, or this class tests nothing new."""
+        root = Path("/repo")
+        files = [root / "examples" / f"p{index}.vera" for index in range(8)]
+        threads: set[int] = set()
+
+        def fake_compile(path: Path) -> Any:
+            threads.add(threading.get_ident())
+            return _ok(path.name)
+
+        _MOD.collect(files, root, fake_compile, jobs=4)
+        assert len(threads) > 1, "every compile ran on the calling thread"
+
+    def test_both_branches_agree(self) -> None:
+        root = Path("/repo")
+        files = [root / "examples" / f"p{index}.vera" for index in range(8)]
+
+        def fake_compile(path: Path) -> Any:
+            return _ok(f"digest-of-{path.name}")
+
+        assert _MOD.collect(files, root, fake_compile, jobs=1) == _MOD.collect(
+            files, root, fake_compile, jobs=4
+        )
+
+
+class TestSideEnvironment:
+    """`_side_env`, which had no test at all (#1329 review)."""
+
+    def test_pythonpath_is_replaced_not_extended(
+        self, monkeypatch: Any
+    ) -> None:
+        """The caller's `PYTHONPATH` usually names the head checkout —
+        that is how this repo is driven.  Inheriting it on the base side
+        puts the head compiler first on the path, so the differential
+        compares a revision against itself and reports zero movers: the
+        vacuity `canary_error` exists to catch, arriving one layer down.
+        """
+        monkeypatch.setenv("PYTHONPATH", "/repo")
+        env = _MOD._side_env(Path("/scratch/base"))
+        assert env["PYTHONPATH"] == str(Path("/scratch/base"))
+        assert "/repo" not in env["PYTHONPATH"]
+
+    def test_bytecode_writing_is_off_for_both_checkouts(
+        self, monkeypatch: Any
+    ) -> None:
+        """Scrubbed from the ambient environment first, deliberately.
+
+        This suite is itself run with `PYTHONDONTWRITEBYTECODE=1`, and
+        `_side_env` copies `os.environ` — so without the scrub the
+        assertion is satisfied by the caller's shell and passes with the
+        line under test deleted.  It measures the function only when the
+        variable is absent to begin with.
+        """
+        monkeypatch.delenv("PYTHONDONTWRITEBYTECODE", raising=False)
+        env = _MOD._side_env(Path("/scratch/base"))
+        assert env["PYTHONDONTWRITEBYTECODE"] == "1"
+
+    def test_the_rest_of_the_environment_is_inherited(
+        self, monkeypatch: Any
+    ) -> None:
+        """Only those two keys are the function's business: the base
+        compiler still needs the venv's interpreter and its PATH."""
+        monkeypatch.setenv("VERA_SIDE_ENV_PROBE", "kept")
+        assert _MOD._side_env(Path("/scratch/base"))["VERA_SIDE_ENV_PROBE"] == "kept"
+
+
+class TestTimeoutValidation:
+    """`--timeout` must be able to elapse (#1329 review).
+
+    Zero or negative expires before any compile finishes, so both sides
+    fail every program, `compare` counts them all as `both_failed`, and
+    `emit` reports "No movers" with exit 0 over a corpus that never
+    compiled — a green run measuring nothing.
+    """
+
+    @pytest.mark.parametrize("value", ["0", "-1"])
+    def test_a_non_positive_budget_is_rejected(self, value: str) -> None:
+        with pytest.raises(argparse.ArgumentTypeError, match="greater than zero"):
+            _MOD._positive_seconds(value)
+
+    def test_a_positive_budget_is_accepted(self) -> None:
+        assert _MOD._positive_seconds("120") == 120
+
+    @pytest.mark.parametrize("value", ["0", "-1"])
+    def test_the_parser_refuses_it_too(self, value: str) -> None:
+        """Wired into `--timeout`, not merely defined beside it."""
+        with pytest.raises(SystemExit):
+            _MOD._parse_args(["--timeout", value])
+
+
+class TestUndecodableCompilerOutput:
+    """A compiler byte the codec cannot read must stay data (#1329 review).
+
+    Strict decoding raises `UnicodeDecodeError` out of `subprocess.run`
+    itself — a `ValueError`, which neither handler in `compile_one`
+    catches — and `collect` iterates `ThreadPoolExecutor.map`, so that
+    one program would abort the whole corpus run.
+    """
+
+    def test_the_compile_asks_for_lenient_decoding(
+        self, monkeypatch: Any
+    ) -> None:
+        seen: dict[str, Any] = {}
+
+        def fake_run(*args: Any, **kwargs: Any) -> Any:
+            seen.update(kwargs)
+            raise subprocess.TimeoutExpired(cmd="x", timeout=1)
+
+        monkeypatch.setattr(_MOD.subprocess, "run", fake_run)
+        _MOD.compile_one("python", Path("/scratch"), 5, Path("/repo/a.vera"))
+        assert seen.get("encoding") == "utf-8"
+        assert seen.get("errors") == "replace"
+
+    def test_strict_decoding_is_what_would_have_raised(self) -> None:
+        """The reason the kwarg above matters, measured rather than
+        asserted: the same bytes through the same call raise on strict
+        and survive on replace."""
+        program = "import sys; sys.stdout.buffer.write(b'\\x97')"
+        command = [sys.executable, "-c", program]
+        with pytest.raises(UnicodeDecodeError):
+            subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+        lenient = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        assert lenient.returncode == 0

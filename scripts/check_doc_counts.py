@@ -914,7 +914,12 @@ _SKIP_REASONS = (
     ("nondeterministic", "nondeterministic ops"),
 )
 _SKIP_LINE = re.compile(r"^SKIPPED \[(\d+)\] (.*)$", re.M)
-_PYTEST_SUMMARY = re.compile(r"(\d+) passed, (\d+) skipped")
+# pytest omits a category with a zero count, so "174 passed in 3.1s" and
+# "52 skipped in 3.1s" are both well-formed summaries.  A pattern
+# requiring both made either one unreadable, and an unreadable report is
+# a gate failure — a false one (#1329 review).
+_PYTEST_TOTALS = re.compile(r"(\d+) (passed|skipped)\b")
+_PYTEST_SUMMARY = re.compile(r"\d+ (?:passed|skipped)\b[^\n]*\bin [\d.]+s")
 _DUAL_TARGET_FIGURES = (
     ("tested", r"(\d+) are dual-tested"),
     ("skipped", r"and (\d+) skip"),
@@ -935,6 +940,7 @@ def parse_dual_target_report(report: str) -> DualTargetSplit | None:
     summary = _PYTEST_SUMMARY.search(report)
     if summary is None:
         return None
+    totals = {kind: int(n) for n, kind in _PYTEST_TOTALS.findall(summary.group(0))}
     counts = dict.fromkeys((name for name, _ in _SKIP_REASONS), 0)
     for raw, reason in _SKIP_LINE.findall(report):
         for name, marker in _SKIP_REASONS:
@@ -943,10 +949,10 @@ def parse_dual_target_report(report: str) -> DualTargetSplit | None:
                 break
         else:
             return None
-    skipped = int(summary.group(2))
+    skipped = totals.get("skipped", 0)
     if sum(counts.values()) != skipped:
         return None
-    return DualTargetSplit(int(summary.group(1)), skipped, **counts)
+    return DualTargetSplit(totals.get("passed", 0), skipped, **counts)
 
 
 def dual_target_split(root: Path) -> DualTargetSplit | None:
@@ -954,15 +960,23 @@ def dual_target_split(root: Path) -> DualTargetSplit | None:
     pytest_bin = root / ".venv/bin/pytest"
     if not pytest_bin.exists():
         pytest_bin = Path("pytest")
-    result = subprocess.run(
-        [str(pytest_bin), _DUAL_TARGET_TEST, "-q", "-rs", "-p", "no:randomly"],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        cwd=str(root),
-        timeout=300,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            [str(pytest_bin), _DUAL_TARGET_TEST, "-q", "-rs", "-p", "no:randomly"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            cwd=str(root),
+            timeout=300,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        # Every other check here turns a failure into a string in `errors`
+        # and lets `main` print the whole list.  Letting this one raise
+        # would end the run on a traceback and the other twenty checks
+        # would never report — and this call is on the default path, so
+        # the pre-commit hook takes it every time (#1329 review).
+        return None
     if result.returncode != 0:
         return None
     return parse_dual_target_report(result.stdout)
@@ -1102,8 +1116,19 @@ def check_bug_issue_parity(rows: list[int], open_bugs: list[int]) -> list[str]:
     return errors
 
 
+class BugQueryError(RuntimeError):
+    """The tracker could not be queried — a failed run, not an empty one."""
+
+
 def open_bug_issues(repo: str = "aallan/vera") -> list[int]:
-    """Open issue numbers carrying the `bug` label, from the GitHub API."""
+    """Open issue numbers carrying the `bug` label, from the GitHub API.
+
+    Raises `BugQueryError` rather than returning `[]` on a transport or
+    payload failure.  `check_bug_issue_parity` reads an empty list as
+    "the query failed", so returning one here would reach the right
+    verdict for the wrong reason — and the caller could no longer tell a
+    burned-down tracker from an unreachable one (#1329 review).
+    """
     numbers: list[int] = []
     for page in range(1, 11):
         url = (
@@ -1114,9 +1139,14 @@ def open_bug_issues(repo: str = "aallan/vera") -> list[int]:
         token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
         if token:
             request.add_header("Authorization", f"Bearer {token}")
-        # The URL is built from a caller-supplied repository, never from input.
-        with urlopen(request, timeout=30) as response:
-            payload = json.load(response)
+        try:
+            # The URL is built from a caller-supplied repository, not input.
+            with urlopen(request, timeout=30) as response:
+                payload = json.load(response)
+        except (OSError, ValueError) as exc:
+            # URLError and HTTPError are OSError; a socket timeout is too,
+            # and a malformed body raises JSONDecodeError, a ValueError.
+            raise BugQueryError(f"could not query {repo} for open bugs: {exc}") from exc
         if not payload:
             break
         numbers += [
@@ -1763,7 +1793,10 @@ def main() -> int:
     if args.check_bug_issues:
         rows = bug_rows(known_issues)
         if rows is not None:
-            errors.extend(check_bug_issue_parity(rows, open_bug_issues()))
+            try:
+                errors.extend(check_bug_issue_parity(rows, open_bug_issues()))
+            except BugQueryError as exc:
+                errors.append(f"KNOWN_ISSUES.md: {exc}")
 
     # ------------------------------------------------------------------
     # Report

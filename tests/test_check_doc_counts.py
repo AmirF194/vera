@@ -26,6 +26,7 @@ or rewording switches the gate off.
 from __future__ import annotations
 
 import importlib.util
+import re
 from pathlib import Path
 from typing import Any
 
@@ -844,6 +845,24 @@ class TestDualTargetRow:
     def test_a_report_with_no_summary_line_is_an_error_not_a_skip(self) -> None:
         assert _MOD.parse_dual_target_report("nothing to see here\n") is None
 
+    def test_a_summary_omitting_the_skipped_category_is_read(self) -> None:
+        """pytest prints no category with a zero count, so `174 passed in
+        3.1s` is a well-formed summary.  Requiring both groups made it
+        unreadable, and an unreadable report is reported as drift — a
+        false failure (#1329 review)."""
+        split = _MOD.parse_dual_target_report("174 passed in 3.15s\n")
+        assert split == _MOD.DualTargetSplit(174, 0, 0, 0, 0)
+
+    def test_a_summary_omitting_the_passed_category_is_read(self) -> None:
+        """The complement: every run-level programme skipped."""
+        report = (
+            "SKIPPED [52] host family: map\n"
+            "52 skipped in 3.15s\n"
+        )
+        assert _MOD.parse_dual_target_report(report) == _MOD.DualTargetSplit(
+            0, 52, 52, 0, 0
+        )
+
 
 # ---------------------------------------------------------------------------
 # KNOWN_ISSUES' Bugs table (#1290 rider): one row per open `bug` issue.
@@ -871,7 +890,20 @@ class TestBugRows:
         )
         rows = _MOD.bug_rows(text)
         assert rows is not None
-        assert len(rows) > 5, "the Bugs table is no longer being read"
+        # The floor is derived from the file, not a literal: `> 5` would
+        # fail the day the tracker is burned down to five open bugs, which
+        # is a project state rather than a regression — and it would not
+        # catch the parser returning a SHORT list, which is the failure
+        # worth naming (#1329 review).
+        section = re.search(r"^## Bugs[ \t]*$(.*?)(?=^## )", text, re.M | re.S)
+        assert section is not None
+        table = [
+            line
+            for line in section.group(1).splitlines()
+            if line.startswith("|") and not set(line) <= set("|- ")
+        ][1:]  # drop the header row
+        assert table, "the Bugs table is no longer being read"
+        assert len(rows) == len(table)
         assert len(set(rows)) == len(rows)
 
     def test_a_row_with_no_issue_link_is_an_error(self) -> None:
@@ -938,6 +970,17 @@ class TestBugIssueParity:
         """A pre-commit hook must not depend on the GitHub API."""
         source = _SCRIPT.read_text(encoding="utf-8")
         assert "--check-bug-issues" in source
-        index = source.rindex("check_bug_issue_parity(")
-        guarded = source[max(0, index - 600) : index]
-        assert "args.check_bug_issues" in guarded
+        # EVERY call site, not just the last one: `rindex` inspected only
+        # the final occurrence, so an unguarded call added above it would
+        # leave this green while the pre-commit hook made a network call
+        # (#1329 review).
+        calls = [
+            index
+            for index in range(len(source))
+            if source.startswith("check_bug_issue_parity(", index)
+            and not source.startswith("def check_bug_issue_parity(", max(0, index - 4))
+        ]
+        assert calls, "the parity check is no longer called at all"
+        for index in calls:
+            guarded = source[max(0, index - 600) : index]
+            assert "args.check_bug_issues" in guarded

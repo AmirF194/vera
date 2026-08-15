@@ -72,3 +72,9 @@ node_modules/
 # and verifies, so it produces neither; `pytest tests/` leaves the tree clean.)
 /hello.txt
 /examples/hello.txt
+
+# `scripts/check_corpus_differential.py` checks the base revision out here
+# by default, keyed by SHA and reused across runs.  Output, not source, and
+# deliberately repository-local rather than under a shared temporary
+# directory (its contents end up on the base side's PYTHONPATH).
+/.corpus-differential/

@@ -92,10 +92,9 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import NamedTuple
 
 
@@ -105,6 +104,31 @@ from typing import NamedTuple
 # program while ignoring the source it is built from, the gap
 # `scripts/check_corpus_canonical.py` records having had.
 _CORPUS_DIRS = ("examples", "tests/conformance")
+
+# The base checkout's default home.  Repository-local rather than under
+# `tempfile.gettempdir()`: the path is fully predictable (a fixed directory
+# name plus a public commit SHA), `base_checkout` reuses a pre-existing
+# directory, and `_side_env` then puts it on PYTHONPATH — so on a shared
+# machine another local user could plant a `vera` package there and the base
+# side would import it.  The canary cannot object, because the planted
+# package sits under the expected root (#1329 review).
+_DEFAULT_WORK_DIR = Path(__file__).resolve().parent.parent / ".corpus-differential"
+
+
+def _positive_seconds(value: str) -> int:
+    """An `argparse` type for a budget that must be able to elapse.
+
+    Zero or negative expires before any compile finishes, so both sides
+    fail every program, `compare` counts them all as `both_failed`, and
+    the run reports "No movers" over a corpus that never compiled.
+    """
+    seconds = int(value)
+    if seconds <= 0:
+        raise argparse.ArgumentTypeError(
+            f"--timeout must be greater than zero, not {seconds}"
+        )
+    return seconds
+
 
 # Per-file compile budget.  Generous — a corpus program compiles in well
 # under a second — so this only fires on a genuine hang, and a hang on
@@ -356,7 +380,7 @@ def probe_compiler(python: str, root: Path) -> str:
     return result.stdout if result.returncode == 0 else ""
 
 
-def _first_error(stderr: str, path: Path) -> str:
+def _first_error(stderr: str, path: PurePath) -> str:
     """The compile's reason, in one line.
 
     A Vera diagnostic is a *block* — marker line, quoted source, caret,
@@ -375,6 +399,14 @@ def _first_error(stderr: str, path: Path) -> str:
     already attached to a named program, and a corpus file's absolute
     path under a scratch checkout is long enough on its own to push the
     diagnostic past the truncation.
+
+    Both spellings of that path are stripped.  Matching on ``str(path)``
+    alone ties the strip to the host's separator, and a diagnostic is
+    free to print the POSIX form on Windows — whereupon the strip
+    matches nothing, silently, and the truncation eats the message
+    instead of the path.  The parameter is a ``PurePath`` rather than a
+    ``Path`` for the same reason: nothing here touches the filesystem,
+    and the wider type lets a test render a Windows path on any host.
     """
     lines = [line.strip() for line in stderr.splitlines()]
     nonempty = [line for line in lines if line]
@@ -386,7 +418,9 @@ def _first_error(stderr: str, path: Path) -> str:
     else:
         reason = nonempty[-1] if nonempty else "compile failed with no output"
 
-    return reason.replace(str(path), path.name)[:160]
+    for rendering in (str(path), path.as_posix()):
+        reason = reason.replace(rendering, path.name)
+    return reason[:160]
 
 
 def compile_one(
@@ -406,6 +440,13 @@ def compile_one(
             capture_output=True,
             text=True,
             encoding="utf-8",
+            # A compiler is free to emit a byte this codec cannot read, and
+            # strict decoding would raise UnicodeDecodeError out of
+            # `subprocess.run` — a ValueError that neither handler below
+            # catches, aborting the whole corpus run through
+            # `ThreadPoolExecutor.map`.  An undecodable diagnostic is data
+            # like any other failure (#1329 review).
+            errors="replace",
             cwd=str(compiler_root),
             env=_side_env(compiler_root),
             stdin=subprocess.DEVNULL,
@@ -581,7 +622,14 @@ def failure_lines(info: RunInfo, comparison: Comparison) -> list[str]:
             "it moved.  Reproduce one with:",
             "",
             "  vera compile --wat <program>            # working tree",
-            f"  (cd {info.base_root} && vera compile --wat <program>)",
+            f"  (cd {info.base_root} && vera compile --wat "
+            f"{info.head_root}/<program>)",
+            "",
+            "<program> is the mover's path above, and BOTH commands compile "
+            "the working tree's copy of it — that is what the differential "
+            "compared.  A relative path in the second command would compile "
+            "the base checkout's own copy instead, which is a different "
+            "input whenever the corpus source has changed.",
         ]
     if comparison.unreported:
         if lines:
@@ -640,16 +688,17 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--work-dir",
-        default=str(Path(tempfile.gettempdir()) / "vera-corpus-differential"),
+        default=str(_DEFAULT_WORK_DIR),
         help="where the base revision is checked out; the checkout is "
-             "keyed by SHA, reused, and never deleted",
+             "keyed by SHA, reused, and never deleted "
+             "(default: %(default)s)",
     )
     parser.add_argument(
         "--jobs", type=int, default=min(8, os.cpu_count() or 1),
         help="parallel compiles per side (default: %(default)s)",
     )
     parser.add_argument(
-        "--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS,
+        "--timeout", type=_positive_seconds, default=DEFAULT_TIMEOUT_SECONDS,
         help="per-program compile budget in seconds (default: %(default)s)",
     )
     parser.add_argument(

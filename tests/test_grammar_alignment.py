@@ -370,6 +370,31 @@ class TestTerminalAudit:
         assert "BLOCK_COMMENT" in _MOD.skipped_terminals(_spec_lines())
         assert "ANNOTATION_COMMENT" in _MOD.skipped_terminals(_spec_lines())
 
+    def test_a_blank_line_closes_the_skipped_group(self) -> None:
+        """A block with no heading of its own inherits nothing.
+
+        `in_group` changed only when a comment opened a block, so a
+        declaration block following a blank line kept whatever the
+        previous block was — silently waiving terminals the marker never
+        named (#1329 review).
+        """
+        # Injected directly AFTER the skipped group, which is the only
+        # placement that distinguishes: appended at the end of the fence
+        # the block would follow a group that is not the skipped one, so
+        # it inherits `False` and the cell passes either way.
+        spec: list[str] = []
+        for line in _spec_lines():
+            spec.append(line)
+            if line.startswith("ANNOTATION_COMMENT:"):
+                spec += ["", 'UNHEADED_TERMINAL: "unheaded"']
+        assert 'UNHEADED_TERMINAL: "unheaded"' in spec, "injection point gone"
+        assert "ANNOTATION_COMMENT" in _MOD.skipped_terminals(spec), (
+            "the skipped group itself must still be recognised"
+        )
+        assert "UNHEADED_TERMINAL" not in _MOD.skipped_terminals(spec)
+        problems = _MOD.terminal_audit(_lark_lines(), spec)
+        assert [p for p in problems if "UNHEADED_TERMINAL" in p]
+
     def test_the_skipped_group_does_not_swallow_the_whole_fence(self) -> None:
         skipped = _MOD.skipped_terminals(_spec_lines())
         assert "FN" not in skipped and "INT_LIT" not in skipped
@@ -496,10 +521,26 @@ class TestBodyDrift:
         ]
 
     def test_a_rule_referring_to_itself_is_not_drift(self) -> None:
-        """Lark spells repetition with left recursion, the chapter with `*`."""
-        lark = _MOD.rule_bodies(_lark_lines())
-        assert "add_expr" in "".join(lark["add_expr"]), "no longer left-recursive"
-        assert not [p for p in _MOD.body_drift(_lark_lines(), _spec_lines())]
+        """Lark spells repetition with left recursion, the chapter with `*`.
+
+        Asserted at the symbol level.  Re-asserting that `body_drift`
+        reports nothing only repeats the clean-file cell above and would
+        stay green if the exclusion were dropped and the chapter grew a
+        matching self-reference (#1329 review).
+        """
+        lark_bodies = _MOD.rule_bodies(_lark_lines())
+        spec_bodies = _MOD.rule_bodies(_spec_lines())
+        assert "add_expr" in "".join(lark_bodies["add_expr"]), "not left-recursive"
+
+        rules, _terminals, _inlined = _MOD._spec_symbols(
+            "add_expr", spec_bodies, set(spec_bodies)
+        )
+        assert "add_expr" not in rules
+        lark_rules, _t, _u = _MOD._lark_symbols(
+            "add_expr", lark_bodies, set(lark_bodies), {}
+        )
+        assert "add_expr" not in lark_rules
+        assert lark_rules, "the extraction returned nothing at all"
 
     def test_a_waived_production_is_folded_at_the_rule_the_waiver_names(self) -> None:
         """`fn_call` inlines what the chapter factors into `module_call`."""
@@ -511,14 +552,38 @@ class TestBodyDrift:
         assert "module_call" not in rules and "qualified_call" not in rules
 
     def test_an_aliased_alternative_is_not_read_as_a_rule_reference(self) -> None:
+        """`func_call` is a real alias — `vera/grammar.lark` spells the
+        first `fn_call` alternative `-> func_call` — so this assertion is
+        falsifiable, and the mutation that stops `rule_bodies` stripping
+        aliases kills it.  The positive control below is what stops an
+        empty body from satisfying it.
+        """
         bodies = _MOD.rule_bodies(_lark_lines())
-        assert "func_call" not in "".join(bodies["fn_call"])
+        aliases = {alias for rule, alias in _MOD.extract_lark_aliases(_lark_text())
+                   if rule == "fn_call"}
+        assert "func_call" in aliases, "the alias this cell rests on is gone"
+
+        body = "".join(bodies["fn_call"])
+        assert "LOWER_IDENT" in body, "positive control: the body was read"
+        for alias in aliases:
+            assert alias not in body
 
 
 class TestCommentStripping:
-    def test_a_regex_body_ending_in_a_slash_is_not_truncated(self) -> None:
+    @pytest.mark.parametrize(
+        "line",
+        [
+            # Lark's spelling, which escapes the class slash.
+            r"%ignore /\/\*[^*]*\*+([^\/*][^*]*\*+)*\//",
+            # The chapter's spelling, which does not — the case that was
+            # truncated inside the character class (#1329 review).
+            r"ANNOTATION_COMMENT: /\/\*[^*]*\*+([^/*][^*]*\*+)*\//",
+        ],
+    )
+    def test_a_regex_body_ending_in_a_slash_is_not_truncated(
+        self, line: str
+    ) -> None:
         """`line.split("//")[0]` cut the annotation-comment terminal in half."""
-        line = r"%ignore /\/\*[^*]*\*+([^\/*][^*]*\*+)*\//"
         assert _MOD.strip_comment(line) == line
 
     def test_a_comment_after_a_regex_is_still_removed(self) -> None:
@@ -531,3 +596,77 @@ class TestCommentStripping:
 
     def test_a_whole_line_comment_is_still_removed(self) -> None:
         assert _MOD.strip_comment("// assert_stmt: gone").strip() == ""
+
+
+class TestCharacterClasses:
+    """A `/` inside a regex character class is not the delimiter (#1329).
+
+    `strip_comment` scanned a `/…/` body for the next unescaped `/`, and
+    the chapter spells the annotation-comment terminal `[^/*]` where the
+    Lark grammar spells it `[^\\/*]`.  The scan therefore ended inside
+    the class, truncating the declaration — and a truncated body is not
+    a bare regex, so `terminal_patterns` skipped the terminal entirely.
+    The gate was green on that terminal by never looking at it.
+    """
+
+    def test_the_specs_annotation_comment_line_survives_the_scan(self) -> None:
+        line = next(
+            raw
+            for raw in _spec_lines()
+            if raw.startswith("ANNOTATION_COMMENT:")
+        )
+        assert "[^/*]" in line, "the chapter no longer spells the class bare"
+        assert _MOD.strip_comment(line) == line
+
+    def test_the_annotation_comment_pattern_is_actually_compared(self) -> None:
+        """Non-vacuity: the terminal must reach the pattern check at all.
+
+        A truncated body fails `_BARE_REGEX`, and a terminal that is not
+        a bare regex is skipped by design — so this is the assertion that
+        separates "compared and equal" from "never compared".
+        """
+        body = _MOD.terminal_declarations(_spec_lines())["ANNOTATION_COMMENT"]
+        assert _MOD._BARE_REGEX.match(body), f"not a bare regex: {body!r}"
+
+    def test_the_two_files_spell_the_class_differently_and_still_agree(self) -> None:
+        spec = _MOD.terminal_declarations(_spec_lines())["ANNOTATION_COMMENT"]
+        lark = next(
+            body for body in _MOD.ignore_patterns(_lark_lines()) if "\\*" in body
+        )
+        assert spec != lark, "the normalisation would be doing no work"
+        assert _MOD.normalise_pattern(spec) == _MOD.normalise_pattern(lark)
+
+    def test_a_drifted_annotation_comment_is_now_caught(self) -> None:
+        """The gate must fail on this terminal, not skip it.
+
+        Before the character-class fix this mutation left the gate green:
+        the body was truncated, so no pattern was compared at all.
+        """
+        # The drift keeps the bare `[^/*]` class the chapter really uses,
+        # so this cell exercises the truncation rather than sidestepping
+        # it: with an escaped class it would be caught either way.
+        spec = [
+            r"ANNOTATION_COMMENT: /\/\*[^/*]XX[^*]*\*+\//"
+            if line.startswith("ANNOTATION_COMMENT:")
+            else line
+            for line in _spec_lines()
+        ]
+        problems = _MOD.terminal_patterns(_lark_lines(), spec)
+        assert [p for p in problems if "ANNOTATION_COMMENT" in p]
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            r"T: /[^/*]/",
+            r"T: /[/]/",
+            r"T: /[abc/def]x/",
+            r"T: /[^]/]/",
+        ],
+    )
+    def test_a_slash_inside_a_character_class_is_not_the_delimiter(
+        self, line: str
+    ) -> None:
+        assert _MOD.strip_comment(line) == line
+
+    def test_a_comment_after_a_class_bearing_regex_is_still_removed(self) -> None:
+        assert _MOD.strip_comment(r"T: /[^/*]/  // note") == r"T: /[^/*]/  "

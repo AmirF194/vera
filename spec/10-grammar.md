@@ -24,7 +24,10 @@ LINE_COMMENT: /--[^\n]*/
 // Block comments nest (Section 1.3), so they are not a regular language and
 // have no regex form.  The reference implementation removes them in
 // vera/lexical.py, by counting depth, before the parser sees the text.
-BLOCK_COMMENT: "{-" (BLOCK_COMMENT | /[\s\S]/)* "-}"
+// The character alternative excludes both delimiters, so a `{-` inside the
+// body opens a nested comment and must be closed: `{- {- -}` is not a
+// block comment, and the implementation reports it unterminated (E020).
+BLOCK_COMMENT: "{-" (BLOCK_COMMENT | /(?!\{-|-\})[\s\S]/)* "-}"
 ANNOTATION_COMMENT: /\/\*[^*]*\*+([^/*][^*]*\*+)*\//
 
 // Keywords

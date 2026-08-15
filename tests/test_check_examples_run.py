@@ -138,6 +138,20 @@ public fn main(-> @Int)
 _UNPARSEABLE_SRC = "public fn main(-> @Int) { this is not Vera at all\n"
 
 
+# A module-qualified effect whose tail is `DB`.  `Mod.DB` names a user
+# effect in another module, not the built-in the registry check validated,
+# so the derivation must not credit it (#1329 review).
+_QUALIFIED_DB_SRC = """\
+public fn main(-> @Int)
+  requires(true)
+  ensures(true)
+  effects(<Mod.DB>)
+{
+  0
+}
+"""
+
+
 def _corpus(tmp_path: Path, programs: dict[str, str]) -> Path:
     d = tmp_path / "examples"
     d.mkdir(exist_ok=True)
@@ -379,6 +393,39 @@ class TestResourceSignalDerivation:
         d = _corpus(tmp_path, {"prose": _COMMENTED_SRC})
         assert _MOD.resource_signals(d / "prose.vera") == frozenset()
 
+    def test_a_pinned_spec_whose_file_is_gone_is_not_mis_diagnosed(
+        self, tmp_path: Path
+    ) -> None:
+        """The derivation never opened it, so it cannot say what it
+        declares.  Building `pinned` from every entry in `run_specs` put
+        this spec into `pinned - signals_by_name`, where it drew the
+        spurious-sentinel wording — "declares no external resource" —
+        for a file that does not exist (#1329 review).
+        """
+        d = _corpus(tmp_path, {"present": _DB_SRC})
+        specs = {
+            "present": _MOD.RunSpec(expect="created the table"),
+            "vanished": _MOD.RunSpec(expect="never printed"),
+        }
+        errors = _MOD.check_sentinel_coverage(d, specs)
+        assert not [e for e in errors if "vanished" in e]
+
+    def test_a_module_qualified_effect_is_not_the_builtin(
+        self, tmp_path: Path
+    ) -> None:
+        """`Mod.DB` is another module's effect, not the registry's `DB`.
+
+        `resource_signals` narrows on `isinstance(ref, ast.EffectRef)`
+        precisely to drop it, and no cell reached that decision: a mutant
+        dropping the narrowing, or one crediting any reference whose tail
+        is `DB`, passed every other case here.  This is the boundary in
+        the direction `_COMMENTED_SRC` does not cover — that one is prose,
+        this one is a real declaration of a different effect (#1329
+        review).
+        """
+        d = _corpus(tmp_path, {"qualified": _QUALIFIED_DB_SRC})
+        assert _MOD.resource_signals(d / "qualified.vera") == frozenset()
+
     def test_a_renamed_resource_effect_is_an_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -426,6 +473,13 @@ class TestResourceSignalDerivation:
         assert len(errors) == 1
         assert "FileIO" in errors[0]
         assert "could not find" in errors[0]
+        # The discriminating half.  BOTH branches say "could not find" and
+        # both interpolate `{effect}.{op}`, so the three assertions above
+        # are satisfied by either — including by the operation-missing
+        # branch, which would have raised KeyError on `live_ops[effect]`
+        # to get there.  This pins the branch that avoids it (#1329 review).
+        assert "has no 'FileIO'" in errors[0]
+        assert "read_file" not in errors[0].split("could not find")[1]
 
 
 class TestDerivedSentinelCoverage:

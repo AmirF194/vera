@@ -470,6 +470,7 @@ def check_sentinel_coverage(
         return errors
 
     signals_by_name: dict[str, frozenset[str]] = {}
+    inspected: set[str] = set()
     for name in sorted(run_specs):
         path = examples_dir / f"{name}.vera"
         if not path.is_file():
@@ -479,6 +480,7 @@ def check_sentinel_coverage(
             # the files gone the derivation is empty, which is the
             # error below.
             continue
+        inspected.add(name)
         try:
             signals = resource_signals(path)
         except Exception as exc:  # noqa: BLE001 — unknown signals are reported, never read as none
@@ -507,7 +509,18 @@ def check_sentinel_coverage(
             f"zero examples."
         ]
 
-    pinned = {name for name, spec in run_specs.items() if spec.expect}
+    # Only the specs whose `.vera` the loop above actually read.  Building
+    # this from every entry in `run_specs` put a spec whose file is missing
+    # into `pinned - signals_by_name`, where it drew the spurious-sentinel
+    # diagnosis — "declares no external resource" — when the truth is that
+    # the derivation never opened it.  `check_coverage` reports the missing
+    # file first in `main`, but this is a public function tests call
+    # directly (#1329 review).
+    pinned = {
+        name
+        for name, spec in run_specs.items()
+        if spec.expect and name in inspected
+    }
     for name in sorted(set(signals_by_name) - pinned):
         errors.append(
             f"{name}.vera reaches outside the process "
