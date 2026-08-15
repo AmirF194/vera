@@ -319,7 +319,15 @@ class ModulesMixin:
             (type_clashes, "data type", "a", "E156"),
             (ctor_clashes, "constructor", "a", "E157"),
         ):
-            for name, deps in clashes.items():
+            # Sorted, because the docstring above promises sorted name
+            # order and the producers hand this back in IMPORT order —
+            # deterministic (measured stable across hash seeds), but not
+            # what the contract says.  Sorting by NAME leaves each name's
+            # supplier list alone, which is the ordering
+            # `ambiguous_in` deliberately keeps in import order so the
+            # report can name the import that completed the clash
+            # (#1330 review).
+            for name, deps in sorted(clashes.items()):
                 labels = [".".join(dep) for dep in deps]
                 joined = ", ".join(f"'{label}'" for label in labels[:-1])
                 joined = f"{joined} and '{labels[-1]}'"

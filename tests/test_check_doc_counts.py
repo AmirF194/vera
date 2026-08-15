@@ -711,7 +711,15 @@ class TestProjectStatusLine:
         text = _STATUS.replace("229 conformance programs, ", "")
         errors = _MOD.check_project_status(text, 11134, 229, 42, 14)
         assert len(errors) == 1
-        assert "could not find" in errors[0]
+        # Both branches say "could not find", so the phrase alone cannot
+        # tell "the line is gone" from "one figure on it is gone" — and
+        # this cell is about the second.  Naming the figure is the
+        # discriminator (#1330 review).
+        assert "could not find the conformance programs count" in errors[0]
+        # The missing-LINE branch quotes the pattern it looked for; the
+        # missing-FIGURE branch names the figure.  Both mention the line,
+        # so that phrase is not the discriminator.
+        assert "Python code coverage" not in errors[0]
 
     def test_the_counts_are_read_from_the_status_line_only(self) -> None:
         """A decoy elsewhere in the file must not satisfy the gate."""
@@ -760,6 +768,13 @@ class TestDualTargetRow:
             _DUAL_ROW, 168, _split(families=42, no_main=7, nondeterministic=2)
         )
         assert len(errors) == 3
+        # Counted AND attributed: three errors are also what a reporter
+        # that swapped two category messages returns, and the three
+        # values are distinct, so each can name its own (#1330 review).
+        joined = "\n".join(errors)
+        assert "families: doc says 43, a live run has 42" in joined
+        assert "no_main: doc says 6, a live run has 7" in joined
+        assert "nondeterministic: doc says 1, a live run has 2" in joined
 
     def test_the_split_must_sum_to_the_run_level_total(self) -> None:
         """Three consistent-looking numbers that do not add up is drift."""

@@ -245,6 +245,40 @@ class TestComparison:
         assert c.identical == 1
         assert c.compared == 1
 
+    def test_a_program_the_head_side_never_reported_is_unreported_too(
+        self,
+    ) -> None:
+        """The mirror direction (#1330 review).
+
+        `unreported` is a symmetric difference, so both directions are
+        one expression — but only the base-missing one was exercised,
+        and an implementation that iterated the head map alone would
+        pass every other cell in this class while under-reporting the
+        corpus.  This is the direction that hides a truncated HEAD run,
+        which is the worse of the two: the base side is a fixed
+        revision, the head side is the tree under test.
+        """
+        c = _MOD.compare(
+            {"a.vera": _ok("same"), "b.vera": _ok("x")},
+            {"a.vera": _ok("same")},
+            "origin/main",
+        )
+        assert c.unreported == ["b.vera"]
+        assert c.identical == 1
+        assert c.compared == 1
+
+    def test_both_sides_missing_a_different_program_are_both_reported(
+        self,
+    ) -> None:
+        """Neither direction shadows the other."""
+        c = _MOD.compare(
+            {"a.vera": _ok("same"), "base_only.vera": _ok("x")},
+            {"a.vera": _ok("same"), "head_only.vera": _ok("y")},
+            "origin/main",
+        )
+        assert c.unreported == ["base_only.vera", "head_only.vera"]
+        assert c.compared == 1
+
 
 # ---------------------------------------------------------------------------
 # Report, exit code, JSON

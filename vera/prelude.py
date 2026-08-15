@@ -18,8 +18,8 @@ from __future__ import annotations
 
 import functools
 import re
+from collections.abc import Mapping
 from types import MappingProxyType
-from typing import Mapping
 
 from vera import ast
 from vera.monomorphize import canonicalize_type_aliases

@@ -99,7 +99,17 @@ class TestConformance:
                     f"type-check cleanly:\n{pre.stdout}\n{pre.stderr}"
                 )
             result = _vera(stage, "--json", path)
-            payload = json.loads(result.stdout)
+            try:
+                payload = json.loads(result.stdout)
+            except json.JSONDecodeError as exc:
+                # A stage died before emitting the envelope; without the
+                # streams this arrives as a bare decode error about an
+                # empty document (#1330 review).
+                raise AssertionError(
+                    f"{path.name}: {stage} --json produced no JSON envelope "
+                    f"({exc}).\nstdout:\n{result.stdout}\n"
+                    f"stderr:\n{result.stderr}"
+                ) from exc
             codes = [d.get("error_code")
                      for d in payload.get("diagnostics", [])]
             assert payload.get("ok") is False and expected_error in codes, (

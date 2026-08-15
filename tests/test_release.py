@@ -729,10 +729,22 @@ class TestCLI:
         workflow = (
             Path(__file__).parent.parent / ".github" / "workflows" / "release.yml"
         ).read_text(encoding="utf-8")
-        step = "python scripts/release.py notes"
-        assert step in workflow, "release.yml no longer invokes the notes builder"
-        tail = workflow[workflow.index(step) : workflow.index(step) + 400]
-        assert "--repo" in tail
+        # The exact invocation, not a proximity window: a 400-character
+        # slice can be satisfied by a `--repo` belonging to a LATER step,
+        # and fails on a correct workflow whose `run:` block grows past
+        # it.  This gate is the only thing tying the tested builder to the
+        # shipped workflow (#1330 review).
+        invocation = (
+            'python scripts/release.py notes \\\n'
+            '            --version "$VERSION" \\\n'
+            '            --repo "$GITHUB_REPOSITORY" \\\n'
+            "            --output release/RELEASE_NOTES.md"
+        )
+        assert invocation in workflow, (
+            "release.yml no longer invokes the notes builder with --repo; "
+            "found:\n"
+            + workflow[workflow.find("release.py notes") - 40 :][:400]
+        )
 
     def test_main_manifest(self, tmp_path: Path) -> None:
         dist = _dist(tmp_path)

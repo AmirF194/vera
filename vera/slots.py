@@ -78,7 +78,7 @@ def bare_call_denotes_user_fn(
     * the three bare-``FnCall`` inference sites in :mod:`vera.wasm.inference`
       and :mod:`vera.wasm.context`, so a shadowed name is typed from the
       function table rather than from the operation's result registry;
-    * ``_handler_always_throws`` in :mod:`vera.wasm.calls_handlers`, whose
+    * ``_handle_exn_always_throws`` in :mod:`vera.wasm.calls_handlers`, whose
       ``throw_installed`` question is the same one for ``Exn``'s operation:
       a bare ``throw`` in a clause body is the op only where no declaration
       owns the name;

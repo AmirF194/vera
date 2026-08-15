@@ -561,7 +561,14 @@ class TestBodyDrift:
         bodies = _MOD.rule_bodies(_lark_lines())
         aliases = {alias for rule, alias in _MOD.extract_lark_aliases(_lark_text())
                    if rule == "fn_call"}
-        assert "func_call" in aliases, "the alias this cell rests on is gone"
+        # The complete set, not just the one name falsifiability rests on:
+        # an `extract_lark_aliases` that regressed to returning only
+        # `{"func_call"}` would leave both this and the loop below green
+        # while covering one alias of five (#1330 review).
+        assert aliases == {
+            "func_call", "constructor_call", "nullary_constructor_expr",
+            "qualified_call", "module_call",
+        }, aliases
 
         body = "".join(bodies["fn_call"])
         assert "LOWER_IDENT" in body, "positive control: the body was read"

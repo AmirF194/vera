@@ -728,7 +728,7 @@ class WasmContext(
         so a name the checker resolved to a user declaration is lowered as
         the ordinary call the checker typed: the clause-inline dispatch, the
         host-cell intrinsics, the #1233 addressability gate, the three
-        result-type inference sites, and ``_handler_always_throws``'s
+        result-type inference sites, and ``_handle_exn_always_throws``'s
         ``throw_installed`` question, which is the same one for ``Exn``'s
         operation.
 

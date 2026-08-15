@@ -154,6 +154,11 @@ def _run_check_json(
         encoding="utf-8",
         env={**os.environ, "PYTHONHASHSEED": seed,
              "PYTHONPATH": str(_VERA_ROOT)},
+        # A seed that drives the checker into a non-terminating
+        # resolution loop is the exact failure this file exists to
+        # find, and an unbounded wait reports it as a hung suite
+        # rather than as a finding (#1330 review).
+        timeout=300,
         check=False,
     )
 

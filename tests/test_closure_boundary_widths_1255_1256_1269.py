@@ -771,8 +771,12 @@ class TestTheThrowPayloadIsAByteWriteBoundary:
         tags = re.findall(r"\(tag \$exn_\S+ \(param ([^)]*)\)\)", wat)
         assert tags == ["i32"], tags
         body = _fn_body(wat, "boom")
-        assert "i32.const 5" in body, body
-        assert "i64.const 5" not in body, body
+        # Token-anchored: a bare substring also matches `i32.const 50`
+        # and `i64.const 512`, so any later constant beginning with 5
+        # would flip either assertion with no width regression
+        # (#1330 review).
+        assert re.search(r"\bi32\.const 5\b", body), body
+        assert not re.search(r"\bi64\.const 5\b", body), body
         lines = [ln.strip() for ln in body.strip().splitlines()]
         throw_at = next(i for i, ln in enumerate(lines)
                         if ln.startswith("throw $exn_"))
