@@ -165,6 +165,8 @@ mypy vera/
 
 ### Validation Scripts
 
+Every Vera code block in the documentation is gated: the `check_*_examples` family replays each fence through the compiler — parsing at minimum, and for the spec, `docs/index.html` and `PYPI_README.md` the whole pipeline — so a fence cannot drift from the language it demonstrates.  The `examples/` corpus is held harder still: `check_examples.py` type-checks and verifies all of it, and `check_examples_run.py` runs it, so an example is gated as a program and not merely as text.
+
 ```bash
 python scripts/check_conformance.py      # verify all conformance programs
 python scripts/check_examples.py         # verify all .vera examples

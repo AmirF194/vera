@@ -14,6 +14,29 @@ Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verificati
 
 11,940 tests, 244 conformance programs, 42 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
 
+## The v0.1.13 burndown
+
+*Fourteen open bugs, driven to zero.*
+
+A bug class outranks stage work, so the next release takes the open `bug`-labelled set as its queue.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) carries each row's full account and stays the one place the detail lives; this table is the order of attack.
+
+| Issue | What |
+|---|---|
+| [#1315](https://github.com/aallan/vera/issues/1315) | The checker accepts a constructor pattern over a container ADT that has no constructors. |
+| [#1320](https://github.com/aallan/vera/issues/1320) | The checker admits literal patterns over scrutinees that can never match them — the general disease behind #1315. |
+| [#1316](https://github.com/aallan/vera/issues/1316) | A main-file `type` alias named after a prelude ADT leaks into the prelude's own bodies. |
+| [#1317](https://github.com/aallan/vera/issues/1317) | `E609` and `E610` refuse two modules' same-named declarations by declaration rather than by use. |
+| [#1312](https://github.com/aallan/vera/issues/1312) | An entry-file `data` declaration and a module's of the same name silently drop the caller when their shapes differ. |
+| [#1321](https://github.com/aallan/vera/issues/1321) | Codegen tests its container branches before `_adt_layouts`, so a user `data` named after a container is misclassified. |
+| [#1327](https://github.com/aallan/vera/issues/1327) | Monomorphization's type namer has no `IndexExpr` arm, so a generic argument that is an array index drops its caller. |
+| [#1310](https://github.com/aallan/vera/issues/1310) | A module generic instantiated at an effect-operation result type never registers its clone. |
+| [#1307](https://github.com/aallan/vera/issues/1307) | The checker resolves a bare call to a sibling function's `where` helper. |
+| [#1298](https://github.com/aallan/vera/issues/1298) | A postcondition may name a `State<T>` the function's effect row never declares. |
+| [#1322](https://github.com/aallan/vera/issues/1322) | A match binding's GC shadow-stack push is never popped, so the stack grows with recursion depth until it traps. |
+| [#1301](https://github.com/aallan/vera/issues/1301) | `md_parse` diverges between the native and browser runtimes on adversarial input. |
+| [#1328](https://github.com/aallan/vera/issues/1328) | The nightly stress workflow never exercises the host-handle reclamation battery. |
+| [#996](https://github.com/aallan/vera/issues/996) | `ch05_closure_nat_return` trapped once in a full conformance run and has not reproduced. |
+
 ## Stage 19 — The verification completeness sprint
 
 *`vera verify` tells the whole truth.*
