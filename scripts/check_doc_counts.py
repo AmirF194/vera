@@ -5,7 +5,7 @@ Checks filesystem-derivable counts (conformance programs, examples, test
 files, pre-commit hooks, CI jobs) and pytest-collection counts (total tests,
 per-file test counts and line counts) against the numbers written in
 TESTING.md, CONTRIBUTING.md, CLAUDE.md, README.md, SKILL.md, AGENTS.md,
-FAQ.md, and ROADMAP.md.  Also checks TESTING.md's passed/stress/skipped
+FAQ.md, and ROADMAP.md.  Also checks TESTING.md's passed/stress-deselected/skipped
 breakdown against the collected total, the KNOWN_ISSUES.md "Refactoring
 needed" line counts (±10% tolerance), the HISTORY.md version-row format
 (one issue link max, no " — " separator per row), the vera/README.md
@@ -88,15 +88,24 @@ def check_refactoring_counts(known_issues_text: str, root: Path) -> list[str]:
 
 _TESTS_BREAKDOWN = re.compile(
     r"\*\*Tests\*\*\s*\|\s*[\d,]+\s+across.*?;\s*([\d,]+) passed"
-    r"\s*\+\s*([\d,]+) stress,\s*([\d,]+) skipped"
+    r"\s*\+\s*([\d,]+) stress-deselected,\s*([\d,]+) skipped"
 )
 
 
 def check_tests_breakdown(testing_text: str, live_total: int) -> list[str]:
     """Check that TESTING.md's tests breakdown sums to the gated total.
 
+    All three parts name a pytest *disposition*, which is what makes the
+    sum readable: the 26 are deselected before the run by
+    ``addopts = "-m 'not stress'"``, so they are disjoint from the passed
+    count rather than a subset of it.  Naming the marker alone — "26
+    stress" beside "passed" and "skipped" — invited reading them as
+    stress tests that passed, which would make the sentence's arithmetic
+    wrong (PR #1329 review).
+
     The overview row states the total *and* its parts, in the shape
-    "1,306 across 40 files (…; 1,234 passed + 5 stress, 67 skipped)" —
+    "1,306 across 40 files (…; 1,234 passed + 5 stress-deselected, 67
+    skipped)" —
     illustrative numbers, so this docstring does not itself become a
     citation to keep in sync.  Pinning the total alone leaves the parts
     free to drift, so a release that moves the parts without moving the
@@ -115,7 +124,8 @@ def check_tests_breakdown(testing_text: str, live_total: int) -> list[str]:
     if m is None:
         return [
             "TESTING.md: no tests breakdown matched"
-            " ('N passed + N stress, N skipped') — the row moved or was"
+            " ('N passed + N stress-deselected, N skipped') — the row"
+            " moved or was"
             " reworded, so the breakdown is no longer gated"
         ]
     parts = [int(g.replace(",", "")) for g in m.groups()]
@@ -124,7 +134,8 @@ def check_tests_breakdown(testing_text: str, live_total: int) -> list[str]:
         passed, stress, skipped = parts
         return [
             f"TESTING.md tests breakdown: {passed:,} passed"
-            f" + {stress:,} stress + {skipped:,} skipped = {total:,},"
+            f" + {stress:,} stress-deselected + {skipped:,} skipped"
+            f" = {total:,},"
             f" but the collected total is {live_total:,}"
         ]
     return []

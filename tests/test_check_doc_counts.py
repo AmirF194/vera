@@ -7,7 +7,7 @@ is testable without a pytest collection run:
   line counts must stay within ±10% of the measured file sizes.
 - ``check_history_row_format`` — HISTORY.md version rows carry at most
   one issue link and no " — " separator.
-- ``check_tests_breakdown`` — TESTING.md's passed/stress/skipped parts
+- ``check_tests_breakdown`` — TESTING.md's passed/stress-deselected/skipped parts
   must sum to the collected total.
 - ``check_vera_readme_test_counts`` — the four counts in vera/README.md's
   Test Suite paragraph.
@@ -208,7 +208,8 @@ def _overview(passed: int, stress: int, skipped: int, total: int) -> str:
         "| Metric | Value |\n"
         "|--------|-------|\n"
         f"| **Tests** | {total:,} across 143 files (~108,000 lines of test"
-        f" code; {passed:,} passed + {stress} stress, {skipped} skipped) |\n"
+        f" code; {passed:,} passed + {stress} stress-deselected,"
+        f" {skipped} skipped) |\n"
     )
 
 
