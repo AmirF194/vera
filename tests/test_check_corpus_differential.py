@@ -573,7 +573,20 @@ class TestParallelCollection:
 
     def test_the_parallel_branch_is_the_one_being_exercised(self) -> None:
         """Non-vacuity: `jobs=4` must not quietly fall through to the
-        sequential path, or this class tests nothing new."""
+        sequential path, or this class tests nothing new.
+
+        The property is *where* the work ran, not how many threads the
+        pool chose to spawn.  `ThreadPoolExecutor` creates a worker only
+        when no idle one is available, so a handful of trivial callables
+        can be drained by a single worker before `map` finishes
+        submitting them: measured over 200 trials on a 12-core host the
+        distinct-thread count came out 2, 3 or 4, and on a 2-core CI
+        runner it is 1.  Asserting `len(threads) > 1` therefore inherited
+        the host's scheduling — green here, red on every CI cell.  What
+        *is* invariant is that the pool never executes inline: the
+        calling thread ran work in 0 of those 200 trials, and 0 of any,
+        because `submit` always hands the callable to a worker.
+        """
         root = Path("/repo")
         files = [root / "examples" / f"p{index}.vera" for index in range(8)]
         threads: set[int] = set()
@@ -583,7 +596,26 @@ class TestParallelCollection:
             return _ok(path.name)
 
         _MOD.collect(files, root, fake_compile, jobs=4)
-        assert len(threads) > 1, "every compile ran on the calling thread"
+        assert threads, "no compile ran at all"
+        assert threading.get_ident() not in threads, (
+            "a compile ran on the calling thread, so `jobs=4` fell through "
+            "to the sequential branch"
+        )
+
+    def test_the_sequential_branch_runs_inline(self) -> None:
+        """The complement, and the reason the cell above is not vacuous:
+        `jobs=1` must run on the caller, so the two branches are told
+        apart by the same observation rather than by a count."""
+        root = Path("/repo")
+        files = [root / "examples" / f"p{index}.vera" for index in range(8)]
+        threads: set[int] = set()
+
+        def fake_compile(path: Path) -> Any:
+            threads.add(threading.get_ident())
+            return _ok(path.name)
+
+        _MOD.collect(files, root, fake_compile, jobs=1)
+        assert threads == {threading.get_ident()}
 
     def test_both_branches_agree(self) -> None:
         root = Path("/repo")
