@@ -544,10 +544,30 @@ def base_checkout(
             encoding="utf-8",
             check=False,
         )
+        status = subprocess.run(
+            ["git", "-C", str(dest), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        # The tree must be CLEAN, not merely at the right commit.  A
+        # reused checkout is persistent by design, so an edit made under
+        # it — a stray debug print, an abandoned bisect — survives to the
+        # next run and silently becomes the base compiler.  `rev-parse`
+        # cannot see that, and neither can the canary: it proves which
+        # checkout was imported, and a modified one is still that
+        # checkout.  A dirty base makes "0 movers" mean nothing and can
+        # invent movers out of the edit, which is the one failure this
+        # instrument must not have.  The message below has always
+        # promised "a clean checkout"; this is what makes it true
+        # (#1330 review).
         if (
             current.returncode == 0
             and current.stdout.strip() == sha
             and (dest / "vera" / "__init__.py").is_file()
+            and status.returncode == 0
+            and not status.stdout.strip()
         ):
             return dest, ""
         return None, (

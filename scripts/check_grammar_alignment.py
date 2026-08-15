@@ -566,10 +566,20 @@ def _literal_terminals(spec_lines: list[str]) -> tuple[dict[str, str], list[str]
 
 
 def _symbols(line: str, rules: set[str]) -> tuple[set[str], set[str]]:
-    """``(rule references, terminal references)`` in one production body line."""
+    """``(rule references, terminal references)`` in one production body line.
+
+    Quoted literals are blanked once, for BOTH halves.  Only the terminal
+    half used to blank them, so a Lark literal spelling a lowercase word
+    — `"handle"`, `"where"` — was counted as a reference to a rule of
+    that name whenever such a rule existed.  No literal collides with a
+    rule name today, which is exactly why it would have arrived as a
+    silent false report rather than as a failure anyone had asked for
+    (#1330 review).
+    """
+    code = _QUOTED.sub(" ", line)
     return (
-        {name for name in re.findall(r"\b[a-z][a-z0-9_]*\b", line)} & rules,
-        set(_TERMINAL_REF.findall(_QUOTED.sub(" ", line))),
+        {name for name in re.findall(r"\b[a-z][a-z0-9_]*\b", code)} & rules,
+        set(_TERMINAL_REF.findall(code)),
     )
 
 

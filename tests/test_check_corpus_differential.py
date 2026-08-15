@@ -32,6 +32,7 @@ import argparse
 import importlib.util
 import io
 import json
+import os
 import subprocess
 import threading
 from pathlib import Path, PureWindowsPath
@@ -756,3 +757,105 @@ class TestUndecodableCompilerOutput:
         with pytest.raises(UnicodeDecodeError):
             b"\x97".decode("utf-8")
         assert b"\x97".decode("cp1252") == "\u2014"
+
+
+def _seed_repo(root: Path) -> str:
+    """A one-commit git repo shaped enough for `base_checkout`."""
+    root.mkdir(parents=True, exist_ok=True)
+    run = lambda *a: subprocess.run(  # noqa: E731
+        ["git", "-C", str(root), *a], check=True,
+        capture_output=True, text=True, encoding="utf-8",
+    )
+    run("init", "-b", "main")
+    run("config", "user.email", "differential-test@example.invalid")
+    run("config", "user.name", "Differential Test")
+    (root / "vera").mkdir(exist_ok=True)
+    (root / "vera" / "__init__.py").write_text("__version__ = '0'\n", encoding="utf-8")
+    run("add", ".")
+    run("commit", "-m", "seed")
+    return subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True, encoding="utf-8",
+    ).stdout.strip()
+
+
+class TestBaseCheckoutReuse:
+    """The persistent base checkout is reused, so it must be CLEAN (#1330).
+
+    `rev-parse HEAD` proves the commit and nothing about the tree.  A
+    reused checkout survives between runs by design, so an edit made
+    under it — a stray print, an abandoned bisect — becomes the base
+    compiler on the next run.  The canary cannot object: it proves which
+    checkout was imported, and a modified one is still that checkout.  A
+    dirty base makes "0 movers" mean nothing and can manufacture movers
+    out of the edit.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _hermetic_git_env(self, monkeypatch: Any) -> None:
+        # Pre-commit exports GIT_DIR/GIT_INDEX_FILE into the hook's
+        # environment, which would override each call's `-C` and drive
+        # the developer's own repository instead of the tmp one.
+        for name in [k for k in os.environ if k.startswith("GIT_")]:
+            monkeypatch.delenv(name, raising=False)
+
+    def test_a_clean_reused_checkout_is_accepted(self, tmp_path: Path) -> None:
+        repo = tmp_path / "repo"
+        sha = _seed_repo(repo)
+        work = tmp_path / "work"
+        first, error = _MOD.base_checkout(repo, sha, work)
+        assert error == "" and first is not None
+
+        again, error = _MOD.base_checkout(repo, sha, work)
+        assert error == "", "the clean checkout must be reused, not refused"
+        assert again == first
+
+    def test_a_dirty_reused_checkout_is_refused(self, tmp_path: Path) -> None:
+        repo = tmp_path / "repo"
+        sha = _seed_repo(repo)
+        work = tmp_path / "work"
+        dest, error = _MOD.base_checkout(repo, sha, work)
+        assert error == "" and dest is not None
+
+        # The edit a reused checkout can carry between runs.  HEAD is
+        # untouched, so the commit check still passes.
+        (dest / "vera" / "__init__.py").write_text(
+            "__version__ = '0'\nSTRAY = True\n", encoding="utf-8"
+        )
+
+        again, error = _MOD.base_checkout(repo, sha, work)
+        assert again is None, "a modified base compiled the differential"
+        assert "clean checkout" in error
+        assert "--work-dir" in error, "the refusal must keep its recreate guidance"
+
+    def test_an_untracked_file_also_makes_it_dirty(self, tmp_path: Path) -> None:
+        """An added file is as much a different compiler as an edited one."""
+        repo = tmp_path / "repo"
+        sha = _seed_repo(repo)
+        work = tmp_path / "work"
+        dest, error = _MOD.base_checkout(repo, sha, work)
+        assert error == "" and dest is not None
+
+        (dest / "vera" / "sitecustomize_probe.py").write_text("x = 1\n", encoding="utf-8")
+
+        again, error = _MOD.base_checkout(repo, sha, work)
+        assert again is None and "clean checkout" in error
+
+    def test_the_commit_check_alone_would_not_have_caught_it(
+        self, tmp_path: Path
+    ) -> None:
+        """Non-vacuity: the dirty tree must still be at the right commit,
+        or this class is testing the pre-existing `rev-parse` check."""
+        repo = tmp_path / "repo"
+        sha = _seed_repo(repo)
+        work = tmp_path / "work"
+        dest, _ = _MOD.base_checkout(repo, sha, work)
+        assert dest is not None
+        (dest / "vera" / "__init__.py").write_text("STRAY = True\n", encoding="utf-8")
+
+        head = subprocess.run(
+            ["git", "-C", str(dest), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True, encoding="utf-8",
+        ).stdout.strip()
+        assert head == sha
+        assert (dest / "vera" / "__init__.py").is_file()

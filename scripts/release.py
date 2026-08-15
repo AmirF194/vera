@@ -193,6 +193,7 @@ def condense_notes(
     section: ChangelogSection,
     *,
     repo: str = REPOSITORY,
+    budget: int = RELEASE_BODY_BUDGET,
     limit: int = GITHUB_RELEASE_BODY_LIMIT,
 ) -> str:
     """Rewrite a release section as the headline index plus a CHANGELOG link.
@@ -204,9 +205,15 @@ def condense_notes(
     """
     anchor = changelog_anchor(section.version, section.date)
     dated = f"[{section.version}]" + (f" - {section.date}" if section.date else "")
+    # Worded against the threshold that actually fired.  Condensing starts
+    # at the budget, not at the hard limit, so a section in the band
+    # between them was published saying it was "past GitHub's
+    # 125,000-character limit" while being comfortably under it — a
+    # falsehood shipped verbatim in the release body (#1330 review).
     preamble = (
         f"The full release notes for this version are {len(section.notes):,} "
-        f"characters — past GitHub's {limit:,}-character release-body limit — so "
+        f"characters, past the {budget:,}-character budget this project "
+        f"publishes verbatim — GitHub's own limit is {limit:,} characters — so "
         "this body carries the headline index and the canonical notes live in the "
         f"CHANGELOG at the tag: **[CHANGELOG.md § {dated}]"
         f"(https://github.com/{repo}/blob/v{section.version}/CHANGELOG.md{anchor})**"
@@ -244,7 +251,7 @@ def release_body(
     """
     if len(section.notes) <= budget:
         return section.notes
-    condensed = condense_notes(section, repo=repo, limit=limit)
+    condensed = condense_notes(section, repo=repo, budget=budget, limit=limit)
     if len(condensed) <= limit:
         return condensed
     notice = (

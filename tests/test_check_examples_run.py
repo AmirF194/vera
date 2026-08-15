@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -762,11 +764,44 @@ class TestOutputSignals:
     def test_clean_output_passes(self) -> None:
         assert _MOD.check_output("a", _MOD.RunSpec(), "all good") is None
 
+    def test_every_command_names_its_entry_point(self) -> None:
+        """What makes the fallback unreachable, pinned.
+
+        `build_command` always passes `--fn`, so `vera run` refuses a
+        missing or private export instead of falling back to the first
+        one.  The backstop below guards a path the command line cannot
+        take *while this holds* — so this is the cell that has to hold
+        (#1330 review).
+        """
+        for name, spec in _MOD.RUN_SPECS.items():
+            assert spec.fn, f"{name} names no entry point"
+            cmd = _MOD.build_command("python", Path(f"{name}.vera"), spec)
+            assert "--fn" in cmd, name
+            assert cmd[cmd.index("--fn") + 1] == spec.fn, name
+
+    def test_an_unresolvable_entry_point_fails_loudly(self, tmp_path: Path) -> None:
+        """The real path, end to end: the failure a privatised or renamed
+        `main` actually produces is a refusal, not a silent fallback."""
+        d = _corpus(tmp_path, {"prog": _CLEAN_SRC})
+        spec = _MOD.RunSpec(fn="not_an_export")
+        result = subprocess.run(
+            _MOD.build_command(sys.executable, d / "prog.vera", spec),
+            capture_output=True, text=True, encoding="utf-8",
+            cwd=str(tmp_path), check=False,
+        )
+        assert result.returncode != 0, "an unresolvable entry point exited 0"
+        combined = result.stdout + result.stderr
+        assert "not found in exports" in combined
+        assert _MOD.FALLBACK_NOTE not in combined, (
+            "vera run fell back instead of refusing, so the backstop below "
+            "is load-bearing after all"
+        )
+
     def test_fallback_note_is_a_failure_at_exit_zero(self) -> None:
-        """`vera run` prints this note when it cannot use the named entry
-        point and picks the first export instead.  Every spec names its
-        entry point, so seeing the note means the resolution did not
-        happen — a run of some other function reported as a pass."""
+        """The backstop, kept for a `build_command` that stops passing
+        `--fn`.  Unreachable through the live command path — the two
+        cells above are what establish that — so it is asserted directly
+        on `check_output` rather than end to end."""
         msg = _MOD.check_output(
             "a", _MOD.RunSpec(),
             "Note: no 'main' declared — running public function 'other'.\n7",

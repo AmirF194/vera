@@ -670,3 +670,37 @@ class TestCharacterClasses:
 
     def test_a_comment_after_a_class_bearing_regex_is_still_removed(self) -> None:
         assert _MOD.strip_comment(r"T: /[^/*]/  // note") == r"T: /[^/*]/  "
+
+
+class TestQuotedLiteralsInBodies:
+    """A quoted literal is not a rule reference (#1330 review).
+
+    Only the terminal half of `_symbols` blanked quoted literals, so a
+    Lark literal spelling a lowercase word counted as a reference to a
+    rule of that name.  Latent: no literal in the grammar collides with
+    a rule name today, which is why it would have surfaced as a silent
+    false report on some later edit rather than as a failure now — and
+    why it needs a unit cell, the shipped files being unable to show it.
+    """
+
+    def test_a_literal_is_not_read_as_a_rule_reference(self) -> None:
+        rules, terminals = _MOD._symbols('foo: "handle" bar', {"handle", "bar", "foo"})
+        assert "handle" not in rules
+        assert rules == {"foo", "bar"}, "positive control: real references survive"
+        assert terminals == set()
+
+    def test_a_literal_is_not_read_as_a_terminal_reference_either(self) -> None:
+        """The half that already blanked them, pinned against a
+        regression in the other direction."""
+        _rules, terminals = _MOD._symbols('foo: "SEMICOLON" BAR', {"foo"})
+        assert terminals == {"BAR"}
+
+    def test_both_halves_read_the_same_blanked_text(self) -> None:
+        line = 'stmt: "where" WHERE where_block'
+        rules, terminals = _MOD._symbols(line, {"stmt", "where", "where_block"})
+        assert rules == {"stmt", "where_block"}, "the `where` literal leaked"
+        assert terminals == {"WHERE"}
+
+    def test_an_escaped_quote_inside_a_literal_does_not_end_it(self) -> None:
+        rules, _t = _MOD._symbols(r'str_lit: "\"" body "\""', {"str_lit", "body"})
+        assert rules == {"str_lit", "body"}

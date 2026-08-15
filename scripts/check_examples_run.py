@@ -571,6 +571,13 @@ def check_output(name: str, spec: RunSpec, output: str) -> str | None:
     back to an arbitrary export, and an external fixture that vanishes,
     where the example takes its graceful arm.
     """
+    # A backstop, not the live path.  `build_command` always passes
+    # `--fn`, so `vera run` refuses a missing or private export outright
+    # (non-zero, "not found in exports") and never reaches its
+    # first-export fallback — the end-to-end cell in the tests pins that
+    # refusal, and another pins that `--fn` is always passed, which is
+    # what keeps this branch unreachable.  It stays as the tripwire for a
+    # `build_command` that stops passing it (#1330 review).
     if FALLBACK_NOTE in output:
         return (
             f"{name}: `vera run` could not use the entry point "

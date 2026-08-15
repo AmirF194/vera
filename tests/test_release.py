@@ -198,7 +198,36 @@ class TestReleaseBody:
         )
         body = release.release_body(section, repo="aallan/vera")
         assert f"{len(section.notes):,} characters" in body
-        assert f"{release.GITHUB_RELEASE_BODY_LIMIT:,}-character" in body
+        assert f"{release.RELEASE_BODY_BUDGET:,}-character budget" in body
+        assert f"{release.GITHUB_RELEASE_BODY_LIMIT:,} characters" in body
+
+    def test_a_section_between_the_budget_and_the_limit_says_so_truthfully(
+        self,
+    ) -> None:
+        """The band the old wording lied in.
+
+        Condensing starts at the budget, not at GitHub's limit, so a
+        section of 120,001-125,000 characters is condensed while being
+        under the limit.  The preamble used to say it was "past GitHub's
+        125,000-character release-body limit" — a falsehood published
+        verbatim in the release body (#1330 review).
+        """
+        section = _section(
+            "### Fixed\n\n"
+            + "\n".join(f"- **Lead {n}.** {'z' * 2400}" for n in range(50))
+        )
+        size = len(section.notes)
+        assert release.RELEASE_BODY_BUDGET < size <= release.GITHUB_RELEASE_BODY_LIMIT
+
+        body = release.release_body(section, repo="aallan/vera")
+        assert body != section.notes, "the band must still condense"
+        # It is past the budget, and it is NOT past the limit.  The
+        # preamble must not claim otherwise.
+        assert f"past the {release.RELEASE_BODY_BUDGET:,}-character budget" in body
+        preamble = body.splitlines()[0]
+        assert "past GitHub" not in preamble
+        assert f"past the {release.GITHUB_RELEASE_BODY_LIMIT:,}" not in preamble
+        assert f"{size:,} characters" in preamble
 
     def test_the_index_reproduces_the_v0110_recovery_shape(self) -> None:
         """The lead-in carries the bullet's LAST issue/PR link, wrapped.
