@@ -18,7 +18,7 @@ Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verificati
 
 *Sixteen open bugs, driven to zero.*
 
-A bug class outranks stage work, so the next release takes the open `bug`-labelled set as its queue.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) carries each row's full account and stays the one place the detail lives; this table is the order of attack.  The soundness row leads it: every other bug is loud, and a verifier that reports a proof it does not have is the one failure a reader cannot see.
+A bug class outranks stage work, so the next release takes the open `bug`-labelled set as its queue.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) carries each row's full account and stays the one place the detail lives; this table is the order of attack.  The soundness row leads it: a verifier that reports a proof it does not have is the one failure a reader cannot see.
 
 | Issue | What |
 |---|---|

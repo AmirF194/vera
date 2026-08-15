@@ -106,7 +106,7 @@ class TestConformance:
                 # streams this arrives as a bare decode error about an
                 # empty document (#1330 review).
                 raise AssertionError(
-                    f"{path.name}: {stage} --json produced no JSON envelope "
+                    f"{entry['file']}: {stage} --json produced no JSON envelope "
                     f"({exc}).\nstdout:\n{result.stdout}\n"
                     f"stderr:\n{result.stderr}"
                 ) from exc
